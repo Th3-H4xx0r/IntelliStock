@@ -1,0 +1,100 @@
+name: Bug report
+description: Something is broken or behaves differently than documented.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. The more reproduction detail you can give,
+        the faster this gets fixed. **Scrub any secrets, API keys, or
+        broker credentials before pasting logs.**
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: A clear description of what went wrong, and what you expected instead.
+      placeholder: "When I open the Backtests tab after running ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps. Include the exact strategy / engine / chatbot prompt that triggered the issue.
+      placeholder: |
+        1. Run `./install.sh`
+        2. Open the dashboard at http://localhost:3000
+        3. Click "Start backtest" with strategy X on symbol Y
+        4. Observe error in browser console / backend logs
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Output of `docker compose logs <service>` for the failing service,
+        or browser console output. Use a code block. **Scrub secrets.**
+      render: shell
+    validations:
+      required: false
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component?
+      multiple: true
+      options:
+        - Frontend (Vue/Vite)
+        - Backend API (FastAPI)
+        - Backtest engine
+        - Live trading instance
+        - Graph Nexus
+        - Chatbot
+        - Discord bot
+        - Credential service
+        - Install script (install.sh / install.ps1)
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Host OS
+      placeholder: "macOS 14.5 / Ubuntu 22.04 / Windows 11 + WSL2"
+    validations:
+      required: true
+
+  - type: input
+    id: docker
+    attributes:
+      label: Docker version
+      description: Output of `docker --version` and `docker compose version`.
+      placeholder: "Docker 27.0.3 / Compose v2.29.0"
+    validations:
+      required: false
+
+  - type: input
+    id: commit
+    attributes:
+      label: Git commit / version
+      description: Output of `git rev-parse --short HEAD`.
+      placeholder: "b1e72d4"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues and this isn't a duplicate
+          required: true
+        - label: I have scrubbed any secrets, API keys, or broker credentials from logs and screenshots
+          required: true

@@ -1,0 +1,3 @@
+# Default reviewer for everything. Add more entries below to route
+# specific paths to subject-matter owners as the project grows.
+*   @Th3-H4xx0r
