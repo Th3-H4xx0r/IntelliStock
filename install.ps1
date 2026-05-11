@@ -4,7 +4,9 @@
   IntelliStock — quick install + start (Windows / PowerShell).
 
 .DESCRIPTION
-  1. Verifies prerequisites (docker, docker compose).
+  1. Verifies prerequisites (docker, docker compose). Auto-installs
+     Docker Desktop via winget if missing, and starts the daemon if
+     it's not already running.
   2. Creates .env with safe defaults + a freshly-generated Fernet
      INTELLISTOCK_CRED_KEY (only if .env doesn't already exist).
   3. Builds the backend image.
@@ -15,6 +17,9 @@
 .NOTES
   Run from any shell:    powershell -ExecutionPolicy Bypass -File .\install.ps1
   Or from PowerShell:    .\install.ps1
+
+  Auto-install of Docker Desktop uses winget and may require
+  administrator elevation + a reboot the first time it runs.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -54,17 +59,84 @@ Banner
 # ── Prerequisite checks ───────────────────────────────────────────
 function Test-Cmd($name) { $null -ne (Get-Command $name -ErrorAction SilentlyContinue) }
 
-Info 'Checking prerequisites…'
-if (-not (Test-Cmd 'docker')) {
-  Fail "docker not found in PATH. Install Docker Desktop: https://docs.docker.com/desktop/install/windows-install/"
+# Refresh PATH from the registry (Machine + User) without restarting the
+# shell. Needed after winget installs because new entries land in the
+# persistent env but not in this process.
+function Refresh-Path {
+  $machine = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+  $user    = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+  $env:Path = ($machine, $user | Where-Object { $_ }) -join ';'
 }
+
+function Install-WithWinget($id, $displayName) {
+  if (-not (Test-Cmd 'winget')) {
+    Fail "$displayName is missing and 'winget' isn't available to install it. Install $displayName manually: https://docs.docker.com/desktop/install/windows-install/"
+  }
+  Info "Installing $displayName via winget (this can take several minutes and may prompt for admin)…"
+  & winget install --id $id --exact --accept-source-agreements --accept-package-agreements --silent
+  # winget returns 0 on fresh install, but also non-zero codes that mean
+  # "already installed" (e.g. APPINSTALLER_CLI_ERROR_NO_APPLICABLE_UPGRADE
+  # 0x8A150016 = -1978335210). Treat those as success and let the
+  # post-install Test-Cmd be the real source of truth.
+  $exit = $LASTEXITCODE
+  Refresh-Path
+  if ($exit -ne 0 -and $exit -ne -1978335189 -and $exit -ne -1978335210) {
+    Fail "winget exited $exit while installing $displayName. Install it manually and re-run."
+  }
+  Ok "$displayName install step finished"
+}
+
+function Find-DockerDesktopExe {
+  $candidates = @(
+    (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Docker\Docker\Docker Desktop.exe')
+  ) | Where-Object { $_ -and (Test-Path $_) }
+  return $candidates | Select-Object -First 1
+}
+
+function Start-DockerDaemon {
+  $exe = Find-DockerDesktopExe
+  if (-not $exe) { return $false }
+  Info 'Starting Docker Desktop…'
+  Start-Process -FilePath $exe | Out-Null
+  # Daemon boot can take ~30-60s after the tray icon appears.
+  for ($i = 1; $i -le 60; $i++) {
+    & docker info > $null 2>&1
+    if ($LASTEXITCODE -eq 0) { return $true }
+    Start-Sleep -Seconds 2
+  }
+  return $false
+}
+
+Info 'Checking prerequisites…'
+
+if (-not (Test-Cmd 'docker')) {
+  Warn 'docker not found — installing Docker Desktop'
+  Install-WithWinget 'Docker.DockerDesktop' 'Docker Desktop'
+  if (-not (Test-Cmd 'docker')) {
+    Fail "Docker Desktop installed but 'docker' still not on PATH. Open a new PowerShell window (so PATH refreshes) and re-run this script."
+  }
+}
+
 & docker compose version > $null 2>&1
 if ($LASTEXITCODE -ne 0) {
-  Fail "'docker compose' subcommand not available. Update Docker Desktop."
+  # 'docker compose' ships with Docker Desktop. If the binary is present
+  # but the subcommand isn't, the install is too old or broken — winget
+  # upgrade gets us a recent build.
+  Warn "'docker compose' subcommand missing — upgrading Docker Desktop"
+  Install-WithWinget 'Docker.DockerDesktop' 'Docker Desktop'
+  & docker compose version > $null 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Fail "'docker compose' still unavailable after upgrade. Reinstall Docker Desktop manually."
+  }
 }
+
 & docker info > $null 2>&1
 if ($LASTEXITCODE -ne 0) {
-  Fail 'Docker daemon is not running. Start Docker Desktop and re-run this script.'
+  Warn 'Docker daemon is not running — attempting to start Docker Desktop…'
+  if (-not (Start-DockerDaemon)) {
+    Fail 'Could not start Docker Desktop automatically. Start it from the Start menu, wait for the whale icon to stop animating, and re-run this script.'
+  }
 }
 Ok 'docker + docker compose present and daemon is up'
 

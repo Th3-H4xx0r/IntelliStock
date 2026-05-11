@@ -2,13 +2,19 @@
 # IntelliStock — quick install + start
 #
 # What it does:
-#   1. Verifies prerequisites (docker, docker compose, openssl)
+#   1. Verifies prerequisites (docker, docker compose, openssl).
+#      Auto-installs any that are missing using the host's package
+#      manager (apt / dnf / yum / pacman / zypper / apk / brew) and
+#      the official get.docker.com convenience script for Linux Docker.
 #   2. Creates .env with safe defaults + a freshly-generated Fernet
 #      INTELLISTOCK_CRED_KEY (only if .env doesn't already exist)
 #   3. Builds the backend image
 #   4. Brings up the full stack (rethinkdb, neo4j, backend, api,
 #      frontend, price-service, backtest-engine, credential-service)
 #   5. Prints local URLs once the API health check passes
+#
+# Auto-install needs sudo on Linux and Homebrew on macOS. Re-run with
+# the user already in the docker group to skip the group-fixup hint.
 
 set -euo pipefail
 
@@ -44,24 +50,183 @@ BANNER
 banner
 
 # ── Prerequisite checks ────────────────────────────────────────────
-need() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    err "$1 not found in PATH. $2"
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Detect the host OS family. Returns one of: macos, ubuntu, debian,
+# fedora, rhel, centos, rocky, almalinux, arch, manjaro, opensuse,
+# alpine, or unknown. We key auto-install decisions off this.
+detect_os() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "macos"; return
+  fi
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    echo "${ID:-unknown}"; return
+  fi
+  echo "unknown"
+}
+
+# sudo wrapper: if we're already root or sudo is absent, just exec.
+_sudo() {
+  if [[ $EUID -eq 0 ]] || ! have sudo; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+# Install one or more packages using the host's package manager. The
+# first arg is the detected OS id; the rest are package names. Caller
+# is responsible for choosing names that exist in that distro's repos.
+pkg_install() {
+  local os="$1"; shift
+  case "$os" in
+    ubuntu|debian|raspbian|linuxmint|pop)
+      _sudo apt-get update -y
+      _sudo apt-get install -y "$@" ;;
+    fedora)
+      _sudo dnf install -y "$@" ;;
+    rhel|centos|rocky|almalinux)
+      if have dnf; then _sudo dnf install -y "$@"; else _sudo yum install -y "$@"; fi ;;
+    arch|manjaro|endeavouros)
+      _sudo pacman -Sy --noconfirm --needed "$@" ;;
+    opensuse-leap|opensuse-tumbleweed|opensuse|sles)
+      _sudo zypper --non-interactive install "$@" ;;
+    alpine)
+      _sudo apk add --no-cache "$@" ;;
+    macos)
+      if ! have brew; then
+        err "Homebrew is required to auto-install on macOS. Install from https://brew.sh and re-run."
+        return 1
+      fi
+      brew install "$@" ;;
+    *)
+      err "Unsupported OS '$os' for auto-install. Install '$*' manually."
+      return 1 ;;
+  esac
+}
+
+ensure_curl() {
+  if have curl; then return 0; fi
+  local os; os="$(detect_os)"
+  warn "curl missing — installing"
+  pkg_install "$os" curl || { err "Install curl manually and re-run."; exit 1; }
+}
+
+ensure_openssl() {
+  if have openssl; then return 0; fi
+  local os; os="$(detect_os)"
+  warn "openssl not found — installing"
+  pkg_install "$os" openssl || { err "Install openssl manually and re-run."; exit 1; }
+}
+
+ensure_docker() {
+  if have docker; then return 0; fi
+  local os; os="$(detect_os)"
+  warn "docker not found — installing for '$os'"
+  case "$os" in
+    macos)
+      # Docker on macOS = Docker Desktop. Brew cask handles that and
+      # the user still has to open it once to grant privileged-helper
+      # permission, so we bail out with instructions afterward.
+      if ! have brew; then
+        err "Install Docker Desktop manually: https://docs.docker.com/desktop/install/mac-install/"
+        exit 1
+      fi
+      brew install --cask docker
+      err "Docker Desktop installed. Open it from Applications once to start the daemon (grants privileged helper), then re-run this script."
+      exit 0
+      ;;
+    ubuntu|debian|raspbian|linuxmint|pop|fedora|rhel|centos|rocky|almalinux|arch|manjaro|endeavouros|opensuse*|sles)
+      # The official convenience script handles repo setup across
+      # every distro the Docker team supports. It's the same
+      # one-liner the Docker docs recommend.
+      ensure_curl
+      info "Installing Docker via get.docker.com…"
+      curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+      _sudo sh /tmp/get-docker.sh
+      rm -f /tmp/get-docker.sh
+      # Drop the invoking user into the docker group so subsequent
+      # 'docker' calls don't need sudo. Only meaningful next session.
+      if getent group docker >/dev/null 2>&1 && [[ -n "${SUDO_USER:-${USER:-}}" ]]; then
+        _sudo usermod -aG docker "${SUDO_USER:-$USER}" || true
+        warn "Added ${SUDO_USER:-$USER} to the 'docker' group — log out + back in for it to take effect (this run will still use sudo via the daemon socket where needed)."
+      fi
+      ;;
+    alpine)
+      pkg_install "$os" docker docker-cli-compose
+      _sudo rc-update add docker default || true
+      _sudo service docker start || true
+      ;;
+    *)
+      err "Unsupported OS '$os'. Install Docker manually: https://docs.docker.com/get-docker/"
+      exit 1
+      ;;
+  esac
+  if ! have docker; then
+    err "Docker install finished but the 'docker' command still isn't on PATH. Open a new shell and re-run."
+    exit 1
+  fi
+  ok "Docker installed"
+}
+
+ensure_compose() {
+  if docker compose version >/dev/null 2>&1; then return 0; fi
+  local os; os="$(detect_os)"
+  warn "'docker compose' subcommand missing — installing compose plugin"
+  case "$os" in
+    ubuntu|debian|raspbian|linuxmint|pop)
+      pkg_install "$os" docker-compose-plugin ;;
+    fedora|rhel|centos|rocky|almalinux)
+      pkg_install "$os" docker-compose-plugin ;;
+    macos)
+      err "'docker compose' should ship with Docker Desktop. Update Docker Desktop and re-run."
+      exit 1 ;;
+    *)
+      err "Couldn't auto-install the compose plugin for '$os'. Install 'docker-compose-plugin' (or equivalent) manually."
+      exit 1 ;;
+  esac
+  if ! docker compose version >/dev/null 2>&1; then
+    err "'docker compose' still unavailable after install. Reinstall Docker manually."
     exit 1
   fi
 }
 
+ensure_docker_running() {
+  if docker info >/dev/null 2>&1; then return 0; fi
+  local os; os="$(detect_os)"
+  case "$os" in
+    macos)
+      warn "Docker daemon not running — opening Docker Desktop…"
+      open -a Docker >/dev/null 2>&1 || true
+      for _ in $(seq 1 60); do
+        docker info >/dev/null 2>&1 && { ok "Docker daemon is up"; return 0; }
+        sleep 2
+      done
+      err "Docker Desktop didn't come up within 2 minutes. Open it manually and re-run."
+      exit 1 ;;
+    *)
+      warn "Docker daemon not running — starting it…"
+      if have systemctl; then
+        _sudo systemctl enable --now docker || true
+      elif have service; then
+        _sudo service docker start || true
+      fi
+      for _ in $(seq 1 15); do
+        docker info >/dev/null 2>&1 && { ok "Docker daemon is up"; return 0; }
+        sleep 2
+      done
+      err "Docker daemon still down. Check 'systemctl status docker' or 'journalctl -u docker' and re-run."
+      exit 1 ;;
+  esac
+}
+
 info "Checking prerequisites…"
-need docker   "Install Docker Desktop or docker engine: https://docs.docker.com/get-docker/"
-if ! docker compose version >/dev/null 2>&1; then
-  err "'docker compose' subcommand not available. Update Docker Desktop, or install the docker-compose-plugin package."
-  exit 1
-fi
-need openssl  "openssl is needed to generate the encryption key. Install via your package manager."
-if ! docker info >/dev/null 2>&1; then
-  err "Docker daemon is not running. Start Docker Desktop (or 'sudo systemctl start docker') and re-run."
-  exit 1
-fi
+ensure_docker
+ensure_compose
+ensure_openssl
+ensure_docker_running
 ok "docker, docker compose, openssl present and daemon is up"
 
 # ── .env scaffold ──────────────────────────────────────────────────
