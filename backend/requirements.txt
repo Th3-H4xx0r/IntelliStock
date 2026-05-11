@@ -58,4 +58,4 @@ pydantic-ai-slim[google,openai]==1.0.18
 # - exchange_calendars: NYSE market calendar with holidays + early closes (live_calendar.py)
 alpaca-py>=0.43.0
 cryptography>=41.0.0
-exchange_calendars>=4.0.0
+exchange_calendars>=4.13.2
