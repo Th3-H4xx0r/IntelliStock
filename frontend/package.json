@@ -11,7 +11,7 @@
   "dependencies": {
     "apexcharts": "^5.10.0",
     "dompurify": "^3.2.4",
-    "marked": "^14.1.4",
+    "marked": "^18.0.3",
     "vue": "^3.5.25",
     "vue3-apexcharts": "^1.11.1",
     "vue-router": "^4.6.4"
