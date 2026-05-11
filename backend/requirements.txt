@@ -44,7 +44,7 @@ lxml>=4.9.0
 TA-Lib
 # For Google News RSS fetching (graph nexus macro news):
 scrapling>=0.2.0
-feedparser>=6.0.0
+feedparser>=6.0.12
 json-repair
 # TOON format: compact token-efficient encoding for LLM prompts (~40% fewer tokens vs JSON)
 toon-format
