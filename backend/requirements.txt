@@ -16,7 +16,12 @@ requests
 tqdm
 pyrh
 alpaca_trade_api
-tensorflow-cpu
+# tensorflow-cpu has no linux_aarch64 / macOS arm64 wheels on PyPI, so
+# Docker builds on Apple Silicon fail to resolve it. Fall back to the
+# full tensorflow package on ARM — it runs CPU-only there anyway
+# (CUDA isn't supported on aarch64), so we get the same behaviour.
+tensorflow-cpu; platform_machine == "x86_64" or platform_machine == "AMD64"
+tensorflow; platform_machine == "aarch64" or platform_machine == "arm64"
 scikit-learn
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
