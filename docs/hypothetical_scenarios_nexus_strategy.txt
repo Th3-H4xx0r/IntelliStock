@@ -1,0 +1,1643 @@
+=== HYPOTHETICAL SCENARIOS FOR NEXUS STRATEGY ===
+Last updated: 2026-03-31
+Purpose: Reference file for validating all edge cases after code changes.
+V15 validation: 2026-03-31
+V12-ROTATION-UNLOCK validation: 2026-03-29
+Run `python -m pytest tests/test_nexus_allocation.py -v` to verify automated tests.
+
+
+================================================================================
+--- CATEGORY 1: SELL MECHANICS ---
+================================================================================
+
+SCENARIO S1: Fast loser cut at configurable threshold
+  Situation: Stock bought at $100, current price $92 (-8%), fast_loser_cut_pct=-8.0
+  Expected: fresh_score set to -1 with "Fast loser cut" reason
+  Code: graph_nexus_analysis.py _finalize_scores() lines 8968-8971
+  Config: fast_loser_cut_pct (default -10.0)
+  Status: MUST PASS (test: TestFastLoserCut::test_fast_loser_cut_at_minus_8pct)
+
+SCENARIO S2: Fast loser cut does NOT fire above threshold
+  Situation: Stock at -5% loss, fast_loser_cut_pct=-10.0
+  Expected: fresh_score unchanged (stays 0/hold)
+  Code: graph_nexus_analysis.py _finalize_scores() line 8969 — condition unrealized_pct <= fast_cut_pct
+  Status: MUST PASS (test: TestFastLoserCut::test_fast_loser_cut_does_not_fire_on_minus_5pct)
+
+SCENARIO S3: Fast loser cut overrides buy signal
+  Situation: Stock at -12% loss, fresh_score=1 (buy), fast_loser_cut_pct=-10.0
+  Expected: fresh_score forced to -1 (sell) — risk management overrides buy signal
+  Code: graph_nexus_analysis.py line 8969 — fresh_score >= 0 includes buy signals
+  Status: MUST PASS (test: TestFastLoserCut::test_fast_loser_cut_fires_on_buy_signal)
+
+SCENARIO S4: Fast loser cut at exact boundary (-10% == -10%)
+  Situation: Stock at exactly -10.0% loss, fast_loser_cut_pct=-10.0
+  Expected: fresh_score set to -1 (uses <= comparison, so exact boundary fires)
+  Code: graph_nexus_analysis.py line 8969 — unrealized_pct <= _fast_cut_pct
+  Status: MUST PASS (test: TestEdgeCases::test_fast_cut_boundary_exactly_at_threshold)
+
+SCENARIO S5: Trailing stop fires after activation
+  Situation: Stock at +15% gain (above 10% activation), price dropped 16% from peak
+  Expected: fresh_score set to -1 with "Trailing stop" reason
+  Code: graph_nexus_analysis.py lines 11118-11124
+  Config: trailing_stop_activation_pct=10.0, trailing_stop_pct=15.0
+  Note: V12 config sets trailing_stop_pct=15; drop must be >= 15% to fire
+        (code default is 8.0; previous test used 12/13% drops which only work with default)
+  Status: MUST PASS (test: TestTrailingStop::test_trailing_stop_fires_at_12pct_drop_from_peak)
+  V12 CHECK: Test must use drop >= 15% when V12 config trailing_stop_pct=15 is active
+
+SCENARIO S6: Trailing stop does NOT fire below activation threshold
+  Situation: Stock at +5% gain (below 10% activation), big drop from peak
+  Expected: fresh_score unchanged — trailing stop inactive below activation
+  Code: graph_nexus_analysis.py line 8976 — unrealized_pct >= _ts_activation
+  Status: MUST PASS (test: TestTrailingStop::test_trailing_stop_does_not_fire_below_activation)
+
+SCENARIO S7: Trailing stop small drop does NOT fire
+  Situation: Stock at +20% (activated), drop from peak only 5%, ts_drop=15%
+  Expected: fresh_score unchanged — drop too small
+  Code: graph_nexus_analysis.py line 8982 — _drop_from_peak >= _ts_drop
+  Status: MUST PASS (test: TestTrailingStop::test_trailing_stop_small_drop_does_not_fire)
+
+SCENARIO S8: Winner protection at +12% gain suppresses sell
+  Situation: Stock at +12% gain, mild negative prop_raw=-0.10, fresh_score=-1
+  Expected: fresh_score changed to 0 (hold) — prop_raw > -0.15 threshold at 10%+ gain (V11)
+  Code: graph_nexus_analysis.py lines 11092-11094
+  Note: V11 tightened threshold from -0.30 to -0.15. prop_raw must be > -0.15.
+        Old scenario had prop_raw=-0.20 which FAILS with V11 threshold (-0.20 < -0.15).
+        Updated prop_raw to -0.10 (which is > -0.15) to test winner protection suppression.
+  Status: MUST PASS (test: TestWinnerProtection::test_winner_protection_suppresses_sell_at_10pct_gain)
+  V12 CHECK: Test must use prop_raw > -0.15 (not -0.30) for V11+ thresholds
+
+SCENARIO S9: Winner protection at +25% gain with moderate negative
+  Situation: Stock at +25% gain, prop_raw=-0.30, fresh_score=-1
+  Expected: fresh_score changed to 0 — prop_raw > -0.35 threshold at 20%+ gain (V11)
+  Code: graph_nexus_analysis.py lines 11089-11091
+  Note: V11 tightened threshold from -0.50 to -0.35. prop_raw must be > -0.35.
+        Old scenario had prop_raw=-0.40 which FAILS with V11 threshold (-0.40 < -0.35).
+        Updated prop_raw to -0.30 (which is > -0.35) to test winner protection suppression.
+  Status: MUST PASS (test: TestWinnerProtection::test_winner_protection_suppresses_sell_at_20pct_gain)
+  V12 CHECK: Test must use prop_raw > -0.35 (not -0.50) for V11+ thresholds
+
+SCENARIO S10: Winner protection at +55% gain with strong negative
+  Situation: Stock at +55% gain, prop_raw=-0.50, fresh_score=-1
+  Expected: fresh_score changed to 0 — prop_raw > -0.55 threshold at 50%+ gain (V11)
+  Code: graph_nexus_analysis.py lines 11086-11088
+  Note: V11 tightened threshold from -0.70 to -0.55. prop_raw must be > -0.55.
+        Old scenario had prop_raw=-0.60 which FAILS with V11 threshold (-0.60 < -0.55).
+        Updated prop_raw to -0.50 (which is > -0.55) to test winner protection suppression.
+  Status: MUST PASS (test: TestWinnerProtection::test_winner_protection_suppresses_sell_at_50pct_gain)
+  V12 CHECK: Test must use prop_raw > -0.55 (not -0.70) for V11+ thresholds
+
+SCENARIO S11: Winner protection boundary — exactly -0.15 raw at +10%
+  Situation: Stock at +10% gain, prop_raw=-0.15 (exactly at V11 boundary)
+  Expected: fresh_score stays -1 (sell) — condition is strictly > -0.15, not >=
+  Code: graph_nexus_analysis.py line 11092 — _prop_raw > (-0.15 + _time_decay)
+  Note: V11 tightened threshold from -0.30 to -0.15. Boundary test updated accordingly.
+  Status: MUST PASS (test: TestEdgeCases::test_winner_protection_boundary_exactly_10pct)
+  V12 CHECK: Test must use prop_raw=-0.15 (not -0.30) for V11+ boundary
+
+SCENARIO S12: Hold-limit bypasses winner protection
+  Situation: Stock at +30% gain, mild prop_raw=-0.10, but hold_limit_forced=True
+  Expected: fresh_score stays -1 — hold-limit forced exit is never suppressed
+  Code: graph_nexus_analysis.py line 8957 — "not _hold_limit_forced" guard
+  Status: MUST PASS (test: TestWinnerProtection::test_hold_limit_bypasses_winner_protection)
+
+SCENARIO S13: Hold-limit exit defers to trailing stop for big winners
+  Situation: Stock held past max_hold_days, but gain >= trailing_stop_activation_pct
+  Expected: Hold-limit does NOT force-sell; trailing stop manages the exit instead
+  Code: graph_nexus_analysis.py lines 8930-8933 — _hl_gain >= _hl_ts_activation => pass
+  Status: MUST PASS
+
+SCENARIO S14: Winner protection then trailing stop override
+  Situation: Stock at +15% gain, prop_raw=-0.10 (triggers winner protection to hold),
+             but drop from peak is 11.5% (>= ts_drop=10%)
+  Expected: Winner protection fires (score -> 0), then trailing stop fires (score -> -1)
+  Code: Winner protection runs first, then trailing stop re-checks score >= 0
+  Status: MUST PASS (test: TestSellMechanicsCombined::test_winner_protection_then_trailing_stop_override)
+
+
+================================================================================
+--- CATEGORY 2: FORCED EXIT ENFORCEMENT ---
+================================================================================
+
+SCENARIO F1: _forced_exit flag set on fast loser cut
+  Situation: Score set to -1 by fast loser cut mechanism
+  Expected: _forced_exit=True in score output dict
+  Code: graph_nexus_analysis.py line 9016/9022 — checks fresh_reason for "Fast loser"
+  Status: MUST PASS (test: TestV6ForcedExitFlag::test_forced_exit_flag_set_on_fast_loser)
+
+SCENARIO F2: _forced_exit flag set on trailing stop
+  Situation: Score set to -1 by trailing stop mechanism
+  Expected: _forced_exit=True in score output dict
+  Code: graph_nexus_analysis.py line 9016/9022 — checks fresh_reason for "Trailing stop"
+  Status: MUST PASS (test: TestV6ForcedExitFlag::test_forced_exit_flag_set_on_trailing_stop)
+
+SCENARIO F3: Forced exit survives ML/overlay recalculation
+  Situation: _finalize_scores sets score=-1 with _forced_exit=True, then
+             _apply_ml_and_overlay_to_scores runs
+  Expected: score stays -1 — ML cannot override forced exit
+  Code: graph_nexus_analysis.py line 9800 — if base.get("_forced_exit"): preserve score
+  Status: MUST PASS (test: TestV6ForcedExitFlag::test_forced_exit_not_overridden_by_ml)
+
+SCENARIO F4: sell_block overlay cannot override forced exit
+  Situation: LLM overlay sets sell_block=True, but score has _forced_exit=True
+  Expected: score stays -1 — forced exit is immune to sell_block
+  Code: graph_nexus_analysis.py line 9810 — "not base.get('_forced_exit')" guard
+  Status: MUST PASS (test: TestV6SweepFixes::test_sell_block_cannot_override_forced_exit)
+
+SCENARIO F5: sell_block works for normal (non-forced) sells with small loss
+  Situation: LLM overlay sets sell_block=True, normal sell score=-1, _forced_exit=False,
+             unrealized loss = -2% (above sell_block_bypass_loss_pct=-5%)
+  Expected: score changed to 0 (hold) — sell_block overrides normal sells when loss < 5%
+  Code: graph_nexus_analysis.py line 12034-12041
+  Note: V12 added sell_block bypass for deep losses. sell_block still works when
+        unrealized loss is above the bypass threshold (default -5%).
+  Status: MUST PASS (test: TestV6SweepFixes::test_sell_block_works_for_normal_sells)
+
+SCENARIO F6: Forced exits added to nexus_sell_enforcement set
+  Situation: Scores contain symbols with _forced_exit=True and score=-1
+  Expected: Those symbols added to nexus_sell_enforcement for broker-level enforcement
+  Code: graph_nexus_analysis.py lines 11738-11743
+  Status: MUST PASS (test: TestV6SweepFixes::test_forced_exit_added_to_sell_enforcement)
+
+SCENARIO F7: Circuit breaker preserves forced exits
+  Situation: Circuit breaker limits sells to N per day; 2 forced + 2 normal sells
+  Expected: Both forced exits kept; normal sells compete for remaining slots
+  Code: broker.py circuit breaker logic — forced exits bypass the cap
+  Status: MUST PASS (test: TestV6SweepFixes::test_circuit_breaker_preserves_forced_exits)
+
+SCENARIO F8: Post-decision AI cannot reverse forced exit
+  Situation: Post-decision AI review suggests holding a forced-exit symbol
+  Expected: Forced exit persists — post-decision cannot override risk management
+  Code: broker.py post-decision loop checks nexus_sell_enforcement set
+  Status: MUST PASS
+
+
+================================================================================
+--- CATEGORY 3: ALLOCATION ---
+================================================================================
+
+SCENARIO A1: Tiered allocation weights (2.5x / 1x / 0.5x)
+  Situation: 5 stocks sorted by score, no conviction_decay configured
+  Expected: Tier1 (top 25%)=2.5, Tier2 (next 50%)=1.0, Tier3 (bottom 25%)=0.5
+  Code: graph_nexus_analysis.py allocation block — tier weighting
+  Status: MUST PASS (test: TestTieredAllocation::test_tiered_allocation_5_stocks)
+
+SCENARIO A2: Power-law allocation with conviction_decay
+  Situation: conviction_decay=0.5, 4 stocks
+  Expected: Weights follow 0.5^i pattern: 1.0, 0.5, 0.25, 0.125
+  Code: graph_nexus_analysis.py — conviction_decay branch
+  Status: MUST PASS (test: TestPowerLawAllocation::test_power_law_enabled_when_conviction_decay_set)
+
+SCENARIO A3: Dual pool split (Pool A = direct, Pool B = propagation)
+  Situation: 3 direct signal stocks + 2 graph_propagation stocks
+  Expected: All 5 allocated — Pool A gets direct, Pool B gets propagation
+  Code: graph_nexus_analysis.py — pool splitting logic
+  Status: MUST PASS (test: TestDualPoolBuySystem::test_pool_a_direct_signals_pool_b_propagation)
+
+SCENARIO A4: Pool split with propagation_priority=True inverts pools
+  Situation: propagation_priority=True, propagation stocks meet min_raw threshold
+  Expected: Pool A = propagation stocks, Pool B = direct signal stocks
+  Code: graph_nexus_analysis.py — propagation_priority branch
+  Status: MUST PASS (test: TestDualPoolBuySystem::test_propagation_priority_inverts_pools)
+
+SCENARIO A5: Symmetric overflow — empty Pool A
+  Situation: All stocks are graph_propagation (Pool A has 0 candidates)
+  Expected: Pool B gets pool_b_base + pool_a_base slots via overflow
+  Code: graph_nexus_analysis.py — symmetric overflow: pool_a < pool_a_min branch
+  Status: MUST PASS (test: TestPoolSymmetricOverflow::test_pool_symmetric_overflow_empty_pool_a)
+
+SCENARIO A6: Symmetric overflow — empty Pool B
+  Situation: All stocks are direct signals (Pool B has 0 candidates)
+  Expected: Pool A gets pool_a_base + pool_b_base slots via overflow
+  Code: graph_nexus_analysis.py — symmetric overflow: pool_b < pool_b_min branch
+  Status: MUST PASS (test: TestPoolSymmetricOverflow::test_pool_symmetric_overflow_empty_pool_b)
+
+SCENARIO A7: Buy cap limits total buys
+  Situation: 5 available stocks, max_stock_buys_per_day=3
+  Expected: Only top 3 stocks allocated
+  Code: graph_nexus_analysis.py — effective_buy_cap calculation
+  Status: MUST PASS (test: TestBuyCap::test_buy_cap_limits_to_max_stock_buys_per_day)
+
+SCENARIO A8: Sell-coupled buy cap expansion
+  Situation: base_buy_cap=2, 5 sells pending
+  Expected: effective_cap = 2 + max(0, 5-2) = 5 — allows replacing sold positions
+  Code: graph_nexus_analysis.py — sell_count expansion formula
+  Status: MUST PASS (test: TestBuyCap::test_sell_coupled_cap_expands_with_sells)
+
+SCENARIO A9: Position headroom limits buys
+  Situation: max_positions=3, 2 existing positions, 3 buy candidates
+  Expected: Only 1 buy allowed (headroom = 3 - 2 = 1)
+  Code: graph_nexus_analysis.py — position_headroom calculation
+  Status: MUST PASS (test: TestBuyCap::test_soft_position_limit_reduces_cap)
+
+SCENARIO A10: V5 pools split BEFORE buy cap
+  Situation: 10 direct stocks (high scores) + 3 propagation stocks (lower scores), buy_cap=5
+  Expected: Propagation stocks get pool slots BEFORE cap truncates — at least 2 survive
+  Code: graph_nexus_analysis.py — V5 pool-first ordering
+  Status: MUST PASS (test: TestV5PoolBeforeBuyCap::test_propagation_stocks_survive_buy_cap)
+
+SCENARIO A11: Min position size filter
+  Situation: $50 budget, min_pos_size=$20, 5 candidates
+  Expected: max_buyable = 50/20 = 2; only 2 stocks allocated, each >= $20
+  Code: graph_nexus_analysis.py — min position size filter
+  Status: MUST PASS (test: TestMinPositionSize::test_min_position_size_filters_small_allocations)
+
+SCENARIO A12: Momentum amplification boosts trending stocks
+  Situation: Stock with positive recent_5 and recent_20, momentum_amplification=True
+  Expected: Weight multiplied by momentum_weight_multiplier (e.g., 2.0x)
+  Code: graph_nexus_analysis.py — momentum amplification block
+  Status: MUST PASS (test: TestMomentumAmplification::test_momentum_amplification_boosts_trending_stocks)
+
+SCENARIO A13: Interleaving — propagation stock gets Pool B slot despite low global rank
+  Situation: 20 direct stocks outscoring SNDK (propagation, score=0.45)
+  Expected: SNDK gets Pool B slot regardless of global rank
+  Code: graph_nexus_analysis.py — pool_b_candidates list built independently
+  Status: MUST PASS (test: TestV5PoolBeforeBuyCap::test_sndk_gets_pool_b_slot)
+
+
+================================================================================
+--- CATEGORY 4: CASH MANAGEMENT ---
+================================================================================
+
+SCENARIO C1: Cash reserve floor limits Day 1 deployment
+  Situation: $7000 portfolio, cash_reserve_floor_pct=0.10
+  Expected: $700 reserved; only $6300 available for buys
+  Code: broker.py line 3697 — _cash_floor calculation
+  Status: MUST PASS (test: TestV6CashReserveFloor::test_cash_floor_limits_deployment)
+
+SCENARIO C2: Cash floor blocks buying when cash at/below floor
+  Situation: $700 cash, floor=$700 (10% of $7000 initial)
+  Expected: available=0; no buys possible
+  Code: broker.py — available = max(0.0, cash - reserved - cash_floor)
+  Status: MUST PASS (test: TestV6CashReserveFloor::test_cash_floor_blocks_when_low)
+
+SCENARIO C3: High conviction bypasses cash floor
+  Situation: Cash at floor, but buy signal has high_conviction=True (score >= 0.50)
+  Expected: effective_floor=0; full cash available for this buy
+  Code: broker.py lines 3699-3700 — _high_conviction bypass
+  Status: MUST PASS (test: TestV6CashReserveFloor::test_high_conviction_bypasses_floor)
+
+SCENARIO C4: _cash_reserve_floor_pct passthrough from strategy
+  Situation: Strategy config has cash_reserve_floor_pct=0.15
+  Expected: nexus_position_sizes["_cash_reserve_floor_pct"] = 0.15
+  Code: graph_nexus_analysis.py line 11748
+  Status: MUST PASS (test: TestV6SweepFixes::test_cash_floor_passthrough_from_strategy)
+
+SCENARIO C5: Day 1 deployment with full budget
+  Situation: $7000 portfolio, 10% nexus allocation = $700 budget, 3 buy signals
+  Expected: All 3 allocated within $700 total budget
+  Code: graph_nexus_analysis.py — allocation pipeline
+  Status: MUST PASS (test: TestIntegrationScenarios::test_day1_allocation_with_7k_portfolio)
+
+
+================================================================================
+--- CATEGORY 5: ETF DEDUPLICATION ---
+================================================================================
+
+SCENARIO E1: Same-sector ETFs deduplicated
+  Situation: SMH and SOXX both have buy signals (both semiconductor sector)
+  Expected: Only the first one encountered is kept; second dropped
+  Code: graph_nexus_analysis.py — ETF sector deduplication
+  Status: MUST PASS (test: TestV6ETFDeduplication::test_semiconductor_etfs_deduped)
+
+SCENARIO E2: Silver ETFs deduplicated
+  Situation: SLV and PSLV both have buy signals (both silver sector)
+  Expected: Only the first one encountered is kept
+  Code: graph_nexus_analysis.py — ETF sector deduplication
+  Status: MUST PASS (test: TestV6ETFDeduplication::test_silver_etfs_deduped)
+
+SCENARIO E3: Held ETF sector blocks new same-sector ETF
+  Situation: Already holding SMH (semiconductor), new buy signal for SOXX
+  Expected: SOXX blocked — held_sectors contains "semiconductor"
+  Code: graph_nexus_analysis.py — held-sector check
+  Status: MUST PASS (test: TestV6ETFDeduplication::test_held_etf_sector_blocked)
+
+SCENARIO E4: Unknown sector ETF passes through
+  Situation: ARKK (not in sector map) has buy signal
+  Expected: Passes through — classified as "other" sector, no dedup conflict
+  Code: graph_nexus_analysis.py — sector lookup defaults to "other"
+  Status: MUST PASS (test: TestV6ETFDeduplication::test_unknown_sector_passes)
+
+
+================================================================================
+--- CATEGORY 6: POSITION ROTATION ---
+================================================================================
+
+SCENARIO R1: Rotation triggers when headroom is zero
+  Situation: Portfolio full (headroom=0), new candidate score=0.45, weakest=0.10,
+             delta=0.35 > min_delta=0.25, new_score >= min_score=0.40
+  Expected: Rotation triggered — sell weakest, buy new candidate
+  Code: graph_nexus_analysis.py — position rotation block
+  Status: MUST PASS (test: TestV6PositionRotation::test_rotation_triggers_when_headroom_zero)
+
+SCENARIO R2: Rotation blocked by insufficient score delta
+  Situation: Weakest score=0.35, new candidate=0.45, delta=0.10 < min_delta=0.25
+  Expected: Rotation blocked — improvement too small to justify churn
+  Code: graph_nexus_analysis.py — rotation delta check
+  Status: MUST PASS (test: TestV6PositionRotation::test_rotation_blocked_by_insufficient_delta)
+
+SCENARIO R3: Rotation blocked by low candidate score
+  Situation: New candidate score=0.30, min_score=0.40
+  Expected: Rotation blocked — candidate must meet absolute quality threshold
+  Code: graph_nexus_analysis.py — rotation min_score check
+  Status: MUST PASS (test: TestV6PositionRotation::test_rotation_blocked_by_low_score)
+
+SCENARIO R4: Max rotations per day capped
+  Situation: 2 rotations already done, max_rotations_per_day=2, another candidate qualifies
+  Expected: Third rotation blocked — daily cap reached
+  Code: graph_nexus_analysis.py — max_rotations_per_day counter
+  Status: MUST PASS (test: TestV6PositionRotation::test_max_rotations_per_day_cap)
+
+
+================================================================================
+--- CATEGORY 7: BACKFILL QUEUE (SPECIFICATION — NOT YET IMPLEMENTED) ---
+================================================================================
+
+SCENARIO BQ1: Blocked buy added to queue
+  Situation: Buy signal for ticker NVDA, but $0 available cash after floor
+  Expected: NVDA added to backfill_queue with signal_price, score, priority, bar_count=0
+  Code: To be implemented in graph_nexus_analysis.py / broker.py
+  Status: SPECIFICATION
+
+SCENARIO BQ2: Queue processes when cash becomes available
+  Situation: Forced exit frees $500 cash, NVDA is in queue with buy_cash=$400
+  Expected: NVDA bought from queue using freed cash
+  Code: To be implemented — post-sell cash check triggers queue processing
+  Status: SPECIFICATION
+
+SCENARIO BQ3: Queue entry expires after max_attempts
+  Situation: NVDA in queue for 5 bars, max_queue_attempts=5
+  Expected: NVDA removed from queue — signal too stale
+  Code: To be implemented — bar_count >= max_queue_attempts check
+  Status: SPECIFICATION
+
+SCENARIO BQ4: Price staleness check blocks queue buy
+  Situation: NVDA queued at signal_price=$100, current price=$125 (+25% above signal)
+  Expected: Queue entry skipped (not bought) — price moved >20% above signal price
+  Code: To be implemented — staleness check: (current - signal) / signal > 0.20
+  Config: queue_price_staleness_pct (default 0.20)
+  Status: SPECIFICATION
+
+SCENARIO BQ5: Queue priority ordering
+  Situation: Queue has: TSLA (propagation, priority=1) and AAPL (direct, priority=2)
+  Expected: TSLA processed first — propagation stocks get priority 1 (higher)
+  Code: To be implemented — queue sorted by priority ascending (1 before 2)
+  Status: SPECIFICATION
+
+SCENARIO BQ6: Cash recycling from forced exit triggers queue check
+  Situation: Fast-loser-cut on MTNB frees $800, queue has NVDA ($600) and AMD ($500)
+  Expected: NVDA immediately bought ($600 from freed $800); AMD also bought if $200 remains
+  Code: To be implemented — forced exit callback triggers queue drain
+  Status: SPECIFICATION
+
+SCENARIO BQ7: Sell-to-buy rotation from queue
+  Situation: Queue has NVDA (priority=1, score=0.80), portfolio full,
+             weakest position has score=0.15, delta=0.65 > min_delta
+  Expected: Weakest position sold, NVDA bought from queue via rotation
+  Code: To be implemented — rotation considers queue entries as candidates
+  Status: SPECIFICATION
+
+SCENARIO BQ8: Queue max size limit
+  Situation: Queue already has 15 entries (max_queue_size=15), new blocked buy
+  Expected: New entry rejected — queue full; lowest-priority entry may be evicted
+  Code: To be implemented — queue.size >= max_queue_size check
+  Config: max_queue_size (default 15)
+  Status: SPECIFICATION
+
+SCENARIO BQ9: Queue entry updated on re-signal
+  Situation: NVDA already in queue with score=0.60, new signal comes with score=0.80
+  Expected: Queue entry updated with new score and reset bar_count=0
+  Code: To be implemented — dedup by ticker, update if new score higher
+  Status: SPECIFICATION
+
+SCENARIO BQ10: Queue cleared on session end
+  Situation: Strategy session ends (backtest day range complete or live session restart)
+  Expected: Queue fully cleared — stale entries do not carry across sessions
+  Code: To be implemented — session boundary cleanup
+  Status: SPECIFICATION
+
+
+================================================================================
+--- CATEGORY 8: V6 CRASH FIX ---
+================================================================================
+
+SCENARIO CF1: Non-dict values in nexus_position_sizes handled
+  Situation: nexus_position_sizes contains _cash_reserve_floor_pct=0.10 (float, not dict)
+  Expected: Sell-first ordering loop does not crash on non-dict value
+  Code: broker.py line 3516 — isinstance(_ps_hint, dict) guard
+  Status: MUST PASS (test: TestV6CrashFix::test_non_dict_values_in_position_sizes_handled)
+
+SCENARIO CF2: strategy_cache None guard
+  Situation: strategy_cache passed as None to _finalize_scores
+  Expected: Converted to {} without crash — trailing stop peak tracking still works
+  Code: graph_nexus_analysis.py line 8975 — _sc = strategy_cache if strategy_cache is not None else {}
+  Status: MUST PASS (test: TestV6SweepFixes::test_strategy_cache_none_guard)
+
+SCENARIO CF3: total_weight zero guard
+  Situation: All stocks filtered out leaving empty weights dict
+  Expected: total_weight defaults to 1.0 via `or 1.0`, no division by zero
+  Code: graph_nexus_analysis.py — total_weight = sum(weights.values()) or 1.0
+  Status: MUST PASS (test: TestV6SweepFixes::test_total_weight_zero_guard)
+
+SCENARIO CF4: _ensure_prices return value captured
+  Situation: _ensure_prices_include_positions called but return value not captured
+  Expected: Return value MUST be captured — function may create new dict when input is None
+  Code: graph_nexus_analysis.py — prices = _ensure_prices_include_positions(prices)
+  Status: MUST PASS (test: TestV6SweepFixes::test_ensure_prices_return_value_captured)
+
+
+================================================================================
+--- CATEGORY 9: CROSS-FILE INTEGRATION ---
+================================================================================
+
+SCENARIO I1: Sell-first ordering at broker boundary
+  Situation: nexus_position_sizes has sells (sell_fraction) and buys (buy_cash)
+  Expected: Sells executed before buys — freed cash available for purchases
+  Code: broker.py lines 3513-3519 — _sell_first / _buy_rest ordering
+  Status: MUST PASS
+
+SCENARIO I2: Rotation sell added to sell_syms
+  Situation: Rotation identifies weakest position to sell for incoming buy
+  Expected: Rotation target added to sell_syms list
+  Code: graph_nexus_analysis.py — rotation logic
+  Status: MUST PASS (test: TestV6SweepFixes::test_rotation_sell_added_to_sell_syms)
+
+SCENARIO I3: nexus_sell_enforcement passed to broker
+  Situation: Strategy populates nexus_sell_enforcement with forced-exit symbols
+  Expected: scores["_nexus_sell_enforcement"] contains the enforcement list for broker
+  Code: graph_nexus_analysis.py line 11747
+  Status: MUST PASS
+
+SCENARIO I4: Prices available for all held positions
+  Situation: Position in MTNB but prices dict missing MTNB
+  Expected: _ensure_prices_include_positions fetches missing price
+  Code: graph_nexus_analysis.py — _ensure_prices_include_positions
+  Status: MUST PASS
+
+
+================================================================================
+--- CATEGORY 10: EDGE CASES ---
+================================================================================
+
+SCENARIO EC1: Zero cash — no crash
+  Situation: portfolio_total=0.0, buy signals present
+  Expected: Empty allocation dict returned, no crash
+  Code: graph_nexus_analysis.py — early return when portfolio_total <= 0
+  Status: MUST PASS (test: TestEdgeCases::test_zero_cash_no_crash)
+
+SCENARIO EC2: Empty buy list — no crash
+  Situation: No buy signals, portfolio has cash
+  Expected: Empty allocation dict returned, no crash
+  Code: graph_nexus_analysis.py — early return when not stock_buys
+  Status: MUST PASS (test: TestEdgeCases::test_empty_buy_list_no_crash)
+
+SCENARIO EC3: Single stock gets entire budget
+  Situation: Only 1 buy signal, $1000 budget
+  Expected: That stock gets full $1000
+  Code: graph_nexus_analysis.py — weights normalize to 100% for single entry
+  Status: MUST PASS (test: TestEdgeCases::test_single_stock_allocation)
+
+SCENARIO EC4: Position headroom zero blocks all buys
+  Situation: 50 existing positions, max_positions=50
+  Expected: No new buys — headroom = 0
+  Code: graph_nexus_analysis.py — position_headroom calculation
+  Status: MUST PASS (test: TestEdgeCases::test_position_headroom_zero_blocks_all_buys)
+
+SCENARIO EC5: Zero peak price — no division by zero
+  Situation: Trailing stop logic with peak_price=0
+  Expected: drop_from_peak = 0 (guard clause), no crash
+  Code: graph_nexus_analysis.py line 8981 — "if _peak > 0 else 0" guard
+  Status: MUST PASS (test: TestEdgeCases::test_sell_logic_with_zero_peak_price)
+
+SCENARIO EC6: Missing price for held position
+  Situation: Position exists but prices dict has no entry for that ticker
+  Expected: Portfolio value computed without crash, missing position valued at 0
+  Code: MockPortfolioEmulator.get_portfolio_value — "if p is not None" guard
+  Status: MUST PASS (test: TestEdgeCases::test_missing_price_for_held_position)
+
+SCENARIO EC7: All high conviction — floor fully bypassed
+  Situation: All buy candidates have high_conviction=True, cash at floor level
+  Expected: All buys proceed — floor bypassed for every buy individually
+  Code: broker.py — _high_conviction check per-symbol
+  Status: MANUAL CHECK
+
+SCENARIO EC8: Lookback phase — no sells on day 1
+  Situation: Backtest first day, positions haven't been held for any lookback period
+  Expected: No sell signals generated — positions need time to evaluate
+  Code: graph_nexus_analysis.py — lookback window check
+  Status: MANUAL CHECK
+
+SCENARIO EC9: ASTI lifecycle — buy, protect, trail, sell
+  Situation: ASTI bought at $10, rises to $15 (peak), sell signal at $14 (+40%),
+             then drops to $12.60 (16% from peak)
+  Expected: Phase 1: Winner protection holds at +40%. Phase 2: Trailing stop sells at 16% drop.
+  Code: Combined winner protection + trailing stop flow
+  Status: MUST PASS (test: TestIntegrationScenarios::test_asti_held_through_winner_protection_then_trailing_stop)
+
+SCENARIO EC10: Day 2 allocation uses portfolio total not just cash
+  Situation: Day 2, cash reduced after Day 1 buys, positions have value
+  Expected: Allocation budget = (cash + position_values) * nexus_pct
+  Code: graph_nexus_analysis.py — portfolio_total includes positions
+  Status: MUST PASS (test: TestIntegrationScenarios::test_cash_exhaustion_day2_limited_buys)
+
+
+================================================================================
+--- NOTES ---
+================================================================================
+
+Config defaults (code hardcoded fallbacks from graph_nexus_analysis.py):
+  fast_loser_cut_pct: -10.0       (V12 config override: -15.0) (V15 config override: -12.0)
+  trailing_stop_activation_pct: 10.0  (V12 config override: 15.0) (V15 config override: 8.0)
+  trailing_stop_pct: 8.0          (V12 config override: 15.0) (V15 config override: 8.0)
+  profit_take_gain_pct: 40.0      (V12 config override: 200.0)
+  max_hold_days: 90               (V12 config override: 120)
+  earnings_penalty_weight: 0.5    (V12 config override: 0.8)
+  rotation_winner_lock_min_pnl_pct: 3.0  (V12 config override: 12.0)
+  rotation_break_glass_delta: 2.25       (V12 config override: 1.25)
+  rotation_break_glass_raw_score: 2.75   (V12 config override: 1.75)
+  sell_block_bypass_loss_pct: -5.0       (V12 new config)
+  cash_reserve_floor_pct: 0.10
+  max_stock_buys_per_day: 15      (V15 config override: 6)
+  max_positions: 50
+  pool_a_base: 10
+  pool_b_base: 5
+  pool_a_min: 3
+  pool_b_min: 2
+  sell_enforcement_min_hold_days: 5  (V15 config override: 12)
+  sell_enforcement_consecutive_neutral_days: 3  (V15 config override: 4)
+  rotation_replace_loss_threshold_pct: -0.5  (V15 config override: -5.0)
+  rotation_min_hold_days: 10       (V15 config override: 7)
+  macro_risk_scale_min: 0.60       (V15 config override: 0.8)
+  min_position_size: 50.0          (V15 config override: 100)
+  buy_threshold: 0.15              (V15 config override: 0.3)
+
+V15 hardcoded code changes (NOT config-driven):
+  _NEXUS_COMPANY_BATCH_SIZE: 4 -> 8   (line 427)
+  _NEXUS_MACRO_BATCH_SIZE: 4 -> 8     (line 428)
+  _nexus_llm_worker_count min: max(1,...) -> max(4,...) (line 2750)
+  Schema company_article_llm_workers default: 2 -> 4
+  Schema macro_article_llm_workers default: 2 -> 6
+
+Winner protection thresholds (cumulative, evaluated top-down — V11 tightened):
+  +50% gain: prop_raw > -0.55 (+ time_decay)  [was -0.70 pre-V11]
+  +20% gain: prop_raw > -0.35 (+ time_decay)  [was -0.50 pre-V11]
+  +10% gain: prop_raw > -0.15 (+ time_decay)  [was -0.30 pre-V11]
+  Time decay: after 45 held days, thresholds tighten by 0.005/day
+
+Execution order in _finalize_scores:
+  1. Hold-limit check (defer to trailing stop if big winner)
+  2. Winner protection (suppress weak sells on gainers, unless hold-limit forced)
+  3. Fast loser cut (override hold/buy to sell on deep losses)
+  4. Trailing stop (sell on large drop from peak after activation)
+  5. _forced_exit flag set based on reason text
+
+Execution order in graph_nexus_analysis run_once:
+  1. _finalize_scores (risk management gates)
+  2. LLM overlay (sell_block check — forced exits immune)
+  3. Circuit breaker (forced exits always kept)
+  4. Allocation (pools -> merge -> cap -> weights -> min size)
+  5. Forced-exit enforcement set populated
+  6. _cash_reserve_floor_pct attached to position sizes
+  7. Sell-first ordering at broker boundary
+
+SCENARIO BQ11: Broker SKIP BUY triggers backfill enqueue on next bar
+  Situation: SNDK allocated $1000 by strategy, broker SKIP BUYs at $0 cash
+  Expected: Next bar, strategy reads _broker_skipped_buys and enqueues SNDK with priority=0
+  Code: broker.py SKIP BUY → strategy_cache; graph_nexus_analysis.py _broker_skipped loop
+  Status: MUST PASS
+
+SCENARIO BQ12: Backfill uses full stock_buys list not just pool stocks
+  Situation: 40 buy signals, pool selects 6, LITE is #20 by score (score=0.45)
+  Expected: LITE gets enqueued from full stock_buys if not in _bfq_bought_this_bar
+  Code: graph_nexus_analysis.py line 11765 — stock_buys not _pool_a_final+_pool_b_final
+  Status: MUST PASS
+
+SCENARIO BQ13: Broker-skipped buy dequeued and bought when cash freed
+  Situation: SNDK skipped Day 10 (queued priority=0), Day 11 sell frees $500
+  Expected: SNDK dequeued, score checked, price checked, bought with freed cash
+  Code: graph_nexus_analysis.py backfill dequeue section
+  Status: MUST PASS
+
+
+================================================================================
+--- CATEGORY 11: FAST LOSER BLACKLIST (V7.3) ---
+================================================================================
+
+SCENARIO BL1: Fast-loser-cut stock blacklisted for 20 bars
+  Situation: DCGO fast-loser-cut at -15.6%, blacklist_days=20
+  Expected: DCGO added to _fast_loser_blacklist with bars_remaining=20
+  Code: graph_nexus_analysis.py _finalize_scores — blacklist block
+  Config: fast_loser_blacklist_days=20
+  Status: MUST PASS
+
+SCENARIO BL2: Blacklisted stock filtered from pool candidates
+  Situation: DCGO in blacklist, propagation discovers DCGO again next bar
+  Expected: DCGO removed from _pool_a_candidates and _pool_b_candidates
+  Code: graph_nexus_analysis.py pool selection — blacklist filter
+  Status: MUST PASS
+
+SCENARIO BL3: Blacklisted stock blocked from expansion re-promotion
+  Situation: DCGO blacklisted, propagation expansion promotes DCGO
+  Expected: DCGO filtered from _prop_expansion_buys
+  Code: graph_nexus_analysis.py expansion promotion — blacklist filter
+  Status: MUST PASS
+
+SCENARIO BL4: Blacklist expires after N bars
+  Situation: DCGO blacklisted with bars_remaining=20, 21 bars later
+  Expected: DCGO removed from blacklist, can be re-bought
+  Code: graph_nexus_analysis.py pool selection — blacklist expiry
+  Status: MUST PASS
+
+
+================================================================================
+--- CATEGORY 12: EXPANSION BUY BACKFILL (V7.3) ---
+================================================================================
+
+SCENARIO EB1: Expansion buy SNDK added to backfill queue
+  Situation: SNDK promoted via propagation expansion, SKIP BUY'd by broker
+  Expected: Next bar, SNDK enqueued via broker-skipped path + scoring net
+  Code: graph_nexus_analysis.py backfill queue — expansion enqueue
+  Status: MUST PASS
+
+SCENARIO EB2: Expansion buy scored on subsequent bars via scoring net
+  Situation: SNDK in backfill queue, not in symbols_list on next bar
+  Expected: Scoring net adds SNDK to symbols_list, _finalize_scores produces fresh score
+  Code: graph_nexus_analysis.py line 11325 — backfill queue scoring net
+  Status: MUST PASS
+
+
+================================================================================
+--- CATEGORY 13: PURE DISCOVERY MODE (V7.3) ---
+================================================================================
+
+SCENARIO PD1: Zero initial tickers — strategy bootstraps from discovery
+  Situation: symbols=[] passed to run_once, no tickers at all
+  Expected: Benzinga/news/trends discovery populates symbols_list, stocks scored and bought
+  Code: graph_nexus_analysis.py run_once — removed empty symbols_list early return
+  Status: MUST PASS
+
+SCENARIO PD2: Zero initial tickers — bars fetched on-demand for discoveries
+  Situation: No initial bar data, ASTI discovered via Benzinga
+  Expected: _ensure_backtest_history_for_symbols fetches ASTI bars on-demand
+  Code: broker.py — on-demand bar fetching for discovered symbols
+  Status: MUST PASS
+
+SCENARIO PD3: Zero initial tickers — portfolio starts pure cash
+  Situation: $7K cash, zero positions, zero symbols
+  Expected: First 1-2 bars may have no trades while discovery bootstraps
+  Code: broker.py main loop — expanded_symbols starts empty, grows via discovery
+  Status: MUST PASS
+
+SCENARIO PD4: Frontend allows empty stock list for Nexus strategy
+  Situation: User selects Nexus strategy, enters zero tickers, clicks Start
+  Expected: Backtest starts without error (no "at least one stock required" validation)
+  Code: frontend InstancesView.vue + InstanceDetailView.vue — validation removed/relaxed
+  Status: MUST PASS
+
+
+================================================================================
+--- CATEGORY 14: V12 SELL_BLOCK BYPASS ---
+================================================================================
+
+SCENARIO SB1: ML SELL_BLOCK bypass on deep loss (-7% unrealized)
+  Type: MUST_PASS
+  Setup: Stock held with -7% unrealized loss, ML overlay has sell_block=True,
+         final_score=-1 (sell signal), _forced_exit=False,
+         sell_block_bypass_loss_pct=-5.0 (default)
+  Action: _apply_ml_and_overlay_to_scores processes this symbol
+  Expected: Sell is ALLOWED through — bypass fires because -7% <= -5% (threshold)
+            and _v11_unrealized_pct != 0.0. final_score stays -1.
+  Code: graph_nexus_analysis.py lines 12034-12041
+  Pass Criteria: final_score == -1 after ML overlay; log contains "SELL_BLOCK BYPASS"
+
+SCENARIO SB2: ML SELL_BLOCK holds on shallow loss (-2% unrealized)
+  Type: MUST_PASS
+  Setup: Stock held with -2% unrealized loss, ML overlay has sell_block=True,
+         final_score=-1 (sell signal), _forced_exit=False,
+         sell_block_bypass_loss_pct=-5.0 (default)
+  Action: _apply_ml_and_overlay_to_scores processes this symbol
+  Expected: Sell is BLOCKED — -2% > -5%, so bypass does NOT fire.
+            final_score changed to 0 (hold). Standard sell_block behavior.
+  Code: graph_nexus_analysis.py lines 12039-12041
+  Pass Criteria: final_score == 0 after ML overlay; log contains "SELL_BLOCK:" (not "BYPASS")
+
+SCENARIO SB3: ML SELL_BLOCK bypass at exact threshold (-5% unrealized)
+  Type: MUST_PASS
+  Setup: Stock held with exactly -5.0% unrealized loss, ML overlay sell_block=True,
+         final_score=-1, _forced_exit=False, sell_block_bypass_loss_pct=-5.0
+  Action: _apply_ml_and_overlay_to_scores processes this symbol
+  Expected: Sell is ALLOWED through — uses <= comparison, -5.0 <= -5.0 is True.
+  Code: graph_nexus_analysis.py line 12037 — _v11_unrealized_pct <= _sb_bypass_pct
+  Pass Criteria: final_score == -1 after ML overlay
+
+SCENARIO SB4: ML SELL_BLOCK bypass does NOT fire on zero unrealized
+  Type: MUST_PASS
+  Setup: Stock held with 0.0% unrealized (break-even), ML overlay sell_block=True,
+         final_score=-1, _forced_exit=False
+  Action: _apply_ml_and_overlay_to_scores processes this symbol
+  Expected: Sell is BLOCKED — code checks _v11_unrealized_pct != 0.0 guard,
+            so 0.0 is excluded from bypass even though 0.0 <= -5.0 is False anyway.
+  Code: graph_nexus_analysis.py line 12037 — "and _v11_unrealized_pct != 0.0"
+  Pass Criteria: final_score == 0 after ML overlay
+
+SCENARIO SB5: ML SELL_BLOCK bypass with custom threshold
+  Type: MUST_PASS
+  Setup: Stock held with -8% unrealized loss, ML overlay sell_block=True,
+         final_score=-1, _forced_exit=False,
+         sell_block_bypass_loss_pct=-10.0 (custom, stricter than default)
+  Action: _apply_ml_and_overlay_to_scores processes this symbol
+  Expected: Sell is BLOCKED — -8% > -10%, bypass does not fire.
+  Code: graph_nexus_analysis.py line 12036-12037
+  Pass Criteria: final_score == 0 after ML overlay
+
+SCENARIO SB6: ML SELL_BLOCK bypass does NOT override forced_exit guard
+  Type: MUST_PASS
+  Setup: Stock with _forced_exit=True (e.g., fast loser cut), ML overlay sell_block=True
+  Action: _apply_ml_and_overlay_to_scores processes this symbol
+  Expected: sell_block logic is never reached — line 12034 has "not base.get('_forced_exit')"
+            guard. Forced exit is preserved regardless of sell_block or bypass.
+  Code: graph_nexus_analysis.py line 12034
+  Pass Criteria: final_score == -1; sell_block bypass logic not evaluated
+
+
+================================================================================
+--- CATEGORY 15: V12 FAST LOSER CUT THRESHOLD CHANGE ---
+================================================================================
+
+SCENARIO FL1: Stock drops -14% with V12 fast_loser_cut_pct=-15 — does NOT fire
+  Type: MUST_PASS
+  Setup: Stock bought at $100, current price $86 (-14% unrealized),
+         fresh_score=0 (hold), config fast_loser_cut_pct=-15.0
+  Action: _finalize_scores risk pipeline evaluates this position
+  Expected: Fast loser cut does NOT fire — -14% > -15% threshold.
+            fresh_score stays 0.
+  Code: graph_nexus_analysis.py line 11097 — _unrealized_pct <= _fast_cut_pct
+        -14.0 <= -15.0 is False
+  Pass Criteria: fresh_score == 0; no "Fast loser cut" in reason
+
+SCENARIO FL2: Stock drops -16% with V12 fast_loser_cut_pct=-15 — fires
+  Type: MUST_PASS
+  Setup: Stock bought at $100, current price $84 (-16% unrealized),
+         fresh_score=0 (hold), config fast_loser_cut_pct=-15.0
+  Action: _finalize_scores risk pipeline evaluates this position
+  Expected: Fast loser cut fires — -16% <= -15% threshold.
+            fresh_score set to -1, reason contains "Fast loser cut".
+  Code: graph_nexus_analysis.py lines 11097-11099
+        -16.0 <= -15.0 is True
+  Pass Criteria: fresh_score == -1; reason contains "Fast loser cut"
+
+SCENARIO FL3: Stock drops -15% exactly with V12 threshold — fires (boundary)
+  Type: MUST_PASS
+  Setup: Stock at exactly -15.0% unrealized, config fast_loser_cut_pct=-15.0
+  Action: _finalize_scores risk pipeline evaluates this position
+  Expected: Fast loser cut fires — uses <= comparison, -15.0 <= -15.0 is True.
+  Code: graph_nexus_analysis.py line 11097
+  Pass Criteria: fresh_score == -1; reason contains "Fast loser cut"
+
+
+================================================================================
+--- CATEGORY 16: V12 ROTATION WINNER LOCK THRESHOLD CHANGE ---
+================================================================================
+
+SCENARIO WL1: Winner with +8% P&L — rotation NOT locked (V12 min_pnl=12%)
+  Type: MUST_PASS
+  Setup: Equity position with +8% unrealized P&L, held 10 days, raw_score=-0.05,
+         drop_from_peak=3%, config rotation_winner_lock_min_pnl_pct=12.0
+  Action: _rotation_winner_lock_active called for this position
+  Expected: Returns (False, "min_pnl") — +8% < +12% threshold.
+            Position is eligible for rotation out.
+  Code: graph_nexus_analysis.py lines 4454-4455
+        float(held_pnl_pct) < min_pnl_pct => 8.0 < 12.0 is True => return False
+  Pass Criteria: winner_lock_active == False, reason == "min_pnl"
+
+SCENARIO WL2: Winner with +15% P&L — rotation IS locked (V12 min_pnl=12%)
+  Type: MUST_PASS
+  Setup: Equity position with +15% unrealized P&L, held 10 days, raw_score=-0.05,
+         drop_from_peak=3%, config rotation_winner_lock_min_pnl_pct=12.0
+  Action: _rotation_winner_lock_active called for this position
+  Expected: Returns (True, "winner_lock") — +15% >= +12% threshold, all other
+            conditions met (held >= 5d, raw_score >= -0.10, drop <= 8%).
+  Code: graph_nexus_analysis.py line 4463 — all checks pass
+  Pass Criteria: winner_lock_active == True, reason == "winner_lock"
+
+SCENARIO WL3: Locked winner with break_glass override (V12 thresholds)
+  Type: MUST_PASS
+  Setup: Equity position with +15% P&L locked by winner lock,
+         incoming candidate raw_score=2.0, delta=1.50,
+         config rotation_break_glass_raw_score=1.75, rotation_break_glass_delta=1.25
+  Action: Rotation evaluation checks break_glass conditions
+  Expected: Break glass fires — raw_score 2.0 >= 1.75 AND delta 1.50 >= 1.25.
+            Returns (True, delta, "break_glass_trim").
+  Code: graph_nexus_analysis.py line 4841-4842
+  Pass Criteria: rotation allowed == True, mode == "break_glass_trim"
+
+SCENARIO WL4: Locked winner — break_glass NOT met (insufficient delta)
+  Type: MUST_PASS
+  Setup: Equity position with +15% P&L locked by winner lock,
+         incoming candidate raw_score=2.0, delta=1.00,
+         config rotation_break_glass_raw_score=1.75, rotation_break_glass_delta=1.25
+  Action: Rotation evaluation checks break_glass conditions
+  Expected: Break glass does NOT fire — raw_score 2.0 >= 1.75 is True BUT
+            delta 1.00 < 1.25. Returns (False, delta, "winner_lock").
+  Code: graph_nexus_analysis.py line 4841 — both conditions required (AND)
+  Pass Criteria: rotation allowed == False, mode == "winner_lock"
+
+SCENARIO WL5: Locked winner — break_glass NOT met (insufficient raw_score)
+  Type: MUST_PASS
+  Setup: Equity position with +15% P&L locked by winner lock,
+         incoming candidate raw_score=1.50, delta=1.50,
+         config rotation_break_glass_raw_score=1.75, rotation_break_glass_delta=1.25
+  Action: Rotation evaluation checks break_glass conditions
+  Expected: Break glass does NOT fire — raw_score 1.50 < 1.75.
+            Returns (False, delta, "winner_lock").
+  Code: graph_nexus_analysis.py line 4841
+  Pass Criteria: rotation allowed == False, mode == "winner_lock"
+
+
+================================================================================
+--- CATEGORY 17: V12 PROFIT TAKE THRESHOLD CHANGE ---
+================================================================================
+
+SCENARIO PT1: Stock at +180% gain — profit take does NOT fire (V12 threshold=200%)
+  Type: MUST_PASS
+  Setup: Stock held with +180% unrealized gain, fresh_score=0 (hold),
+         config profit_take_gain_pct=200.0, never previously profit-taken
+  Action: _finalize_scores profit take logic evaluates this position
+  Expected: Profit take does NOT fire — 180% < 200% threshold.
+            fresh_score stays 0.
+  Code: graph_nexus_analysis.py line 11149
+        _unrealized_pct >= _profit_take_gain_pct => 180.0 >= 200.0 is False
+  Pass Criteria: fresh_score == 0; no "Profit take" in reason
+
+SCENARIO PT2: Stock at +210% gain — profit take fires (V12 threshold=200%)
+  Type: MUST_PASS
+  Setup: Stock held with +210% unrealized gain, fresh_score=0 (hold),
+         config profit_take_gain_pct=200.0, never previously profit-taken
+  Action: _finalize_scores profit take logic evaluates this position
+  Expected: Profit take fires — 210% >= 200% threshold.
+            fresh_score set to -1, sell_fraction=0.50 (trim half).
+  Code: graph_nexus_analysis.py lines 11149-11156
+  Pass Criteria: fresh_score == -1; reason contains "Profit take"; sell_fraction == 0.50
+
+SCENARIO PT3: Stock at +200% exactly — profit take fires (boundary)
+  Type: MUST_PASS
+  Setup: Stock at exactly +200.0% gain, config profit_take_gain_pct=200.0,
+         never previously profit-taken
+  Action: _finalize_scores profit take logic evaluates this position
+  Expected: Profit take fires — uses >= comparison, 200.0 >= 200.0 is True.
+  Code: graph_nexus_analysis.py line 11149
+  Pass Criteria: fresh_score == -1; reason contains "Profit take"
+
+
+================================================================================
+--- CATEGORY 18: V12 EARNINGS PENALTY WEIGHT CHANGE ---
+================================================================================
+
+SCENARIO EP1: Single-path earnings buy with V12 penalty weight 0.8
+  Type: MUST_PASS
+  Setup: Symbol with event="earnings", n_paths=1, raw_net=1.0 before penalty,
+         config earnings_penalty_weight=0.8
+  Action: Candidate scoring applies earnings penalty
+  Expected: raw_net reduced to 1.0 * 0.8 = 0.8 (20% haircut, less severe than old 50%)
+  Code: graph_nexus_analysis.py lines 11798-11802
+  Pass Criteria: raw_net == 0.8 after penalty
+
+SCENARIO EP2: Multi-path earnings buy — no penalty applied
+  Type: MUST_PASS
+  Setup: Symbol with event="earnings", n_paths=3, raw_net=1.0 before penalty,
+         config earnings_penalty_weight=0.8
+  Action: Candidate scoring checks earnings penalty condition
+  Expected: No penalty — n_paths > 1, condition at line 11798 not met.
+  Code: graph_nexus_analysis.py line 11798 — _ep_n_paths <= 1
+  Pass Criteria: raw_net == 1.0 (unchanged)
+
+
+================================================================================
+--- CATEGORY 19: V12 MAX HOLD DAYS CHANGE ---
+================================================================================
+
+SCENARIO HD1: Stock held 100 days with V12 max_hold_days=120 — no exit
+  Type: MUST_PASS
+  Setup: Stock held for 100 days, fresh_score=0 (hold), no fresh buy signal,
+         config max_hold_days=120
+  Action: _finalize_scores hold-limit check evaluates this position
+  Expected: Hold-limit does NOT fire — 100 days <= 120 day threshold.
+            fresh_score stays 0.
+  Code: graph_nexus_analysis.py line 11039 — days > max_hold_days
+        100 > 120 is False
+  Pass Criteria: fresh_score == 0; no "Hold-limit exit" in reason
+
+SCENARIO HD2: Stock held 125 days with V12 max_hold_days=120 — exits
+  Type: MUST_PASS
+  Setup: Stock held for 125 days, fresh_score=0 (hold), no fresh buy signal,
+         unrealized gain < trailing_stop_activation_pct, config max_hold_days=120
+  Action: _finalize_scores hold-limit check evaluates this position
+  Expected: Hold-limit fires — 125 > 120. fresh_score set to -1.
+  Code: graph_nexus_analysis.py lines 11039-11056
+  Pass Criteria: fresh_score == -1; reason contains "Hold-limit exit"
+
+
+================================================================================
+--- CATEGORY 20: V15 CODE + CONFIG CHANGES ---
+================================================================================
+
+SCENARIO V15-1: Company article batch size increased to 8
+  Type: MUST_PASS
+  Setup: 16 company articles queued for LLM classification,
+         _NEXUS_COMPANY_BATCH_SIZE = 8 (hardcoded constant, line 427)
+  Action: Articles are chunked into batches for _classify_company_article_chunk
+  Expected: 2 batches of 8 articles each (not 4 batches of 4).
+            Each batch is a valid LLM prompt containing 8 article entries.
+  Code: graph_nexus_analysis.py line 427 — _NEXUS_COMPANY_BATCH_SIZE = 8
+  Pass Criteria: len(chunk) == 8 for each full batch; all 16 articles classified
+
+SCENARIO V15-2: Macro article batch size increased to 8
+  Type: MUST_PASS
+  Setup: 24 macro articles queued for LLM classification,
+         _NEXUS_MACRO_BATCH_SIZE = 8 (hardcoded constant, line 428)
+  Action: Articles are chunked into batches for macro classification
+  Expected: 3 batches of 8 articles each (not 6 batches of 4).
+            Each batch is a valid LLM prompt containing 8 article entries.
+  Code: graph_nexus_analysis.py line 428 — _NEXUS_MACRO_BATCH_SIZE = 8
+  Pass Criteria: len(chunk) == 8 for each full batch; all 24 articles classified
+
+SCENARIO V15-3: Worker minimum of 4 even when config says 2
+  Type: MUST_PASS
+  Setup: config company_article_llm_workers=2, macro_article_llm_workers=2
+  Action: _nexus_llm_worker_count(config, "company_article_llm_workers", 2) called
+  Expected: Returns 4 (not 2) — max(4, min(12, 2)) = max(4, 2) = 4.
+            Floor of 4 workers enforced regardless of config.
+  Code: graph_nexus_analysis.py line 2750 — return max(4, min(12, configured))
+  Pass Criteria: _nexus_llm_worker_count returns 4 when config value is 2
+
+SCENARIO V15-4: Worker count respects upper bound of 12
+  Type: MUST_PASS
+  Setup: config company_article_llm_workers=20
+  Action: _nexus_llm_worker_count(config, "company_article_llm_workers", 4) called
+  Expected: Returns 12 (not 20) — max(4, min(12, 20)) = max(4, 12) = 12.
+  Code: graph_nexus_analysis.py line 2750
+  Pass Criteria: _nexus_llm_worker_count returns 12 when config value is 20
+
+SCENARIO V15-5: Extended sell enforcement min hold — 10 days does NOT force-sell
+  Type: MUST_PASS
+  Setup: Position held 10 days, trend reversal detected (raw_score <= 0),
+         config sell_enforcement_min_hold_days=12 (V15 RethinkDB override)
+  Action: _should_force_sell_on_trend_reversal evaluates this position
+  Expected: allow_force_sell = False — held_days 10 < min_hold_days 12.
+            skip_reason contains "held 10d < 12d min".
+  Code: graph_nexus_analysis.py line 4555 — held_days < min_hold_days
+        10 < 12 is True => return False
+  Pass Criteria: allow_force_sell == False; skip_reason mentions min hold
+
+SCENARIO V15-6: Extended sell enforcement min hold — 15 days DOES force-sell
+  Type: MUST_PASS
+  Setup: Position held 15 days, trend reversal detected (raw_score <= 0),
+         unrealized loss -2% (below profitable threshold),
+         consecutive neutral days >= 4 (meets V15 consecutive requirement),
+         config sell_enforcement_min_hold_days=12
+  Action: _should_force_sell_on_trend_reversal evaluates this position
+  Expected: allow_force_sell = True — held_days 15 >= min_hold_days 12,
+            not profitable, neutral days met.
+  Code: graph_nexus_analysis.py line 4555 — 15 < 12 is False => proceeds
+  Pass Criteria: allow_force_sell == True
+
+SCENARIO V15-7: Extended consecutive neutral days — 3 days does NOT trigger
+  Type: MUST_PASS
+  Setup: Position with 3 consecutive neutral days (raw_score <= 0),
+         config sell_enforcement_consecutive_neutral_days=4 (V15 override),
+         held long enough, not profitable
+  Action: _should_force_sell_on_trend_reversal evaluates this position
+  Expected: allow_force_sell = False — neutral_days 3 < consec_neutral_required 4.
+            skip_reason contains "neutral days 3 < 4".
+  Code: graph_nexus_analysis.py line 4595 — neutral_days < consec_neutral_required
+        3 < 4 is True => return False
+  Pass Criteria: allow_force_sell == False
+
+SCENARIO V15-8: Rotation requires -5% loss minimum — position at -3% NOT rotated
+  Type: MUST_PASS
+  Setup: Losing position with -3% unrealized P&L (held_pnl_pct=-3.0),
+         held_rotation_score=0.05 (positive, so second OR branch needed),
+         incoming candidate with sufficient delta and raw_score >= min_score,
+         config rotation_replace_loss_threshold_pct=-5.0 (V15 override),
+         held_days >= rotation_min_hold_days
+  Action: _should_rotation_replace evaluates this losing position
+  Expected: Rotation NOT allowed — held_rotation_score > 0 (0.05 > 0) AND
+            held_pnl_pct -3.0 > replace_loss_threshold_pct -5.0.
+            Both OR branches are False => allow = False.
+  Code: graph_nexus_analysis.py lines 4906-4908
+        allow = delta >= min_delta AND (
+            held_rotation_score <= 0.0 OR held_pnl_pct <= replace_loss_threshold_pct
+        )
+        0.05 <= 0.0 is False; -3.0 <= -5.0 is False => allow = False
+  Pass Criteria: rotation_allowed == False, mode == "losing_hold"
+
+SCENARIO V15-9: Rotation allows exit at -6% loss (below -5% threshold)
+  Type: MUST_PASS
+  Setup: Losing position with -6% unrealized P&L (held_pnl_pct=-6.0),
+         held_rotation_score=0.05, incoming delta >= min_delta,
+         incoming raw_score >= min_score,
+         config rotation_replace_loss_threshold_pct=-5.0 (V15 override),
+         held_days >= rotation_min_hold_days
+  Action: _should_rotation_replace evaluates this losing position
+  Expected: Rotation allowed — held_pnl_pct -6.0 <= -5.0 is True (second OR branch).
+  Code: graph_nexus_analysis.py lines 4906-4908
+        -6.0 <= -5.0 is True => allow = True (assuming delta >= min_delta)
+  Pass Criteria: rotation_allowed == True, mode == "losing_hold"
+
+SCENARIO V15-10: Rotation min hold days at 7 — position held 5 days blocked
+  Type: MUST_PASS
+  Setup: Losing position held 5 days, incoming candidate qualifies,
+         config rotation_min_hold_days=7 (V15 RethinkDB override)
+  Action: _should_rotation_replace evaluates this position
+  Expected: Rotation NOT allowed — held_days 5 < min_hold_days 7.
+            Returns (False, delta, "min_hold").
+  Code: graph_nexus_analysis.py line 4904 — held_days < min_hold_days
+        5 < 7 is True => return False
+  Pass Criteria: rotation_allowed == False, mode == "min_hold"
+
+SCENARIO V15-11: Macro risk scale floor at 0.8 — budget never below 80%
+  Type: MUST_PASS
+  Setup: Heavily bearish macro environment: net_score = -5.0,
+         config macro_risk_scale_step=0.10, macro_risk_scale_min=0.8 (V15 override)
+  Action: _compute_macro_risk_scale computes scale factor
+  Expected: scale = max(0.8, 1.0 - (5.0 * 0.10)) = max(0.8, 0.5) = 0.8.
+            Budget scaled to 80% of base, never lower.
+  Code: graph_nexus_analysis.py line 5498 — scale = max(scale_min, 1.0 - (abs(net_score) * scale_step))
+  Pass Criteria: scale == 0.8
+
+SCENARIO V15-12: Macro risk scale at moderate bearish — scale above floor
+  Type: MUST_PASS
+  Setup: Moderately bearish macro: net_score = -1.0,
+         config macro_risk_scale_step=0.10, macro_risk_scale_min=0.8
+  Action: _compute_macro_risk_scale computes scale factor
+  Expected: scale = max(0.8, 1.0 - (1.0 * 0.10)) = max(0.8, 0.9) = 0.9.
+            Floor not reached; scale is 0.9.
+  Code: graph_nexus_analysis.py line 5498
+  Pass Criteria: scale == 0.9
+
+SCENARIO V15-13: Buy threshold at 0.3 — stock with raw_score 0.25 NOT bought
+  Type: MUST_PASS
+  Setup: Symbol with raw_net=0.25, no forced exit, no overlay blocks,
+         config buy_threshold=0.3 (V15 RethinkDB override)
+  Action: _apply_ml_and_overlay_to_scores evaluates final_score
+  Expected: final_score = 0 (hold) — raw_net 0.25 < buy_threshold 0.30.
+            Stock does not receive a buy signal.
+  Code: graph_nexus_analysis.py line 12200 — raw_net >= buy_threshold
+        0.25 >= 0.30 is False => final_score stays 0
+  Pass Criteria: final_score == 0
+
+SCENARIO V15-14: Buy threshold at 0.3 — stock with raw_score 0.35 IS bought
+  Type: MUST_PASS
+  Setup: Symbol with raw_net=0.35, no forced exit, no overlay blocks,
+         config buy_threshold=0.3 (V15 RethinkDB override)
+  Action: _apply_ml_and_overlay_to_scores evaluates final_score
+  Expected: final_score = 1 (buy) — raw_net 0.35 >= buy_threshold 0.30.
+  Code: graph_nexus_analysis.py line 12200
+        0.35 >= 0.30 is True => final_score = 1
+  Pass Criteria: final_score == 1
+
+SCENARIO V15-15: Trailing stop at 8% — drop triggers sell
+  Type: MUST_PASS
+  Setup: Stock bought at $100, peak=$120, current=$110.40,
+         config trailing_stop_activation_pct=8.0, trailing_stop_pct=8.0 (V15 override)
+  Action: _finalize_scores trailing stop logic evaluates this position
+  Expected: Trailing stop fires:
+            unrealized_pct = (110.40 - 100) / 100 * 100 = +10.4% >= 8.0% activation.
+            drop_from_peak = (120 - 110.40) / 120 * 100 = 8.0% >= 8.0% trailing_stop_pct.
+  Note: Activation check uses unrealized_pct from entry (not from peak), so current
+        price must still be >= 8% above entry for trailing stop to be active.
+  Code: graph_nexus_analysis.py lines 11286-11292
+        unrealized_pct >= _ts_activation: 10.4 >= 8.0 is True
+        _drop_from_peak >= _ts_drop: 8.0 >= 8.0 is True => sell
+  Pass Criteria: fresh_score == -1; reason contains "Trailing stop"
+
+SCENARIO V15-16: Trailing stop at 8% — 6% drop does NOT trigger
+  Type: MUST_PASS
+  Setup: Stock bought at $100, peak=$120, current=$112.80,
+         config trailing_stop_activation_pct=8.0, trailing_stop_pct=8.0 (V15 override)
+  Action: _finalize_scores trailing stop logic evaluates this position
+  Expected: Trailing stop does NOT fire — unrealized_pct=12.8% >= 8.0% (activated),
+            but drop_from_peak = (120 - 112.80) / 120 * 100 = 6.0%.
+            6.0% < 8.0% trailing_stop_pct => does NOT fire.
+  Code: graph_nexus_analysis.py line 11290 — _drop_from_peak >= _ts_drop
+        6.0 >= 8.0 is False
+  Pass Criteria: fresh_score unchanged (stays 0); no "Trailing stop" in reason
+
+SCENARIO V15-17: Fast loser cut at -12% — stock at -11% NOT cut
+  Type: MUST_PASS
+  Setup: Stock bought at $100, current price $89 (-11% unrealized),
+         fresh_score=0 (hold), config fast_loser_cut_pct=-12.0 (V15 override)
+  Action: _finalize_scores fast loser cut logic evaluates this position
+  Expected: Fast loser cut does NOT fire — -11% > -12% threshold.
+            fresh_score stays 0.
+  Code: graph_nexus_analysis.py line 11265 — _unrealized_pct <= _fast_cut_pct
+        -11.0 <= -12.0 is False
+  Pass Criteria: fresh_score == 0; no "Fast loser cut" in reason
+
+SCENARIO V15-18: Fast loser cut at -12% — stock at -13% IS cut
+  Type: MUST_PASS
+  Setup: Stock bought at $100, current price $87 (-13% unrealized),
+         fresh_score=0 (hold), config fast_loser_cut_pct=-12.0 (V15 override)
+  Action: _finalize_scores fast loser cut logic evaluates this position
+  Expected: Fast loser cut fires — -13% <= -12% threshold.
+            fresh_score set to -1, reason contains "Fast loser cut".
+  Code: graph_nexus_analysis.py line 11265
+        -13.0 <= -12.0 is True
+  Pass Criteria: fresh_score == -1; reason contains "Fast loser cut"
+
+SCENARIO V15-19: Max stock buys per day capped at 6
+  Type: MUST_PASS
+  Setup: 10 buy candidates all qualifying, 0 sells pending,
+         config max_stock_buys_per_day=6 (V15 RethinkDB override)
+  Action: Allocation pipeline applies effective_buy_cap
+  Expected: Only top 6 stocks allocated — _base_buy_cap=6,
+            _effective_buy_cap = min(10, 6 + max(0, 0-6)) = min(10, 6) = 6.
+  Code: graph_nexus_analysis.py line 14760-14762
+  Pass Criteria: len(new_stock_candidates) <= 6
+
+SCENARIO V22-20: New entry budget reserved from momentum amplifier
+  Type: MUST_PASS
+  Setup: stock_budget_after_adds=$1000, new_entry_reserved_budget_pct=0.30,
+         1 momentum amplifier candidate requesting $1600, 3 new stock candidates
+  Action: Amplifier budget computed as $1000 * (1-0.30) = $700.
+          Amplifier capped at $700 (not $1000). Remaining $300 available for new entries.
+  Expected: Momentum amplifier gets at most $700. New entries compete for
+            at least $300. Previously amplifier would get $1000 leaving $0.
+  Code: graph_nexus_analysis.py ~line 15612 (V22 new_entry_reserved_budget_pct)
+  Pass Criteria: _amplifier_budget_remaining == 700; _new_entry_reserve == 300
+
+SCENARIO V28.7-1: Big-winner protect blocks trend-reversal at +170% P&L with minor pullback
+  Type: MUST_PASS
+  Setup: SNDK position at entry=$200, current_price=$540, unrealized_pct=+170%.
+         raw_score=-0.8, drop_from_peak=5%, held_days=40.
+         config sell_enforcement_big_winner_pnl_pct=50.0,
+         sell_enforcement_big_winner_hysteresis=-1.5,
+         sell_enforcement_big_winner_drawdown_escape_pct=15.0.
+  Action: _evaluate_trend_sell_enforcement runs. Big-winner protect check:
+          unrealized > 50% AND raw -0.8 >= -1.5 AND drop_from_peak 5% < 15% escape.
+  Expected: allow_force_sell = False; skip_reason contains "V28.7 big-winner protect".
+  Code: graph_nexus_analysis.py lines 4711-4740
+  Pass Criteria: result["allow_force_sell"] == False AND "big-winner protect" in skip_reason
+
+SCENARIO V28.7-2: Big-winner drawdown escape hatch allows real reversal exit
+  Type: MUST_PASS
+  Setup: Same as V28.7-1 BUT drop_from_peak_pct = 18% (stock dropped 18% from peak).
+  Action: _evaluate_trend_sell_enforcement runs. Big-winner protect check:
+          unrealized > 50% AND raw -0.8 >= -1.5 but drop_from_peak 18% >= 15% escape.
+  Expected: Big-winner protect yields (does NOT early-return skip).
+            Flow continues to normal neutral-counter check.
+  Code: graph_nexus_analysis.py line 4735 (drawdown escape conditional)
+  Pass Criteria: result["allow_force_sell"] is NOT forcibly set to False by big-winner block
+
+SCENARIO V28.7-3: Neutral counter only counts real bearish bars (not flat)
+  Type: MUST_PASS
+  Setup: MU held 20 days, unrealized_pct=+30%, held_days > min_hold.
+         current_raw sequence over 6 bars: [-0.1, -0.2, -0.15, -0.1, -0.2, -0.05].
+         config sell_enforcement_neutral_threshold=-0.25,
+         sell_enforcement_consecutive_neutral_days=6.
+  Action: _evaluate_trend_sell_enforcement runs for each bar.
+          Under V28.7 logic, raw_score > -0.25 -> neutral counter reset to 0 every bar.
+  Expected: neutral_days never reaches 6; allow_force_sell stays blocked (waiting).
+  Code: graph_nexus_analysis.py line 4756 (neutral_threshold check)
+  Pass Criteria: _nt_val < 6 throughout the sequence
+
+SCENARIO V28.7-4: Neutral counter DOES count bars below -0.25 threshold
+  Type: MUST_PASS
+  Setup: Stock held 20 days, unrealized_pct=-3% (not profitable skip).
+         current_raw sequence: [-0.3, -0.4, -0.35, -0.28, -0.5, -0.31] over 6 bars.
+         config sell_enforcement_neutral_threshold=-0.25,
+         sell_enforcement_consecutive_neutral_days=6.
+  Action: All 6 bars have raw < -0.25 -> neutral counter increments every bar.
+  Expected: After 6 bars, _nt_val == 6, force-sell allowed.
+  Pass Criteria: neutral_days == 6; allow_force_sell == True
+
+SCENARIO V28.7-5: Winner-add floor lifts small positions to min_notional
+  Type: MUST_PASS
+  Setup: entry_notional=$300, add_fraction_of_initial=0.5, remaining_budget=$2000,
+         config winner_add_min_notional=250.0, winner_add_max_multiple_of_entry=1.2.
+  Action: _plan_winner_adds computes:
+          raw_allocation = $300 * 0.5 = $150
+          target = max($150, $250) = $250
+          max_allowed = $300 * 1.2 = $360
+          target = min($250, $360) = $250
+          allocation = min($2000, $250) = $250
+  Expected: buy_cash = $250 (not $150 as pre-V28.7).
+  Code: graph_nexus_analysis.py lines 5367-5382
+  Pass Criteria: funded[0]["buy_cash"] == 250.0
+
+SCENARIO V28.7-6: Winner-add max_multiple_of_entry caps large raw_allocation
+  Type: MUST_PASS
+  Setup: entry_notional=$500, add_fraction_of_initial=2.0 (misconfig or edge),
+         remaining_budget=$5000, winner_add_min_notional=250.0,
+         winner_add_max_multiple_of_entry=1.2.
+  Action: raw_allocation = $500 * 2.0 = $1000
+          target = max($1000, $250) = $1000
+          max_allowed = $500 * 1.2 = $600
+          target = min($1000, $600) = $600
+          allocation = min($5000, $600) = $600
+  Expected: buy_cash = $600 (capped at 1.2x entry notional).
+  Pass Criteria: funded[0]["buy_cash"] == 600.0
+
+SCENARIO V28.7-7: BFQ rotation fires on zero headroom (not just cash starvation)
+  Type: MUST_PASS
+  Setup: _bfq_cash=$800 (above min_pos $100), _bfq_headroom=0,
+         _bfq_rotation_enabled=True, _bfq_unfilled has 2 high-conv items,
+         _drawdown_halt_active=False, _downtrend_active=False,
+         config bfq_rotation_on_zero_headroom=True.
+  Action: Old code: cash starvation gate (cash < min_pos) false -> skip rotation.
+          New code: _bfq_is_headroom_starved=True -> trigger rotation path.
+  Expected: BFQ rotation loop executes, attempts weakest-held selection.
+  Code: graph_nexus_analysis.py lines 17617-17628 (expanded trigger)
+  Pass Criteria: _bfq_rotation_count increments OR rotation code path is entered
+
+SCENARIO V28.7-8: BFQ rotation skips eviction-cooldown tickers
+  Type: MUST_PASS
+  Setup: _bfq contains tickers [X, Y, Z]. _evict_cooldown = {"Y": 3}.
+         Triggered via headroom starvation.
+  Action: BFQ rotation filter excludes Y from _bfq_unfilled.
+  Expected: _bfq_unfilled contains only X and Z (cooldown-clean).
+  Code: graph_nexus_analysis.py lines 17633 (cooldown filter)
+  Pass Criteria: Y not in [q["ticker"] for q in _bfq_unfilled]
+
+SCENARIO V28.7-9: FLC recent-runup block prevents cut on hot entry
+  Type: MUST_PASS
+  Setup: Ticker LITE bought day 0 at $651, day 3 price=$558, unrealized_pct=-14.3%.
+         price_history[LITE] last 20 bars range: low=$240, high=$702
+         (represents the 192% run from Dec to Mar 6).
+         config fast_loser_cut_pct=-12.0, fast_loser_cut_recent_runup_block_pct=40.0,
+         fast_loser_cut_recent_runup_lookback_bars=20.
+  Action: _finalize_scores FLC block runs. unrealized -14.3% <= -12% threshold.
+          Recent runup check: (702-240)/240 * 100 = +192.5% > 40% threshold.
+  Expected: FLC cut BLOCKED. _flc_block_runup=True, fresh_score NOT set to -1.
+            Log line contains "FLC recent-runup block".
+  Code: graph_nexus_analysis.py lines 12267-12300 (recent-runup block)
+  Pass Criteria: fresh_score != -1 AND blacklist not created
+
+SCENARIO V28.7-10: FLC fires normally when runup is small
+  Type: MUST_PASS
+  Setup: Ticker TSLA bought day 0 at $440, day 3 price=$385, unrealized=-12.5%.
+         price_history[TSLA] last 20 bars: low=$420, high=$445 (small range, 6% swing).
+         config fast_loser_cut_pct=-12.0, fast_loser_cut_recent_runup_block_pct=40.0.
+  Action: FLC evaluates. unrealized -12.5% <= -12% threshold.
+          Recent runup check: (445-420)/420 * 100 = +5.95% < 40% threshold.
+  Expected: FLC fires normally. fresh_score = -1. Blacklist set.
+  Pass Criteria: fresh_score == -1; reason contains "Fast loser cut"
+
+SCENARIO V28.7-11: max_positions breach blocks ALL new entries
+  Type: MUST_PASS
+  Setup: portfolio has 20 open positions, config max_positions=12.
+         _new_stock_candidates = [A, B, C, D] (4 qualified new tickers).
+  Action: V28.7 breach detector: _current_positions 20 > _max_positions 12.
+          Logs "max_positions BREACH", sets _blocked_buys = [A,B,C,D],
+          _new_stock_candidates = [].
+  Expected: All 4 new-stock candidates blocked. Held-add candidates still flow.
+  Code: graph_nexus_analysis.py lines 16397-16418 (breach detector)
+  Pass Criteria: len(_new_stock_candidates) == 0; len(_blocked_buys) == 4
+
+SCENARIO V28.7-12: Momentum rediscovery rejects stale high-runup signals
+  Type: MUST_PASS
+  Setup: LITE previously sold, now in discovered table with status=sold.
+         price_history: 20d return = 105%, 60d return = 192%.
+         config momentum_rediscovery_max_20d_return=80.0,
+         momentum_rediscovery_max_60d_return=120.0.
+  Action: _rediscover_momentum_comebacks evaluates LITE.
+          ret_20d=105% > max_20d_cap=80% -> continue (skip).
+  Expected: LITE NOT in results list. No rediscovery_pending status set.
+  Code: graph_nexus_analysis.py lines 7967-7976 (max-runup ceiling)
+  Pass Criteria: LITE not in [r["ticker"] for r in results]
+
+SCENARIO V28.7-13: Momentum rediscovery accepts moderate runup (within caps)
+  Type: MUST_PASS
+  Setup: MRVL previously sold, 20d return=35%, 60d return=70%.
+         config momentum_rediscovery_max_20d_return=80.0,
+         momentum_rediscovery_max_60d_return=120.0,
+         momentum_rediscovery_min_20d_return=20.0.
+  Action: 35% < 80% cap AND 35% > 20% min -> admit. 70% < 120% cap.
+  Expected: MRVL admitted to results. rediscovery_pending written.
+  Pass Criteria: MRVL in [r["ticker"] for r in results]
+
+SCENARIO V28.7-14: _plan_backfill_buy_allocation emits rotation_needed marker when headroom=0
+  Type: MUST_PASS
+  Setup: headroom=0, min_position_size=100, all other params valid.
+  Action: _plan_backfill_buy_allocation called with headroom=0.
+  Expected: Returns (0.0, "rotation_needed_zero_headroom")
+  Code: graph_nexus_analysis.py line 5028-5033
+  Pass Criteria: result == (0.0, "rotation_needed_zero_headroom")
+
+SCENARIO V28.7-15: Full flow - SNDK at +170% held through normal pullback, exits on 15%+ drawdown
+  Type: SPECIFICATION
+  Setup: SNDK held for 50 days, current P&L +170%. Days 45-48: raw_score
+         drops to [-0.6, -0.7, -0.6, -0.8]. Drop-from-peak: 8%, 10%, 12%, 14%.
+         Day 49: drop-from-peak=16% (real reversal), raw=-0.9.
+  Action: Evaluated on each bar:
+          Days 45-48: big-winner protect blocks (drop < 15%).
+          Day 49: big-winner protect yields (drop 16% >= 15% escape).
+                  Trailing stop at 12% already fired earlier.
+  Expected: Days 45-48 HELD (big-winner protect). Day 49 exit via trailing stop
+            or continued holding if trend recovers.
+  Pass Criteria: position not sold on days 45-48 via sell enforcement
+
+SCENARIO V28.7-16: Winner_add now fires up to 5 times (not 3) per position
+  Type: MUST_PASS
+  Setup: SNDK position held 30 days, has already had 3 winner_adds logged.
+         Config winner_add_max_count=5. Current signals qualify for 4th add.
+  Action: _plan_winner_adds evaluates. existing_add_count=3 < max_count=5.
+  Expected: 4th winner add is admitted (not blocked by max_count).
+  Code: graph_nexus_analysis.py line 5355 (max_count check) + DB config update
+  Pass Criteria: 4th add emitted; existing_add_count becomes 4
+
+SCENARIO V28.8-1: max_positions breach does NOT suppress BFQ rotation
+  Type: MUST_PASS
+  Setup: portfolio has 15 open positions, config max_positions=15.
+         BFQ has SNDK queued at score 1.88, headroom=0.
+         bfq_rotation_on_zero_headroom=True, no drawdown halt, no downtrend.
+  Action: _current_positions (15) NOT > _max_positions (15), so no breach.
+          If _current_positions drifts to 16 on bar N, breach log fires but
+          strategy_cache does NOT get _v28_7_position_breach_active set.
+          BFQ rotation trigger checks ONLY cash/headroom starvation — no
+          breach-suppression gate.
+  Expected: BFQ rotation fires, weakest-held swap for SNDK executes.
+  Code: graph_nexus_analysis.py around line 17710 (V28.8 breach check removed)
+  Pass Criteria: rotation pair emitted with SNDK buy + weakest-held sell
+
+SCENARIO V28.8-2: max_positions breach suppresses DIRECT new-ticker buys only
+  Type: MUST_PASS
+  Setup: portfolio at 16 positions (drifted past cap=15), _new_stock_candidates=[A,B,C].
+  Action: Breach check fires: current 16 > max 15. _new_stock_candidates cleared
+          to [], _blocked_buys set to [A,B,C] (to feed rotation as swap candidates).
+          No strategy_cache flag set. BFQ direct-reserved, BFQ dequeue, BFQ rotation,
+          and queue→rotation promotion all still run normally.
+  Expected: direct buys A/B/C blocked; rotation path may still swap them in via
+            weakest-held replacement (net-zero position count).
+  Pass Criteria: _new_stock_candidates == []; rotation code path still executes
+
+SCENARIO V28.8-3: BFQ direct-reserved path fires during breach
+  Type: MUST_PASS
+  Setup: Portfolio has 16 positions (breach state), _bfq_headroom=0 for direct,
+         but some rotation sells freed a slot pushing _bfq_headroom to 1.
+         _bfq_direct_candidates has a high-conv "direct" signal.
+  Action: V28.8 removed the _bfq_breach_block gate. Direct-reserved fires on
+          headroom > 0 regardless of breach state.
+  Expected: Direct-reserved ticker gets funded.
+  Code: graph_nexus_analysis.py around line 17453
+  Pass Criteria: _bfq_processed contains the reserved ticker
+
+SCENARIO V28.8-4: BFQ dequeue loop no longer early-skips during breach
+  Type: MUST_PASS
+  Setup: Portfolio at 16 positions, BFQ has 5 items.
+  Action: V28.8 removed the breach early-skip that caused items to age out
+          without funding. The loop now proceeds to normal allocation logic
+          which naturally handles headroom=0 via _plan_backfill_buy_allocation
+          returning 0 (then flowing to BFQ rotation path).
+  Expected: Items age normally, allocation attempted (then falls through to
+            rotation path).
+  Pass Criteria: No early `continue` fired; items pass through to allocation
+
+SCENARIO V28.8-5: Queue→rotation promotion fires during breach
+  Type: MUST_PASS
+  Setup: _bfq_pending has aged items (bars_in_queue >= min_bars).
+         Portfolio at 16 positions (breach).
+  Action: V28.8 removed the `not _position_breach_active` gate. Promotion
+          check now only gates on config flag + queue presence.
+  Expected: Aged items promoted to _blocked_buys, feeding rotation swap path.
+  Code: graph_nexus_analysis.py around line 16537
+  Pass Criteria: _aged_queue_promotions non-empty; _blocked_buys includes them
+
+SCENARIO V28.8-6: Rotation break_glass fires at lower threshold (1.5/1.5)
+  Type: MUST_PASS
+  Setup: Held position with P&L 0% (neutral, not winner-locked).
+         Incoming ticker has raw_net_score 1.6, delta 1.6.
+         config rotation_break_glass_raw_score=1.5, delta=1.5.
+  Action: Rotation_candidate_allowed evaluates. Previously (V28.7) threshold
+          was 2.0/2.0 → would return False. Now (V28.8) 1.6 >= 1.5 → True.
+  Expected: Rotation pair executes.
+  Pass Criteria: rotation returns (True, delta, "break_glass_trim")
+
+SCENARIO V28.8-7: Winner_add with V28.8 fraction 0.75 on $400 position
+  Type: MUST_PASS
+  Setup: entry_notional=$400, winner_add_fraction_of_initial=0.75,
+         winner_add_min_notional=250, winner_add_max_multiple_of_entry=1.2.
+  Action: raw_allocation = $400 * 0.75 = $300
+          target = max($300, $250) = $300
+          max_allowed = $400 * 1.2 = $480
+          target = min($300, $480) = $300
+          allocation = $300
+  Expected: buy_cash = $300 (up from $250 with V28.7 fraction=0.5).
+  Pass Criteria: funded[0]["buy_cash"] == 300.0
+
+SCENARIO V28.9-1: At-cap losing_break_glass converted to full exit
+  Type: MUST_PASS
+  Setup: Portfolio at 15/15 (at cap), rotation pair candidate:
+         held=XLK unrealized_pct=-7.6%, incoming=SNDK raw=1.829,
+         rotation_mode=v28_hc_losing_break_glass, sell_fraction=0.5 (50% trim).
+  Action: _v288_at_cap = True (headroom=0). sell_fraction < 0.999.
+          _v289_held_pnl_pct = -7.6, _rotation_mode == "v28_hc_losing_break_glass".
+          -7.6 <= -2.0, so _v289_can_convert_loser = True.
+          sell_fraction reassigned to 1.0, rotation_mode updated.
+          Fall through to _rotation_pairs.append.
+  Expected: Pair appended with sell_fraction=1.0 (full exit XLK, buy SNDK).
+  Log contains "V28.9 rotation pair CONVERTED (losing_break_glass at cap)".
+  Pass Criteria: rotation pair has sell_fraction == 1.0 and SNDK in buy
+
+SCENARIO V28.9-2: At-cap losing_break_glass NOT converted when held_pnl close to zero
+  Type: MUST_PASS
+  Setup: Portfolio at 15/15, held=CCOI unrealized_pct=-1.0% (above -2.0 threshold),
+         incoming=NVDA raw=1.9, rotation_mode=v28_hc_losing_break_glass.
+  Action: _v289_held_pnl_pct = -1.0, NOT <= -2.0.
+          _v289_can_convert_loser = False.
+          Falls to else branch, continue (skip pair).
+  Expected: Pair SKIPPED with log "SKIPPED (at cap, partial trim, winner/marginal)".
+  Pass Criteria: rotation pair not appended
+
+SCENARIO V28.9-3: At-cap top_momentum_break_glass still skipped (winner protection)
+  Type: MUST_PASS
+  Setup: Portfolio at 15/15, held=SIBN unrealized_pct=+23.8% (winner),
+         incoming=SNDK raw=1.829, rotation_mode=top_momentum_break_glass.
+  Action: _v289_can_convert_loser = False (mode is not v28_hc_losing_break_glass).
+          Falls to else branch, continue (skip pair).
+  Expected: SIBN (winner) NOT full-exited. Pair SKIPPED.
+  Pass Criteria: rotation pair not appended, SIBN still in portfolio
+
+SCENARIO V28.9-4: Below cap, losing_break_glass still fires as partial trim
+  Type: MUST_PASS
+  Setup: Portfolio at 13/15 (NOT at cap, _position_headroom = 2),
+         held=JD unrealized_pct=-5%, incoming=META raw=1.85,
+         rotation_mode=v28_hc_losing_break_glass, sell_fraction=0.5.
+  Action: _v288_at_cap = False (headroom > 0, no breach).
+          V28.9 conversion logic skipped entirely.
+          Falls through to normal append as 50% partial trim.
+  Expected: Pair appended with sell_fraction=0.5 (partial trim preserved below cap).
+  Pass Criteria: rotation pair has sell_fraction == 0.5
+
+SCENARIO V28.9-5: Winner_add with V28.9 max_multiple_of_entry=2.0
+  Type: MUST_PASS
+  Setup: entry_notional=$500, winner_add_fraction_of_initial=0.6,
+         winner_add_min_notional=400, winner_add_max_multiple_of_entry=2.0.
+  Action: raw_allocation = $500 * 0.6 = $300
+          target = max($300, $400) = $400
+          max_allowed = $500 * 2.0 = $1000
+          target = min($400, $1000) = $400
+          allocation = min(remaining_budget, $400)
+  Expected: buy_cash = $400 (floor-limited, safety cap inactive).
+  Pass Criteria: funded[0]["buy_cash"] == 400.0
+
+SCENARIO V28.9-6: allocation_max_new_stock_buys=10 accommodates 8 rotation pair buys
+  Type: SPECIFICATION
+  Setup: 8 rotation pairs accepted on a single bar, each generating a
+         new-ticker buy. Slate planner slot_cap = min(10, len(ranked)).
+  Action: With slot_cap=10 and 8 rotation buys, all 8 fit within the slate.
+  Expected: No rotation pair buys dropped to deferred_unfunded_buy.
+  Pass Criteria: All 8 accepted buys execute, no stranded sells
+
+
+--- CATEGORY 23: V29.1 AMPLIFIER GUARDRAILS (entry price + concentration) ---
+================================================================================
+
+SCENARIO V29.1-1: Amplified position uses original entry for trailing stop
+Type: MUST_PASS
+Setup: MU bought at $237.51, then 6 amplifier adds ($285-$363). Position = 8% of portfolio.
+  Price peaks at $419 (+76.7% from original entry), then drops to $368 (-12.2% from peak).
+Action: Risk pipeline computes _ep via _get_open_position_entry_trade() = $237.51 (not $363).
+  Trailing stop: unrealized_pct = ($368-$237)/$237 = +55.3% >= 15% activation. Drop from peak
+  = ($419-$368)/$419 = 12.2% >= 12% threshold.
+Expected: Trailing stop fires. MU sold at ~$368 preserving +55% gain.
+Pass Criteria: _ep == 237.51 (original entry); trailing_stop fires at -12% from peak
+
+SCENARIO V29.1-2: Amplified position peak protection activates with original entry
+Type: MUST_PASS
+Setup: MU at $237.51 entry, amplified to 8% of portfolio. Price peaks at $419 (+76.7%).
+  Peak P&L from original entry = +76.7% >= 30% threshold.
+Action: Peak protection checks peak_pnl >= peak_protection_min_peak_pnl_pct (30%).
+Expected: _peak_protected = True. With inflated _ep=$363, peak_pnl would be only +15.4% < 30%.
+Pass Criteria: _peak_protected == True when using original entry
+
+SCENARIO V29.1-3: Amplifier respects 8% max_position_pct
+Type: MUST_PASS
+Setup: MU at 3% of portfolio, meets amplifier criteria (P&L>20%, 20d_ret>25%).
+  momentum_amplifier_max_position_pct = 0.08.
+Action: Amplifier pass fires. Calculates target exposure = 8% of portfolio.
+Expected: Amplifier adds enough to reach 8% (not 15%). Total MU exposure capped at 8%.
+Pass Criteria: Post-amplifier exposure for MU <= 8% of portfolio value
+
+SCENARIO V29.1-4: Hold-limit uses original entry consistently with risk pipeline
+Type: MUST_PASS
+Setup: Stock held past max_hold_days with 3 amplifier adds. Last add at $150.
+  Original entry = $100. Current price = $130.
+Action: Hold-limit checks _hl_ep via _get_open_position_entry_trade() = $100.
+  _hl_gain = ($130-$100)/$100 = +30% >= trailing_stop_activation (15%).
+Expected: Hold-limit deferred — trailing stop manages this winner.
+Pass Criteria: _hl_ep == 100 (original entry, not $150 last add); hold_limit_deferred = True
+
+
+SCENARIO V31-1: SNDK held through grace period
+Type: MUST_PASS
+Setup: SNDK bought 2025-11-24 @ $200.26 in nexus-testing instance. Day 5 stock at $194 (-3.13%).
+  Day 10 stock at $194.57 (-2.84%). LLM sentiment generates fresh_score=-1 on day 10.
+  initial_grace_enabled=True, initial_grace_bars=14, catastrophic=-15%, cumulative=-10% after 5d.
+Action: _finalize_scores risk pipeline runs. fresh_score=-1 from sentiment. Grace check fires.
+Expected: days_held=10 < 14, unrealized=-2.84% > -15% (no escape A), > -10% (no escape B),
+  regime=bull (no escape C). Grace SUPPRESS fires. fresh_score forced to 0. SNDK held.
+Pass Criteria: out["SNDK"]["score"] == 0 with reason starting "V31 grace period"
+
+SCENARIO V31-2: NVDA re-entry blacklist
+Type: MUST_PASS
+Setup: NVDA bought 2025-11-17 @ $190, sold 2025-11-24 @ $179 (-5.97%, panic exit before V31).
+  recent_sell_block_enabled=True, recent_sell_block_bars=30, recent_sell_block_recovery_pct=10.
+Action: On 2025-12-16 (22 days later), NVDA appears as a buy candidate at $176.
+  _build_recent_sell_block_set called. _recent_sell_block_active checks NVDA.
+Expected: days_since=22 < 30 (block window active). $176 < $179 * 0.90 = $161.10? No, $176 > $161.
+  Block ACTIVE — NVDA filtered out of slate AND BFQ. Same on 2026-01-06 ($188 > $161).
+Pass Criteria: NVDA in _v31_blocked_set throughout days 22-50 unless price drops below $161
+
+SCENARIO V31-3: Catastrophic single-bar loss escape
+Type: MUST_PASS
+Setup: Stock bought day 1 @ $100. Day 5 gap-down to $84 (-16%). Grace period active (day 5 < 14).
+Action: _in_initial_grace_period called. unrealized_pct=-16% <= catastrophic_loss_pct=-15.0.
+Expected: Escape A fires. (in_grace=True, escape_fired=True). Sell allowed normally.
+  Circuit breaker at -15% in risk pipeline ALSO fires for hard cut.
+Pass Criteria: Position exits on day 5 with realized loss ~ -16%
+
+SCENARIO V31-4: Profit-take removed
+Type: MUST_PASS
+Setup: Stock bought @ $100. Day 30 stock at $145 (+45%). profit_take_enabled=False (V31 default).
+Action: _finalize_scores risk pipeline runs. The profit_take_enabled flag check returns False
+  and the profit-take branch is skipped entirely.
+Expected: NO profit-take sell. Trailing stop activates (gain >= 10%) and manages position.
+  Trailing stop fires only when drop_from_peak >= trailing_stop_pct (8%).
+Pass Criteria: scores[sym]["sell_fraction"] is NOT set; no "Profit take TRIGGER" log line
+
+SCENARIO V31-5: Anchor reinforcement stage 1 fires
+Type: MUST_PASS
+Setup: Position open 8 days, unrealized=+18%, drawdown_from_peak=2%, raw_net_score=+0.5.
+  anchor_reinforce_enabled=True. entry_notional=$1000.
+Action: _plan_anchor_reinforcement iterates candidates. Stage check:
+  held_days=8 >= 7 (s1_days), unrealized=18 >= 15 (s1_pnl), drop=2 <= 5 (max_dd) → stage 1 eligible.
+Expected: target_total = $1000 * 1.3 = $1300. current_value = $1000 * 1.18 = $1180.
+  additional = $1300 - $1180 = $120. allocation = min(remaining_budget, $120).
+  Stage 1 marked fired in strategy_cache.
+Pass Criteria: funded list contains item with anchor_stage=1 and buy_cash ~ $120
+
+SCENARIO V31-6: Anchor reinforcement skipped on pullback
+Type: MUST_PASS
+Setup: Position open 8 days, unrealized=+18%, drawdown_from_peak=7% (above 5% threshold).
+Action: _plan_anchor_reinforcement evaluates. Drawdown 7 > max_dd 5 → continue (skip).
+Expected: Stage 1 NOT triggered despite +18% gain and held >= 7 days.
+Pass Criteria: This ticker not in funded list
+
+SCENARIO V31-7: Sector portfolio cap demotes lowest-conviction
+Type: MUST_PASS
+Setup: portfolio_total=$10000, max_sector_portfolio_pct=0.40 (cap=$4000). 3 of 8 positions
+  are semiconductors worth $3500 total. New buy slate has 2 semi candidates: NVDA $400 (raw=2.0)
+  and AMD $300 (raw=1.5). After buy, semi exposure = $3500 + $400 + $300 = $4200 > $4000.
+Action: _enforce_sector_portfolio_cap runs. excess = $200. Sorted by lowest score → AMD demoted.
+Expected: AMD buy_cash zeroed. excess after demotion = $200 - $300 = -$100 (capped). Cap restored.
+Pass Criteria: AMD has buy_cash=0 and sector_cap_demoted=True; NVDA buy preserved
+
+SCENARIO V31-8: Regime detector flips to bear, escape C activates
+Type: MUST_PASS
+Setup: SPY (or QQQ proxy) 20d return computed = -7%. regime_bear_spy_drawdown_pct=5. Held position
+  on day 5 of grace at -2% pnl. initial_grace_regime_escape_enabled=True.
+Action: _detect_market_regime returns "bear" (ret_20d < -5). strategy_cache["_market_regime"]="bear".
+  _in_initial_grace_period called: regime="bear" AND unrealized<0 → escape C fires.
+Expected: Sell evaluated normally on day 5 instead of waiting for day 14.
+Pass Criteria: _g_in=True, _g_esc=True, _g_reason contains "escape_C_regime"
+
+SCENARIO V31-9: Breakout score boost promotes neutral stock
+Type: MUST_PASS
+Setup: Stock with no LLM news (sentiment=0), no graph propagation (raw_score=0). Price history
+  shows current_close >= 0.99 * max(closes[-25:]) (5w breakout).
+  breakout_score_boost_enabled=True, breakout_5w_boost=0.3, buy_threshold=0.15.
+Action: _compute_breakout_score_boost called. Returns (0.3, "5w_high(+0.30)").
+  fresh_score logic: existing_raw=0 + 0.3 = 0.3 >= buy_thresh 0.15 → fresh_score=1.
+Expected: Stock promoted to BUY despite no news/no propagation.
+Pass Criteria: fresh_score=1, fresh_reason contains "breakout(5w_high"
+
+SCENARIO V31-10: Cumulative bleed escape (cross-feature)
+Type: MUST_PASS
+Setup: Stock bought day 1 @ $100. Day 3 at $96 (-4%). Day 6 at $94 (-6%). Day 8 at $89 (-11%).
+  initial_grace_bars=14, cumulative_pct=-10%, cumulative_min_days=5. Day 8 ≥ 5.
+Action: Day 8 _in_initial_grace_period: unrealized=-11% <= cumulative=-10% AND days_held=8 >= 5.
+Expected: Escape B fires. in_grace=True, escape_fired=True, reason="escape_B_cumulative".
+  Sell allowed on day 8, exits at ~ -11%. NOT held to day 14.
+Pass Criteria: _g_esc=True with escape_B reason; sell decision propagates
+
+SCENARIO V31-11: Regime flip during grace (cross-feature)
+Type: MUST_PASS
+Setup: Stock bought day 1, position at -2% on day 5. Market was bull on days 1-4. On day 5,
+  SPY drops -7% (20d return). _detect_market_regime returns "bear" mid-bar.
+Action: strategy_cache["_market_regime"]="bear" set BEFORE _finalize_scores runs. Grace check
+  reads regime="bear". escape C condition: regime=="bear" AND unrealized<0 → fires.
+Expected: Day 5 sell evaluated normally (not grace-suppressed). If LLM signal is 0, position held;
+  if signal is -1, position exits on day 5.
+Pass Criteria: _g_esc=True with escape_C reason whenever regime=="bear" and pnl<0 within grace
+
+SCENARIO V31-12: Re-entry blacklist persistence across container restart
+Type: MUST_PASS
+Setup: Stock sold day 10 @ $50. recent_sell_block_bars=30, recovery_pct=10 → blacklist active.
+  Container/strategy restarts mid-day 11 (strategy_cache wiped).
+Action: On day 11 startup, _build_recent_sell_block_set is called. It reads trade history
+  from portfolio_emulator.get_trade_history() (which is persisted in backtest state).
+  Finds the day 10 sell. Computes days_since=1, current_price=$48 vs threshold $45. Blocked.
+Expected: Blacklist re-derived from persistent trade history without needing strategy_cache.
+  Day 11 buy attempt blocked. (No persistence-of-state required because trade_history IS persistent.)
+Pass Criteria: Blocked set contains the ticker on day 11 even after cache wipe

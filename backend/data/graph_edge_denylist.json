@@ -1,0 +1,22 @@
+{
+  "CONTROLS": [
+    ["AEP", "PEG"],
+    ["ENB", "D"],
+    ["MCD", "ARCO"],
+    ["MRK", "OGN"],
+    ["NWG", "CFG"],
+    ["NWL", "GGG"],
+    ["PFE", "COTY"],
+    ["PFE", "ZTS"],
+    ["PNC", "BLK"],
+    ["SPGI", "IHS"]
+  ],
+  "SUPPLIER_OF": [
+    ["BVS", "BRTX"],
+    ["CCC", "LUD"],
+    ["CELZ", "NEGG"],
+    ["JAKK", "REYN"],
+    ["OLED", "LUD"],
+    ["STKL", "ROAD"]
+  ]
+}

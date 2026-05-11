@@ -1,0 +1,195 @@
+"""Centralized US-equity ticker validator.
+
+Problem (2026-04-22): LLM strategy paths (daily-sentiment classifier,
+event-maintenance, trend extraction, macro-resolution) were returning
+company names ("ADOBE") and hallucinated strings ("DLUX", "ABAC", "BGN",
+"ACVF") as "tickers". Those strings flowed unchecked into the Nexus
+discovered-stocks set, wasted Alpaca price-fetch quota and overlay-LLM
+tokens, and polluted the GraphNexusDiscoveredStocks table until the
+post-scoring quality filter evicted them cycles later.
+
+Fix: a single validator used at every ingestion boundary.
+  1. Regex `^[A-Z]{1,5}(\\.[A-Z])?$` — fast reject for non-ticker strings
+     (company names like "ADOBE" are 5 chars but pass this, hence step 2).
+  2. Membership in the cached Nasdaq/NYSE universe (refreshed once per
+     process; 24h TTL). This is the ground-truth set — ADOBE is not in
+     it because Adobe Inc. trades as ADBE.
+
+The validator is pure / idempotent / thread-safe. It fails OPEN on
+network errors (Nasdaq API down → treat all tickers as possibly-valid
+so we never block legitimate trading; invalid strings will still fail
+downstream at Alpaca price fetch with a clean error path).
+
+Kept OUT of discover.py to avoid coupling the main backtest-discovery
+entry point; all consumers import from here.
+"""
+from __future__ import annotations
+
+import re
+import threading
+import time
+from typing import Iterable, Optional
+
+
+# Accept both `.` (Nasdaq-style: BRK.B, BF.B) and `-` (Alpaca-style: BRK-B,
+# BF-B) share-class suffixes. Previously only `.` was allowed, which silently
+# rejected every legitimate Alpaca-keyed dash ticker at every ingestion site.
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}([.\-][A-Z])?$")
+
+# Cached universe. Populated lazily on first call and refreshed after TTL.
+_UNIVERSE: set[str] | None = None
+_UNIVERSE_FETCHED_AT: float = 0.0
+_UNIVERSE_TTL_SEC: float = 24 * 3600.0
+_UNIVERSE_LOCK = threading.Lock()
+
+NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks"
+NASDAQ_SCREENER_HEADERS = {
+    "user-agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "accept": "application/json",
+    "referer": "https://www.nasdaq.com/",
+}
+
+
+def _fetch_universe() -> set[str]:
+    """Pull the Nasdaq screener's full stock list. Best-effort; returns
+    an empty set on any error so callers can fail open."""
+    try:
+        import requests
+        r = requests.get(
+            NASDAQ_SCREENER_URL,
+            headers=NASDAQ_SCREENER_HEADERS,
+            params={"tableonly": "true", "limit": 10000, "offset": 0, "download": "true"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json().get("data") or {}
+        rows = data.get("rows") or []
+        symbols: set[str] = set()
+        for row in rows:
+            if isinstance(row, dict):
+                sym = (row.get("symbol") or row.get("ticker") or "").strip().upper()
+            elif isinstance(row, (list, tuple)) and row:
+                sym = str(row[0] or "").strip().upper()
+            else:
+                continue
+            if sym and sym not in ("N/A", ""):
+                symbols.add(sym)
+                # Also admit the dot→dash normalization Alpaca uses (BRK.B ↔ BRK-B).
+                if "." in sym:
+                    symbols.add(sym.replace(".", "-"))
+        return symbols
+    except Exception:
+        return set()
+
+
+_UNIVERSE_MIN_RETRY_SEC: float = 60.0  # Don't re-hit Nasdaq faster than this on failure.
+_UNIVERSE_LAST_FAIL_AT: float = 0.0
+
+
+def _get_universe() -> set[str]:
+    """Return the cached ticker universe, refreshing if TTL expired.
+
+    Double-checked locking: the 30s Nasdaq REST call runs OUTSIDE the lock
+    so N concurrent first-cycle callers don't serialise on a single thread's
+    network fetch. Last-writer-wins on the published dict is acceptable
+    because `_fetch_universe` is idempotent.
+
+    On fetch failure, we throttle subsequent retries via
+    `_UNIVERSE_MIN_RETRY_SEC` to prevent a persistently-429ing Nasdaq from
+    freezing every ticker validation in the cycle.
+    """
+    global _UNIVERSE, _UNIVERSE_FETCHED_AT, _UNIVERSE_LAST_FAIL_AT
+    now = time.time()
+    # Fast path: cached + fresh.
+    with _UNIVERSE_LOCK:
+        if _UNIVERSE is not None and (now - _UNIVERSE_FETCHED_AT) <= _UNIVERSE_TTL_SEC:
+            return _UNIVERSE
+        # Failure throttle — don't hammer a down API.
+        if _UNIVERSE is not None and (now - _UNIVERSE_LAST_FAIL_AT) < _UNIVERSE_MIN_RETRY_SEC:
+            return _UNIVERSE
+    # Fetch OUTSIDE the lock so concurrent callers don't block on network.
+    fresh = _fetch_universe()
+    with _UNIVERSE_LOCK:
+        if fresh:
+            _UNIVERSE = fresh
+            _UNIVERSE_FETCHED_AT = time.time()
+        else:
+            _UNIVERSE_LAST_FAIL_AT = time.time()
+            if _UNIVERSE is None:
+                # First-call failure — seed an empty set so callers see
+                # "fail-open via regex" rather than NoneType errors.
+                _UNIVERSE = set()
+        return _UNIVERSE or set()
+
+
+def is_valid_us_ticker(ticker: str, *, strict: bool = True) -> bool:
+    """Return True if `ticker` looks like a real US-listed equity symbol.
+
+    Validation:
+      1. Regex gate: uppercase 1-5 letters, optional `.X` suffix (class share).
+      2. (if strict) Membership in the Nasdaq screener universe — blocks
+         company-name hallucinations (ADOBE, DLUX, ABAC, BGN, ACVF).
+
+    strict=False: regex-only. Use when network access is unreliable and
+    you'd rather not call `_fetch_universe`. The caller accepts that
+    hallucinated 4-5-letter uppercase strings will slip through.
+
+    Fails OPEN on network errors: if the universe couldn't be fetched at
+    ALL, strict mode degrades to regex-only so we never block trading
+    because of a Nasdaq outage.
+    """
+    if not ticker:
+        return False
+    t = str(ticker).strip().upper()
+    if not t or not _TICKER_RE.match(t):
+        return False
+    if not strict:
+        return True
+    universe = _get_universe()
+    if not universe:
+        # Fail open — Nasdaq API unreachable, don't block trading.
+        return True
+    return t in universe
+
+
+def filter_valid_tickers(tickers: Iterable[str], *, strict: bool = True) -> list[str]:
+    """Return only the entries in `tickers` that pass `is_valid_us_ticker`.
+
+    Preserves input order, de-dupes case-insensitively, uppercases output.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tickers or []:
+        if not t:
+            continue
+        norm = str(t).strip().upper()
+        if norm in seen:
+            continue
+        if is_valid_us_ticker(norm, strict=strict):
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+def invalid_tickers(tickers: Iterable[str], *, strict: bool = True) -> list[str]:
+    """Return the entries in `tickers` that do NOT pass validation.
+
+    Useful for diagnostic logging without changing the caller's flow —
+    callers can see which specific strings were rejected.
+    """
+    rejected: list[str] = []
+    for t in tickers or []:
+        if not t:
+            continue
+        norm = str(t).strip().upper()
+        if not is_valid_us_ticker(norm, strict=strict):
+            rejected.append(norm)
+    return rejected
+
+
+def universe_size() -> Optional[int]:
+    """Return current universe size, or None if not yet fetched."""
+    return len(_UNIVERSE) if _UNIVERSE is not None else None

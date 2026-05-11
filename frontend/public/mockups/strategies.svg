@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680">
+
+  <!-- Background -->
+  <rect width="1200" height="680" fill="#080b0f"/>
+
+  <!-- ── Sidebar ── -->
+  <rect width="190" height="680" fill="#0b0e14"/>
+  <line x1="190" y1="0" x2="190" y2="680" stroke="#ffffff0e" stroke-width="1"/>
+  <rect x="14" y="17" width="24" height="24" rx="5" fill="#00e1ff1a"/>
+  <text x="26" y="32" font-family="'Courier New',monospace" font-size="8" font-weight="900" fill="#00e1ff" text-anchor="middle">IS</text>
+  <text x="44" y="32" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="700" fill="#f1f5f9">IntelliStock</text>
+  <rect x="21" y="66" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="77" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Dashboard</text>
+  <rect x="21" y="102" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="113" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Brokerages</text>
+  <rect x="21" y="138" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="149" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Instances</text>
+  <rect x="21" y="174" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="185" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Backtests</text>
+  <rect x="21" y="210" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="221" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Agent Runs</text>
+  <rect x="21" y="246" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="257" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Nexus Graph</text>
+  <!-- Nav: Strategies (active) -->
+  <rect x="8" y="274" width="174" height="30" rx="6" fill="#00e1ff18"/>
+  <rect x="21" y="282" width="12" height="12" rx="3" fill="#00e1ff40"/>
+  <text x="39" y="293" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#00e1ff">Strategies</text>
+  <line x1="8" y1="634" x2="182" y2="634" stroke="#ffffff0a" stroke-width="1"/>
+  <circle cx="25" cy="657" r="9" fill="#1e2a3a"/>
+  <text x="40" y="661" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">pranav</text>
+
+  <!-- ── Main Content ── -->
+  <text x="220" y="44" font-family="system-ui,-apple-system,sans-serif" font-size="22" font-weight="900" fill="#f1f5f9">Strategies</text>
+  <text x="220" y="61" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">All trading strategies with their best AI backtest results.</text>
+  <!-- 20/page -->
+  <rect x="1080" y="30" width="90" height="26" rx="7" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1125" y="47" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">20/page ▾</text>
+
+  <!-- TOP 5 label -->
+  <text x="220" y="86" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#f59e0b" letter-spacing="2">🏆 TOP 5 BEST STRATEGIES</text>
+  <text x="400" y="86" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#64748b">  ranked by P&amp;L%</text>
+
+  <!-- ── Top 3 Cards ── -->
+  <!-- Rank 1: Trend Following System -->
+  <rect x="220" y="97" width="300" height="148" rx="13" fill="#0f1420" stroke="#f59e0b44" stroke-width="1"/>
+  <rect x="220" y="97" width="300" height="3" rx="2" fill="#f59e0b88"/>
+  <text x="238" y="118" font-family="system-ui,-apple-system,sans-serif" font-size="13" font-weight="700" fill="#f59e0b">Trend Following System</text>
+  <rect x="380" y="108" width="52" height="16" rx="4" fill="#f59e0b22" stroke="#f59e0b44" stroke-width="1"/>
+  <text x="406" y="120" font-family="system-ui,-apple-system,sans-serif" font-size="8" font-weight="700" fill="#f59e0b" text-anchor="middle">RANK 1</text>
+  <text x="238" y="132" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">7 sub-strategies</text>
+  <text x="238" y="154" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" letter-spacing="1">BEST P&amp;L</text>
+  <text x="350" y="154" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" letter-spacing="1">BEST P&amp;L%</text>
+  <text x="238" y="170" font-family="'Courier New',monospace" font-size="16" font-weight="700" fill="#10b981">+$7,368.96</text>
+  <text x="350" y="170" font-family="'Courier New',monospace" font-size="16" font-weight="700" fill="#10b981">+73.69%</text>
+  <!-- Strategy tags -->
+  <rect x="238" y="182" width="52" height="14" rx="3" fill="#1e2535"/>
+  <text x="264" y="193" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#64748b" text-anchor="middle">parabolic_sar</text>
+  <rect x="294" y="182" width="28" height="14" rx="3" fill="#1e2535"/>
+  <text x="308" y="193" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#64748b" text-anchor="middle">macd</text>
+  <rect x="326" y="182" width="34" height="14" rx="3" fill="#1e2535"/>
+  <text x="343" y="193" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#64748b" text-anchor="middle">candles</text>
+  <rect x="364" y="182" width="50" height="14" rx="3" fill="#1e2535"/>
+  <text x="389" y="193" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#64748b" text-anchor="middle">cooldown_mgr</text>
+  <!-- Buttons -->
+  <rect x="238" y="208" width="80" height="24" rx="6" fill="#00e1ff22" stroke="#00e1ff44" stroke-width="1"/>
+  <text x="278" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#00e1ff" text-anchor="middle">⊡ View Strategy</text>
+  <rect x="326" y="208" width="60" height="24" rx="6" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="356" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#64748b" text-anchor="middle">⊙ Backtest</text>
+  <rect x="393" y="208" width="60" height="24" rx="6" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="423" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#64748b" text-anchor="middle">✎ Edit</text>
+
+  <!-- Rank 2: Trend-Following Breakout -->
+  <rect x="530" y="97" width="300" height="148" rx="13" fill="#0f1420" stroke="#94a3b833" stroke-width="1"/>
+  <rect x="530" y="97" width="300" height="3" rx="2" fill="#94a3b866"/>
+  <text x="548" y="118" font-family="system-ui,-apple-system,sans-serif" font-size="12" font-weight="700" fill="#94a3b8">Trend-Following Breakout System</text>
+  <rect x="756" y="108" width="52" height="16" rx="4" fill="#94a3b822" stroke="#94a3b844" stroke-width="1"/>
+  <text x="782" y="120" font-family="system-ui,-apple-system,sans-serif" font-size="8" font-weight="700" fill="#94a3b8" text-anchor="middle">RANK 2</text>
+  <text x="548" y="132" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">5 sub-strategies</text>
+  <text x="548" y="154" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" letter-spacing="1">BEST P&amp;L</text>
+  <text x="660" y="154" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" letter-spacing="1">BEST P&amp;L%</text>
+  <text x="548" y="170" font-family="'Courier New',monospace" font-size="16" font-weight="700" fill="#10b981">+$6,817.26</text>
+  <text x="660" y="170" font-family="'Courier New',monospace" font-size="16" font-weight="700" fill="#10b981">+68.17%</text>
+  <rect x="548" y="182" width="52" height="14" rx="3" fill="#1e2535"/>
+  <text x="574" y="193" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#64748b" text-anchor="middle">parabolic_sar</text>
+  <rect x="604" y="182" width="34" height="14" rx="3" fill="#1e2535"/>
+  <text x="621" y="193" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#64748b" text-anchor="middle">candles</text>
+  <rect x="548" y="208" width="80" height="24" rx="6" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="588" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#94a3b8" text-anchor="middle">⊡ View Strategy</text>
+  <rect x="636" y="208" width="60" height="24" rx="6" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="666" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#64748b" text-anchor="middle">⊙ Backtest</text>
+
+  <!-- Rank 3: Earnings & Pattern-Driven -->
+  <rect x="840" y="97" width="330" height="148" rx="13" fill="#0f1420" stroke="#cd7c3233" stroke-width="1"/>
+  <rect x="840" y="97" width="330" height="3" rx="2" fill="#cd7c3266"/>
+  <text x="858" y="118" font-family="system-ui,-apple-system,sans-serif" font-size="12" font-weight="700" fill="#cd7c32">Earnings &amp; Pattern-Driven (Run-Once)</text>
+  <rect x="1070" y="108" width="52" height="16" rx="4" fill="#cd7c3222" stroke="#cd7c3244" stroke-width="1"/>
+  <text x="1096" y="120" font-family="system-ui,-apple-system,sans-serif" font-size="8" font-weight="700" fill="#cd7c32" text-anchor="middle">RANK 3</text>
+  <text x="858" y="132" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">2 sub-strategies</text>
+  <text x="858" y="154" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" letter-spacing="1">BEST P&amp;L</text>
+  <text x="970" y="154" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" letter-spacing="1">BEST P&amp;L%</text>
+  <text x="858" y="170" font-family="'Courier New',monospace" font-size="16" font-weight="700" fill="#10b981">+$4,580.33</text>
+  <text x="970" y="170" font-family="'Courier New',monospace" font-size="16" font-weight="700" fill="#10b981">+45.80%</text>
+  <rect x="858" y="208" width="80" height="24" rx="6" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="898" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#94a3b8" text-anchor="middle">⊡ View Strategy</text>
+  <rect x="946" y="208" width="60" height="24" rx="6" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="976" y="224" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#64748b" text-anchor="middle">⊙ Backtest</text>
+
+  <!-- ── Table ── -->
+  <!-- Table header -->
+  <rect x="220" y="260" width="950" height="28" rx="0" fill="#0d1520"/>
+  <text x="236" y="278" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="1">NAME</text>
+  <text x="610" y="278" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="1">SUBS</text>
+  <text x="680" y="278" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="1">INSTANCES</text>
+  <text x="780" y="278" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="1">BACKTESTS</text>
+  <text x="868" y="278" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="1">BEST P&amp;L ↓</text>
+  <text x="966" y="278" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="1">BEST P&amp;L%</text>
+  <text x="1090" y="278" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="1">ACTIONS</text>
+  <line x1="220" y1="288" x2="1170" y2="288" stroke="#ffffff08" stroke-width="1"/>
+
+  <!-- Row 1: Rank 1 -->
+  <rect x="220" y="288" width="950" height="36" fill="#0f1b2a"/>
+  <rect x="238" y="298" width="28" height="28" rx="7" fill="#0f2a1a"/>
+  <text x="252" y="316" font-family="system-ui,-apple-system,sans-serif" font-size="14" fill="#f59e0b" text-anchor="middle">★</text>
+  <text x="270" y="311" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#f59e0b">AI Temp Trend Following System</text>
+  <rect x="494" y="302" width="52" height="16" rx="4" fill="#f59e0b22" stroke="#f59e0b44" stroke-width="1"/>
+  <text x="520" y="314" font-family="system-ui,-apple-system,sans-serif" font-size="7" font-weight="700" fill="#f59e0b" text-anchor="middle">RANK 1</text>
+  <text x="622" y="311" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">7</text>
+  <text x="706" y="311" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#64748b" text-anchor="middle">—</text>
+  <text x="806" y="311" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">1</text>
+  <text x="885" y="311" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+$7,368.96</text>
+  <text x="984" y="311" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+73.69%</text>
+  <rect x="1090" y="299" width="42" height="20" rx="5" fill="#00e1ff22" stroke="#00e1ff44" stroke-width="1"/>
+  <text x="1111" y="313" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#00e1ff" text-anchor="middle">⊡ View</text>
+  <rect x="1136" y="299" width="28" height="20" rx="5" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1150" y="313" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#64748b" text-anchor="middle">⊙</text>
+  <line x1="220" y1="324" x2="1170" y2="324" stroke="#ffffff06" stroke-width="1"/>
+
+  <!-- Row 2: Rank 2 -->
+  <rect x="220" y="324" width="950" height="36" fill="transparent"/>
+  <rect x="238" y="334" width="28" height="28" rx="7" fill="#141a24"/>
+  <text x="252" y="352" font-family="system-ui,-apple-system,sans-serif" font-size="14" fill="#94a3b8" text-anchor="middle">★</text>
+  <text x="270" y="347" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#94a3b8">AI Temp Trend-Following Breakout Sys...</text>
+  <rect x="494" y="338" width="52" height="16" rx="4" fill="#94a3b822" stroke="#94a3b844" stroke-width="1"/>
+  <text x="520" y="350" font-family="system-ui,-apple-system,sans-serif" font-size="7" font-weight="700" fill="#94a3b8" text-anchor="middle">RANK 2</text>
+  <text x="622" y="347" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">5</text>
+  <text x="706" y="347" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">1</text>
+  <text x="806" y="347" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">1</text>
+  <text x="885" y="347" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+$6,817.26</text>
+  <text x="984" y="347" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+68.17%</text>
+  <rect x="1090" y="335" width="42" height="20" rx="5" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1111" y="349" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#94a3b8" text-anchor="middle">⊡ View</text>
+  <rect x="1136" y="335" width="28" height="20" rx="5" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1150" y="349" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#64748b" text-anchor="middle">⊙</text>
+  <line x1="220" y1="360" x2="1170" y2="360" stroke="#ffffff06" stroke-width="1"/>
+
+  <!-- Row 3: Rank 3 -->
+  <rect x="220" y="360" width="950" height="36" fill="#0f1b2a"/>
+  <rect x="238" y="370" width="28" height="28" rx="7" fill="#1a140f"/>
+  <text x="252" y="388" font-family="system-ui,-apple-system,sans-serif" font-size="14" fill="#cd7c32" text-anchor="middle">★</text>
+  <text x="270" y="383" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#cd7c32">AI Temp Earnings &amp; Pattern-Driven (Run...</text>
+  <rect x="494" y="374" width="52" height="16" rx="4" fill="#cd7c3222" stroke="#cd7c3244" stroke-width="1"/>
+  <text x="520" y="386" font-family="system-ui,-apple-system,sans-serif" font-size="7" font-weight="700" fill="#cd7c32" text-anchor="middle">RANK 3</text>
+  <text x="622" y="383" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">5</text>
+  <text x="706" y="383" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#64748b" text-anchor="middle">—</text>
+  <text x="806" y="383" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">1</text>
+  <text x="885" y="383" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+$4,580.33</text>
+  <text x="984" y="383" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+45.80%</text>
+  <rect x="1090" y="371" width="42" height="20" rx="5" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1111" y="385" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#94a3b8" text-anchor="middle">⊡ View</text>
+  <rect x="1136" y="371" width="28" height="20" rx="5" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1150" y="385" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#64748b" text-anchor="middle">⊙</text>
+  <line x1="220" y1="396" x2="1170" y2="396" stroke="#ffffff06" stroke-width="1"/>
+
+  <!-- Row 4: Rank 4 -->
+  <rect x="238" y="406" width="28" height="28" rx="7" fill="#141a24"/>
+  <text x="252" y="424" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#64748b" text-anchor="middle">#4</text>
+  <text x="270" y="419" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#94a3b8">News-Driven Pipeline with Technical Guard...</text>
+  <text x="622" y="419" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">5</text>
+  <text x="706" y="419" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#64748b" text-anchor="middle">—</text>
+  <text x="806" y="419" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">1</text>
+  <text x="885" y="419" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+$3,026.48</text>
+  <text x="984" y="419" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+30.26%</text>
+  <rect x="1090" y="407" width="42" height="20" rx="5" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1111" y="421" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#94a3b8" text-anchor="middle">⊡ View</text>
+  <line x1="220" y1="432" x2="1170" y2="432" stroke="#ffffff06" stroke-width="1"/>
+
+  <!-- Row 5: Rank 5 -->
+  <rect x="220" y="432" width="950" height="36" fill="#0f1b2a"/>
+  <rect x="238" y="442" width="28" height="28" rx="7" fill="#141a24"/>
+  <text x="252" y="460" font-family="system-ui,-apple-system,sans-serif" font-size="12" fill="#64748b" text-anchor="middle">#5</text>
+  <text x="270" y="455" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#94a3b8">Candles + Parabolic SAR + Swing</text>
+  <text x="622" y="455" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">5</text>
+  <text x="706" y="455" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#64748b" text-anchor="middle">—</text>
+  <text x="806" y="455" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">1</text>
+  <text x="885" y="455" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+$2,938.76</text>
+  <text x="984" y="455" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#10b981">+29.39%</text>
+  <rect x="1090" y="443" width="42" height="20" rx="5" fill="#1a2030" stroke="#2a3545" stroke-width="1"/>
+  <text x="1111" y="457" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#94a3b8" text-anchor="middle">⊡ View</text>
+</svg>

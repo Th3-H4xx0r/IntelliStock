@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680">
+  <defs>
+    <linearGradient id="alpaca-area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rh-area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ef4444" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#ef4444" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="is-area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="680" fill="#080b0f"/>
+
+  <!-- ── Sidebar ── -->
+  <rect width="190" height="680" fill="#0b0e14"/>
+  <line x1="190" y1="0" x2="190" y2="680" stroke="#ffffff0e" stroke-width="1"/>
+
+  <!-- Logo -->
+  <rect x="14" y="17" width="24" height="24" rx="5" fill="#00e1ff1a"/>
+  <text x="26" y="32" font-family="'Courier New',monospace" font-size="8" font-weight="900" fill="#00e1ff" text-anchor="middle">IS</text>
+  <text x="44" y="32" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="700" fill="#f1f5f9">IntelliStock</text>
+
+  <!-- Nav: Dashboard (active) -->
+  <rect x="8" y="58" width="174" height="30" rx="6" fill="#00e1ff18"/>
+  <rect x="21" y="66" width="12" height="12" rx="3" fill="#00e1ff40"/>
+  <text x="39" y="77" font-family="system-ui,-apple-system,sans-serif" font-size="10" font-weight="600" fill="#00e1ff">Dashboard</text>
+
+  <!-- Nav: Brokerages -->
+  <rect x="21" y="102" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="113" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Brokerages</text>
+
+  <!-- Nav: Instances -->
+  <rect x="21" y="138" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="149" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Instances</text>
+
+  <!-- Nav: Backtests -->
+  <rect x="21" y="174" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="185" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Backtests</text>
+
+  <!-- Nav: Agent Runs -->
+  <rect x="21" y="210" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="221" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Agent Runs</text>
+
+  <!-- Nav: Nexus Graph -->
+  <rect x="21" y="246" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="257" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Nexus Graph</text>
+
+  <!-- Nav: Strategies -->
+  <rect x="21" y="282" width="12" height="12" rx="3" fill="#1e2535"/>
+  <text x="39" y="293" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Strategies</text>
+
+  <!-- User -->
+  <line x1="8" y1="634" x2="182" y2="634" stroke="#ffffff0a" stroke-width="1"/>
+  <circle cx="25" cy="657" r="9" fill="#1e2a3a"/>
+  <text x="40" y="661" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">pranav</text>
+
+  <!-- ── Main Content ── -->
+  <!-- Page label -->
+  <text x="220" y="46" font-family="system-ui,-apple-system,sans-serif" font-size="9" font-weight="700" fill="#00e1ff" letter-spacing="2">DASHBOARD</text>
+
+  <!-- Heading -->
+  <text x="220" y="80" font-family="system-ui,-apple-system,sans-serif" font-size="26" font-weight="900">
+    <tspan fill="#f1f5f9">Welcome back, </tspan><tspan fill="#00e1ff">pranav</tspan><tspan fill="#f1f5f9">.</tspan>
+  </text>
+  <text x="220" y="100" font-family="system-ui,-apple-system,sans-serif" font-size="11" fill="#64748b">Your workspace is ready.</text>
+
+  <!-- Portfolio section -->
+  <text x="220" y="134" font-family="system-ui,-apple-system,sans-serif" font-size="14" font-weight="700" fill="#f1f5f9">Portfolio</text>
+  <text x="220" y="150" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Live equity history from your linked brokerages.</text>
+  <text x="1070" y="134" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#00e1ff">Manage brokerages →</text>
+
+  <!-- ── Card 1: Alpaca ── -->
+  <rect x="220" y="162" width="308" height="192" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
+  <!-- Active dot -->
+  <circle cx="501" cy="182" r="4" fill="#10b981"/>
+  <text x="494" y="185" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#10b981" text-anchor="end">active</text>
+  <text x="238" y="183" font-family="'Courier New',monospace" font-size="8" font-weight="700" fill="#64748b" letter-spacing="1">ALPACA</text>
+  <text x="238" y="198" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">Alpaca Live Trading Test</text>
+  <text x="238" y="226" font-family="'Courier New',monospace" font-size="20" font-weight="700" fill="#f1f5f9">$0.00</text>
+  <text x="238" y="244" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#10b981">▲ +$0.00 (+0.00%)</text>
+  <!-- Time pills -->
+  <rect x="238" y="252" width="24" height="14" rx="3" fill="#1a2030"/>
+  <text x="250" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" text-anchor="middle">1D</text>
+  <rect x="266" y="252" width="24" height="14" rx="3" fill="#1a2030"/>
+  <text x="278" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" text-anchor="middle">1W</text>
+  <rect x="294" y="252" width="24" height="14" rx="3" fill="#00e1ff22" stroke="#00e1ff44" stroke-width="1"/>
+  <text x="306" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#00e1ff" text-anchor="middle">1M</text>
+  <rect x="322" y="252" width="24" height="14" rx="3" fill="#1a2030"/>
+  <text x="334" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" text-anchor="middle">3M</text>
+  <!-- Chart area -->
+  <rect x="222" y="272" width="304" height="76" rx="0" fill="#080b0f"/>
+  <rect x="222" y="272" width="304" height="76" rx="0" fill="url(#alpaca-area)"/>
+  <!-- Flat chart line -->
+  <line x1="222" y1="336" x2="526" y2="336" stroke="#10b981" stroke-width="1.5" opacity="0.55"/>
+  <!-- Y-axis labels -->
+  <text x="218" y="278" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$2</text>
+  <text x="218" y="296" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$1.5</text>
+  <text x="218" y="314" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$1</text>
+  <text x="218" y="332" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$0.5</text>
+  <text x="218" y="348" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$0</text>
+  <!-- X-axis dates -->
+  <text x="240" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Feb 07</text>
+  <text x="310" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Feb 22</text>
+  <text x="498" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Mar 03</text>
+
+  <!-- ── Card 2: Robinhood Individual ── -->
+  <rect x="541" y="162" width="308" height="192" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
+  <circle cx="822" cy="182" r="4" fill="#ef4444"/>
+  <text x="815" y="185" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#ef4444" text-anchor="end">expired</text>
+  <text x="559" y="183" font-family="'Courier New',monospace" font-size="8" font-weight="700" fill="#64748b" letter-spacing="1">ROBINHOOD</text>
+  <text x="559" y="198" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">Robinhood Individual Account</text>
+  <text x="559" y="226" font-family="'Courier New',monospace" font-size="20" font-weight="700" fill="#f1f5f9">$6,475.80</text>
+  <text x="559" y="244" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#ef4444">▼ -$171.73 (-2.58%)</text>
+  <!-- Time pills -->
+  <rect x="559" y="252" width="24" height="14" rx="3" fill="#1a2030"/>
+  <text x="571" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" text-anchor="middle">1D</text>
+  <rect x="587" y="252" width="24" height="14" rx="3" fill="#1a2030"/>
+  <text x="599" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" text-anchor="middle">1W</text>
+  <rect x="615" y="252" width="24" height="14" rx="3" fill="#00e1ff22" stroke="#00e1ff44" stroke-width="1"/>
+  <text x="627" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#00e1ff" text-anchor="middle">1M</text>
+  <rect x="643" y="252" width="24" height="14" rx="3" fill="#1a2030"/>
+  <text x="655" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" text-anchor="middle">3M</text>
+  <!-- Chart area -->
+  <rect x="543" y="272" width="304" height="76" rx="0" fill="#080b0f"/>
+  <path d="M543,284 C565,283 580,286 600,290 C620,294 640,295 660,294 C680,293 700,296 720,299 C735,302 745,305 760,308 C775,311 790,316 810,322 C825,326 835,331 847,340 L847,348 L543,348 Z" fill="url(#rh-area)"/>
+  <path d="M543,284 C565,283 580,286 600,290 C620,294 640,295 660,294 C680,293 700,296 720,299 C735,302 745,305 760,308 C775,311 790,316 810,322 C825,326 835,331 847,340" stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.85"/>
+  <!-- Y-axis -->
+  <text x="539" y="278" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$7,000</text>
+  <text x="539" y="296" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$6,800</text>
+  <text x="539" y="314" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$6,600</text>
+  <text x="539" y="332" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$6,400</text>
+  <!-- X dates -->
+  <text x="560" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Feb 10</text>
+  <text x="650" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Feb 22</text>
+  <text x="820" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Mar 03</text>
+
+  <!-- ── Card 3: Robinhood IntelliStock ── -->
+  <rect x="862" y="162" width="308" height="192" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
+  <circle cx="1143" cy="182" r="4" fill="#10b981"/>
+  <text x="1136" y="185" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#10b981" text-anchor="end">active</text>
+  <text x="880" y="183" font-family="'Courier New',monospace" font-size="8" font-weight="700" fill="#64748b" letter-spacing="1">ROBINHOOD</text>
+  <text x="880" y="198" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">Robinhood Intellistock Account</text>
+  <text x="880" y="226" font-family="'Courier New',monospace" font-size="20" font-weight="700" fill="#10b981">$6.13</text>
+  <text x="880" y="244" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#10b981">▲ +$0.22 (+3.67%)</text>
+  <!-- Time pills -->
+  <rect x="880" y="252" width="24" height="14" rx="3" fill="#00e1ff22" stroke="#00e1ff44" stroke-width="1"/>
+  <text x="892" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#00e1ff" text-anchor="middle">1M</text>
+  <rect x="908" y="252" width="24" height="14" rx="3" fill="#1a2030"/>
+  <text x="920" y="263" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#475569" text-anchor="middle">3M</text>
+  <!-- Chart area - upward -->
+  <rect x="864" y="272" width="304" height="76" rx="0" fill="#080b0f"/>
+  <path d="M864,342 C890,338 910,332 930,326 C950,318 970,310 990,304 C1010,298 1030,294 1055,290 C1075,287 1100,284 1120,283 C1140,282 1155,282 1168,282 L1168,348 L864,348 Z" fill="url(#is-area)"/>
+  <path d="M864,342 C890,338 910,332 930,326 C950,318 970,310 990,304 C1010,298 1030,294 1055,290 C1075,287 1100,284 1120,283 C1140,282 1155,282 1168,282" stroke="#10b981" stroke-width="1.5" fill="none" opacity="0.9"/>
+  <!-- Y-axis -->
+  <text x="860" y="278" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$6.2</text>
+  <text x="860" y="296" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$6.1</text>
+  <text x="860" y="314" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$6</text>
+  <text x="860" y="332" font-family="'Courier New',monospace" font-size="7" fill="#2a3a4a" text-anchor="end">$5.9</text>
+  <!-- X dates -->
+  <text x="880" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Mar 04</text>
+  <text x="990" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Mar 05</text>
+  <text x="1140" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Mar 06</text>
+
+  <!-- ── Services section ── -->
+  <text x="220" y="396" font-family="system-ui,-apple-system,sans-serif" font-size="14" font-weight="700" fill="#f1f5f9">Services</text>
+  <text x="220" y="412" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#475569">Status and controls for all IntelliStock background services.</text>
+
+  <!-- Service Card 1: Price Engine -->
+  <rect x="220" y="424" width="308" height="90" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
+  <rect x="238" y="440" width="32" height="32" rx="8" fill="#0e2030"/>
+  <text x="254" y="461" font-family="system-ui,-apple-system,sans-serif" font-size="18" fill="#00e1ff" text-anchor="middle">↗</text>
+  <text x="280" y="454" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="600" fill="#e2e8f0">Price Engine</text>
+  <text x="280" y="469" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">Live market data</text>
+  <rect x="444" y="440" width="68" height="18" rx="4" fill="#10b98118" stroke="#10b98133" stroke-width="1"/>
+  <text x="478" y="453" font-family="system-ui,-apple-system,sans-serif" font-size="8" font-weight="700" fill="#10b981" text-anchor="middle">RUNNING</text>
+  <text x="238" y="498" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#334155">broker  on</text>
+
+  <!-- Service Card 2: Discover Engine -->
+  <rect x="541" y="424" width="308" height="90" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
+  <rect x="559" y="440" width="32" height="32" rx="8" fill="#141a24"/>
+  <text x="575" y="461" font-family="system-ui,-apple-system,sans-serif" font-size="18" fill="#64748b" text-anchor="middle">⊕</text>
+  <text x="601" y="454" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="600" fill="#e2e8f0">Discover Engine</text>
+  <text x="601" y="469" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">Opportunity discovery</text>
+  <rect x="698" y="440" width="135" height="18" rx="4" fill="#1e253518" stroke="#33415533" stroke-width="1"/>
+  <text x="765" y="453" font-family="system-ui,-apple-system,sans-serif" font-size="8" font-weight="700" fill="#64748b" text-anchor="middle">STOPPED (TERMINATE)</text>
+  <text x="559" y="498" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#334155">No extra details</text>
+
+  <!-- Service Card 3: AI Backtest Agent -->
+  <rect x="862" y="424" width="308" height="90" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
+  <rect x="880" y="440" width="32" height="32" rx="8" fill="#1a142a"/>
+  <text x="896" y="461" font-family="system-ui,-apple-system,sans-serif" font-size="18" fill="#a855f7" text-anchor="middle">⚙</text>
+  <text x="922" y="454" font-family="system-ui,-apple-system,sans-serif" font-size="11" font-weight="600" fill="#e2e8f0">AI Backtest Agent</text>
+  <text x="922" y="469" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">Automated strategy search</text>
+  <rect x="1082" y="440" width="68" height="18" rx="4" fill="#10b98118" stroke="#10b98133" stroke-width="1"/>
+  <text x="1116" y="453" font-family="system-ui,-apple-system,sans-serif" font-size="8" font-weight="700" fill="#10b981" text-anchor="middle">RUNNING</text>
+  <text x="880" y="486" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">Backtests today</text>
+  <text x="880" y="500" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#64748b">63</text>
+  <text x="960" y="486" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#475569">Last run</text>
+  <text x="960" y="500" font-family="'Courier New',monospace" font-size="10" font-weight="700" fill="#64748b">2026-03-06</text>
+</svg>

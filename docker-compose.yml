@@ -1,0 +1,279 @@
+# Single backend image; each service runs a different command (server, priceService, discoverService, api).
+# Only "backend" builds the image; other services reuse it (saves space).
+# Ports and API URL: set API_PORT and API_URL in .env; they are used by the api service.
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked into the JS bundle at build time — set VITE_API_URL in .env.
+        # Empty default = JS uses /api and the frontend container's nginx
+        # proxies it to the api service. Override only when serving the
+        # frontend from a different host than the API.
+        - VITE_API_URL=${VITE_API_URL:-}
+        # VITE_PREVIEW_MODE=true builds a landing-only bundle (no portal,
+        # GitHub CTA in place of auth). Empty/unset = full portal.
+        - VITE_PREVIEW_MODE=${VITE_PREVIEW_MODE:-}
+    container_name: intellistock-frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    environment:
+      # nginx proxy fallback: if JS uses /api (VITE_API_URL not set), nginx routes here
+      - API_URL=${API_URL:-http://intellistock-api:${API_PORT:-8011}}
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: intellistock-backend
+    container_name: intellistock-backend
+    command: ["python", "server.py"]
+    ports:
+      - "5000:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - nexus_cache:/app/.cache
+      - discover_stocks_data:/app/discoverStocks
+      - backtest_logs:/app/backtest_logs
+      - nexus_graph_logs:/app/nexus_graph_logs
+      - live_trading_logs:/app/live_trading_logs
+    restart: unless-stopped
+    depends_on:
+      - rethinkdb
+      - neo4j
+    env_file:
+      - .env
+    environment:
+      - TERM=dumb
+      - RETHINKDB_HOST=rethinkdb
+      - RETHINKDB_PORT=28015
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
+      - DOCKER_INSTANCE_IMAGE=intellistock-backend
+      - INSTANCE_RETHINKDB_HOST=rethinkdb
+      - INSTANCE_SERVER_URL=http://intellistock-backend:5000
+      - INSTANCE_DOCKER_NETWORK=intellistockv4_default
+      - GRAPH_NEXUS_CACHE_DIR=/app/.cache
+      - NEXUS_GRAPH_LOG_VOLUME=nexus_graph_logs
+      - NEXUS_GRAPH_LOG_DIR=/app/nexus_graph_logs
+      - LIVE_TRADING_LOG_VOLUME=live_trading_logs
+      - LIVE_TRADING_LOG_DIR=/app/live_trading_logs
+      - NEXUS_CACHE_VOLUME_NAME=${NEXUS_CACHE_VOLUME_NAME:-intellistock_graph_nexus_cache}
+      - PHASE7_HOLDS_WRITE_BATCH_SIZE=${PHASE7_HOLDS_WRITE_BATCH_SIZE:-1000}
+      - PHASE7_CLOSE_INTERVAL_BATCH_SIZE=${PHASE7_CLOSE_INTERVAL_BATCH_SIZE:-500}
+      - PHASE7_HOLDS_INTERVAL_SYNC_BATCH_SIZE=${PHASE7_HOLDS_INTERVAL_SYNC_BATCH_SIZE:-1000}
+      - PHASE7_INFLATION_FIX_BATCH_SIZE=${PHASE7_INFLATION_FIX_BATCH_SIZE:-5000}
+      - PHASE7_INFLATION_FIX_MIN_BATCH_SIZE=${PHASE7_INFLATION_FIX_MIN_BATCH_SIZE:-500}
+      - USASPENDING_WINDOW_DAYS=${USASPENDING_WINDOW_DAYS:-90}
+      - USASPENDING_FAILURE_BURST_THRESHOLD=${USASPENDING_FAILURE_BURST_THRESHOLD:-3}
+      - USASPENDING_FAILURE_BURST_WINDOW_SECONDS=${USASPENDING_FAILURE_BURST_WINDOW_SECONDS:-180}
+      - USASPENDING_FAILURE_BURST_COOLDOWN_SECONDS=${USASPENDING_FAILURE_BURST_COOLDOWN_SECONDS:-60}
+      - USASPENDING_FAILURE_BURST_MAX_COOLDOWN_SECONDS=${USASPENDING_FAILURE_BURST_MAX_COOLDOWN_SECONDS:-180}
+      - USASPENDING_DEGRADED_BREAK_EVERY=${USASPENDING_DEGRADED_BREAK_EVERY:-1000}
+      - USASPENDING_DEGRADED_BREAK_SECONDS=${USASPENDING_DEGRADED_BREAK_SECONDS:-15}
+      - USASPENDING_DEGRADED_MODE_SECONDS=${USASPENDING_DEGRADED_MODE_SECONDS:-600}
+
+  api:
+    image: intellistock-backend
+    container_name: intellistock-api
+    command: ["python", "api/main.py"]
+    ports:
+      - "${API_PORT:-8011}:${API_PORT:-8011}"
+    volumes:
+      - nexus_cache:/app/.cache
+      - backtest_logs:/app/backtest_logs
+      - nexus_graph_logs:/app/nexus_graph_logs
+      - live_trading_logs:/app/live_trading_logs
+    env_file:
+      - .env
+    environment:
+      - RETHINKDB_HOST=rethinkdb
+      - RETHINKDB_PORT=28015
+      - API_HOST=0.0.0.0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
+      - GRAPH_NEXUS_CACHE_DIR=/app/.cache
+      - NEXUS_CACHE_VOLUME_NAME=${NEXUS_CACHE_VOLUME_NAME:-intellistock_graph_nexus_cache}
+      - NEXUS_GRAPH_LOG_DIR=/app/nexus_graph_logs
+      - LIVE_TRADING_LOG_DIR=/app/live_trading_logs
+    restart: unless-stopped
+    depends_on:
+      - rethinkdb
+      - neo4j
+
+  price-service:
+    image: intellistock-backend
+    container_name: intellistock-price-service
+    command: ["python", "engines/price_engine.py"]
+    restart: unless-stopped
+    depends_on:
+      - rethinkdb
+    environment:
+      - RETHINKDB_HOST=rethinkdb
+      - RETHINKDB_PORT=28015
+
+  backtest-engine:
+    image: intellistock-backend
+    container_name: intellistock-backtest-engine
+    command: ["python", "engines/backtest_engine.py"]
+    restart: unless-stopped
+    depends_on:
+      - rethinkdb
+      - neo4j
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - backtest_logs:/app/backtest_logs
+    # R19 (2026-04-25): backtest-engine spawns ephemeral broker containers and
+    # must forward INTELLISTOCK_CRED_KEY into them so the broker can decrypt
+    # Fernet-encrypted BrokerageAccounts rows. Without env_file the engine's
+    # own os.environ is missing the cred key — every spawned broker hits 401
+    # because data_brokerage decrypt fails silently and falls back to paper.
+    env_file:
+      - .env
+    environment:
+      - RETHINKDB_HOST=rethinkdb
+      - RETHINKDB_PORT=28015
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
+      - DOCKER_INSTANCE_IMAGE=intellistock-backend
+      - INSTANCE_RETHINKDB_HOST=rethinkdb
+      - INSTANCE_DOCKER_NETWORK=intellistockv4_default
+      - BACKTEST_LOG_VOLUME=backtest_logs
+      - BACKTEST_LOG_DIR=/app/backtest_logs
+      # R19: explicit passthrough as belt-and-suspenders against env_file
+      # not being populated by the orchestrator (e.g. Dockploy may render
+      # service env separately from the project .env file).
+      - INTELLISTOCK_CRED_KEY=${INTELLISTOCK_CRED_KEY:-}
+      - ALLOW_LEGACY_ENV_CREDS=${ALLOW_LEGACY_ENV_CREDS:-}
+
+  # AI backtesting agent is NOT started here. The backend (server.py) starts and stops it via the Docker API
+  # when AgentControl.running is set to true/false (e.g. via API or CLI "agent start" / "agent stop").
+
+  # Daily digest engine is NOT started here. The backend (server.py) starts and stops it via the Docker API
+  # when DigestControl.running is set to true/false (e.g. via CLI "digest start" / "digest stop").
+
+  # Discover engine is NOT started here. The backend (server.py) starts and stops it via the Docker API
+  # when EngineControl.discover_engine.running is set to true/false (e.g. via dashboard or API).
+
+  credential-service:
+    image: intellistock-backend
+    container_name: intellistock-credential-service
+    command: ["python", "credential_service.py"]
+    restart: unless-stopped
+    depends_on:
+      - rethinkdb
+    # 2026-04-26: credential_service.py decrypts Fernet-encrypted Robinhood
+    # tokens via secret_store before refresh and re-encrypts on write. Without
+    # INTELLISTOCK_CRED_KEY in env, every refresh raises and marks the account
+    # status="expired" (codex review caught this gap on the keys-on-baseline
+    # branch — same R19-style hole as backtest-engine had).
+    env_file:
+      - .env
+    environment:
+      - RETHINKDB_HOST=rethinkdb
+      - RETHINKDB_PORT=28015
+      # How often to check for expiring tokens (seconds, default 300 = 5 min)
+      - CREDENTIAL_CHECK_INTERVAL=300
+      # Refresh tokens this many seconds before expiry (default 1800 = 30 min)
+      - CREDENTIAL_REFRESH_BEFORE_EXPIRY=1800
+      - INTELLISTOCK_CRED_KEY=${INTELLISTOCK_CRED_KEY:-}
+
+  discord-bot:
+    image: intellistock-backend
+    container_name: intellistock-discord-bot
+    command: ["python", "engines/discord_bot.py"]
+    restart: unless-stopped
+    depends_on:
+      - rethinkdb
+      - neo4j
+    ports:
+      - "${DISCORD_BOT_HTTP_PORT:-8050}:8050"   # HTTP API for other services to send messages
+    env_file:
+      - .env
+    environment:
+      - RETHINKDB_HOST=rethinkdb
+      - RETHINKDB_PORT=28015
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - DISCORD_BOT_HTTP_PORT=8050
+      - DISCORD_BOT_API_KEY=${DISCORD_BOT_API_KEY:-}
+
+  neo4j:
+    image: neo4j:5.15.0
+    container_name: intellistock-neo4j
+    # Default user (neo4j) is created on first container startup when NEO4J_AUTH is set.
+    # NEO4J_PASSWORD must be set in .env (install.sh/install.ps1 auto-generate one).
+    # The compose file refuses to render with the legacy literal default.
+    ports:
+      - "7474:7474"   # HTTP (browser)
+      - "7687:7687"   # Bolt (drivers)
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_server_memory_heap_initial__size=${NEO4J_HEAP_INITIAL_SIZE:-4G}
+      - NEO4J_server_memory_heap_max__size=${NEO4J_HEAP_MAX_SIZE:-4G}
+      - NEO4J_dbms_memory_transaction_total_max=${NEO4J_DBMS_MEMORY_TRANSACTION_TOTAL_MAX:-3G}
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs   # prevents anonymous volume for logs (debug.log, neo4j.log, etc.)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Graph Nexus is no longer a separate service. The server (backend) starts/stops it via NexusControl in RethinkDB.
+  # Use CLI: nexus start | nexus stop | nexus status. Or API: GET/POST /nexus/control, GET /nexus/status. Or Discord: !nexus start|stop|status.
+
+  rethinkdb:
+    image: rethinkdb:2.4
+    container_name: intellistock-rethinkdb
+    # --cache-size: MB for query cache (default is half of available); more = better throughput
+    command: rethinkdb --bind all -d /data --cache-size 2048
+    ports:
+      - "28015:28015"   # Driver port
+      - "${RETHINKDB_WEB_PORT:-8080}:8080"   # Web admin UI (host port from env; set RETHINKDB_WEB_PORT if 8080 is in use)
+    volumes:
+      - rethinkdb_data:/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "3"
+          memory: 3G
+        reservations:
+          cpus: "2"
+          memory: 512M
+    # If RethinkDB still gets random SIGTERM: raise Docker Desktop memory/CPUs, or add oom_kill_disable: true (risky on shared hosts)
+    healthcheck:
+      # Driver port 28015: bash /dev/tcp works in Debian-based image
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/28015"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  nexus_cache:
+    name: ${NEXUS_CACHE_VOLUME_NAME:-intellistock_graph_nexus_cache}
+  discover_stocks_data:
+  rethinkdb_data:
+  neo4j_data:
+  neo4j_logs:   # Neo4j log files; without this the image creates an anonymous volume for /logs
+  backtest_logs: # Full backtest log files; mounted to api + backtest-engine + ephemeral broker containers
+    name: backtest_logs  # Must match BACKTEST_LOG_VOLUME; no project prefix so Docker SDK can reference it directly
+  nexus_graph_logs: # Per-build log files from nexus_graph_engine; mounted on backend + api
+    name: nexus_graph_logs  # Must match NEXUS_GRAPH_LOG_VOLUME; plain name for Docker SDK
+  live_trading_logs: # Per-instance broker log files; mounted on backend + api + per-instance broker containers
+    name: live_trading_logs  # Must match LIVE_TRADING_LOG_VOLUME; plain name for Docker SDK

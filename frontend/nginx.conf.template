@@ -1,0 +1,53 @@
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ── Security headers ──────────────────────────────────────────────────────
+    # Applied on every response. CSP is intentionally loose-ish for the SPA:
+    # 'unsafe-inline' for styles is required by Tailwind's runtime injection;
+    # 'wasm-unsafe-eval' covers ApexCharts. Tighten further if you swap out
+    # those libraries.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://api.star-history.com https://repobeats.axiom.co; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), camera=(), microphone=(), payment=()" always;
+    # HSTS only fires when the page is already on HTTPS. Safe to set
+    # unconditionally — browsers ignore it on plain-HTTP responses.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # ── SPA fallback ──────────────────────────────────────────────────────────
+    # All non-asset requests return index.html so Vue Router handles the URL.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # ── API proxy ─────────────────────────────────────────────────────────────
+    # Strips /api prefix and forwards to the backend.
+    # Set API_URL env var when running the container, e.g.:
+    #   API_URL=http://intellistock-api:8011
+    location /api/ {
+        proxy_pass        ${API_URL}/;
+        proxy_http_version 1.1;
+        proxy_set_header  Host              $http_host;
+        proxy_set_header  X-Real-IP         $remote_addr;
+        proxy_set_header  X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header  X-Forwarded-Proto $scheme;
+        proxy_set_header  Upgrade           $http_upgrade;
+        proxy_set_header  Connection        "upgrade";
+        proxy_read_timeout 120s;
+    }
+
+    # ── Static asset caching ──────────────────────────────────────────────────
+    location ~* \.(?:js|css|woff2?|ttf|eot|svg|png|jpg|webp|ico|json)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # ── Gzip ──────────────────────────────────────────────────────────────────
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+    gzip_min_length 1024;
+}

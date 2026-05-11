@@ -1,0 +1,116 @@
+"""
+Runtime resolver for model_id references in strategy configs.
+
+When a strategy config contains keys like ``llm_model_id`` or
+``sentiment_llm_model_id``, this module looks up the corresponding
+document in the RethinkDB ``Models`` table and injects the credentials
+as inline config fields.  Downstream strategy code continues to read
+``config.get("llm_provider")`` etc. unchanged — the resolution is
+transparent.
+"""
+
+import os
+import threading
+import time
+
+from rethinkdb import RethinkDB
+
+r = RethinkDB()
+DB_NAME = "IntelliStock"
+RETHINKDB_HOST = os.environ.get("RETHINKDB_HOST", "localhost")
+RETHINKDB_PORT = int(os.environ.get("RETHINKDB_PORT", "28015"))
+
+# Thread-safe in-memory cache with TTL
+_model_cache: dict = {}
+_cache_lock = threading.Lock()
+_CACHE_TTL = 300  # seconds
+
+
+def _get_conn():
+    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+
+
+def _get_model_from_cache_or_db(conn, model_id: str):
+    """Fetch a model doc, using the in-memory cache when fresh."""
+    now = time.time()
+    with _cache_lock:
+        cached = _model_cache.get(model_id)
+        if cached and (now - cached["ts"]) < _CACHE_TTL:
+            return cached["doc"]
+    try:
+        doc = r.db(DB_NAME).table("Models").get(model_id).run(conn)
+    except Exception:
+        return None
+    if doc:
+        with _cache_lock:
+            _model_cache[model_id] = {"doc": doc, "ts": now}
+    return doc
+
+
+def invalidate_model_cache(model_id: str | None = None):
+    """Drop cached model(s) so the next resolution fetches fresh data."""
+    with _cache_lock:
+        if model_id:
+            _model_cache.pop(model_id, None)
+        else:
+            _model_cache.clear()
+
+
+def resolve_model_refs_in_config(conn, config: dict) -> dict:
+    """
+    Find all ``*_llm_model_id`` keys in *config*, look up each from the
+    Models table, and inject the model's credentials as inline fields.
+
+    Returns a **new** dict — the original is not mutated.
+    If a model_id cannot be resolved (deleted / missing), the key is
+    silently skipped and the strategy falls through to environment
+    variables / provider defaults.
+    """
+    if not config:
+        return config
+
+    # Fast path: skip if no model_id keys exist
+    model_keys = [k for k in config if k.endswith("llm_model_id")]
+    if not model_keys:
+        return config
+
+    resolved = dict(config)
+    for key in model_keys:
+        model_id = (resolved[key] or "").strip()
+        if not model_id:
+            continue
+        prefix = key[: -len("llm_model_id")]  # e.g. "sentiment_" or ""
+        model_doc = _get_model_from_cache_or_db(conn, model_id)
+        if model_doc is None:
+            continue
+
+        provider = (model_doc.get("provider") or "").strip().lower()
+
+        # Build field mapping: model_doc field → strategy config key
+        field_map = {
+            "provider": f"{prefix}llm_provider",
+            "model": f"{prefix}llm_model" if prefix else "model_name",
+            "api_key": f"{prefix}llm_api_key",
+            "openai_base_url": f"{prefix}openai_base_url",
+            "nvidia_base_url": f"{prefix}nvidia_base_url",
+            "azure_openai_endpoint": f"{prefix}azure_openai_endpoint",
+            "azure_openai_api_version": f"{prefix}azure_openai_api_version",
+            "reasoning_effort": f"{prefix}llm_reasoning_effort",
+        }
+
+        for doc_field, config_key in field_map.items():
+            val = (model_doc.get(doc_field) or "").strip()
+            if val:
+                resolved[config_key] = val
+
+        # Azure uses a separate api key field too
+        if provider == "azure":
+            api_key = (model_doc.get("api_key") or "").strip()
+            if api_key:
+                resolved[f"{prefix}azure_openai_api_key"] = api_key
+
+        # Also set the alternative model key for the default group
+        if not prefix and model_doc.get("model"):
+            resolved["llm_model"] = model_doc["model"].strip()
+
+    return resolved

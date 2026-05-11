@@ -1,0 +1,635 @@
+NEXUS BACKTEST ITERATION WORKFLOW
+=================================
+Copy-paste this entire prompt into Claude Code to run a full backtest analyze-fix-deploy cycle.
+---------------------------------
+
+You are running the Nexus Backtest Iteration Workflow. Follow every step below in order. Do not skip steps. Use the Hive Mind protocol for analysis and planning phases.
+
+== CONFIGURATION (DO NOT CHANGE) ==
+API_URL = http://localhost:8011
+AUTH_ENDPOINT = /auth/login
+BACKTESTS_ENDPOINT = /backtests
+INSTANCE_ID = nexus-testing
+BACKTEST_START = 2025-11-10
+BACKTEST_END = 2026-03-25
+INITIAL_CASH = 7000
+GRANULARITY = 86400
+TARGET_TICKERS = SNDK, MU, LITE
+TARGET_PNL_PCT = 50
+STRATEGY_IDS = 179, 180, 181
+RETHINKDB_HOST = $RETHINKDB_HOST
+RETHINKDB_PORT = 28015
+LOG_DIR = backtest_logs
+LOG_NAMING = backtest_logs/nexus-{N}.txt (N = next sequential number after existing files in backtest_logs/)
+
+VERY IMPORTANT: YOU MUST USE THE HIVE MIND PROTOCOL MCP FOR ALL STEPS.
+== STEP 1: AUTHENTICATE & FETCH LATEST BACKTEST ==
+
+Run this Python script to get API credentials from .env and fetch the latest backtest:
+
+```python
+import requests, json, glob, re, os, sys
+sys.stdout.reconfigure(encoding='utf-8')
+from dotenv import dotenv_values
+
+config = dotenv_values('.env')
+API_URL = "http://localhost:8011"
+
+# Login
+resp = requests.post(f'{API_URL}/auth/login', json={
+    'username': config['AGENT_API_USERNAME'],
+    'password': config['AGENT_API_PASSWORD']
+}, timeout=15)
+assert resp.status_code == 200, f"Login failed: {resp.status_code} {resp.text[:200]}"
+TOKEN = resp.json()['access_token']
+HEADERS = {'Authorization': f'Bearer {TOKEN}'}
+
+# Get latest backtest
+r = requests.get(f'{API_URL}/backtests?sort_order=desc&per_page=5', headers=HEADERS, timeout=15)
+data = r.json()
+backtests = data.get('backtests', data) if isinstance(data, dict) else data
+latest = backtests[0] if backtests else None
+print(f"LATEST BACKTEST:")
+print(f"  ID: {latest['id']}")
+print(f"  Status: {latest.get('status')}")
+print(f"  Progress: {latest.get('progress')}%")
+print(f"  P&L: {latest.get('pnl_percent', latest.get('pnl_pct', '?'))}%")
+print(f"  Stocks: {latest.get('stocks')}")
+print(f"  Range: {latest.get('start_date')} to {latest.get('end_date')}")
+
+# Ensure backtest_logs directory exists
+LOG_DIR = "backtest_logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Determine next log file number
+existing = glob.glob(os.path.join(LOG_DIR, 'nexus-*.txt'))
+nums = [int(m.group(1)) for f in existing if (m := re.search(r'nexus-(\d+)', f))]
+next_num = max(nums) + 1 if nums else 1
+log_file = os.path.join(LOG_DIR, f"nexus-{next_num}.txt")
+
+# Download logs
+if latest.get('status') in ('finished', 'stopped', 'running'):
+    log_resp = requests.get(f"{API_URL}/backtests/{latest['id']}/logs", headers=HEADERS, timeout=30)
+    if log_resp.status_code == 200:
+        log_data = log_resp.json()
+        logs_text = log_data if isinstance(log_data, str) else json.dumps(log_data, indent=2)
+        # If it's a dict with a 'logs' key, extract it
+        if isinstance(log_data, dict) and 'logs' in log_data:
+            logs_text = log_data['logs'] if isinstance(log_data['logs'], str) else '\n'.join(log_data['logs'])
+        with open(log_file, 'w', encoding='utf-8') as f:
+            f.write(logs_text)
+        print(f"\nLogs saved to: {log_file} ({len(logs_text)} chars)")
+    else:
+        print(f"\nFailed to fetch logs: {log_resp.status_code}")
+
+# Also get summary
+sum_resp = requests.get(f"{API_URL}/backtests/{latest['id']}/summary", headers=HEADERS, timeout=15)
+if sum_resp.status_code == 200:
+    summary = sum_resp.json()
+    print(f"\nSUMMARY:")
+    for k, v in (summary.items() if isinstance(summary, dict) else []):
+        print(f"  {k}: {v}")
+```
+
+Record the BACKTEST_ID and LOG_FILE name from the output.
+
+== STEP 2: INVESTIGATE BACKTEST PERFORMANCE ==
+VERY IMPORTANT: YOU MUST USE THE HIVE MIND PROTOCOL MCP FOR THIS STEP
+
+Using the Hive Mind protocol, analyze the downloaded log file from the backtest_logs/ folder.
+The log file path is: backtest_logs/nexus-{N}.txt (where N was determined in Step 1).
+ALWAYS read logs from the backtest_logs/ directory. Initialize hive mind status first, then spawn worker agents.
+
+Key questions to answer:
+1. Were SNDK, MU, and LITE bought? If yes, at what prices and when? If no, why not?
+2. What is the final P&L percentage? Is it >= 50%?
+3. How many total trades (buys and sells)?
+4. Were sells executing properly? (fast loser cut, trailing stop, hold-limit)
+5. Were there any runtime errors or crashes?
+6. What stocks performed best and worst?
+7. Was cash being deployed efficiently or sitting idle?
+8. Did the backfill queue work correctly?
+9. Did rotation replace losing positions with better candidates?
+10. Were winner add-on buys firing for strong positions?
+
+== LLM OUTPUT INSPECTION (use when investigating LLM decision quality) ==
+
+When the logs show an LLM call with a saved output, you can fetch the full prompt+response
+to understand WHY the LLM made a specific decision (e.g., why it classified an article as
+bearish, why the overlay said SELL, why the panel gave a low score).
+
+Log format:
+  [llm_utils] LLM output log saved: llm/outputs/{OUTPUT_ID}
+
+To fetch the full LLM input/output:
+```python
+import requests
+from dotenv import dotenv_values
+config = dotenv_values('.env')
+API_URL = "http://localhost:8011"
+resp = requests.post(f'{API_URL}/auth/login', json={
+    'username': config['AGENT_API_USERNAME'],
+    'password': config['AGENT_API_PASSWORD']
+}, timeout=15)
+TOKEN = resp.json()['access_token']
+HEADERS = {'Authorization': f'Bearer {TOKEN}'}
+
+# Replace OUTPUT_ID with the 32-char hex ID from the log
+OUTPUT_ID = "af562e6da9d34e37b21a13a04223e692"
+r = requests.get(f'{API_URL}/llm/outputs/{OUTPUT_ID}', headers=HEADERS, timeout=15)
+if r.status_code == 200:
+    data = r.json()
+    print(f"Provider: {data.get('provider')}")
+    print(f"Model: {data.get('model')}")
+    print(f"Prompt:\n{data.get('prompt', '')[:500]}...")
+    print(f"Response:\n{data.get('response', '')[:1000]}...")
+```
+
+== RETHINKDB DIRECT QUERIES (use when investigating state/cache issues) ==
+
+When you need to inspect the actual data stored in RethinkDB (events, discoveries,
+caches, trends, outcomes), you can query directly. The API may not be reachable from
+this machine (Tailscale), so use the IntelliStock API proxy OR direct RethinkDB.
+
+Connection:
+```python
+from rethinkdb import r
+conn = r.connect(host='$RETHINKDB_HOST', port=28015, timeout=15)
+DB = 'IntelliStock'
+INSTANCE_ID = 'nexus-testing|175aaf8b350136373ed52a82'  # Update from logs
+```
+
+Available tables and useful queries:
+
+1. **Active Events** — What events is the strategy tracking?
+```python
+events = list(r.db(DB).table('GraphNexusActiveEvents')
+    .filter(lambda d: d['instance_id'] == INSTANCE_ID)
+    .order_by(r.desc('start_date'))
+    .limit(20).run(conn))
+for e in events:
+    print(f"{e.get('event_type','?')} | {e.get('headline','?')[:60]} | started={e.get('start_date')} | tickers={e.get('affected_tickers',[])} | impact={e.get('impact_direction')}")
+```
+
+2. **Discovered Stocks** — What stocks are in the discovery pool?
+```python
+stocks = list(r.db(DB).table('GraphNexusDiscoveredStocks')
+    .filter(lambda d: d['instance_id'] == INSTANCE_ID)
+    .run(conn))
+for s in sorted(stocks, key=lambda x: x.get('status','')):
+    print(f"{s.get('ticker','?'):6s} | status={s.get('status','?'):20s} | source={s.get('source','?'):20s} | discovered={s.get('discovered_date','?')} | sold={s.get('sold_date','')}")
+```
+
+3. **Market Trends** — What trends are driving buy/sell signals?
+```python
+trends = list(r.db(DB).table('GraphNexusMarketTrends')
+    .filter(lambda d: d['instance_id'] == INSTANCE_ID)
+    .run(conn))
+for t in trends:
+    print(f"{t.get('name','?'):40s} | direction={t.get('direction','?')} | strength={t.get('strength',0):.2f} | started={t.get('start_date','?')}")
+```
+
+4. **Learning Cache** — What patterns has the learning stage found?
+```python
+cache = list(r.db(DB).table('GraphNexusLearningCache')
+    .filter(lambda d: d['instance_id'] == INSTANCE_ID)
+    .run(conn))
+for c in cache:
+    print(f"id={c.get('id','?')} | {str(c.get('summary',''))[:200]}")
+```
+
+5. **Outcomes** — Historical trade outcomes for pattern learning
+```python
+outcomes = list(r.db(DB).table('GraphNexusOutcomes')
+    .filter(lambda d: d['instance_id'] == INSTANCE_ID)
+    .order_by(r.desc('date_key'))
+    .limit(20).run(conn))
+for o in outcomes:
+    print(f"{o.get('date_key','?')} | events={len(o.get('events',[]))}")
+```
+
+6. **News LLM Classifications** — What did the LLM classify articles as?
+```python
+# Company article classifications for a specific date
+rows = list(r.db(DB).table('GraphNexusNewsLLMCompany')
+    .filter(lambda d: d['date_key'] == '2025-11-10')
+    .limit(10).run(conn))
+for row in rows:
+    print(f"{row.get('source','?')} | {str(row.get('classifications',[]))[:100]}")
+```
+
+7. **Macro Article Classifications** — Macro/geopolitical article analysis
+```python
+rows = list(r.db(DB).table('GraphNexusNewsLLMMacro')
+    .filter(lambda d: d['date_key'] == '2025-11-10')
+    .limit(10).run(conn))
+for row in rows:
+    print(f"impact={row.get('impact_direction','?')} | sectors={row.get('affected_sectors',[])} | reason={str(row.get('reason',''))[:80]}")
+```
+
+8. **Event Maintenance Cache** — Why events were kept/expired
+```python
+rows = list(r.db(DB).table('GraphNexusActiveEventMaintenance')
+    .filter(lambda d: d['instance_id'] == INSTANCE_ID)
+    .order_by(r.desc('date_key'))
+    .limit(10).run(conn))
+for row in rows:
+    print(f"{row.get('date_key','?')} | prompt_version={row.get('llm_prompt_version','?')}")
+```
+
+9. **Trade Contexts** — Full context snapshots for each trade decision
+```python
+rows = list(r.db(DB).table('GraphNexusTradeContexts')
+    .filter(lambda d: d['instance_id'] == INSTANCE_ID)
+    .order_by(r.desc('date_key'))
+    .limit(5).run(conn))
+for row in rows:
+    print(f"{row.get('date_key','?')} | symbols={len(row.get('symbols',[]))} | events={len(row.get('active_events',[]))}")
+```
+
+10. **Row counts** — Quick health check of all tables
+```python
+tables = ['GraphNexusDiscoveredStocks', 'GraphNexusMarketTrends', 'GraphNexusActiveEvents',
+          'GraphNexusActiveEventHistory', 'GraphNexusOutcomes', 'GraphNexusLearningCache',
+          'GraphNexusTradeContexts', 'GraphNexusNewsLLMCompany', 'GraphNexusNewsLLMMacro']
+for t in tables:
+    try:
+        n = r.db(DB).table(t).filter(lambda d: d['instance_id'] == INSTANCE_ID).count().run(conn)
+        print(f"{t:45s} {n:6d} rows")
+    except: pass
+```
+
+When to use RethinkDB queries:
+- Step 2: Check how many trends/events/discoveries exist (stale state diagnosis)
+- Step 3: Verify config changes took effect in the strategy data
+- Step 5A: Verify cleanup didn't wipe lookback data or leave orphaned rows
+- Any time you suspect stale cached data is causing bad decisions
+
+When to use LLM output inspection:
+- Step 2: When a stock got an unexpected buy/sell signal — fetch the overlay or sentiment
+  output to see what the LLM actually said
+- Step 3: When creating the fix plan — fetch macro article classifications to understand
+  why the macro score was bearish/bullish
+- Step 5A: During adversarial sweep — fetch overlay outputs for positions that had
+  unexpected sell_block or buy_block decisions
+- Any time a log shows "LLM output log saved:" — the full prompt+response is available
+
+LLM output types available:
+- macro_article: Macro article classification (sector/theme/impact)
+- company_article: Company article classification (ticker/sentiment/event)
+- event_maintenance: Active event maintenance (keep/expire/update)
+- enhanced_sentiment: Daily sentiment analysis (all tickers)
+- overlay: Trade overlay decision (buy/sell/hold per stock)
+- panel agents: Analyst panel R1/R2 responses
+
+After analysis, store findings in hive mind memory with key "backtest-analysis-{N}".
+
+== STEP 2B: CODEX PARALLEL INVESTIGATION ==
+
+Run a Codex investigation IN PARALLEL with Step 2's Hive Mind analysis.
+Codex investigates independently — different perspective, different focus areas.
+
+1. Stage the strategy file so Codex can read it:
+   ```bash
+   git add backend/strategies/graph_nexus_analysis.py
+   ```
+
+2. Launch Codex investigation in the BACKGROUND while Hive Mind workers run:
+   ```bash
+   node "$CODEX_COMPANION" adversarial-review "--wait Investigate the backtest log at backtest_logs/nexus-{N}.txt and the strategy code at backend/strategies/graph_nexus_analysis.py. Focus on: 1) What structural code patterns cause the most P&L drag? 2) Are there sequential LLM call chains that could be parallelized for speed? 3) What config values interact in surprising ways (e.g. sell enforcement + rotation + trailing stop thresholds)? 4) Are there any positions where the strategy did the opposite of what it should have? 5) What would a contrarian approach suggest — is the strategy too conservative or too aggressive?"
+   ```
+   Run this in the background so it executes concurrently with the Hive Mind analysis.
+
+3. When BOTH Codex and Hive Mind workers complete, MERGE their findings:
+   - Codex findings go into a section called "CODEX INVESTIGATION" in the analysis
+   - Hive Mind findings go into "HIVE MIND INVESTIGATION"
+   - Note areas of agreement (high confidence) and disagreement (needs deeper look)
+   - Any finding flagged by BOTH Codex and Hive Mind gets priority in the fix plan
+
+4. Store merged findings in hive mind memory with key "backtest-analysis-{N}-merged".
+
+5. Unstage files:
+   ```bash
+   git reset HEAD backend/strategies/graph_nexus_analysis.py
+   ```
+
+== STEP 3: CREATE FIX PLAN ==
+VERY IMPORTANT: YOU MUST USE THE HIVE MIND PROTOCOL MCP FOR THIS STEP.
+
+Based on the MERGED analysis (both Hive Mind AND Codex findings), create a plan to achieve 50%+ P&L.
+Prioritize issues flagged by BOTH Codex and Hive Mind. The plan MUST:
+
+- Target getting SNDK, MU, and LITE bought if they weren't
+- Fix any sell mechanic failures found in Step 2
+- Fix any runtime errors or crashes
+- Propose RethinkDB config changes for strategies 179, 180, 181
+  IMPORTANT: Do NOT change any of these config keys:
+    - Any key containing "llm", "api_key", "provider", "model" (case-insensitive)
+    - GRAPH_NEXUS_LLM_*, AI_*, BENZINGA_API_KEY, etc.
+  You CAN change: thresholds, percentages, pool sizes, buy/sell mechanics, allocation settings, timing, discovery settings, etc.
+- Identify code changes needed in backend/strategies/graph_nexus_analysis.py
+
+Submit the plan for Hive Mind BFT consensus before proceeding.
+
+== STEP 3B: CODEX ADVERSARIAL REVIEW OF PLAN ==
+
+Run a Codex adversarial review to challenge the fix plan before implementing it.
+This review questions assumptions, design tradeoffs, and identifies weak points.
+
+1. Write the fix plan summary to a temp file for Codex to review:
+   Write the plan (speed fixes, P&L fixes, config changes, code changes) to
+   `scripts/tmp_fix_plan.md` as a structured markdown document.
+
+2. Run the Codex adversarial review in the background:
+   ```bash
+   node "$CODEX_COMPANION" adversarial-review "Review the fix plan in scripts/tmp_fix_plan.md. Challenge: Are the config threshold values optimal? Could any change backfire? Are there interactions between changes that could cause unexpected behavior? Is anything missing?"
+   ```
+
+3. When the review completes, read its output. For each valid concern raised:
+   - Adjust the plan if the concern has merit
+   - Document why if you disagree with a concern
+   - Re-submit adjusted plan for BFT consensus if changes were made
+
+4. Clean up: delete `scripts/tmp_fix_plan.md`
+
+== STEP 4: IMPLEMENT THE PLAN ==
+VERY IMPORTANT: YOU MUST USE THE HIVE MIND PROTOCOL MCP FOR THIS STEP
+
+Execute all code changes and config updates:
+
+For code changes:
+- Read the file before editing
+- Make targeted edits (do not rewrite large sections)
+- Keep files under 500 lines per the project rules
+
+For RethinkDB config updates, use this pattern:
+IMPORTANT: Config lives inside strategies[0].config, NOT at the top level of the document.
+You MUST read the full document, update the nested config, and replace the whole document.
+Using .update() at the top level will NOT work — the strategy code reads from strategies[0].config.
+```python
+from rethinkdb import r
+conn = r.connect(host='$RETHINKDB_HOST', port=28015)
+
+updates = {
+    # Add your config changes here as key: value pairs
+    # Example: "fast_loser_cut_pct": -8.0,
+    # DO NOT include any LLM/API key settings
+}
+
+for sid in [179, 180, 181]:
+    strat = r.db('IntelliStock').table('Strategies').get(sid).run(conn)
+    if strat and 'strategies' in strat and len(strat['strategies']) > 0:
+        strat['strategies'][0]['config'].update(updates)
+        r.db('IntelliStock').table('Strategies').get(sid).replace(strat).run(conn)
+        # Verify the update took effect
+        verify = r.db('IntelliStock').table('Strategies').get(sid).run(conn)
+        cfg = verify['strategies'][0]['config']
+        print(f"Strategy {sid} updated + verified: {[(k, cfg[k]) for k in updates.keys()]}")
+    else:
+        print(f"Strategy {sid}: NOT FOUND or missing strategies array")
+
+# Clear learning cache to force fresh learning
+r.db('IntelliStock').table('GraphNexusLearningCache').delete().run(conn)
+print("Learning cache cleared")
+conn.close()
+```
+
+== STEP 4B: HYPOTHETICAL SCENARIO VALIDATION ==
+VERY IMPORTANT: YOU MUST USE THE HIVE MIND PROTOCOL MCP FOR ALL STEPS.
+
+Read the file `hypothetical_scenarios_nexus_strategy.txt` in the project root.
+This file contains numbered hypothetical scenarios that the strategy MUST handle correctly.
+
+1. Read the entire file and parse each scenario.
+
+2. For each scenario marked MUST_PASS or SPECIFICATION:
+   - Mentally trace the scenario through the ACTUAL current code
+   - Verify the expected outcome matches what the code would produce
+   - If a scenario FAILS: fix the code immediately, then re-trace to confirm
+
+3. For each scenario marked MANUAL: note it for the user but do not block on it.
+
+4. After validating all existing scenarios, ADD NEW SCENARIOS for the fixes
+   made in Step 4. Each new scenario should:
+   - Have a unique sequential ID (continue from the last number in the file)
+   - Cover the specific bug or behavior change from the current iteration
+   - Include: Setup, Action, Expected Result, and Pass Criteria
+   - Be marked as MUST_PASS
+
+   Example format:
+   ```
+   SCENARIO {N}: {Title}
+   Type: MUST_PASS
+   Setup: {describe initial state}
+   Action: {what happens}
+   Expected: {what the strategy should do}
+   Pass Criteria: {how to verify}
+   ```
+
+5. Append the new scenarios to `hypothetical_scenarios_nexus_strategy.txt`.
+
+6. Report: "{X} existing scenarios validated, {Y} new scenarios added, {Z} failures fixed"
+
+== STEP 4C: CODEX ADVERSARIAL REVIEW OF SCENARIOS ==
+
+Run a Codex adversarial review on the hypothetical scenarios and code changes.
+
+1. Stage the changed files so Codex can see the diff:
+   ```bash
+   git add backend/strategies/graph_nexus_analysis.py hypothetical_scenarios_nexus_strategy.txt
+   ```
+
+2. Run the Codex adversarial review (wait for results):
+   ```bash
+   node "$CODEX_COMPANION" adversarial-review "--wait Challenge the hypothetical scenarios: Are there edge cases not covered? Do the new scenarios actually test the fixes made? Could any scenario pass in tests but fail in production? Are there interactions between config changes that no scenario covers?"
+   ```
+
+3. Review Codex output. For each valid gap found:
+   - Add missing scenarios to `hypothetical_scenarios_nexus_strategy.txt`
+   - Fix any code issues Codex identifies
+   - Re-run syntax check if code was changed
+
+4. Unstage files (they'll be re-staged at commit time):
+   ```bash
+   git reset HEAD backend/strategies/graph_nexus_analysis.py hypothetical_scenarios_nexus_strategy.txt
+   ```
+
+== STEP 5: FULL BUG CHECK ==
+VERY IMPORTANT: YOU MUST USE THE HIVE MIND PROTOCOL MCP FOR THIS STEP
+
+Run comprehensive verification:
+
+1. Python syntax check:
+   python -c "import py_compile; py_compile.compile('backend/strategies/graph_nexus_analysis.py', doraise=True)"
+
+2. Run ALL test suites:
+   python -m pytest backend/tests/test_nexus_v9_preflight.py tests/test_nexus_allocation.py -x -q
+
+3. Check for common runtime errors:
+   - Search for UnboundLocalError risks (variables used before assignment)
+   - Search for KeyError risks (dict bracket access without .get())
+   - Search for division by zero risks
+   - Verify all new code references variables that exist in scope
+
+4. If ANY test fails or syntax error found: FIX IT before proceeding.
+   Do NOT proceed to Step 6 until all tests pass.
+
+== STEP 5A: DEEP ADVERSARIAL BUG SWEEP (HIVE MIND) ==
+VERY IMPORTANT: YOU MUST USE THE HIVE MIND PROTOCOL MCP FOR THIS STEP
+
+This step uses the Hive Mind to do a thorough second-pass sweep AFTER all fixes from Step 5 are applied.
+Do NOT skip this step. Do NOT proceed until all issues are resolved.
+
+1. Verify Hive Mind health:
+   Call mcp__ruflo__hive-mind_status with verbose=true
+
+2. Spawn 4 specialized sweep workers:
+
+   Worker 1 (forward-ref-scanner): Scan the ENTIRE main run_once function for variables used
+   before assignment. Check every conditional block (if/elif/else, try/except) for variables
+   that might be unbound on certain code paths. This is the same class of bug that caused the
+   propagated UnboundLocalError — find ALL instances.
+
+   Worker 2 (logging-and-edit-verifier): Read every line changed in Step 4. For each edit,
+   verify: (a) all referenced variables exist in scope, (b) string formatting won't crash
+   (no None in f-string format specs), (c) no accidental indentation changes that move code
+   into/out of blocks, (d) no duplicate variable names shadowing outer scope.
+
+   Worker 3 (runtime-crash-scanner): Scan _finalize_scores, _apply_ml_and_overlay_to_scores,
+   the main allocation section, and the backfill queue for: division by zero, None.get(),
+   KeyError on bracket dict access, float() on None, and type mismatches. Focus specifically
+   on code paths that only execute when portfolio has positions (these are the paths that fail
+   in backtest but pass in unit tests).
+
+   Worker 4 (adversarial-scenario-tester): Walk through 5 adversarial scenarios against the
+   ACTUAL code:
+   (a) Stock drops -50% on day 1 — does fast loser cut fire and stay fired through ML overlay?
+   (b) Stock gains +200% then drops -15% from peak — does trailing stop fire?
+   (c) All buy signals on one bar with $0 cash — does backfill queue catch them?
+   (d) Propagation floor tries to override a forced-exit sell — is it blocked?
+   (e) Winner add fires but budget is exhausted — does it gracefully skip?
+
+3. Deploy corresponding Agent tool workers in parallel to do the actual file analysis.
+
+4. Collect all findings. For each bug found:
+   - Fix it immediately
+   - Re-run syntax check and full test suite
+   - Verify the fix doesn't break anything else
+
+5. Submit sweep results for Hive Mind BFT consensus (propose + 3 votes).
+
+6. Store findings in hive mind memory with key "sweep-results-{N}".
+
+7. Final gate check — run one last time:
+   python -c "import py_compile; py_compile.compile('backend/strategies/graph_nexus_analysis.py', doraise=True)"
+   python -m pytest backend/tests/test_nexus_v9_preflight.py tests/test_nexus_allocation.py -x -q
+
+   ALL tests must pass. If any fail, fix and re-run. Loop until green.
+
+== STEP 5B: CODEX ADVERSARIAL REVIEW OF CODE CHANGES ==
+
+Run a final Codex adversarial review on ALL code changes before committing.
+This is the last deep-thinking gate before deployment.
+
+1. Stage all changed files:
+   ```bash
+   git add backend/strategies/graph_nexus_analysis.py hypothetical_scenarios_nexus_strategy.txt
+   ```
+
+2. Run the Codex adversarial review (wait for results):
+   ```bash
+   node "$CODEX_COMPANION" adversarial-review "--wait Final pre-commit review. Challenge: Are there any runtime crash risks in the changes? Could any edit cause UnboundLocalError, KeyError, or division by zero on edge-case code paths? Do the changes interact safely with each other? Is there any scenario where the new code would perform WORSE than before?"
+   ```
+
+3. Review Codex output. For CRITICAL issues only (crash risks, data corruption, logic inversions):
+   - Fix the issue immediately
+   - Re-run syntax check and full test suite
+   - Re-run the Codex review if substantial changes were made
+
+4. For non-critical concerns (style, minor inefficiency, hypothetical edge cases):
+   - Document them but do NOT block the commit
+   - These can be addressed in the next iteration
+
+5. Unstage files:
+   ```bash
+   git reset HEAD backend/strategies/graph_nexus_analysis.py hypothetical_scenarios_nexus_strategy.txt
+   ```
+
+== STEP 6: GIT COMMIT & PUSH ==
+
+Stage, commit, and push changes:
+
+```bash
+git add backend/strategies/graph_nexus_analysis.py
+git status
+```
+
+Review what's staged. Then commit and push:
+
+```bash
+git commit -m "$(cat <<'EOF'
+Nexus V{VERSION}: {brief description of changes}
+
+- {change 1}
+- {change 2}
+- RethinkDB strategies 179/180/181 updated
+- All tests pass ({N} tests)
+
+Co-Authored-By: claude-flow <ruv@ruv.net>
+EOF
+)"
+
+git push origin main
+```
+
+== STEP 7: WAIT FOR DOCKER REBUILD ==
+
+Wait 5 minutes for the Docker image to rebuild and deploy:
+
+```bash
+echo "Waiting 5 minutes for Docker rebuild..." && sleep 300 && echo "Done waiting. Proceeding to create backtest."
+```
+
+== STEP 8: CREATE NEW BACKTEST ==
+
+Create a fresh backtest via the API:
+
+```python
+import requests
+from dotenv import dotenv_values
+
+config = dotenv_values('.env')
+API_URL = "http://localhost:8011"
+
+# Login
+resp = requests.post(f'{API_URL}/auth/login', json={
+    'username': config['AGENT_API_USERNAME'],
+    'password': config['AGENT_API_PASSWORD']
+}, timeout=15)
+TOKEN = resp.json()['access_token']
+HEADERS = {'Authorization': f'Bearer {TOKEN}'}
+
+# Create backtest
+body = {
+    "instance_id": "nexus-testing",
+    "stocks": [],
+    "start_date": "2025-11-10",
+    "end_date": "2026-03-25",
+    "granularity": "86400",
+    "initial_cash": 7000
+}
+r = requests.post(f'{API_URL}/backtests', json=body, headers=HEADERS, timeout=15)
+print(f"Create backtest: {r.status_code}")
+print(r.json())
+```
+
+== STEP 9: CONFIRM ==
+
+Report to the user:
+- What was found in the backtest analysis
+- What changes were made (code + config)
+- Test results (N/N pass)
+- Git commit hash
+- New backtest ID and status
+
+== END OF WORKFLOW ==

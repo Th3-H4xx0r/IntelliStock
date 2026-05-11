@@ -1,0 +1,56 @@
+python-dotenv
+colorama
+psutil
+termcolor
+python-socketio
+waitress
+multiprocess
+rethinkdb
+websocket-client
+docker
+pytz
+yfinance
+numpy
+pandas
+requests
+tqdm
+pyrh
+alpaca_trade_api
+tensorflow-cpu
+scikit-learn
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+# For MlNews FinBERT sentiment scoring:
+transformers>=4.30.0
+fastapi
+uvicorn[standard]
+bcrypt
+pyjwt
+discord.py>=2.3.0
+aiohttp>=3.8.0
+neo4j>=5.15.0
+sec-edgar-downloader>=5.0.0
+beautifulsoup4>=4.12.0
+# For SEC EDGAR supply chain NER and fuzzy matching:
+spacy>=3.0.0
+rapidfuzz>=3.0.0
+# After install, run: python -m spacy download en_core_web_lg
+lxml>=4.9.0
+TA-Lib
+# For Google News RSS fetching (graph nexus macro news):
+scrapling>=0.2.0
+feedparser>=6.0.0
+json-repair
+# TOON format: compact token-efficient encoding for LLM prompts (~40% fewer tokens vs JSON)
+toon-format
+# PydanticAI slim install with only the providers used here:
+# - Gemini via Google provider
+# - DeepSeek via OpenAI-compatible provider
+pydantic-ai-slim[google,openai]==1.0.18
+# Live-mode trading (V32 Phase 5):
+# - alpaca-py: new TradingClient + TradingStream (supersedes alpaca_trade_api above for live order path)
+# - cryptography: Fernet-encrypted BrokerageAccounts credentials (secret_store.py)
+# - exchange_calendars: NYSE market calendar with holidays + early closes (live_calendar.py)
+alpaca-py>=0.43.0
+cryptography>=41.0.0
+exchange_calendars>=4.0.0

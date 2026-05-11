@@ -1,0 +1,2418 @@
+"""
+IntelliStock REST API - Exposes all CLI commands as JSON endpoints.
+Auth: JWT Bearer; signup requires SECRET_AUTH_KEY. Default admin created on server startup.
+Run from backend: uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+"""
+
+import os
+import sys
+
+_backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+os.chdir(_backend_dir)
+
+from dotenv import load_dotenv
+load_dotenv(os.path.join(_backend_dir, ".env"))
+load_dotenv(os.path.join(os.path.dirname(_backend_dir), ".env"))
+
+from contextlib import contextmanager
+from typing import Any, List, Optional, Union
+
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
+
+from llm_utils import (
+    call_structured_llm_by_provider,
+    get_last_structured_llm_call_metadata,
+    normalize_reasoning_effort,
+    resolve_api_key_for_provider,
+)
+from auth_utils import (
+    r as _r_auth,  # R16 phase-3: shared RethinkDB driver instance for direct queries
+    create_user,
+    get_user_by_username,
+    get_user_by_id,
+    list_users,
+    update_user,
+    delete_user,
+    verify_password,
+    verify_secret_auth_key,
+    create_access_token,
+    decode_access_token,
+    user_doc_to_public,
+    ensure_users_table,
+    ensure_default_admin,
+    set_onboarding_completed,
+)
+from strategies_meta import get_available_strategies
+from interactive_utils import (
+    get_conn,
+    parse_granularity_to_seconds,
+    action_status,
+    action_tickers,
+    action_add_ticker,
+    action_remove_ticker,
+    action_prices,
+    action_history,
+    action_instances,
+    action_create_instance,
+    action_edit_instance,
+    action_get_instance,
+    action_delete_instance,
+    action_add_stock,
+    action_remove_stock,
+    action_start_instance,
+    action_stop_instance,
+    action_terminate_price,
+    action_terminate_discover,
+    action_start_broker,
+    action_discover_control_get,
+    action_discover_control_set,
+    action_strategies,
+    action_get_strategy,
+    action_create_strategy,
+    action_edit_strategy,
+    action_delete_strategy,
+    action_link_strategy,
+    action_unlink_strategy,
+    action_link_brokerage_to_instance,
+    action_link_data_brokerage_to_instance,
+    action_list_backtests,
+    action_create_backtest,
+    action_delete_backtest,
+    action_stop_backtest,
+    action_stop_all_backtests,
+    action_pause_backtest,
+    action_resume_backtest,
+    action_get_backtest_status,
+    action_summarize_backtest,
+    action_backtest_logs,
+    action_list_nexus_graph_builds,
+    action_get_nexus_graph_build,
+    action_nexus_graph_build_logs,
+    action_backtest_best_per_strategy,
+    action_graph_backtest_data,
+    action_get_backtest_playback_data,
+    action_agent_control_get,
+    action_agent_control_set,
+    action_agent_restart,
+    action_resume_timer,
+    action_agent_increment_backtest_count,
+    action_list_ai_backtest_results,
+    action_insert_ai_backtest_result,
+    action_agent_get_best,
+    action_agent_set_best,
+    action_agent_get_top5,
+    action_agent_update_top5,
+    action_digest_control_get,
+    action_digest_control_set,
+    action_digest_trigger_send_now,
+    action_nexus_control_get,
+    action_nexus_control_set,
+    action_nexus_status,
+    action_nexus_cache_entries,
+    action_nexus_rebuild,
+    action_nexus_delete_edges,
+    action_list_trends,
+    action_get_trend,
+    action_end_trend,
+    action_delete_trend,
+    action_list_discovered_stocks,
+    action_remove_discovered_stock,
+    action_nexus_config_get,
+    action_nexus_config_set,
+    action_list_brokerages,
+    action_link_alpaca,
+    alpaca_run_diagnostic_suite,
+    action_link_robinhood_tokens,
+    action_fetch_robinhood_accounts,
+    action_delete_brokerage,
+    action_update_brokerage,
+    action_refresh_robinhood,
+    action_get_portfolio_history,
+    action_ensure_ai_alpaca_brokerage,
+    action_agent_cycle_log_create,
+    action_agent_cycle_log_update,
+    action_list_agent_runs,
+    action_agent_run_force_stop,
+    action_list_models,
+    action_get_model,
+    action_create_model,
+    action_edit_model,
+    action_delete_model,
+    action_model_strategies,
+    action_get_live_state,
+    action_submit_live_command,
+    action_get_live_command,
+    action_live_trading_logs,
+    LiveInstanceNotFoundError,
+)
+
+# OpenAPI / Swagger UI gated to admins-only in production. The schema
+# enumerates every endpoint and parameter — useful for development, an
+# attack surface map for production.
+_API_DOCS_PUBLIC = os.environ.get("API_DOCS_PUBLIC", "").strip().lower() in ("1", "true", "yes")
+app = FastAPI(
+    title="IntelliStock API",
+    description="REST API for IntelliStock backend (CLI-equivalent).",
+    docs_url="/docs" if _API_DOCS_PUBLIC else None,
+    redoc_url="/redoc" if _API_DOCS_PUBLIC else None,
+    openapi_url="/openapi.json" if _API_DOCS_PUBLIC else None,
+)
+
+# Allowed CORS origins. Default is "no cross-origin" (single-host install
+# behind nginx in the same container fleet doesn't need CORS at all).
+# Operators with split frontend/API hosts set CORS_ALLOW_ORIGINS=
+# "https://app.example.com,https://staging.example.com".
+_cors_origins_raw = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,  # JWT-in-Authorization-header is not a credential
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+security = HTTPBearer(auto_error=True)
+
+
+@app.on_event("startup")
+def api_startup_ensure_default_admin():
+    """Ensure Users table exists and default admin user is created if not already present. Retries for DB readiness."""
+    import time
+    import logging
+    log = logging.getLogger("uvicorn.error")
+    for attempt in range(1, 6):
+        try:
+            conn = get_conn()
+            try:
+                ensure_users_table(conn)
+                ensure_default_admin(conn)
+                # Chatbot conversations table — first per-user resource in this codebase.
+                try:
+                    from chatbot.conversations import ensure_chatbot_tables
+                    ensure_chatbot_tables(conn)
+                except Exception as ce:
+                    log.warning("Chatbot table init failed: %s", ce)
+                if attempt > 1:
+                    log.info("Default admin setup succeeded on attempt %d", attempt)
+                break
+            finally:
+                conn.close()
+        except RuntimeError as cfg_err:
+            # Unrecoverable misconfiguration (e.g. missing/weak DEFAULT_ADMIN_PASSWORD).
+            # No point retrying — surface a clear message and stop.
+            log.error(
+                "Default admin setup failed due to misconfiguration: %s. "
+                "API will start but login is unavailable until this is fixed.",
+                cfg_err,
+            )
+            break
+        except Exception as e:
+            log.warning("Default admin setup (attempt %d/5): %s", attempt, e)
+            if attempt == 5:
+                break
+            time.sleep(2)
+
+
+def conn_dependency():
+    conn = get_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    conn=Depends(conn_dependency),
+) -> dict:
+    """Validate JWT and return current user dict (id, username, role). Raises 401 if invalid."""
+    token = credentials.credentials
+    payload = decode_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = get_user_by_id(conn, user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return {
+        "id": user.get("id"),
+        "username": user.get("username"),
+        "role": user.get("role", "user"),
+    }
+
+
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Dependency: require role admin. Returns current_user."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return current_user
+
+
+def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]:
+    provider = (body.provider or "").strip().lower()
+    config: dict[str, Any] = {}
+    if provider == "openai":
+        base_url = str(body.openai_base_url or "").strip()
+        if base_url:
+            config["base_url"] = base_url
+    if provider == "azure":
+        endpoint = str(body.azure_openai_endpoint or "").strip()
+        api_version = str(body.azure_openai_api_version or "").strip()
+        if endpoint:
+            config["azure_endpoint"] = endpoint
+        if api_version:
+            config["api_version"] = api_version
+    if provider == "nvidia":
+        config["base_url"] = "https://integrate.api.nvidia.com/v1"
+    reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
+    if provider in {"openai", "azure", "nvidia"} and reasoning_effort:
+        config["reasoning_effort"] = reasoning_effort
+    return config
+
+
+# --- Request/response models (optional; we also accept dicts) ---
+
+
+class AddTickerBody(BaseModel):
+    symbols: List[str] = Field(..., min_length=1)
+
+
+class CreateInstanceBody(BaseModel):
+    id: str = Field(..., min_length=1)
+    name: Optional[str] = None
+    strategy_id: Optional[int] = None
+    key: Optional[str] = None
+    secret: Optional[str] = None
+    granularity: Optional[str] = "60"
+    run_command: Optional[bool] = False
+    created_by: Optional[str] = "user"
+    brokerage_id: Optional[str] = None
+    max_usage: Optional[float] = None
+
+
+class EditInstanceBody(BaseModel):
+    name: Optional[str] = None
+    granularity: Optional[str] = None
+    max_usage: Optional[float] = None
+    brokerage_id: Optional[str] = None
+
+
+class DeleteInstanceBody(BaseModel):
+    force: bool = False
+
+
+class AddStockBody(BaseModel):
+    symbol: str = Field(..., min_length=1)
+
+
+class CreateStrategyBody(BaseModel):
+    name: str = Field(..., min_length=1)
+    strategies: List[dict] = Field(..., min_length=1)
+
+
+class EditStrategyBody(BaseModel):
+    name: Optional[str] = None
+    strategies: Optional[List[dict]] = None
+
+
+class DeleteStrategyBody(BaseModel):
+    force: bool = False
+
+
+class LinkStrategyBody(BaseModel):
+    strategy_id: int
+
+
+class LinkBrokerageToInstanceBody(BaseModel):
+    brokerage_id: Optional[str] = None
+
+
+class LlmConfigTestBody(BaseModel):
+    provider: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    api_key: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    nvidia_base_url: Optional[str] = None
+    azure_openai_endpoint: Optional[str] = None
+    azure_openai_api_version: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+
+
+class LlmConfigTestOutput(BaseModel):
+    ok: bool
+    provider: str
+    model: str
+
+
+class CreateModelBody(BaseModel):
+    name: str = Field(..., min_length=1)
+    provider: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    api_key: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    nvidia_base_url: Optional[str] = None
+    azure_openai_endpoint: Optional[str] = None
+    azure_openai_api_version: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+
+
+class EditModelBody(BaseModel):
+    name: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    nvidia_base_url: Optional[str] = None
+    azure_openai_endpoint: Optional[str] = None
+    azure_openai_api_version: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+
+
+class BenzingaTestBody(BaseModel):
+    api_key: Optional[str] = None
+    sources: Optional[List[str]] = None  # if None, test all 10
+
+
+class CreateBacktestBody(BaseModel):
+    instance_id: Optional[str] = None
+    stocks: List[str] = Field(default_factory=list)  # V7.3: Allow empty for pure discovery
+    start_date: str = Field(..., min_length=1)
+    end_date: str = Field(..., min_length=1)
+    granularity: Optional[str] = "60"
+    key: Optional[str] = None
+    secret: Optional[str] = None
+    initial_cash: Optional[float] = 100000.0
+
+
+class AgentControlBody(BaseModel):
+    running: Optional[bool] = None
+    paused: Optional[bool] = None
+    special_request: Optional[str] = None
+
+
+class ResumeTimerBody(BaseModel):
+    days: Optional[int] = 0
+    hours: Optional[int] = 0
+    minutes: Optional[int] = 0
+    seconds: Optional[int] = 0
+
+
+class AgentRestartBody(BaseModel):
+    special_request: Optional[str] = None
+
+
+class AgentResultBody(BaseModel):
+    strategy_snapshot: dict
+    backtest_id: Optional[int] = None
+    instance_id: Optional[str] = None
+    strategy_id: Optional[int] = None
+    overall_profit: Optional[float] = None
+    pnl_percent: Optional[float] = None
+    pnl_per_stock: Optional[dict] = None
+    pnl_percent_per_stock: Optional[dict] = None
+    stock_price_change: Optional[dict] = None
+    start_date: str = ""
+    end_date: str = ""
+    stocks_used: List[str] = Field(default_factory=list)
+    status: str = "passed"
+    agent_notes: Optional[str] = None
+
+
+class AgentSetBestBody(BaseModel):
+    strategy_snapshot: dict
+    overall_profit: Optional[float] = None
+    pnl_percent: Optional[float] = None
+    results_summary: Optional[dict] = None
+
+
+class AgentUpdateTop5Body(BaseModel):
+    strategy_snapshot: dict
+    overall_profit: Optional[float] = None
+    pnl_percent: Optional[float] = None
+    strategy_id: Optional[int] = None
+    backtest_id: Optional[int] = None
+    results_summary: Optional[dict] = None
+
+
+class AgentCycleLogCreateBody(BaseModel):
+    cycle_id: str
+    name: str
+
+
+class AgentCycleLogUpdateBody(BaseModel):
+    status: Optional[str] = None
+    stages: Optional[List[Any]] = None
+    final_result: Optional[str] = None
+
+
+class DigestControlBody(BaseModel):
+    running: Optional[bool] = None
+    send_now: Optional[bool] = None
+
+
+class DiscoverControlBody(BaseModel):
+    running: Optional[bool] = None
+
+
+class _LegacyNexusControlBody(BaseModel):
+    running: Optional[bool] = None
+    start_phase: Optional[Union[int, str]] = None  # execution-order 1-14 or selector like 2b / 6b
+    end_phase: Optional[Union[int, str]] = None    # execution-order 1-14 or selector like 2b / 6b
+
+
+class NexusControlBody(BaseModel):
+    running: Optional[bool] = None
+    start_phase: Optional[Union[int, str]] = None
+    end_phase: Optional[Union[int, str]] = None
+    selected_phases: Optional[List[Union[int, str]]] = None
+    force_bootstrap_rebuild: Optional[bool] = None
+    auto_update_enabled: Optional[bool] = None
+    auto_update_interval_hours: Optional[int] = None
+    auto_update_start_phase: Optional[Union[int, str]] = None
+    auto_update_end_phase: Optional[Union[int, str]] = None
+    phase7_history_quarters: Optional[int] = None
+    historical_mode_enabled: Optional[bool] = None
+    historical_start_date: Optional[str] = None
+
+
+class NexusRebuildBody(BaseModel):
+    confirm: bool = False
+    destructive: bool = False
+    force_bootstrap_rebuild: bool = False
+    delete_cache_paths: List[str] = Field(default_factory=list)
+
+
+class NexusDeleteBody(BaseModel):
+    selected_phases: List[Union[int, str]] = Field(default_factory=list)
+
+
+# --- Auth body models ---
+
+
+class SignupBody(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=6)
+    secret_auth_key: str = Field(..., min_length=1)
+
+
+class LoginBody(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class CreateUserBody(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=6)
+    role: str = Field(default="user", pattern="^(admin|user)$")
+    email: Optional[str] = None
+
+
+class UpdateUserBody(BaseModel):
+    password: Optional[str] = Field(None, min_length=6)
+    role: Optional[str] = Field(None, pattern="^(admin|user)$")
+    email: Optional[str] = None
+
+
+class EndTrendBody(BaseModel):
+    reason: Optional[str] = "ended via API"
+
+
+class NexusConfigUpdateBody(BaseModel):
+    trend_tracking_enabled: Optional[bool] = None
+    stock_finder_enabled: Optional[bool] = None
+    sell_enforcement_enabled: Optional[bool] = None
+    max_discovered_stocks: Optional[int] = None
+    trend_min_strength_to_buy: Optional[float] = None
+    trend_max_age_days: Optional[int] = None
+    nexus_portfolio_pct: Optional[float] = None
+    google_news_enabled: Optional[bool] = None
+
+
+class FetchRobinhoodAccountsBody(BaseModel):
+    access_token: str
+    refresh_token: Optional[str] = None
+    device_token: Optional[str] = None
+
+
+class LinkBrokerageBody(BaseModel):
+    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood)$")
+    account_name: str = Field(..., min_length=1)
+    # Alpaca
+    key: Optional[str] = None
+    secret: Optional[str] = None
+    paper: Optional[bool] = True
+    # 2026-04-23: alpaca bars-feed choice (iex=free, sip=paid). Backend
+    # validates the live account has the subscription before accepting.
+    alpaca_data_feed: Optional[str] = Field(default="iex", pattern="^(iex|sip)$")
+    # Robinhood (token paste)
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    device_token: Optional[str] = None
+    expires_in: Optional[int] = None
+    obtained_at_epoch: Optional[int] = None
+    # Robinhood account selection (from preview step)
+    account_number: Optional[str] = None
+
+
+class UpdateBrokerageBody(BaseModel):
+    account_name: Optional[str] = None
+    # Alpaca
+    key: Optional[str] = None
+    secret: Optional[str] = None
+    paper: Optional[bool] = None
+    alpaca_data_feed: Optional[str] = Field(default=None, pattern="^(iex|sip)$")
+    # Robinhood
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    device_token: Optional[str] = None
+    account_number: Optional[str] = None
+
+
+def _run(f, *args, **kwargs) -> Any:
+    try:
+        return f(*args, **kwargs)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        # NexusBuildNotFoundError (and any other LookupError-derived "missing"
+        # signal from an action) — distinct 404 so the UI can show "nothing yet"
+        # instead of conflating with real backend failures (5xx).
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Health check (public, no-auth) ---
+
+
+@app.get("/health", response_class=JSONResponse)
+def api_health():
+    """Liveness probe for load balancers / Dockploy / monitoring.
+
+    Returns 200 with RethinkDB ping result and version. No authentication
+    required so external probes can hit it. Uses a 2-second timeout so a
+    hung DB connection doesn't block the health response.
+
+    Live-readiness OPS #1 (2026-04-29): added so Dockploy and external
+    probes can verify the API container is responding (not just running).
+    """
+    import os as _os
+    import socket as _sock
+    _ok = True
+    _db_status = "unknown"
+    try:
+        from rethinkdb import RethinkDB as _R
+        _r = _R()
+        _host = _os.environ.get("RETHINKDB_HOST", "localhost")
+        _port = int(_os.environ.get("RETHINKDB_PORT", "28015"))
+        # Q10 fix: rethinkdb-python `timeout` kwarg support varies by version;
+        # try with timeout first, fall back to no-timeout if TypeError.
+        try:
+            _conn = _r.connect(host=_host, port=_port, timeout=2)
+        except TypeError:
+            _conn = _r.connect(host=_host, port=_port)
+        try:
+            list(_r.db_list().run(_conn))
+            _db_status = "ok"
+        finally:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+    except Exception as _e:
+        _db_status = f"error: {type(_e).__name__}"
+        _ok = False
+    payload = {
+        "status": "ok" if _ok else "degraded",
+        "rethinkdb": _db_status,
+        "host": _sock.gethostname(),
+    }
+    if not _ok:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
+
+
+# --- Help / commands list (public) ---
+
+
+@app.get("/help", response_class=JSONResponse)
+def api_help():
+    """List all available API commands (CLI-equivalent). Public."""
+    return {
+        "commands": [
+            {"path": "POST /auth/signup", "body": "username, password, secret_auth_key", "description": "Register (requires SECRET_AUTH_KEY)"},
+            {"path": "POST /auth/login", "body": "username, password", "description": "Login, returns access_token"},
+            {"path": "GET /auth/me", "description": "Current user (auth required)"},
+            {"path": "GET /onboarding/state", "description": "Get current user's onboarding state + resource counts"},
+            {"path": "POST /onboarding/complete", "description": "Mark onboarding as complete for current user"},
+            {"path": "POST /onboarding/reset", "description": "Reset onboarding so it shows again"},
+            {"path": "GET /chatbot/conversations", "description": "List current user's chatbot conversations"},
+            {"path": "POST /chatbot/conversations", "body": "ChatbotCreateBody", "description": "Create a new chatbot conversation"},
+            {"path": "GET /chatbot/conversations/{id}", "description": "Get a conversation with full message history"},
+            {"path": "PATCH /chatbot/conversations/{id}", "body": "ChatbotUpdateBody", "description": "Update a conversation's title / model / settings"},
+            {"path": "DELETE /chatbot/conversations/{id}", "description": "Delete a conversation"},
+            {"path": "POST /chatbot/conversations/{id}/clear", "description": "Wipe a conversation's messages"},
+            {"path": "POST /chatbot/conversations/{id}/turn", "body": "ChatbotTurnBody", "description": "Send a message and run the LLM↔tool loop"},
+            {"path": "POST /chatbot/conversations/{id}/confirm-tool", "body": "ChatbotConfirmBody", "description": "Approve or decline a pending tool call"},
+            {"path": "GET /chatbot/tools", "description": "Get the curated tool catalog the chatbot can use"},
+            {"path": "GET /auth/users", "description": "List users (admin only)"},
+            {"path": "POST /auth/users", "body": "CreateUserBody", "description": "Create user (admin only)"},
+            {"path": "GET /auth/users/{id}", "description": "Get user (admin or self)"},
+            {"path": "PUT /auth/users/{id}", "body": "UpdateUserBody", "description": "Update user (admin or self)"},
+            {"path": "DELETE /auth/users/{id}", "description": "Delete user (admin only)"},
+            {"path": "GET /status", "description": "Config, service flags, and engines status table (all services/engines with running state and details)"},
+            {"path": "GET /tickers", "description": "List tickers (LivePricesStocks)"},
+            {"path": "POST /tickers", "body": {"symbols": ["AAPL", "MSFT"]}, "description": "Add ticker(s)"},
+            {"path": "DELETE /tickers/{symbol}", "description": "Remove a ticker"},
+            {"path": "GET /prices", "description": "Current prices (LivePrices)"},
+            {"path": "GET /history", "params": "ticker, limit", "description": "Price history"},
+            {"path": "GET /instances", "description": "List instances"},
+            {"path": "POST /instances", "body": "CreateInstanceBody", "description": "Create instance"},
+            {"path": "PATCH /instances/{id}", "body": "EditInstanceBody", "description": "Edit instance info"},
+            {"path": "DELETE /instances/{id}", "body": "force?", "description": "Delete instance"},
+            {"path": "POST /instances/{id}/stocks", "body": {"symbol": "AAPL"}, "description": "Add stock to instance"},
+            {"path": "DELETE /instances/{id}/stocks/{symbol}", "description": "Remove stock from instance"},
+            {"path": "POST /instances/{id}/start", "description": "Start instance"},
+            {"path": "POST /instances/{id}/stop", "description": "Stop instance"},
+            {"path": "POST /config/terminate-price", "description": "Terminate price service"},
+            {"path": "POST /config/terminate-discover", "description": "Terminate discover service"},
+            {"path": "POST /config/start-broker", "description": "Start broker"},
+            {"path": "GET /strategies/available", "description": "List available strategy types with schema and description"},
+            {"path": "GET /strategies", "description": "List strategies"},
+            {"path": "GET /strategies/{id}", "description": "Get one strategy"},
+            {"path": "POST /strategies", "body": "CreateStrategyBody", "description": "Create strategy"},
+            {"path": "PUT /strategies/{id}", "body": "EditStrategyBody", "description": "Edit strategy"},
+            {"path": "DELETE /strategies/{id}", "body": "force?", "description": "Delete strategy"},
+            {"path": "POST /instances/{instance_id}/link-strategy", "body": {"strategy_id": 5}, "description": "Link strategy to instance"},
+            {"path": "GET /backtests", "description": "List backtests"},
+            {"path": "POST /backtests", "body": "CreateBacktestBody", "description": "Create backtest"},
+            {"path": "DELETE /backtests/{id}", "description": "Delete backtest"},
+            {"path": "POST /backtests/{id}/stop", "description": "Stop running backtest"},
+            {"path": "POST /backtests/stop-all", "description": "Stop all running backtests and clear the queue"},
+            {"path": "POST /backtests/{id}/pause", "description": "Pause running backtest"},
+            {"path": "POST /backtests/{id}/resume", "description": "Resume paused backtest"},
+            {"path": "GET /backtests/{id}/status", "description": "Backtest status and progress (from BacktestResults)"},
+            {"path": "GET /backtests/{id}/summary", "description": "Backtest summary"},
+            {"path": "GET /backtests/{id}/logs", "description": "Backtest logs"},
+            {"path": "GET /backtests/{id}/graph-data", "description": "Backtest data for plotting"},
+            {"path": "GET /agent/control", "description": "Get AI backtesting agent status (running, count_today)"},
+            {"path": "POST /agent/control", "body": "AgentControlBody", "description": "Start or stop AI backtesting agent"},
+            {"path": "GET /agent/results", "description": "List AI backtesting results (profitable strategies)"},
+            {"path": "GET /agent/best", "description": "Get best strategy (tag Best) with details and settings"},
+            {"path": "POST /agent/best", "body": "AgentSetBestBody", "description": "Set best strategy if outperforms current (persists in Strategies with tag Best)"},
+            {"path": "GET /digest/control", "description": "Get daily digest engine status (running, send_now, last_sent_at)"},
+            {"path": "POST /digest/control", "body": "DigestControlBody", "description": "Start or stop digest engine (running), or set send_now to trigger immediate send"},
+            {"path": "POST /digest/send-now", "description": "Trigger digest engine to send a brief immediately (morning style)"},
+            {"path": "GET /discover/control", "description": "Get discover engine status (running, terminate)"},
+            {"path": "POST /discover/control", "body": "DiscoverControlBody", "description": "Start or stop the discover engine"},
+            {"path": "GET /nexus/control", "description": "Get Graph Nexus service control (running)"},
+            {"path": "POST /nexus/control", "body": "NexusControlBody", "description": "Start/stop Graph Nexus, request phase reruns, and configure auto-update scheduling."},
+            {"path": "GET /nexus/status", "description": "Comprehensive Graph Nexus status: control, graph build progress, SEC scraper progress, graph_built"},
+            {"path": "GET /nexus/cache", "description": "List top-level cache entries from the mounted Nexus cache root or the running Nexus container so the rebuild UI can offer selective cache deletion."},
+            {"path": "POST /nexus/rebuild", "body": "NexusRebuildBody", "description": "Queue a Nexus rebuild from phase 1. Supports non-destructive in-place reruns or destructive Neo4j/Rethink resets, plus optional cache deletion from the mounted cache root or the running Nexus container."},
+        ]
+    }
+
+
+# --- Auth endpoints (signup/login public; rest protected) ---
+
+
+@app.post("/auth/signup", response_class=JSONResponse)
+def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
+    """Register a new user. Requires SECRET_AUTH_KEY to match env."""
+    if not verify_secret_auth_key(body.secret_auth_key):
+        raise HTTPException(status_code=403, detail="Invalid signup key")
+    try:
+        user = create_user(conn, body.username, body.password, role="user")
+        token = create_access_token(user["id"], user["username"], user["role"])
+        return {"access_token": token, "token_type": "bearer", "user": user}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/auth/login", response_class=JSONResponse)
+def api_login(body: LoginBody, conn=Depends(conn_dependency)):
+    """Login with username/password. Returns JWT access_token. Creates default admin on first login if missing."""
+    username = (body.username or "").strip().lower()
+    user = get_user_by_username(conn, username)
+    if not user or not verify_password(body.password, user.get("password_hash", "")):
+        # If admin doesn't exist yet (e.g. startup ran before DB was ready), ensure default admin and retry
+        default_user = (os.environ.get("DEFAULT_ADMIN_USERNAME") or "").strip().lower()
+        if username == default_user and default_user:
+            ensure_users_table(conn)
+            ensure_default_admin(conn)
+            user = get_user_by_username(conn, username)
+            if user and verify_password(body.password, user.get("password_hash", "")):
+                user_public = user_doc_to_public(user)
+                token = create_access_token(user["id"], user["username"], user.get("role", "user"))
+                return {"access_token": token, "token_type": "bearer", "user": user_public}
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    user_public = user_doc_to_public(user)
+    token = create_access_token(user["id"], user["username"], user.get("role", "user"))
+    return {"access_token": token, "token_type": "bearer", "user": user_public}
+
+
+@app.get("/auth/me", response_class=JSONResponse)
+def api_me(current_user: dict = Depends(get_current_user), conn=Depends(conn_dependency)):
+    """Return current authenticated user."""
+    user = get_user_by_id(conn, current_user["id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user_doc_to_public(user)
+
+
+@app.get("/auth/users", response_class=JSONResponse)
+def api_list_auth_users(
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(require_admin),
+):
+    """List all users. Admin only."""
+    users = list_users(conn)
+    return {"users": users}
+
+
+@app.post("/auth/users", response_class=JSONResponse)
+def api_create_auth_user(
+    body: CreateUserBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(require_admin),
+):
+    """Create a new user. Admin only. No secret_auth_key required."""
+    try:
+        user = create_user(conn, body.username, body.password, role=body.role, email=body.email)
+        return user
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/auth/users/{user_id}", response_class=JSONResponse)
+def api_get_auth_user(
+    user_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Get user by id. Admin or self."""
+    if current_user.get("role") != "admin" and current_user.get("id") != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    user = get_user_by_id(conn, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user_doc_to_public(user)
+
+
+@app.put("/auth/users/{user_id}", response_class=JSONResponse)
+def api_update_auth_user(
+    user_id: str,
+    body: UpdateUserBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update user. Admin can change role; user can change own password/email."""
+    if current_user.get("role") != "admin" and current_user.get("id") != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if current_user.get("role") != "admin" and body.role is not None:
+        raise HTTPException(status_code=403, detail="Only admin can change role")
+    try:
+        user = update_user(conn, user_id, password=body.password, role=body.role, email=body.email)
+        return user
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/auth/users/{user_id}", response_class=JSONResponse)
+def api_delete_auth_user(
+    user_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(require_admin),
+):
+    """Delete user. Admin only."""
+    if current_user.get("id") == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    try:
+        delete_user(conn, user_id)
+        return {"deleted": True, "id": user_id}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Onboarding (per-user welcome flow flag) ---
+
+
+@app.get("/onboarding/state", response_class=JSONResponse)
+def api_onboarding_state(
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the current user's onboarding state.
+
+    Also reports whether any models / brokerages / instances exist in the
+    database — the onboarding UI uses these counts to surface existing
+    resources so an already-configured user can re-onboard or top up.
+    """
+    user = get_user_by_id(conn, current_user["id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    def _safe_count(table_name: str) -> int:
+        try:
+            return int(_r_auth.db(os.environ.get("INTELLISTOCK_DB_NAME", "IntelliStock")).table(table_name).count().run(conn))
+        except Exception as e:
+            # Missing-table is expected on a brand-new install; logging keeps
+            # connection-drop failures observable instead of silently reporting
+            # "0 resources" to the UI (which would force re-onboarding).
+            import logging
+            logging.getLogger(__name__).debug("onboarding _safe_count(%s) failed: %s", table_name, e)
+            return 0
+
+    counts = {
+        "models": _safe_count("Models"),
+        "brokerages": _safe_count("BrokerageAccounts"),
+        "instances": _safe_count("Instances"),
+    }
+    public = user_doc_to_public(user) or {}
+    return {
+        "has_completed_onboarding": bool(public.get("has_completed_onboarding", False)),
+        "counts": counts,
+        "user": public,
+    }
+
+
+@app.post("/onboarding/complete", response_class=JSONResponse)
+def api_onboarding_complete(
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Mark the current user's onboarding flow as complete."""
+    try:
+        user = set_onboarding_completed(conn, current_user["id"], True)
+        return {"ok": True, "user": user}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/onboarding/reset", response_class=JSONResponse)
+def api_onboarding_reset(
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Reset the current user's onboarding flow so it shows again on next login."""
+    try:
+        user = set_onboarding_completed(conn, current_user["id"], False)
+        return {"ok": True, "user": user}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Chatbot (integrated assistant: tool-calling LLM over the API) ---
+
+
+class ChatbotCreateBody(BaseModel):
+    title: Optional[str] = None
+    model_id: Optional[str] = None
+
+
+class ChatbotUpdateBody(BaseModel):
+    title: Optional[str] = None
+    model_id: Optional[str] = None
+    auto_confirm_safe_tools: Optional[bool] = None
+
+
+class ChatbotTurnBody(BaseModel):
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
+class ChatbotConfirmBody(BaseModel):
+    message_id: str = Field(..., min_length=1)
+    approved: bool
+
+
+def _chatbot_model_name(conn, model_id: Optional[str]) -> Optional[str]:
+    if not model_id:
+        return None
+    try:
+        from chatbot.orchestration import _fetch_model_doc as _fetch
+        doc = _fetch(conn, model_id)
+        return (doc or {}).get("name")
+    except Exception:
+        return None
+
+
+def _ensure_chatbot_ready(conn) -> None:
+    """Lazily create the ChatbotConversations table on first use. The
+    startup-hook already attempts this, but if RethinkDB was unavailable at
+    boot the table is missing — recreate here so the user doesn't have to
+    restart the API container."""
+    try:
+        from chatbot.conversations import ensure_chatbot_tables
+        ensure_chatbot_tables(conn)
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "ensure_chatbot_tables (lazy) failed: %s", e,
+        )
+
+
+@app.get("/chatbot/conversations", response_class=JSONResponse)
+def api_chatbot_list(
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """List the current user's chatbot conversations (most recently updated first)."""
+    _ensure_chatbot_ready(conn)
+    from chatbot import conversations as conv_store
+    return {"conversations": conv_store.list_conversations(conn, current_user["id"])}
+
+
+@app.post("/chatbot/conversations", response_class=JSONResponse)
+def api_chatbot_create(
+    body: ChatbotCreateBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a new conversation. model_id is optional but required before sending the first message."""
+    _ensure_chatbot_ready(conn)
+    from chatbot import conversations as conv_store
+    model_name = _chatbot_model_name(conn, body.model_id)
+    convo = conv_store.create_conversation(
+        conn,
+        current_user["id"],
+        model_id=body.model_id,
+        model_name=model_name,
+        title=body.title,
+    )
+    return convo
+
+
+@app.get("/chatbot/conversations/{conv_id}", response_class=JSONResponse)
+def api_chatbot_get(
+    conv_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    from chatbot import conversations as conv_store
+    convo = conv_store.get_conversation(conn, current_user["id"], conv_id)
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return convo
+
+
+@app.patch("/chatbot/conversations/{conv_id}", response_class=JSONResponse)
+def api_chatbot_update(
+    conv_id: str,
+    body: ChatbotUpdateBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    from chatbot import conversations as conv_store
+    settings_update = None
+    if body.auto_confirm_safe_tools is not None:
+        settings_update = {"auto_confirm_safe_tools": bool(body.auto_confirm_safe_tools)}
+    model_name = _chatbot_model_name(conn, body.model_id) if body.model_id else None
+    convo = conv_store.update_conversation(
+        conn,
+        current_user["id"],
+        conv_id,
+        title=body.title,
+        model_id=body.model_id,
+        model_name=model_name,
+        settings=settings_update,
+    )
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return convo
+
+
+@app.delete("/chatbot/conversations/{conv_id}", response_class=JSONResponse)
+def api_chatbot_delete(
+    conv_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    from chatbot import conversations as conv_store
+    if not conv_store.delete_conversation(conn, current_user["id"], conv_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"deleted": True, "id": conv_id}
+
+
+@app.post("/chatbot/conversations/{conv_id}/clear", response_class=JSONResponse)
+def api_chatbot_clear(
+    conv_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    from chatbot import conversations as conv_store
+    convo = conv_store.clear_messages(conn, current_user["id"], conv_id)
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return convo
+
+
+@app.post("/chatbot/conversations/{conv_id}/turn", response_class=JSONResponse)
+def api_chatbot_turn(
+    conv_id: str,
+    body: ChatbotTurnBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Send a user message and run the LLM↔tool loop. Returns the new
+    messages appended in this turn (user echo + assistant rounds + tool
+    results). May end with a pending_confirmation message awaiting
+    /confirm-tool when the model wanted to call a non-safe tool."""
+    from chatbot.orchestration import run_turn
+    try:
+        appended = run_turn(conn, current_user, conv_id, body.content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"messages": appended}
+
+
+@app.post("/chatbot/conversations/{conv_id}/confirm-tool", response_class=JSONResponse)
+def api_chatbot_confirm_tool(
+    conv_id: str,
+    body: ChatbotConfirmBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Approve or decline a pending tool call and resume the conversation."""
+    from chatbot.orchestration import confirm_pending_tool
+    try:
+        appended = confirm_pending_tool(
+            conn, current_user, conv_id, body.message_id, bool(body.approved),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"messages": appended}
+
+
+@app.get("/chatbot/tools", response_class=JSONResponse)
+def api_chatbot_tools(current_user: dict = Depends(get_current_user)):
+    """Return the curated tool catalog for display in the chatbot settings."""
+    from chatbot.tools import tool_catalog
+    return {"tools": tool_catalog()}
+
+
+# --- Config & Tickers (all protected) ---
+
+
+@app.get("/status", response_class=JSONResponse)
+def api_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_status, conn)
+
+
+@app.post("/llm/test", response_class=JSONResponse)
+def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(get_current_user)):
+    provider = str(body.provider or "").strip().lower()
+    model = str(body.model or "").strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail="LLM provider is required")
+    if not model:
+        raise HTTPException(status_code=400, detail="LLM model or deployment name is required")
+
+    api_key = resolve_api_key_for_provider(provider, body.api_key)
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No API key provided for the selected LLM provider, and no matching environment fallback was found.",
+        )
+
+    provider_config = _build_llm_test_provider_config(body)
+    _reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
+    _test_max_tokens = {"high": 2048, "medium": 1024, "low": 256}.get(_reasoning_effort, 64)
+    result = call_structured_llm_by_provider(
+        provider,
+        api_key,
+        model,
+        (
+            "Return ok=true if this provider configuration is valid. "
+            f"Set provider={provider!r} and model={model!r}."
+        ),
+        LlmConfigTestOutput,
+        system_prompt=(
+            "You are a connectivity test. Return only the requested structured object. "
+            "Do not add extra text."
+        ),
+        max_output_tokens=_test_max_tokens,
+        timeout_sec=30,
+        retries=1,
+        output_retries=1,
+        provider_config=provider_config,
+    )
+    meta = get_last_structured_llm_call_metadata()
+    if result is None:
+        detail = str(meta.get("error") or "").strip() or "LLM connectivity test failed."
+        raise HTTPException(status_code=400, detail=detail)
+
+    return {
+        "ok": True,
+        "provider": provider,
+        "model": model,
+        "effective_model": str(meta.get("effective_model") or model),
+        "provider_meta": meta.get("provider_meta") or {},
+        "message": f"{provider} connectivity test succeeded.",
+    }
+
+
+@app.post("/benzinga/test", response_class=JSONResponse)
+def api_test_benzinga_sources(body: BenzingaTestBody, current_user: dict = Depends(get_current_user)):
+    """Test which Benzinga API sources are accessible with the given API key."""
+    import requests as _req
+    from datetime import datetime, timedelta
+
+    api_key = (body.api_key or "").strip() or os.environ.get("BENZINGA_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="No Benzinga API key provided and no BENZINGA_API_KEY env var found.")
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    week_ago = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    # All 10 Benzinga sources with their test endpoints
+    _ALL_SOURCES = {
+        "ratings": {
+            "url": "https://api.benzinga.com/api/v2/calendar/ratings",
+            "params": {"parameters[date_from]": week_ago, "parameters[date_to]": today, "pagesize": "1"},
+            "label": "Analyst Ratings",
+        },
+        "insights": {
+            "url": "https://api.benzinga.com/api/v2/analyst-insights",
+            "params": {"parameters[date_from]": week_ago, "parameters[date_to]": today, "pagesize": "1"},
+            "label": "Analyst Insights",
+        },
+        "insider_trades": {
+            "url": "https://api.benzinga.com/api/v1/sec/insider_transactions/transactions",
+            "params": {"date_from": week_ago, "date_to": today, "search_keys": "AAPL", "search_keys_type": "symbol"},
+            "label": "Insider Transactions",
+        },
+        "gov_trades": {
+            "url": "https://api.benzinga.com/api/v1/government_trades",
+            "params": {"date_from": week_ago, "date_to": today, "search_keys": "AAPL", "search_keys_type": "ticker"},
+            "label": "Government Trades",
+        },
+        "ma": {
+            "url": "https://api.benzinga.com/api/v2/calendar/ma",
+            "params": {"parameters[date_from]": week_ago, "parameters[date_to]": today, "pagesize": "1"},
+            "label": "Mergers & Acquisitions",
+        },
+        "ipos": {
+            "url": "https://api.benzinga.com/api/v2/calendar/ipos",
+            "params": {"parameters[date_from]": week_ago, "parameters[date_to]": today, "pagesize": "1"},
+            "label": "IPOs",
+        },
+        "splits": {
+            "url": "https://api.benzinga.com/api/v2/calendar/splits",
+            "params": {"parameters[date_from]": week_ago, "parameters[date_to]": today, "pagesize": "1"},
+            "label": "Stock Splits",
+        },
+        "earnings": {
+            "url": "https://api.benzinga.com/api/v2/calendar/earnings",
+            "params": {"parameters[date_from]": week_ago, "parameters[date_to]": today, "pagesize": "1"},
+            "label": "Earnings Calendar",
+        },
+        "company_actions": {
+            "url": "https://api.benzinga.com/api/v2/calendar/dividends",
+            "params": {"parameters[date_from]": week_ago, "parameters[date_to]": today, "pagesize": "1"},
+            "label": "Company Actions / Dividends",
+        },
+        "prediction_markets": {
+            "url": "https://api.benzinga.com/api/v1/bulls-bears",
+            "params": {"tickers": "AAPL"},
+            "label": "Prediction Markets",
+        },
+    }
+
+    sources_to_test = body.sources if body.sources else list(_ALL_SOURCES.keys())
+    results = []
+    accessible_count = 0
+
+    for source_key in sources_to_test:
+        info = _ALL_SOURCES.get(source_key)
+        if not info:
+            results.append({"source": source_key, "label": source_key, "ok": False, "status": 0, "error": "Unknown source"})
+            continue
+        params = dict(info["params"])
+        params["token"] = api_key
+        try:
+            resp = _req.get(info["url"], params=params, timeout=10)
+            ok = resp.status_code == 200
+            error = ""
+            if resp.status_code == 401:
+                error = "Invalid API key"
+            elif resp.status_code == 403:
+                error = "Not included in your plan"
+            elif resp.status_code == 404:
+                error = "Endpoint not available"
+            elif resp.status_code == 429:
+                ok = True  # rate limited but accessible
+                error = "Rate limited (but accessible)"
+            elif resp.status_code != 200:
+                error = f"HTTP {resp.status_code}"
+            if ok:
+                accessible_count += 1
+            results.append({
+                "source": source_key,
+                "label": info["label"],
+                "ok": ok,
+                "status": resp.status_code,
+                "error": error,
+            })
+        except Exception as e:
+            results.append({
+                "source": source_key,
+                "label": info["label"],
+                "ok": False,
+                "status": 0,
+                "error": str(e)[:100],
+            })
+
+    return {
+        "ok": accessible_count > 0,
+        "accessible": accessible_count,
+        "total": len(sources_to_test),
+        "results": results,
+        "message": f"{accessible_count}/{len(sources_to_test)} Benzinga sources accessible.",
+    }
+
+
+@app.get("/tickers", response_class=JSONResponse)
+def api_tickers(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_tickers, conn)
+
+
+@app.post("/tickers", response_class=JSONResponse)
+def api_add_ticker(body: AddTickerBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_add_ticker, conn, body.symbols)
+
+
+@app.delete("/tickers/{symbol}", response_class=JSONResponse)
+def api_remove_ticker(symbol: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_remove_ticker, conn, symbol)
+
+
+@app.get("/prices", response_class=JSONResponse)
+def api_prices(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_prices, conn)
+
+
+@app.get("/history", response_class=JSONResponse)
+def api_history(ticker: Optional[str] = None, limit: int = 30, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_history, conn, ticker, limit)
+
+
+# --- Instances ---
+
+
+@app.get("/instances", response_class=JSONResponse)
+def api_instances(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_instances, conn)
+
+
+@app.post("/instances", response_class=JSONResponse)
+def api_create_instance(body: CreateInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(
+        action_create_instance,
+        conn,
+        body.id,
+        name=body.name,
+        strategy_id=body.strategy_id,
+        key=body.key,
+        secret=body.secret,
+        granularity_time_increment=body.granularity,
+        run_command=body.run_command if body.run_command is not None else False,
+        created_by=body.created_by or "user",
+        brokerage_id=body.brokerage_id,
+        max_usage=body.max_usage,
+    )
+
+
+@app.get("/instances/{instance_id}", response_class=JSONResponse)
+def api_get_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_get_instance, conn, instance_id)
+
+
+@app.patch("/instances/{instance_id}", response_class=JSONResponse)
+def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(
+        action_edit_instance,
+        conn,
+        instance_id,
+        name=body.name,
+        granularity_time_increment=body.granularity,
+        max_usage=body.max_usage,
+        brokerage_id=body.brokerage_id,
+    )
+
+
+@app.delete("/instances/{instance_id}", response_class=JSONResponse)
+def api_delete_instance(instance_id: str, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_delete_instance, conn, instance_id, force=force)
+
+
+@app.post("/instances/{instance_id}/stocks", response_class=JSONResponse)
+def api_add_stock(instance_id: str, body: AddStockBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_add_stock, conn, instance_id, body.symbol)
+
+
+@app.delete("/instances/{instance_id}/stocks/{symbol}", response_class=JSONResponse)
+def api_remove_stock(instance_id: str, symbol: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_remove_stock, conn, instance_id, symbol)
+
+
+@app.post("/instances/{instance_id}/start", response_class=JSONResponse)
+def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_start_instance, conn, instance_id)
+
+
+@app.post("/instances/{instance_id}/stop", response_class=JSONResponse)
+def api_stop_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_stop_instance, conn, instance_id)
+
+
+# --- Config flags ---
+
+
+@app.post("/config/terminate-price", response_class=JSONResponse)
+def api_terminate_price(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    return _run(action_terminate_price, conn)
+
+
+@app.post("/config/terminate-discover", response_class=JSONResponse)
+def api_terminate_discover(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    return _run(action_terminate_discover, conn)
+
+
+@app.post("/config/start-broker", response_class=JSONResponse)
+def api_start_broker(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    return _run(action_start_broker, conn)
+
+
+# --- Strategies ---
+
+
+@app.get("/strategies/available", response_class=JSONResponse)
+def api_available_strategies(current_user: dict = Depends(get_current_user)):
+    """Return all available strategy types from backend/strategies with schema and description."""
+    try:
+        strategies = get_available_strategies()
+        return JSONResponse(content={"strategies": strategies})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/strategies", response_class=JSONResponse)
+def api_strategies(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_strategies, conn)
+
+
+@app.get("/strategies/{strategy_id}", response_class=JSONResponse)
+def api_get_strategy(strategy_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_get_strategy, conn, strategy_id)
+
+
+@app.post("/strategies", response_class=JSONResponse)
+def api_create_strategy(body: CreateStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_create_strategy, conn, body.name, body.strategies)
+
+
+@app.put("/strategies/{strategy_id}", response_class=JSONResponse)
+def api_edit_strategy(strategy_id: int, body: EditStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_edit_strategy, conn, strategy_id, name=body.name, strategies=body.strategies)
+
+
+@app.delete("/strategies/{strategy_id}", response_class=JSONResponse)
+def api_delete_strategy(strategy_id: int, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_delete_strategy, conn, strategy_id, force=force)
+
+
+@app.post("/instances/{instance_id}/link-strategy", response_class=JSONResponse)
+def api_link_strategy(instance_id: str, body: LinkStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_link_strategy, conn, instance_id, body.strategy_id)
+
+
+@app.post("/instances/{instance_id}/unlink-strategy", response_class=JSONResponse)
+def api_unlink_strategy(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_unlink_strategy, conn, instance_id)
+
+
+@app.post("/instances/{instance_id}/link-brokerage", response_class=JSONResponse)
+def api_link_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Set or clear the brokerage linked to an instance."""
+    return _run(action_link_brokerage_to_instance, conn, instance_id, body.brokerage_id or None)
+
+
+@app.post("/instances/{instance_id}/link-data-brokerage", response_class=JSONResponse)
+def api_link_data_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Set or clear the market-data Alpaca brokerage for this instance.
+
+    Separate from the trading brokerage so operators can pair a paper
+    trading account with a live data-subscription account. Pass
+    brokerage_id=null (or omit) to unlink; strategy then falls back to
+    trading creds for data fetches.
+    """
+    return _run(action_link_data_brokerage_to_instance, conn, instance_id, body.brokerage_id or None)
+
+
+# --- Models ---
+
+
+@app.get("/models", response_class=JSONResponse)
+def api_list_models(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_list_models, conn)
+
+
+@app.get("/models/{model_id}", response_class=JSONResponse)
+def api_get_model(model_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_get_model, conn, model_id)
+
+
+@app.post("/models", response_class=JSONResponse)
+def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(
+        action_create_model, conn,
+        name=body.name,
+        provider=body.provider,
+        model=body.model,
+        api_key=body.api_key,
+        openai_base_url=body.openai_base_url,
+        nvidia_base_url=body.nvidia_base_url,
+        azure_openai_endpoint=body.azure_openai_endpoint,
+        azure_openai_api_version=body.azure_openai_api_version,
+        reasoning_effort=body.reasoning_effort,
+    )
+
+
+@app.put("/models/{model_id}", response_class=JSONResponse)
+def api_edit_model(model_id: str, body: EditModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    kwargs = {k: v for k, v in body.dict().items() if v is not None}
+    return _run(action_edit_model, conn, model_id, **kwargs)
+
+
+@app.delete("/models/{model_id}", response_class=JSONResponse)
+def api_delete_model(model_id: str, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_delete_model, conn, model_id, force=force)
+
+
+@app.get("/models/{model_id}/strategies", response_class=JSONResponse)
+def api_model_strategies(model_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_model_strategies, conn, model_id)
+
+
+# --- Backtests ---
+
+
+@app.get("/backtests", response_class=JSONResponse)
+def api_list_backtests(
+    instance_id: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 20,
+    sort_by: str = "completed_at",
+    sort_order: str = "desc",
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    return _run(
+        action_list_backtests,
+        conn,
+        instance_id=instance_id,
+        page=page,
+        per_page=per_page,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+
+@app.get("/instances/{instance_id}/backtests", response_class=JSONResponse)
+def api_list_instance_backtests(
+    instance_id: str,
+    page: int = 1,
+    per_page: int = 20,
+    sort_by: str = "completed_at",
+    sort_order: str = "desc",
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    return _run(
+        action_list_backtests,
+        conn,
+        instance_id=instance_id,
+        page=page,
+        per_page=per_page,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+
+@app.post("/backtests", response_class=JSONResponse)
+def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    gran_sec = parse_granularity_to_seconds(body.granularity) if body.granularity else 60
+    return _run(
+        action_create_backtest,
+        conn,
+        body.instance_id,
+        body.stocks,
+        body.start_date,
+        body.end_date,
+        granularity_sec=gran_sec,
+        key=body.key,
+        secret=body.secret,
+        initial_cash=body.initial_cash,
+    )
+
+
+@app.delete("/backtests/{backtest_id}", response_class=JSONResponse)
+def api_delete_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_delete_backtest, conn, backtest_id)
+
+
+@app.post("/backtests/stop-all", response_class=JSONResponse)
+def api_stop_all_backtests(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Stop all running backtests and clear the queue."""
+    return _run(action_stop_all_backtests, conn)
+
+
+@app.post("/backtests/{backtest_id}/stop", response_class=JSONResponse)
+def api_stop_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_stop_backtest, conn, backtest_id)
+
+
+@app.post("/backtests/{backtest_id}/pause", response_class=JSONResponse)
+def api_pause_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_pause_backtest, conn, backtest_id)
+
+
+@app.post("/backtests/{backtest_id}/resume", response_class=JSONResponse)
+def api_resume_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_resume_backtest, conn, backtest_id)
+
+
+@app.get("/backtests/{backtest_id}/status", response_class=JSONResponse)
+def api_backtest_status(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return status and progress from BacktestResults (or queue if not yet run)."""
+    return _run(action_get_backtest_status, conn, backtest_id)
+
+
+@app.get("/backtests/{backtest_id}/summary", response_class=JSONResponse)
+def api_summarize_backtest(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_summarize_backtest, conn, backtest_id)
+
+
+@app.get("/backtests/{backtest_id}/logs", response_class=JSONResponse)
+def api_backtest_logs(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_backtest_logs, conn, backtest_id)
+
+
+# --- Nexus graph builds (history + log files) ---
+#
+# ROUTE-ORDER GUARD: literal /nexus-graph-builds/latest routes MUST be declared
+# before /nexus-graph-builds/{build_id}. FastAPI matches in declaration order,
+# so a later {build_id} route would otherwise capture "latest" and route all
+# /latest traffic into the generic by-id handlers. Keep the order below intact.
+
+@app.get("/nexus-graph-builds", response_class=JSONResponse)
+def api_list_nexus_graph_builds(limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """List recent nexus_graph_engine builds (newest first)."""
+    return _run(action_list_nexus_graph_builds, conn, limit)
+
+
+@app.get("/nexus-graph-builds/latest", response_class=JSONResponse)
+def api_get_latest_nexus_graph_build(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the most recent build's full document (shortcut for id=latest)."""
+    return _run(action_get_nexus_graph_build, conn, "latest")
+
+
+@app.get("/nexus-graph-builds/latest/logs", response_class=JSONResponse)
+def api_get_latest_nexus_graph_build_logs(since_line: int = 0, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the most recent build's log (shortcut for id=latest).
+
+    Pass since_line=N to fetch only lines with 0-based index >= N. The response
+    includes next_line which the client should echo on the next poll to tail
+    efficiently. since_line=0 (default) returns the full log.
+    """
+    return _run(action_nexus_graph_build_logs, conn, "latest", since_line)
+
+
+@app.get("/nexus-graph-builds/{build_id}", response_class=JSONResponse)
+def api_get_nexus_graph_build(build_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return full build document. Pass build_id=latest to resolve to the newest build."""
+    return _run(action_get_nexus_graph_build, conn, build_id)
+
+
+@app.get("/nexus-graph-builds/{build_id}/logs", response_class=JSONResponse)
+def api_get_nexus_graph_build_logs(build_id: str, since_line: int = 0, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return log file for a build. Pass build_id=latest to resolve to the newest build.
+
+    Pass since_line=N to fetch only lines with 0-based index >= N. The response
+    includes next_line which the client should echo on the next poll to tail
+    efficiently. since_line=0 (default) returns the full log.
+    """
+    return _run(action_nexus_graph_build_logs, conn, build_id, since_line)
+
+
+# --- Live trading state, commands, logs ---
+#
+# GET  /instances/{id}/live-state     — UI poll every 2s while active, 10s idle
+# GET  /instances/{id}/live-logs      — since_line cursor tailing (same contract as nexus)
+# POST /instances/{id}/live-command   — admin only: halt / close_position / submit_order
+# GET  /live-commands/{command_id}    — UI polls command status until terminal
+#
+# The POST requires admin role because the destructive commands (halt,
+# close_position, submit_order) can move real money. Reads are authenticated
+# but not admin-gated so any authenticated user can monitor.
+
+class LiveCommandBody(BaseModel):
+    type: str = Field(pattern="^(halt|close_position|submit_order)$")
+    payload: Optional[dict] = None
+
+
+@app.get("/instances/{instance_id}/live-state", response_class=JSONResponse)
+def api_get_live_state(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the current LiveState row for an instance. 404 if the instance
+    has never booted a broker, or has already been shut down (no row)."""
+    return _run(action_get_live_state, conn, instance_id)
+
+
+@app.get("/instances/{instance_id}/live-logs", response_class=JSONResponse)
+def api_get_live_trading_logs(instance_id: str, since_line: int = 0, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Live-tail of the broker's log for this instance. since_line cursor
+    exactly mirrors /nexus-graph-builds/{id}/logs so the frontend can reuse
+    the same polling logic with a different endpoint."""
+    return _run(action_live_trading_logs, conn, instance_id, since_line)
+
+
+@app.post("/instances/{instance_id}/live-command", response_class=JSONResponse)
+def api_submit_live_command(instance_id: str, body: LiveCommandBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Submit a command to the broker. Any authenticated user can halt,
+    close a position, or submit a manual order — the UI typed-confirm modals
+    already provide the safety gate. Broker picks up within ~1s.
+
+    Body: {type: "halt"|"close_position"|"submit_order", payload: {...}}
+    Payload shape depends on type — see the action docstring. The response
+    includes {command_id} which the client should poll at
+    /live-commands/{command_id} to see status and result.
+    """
+    return _run(
+        action_submit_live_command, conn, instance_id, body.type, body.payload or {},
+        current_user.get("id") or current_user.get("username"),
+    )
+
+
+@app.get("/live-commands/{command_id}", response_class=JSONResponse)
+def api_get_live_command(command_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return the status and result of a previously-submitted live command.
+    UI polls this until `status` ∈ {completed, failed}."""
+    return _run(action_get_live_command, conn, command_id)
+
+
+@app.get("/backtests/{backtest_id}/graph-data", response_class=JSONResponse)
+def api_graph_backtest_data(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_graph_backtest_data, conn, backtest_id)
+
+
+@app.get("/backtests/{backtest_id}/playback-data", response_class=JSONResponse)
+def api_backtest_playback_data(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Return time-ordered event stream for the backtest playback UI."""
+    return _run(action_get_backtest_playback_data, conn, backtest_id)
+
+
+@app.get("/backtests/best-per-strategy", response_class=JSONResponse)
+def api_backtest_best_per_strategy(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_backtest_best_per_strategy, conn)
+
+
+# --- AI Backtesting Agent ---
+
+
+@app.get("/agent/control", response_class=JSONResponse)
+def api_agent_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get agent status: running, last_run_date, count_today."""
+    return _run(action_agent_control_get, conn)
+
+
+@app.post("/agent/control", response_class=JSONResponse)
+def api_agent_control_set(body: AgentControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    """Start, stop, or pause/resume the AI backtesting agent. Send running and/or paused (omit to leave unchanged). Optional special_request: instruction for strategy generation (e.g. include a specific strategy in each)."""
+    return _run(action_agent_control_set, conn, body.running, body.paused, body.special_request)
+
+
+@app.post("/agent/resume-timer", response_class=JSONResponse)
+def api_resume_timer(body: ResumeTimerBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Schedule agent to resume after specified time. All time fields optional (default 0)."""
+    return _run(action_resume_timer, conn, body.days or 0, body.hours or 0, body.minutes or 0, body.seconds or 0)
+
+
+@app.post("/agent/restart", response_class=JSONResponse)
+def api_agent_restart(body: AgentRestartBody = AgentRestartBody(), conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Restart the AI backtesting agent: stop, wait a few seconds, then start. Optional special_request for strategy generation."""
+    return _run(action_agent_restart, conn, body.special_request)
+
+
+@app.post("/agent/increment-count", response_class=JSONResponse)
+def api_agent_increment_count(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Increment today's backtest count (used by agent when it queues a backtest)."""
+    count = action_agent_increment_backtest_count(conn)
+    return {"count_today": count}
+
+
+@app.get("/agent/results", response_class=JSONResponse)
+def api_agent_results(conn=Depends(conn_dependency), limit: int = 100, current_user: dict = Depends(get_current_user)):
+    """List AI backtesting results (profitable strategies)."""
+    return _run(action_list_ai_backtest_results, conn, limit)
+
+
+@app.post("/agent/results", response_class=JSONResponse)
+def api_agent_results_post(body: AgentResultBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Record an AI backtest result (used by the agent service)."""
+    return _run(
+        action_insert_ai_backtest_result,
+        conn,
+        strategy_snapshot=body.strategy_snapshot,
+        backtest_id=body.backtest_id,
+        instance_id=body.instance_id,
+        strategy_id=body.strategy_id,
+        overall_profit=body.overall_profit,
+        pnl_percent=body.pnl_percent,
+        pnl_per_stock=body.pnl_per_stock,
+        pnl_percent_per_stock=body.pnl_percent_per_stock,
+        stock_price_change=body.stock_price_change,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        stocks_used=body.stocks_used,
+        status=body.status,
+        agent_notes=body.agent_notes,
+    )
+
+
+@app.get("/agent/best", response_class=JSONResponse)
+def api_agent_best(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get the current best strategy (tag Best in Strategies table). Returns null if none set."""
+    best = action_agent_get_best(conn)
+    return {"best": best}
+
+
+@app.post("/agent/best", response_class=JSONResponse)
+def api_agent_set_best_post(body: AgentSetBestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Set or update the best strategy if this result outperforms current best. Persists in Strategies with tag Best."""
+    return _run(
+        action_agent_set_best,
+        conn,
+        strategy_snapshot=body.strategy_snapshot,
+        overall_profit=body.overall_profit,
+        pnl_percent=body.pnl_percent,
+        results_summary=body.results_summary,
+    )
+
+
+@app.get("/agent/top5", response_class=JSONResponse)
+def api_agent_top5_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get the current top-5 best strategies ranked by P&L%."""
+    return _run(action_agent_get_top5, conn)
+
+
+@app.post("/agent/top5", response_class=JSONResponse)
+def api_agent_top5_update(body: AgentUpdateTop5Body, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Submit a candidate strategy to the top-5 list. Replaces worst entry if candidate qualifies."""
+    return _run(
+        action_agent_update_top5, conn,
+        strategy_snapshot=body.strategy_snapshot,
+        overall_profit=body.overall_profit,
+        pnl_percent=body.pnl_percent,
+        strategy_id=body.strategy_id,
+        backtest_id=body.backtest_id,
+        results_summary=body.results_summary,
+    )
+
+
+@app.post("/agent/cycle-log", response_class=JSONResponse)
+def api_agent_cycle_log_create(body: AgentCycleLogCreateBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Create a new agent cycle log entry (called by the agent at strategy start)."""
+    return _run(action_agent_cycle_log_create, conn, body.cycle_id, body.name)
+
+
+@app.post("/agent/cycle-log/{log_id}/update", response_class=JSONResponse)
+def api_agent_cycle_log_update(log_id: str, body: AgentCycleLogUpdateBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Update an agent cycle log entry with stage progress or final status."""
+    return _run(action_agent_cycle_log_update, conn, log_id, body.status, body.stages, body.final_result)
+
+
+@app.get("/agent/runs", response_class=JSONResponse)
+def api_agent_runs(page: int = 1, per_page: int = 20, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """List agent strategy attempts (cycle log) with pagination."""
+    return _run(action_list_agent_runs, conn, page, per_page)
+
+
+@app.post("/agent/runs/{log_id}/force-stop", response_class=JSONResponse)
+def api_agent_run_force_stop(log_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Manually mark a stale 'running' agent cycle log entry as stopped."""
+    return _run(action_agent_run_force_stop, conn, log_id)
+
+
+# --- Daily Digest Engine ---
+
+
+@app.get("/digest/control", response_class=JSONResponse)
+def api_digest_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get daily digest engine status: running, send_now, last_sent_at, last_morning_at, last_evening_at."""
+    return _run(action_digest_control_get, conn)
+
+
+@app.post("/digest/control", response_class=JSONResponse)
+def api_digest_control_set(body: DigestControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Start or stop the digest engine (running), or set send_now to trigger an immediate send."""
+    return _run(action_digest_control_set, conn, body.running, body.send_now)
+
+
+@app.post("/digest/send-now", response_class=JSONResponse)
+def api_digest_send_now(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Trigger the digest engine to send a brief immediately (morning-style summary to #briefs)."""
+    return _run(action_digest_trigger_send_now, conn)
+
+
+# --- Discover Engine ---
+
+
+@app.get("/discover/control", response_class=JSONResponse)
+def api_discover_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get discover engine status: running and terminate."""
+    return _run(action_discover_control_get, conn)
+
+
+@app.post("/discover/control", response_class=JSONResponse)
+def api_discover_control_set(body: DiscoverControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Start or stop the discover engine."""
+    return _run(action_discover_control_set, conn, body.running)
+
+
+# --- Graph Nexus (server-controlled subprocess) ---
+
+
+@app.get("/nexus/control", response_class=JSONResponse)
+def api_nexus_control_get(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get Graph Nexus service control state (running)."""
+    return _run(action_nexus_control_get, conn)
+
+
+@app.post("/nexus/control", response_class=JSONResponse)
+def api_nexus_control_set(body: NexusControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    """Start or stop the Graph Nexus service. Optional phase selectors accept execution-order 1-14 or labels like 2B / 6B."""
+    return _run(
+        action_nexus_control_set,
+        conn,
+        body.running,
+        body.start_phase,
+        body.end_phase,
+        body.force_bootstrap_rebuild,
+        body.auto_update_enabled,
+        body.auto_update_interval_hours,
+        body.auto_update_start_phase,
+        body.auto_update_end_phase,
+        body.phase7_history_quarters,
+        body.historical_mode_enabled,
+        body.historical_start_date,
+        body.selected_phases,
+    )
+
+
+@app.get("/nexus/status", response_class=JSONResponse)
+def api_nexus_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Comprehensive Graph Nexus status: control, graph build progress, SEC EDGAR scraper progress, graph_built."""
+    return _run(action_nexus_status, conn)
+
+
+@app.get("/nexus/cache", response_class=JSONResponse)
+def api_nexus_cache(current_user: dict = Depends(get_current_user)):
+    """List top-level cache entries from the mounted Nexus cache root or the running Nexus container."""
+    return action_nexus_cache_entries()
+
+
+@app.post("/nexus/rebuild", response_class=JSONResponse)
+def api_nexus_rebuild(body: NexusRebuildBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    """Queue a Nexus rebuild. Optionally select destructive mode and/or delete selected cache entries from the mounted cache root or the running Nexus container before restart."""
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Send {\"confirm\": true} to confirm rebuild.")
+    return _run(
+        action_nexus_rebuild,
+        conn,
+        delete_cache_paths=body.delete_cache_paths,
+        destructive=body.destructive,
+        force_bootstrap_rebuild=body.force_bootstrap_rebuild,
+    )
+
+
+@app.post("/nexus/delete-edges", response_class=JSONResponse)
+def api_nexus_delete_edges(body: NexusDeleteBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    """Delete selected Nexus graph phase outputs and track live progress through the Nexus control document."""
+    return _run(action_nexus_delete_edges, conn, body.selected_phases)
+
+
+# ── Market Trends ─────────────────────────────────────────────────────────────
+
+@app.get("/trends", response_class=JSONResponse)
+def api_list_trends(instance_id: Optional[str] = None, status: Optional[str] = "active", conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """List market trends tracked by the nexus strategy. Filter by instance_id and/or status."""
+    return _run(action_list_trends, conn, instance_id=instance_id, status=status)
+
+
+@app.get("/trends/{trend_id}", response_class=JSONResponse)
+def api_get_trend(trend_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get a single trend by its ID."""
+    return _run(action_get_trend, conn, trend_id)
+
+
+@app.post("/trends/{trend_id}/end", response_class=JSONResponse)
+def api_end_trend(trend_id: str, body: EndTrendBody = EndTrendBody(), conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """End an active trend. Optionally provide a reason."""
+    return _run(action_end_trend, conn, trend_id, reason=body.reason)
+
+
+@app.delete("/trends/{trend_id}", response_class=JSONResponse)
+def api_delete_trend(trend_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Delete a trend by its ID."""
+    return _run(action_delete_trend, conn, trend_id)
+
+
+# ── Discovered Stocks ──────────────────────────────────────────────────────────
+
+@app.get("/discovered", response_class=JSONResponse)
+def api_list_discovered(instance_id: Optional[str] = None, status: Optional[str] = "active", conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """List stocks discovered by the nexus trend tracking engine. Filter by instance_id and/or status."""
+    return _run(action_list_discovered_stocks, conn, instance_id=instance_id, status=status)
+
+
+@app.delete("/discovered/{instance_id}/{ticker}", response_class=JSONResponse)
+def api_remove_discovered(instance_id: str, ticker: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Remove a discovered stock from an instance (marks it as removed)."""
+    return _run(action_remove_discovered_stock, conn, instance_id, ticker)
+
+
+# ── Nexus Trend/Discovery Config ───────────────────────────────────────────────
+
+@app.get("/nexus/config/{instance_id}", response_class=JSONResponse)
+def api_nexus_config_get(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Get nexus trend tracking and stock discovery configuration for an instance."""
+    return _run(action_nexus_config_get, conn, instance_id)
+
+
+@app.patch("/nexus/config/{instance_id}", response_class=JSONResponse)
+def api_nexus_config_set(instance_id: str, body: NexusConfigUpdateBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Update nexus trend tracking and stock discovery configuration for an instance."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update.")
+    return _run(action_nexus_config_set, conn, instance_id, updates)
+
+
+# ── Brokerage Accounts ─────────────────────────────────────────────────────────
+
+@app.get("/brokerages", response_class=JSONResponse)
+def api_list_brokerages(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """List all linked brokerage accounts (credentials masked)."""
+    return _run(action_list_brokerages, conn)
+
+
+@app.post("/brokerages/robinhood/accounts", response_class=JSONResponse)
+def api_fetch_robinhood_accounts(body: FetchRobinhoodAccountsBody, current_user: dict = Depends(get_current_user)):
+    """Validate Robinhood tokens and return available accounts for account selection."""
+    return _run(action_fetch_robinhood_accounts, body.access_token, body.refresh_token, body.device_token)
+
+
+@app.post("/brokerages", response_class=JSONResponse)
+def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Link a new brokerage account (Alpaca or Robinhood). Validates credentials before saving."""
+    if body.brokerage_type == "alpaca":
+        if not body.key or not body.secret:
+            raise HTTPException(status_code=400, detail="key and secret are required for Alpaca")
+        return _run(
+            action_link_alpaca, conn, body.account_name, body.key, body.secret,
+            body.paper if body.paper is not None else True,
+            (body.alpaca_data_feed or "iex"),
+        )
+    else:
+        if not body.access_token or not body.refresh_token:
+            raise HTTPException(status_code=400, detail="access_token and refresh_token are required for Robinhood")
+        return _run(action_link_robinhood_tokens, conn, body.account_name, body.access_token, body.refresh_token,
+                    body.device_token, body.expires_in, body.obtained_at_epoch, body.account_number)
+
+
+@app.put("/brokerages/{brokerage_id}", response_class=JSONResponse)
+def api_update_brokerage(brokerage_id: str, body: UpdateBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Update a linked brokerage account's name and/or credentials."""
+    return _run(action_update_brokerage, conn, brokerage_id,
+                account_name=body.account_name, key=body.key, secret=body.secret, paper=body.paper,
+                access_token=body.access_token, refresh_token=body.refresh_token,
+                device_token=body.device_token, account_number=body.account_number,
+                alpaca_data_feed=body.alpaca_data_feed)
+
+
+@app.delete("/brokerages/{brokerage_id}", response_class=JSONResponse)
+def api_delete_brokerage(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Remove a linked brokerage account."""
+    return _run(action_delete_brokerage, conn, brokerage_id)
+
+
+class TestAlpacaBody(BaseModel):
+    # R16 phase-3: key/secret are now optional. The endpoint accepts EITHER
+    # raw creds (add-mode flow, before save) OR a brokerage_id (edit-mode
+    # flow, where the form intentionally hides the stored secret). When
+    # brokerage_id is provided and key/secret are blank, the endpoint
+    # decrypts the stored creds from RethinkDB and tests those instead.
+    # paper / alpaca_data_feed remain user-overridable so an operator can
+    # test "what would happen if I switched feed=sip" without writing to DB.
+    key: Optional[str] = ""
+    secret: Optional[str] = ""
+    brokerage_id: Optional[str] = None
+    paper: Optional[bool] = None
+    alpaca_data_feed: Optional[str] = Field(default=None, pattern="^(iex|sip)$")
+
+
+@app.post("/brokerages/test-alpaca", response_class=JSONResponse)
+def api_test_alpaca_brokerage(
+    body: TestAlpacaBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """R16 (2026-04-25): Diagnostic test suite for Alpaca creds.
+
+    Runs 5 endpoints (account, clock, bars, latest_quote, news) against the
+    supplied key/secret and returns per-test PASS/FAIL plus aggregated hints.
+    Used by the brokerage add/edit popup so the user can see at config time
+    whether the creds will actually work for the bars/news/account paths the
+    runtime broker needs. Probe-only — does NOT save anything.
+
+    Two cred-source paths:
+      1. Raw key+secret in body (add-mode / "test the creds I'm about to save").
+      2. brokerage_id in body, no key/secret (edit-mode / "test the creds
+         already stored for this brokerage"). Falls back to row's
+         stored ``alpaca_paper`` and ``alpaca_data_feed`` when not overridden.
+    """
+    key = (body.key or "").strip()
+    secret = (body.secret or "").strip()
+    paper = body.paper
+    feed = (body.alpaca_data_feed or "").strip().lower() or None
+
+    # R16 phase-3: edit-mode path — pull stored creds when caller didn't pass them.
+    if (not key or not secret) and body.brokerage_id:
+        try:
+            from secret_store import decrypt as _decrypt
+            row = (
+                _r_auth.db("IntelliStock")
+                .table("BrokerageAccounts")
+                .get(str(body.brokerage_id))
+                .run(conn)
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Brokerage {body.brokerage_id!r} not found")
+            if str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Brokerage {body.brokerage_id!r} is not an Alpaca account",
+                )
+            try:
+                key = _decrypt(row.get("alpaca_key")) or ""
+                secret = _decrypt(row.get("alpaca_secret")) or ""
+            except Exception as _decrypt_exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Could not decrypt stored creds for {body.brokerage_id} "
+                        f"(check INTELLISTOCK_CRED_KEY): "
+                        f"{type(_decrypt_exc).__name__}: {_decrypt_exc}"
+                    ),
+                )
+            if paper is None:
+                paper = bool(row.get("alpaca_paper", False))
+            if feed is None:
+                _stored_feed = str(row.get("alpaca_data_feed") or "").strip().lower()
+                feed = _stored_feed if _stored_feed in ("iex", "sip") else "iex"
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not load brokerage {body.brokerage_id!r}: {type(e).__name__}: {e}",
+            )
+
+    if not key or not secret:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either key+secret or brokerage_id of an existing Alpaca brokerage",
+        )
+
+    try:
+        return alpaca_run_diagnostic_suite(
+            key=key,
+            secret=secret,
+            feed=feed or "iex",
+            paper=bool(paper) if paper is not None else True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Alpaca test suite error: {type(e).__name__}: {e}")
+
+
+@app.post("/brokerages/{brokerage_id}/refresh", response_class=JSONResponse)
+def api_refresh_brokerage(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Manually refresh Robinhood tokens for a linked account."""
+    return _run(action_refresh_robinhood, conn, brokerage_id)
+
+
+@app.post("/brokerages/ensure-ai-alpaca", response_class=JSONResponse)
+def api_ensure_ai_alpaca(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Create (or find) an Alpaca brokerage for the AI engine using env vars. Returns brokerage_id."""
+    brokerage_id = action_ensure_ai_alpaca_brokerage(conn)
+    return {"brokerage_id": brokerage_id}
+
+
+@app.get("/brokerages/{brokerage_id}/portfolio-history", response_class=JSONResponse)
+def api_portfolio_history(
+    brokerage_id: str,
+    range: Optional[str] = "1M",
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Fetch portfolio equity history for a linked brokerage account.
+    range: 1D | 1W | 1M | 3M | YTD | 1Y | ALL
+    Returns timestamps (ms epoch), values, current_value, change_abs, change_pct.
+    """
+    return _run(action_get_portfolio_history, conn, brokerage_id, range)
+
+
+# ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
+#
+# Used by LiveTradingView so the frontend never has to learn the brokerage_id
+# and never reads from the in-container snapshot writer (which samples sparsely
+# at the strategy tick cadence). Always pulls from the broker's authoritative
+# history endpoint — Alpaca /v2/account/portfolio/history or RH Bonfire.
+
+@app.get("/instances/{instance_id}/portfolio-history", response_class=JSONResponse)
+def api_instance_portfolio_history(
+    instance_id: str,
+    range: Optional[str] = "1D",
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Look up the linked brokerage_id for the instance, then fetch broker-side
+    portfolio history (Alpaca/RH dispatch handled by action_get_portfolio_history)."""
+    try:
+        inst = action_get_instance(conn, instance_id)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Instance not found: {e}")
+    bid = (inst or {}).get("brokerage", {}).get("brokerage_id") or (inst or {}).get("brokerage_id")
+    # Some action_get_instance shapes nest the id under brokerage.id; try that too.
+    if not bid:
+        bid = (inst or {}).get("brokerage", {}).get("id")
+    if not bid:
+        raise HTTPException(status_code=400, detail="Instance has no brokerage linked")
+    return _run(action_get_portfolio_history, conn, bid, range)
+
+
+# ── Per-symbol historicals (Robinhood public) ─────────────────────────────────
+#
+# Hits Robinhood's unauthenticated /quotes/historicals/ batch endpoint. Used by
+# the live trading view to render per-position price charts that share the same
+# range toggle as the equity curve. Cached briefly per (range, symbol-csv) so
+# rapid repolls don't hammer Robinhood.
+
+_SYMBOL_HISTORICALS_CACHE: dict = {}
+_SYMBOL_HISTORICALS_TTL_SEC = 60.0  # cache for 60s — matches RH's data freshness
+
+# Range → (interval, span) per RH's documented values.
+# 1D uses 5-minute bars over a day; ALL falls back to weekly bars over 5 years.
+_RH_RANGE_MAP = {
+    "1D":  ("5minute",  "day"),
+    "1W":  ("10minute", "week"),
+    "1M":  ("hour",     "month"),
+    "3M":  ("day",      "3month"),
+    "YTD": ("day",      "year"),    # caller may filter to year-start
+    "1Y":  ("day",      "year"),
+    "ALL": ("week",     "5year"),
+}
+
+
+def fetch_symbol_historicals(symbols: str, range_str: str = "1D") -> dict:
+    """Fetch close-price history for one or more tickers from Robinhood's
+    public /quotes/historicals/ endpoint. Returned shape:
+    ``{range, results: {SYMBOL: [{ts, value}, ...], ...}, error?: str}``.
+
+    Cached for ``_SYMBOL_HISTORICALS_TTL_SEC`` seconds per (range, sorted-symbols)
+    so rapid repolls don't hammer RH. Used by both the HTTP endpoint and the
+    chatbot's get_price_history tool — single source of truth.
+    """
+    import time as _time
+    import requests as _req
+
+    rng = (range_str or "1D").strip().upper()
+    if rng not in _RH_RANGE_MAP:
+        raise ValueError(f"Invalid range: {rng}. Must be one of: {', '.join(_RH_RANGE_MAP.keys())}")
+    interval, span = _RH_RANGE_MAP[rng]
+    # RH rejects bounds=trading for spans > day. Use 'regular' for everything
+    # except 1D where extended-hours truncation is fine.
+    bounds = "trading" if span == "day" else "regular"
+
+    syms = [s.strip().upper().replace(".", "-") for s in (symbols or "").split(",") if s.strip()]
+    if not syms:
+        return {"range": rng, "results": {}}
+    if len(syms) > 75:
+        syms = syms[:75]  # RH batch cap
+
+    cache_key = (rng, ",".join(sorted(set(syms))))
+    now = _time.time()
+    cached = _SYMBOL_HISTORICALS_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _SYMBOL_HISTORICALS_TTL_SEC:
+        return {"range": rng, "results": cached[1]}
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    out: dict = {sym: [] for sym in syms}
+    try:
+        rsp = _req.get(
+            "https://api.robinhood.com/quotes/historicals/",
+            params={
+                "symbols": ",".join(syms),
+                "interval": interval,
+                "span": span,
+                "bounds": bounds,
+            },
+            headers=headers,
+            timeout=15,
+        )
+        if not rsp.ok:
+            return {"range": rng, "results": out, "error": f"RH HTTP {rsp.status_code}"}
+        data = rsp.json() or {}
+        for res in (data.get("results") or []):
+            sym = (res.get("symbol") or "").upper()
+            if not sym:
+                continue
+            points = []
+            for h in (res.get("historicals") or []):
+                ts = h.get("begins_at")
+                close = h.get("close_price")
+                if ts is None or close is None:
+                    continue
+                try:
+                    points.append({"ts": ts, "value": float(close)})
+                except (TypeError, ValueError):
+                    continue
+            # YTD: trim to start of current year (RH 'year' span returns trailing 1y).
+            if rng == "YTD" and points:
+                from datetime import datetime as _dt, timezone as _tz
+                jan1 = _dt(_dt.now(_tz.utc).year, 1, 1, tzinfo=_tz.utc).isoformat()
+                points = [p for p in points if p["ts"] >= jan1]
+            out[sym] = points
+    except Exception as e:
+        return {"range": rng, "results": out, "error": str(e)}
+
+    _SYMBOL_HISTORICALS_CACHE[cache_key] = (now, out)
+    return {"range": rng, "results": out}
+
+
+@app.get("/symbol-historicals", response_class=JSONResponse)
+def api_symbol_historicals(
+    symbols: str,
+    range: str = "1D",
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Fetch OHLC bar history for one or more symbols from Robinhood's public
+    /quotes/historicals/ endpoint. Returns close-price points keyed by symbol.
+
+    Query params:
+      symbols: CSV of tickers (max 75 per RH batch limit), e.g. "AAPL,MSFT,GOOG"
+      range:   1D | 1W | 1M | 3M | YTD | 1Y | ALL
+
+    Response: { range, results: { SYMBOL: [{ts, value}, ...], ... } }
+    """
+    try:
+        return fetch_symbol_historicals(symbols, range)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── LLM Output Logs ────────────────────────────────────────────────────────────
+
+_LLM_OUTPUT_LOG_DIR = os.path.join(os.environ.get("BACKTEST_LOG_DIR", "/app/backtest_logs"), "llm_outputs")
+
+
+class LLMOutputBody(BaseModel):
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    prompt_hash: Optional[str] = None
+    raw_output: str
+    logged_at: Optional[str] = None
+
+
+@app.post("/llm/outputs", response_class=JSONResponse)
+def api_llm_output_save(body: LLMOutputBody):
+    """Save a raw LLM output log. Unprotected — called internally by llm_utils."""
+    import uuid as _uuid
+    output_id = _uuid.uuid4().hex
+    os.makedirs(_LLM_OUTPUT_LOG_DIR, exist_ok=True)
+    path = os.path.join(_LLM_OUTPUT_LOG_DIR, f"{output_id}.txt")
+    lines = []
+    if body.logged_at:
+        lines.append(f"logged_at: {body.logged_at}")
+    if body.provider:
+        lines.append(f"provider: {body.provider}")
+    if body.model:
+        lines.append(f"model: {body.model}")
+    if body.prompt_hash:
+        lines.append(f"prompt_hash: {body.prompt_hash}")
+    lines.append("")
+    lines.append(body.raw_output)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return {"id": output_id}
+
+
+@app.get("/llm/outputs/{output_id}", response_class=JSONResponse)
+def api_llm_output_get(output_id: str):
+    """Retrieve a raw LLM output log by ID. Unprotected."""
+    import re as _re
+    if not _re.match(r"^[a-f0-9]{32}$", output_id):
+        raise HTTPException(status_code=400, detail="Invalid output ID")
+    path = os.path.join(_LLM_OUTPUT_LOG_DIR, f"{output_id}.txt")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="LLM output log not found")
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    # Parse header lines (key: value) and JSON body into structured response
+    result: dict = {"id": output_id}
+    lines = content.split("\n")
+    json_lines = []
+    in_body = False
+    for line in lines:
+        if in_body:
+            json_lines.append(line)
+        elif line.strip() == "":
+            in_body = True
+        elif ": " in line:
+            k, _, v = line.partition(": ")
+            result[k.strip()] = v.strip()
+    raw_json = "\n".join(json_lines).strip()
+    if raw_json:
+        try:
+            result["output"] = json.loads(raw_json)
+        except Exception:
+            result["output"] = raw_json
+    return result
+
+
+# Host/port from env (used when running this module; uvicorn CLI can override with --host/--port)
+API_HOST = os.environ.get("API_HOST", "0.0.0.0")
+API_PORT = int(os.environ.get("API_PORT", "8000"))
+# Full URL for other services (e.g. frontend, backtest engine) to call the API. Set in .env.
+API_URL = os.environ.get("API_URL", "").strip() or ("http://%s:%d" % (API_HOST if API_HOST != "0.0.0.0" else "localhost", API_PORT))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=API_HOST, port=API_PORT)
