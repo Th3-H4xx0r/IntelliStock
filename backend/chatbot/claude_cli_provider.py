@@ -332,7 +332,12 @@ _CC_RUNTIME_UID_ENV = (os.environ.get("CLAUDE_CLI_RUNTIME_UID") or "").strip()
 def _runtime_user_kwargs() -> Dict[str, Any]:
     """Popen kwargs that drop privileges to ``CLAUDE_CLI_RUNTIME_USER``
     (or its numeric UID via ``CLAUDE_CLI_RUNTIME_UID``). Returns ``{}``
-    when no drop is configured — the bare process UID is used."""
+    when no drop is configured — the bare process UID is used.
+
+    NOTE: in practice we prefer wrapping argv with ``runuser`` (see
+    ``_wrap_argv_for_runtime_user``) so the privilege drop is visible
+    in process listings / logs. This function is retained for
+    completeness; callers that wrap argv should NOT use both."""
     if sys.platform == "win32":
         # No POSIX user/group switching on Windows.
         return {}
@@ -349,6 +354,47 @@ def _runtime_user_kwargs() -> Dict[str, Any]:
     if target is None:
         return {}
     return {"user": target}
+
+
+def _wrap_argv_for_runtime_user(argv: List[str]) -> List[str]:
+    """Wrap ``argv`` with ``runuser`` (or ``su``) so the spawned process
+    actually runs as ``CLAUDE_CLI_RUNTIME_USER``. We use this in place
+    of Popen's ``user=`` kwarg because the latter has been observed to
+    silently no-op inside containers where libc capabilities are
+    restricted — the symptom is CC continuing to see ``uid=0`` and
+    refusing ``--dangerously-skip-permissions``.
+
+    Picks the first available wrapper:
+      1. ``runuser -u <user> --``  (util-linux, always available on
+         python:3.11-slim Debian-based images)
+      2. ``su -s /bin/sh -c "<argv>" <user>``  (fallback; requires
+         quoting the argv into a single shell command)
+
+    Returns the argv unchanged if no runtime user is configured or if
+    we're on Windows.
+    """
+    if sys.platform == "win32":
+        return argv
+    if not _CC_RUNTIME_USER:
+        return argv
+    import shutil
+    runuser_path = shutil.which("runuser")
+    if runuser_path:
+        # ``--`` terminates runuser's own option parsing so flags in
+        # argv (e.g. ``--strict-mcp-config``) are passed through.
+        return [runuser_path, "-u", _CC_RUNTIME_USER, "--", *argv]
+    # Fallback to su; quote argv into a single -c argument.
+    su_path = shutil.which("su")
+    if su_path:
+        quoted = " ".join(shlex.quote(a) for a in argv)
+        return [su_path, "-s", "/bin/sh", "-c", quoted, _CC_RUNTIME_USER]
+    # Neither available — return as-is and let Popen's user= take over.
+    _log(
+        "no runuser/su available; relying on Popen(user=) which may "
+        "no-op silently in some container configurations",
+        "yellow",
+    )
+    return argv
 
 
 def _drop_user_uid() -> Optional[int]:
@@ -1103,14 +1149,24 @@ class ClaudeCliSessionManager:
             extra_args=extra_args,
             mcp_config_path=sess.mcp_config_path,
         )
+        # Wrap argv with ``runuser -u claudeuser --`` so the privilege
+        # drop is explicit and visible — Popen(user=) was observed to
+        # silently no-op in some container capability configurations.
+        argv = _wrap_argv_for_runtime_user(argv)
         # Build the env for the child. We override HOME so CC reads the
         # chowned copy of ~/.claude that the runtime user can access, and
         # we keep PATH so claude / node / python still resolve.
         child_env = os.environ.copy()
         if sess.runtime_home:
             child_env["HOME"] = sess.runtime_home
+        # Diagnostic: log the actual argv head + runtime config so it's
+        # obvious in the api logs whether the wrap landed.
+        _log(
+            f"spawn argv[0:3]={argv[:3]} runtime_user={_CC_RUNTIME_USER!r} "
+            f"runtime_home={sess.runtime_home!r}",
+            "cyan",
+        )
         spawn_kwargs: Dict[str, Any] = dict(_platform_popen_kwargs())
-        spawn_kwargs.update(_runtime_user_kwargs())
         try:
             proc = subprocess.Popen(
                 argv,
