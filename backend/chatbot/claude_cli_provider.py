@@ -321,11 +321,37 @@ _MCP_FLAGS_TEMPLATE = [
 # (CC refuses --dangerously-skip-permissions when running as root, and
 # every other permission-mode either trips the same root check or
 # silently blocks MCP tool invocation). The Dockerfile creates
-# ``claudeuser`` (UID 1000) for this purpose. ``None`` disables the
-# drop — the bare Python process's existing UID is used — which is
-# the right default for non-Docker / dev environments where the
-# operator already runs as a non-root user.
-_CC_RUNTIME_USER = (os.environ.get("CLAUDE_CLI_RUNTIME_USER") or "").strip() or None
+# ``claudeuser`` (UID 1000) for this purpose and sets the env var via
+# ``ENV CLAUDE_CLI_RUNTIME_USER=claudeuser`` so the privilege drop is
+# active by default for all in-image installs.
+#
+# Fallback: if neither env var is set but we're running as root AND
+# ``claudeuser`` exists in /etc/passwd, auto-pick it. This catches
+# operators whose orchestrator strips ENV from the image (some
+# Dockploy / Coolify configurations do this).
+
+
+def _detect_runtime_user_default() -> Optional[str]:
+    if sys.platform == "win32":
+        return None
+    try:
+        if os.geteuid() != 0:
+            return None     # we're already non-root; no drop needed
+    except Exception:
+        return None
+    try:
+        import pwd
+        pwd.getpwnam("claudeuser")
+        return "claudeuser"
+    except Exception:
+        return None
+
+
+_CC_RUNTIME_USER = (
+    (os.environ.get("CLAUDE_CLI_RUNTIME_USER") or "").strip()
+    or _detect_runtime_user_default()
+    or None
+)
 _CC_RUNTIME_UID_ENV = (os.environ.get("CLAUDE_CLI_RUNTIME_UID") or "").strip()
 
 

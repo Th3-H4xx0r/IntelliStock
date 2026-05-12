@@ -25,13 +25,22 @@ RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
 # Non-root user that ``claude`` subprocess invocations run as. The CLI
 # hard-refuses ``--dangerously-skip-permissions`` (and any equivalent
 # permission-mode) when running as root, so the chatbot's claude
-# subprocesses drop privileges via Popen(user=...) at spawn time. The
+# subprocesses drop privileges via ``runuser`` at spawn time. The
 # Python servers themselves keep running as root (the rest of the
 # codebase assumes that). UID 1000 is the conventional first non-system
 # user on Debian-based images.
 RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
         useradd -m -u 1000 -s /bin/bash claudeuser 2>/dev/null || true; \
     fi
+
+# Bake the runtime-user env into the image so it doesn't depend on
+# compose ``${VAR:-default}`` substitution reaching the container —
+# Dockploy and some other orchestrators don't propagate compose-file
+# defaults the way ``docker compose up`` does, so the variable would
+# arrive as ``None`` and the privilege drop would silently no-op.
+# Compose / operator can still override it via the service ``environment``
+# block when needed.
+ENV CLAUDE_CLI_RUNTIME_USER=claudeuser
 
 # Install Python dependencies
 COPY requirements.txt .
