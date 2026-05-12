@@ -1499,13 +1499,14 @@ def api_get_model(model_id: str, conn=Depends(conn_dependency), current_user: di
 
 
 @app.post("/models", response_class=JSONResponse)
-def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Create a Model record.
 
-    Admin-gated: the Models table is global and a malicious model record
-    can be pivoted into RCE via ``cli_path`` (see security audit). Even
-    with that defense, write access on shared model config is not a
-    surface we want exposed to every authenticated user.
+    The Models table is shared across all users. The cli_path allowlist
+    and extra_args whitelist (see chatbot/claude_cli_provider.py) prevent
+    an authenticated user from pivoting model config into RCE or
+    re-enabling CC's filesystem/tool capabilities, so this endpoint is
+    open to any authenticated user.
     """
     try:
         return _run(
@@ -1528,8 +1529,9 @@ def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), curre
 
 
 @app.put("/models/{model_id}", response_class=JSONResponse)
-def api_edit_model(model_id: str, body: EditModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
-    """Edit a Model record. Admin-gated (same reasoning as create)."""
+def api_edit_model(model_id: str, body: EditModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Edit a Model record. Open to any authenticated user; same safety
+    reasoning as create (cli_path + extra_args allowlists)."""
     kwargs = {k: v for k, v in body.dict().items() if v is not None}
     try:
         return _run(action_edit_model, conn, model_id, **kwargs)
@@ -1549,14 +1551,15 @@ _TEST_CLI_MIN_INTERVAL_SEC = float(os.environ.get("CLAUDE_CLI_TEST_MIN_INTERVAL_
 async def api_test_claude_cli(
     model_id: str,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
     """Test the Claude Code CLI for a specific model: checks the binary is
     installed, the host is logged in, and the chosen model alias resolves.
     Returns {ok, version, logged_in, model_response, error, elapsed_ms}.
 
-    Admin-gated (write-side authority over the Models table) and rate-
-    limited per-user to deter quota burn / semaphore starvation.
+    Open to any authenticated user. Per-user rate-limited (default 5 s
+    between probes; override with ``CLAUDE_CLI_TEST_MIN_INTERVAL_SEC``)
+    to deter quota burn and global-semaphore starvation.
     """
     now_mono = time.monotonic()
     uid = str(current_user.get("id") or "?")
