@@ -273,14 +273,14 @@ class TestArgvBuilders:
         assert "--strict-mcp-config" in argv
         assert "--no-session-persistence" in argv
         assert "--disable-slash-commands" in argv
-        # acceptEdits — CC refuses both --dangerously-skip-permissions
-        # and --permission-mode bypassPermissions when running as root,
-        # which Docker containers commonly are. acceptEdits auto-grants
-        # edit-style tool calls (including MCP tools) without the root
-        # check.
-        assert "--permission-mode" in argv
-        assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+        # No --permission-mode flag — CC's default in -p mode plus
+        # --allowedTools mcp__* lets MCP calls through, where every
+        # named permission mode either trips the root check (bypass /
+        # dangerously-skip) or silently blocks MCP invocation (acceptEdits).
+        assert "--permission-mode" not in argv
         assert "--dangerously-skip-permissions" not in argv
+        assert "--allowedTools" in argv
+        assert argv[argv.index("--allowedTools") + 1] == "mcp__*"
 
     def test_structured_argv_has_json_schema(self):
         argv = _build_structured_argv(

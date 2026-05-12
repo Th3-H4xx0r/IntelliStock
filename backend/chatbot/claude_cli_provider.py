@@ -288,20 +288,19 @@ _SAFETY_FLAGS = [
 # disabled). The session populates ``--mcp-config`` with the per-session
 # path at spawn time.
 #
-# Permission mode notes (CC 2.1.x in Docker-as-root):
+# Permission-mode lab notes (CC 2.1.x running as root inside Docker):
 #
-#   * ``--dangerously-skip-permissions`` hard-refuses to run as root
-#     ("cannot be used with root/sudo privileges for security reasons").
-#   * ``--permission-mode bypassPermissions`` triggers the SAME root
-#     check internally — verified via stderr in production. Same
-#     refusal message.
-#   * ``--permission-mode acceptEdits`` does NOT trip the root check
-#     and auto-grants edit-style tool calls. CC categorises external
-#     MCP tools under the "edit" class for permission purposes, so
-#     ``mcp__intellistock__*`` calls are auto-granted in this mode.
-#     The JarvisClaw "acceptEdits silently blocked Bash mid-turn"
-#     complaint doesn't apply to us — we never expose Bash, only
-#     MCP tools.
+#   * ``--dangerously-skip-permissions`` — refused at startup, root.
+#   * ``--permission-mode bypassPermissions`` — same root refusal.
+#   * ``--permission-mode acceptEdits`` — starts cleanly, lists MCP
+#     tools, but silently BLOCKS the actual invocation (verified in
+#     production: tools/list HTTP'd through, tools/call never did).
+#     CC doesn't classify MCP tools as "edit" for permission purposes.
+#   * **No ``--permission-mode`` at all** — relies on CC's default
+#     behaviour in ``-p`` mode (which skips the workspace-trust
+#     dialog automatically). With ``--allowedTools mcp__*`` granting
+#     the namespace explicitly, MCP calls go through. This is the
+#     option we ship.
 #
 # Allow-list note:
 #   ``--allowedTools mcp__*`` (broad MCP glob) rather than
@@ -313,7 +312,6 @@ _MCP_FLAGS_TEMPLATE = [
     "--strict-mcp-config",
     "--no-session-persistence",
     "--disable-slash-commands",
-    "--permission-mode", "acceptEdits",
     "--allowedTools", "mcp__*",
 ]
 
