@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import sys
 import time
 import threading
 from collections import deque
@@ -962,6 +963,309 @@ def _try_raw_structured_json_once(
     return result
 
 
+def _call_claude_cli_plain(
+    *,
+    model: str,
+    prompt: str,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 0,
+) -> str:
+    """Plain-text claude-cli call. Returns the assistant's reply text, or
+    empty string on failure. Mirrors the existing call_llm_by_provider
+    contract (best-effort, never raises into the strategy)."""
+    if not model:
+        return ""
+    cfg = provider_config or {}
+    cli_path = (cfg.get("cli_path") or "claude") or "claude"
+    raw_extra = cfg.get("extra_args")
+    extra_args: list[str]
+    # Validate cli_path + extra_args BEFORE spawning. Both go through the
+    # same allowlist gates as the chatbot path so an authenticated user
+    # can't pivot the strategy config into RCE.
+    try:
+        from chatbot.claude_cli_provider import (
+            validate_extra_args, _resolve_cli_path, _classify_error_text,
+            ClaudeCliNotInstalledError, ClaudeCliError,
+        )
+    except Exception as e:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = f"claude_cli_provider import failed: {e}"
+        except Exception:
+            pass
+        return ""
+    if isinstance(raw_extra, str):
+        try:
+            extra_args = validate_extra_args(raw_extra)
+        except Exception as e:
+            try:
+                _LAST_PLAIN_LLM_CALL_ERROR.error = f"invalid extra_args: {e}"
+            except Exception:
+                pass
+            return ""
+    elif isinstance(raw_extra, (list, tuple)):
+        extra_args = [str(x) for x in raw_extra]
+    else:
+        extra_args = []
+    try:
+        resolved_cli = _resolve_cli_path(cli_path)
+    except (ClaudeCliNotInstalledError, ClaudeCliError) as e:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = str(e)
+        except Exception:
+            pass
+        return ""
+
+    import subprocess as _subprocess
+    timeout = _coerce_timeout_sec(timeout_sec)
+    last_err = ""
+    for attempt in range(max(1, int(retries or 0) + 1)):
+        argv = [
+            resolved_cli, "-p",
+            "--output-format", "json",
+            "--model", model,
+            "--tools", "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+            *extra_args,
+        ]
+        try:
+            kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = getattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            proc = _subprocess.run(
+                argv,
+                input=prompt or "",
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                **kwargs,
+            )
+        except FileNotFoundError:
+            last_err = (
+                f"claude binary not found at {resolved_cli!r}; "
+                "install with `npm i -g @anthropic-ai/claude-code`."
+            )
+            break
+        except _subprocess.TimeoutExpired:
+            last_err = f"claude -p timed out after {timeout}s"
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        stdout = (proc.stdout or "").strip()
+        if not stdout:
+            last_err = (proc.stderr or "").strip()[:300] or "no stdout from claude"
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        try:
+            envelope = json.loads(stdout)
+        except Exception:
+            last_err = f"claude returned non-JSON: {stdout[:200]!r}"
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        if envelope.get("is_error"):
+            # Classify so operators get an actionable error (e.g.
+            # "log in on the server") instead of a generic empty string.
+            classified = _classify_error_text(str(envelope.get("result") or "claude error"))
+            last_err = str(classified)
+            # Don't retry on hard failures.
+            break
+        result_text = envelope.get("result") or ""
+        # Persist to prompt cache if enabled.
+        try:
+            _effort_key = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+            _store_prompt_cache(prompt, model, _effort_key, str(result_text))
+        except Exception:
+            pass
+        return str(result_text)
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = last_err or "claude-cli plain call failed"
+    except Exception:
+        pass
+    return ""
+
+
+def _call_claude_cli_structured_from_strategy(
+    *,
+    model: str,
+    prompt: str,
+    output_type: Any,
+    system_prompt: str | Sequence[str] | None = None,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 1,
+    use_prompt_cache: bool = False,
+) -> Any:
+    """Adapter that lets the strategies' ``call_structured_llm_by_provider``
+    contract run through the locally-installed ``claude`` CLI. Bypasses
+    PydanticAI entirely — CC enforces structure via its native
+    ``--json-schema`` flag and we re-validate with Pydantic on receipt.
+    """
+    if not model or output_type is None:
+        return None
+
+    # Normalise the system prompt to a single string (call_structured_llm_by_provider
+    # historically accepts both a string and a sequence-of-strings shape).
+    if isinstance(system_prompt, (list, tuple)):
+        sys_str = "\n\n".join([s for s in system_prompt if s])
+    else:
+        sys_str = system_prompt or ""
+
+    cfg = provider_config or {}
+    cli_path = (cfg.get("cli_path") or "claude") or "claude"
+    raw_extra = cfg.get("extra_args")
+    if isinstance(raw_extra, str):
+        try:
+            from chatbot.claude_cli_provider import validate_extra_args
+            extra_args = validate_extra_args(raw_extra)
+        except Exception as e:
+            _LAST_STRUCTURED_LLM_CALL.data = {
+                "provider": "claude-cli",
+                "requested_model": model,
+                "model_candidates": [model],
+                "attempted_models": [model],
+                "provider_meta": {"cli_path": cli_path},
+                "effective_model": "",
+                "fallback_used": False,
+                "raw_json_fallback_used": False,
+                "ok": False,
+                "error": f"invalid extra_args: {e}",
+                "usage": {},
+                "suppressed": False,
+            }
+            return None
+    elif isinstance(raw_extra, (list, tuple)):
+        extra_args = [str(x) for x in raw_extra]
+    else:
+        extra_args = []
+
+    # ── Scoped prompt-cache lookup (mirror the main function's logic) ──
+    cache_effort = ""
+    if use_prompt_cache:
+        cache_effort = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+        try:
+            _cached_raw = _check_prompt_cache(prompt, model, cache_effort, force_cache=True)
+        except Exception:
+            _cached_raw = None
+        if _cached_raw:
+            try:
+                _cached_obj = _validate_structured_output_from_raw_text(output_type, _cached_raw)
+            except Exception:
+                _cached_obj = None
+            if _cached_obj is not None:
+                _LAST_STRUCTURED_LLM_CALL.data = {
+                    "provider": "claude-cli",
+                    "requested_model": model,
+                    "model_candidates": [model],
+                    "attempted_models": [],
+                    "provider_meta": {"cli_path": cli_path},
+                    "effective_model": model,
+                    "fallback_used": False,
+                    "raw_json_fallback_used": False,
+                    "ok": True,
+                    "error": "",
+                    "usage": {},
+                    "suppressed": False,
+                    "prompt_cache_hit": True,
+                }
+                return _cached_obj
+
+    from chatbot.claude_cli_provider import (
+        call_claude_cli_structured,
+        ClaudeCliError,
+        ClaudeCliRateLimitError,
+        ClaudeCliNotLoggedInError,
+        ClaudeCliValidationError,
+    )
+
+    last_err: Exception | None = None
+    _attempted: list[str] = []
+    # Honour the same retry contract as the rest of the function. Each retry
+    # gets a backoff to avoid hammering CC on a transient failure.
+    for attempt in range(max(1, int(retries or 1) + 1)):
+        _attempted.append(model)
+        try:
+            result = call_claude_cli_structured(
+                model=model,
+                system_prompt=sys_str,
+                user_prompt=prompt or "",
+                output_schema=output_type,
+                cli_path=cli_path,
+                extra_args=extra_args,
+                timeout_sec=timeout_sec,
+            )
+            _LAST_STRUCTURED_LLM_CALL.data = {
+                "provider": "claude-cli",
+                "requested_model": model,
+                "model_candidates": [model],
+                "attempted_models": _attempted,
+                "provider_meta": {"cli_path": cli_path},
+                "effective_model": model,
+                "fallback_used": False,
+                "raw_json_fallback_used": False,
+                "ok": True,
+                "error": "",
+                "usage": {},
+                "suppressed": False,
+            }
+            # Store in prompt cache if requested.
+            if use_prompt_cache and result is not None:
+                try:
+                    if hasattr(result, "model_dump_json"):
+                        raw_json = result.model_dump_json()
+                    elif hasattr(result, "dict"):
+                        raw_json = json.dumps(result.dict())
+                    else:
+                        raw_json = json.dumps(result)
+                    _store_prompt_cache(prompt, model, cache_effort, raw_json, force_cache=True)
+                except Exception:
+                    pass
+            return result
+        except ClaudeCliNotLoggedInError as e:
+            # Terminal — retrying won't help.
+            last_err = e
+            break
+        except (ClaudeCliValidationError, ClaudeCliRateLimitError) as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt, base=2.0, cap=60.0))
+                continue
+            break
+        except ClaudeCliError as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        except Exception as e:
+            last_err = e
+            break
+
+    _LAST_STRUCTURED_LLM_CALL.data = {
+        "provider": "claude-cli",
+        "requested_model": model,
+        "model_candidates": [model],
+        "attempted_models": _attempted,
+        "provider_meta": {"cli_path": cli_path},
+        "effective_model": "",
+        "fallback_used": False,
+        "raw_json_fallback_used": False,
+        "ok": False,
+        "error": str(last_err or "claude-cli structured call failed"),
+        "usage": {},
+        "suppressed": False,
+    }
+    return None
+
+
 def call_structured_llm_by_provider(
     provider: str,
     api_key: str,
@@ -993,6 +1297,20 @@ def call_structured_llm_by_provider(
     and output_type schema are intentionally excluded — they are stable for
     a given role/model combination in the analyst-panel use case).
     """
+    # ── claude-cli: bypass PydanticAI entirely (CC has no PydanticAI backend)
+    # and use the locally-installed `claude` binary with --json-schema. No
+    # api_key is required for this provider.
+    if (provider or "").strip().lower() == "claude-cli":
+        return _call_claude_cli_structured_from_strategy(
+            model=model,
+            prompt=prompt,
+            output_type=output_type,
+            system_prompt=system_prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            use_prompt_cache=use_prompt_cache,
+        )
     if not _PYDANTIC_AI_AVAILABLE or not api_key or not model or output_type is None:
         return None
     # ── Scoped prompt-cache lookup ──
@@ -2216,13 +2534,22 @@ def call_llm_by_provider(
     provider_config: dict[str, Any] | None = None,
 ) -> str:
     """
-    Call LLM by provider. Supports 'gemini', 'deepseek', 'openai', and 'azure'.
+    Call LLM by provider. Supports 'gemini', 'deepseek', 'openai', 'azure',
+    and 'claude-cli' (uses the locally-installed ``claude`` binary).
     Returns response text or empty string.
 
     timeout_sec: Optional override for LLM_REQUEST_TIMEOUT (seconds).
     retries: Number of retries on retriable failures (e.g. 503/429/timeouts).
     response_mime_type: Gemini-only response MIME type (e.g. application/json).
     """
+    if (provider or "").strip().lower() == "claude-cli":
+        return _call_claude_cli_plain(
+            model=model,
+            prompt=prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+        )
     if not api_key or not model:
         return ""
     # ── Prompt cache check ──

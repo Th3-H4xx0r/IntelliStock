@@ -35,9 +35,22 @@ const formDraft = ref({
   azureEndpoint: '',
   azureApiVersion: '2024-10-21',
   reasoningEffort: '',
+  cliPath: '',
+  extraArgs: '',
 })
 
+const testCliStates = ref({})
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+function _normalizeError(data, status) {
+  const d = data?.detail
+  if (Array.isArray(d)) return d.map(x => (x && (x.msg || x.message)) || JSON.stringify(x)).join('; ')
+  if (typeof d === 'string') return d
+  if (d && typeof d === 'object') return d.msg || d.message || JSON.stringify(d)
+  if (data?.error) return data.error
+  return `HTTP ${status}`
+}
+
 function authHeaders() {
   const token = getToken()
   return token
@@ -80,6 +93,8 @@ function openCreateModal() {
     azureEndpoint: '',
     azureApiVersion: '2024-10-21',
     reasoningEffort: '',
+    cliPath: '',
+    extraArgs: '',
   }
   submitting.value = false
   submitMsg.value = ''
@@ -100,6 +115,8 @@ function openEditModal(m) {
     azureEndpoint: m.azure_openai_endpoint || '',
     azureApiVersion: m.azure_openai_api_version || '2024-10-21',
     reasoningEffort: m.reasoning_effort || '',
+    cliPath: m.cli_path || '',
+    extraArgs: m.extra_args || '',
   }
   submitting.value = false
   submitMsg.value = ''
@@ -121,12 +138,14 @@ async function submitModel() {
   if (!d.model.trim()) { submitMsg.value = 'Model is required'; submitOk.value = false; return }
 
   submitting.value = true
-  submitMsg.value = 'Testing LLM configuration...'
   submitOk.value = false
+  const isCli = d.provider === 'claude-cli'
+  submitMsg.value = isCli ? (editMode.value ? 'Updating model...' : 'Saving model...') : 'Testing LLM configuration...'
 
-  // Test the LLM config first (skip test if editing without changing key)
+  // Test the LLM config first. Skip for claude-cli (no key), and skip on edit when
+  // no api_key is in the draft (user didn't intend to re-test creds they didn't change).
   const hasKey = !!d.apiKey.trim()
-  if (!editMode.value || hasKey) {
+  if (!isCli && hasKey) {
     try {
       const testPayload = buildStrategyLlmTestPayload(d)
       const testRes = await fetch(`${API_BASE}/llm/test`, {
@@ -135,7 +154,7 @@ async function submitModel() {
         body: JSON.stringify(testPayload),
       })
       const testBody = await testRes.json().catch(() => ({}))
-      if (!testRes.ok) throw new Error(testBody.detail || `HTTP ${testRes.status}`)
+      if (!testRes.ok) throw new Error(_normalizeError(testBody, testRes.status))
     } catch (e) {
       submitOk.value = false
       submitMsg.value = `LLM test failed: ${e.message}`
@@ -151,15 +170,23 @@ async function submitModel() {
       name: d.name.trim(),
       provider: d.provider,
       model: d.model.trim(),
-      openai_base_url: d.openaiBaseUrl.trim(),
-      nvidia_base_url: d.nvidiaBaseUrl.trim(),
-      azure_openai_endpoint: d.azureEndpoint.trim(),
-      azure_openai_api_version: d.azureApiVersion.trim() || '2024-10-21',
-      reasoning_effort: d.reasoningEffort.trim(),
     }
-    // Only include api_key if it was provided (don't overwrite with empty on edit)
-    if (d.apiKey.trim()) {
-      payload.api_key = d.apiKey.trim()
+    if (isCli) {
+      payload.cli_path = d.cliPath.trim() || undefined
+      payload.extra_args = d.extraArgs.trim() || undefined
+    } else {
+      payload.openai_base_url = d.openaiBaseUrl.trim() || undefined
+      payload.nvidia_base_url = d.nvidiaBaseUrl.trim() || undefined
+      payload.azure_openai_endpoint = d.azureEndpoint.trim() || undefined
+      payload.azure_openai_api_version = d.azureApiVersion.trim() || undefined
+      payload.reasoning_effort = (d.reasoningEffort || '').trim() || undefined
+      // Clear any leftover CLI fields when switching provider away from claude-cli
+      payload.cli_path = undefined
+      payload.extra_args = undefined
+      // Only include api_key if it was provided (don't overwrite with empty on edit)
+      if (d.apiKey.trim()) {
+        payload.api_key = d.apiKey.trim()
+      }
     }
 
     const url = editMode.value ? `${API_BASE}/models/${editId.value}` : `${API_BASE}/models`
@@ -170,7 +197,7 @@ async function submitModel() {
       body: JSON.stringify(payload),
     })
     const body = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`)
+    if (!res.ok) throw new Error(_normalizeError(body, res.status))
 
     submitOk.value = true
     submitMsg.value = editMode.value ? 'Model updated.' : 'Model saved.'
@@ -181,6 +208,48 @@ async function submitModel() {
     submitOk.value = false
     submitMsg.value = e.message || 'Failed to save model.'
     submitting.value = false
+  }
+}
+
+async function testCliConnection(id) {
+  testCliStates.value = { ...testCliStates.value, [id]: { loading: true, ok: null, message: 'Testing...' } }
+  try {
+    const res = await fetch(`${API_BASE}/models/${id}/test-cli`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.status === 404) {
+      testCliStates.value = {
+        ...testCliStates.value,
+        [id]: { loading: false, ok: false, message: 'Model no longer exists. Refreshed.' },
+      }
+      await fetchModels()
+      return
+    }
+    if (!res.ok) throw new Error(_normalizeError(data, res.status))
+    if (data.ok) {
+      const loggedIn = data.logged_in ? 'logged in' : 'not logged in'
+      const responseSegment = data.model_response ? `, response: ${data.model_response}` : ''
+      testCliStates.value = {
+        ...testCliStates.value,
+        [id]: {
+          loading: false,
+          ok: true,
+          message: `✓ v${data.version || '?'}, ${loggedIn}${responseSegment}`,
+        },
+      }
+    } else {
+      testCliStates.value = {
+        ...testCliStates.value,
+        [id]: { loading: false, ok: false, message: data.error || 'Unknown error' },
+      }
+    }
+  } catch (e) {
+    testCliStates.value = {
+      ...testCliStates.value,
+      [id]: { loading: false, ok: false, message: e.message || 'Test failed' },
+    }
   }
 }
 
@@ -259,10 +328,24 @@ onMounted(fetchModels)
               <td class="px-5 py-3.5 font-medium text-slate-200">{{ m.name }}</td>
               <td class="px-5 py-3.5 text-slate-400">{{ getLlmProviderLabel(m.provider) }}</td>
               <td class="px-5 py-3.5 text-slate-400 font-mono text-xs">{{ m.model }}</td>
-              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : 'Default' }}</td>
-              <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">{{ m.api_key || '—' }}</td>
+              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.provider === 'claude-cli' ? '—' : (m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : 'Default') }}</td>
+              <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">
+                <template v-if="m.provider === 'claude-cli'">{{ m.cli_path || 'claude' }}</template>
+                <template v-else>{{ m.api_key || '—' }}</template>
+              </td>
               <td class="px-5 py-3.5 text-slate-500 text-xs">{{ fmtDate(m.created_at) }}</td>
-              <td class="px-5 py-3.5 text-right">
+              <td class="px-5 py-3.5 text-right whitespace-nowrap">
+                <button
+                  v-if="m.provider === 'claude-cli'"
+                  @click="testCliConnection(m.id)"
+                  :disabled="testCliStates[m.id]?.loading"
+                  class="text-slate-500 hover:text-primary transition-colors mr-2 disabled:opacity-40"
+                  title="Test connection"
+                >
+                  <span class="material-symbols-outlined text-base" :class="{ 'animate-spin': testCliStates[m.id]?.loading }">
+                    {{ testCliStates[m.id]?.loading ? 'progress_activity' : 'cable' }}
+                  </span>
+                </button>
                 <button
                   @click="openEditModal(m)"
                   class="text-slate-500 hover:text-primary transition-colors mr-2"
@@ -277,6 +360,17 @@ onMounted(fetchModels)
                 >
                   <span class="material-symbols-outlined text-base">delete</span>
                 </button>
+                <Transition name="fade">
+                  <div
+                    v-if="testCliStates[m.id]?.message && !testCliStates[m.id]?.loading"
+                    class="mt-2 inline-block max-w-xs text-left rounded-md px-2 py-1.5 text-[11px] leading-relaxed border"
+                    :class="testCliStates[m.id]?.ok
+                      ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
+                      : 'border-red-500/20 bg-red-500/10 text-red-300'"
+                  >
+                    {{ testCliStates[m.id].message }}
+                  </div>
+                </Transition>
               </td>
             </tr>
           </tbody>
@@ -352,7 +446,12 @@ onMounted(fetchModels)
             <button @click="submitModel"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
-              {{ submitting ? 'Testing...' : (editMode ? 'Test & Update' : 'Test & Save') }}
+              <template v-if="submitting">
+                {{ formDraft.provider === 'claude-cli' ? (editMode ? 'Updating...' : 'Saving...') : 'Testing...' }}
+              </template>
+              <template v-else>
+                {{ editMode ? 'Test & Update' : 'Test & Save' }}
+              </template>
             </button>
           </div>
         </div>

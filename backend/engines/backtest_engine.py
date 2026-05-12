@@ -670,6 +670,19 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
     log_volume_name = os.environ.get('BACKTEST_LOG_VOLUME', 'backtest_logs')
     container_volumes = {log_volume_name: {'bind': log_dir, 'mode': 'rw'}}
 
+    # Share the host's claude login into the spawned broker container so
+    # strategies (graph_nexus, earnings, ml_news, …) that select a
+    # claude-cli model can hit the operator's Pro/Max subscription. The
+    # backtest-engine service itself receives this path via the
+    # CLAUDE_HOST_HOME env (see docker-compose.yml); if it's unset, skip
+    # the mount and let any claude-cli strategy call surface a clear
+    # "Not logged in" error.
+    claude_host_home = (os.environ.get('CLAUDE_HOST_HOME') or '').strip()
+    if claude_host_home:
+        # Read-only mount: CC only needs to read the operator's OAuth
+        # state, never to mutate it during a backtest.
+        container_volumes[claude_host_home] = {'bind': '/root/.claude', 'mode': 'ro'}
+
     try:
         client = _get_docker_client()
         if not client:

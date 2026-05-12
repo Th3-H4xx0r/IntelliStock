@@ -29,6 +29,11 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        # Build the claude CLI into the image by default. Set to 0 to skip
+        # (smaller image; only relevant if you'll never use the "claude-cli"
+        # LLM provider).
+        - INSTALL_CLAUDE_CLI=${INSTALL_CLAUDE_CLI:-1}
     image: intellistock-backend
     container_name: intellistock-backend
     command: ["python", "server.py"]
@@ -41,6 +46,12 @@ services:
       - backtest_logs:/app/backtest_logs
       - nexus_graph_logs:/app/nexus_graph_logs
       - live_trading_logs:/app/live_trading_logs
+      # Mount the host's ~/.claude so the in-container claude CLI shares
+      # the operator's login. Override CLAUDE_HOST_HOME in .env if your
+      # auth state lives elsewhere. If the path doesn't exist on the host
+      # Docker creates an empty dir; claude will report "Not logged in"
+      # via the /models/{id}/test-cli endpoint until you log in on the host.
+      - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
     restart: unless-stopped
     depends_on:
       - rethinkdb
@@ -77,6 +88,10 @@ services:
       - USASPENDING_DEGRADED_BREAK_EVERY=${USASPENDING_DEGRADED_BREAK_EVERY:-1000}
       - USASPENDING_DEGRADED_BREAK_SECONDS=${USASPENDING_DEGRADED_BREAK_SECONDS:-15}
       - USASPENDING_DEGRADED_MODE_SECONDS=${USASPENDING_DEGRADED_MODE_SECONDS:-600}
+      # HOST-side path to ~/.claude — forwarded into spawned containers
+      # (instance brokers, AI agent, daily digest, discover engine, graph
+      # nexus). See server.py::_claude_home_mount.
+      - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
 
   api:
     image: intellistock-backend
@@ -89,6 +104,9 @@ services:
       - backtest_logs:/app/backtest_logs
       - nexus_graph_logs:/app/nexus_graph_logs
       - live_trading_logs:/app/live_trading_logs
+      # Share the host's claude login (used by the chatbot when a user
+      # picks a "claude-cli" model). See backend service notes above.
+      - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
     env_file:
       - .env
     environment:
@@ -129,6 +147,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - backtest_logs:/app/backtest_logs
+      # Share the host's claude login so strategies (graph_nexus, earnings,
+      # ml_news, ai_trading_decision) that select a claude-cli model can
+      # reach the operator's Pro/Max subscription. See backend notes above.
+      - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
     # R19 (2026-04-25): backtest-engine spawns ephemeral broker containers and
     # must forward INTELLISTOCK_CRED_KEY into them so the broker can decrypt
     # Fernet-encrypted BrokerageAccounts rows. Without env_file the engine's
@@ -152,6 +174,10 @@ services:
       # service env separately from the project .env file).
       - INTELLISTOCK_CRED_KEY=${INTELLISTOCK_CRED_KEY:-}
       - ALLOW_LEGACY_ENV_CREDS=${ALLOW_LEGACY_ENV_CREDS:-}
+      # HOST-side path to ~/.claude — forwarded into spawned ephemeral
+      # broker containers (see backtest_engine.py) so claude-cli strategy
+      # calls can reach the operator's logged-in subscription.
+      - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
 
   # AI backtesting agent is NOT started here. The backend (server.py) starts and stops it via the Docker API
   # when AgentControl.running is set to true/false (e.g. via API or CLI "agent start" / "agent stop").

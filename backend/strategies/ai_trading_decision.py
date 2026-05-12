@@ -35,7 +35,7 @@ def _call_llm(
     provider_config: dict | None = None,
 ) -> str:
     """Call LLM. Returns response text or empty string."""
-    if not api_key:
+    if not api_key and (provider or "").strip().lower() != "claude-cli":
         return ""
     try:
         from llm_utils import call_llm_by_provider
@@ -128,7 +128,7 @@ class AiTradingDecision:
         _log(f"get_final_decision: symbol={symbol} current_decision={current_decision} ({action}) strategies={n_strategies} price_bars={n_bars}", "white")
 
         provider = ((config.get("llm_provider") or "").strip() or os.environ.get("AI_TRADING_DECISION_PROVIDER", "gemini").strip()).lower()
-        if provider not in ("gemini", "deepseek", "openai", "azure"):
+        if provider not in ("gemini", "deepseek", "openai", "azure", "claude-cli"):
             provider = "gemini"
         api_key = (
             (config.get("azure_openai_api_key") or "").strip()
@@ -142,6 +142,8 @@ class AiTradingDecision:
                 api_key = os.environ.get("OPENAI_API_KEY", "")
             elif provider == "azure":
                 api_key = os.environ.get("AZURE_OPENAI_API_KEY", "")
+            elif provider == "claude-cli":
+                api_key = ""  # claude-cli authenticates via the host's ~/.claude login
             else:
                 api_key = os.environ.get("GEMINI_API_KEY", "")
         model = (config.get("llm_model") or "").strip() or os.environ.get("AI_TRADING_DECISION_MODEL", "")
@@ -152,9 +154,11 @@ class AiTradingDecision:
                 model = "gpt-4.1-mini"
             elif provider == "azure":
                 model = (os.environ.get("AZURE_OPENAI_DEPLOYMENT") or os.environ.get("AZURE_OPENAI_MODEL") or "gpt-4.1-mini").strip()
+            elif provider == "claude-cli":
+                model = (os.environ.get("AI_TRADING_DECISION_MODEL") or "claude-haiku-4-5").strip() or "claude-haiku-4-5"
             else:
                 model = "gemini-2.0-flash-exp"
-        if not api_key:
+        if provider != "claude-cli" and not api_key:
             _log("No LLM API key; skipping final decision override (keeping current decision).", "yellow")
             return None
         provider_config = {}
@@ -179,6 +183,12 @@ class AiTradingDecision:
             )
             if base_url:
                 provider_config = {"base_url": base_url}
+        elif provider == "claude-cli":
+            cli_path = (config.get("cli_path") or "claude").strip() or "claude"
+            extra_args = config.get("extra_args") or ""
+            provider_config = {"cli_path": cli_path}
+            if extra_args:
+                provider_config["extra_args"] = extra_args
         _log(f"LLM config: provider={provider} model={model}", "white")
         summary_lines = []
         for s in (strategy_summary or []):

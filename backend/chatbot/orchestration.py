@@ -94,6 +94,29 @@ def _resolve_model(conn, model_id: Optional[str]) -> Dict[str, Any]:
     doc = _fetch_model_doc(conn, model_id)
     if not doc:
         raise ValueError(f"Model {model_id} not found. Open the chatbot settings to pick another.")
+    provider = (doc.get("provider") or "gemini").strip().lower()
+    if provider == "claude-cli":
+        # claude-cli uses the locally-installed `claude` binary; there's no
+        # API key to resolve, just a cli_path + optional extra_args.
+        from chatbot.claude_cli_provider import validate_extra_args
+        try:
+            extra_args = validate_extra_args(doc.get("extra_args") or "")
+        except ValueError as e:
+            raise ValueError(
+                f"Model has invalid extra_args: {e}. Edit it on the Models page."
+            ) from e
+        return {
+            "provider": "claude-cli",
+            "model": doc.get("model") or "",
+            "model_name": doc.get("name") or "",
+            "api_key": "",  # not used
+            "cli_path": (doc.get("cli_path") or "claude").strip() or "claude",
+            "extra_args": extra_args,
+            "base_url": None,
+            "azure_endpoint": None,
+            "azure_api_version": None,
+            "reasoning_effort": doc.get("reasoning_effort"),
+        }
     api_key = doc.get("api_key") or ""
     if not api_key:
         # Fallback to env vars via resolver pattern; we keep this simple here
@@ -103,7 +126,7 @@ def _resolve_model(conn, model_id: Optional[str]) -> Dict[str, Any]:
     if not api_key:
         raise ValueError("This model has no API key configured. Edit it on the Models page.")
     return {
-        "provider": (doc.get("provider") or "gemini").strip().lower(),
+        "provider": provider,
         "model": doc.get("model") or "",
         "model_name": doc.get("name") or "",
         "api_key": api_key,
@@ -264,7 +287,30 @@ def _llm_messages_for_call(history: List[Dict[str, Any]], system: str) -> List[D
     return out
 
 
-def _call_llm(model_cfg: Dict[str, Any], history: List[Dict[str, Any]], system: str, with_tools: bool = True) -> Dict[str, Any]:
+def _call_llm(
+    model_cfg: Dict[str, Any],
+    history: List[Dict[str, Any]],
+    system: str,
+    with_tools: bool = True,
+    *,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    provider = (model_cfg.get("provider") or "").strip().lower()
+    if provider == "claude-cli":
+        # claude-cli uses a persistent subprocess per conversation. The
+        # CLI itself holds history, and we currently run it in pure-text
+        # mode (no tools) — so we always pass with_tools=False here even
+        # if the caller asked for tools.
+        from chatbot.claude_cli_provider import call_claude_cli_chat
+        return call_claude_cli_chat(
+            conversation_id=conversation_id or "",
+            messages=_llm_messages_for_call(history, system),
+            system_prompt=system,
+            model=model_cfg["model"],
+            cli_path=model_cfg.get("cli_path") or "claude",
+            extra_args=model_cfg.get("extra_args") or [],
+            timeout_sec=LLM_TIMEOUT_SEC,
+        )
     return call_chat_with_tools(
         provider=model_cfg["provider"],
         api_key=model_cfg["api_key"],
@@ -292,12 +338,18 @@ def _run_loop(
     model_cfg: Dict[str, Any],
     system: str,
     auto_confirm_safe: bool,
+    *,
+    conv_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Drive the LLM↔tool loop. Mutates ``history`` and ``appended`` in place
     and returns ``appended``. Used by both run_turn and resume-after-tool."""
+    # The claude-cli provider needs the conversation_id to route turns to
+    # the right persistent subprocess. Fall back to the doc id if the
+    # caller didn't pass it explicitly.
+    conv_id_eff = conv_id or convo.get("id") or ""
     for _ in range(MAX_TOOL_ROUNDS):
         try:
-            result = _call_llm(model_cfg, history, system, with_tools=True)
+            result = _call_llm(model_cfg, history, system, with_tools=True, conversation_id=conv_id_eff)
         except Exception as e:
             _log.warning("chatbot LLM call failed: %s", e, exc_info=False)
             err_msg = conv_store.new_message(
@@ -424,7 +476,7 @@ def run_turn(
     history = list(convo.get("messages") or []) + [user_msg]
     auto_confirm_safe = bool(((convo.get("settings") or {}).get("auto_confirm_safe_tools", True)))
 
-    _run_loop(conn, user, convo, history, appended, model_cfg, system, auto_confirm_safe)
+    _run_loop(conn, user, convo, history, appended, model_cfg, system, auto_confirm_safe, conv_id=conv_id)
 
     conv_store.append_messages(conn, user_id, conv_id, appended)
     # Auto-title brand-new conversations.
@@ -542,7 +594,7 @@ def _resume_after_tool_results(
     auto_confirm_safe = bool(((convo.get("settings") or {}).get("auto_confirm_safe_tools", True)))
 
     new_appends = list(appended_so_far)
-    _run_loop(conn, user, convo, history, new_appends, model_cfg, system, auto_confirm_safe)
+    _run_loop(conn, user, convo, history, new_appends, model_cfg, system, auto_confirm_safe, conv_id=conv_id)
     # Persist the full new_appends — confirm_pending_tool only persisted the
     # pending→complete promotion via replace_message, so the tool result
     # message it passed in `appended_so_far` is NOT yet in the DB. Saving

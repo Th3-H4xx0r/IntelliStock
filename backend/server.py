@@ -20,6 +20,7 @@ import os
 import threading
 import logging
 from datetime import datetime
+from typing import Dict
 from rethinkdb import RethinkDB
 import socketio
 from waitress import serve
@@ -199,6 +200,72 @@ def _detect_container_network(client):
         return None
 
 
+def _claude_home_mount():
+    """Return the host->container claude-auth bind-mount as a dict suitable
+    for the Docker SDK, or ``None`` if the operator hasn't configured a
+    ``CLAUDE_HOST_HOME`` path.
+
+    Spawned containers (live trading instances, AI backtesting agent,
+    daily digest, graph nexus) reuse the parent service's claude login
+    by bind-mounting the same host directory at ``/root/.claude``. With
+    no env var set, we skip the mount — claude-cli calls in the child
+    will surface a clean "Not logged in" error instead of failing
+    obscurely on a missing volume.
+
+    Mounted **read-only** so a compromised CC subprocess can't tamper
+    with the host's auth state. CC only reads ``.credentials.json`` and
+    ``settings.json`` from this dir; it doesn't write back during the
+    short-lived calls we make.
+    """
+    host_path = (os.environ.get('CLAUDE_HOST_HOME') or '').strip()
+    if not host_path:
+        return None
+    return {host_path: {'bind': '/root/.claude', 'mode': 'ro'}}
+
+
+def _augment_volumes_with_claude(volumes):
+    """Append the claude-auth mount to a ``volumes`` argument.
+
+    The Docker SDK accepts either a dict shape
+    ``{host_path: {bind, mode}}`` or a list of ``"name:/path"`` /
+    ``"host:/container"`` strings. The list-with-mode form
+    (``"host:/container:rw"``) is the Docker *CLI* syntax and is
+    inconsistently supported by the SDK across versions. To be safe we
+    always emit dict shape when the claude mount is added: an input
+    list-of-strings is converted to a dict in that case, dict input is
+    extended in place.
+
+    Returns a NEW container suitable for the SDK's ``volumes=`` arg.
+    Read-only is fine for claude's auth state (the CLI only reads
+    ``.credentials.json`` / ``settings.json``).
+    """
+    mount = _claude_home_mount()
+    if not mount:
+        return volumes
+    host_path, spec = next(iter(mount.items()))
+    # Convert any input shape to a dict.
+    out: Dict[str, Dict[str, str]] = {}
+    if isinstance(volumes, dict):
+        out = dict(volumes)
+    elif isinstance(volumes, list):
+        for entry in volumes:
+            if not isinstance(entry, str):
+                continue
+            parts = entry.split(":")
+            if len(parts) == 2:
+                host, bind = parts
+                out[host] = {"bind": bind, "mode": "rw"}
+            elif len(parts) == 3:
+                host, bind, mode = parts
+                out[host] = {"bind": bind, "mode": mode}
+            else:
+                # Single-token volume name — leave it for the SDK to
+                # interpret (this branch shouldn't be hit in our code).
+                out[entry] = {"bind": "/data", "mode": "rw"}
+    out[host_path] = spec
+    return out
+
+
 def _get_instance_network(client):
     """
     Return the Docker network name to attach instance containers to.
@@ -317,7 +384,7 @@ def start_instance_container(instance_id):
             name=name,
             environment=env,
             network=network,
-            volumes=volumes,
+            volumes=_augment_volumes_with_claude(volumes),
             detach=True,
             remove=False,
         )
@@ -464,6 +531,7 @@ def start_agent_container(force_restart=False):
             name=name,
             environment=env,
             network=network,
+            volumes=_augment_volumes_with_claude([]),
             detach=True,
             remove=False,
         )
@@ -572,6 +640,7 @@ def start_digest_container():
             name=name,
             environment=env,
             network=network,
+            volumes=_augment_volumes_with_claude([]),
             detach=True,
             remove=False,
         )
@@ -690,7 +759,7 @@ def start_discover_container():
             name=name,
             environment=_discover_container_env(),
             network=network,
-            volumes=[f'{DISCOVER_DATA_VOLUME_NAME}:/app/discoverStocks'],
+            volumes=_augment_volumes_with_claude([f'{DISCOVER_DATA_VOLUME_NAME}:/app/discoverStocks']),
             detach=True,
             remove=False,
         )
@@ -883,7 +952,7 @@ def start_nexus_container():
             name=name,
             environment=env,
             network=network,
-            volumes=volumes,
+            volumes=_augment_volumes_with_claude(volumes),
             detach=True,
             remove=False,
         )

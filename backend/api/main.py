@@ -16,8 +16,11 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(_backend_dir, ".env"))
 load_dotenv(os.path.join(os.path.dirname(_backend_dir), ".env"))
 
+import asyncio
+import threading
+import time
 from contextlib import contextmanager
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -145,6 +148,7 @@ from interactive_utils import (
     action_edit_model,
     action_delete_model,
     action_model_strategies,
+    action_resolve_model_for_runtime,
     action_get_live_state,
     action_submit_live_command,
     action_get_live_command,
@@ -219,6 +223,19 @@ def api_startup_ensure_default_admin():
             if attempt == 5:
                 break
             time.sleep(2)
+
+
+@app.on_event("shutdown")
+def api_shutdown_close_claude_cli_sessions():
+    """Gracefully close any persistent ``claude`` subprocesses still alive
+    in the chatbot session pool when the API shuts down."""
+    try:
+        from chatbot.claude_cli_provider import shutdown_session_manager
+        shutdown_session_manager()
+    except Exception:
+        # Provider module may not be importable yet on a partial install;
+        # never block API shutdown on this.
+        pass
 
 
 def conn_dependency():
@@ -355,27 +372,35 @@ class LlmConfigTestOutput(BaseModel):
 
 
 class CreateModelBody(BaseModel):
-    name: str = Field(..., min_length=1)
-    provider: str = Field(..., min_length=1)
-    model: str = Field(..., min_length=1)
-    api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None
-    nvidia_base_url: Optional[str] = None
-    azure_openai_endpoint: Optional[str] = None
-    azure_openai_api_version: Optional[str] = None
-    reasoning_effort: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=128)
+    provider: str = Field(..., min_length=1, max_length=32)
+    model: str = Field(..., min_length=1, max_length=128)
+    api_key: Optional[str] = Field(default=None, max_length=4096)
+    openai_base_url: Optional[str] = Field(default=None, max_length=512)
+    nvidia_base_url: Optional[str] = Field(default=None, max_length=512)
+    azure_openai_endpoint: Optional[str] = Field(default=None, max_length=512)
+    azure_openai_api_version: Optional[str] = Field(default=None, max_length=32)
+    reasoning_effort: Optional[str] = Field(default=None, max_length=16)
+    # claude-cli only — locally-installed `claude` binary path + free-text
+    # extra args (whitelisted server-side, rejects --tools/--mcp-config/etc).
+    # The caps prevent argv-length DoS and pathological allowed-flag
+    # repetition; the allowlist itself caps token count too.
+    cli_path: Optional[str] = Field(default=None, max_length=256)
+    extra_args: Optional[str] = Field(default=None, max_length=1024)
 
 
 class EditModelBody(BaseModel):
-    name: Optional[str] = None
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None
-    nvidia_base_url: Optional[str] = None
-    azure_openai_endpoint: Optional[str] = None
-    azure_openai_api_version: Optional[str] = None
-    reasoning_effort: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=128)
+    provider: Optional[str] = Field(default=None, max_length=32)
+    model: Optional[str] = Field(default=None, max_length=128)
+    api_key: Optional[str] = Field(default=None, max_length=4096)
+    openai_base_url: Optional[str] = Field(default=None, max_length=512)
+    nvidia_base_url: Optional[str] = Field(default=None, max_length=512)
+    azure_openai_endpoint: Optional[str] = Field(default=None, max_length=512)
+    azure_openai_api_version: Optional[str] = Field(default=None, max_length=32)
+    reasoning_effort: Optional[str] = Field(default=None, max_length=16)
+    cli_path: Optional[str] = Field(default=None, max_length=256)
+    extra_args: Optional[str] = Field(default=None, max_length=1024)
 
 
 class BenzingaTestBody(BaseModel):
@@ -1474,25 +1499,95 @@ def api_get_model(model_id: str, conn=Depends(conn_dependency), current_user: di
 
 
 @app.post("/models", response_class=JSONResponse)
-def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    return _run(
-        action_create_model, conn,
-        name=body.name,
-        provider=body.provider,
-        model=body.model,
-        api_key=body.api_key,
-        openai_base_url=body.openai_base_url,
-        nvidia_base_url=body.nvidia_base_url,
-        azure_openai_endpoint=body.azure_openai_endpoint,
-        azure_openai_api_version=body.azure_openai_api_version,
-        reasoning_effort=body.reasoning_effort,
-    )
+def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    """Create a Model record.
+
+    Admin-gated: the Models table is global and a malicious model record
+    can be pivoted into RCE via ``cli_path`` (see security audit). Even
+    with that defense, write access on shared model config is not a
+    surface we want exposed to every authenticated user.
+    """
+    try:
+        return _run(
+            action_create_model, conn,
+            name=body.name,
+            provider=body.provider,
+            model=body.model,
+            api_key=body.api_key,
+            openai_base_url=body.openai_base_url,
+            nvidia_base_url=body.nvidia_base_url,
+            azure_openai_endpoint=body.azure_openai_endpoint,
+            azure_openai_api_version=body.azure_openai_api_version,
+            reasoning_effort=body.reasoning_effort,
+            cli_path=body.cli_path,
+            extra_args=body.extra_args,
+        )
+    except ValueError as e:
+        # claude-cli extra_args allowlist rejections surface here.
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.put("/models/{model_id}", response_class=JSONResponse)
-def api_edit_model(model_id: str, body: EditModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_edit_model(model_id: str, body: EditModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+    """Edit a Model record. Admin-gated (same reasoning as create)."""
     kwargs = {k: v for k, v in body.dict().items() if v is not None}
-    return _run(action_edit_model, conn, model_id, **kwargs)
+    try:
+        return _run(action_edit_model, conn, model_id, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# Coarse in-process rate limit for /test-cli: each authenticated user
+# spawns a real ``claude`` subprocess and burns subscription tokens, so
+# we cap to roughly one probe per 5 s per user to deter spam/DoS.
+_TEST_CLI_LAST_CALL: Dict[str, float] = {}
+_TEST_CLI_LAST_CALL_LOCK = threading.Lock()
+_TEST_CLI_MIN_INTERVAL_SEC = float(os.environ.get("CLAUDE_CLI_TEST_MIN_INTERVAL_SEC", "5"))
+
+
+@app.post("/models/{model_id}/test-cli", response_class=JSONResponse)
+async def api_test_claude_cli(
+    model_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(require_admin),
+):
+    """Test the Claude Code CLI for a specific model: checks the binary is
+    installed, the host is logged in, and the chosen model alias resolves.
+    Returns {ok, version, logged_in, model_response, error, elapsed_ms}.
+
+    Admin-gated (write-side authority over the Models table) and rate-
+    limited per-user to deter quota burn / semaphore starvation.
+    """
+    now_mono = time.monotonic()
+    uid = str(current_user.get("id") or "?")
+    with _TEST_CLI_LAST_CALL_LOCK:
+        prev = _TEST_CLI_LAST_CALL.get(uid, 0.0)
+        if now_mono - prev < _TEST_CLI_MIN_INTERVAL_SEC:
+            remaining = int(_TEST_CLI_MIN_INTERVAL_SEC - (now_mono - prev)) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Test endpoint is rate-limited; retry in ~{remaining}s.",
+            )
+        _TEST_CLI_LAST_CALL[uid] = now_mono
+
+    # Resolve the model doc *now*, then re-fetch under the same call so
+    # we don't run the test against a stale/edited record (TOCTOU).
+    doc = _run(action_resolve_model_for_runtime, conn, model_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    provider = (doc.get("provider") or "").strip().lower()
+    if provider != "claude-cli":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Test endpoint only valid for provider='claude-cli'; this model uses {provider!r}.",
+        )
+    cli_path = (doc.get("cli_path") or "claude").strip() or "claude"
+    model = (doc.get("model") or "claude-haiku-4-5").strip() or "claude-haiku-4-5"
+
+    # ``test_claude_cli`` spawns subprocesses and waits up to ~30 s. Run
+    # it off the event loop so the FastAPI threadpool slot isn't blocked.
+    from chatbot.claude_cli_provider import test_claude_cli
+    return await asyncio.to_thread(test_claude_cli, cli_path=cli_path, model=model)
 
 
 @app.delete("/models/{model_id}", response_class=JSONResponse)

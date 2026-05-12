@@ -109,6 +109,18 @@ def resolve_model_refs_in_config(conn, config: dict) -> dict:
             if api_key:
                 resolved[f"{prefix}azure_openai_api_key"] = api_key
 
+        # claude-cli uses the locally-installed `claude` binary instead of
+        # an API key. Inject cli_path and extra_args under the same
+        # ``{prefix}…`` naming convention so strategies can read them.
+        if provider == "claude-cli":
+            cli_path = (model_doc.get("cli_path") or "claude").strip() or "claude"
+            resolved[f"{prefix}cli_path"] = cli_path
+            extra_args = model_doc.get("extra_args")
+            if isinstance(extra_args, str):
+                resolved[f"{prefix}extra_args"] = extra_args.strip()
+            elif isinstance(extra_args, (list, tuple)):
+                resolved[f"{prefix}extra_args"] = list(extra_args)
+
         # Also set the alternative model key for the default group
         if not prefix and model_doc.get("model"):
             resolved["llm_model"] = model_doc["model"].strip()

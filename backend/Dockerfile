@@ -3,7 +3,26 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install Python deps. ``claude`` CLI itself is installed via Node below;
+# enable/disable that with the INSTALL_CLAUDE_CLI build arg (default on).
+ARG INSTALL_CLAUDE_CLI=1
+
+# Install the Claude Code CLI (used by the "claude-cli" LLM provider when
+# the operator wires up their Pro/Max subscription via the locally-mounted
+# ``~/.claude/`` auth state). Skip with ``--build-arg INSTALL_CLAUDE_CLI=0``
+# if you don't plan to use this provider.
+RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+        && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+        && apt-get install -y --no-install-recommends nodejs \
+        && npm install -g @anthropic-ai/claude-code \
+        && claude --version \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && python -m spacy download en_core_web_lg

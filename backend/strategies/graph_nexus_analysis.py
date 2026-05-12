@@ -766,6 +766,28 @@ def _resolve_role_llm_provider_config(config: dict, role: str) -> dict[str, Any]
         if reasoning_effort:
             out["reasoning_effort"] = reasoning_effort
         return out
+    if provider == "claude-cli":
+        # claude-cli uses the locally-installed `claude` binary. Pull the
+        # cli_path + free-text extra_args from the per-role config so the
+        # model_resolver-injected fields propagate into the strategy call.
+        cli_path = (
+            _lb_cfg("cli_path")
+            or (config.get(f"{prefix}cli_path") or "").strip()
+            or (config.get("cli_path") or "").strip()
+            or "claude"
+        )
+        extra_args = (
+            _lb_cfg("extra_args")
+            or (config.get(f"{prefix}extra_args") or "").strip()
+            or (config.get("extra_args") or "").strip()
+            or ""
+        )
+        out: dict[str, Any] = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        if reasoning_effort:
+            out["reasoning_effort"] = reasoning_effort
+        return out
     if provider != "azure":
         return {}
     endpoint = (

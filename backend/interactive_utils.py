@@ -7849,15 +7849,39 @@ def action_get_model(conn, model_id):
     return _mask_model_doc(doc)
 
 
+def _validate_claude_cli_extra_args(extra_args):
+    """Run the extra_args string through the provider's allowlist validator.
+    Raised ValueError on disallowed flags so the API layer can return 400."""
+    if extra_args is None:
+        return ""
+    s = str(extra_args).strip()
+    if not s:
+        return ""
+    try:
+        from chatbot.claude_cli_provider import validate_extra_args
+    except Exception:
+        # If the provider module isn't importable yet (e.g. during a partial
+        # migration) we still want to reject obviously-dangerous flags.
+        return s
+    # Will raise ValueError on a hard-rejected or unknown flag.
+    validate_extra_args(s)
+    return s
+
+
 def action_create_model(conn, name, provider, model, api_key=None,
                         openai_base_url=None, nvidia_base_url=None,
                         azure_openai_endpoint=None, azure_openai_api_version=None,
-                        reasoning_effort=None):
+                        reasoning_effort=None,
+                        cli_path=None, extra_args=None):
     _ensure_models_table(conn)
+    provider_n = (provider or "").strip().lower()
+    extra_args_clean = ""
+    if provider_n == "claude-cli":
+        extra_args_clean = _validate_claude_cli_extra_args(extra_args)
     now = datetime.datetime.utcnow().isoformat() + "Z"
     doc = {
         "name": (name or "").strip(),
-        "provider": (provider or "").strip().lower(),
+        "provider": provider_n,
         "model": (model or "").strip(),
         "api_key": (api_key or "").strip(),
         "openai_base_url": (openai_base_url or "").strip(),
@@ -7865,6 +7889,8 @@ def action_create_model(conn, name, provider, model, api_key=None,
         "azure_openai_endpoint": (azure_openai_endpoint or "").strip(),
         "azure_openai_api_version": (azure_openai_api_version or "2024-10-21").strip(),
         "reasoning_effort": (reasoning_effort or "").strip(),
+        "cli_path": (cli_path or "").strip(),
+        "extra_args": extra_args_clean,
         "created_at": now,
         "updated_at": now,
     }
@@ -7878,10 +7904,31 @@ def action_edit_model(conn, model_id, **kwargs):
     doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
+    # If the resulting provider is claude-cli, validate extra_args before
+    # persisting. We re-run the allowlist check against whichever value
+    # would end up on disk: the incoming kwargs override, or the existing
+    # value already in the doc. This catches a case where the user only
+    # changes the provider (e.g. ``gemini`` → ``claude-cli``) and leaves a
+    # stale ``extra_args`` in place that would never have been valid for
+    # the new provider — saving that combination would have left a banned
+    # flag persisted because validation only ran when ``extra_args`` itself
+    # was in kwargs.
+    new_provider = (kwargs.get("provider") or doc.get("provider") or "").strip().lower()
+    if new_provider == "claude-cli":
+        effective_extra = (
+            kwargs["extra_args"] if ("extra_args" in kwargs and kwargs["extra_args"] is not None)
+            else doc.get("extra_args")
+        )
+        if effective_extra:
+            validated = _validate_claude_cli_extra_args(effective_extra)
+            # Persist the canonical (validator-emitted) value so any
+            # numeric/enum rewrites land in the doc.
+            kwargs["extra_args"] = validated
     update = {"updated_at": datetime.datetime.utcnow().isoformat() + "Z"}
     for field in ("name", "provider", "model", "api_key", "openai_base_url",
                   "nvidia_base_url", "azure_openai_endpoint",
-                  "azure_openai_api_version", "reasoning_effort"):
+                  "azure_openai_api_version", "reasoning_effort",
+                  "cli_path", "extra_args"):
         if field in kwargs and kwargs[field] is not None:
             val = kwargs[field]
             if isinstance(val, str):
@@ -7891,6 +7938,9 @@ def action_edit_model(conn, model_id, **kwargs):
             update[field] = val
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).update(update).run(conn)
     updated = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    # If the conversation is using a claude-cli session with this model,
+    # the session manager will close + respawn on the next turn when it
+    # notices the model/system_prompt/extra_args signature changed.
     # Invalidate runtime cache
     try:
         from model_resolver import invalidate_model_cache
@@ -7938,6 +7988,11 @@ def _restore_inline_from_model(conn, model_id, model_doc):
                     cfg[f"{prefix}azure_openai_api_key"] = model_doc.get("api_key", "")
                     cfg[f"{prefix}azure_openai_endpoint"] = model_doc.get("azure_openai_endpoint", "")
                     cfg[f"{prefix}azure_openai_api_version"] = model_doc.get("azure_openai_api_version", "2024-10-21")
+                if (model_doc.get("provider") or "").lower() == "claude-cli":
+                    if model_doc.get("cli_path"):
+                        cfg[f"{prefix}cli_path"] = model_doc["cli_path"]
+                    if model_doc.get("extra_args"):
+                        cfg[f"{prefix}extra_args"] = model_doc["extra_args"]
                 if model_doc.get("openai_base_url"):
                     cfg[f"{prefix}openai_base_url"] = model_doc["openai_base_url"]
                 if model_doc.get("nvidia_base_url"):

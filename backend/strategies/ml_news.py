@@ -226,7 +226,7 @@ def _default_api_key_for_provider(provider: str) -> str:
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
-def _resolve_provider_config(config: dict, provider: str) -> dict[str, str]:
+def _resolve_provider_config(config: dict, provider: str) -> dict:
     provider = _normalize_llm_provider(provider)
     if provider == "azure":
         endpoint = (
@@ -245,6 +245,13 @@ def _resolve_provider_config(config: dict, provider: str) -> dict[str, str]:
             or os.environ.get("OPENAI_BASE_URL", "").strip()
         )
         return {"base_url": base_url} if base_url else {}
+    if provider == "claude-cli":
+        cli_path = (config.get("cli_path") or "claude").strip() or "claude"
+        extra_args = config.get("extra_args") or ""
+        out: dict = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        return out
     return {}
 
 
