@@ -288,29 +288,32 @@ _SAFETY_FLAGS = [
 # disabled). The session populates ``--mcp-config`` with the per-session
 # path at spawn time.
 #
-# Two specific syntax choices that matter:
+# Permission mode notes (CC 2.1.x in Docker-as-root):
 #
-#   * ``--permission-mode bypassPermissions`` rather than
-#     ``--dangerously-skip-permissions``. The latter has a hard refusal
-#     when CC detects it's running as root (Docker containers commonly
-#     run as root and we can't easily switch). The former achieves the
-#     same effect — auto-grant every tool call — without the root
-#     check. JarvisClaw's note about ``acceptEdits`` silently blocking
-#     Bash mid-turn does NOT apply to ``bypassPermissions`` and is
-#     moot anyway since we expose only MCP tools, never Bash.
+#   * ``--dangerously-skip-permissions`` hard-refuses to run as root
+#     ("cannot be used with root/sudo privileges for security reasons").
+#   * ``--permission-mode bypassPermissions`` triggers the SAME root
+#     check internally — verified via stderr in production. Same
+#     refusal message.
+#   * ``--permission-mode acceptEdits`` does NOT trip the root check
+#     and auto-grants edit-style tool calls. CC categorises external
+#     MCP tools under the "edit" class for permission purposes, so
+#     ``mcp__intellistock__*`` calls are auto-granted in this mode.
+#     The JarvisClaw "acceptEdits silently blocked Bash mid-turn"
+#     complaint doesn't apply to us — we never expose Bash, only
+#     MCP tools.
 #
-#   * ``--allowedTools mcp__*`` (broad MCP glob) rather than
-#     ``mcp__intellistock__*``. CC's allowedTools parser supports the
-#     ``mcp__*`` pattern but not all CC versions handle the more
-#     specific ``mcp__<server>__*`` form; ``mcp__*`` is the safer
-#     across-versions choice. With ``--strict-mcp-config`` pointing
-#     only at our config, this is functionally equivalent to
-#     restricting to IntelliStock tools.
+# Allow-list note:
+#   ``--allowedTools mcp__*`` (broad MCP glob) rather than
+#   ``mcp__intellistock__*``. The broader pattern is supported across
+#   more CC versions. With ``--strict-mcp-config`` pointing only at
+#   our config, this is functionally equivalent to restricting to
+#   IntelliStock tools.
 _MCP_FLAGS_TEMPLATE = [
     "--strict-mcp-config",
     "--no-session-persistence",
     "--disable-slash-commands",
-    "--permission-mode", "bypassPermissions",
+    "--permission-mode", "acceptEdits",
     "--allowedTools", "mcp__*",
 ]
 
