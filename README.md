@@ -10,9 +10,9 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-a78bfa?style=for-the-badge" alt="License: MIT"></a>
-  <a href="https://github.com/Th3-H4xx0r/IntelliStock-V4/stargazers"><img src="https://img.shields.io/github/stars/Th3-H4xx0r/IntelliStock-V4?style=for-the-badge&color=7c3aed&labelColor=1f1733" alt="GitHub stars"></a>
-  <a href="https://github.com/Th3-H4xx0r/IntelliStock-V4/commits/main"><img src="https://img.shields.io/github/last-commit/Th3-H4xx0r/IntelliStock-V4?style=for-the-badge&color=a78bfa&labelColor=1f1733" alt="Last commit"></a>
-  <a href="https://github.com/Th3-H4xx0r/IntelliStock-V4/issues"><img src="https://img.shields.io/github/issues/Th3-H4xx0r/IntelliStock-V4?style=for-the-badge&color=7c3aed&labelColor=1f1733" alt="Open issues"></a>
+  <a href="https://github.com/Th3-H4xx0r/IntelliStock/stargazers"><img src="https://img.shields.io/github/stars/Th3-H4xx0r/IntelliStock?style=for-the-badge&color=7c3aed&labelColor=1f1733" alt="GitHub stars"></a>
+  <a href="https://github.com/Th3-H4xx0r/IntelliStock/commits/main"><img src="https://img.shields.io/github/last-commit/Th3-H4xx0r/IntelliStock?style=for-the-badge&color=a78bfa&labelColor=1f1733" alt="Last commit"></a>
+  <a href="https://github.com/Th3-H4xx0r/IntelliStock/issues"><img src="https://img.shields.io/github/issues/Th3-H4xx0r/IntelliStock?style=for-the-badge&color=7c3aed&labelColor=1f1733" alt="Open issues"></a>
 </p>
 
 <p align="center">
@@ -92,6 +92,19 @@ strategy, brokerage, watchlist, granularity, status, and live P&L. New
 instances spin up from here, and the same screen drives "stop", "pause",
 "resume", and "edit strategy". The agent-vs-user filter at the top
 splits human-built instances from ones the AI agent created.
+
+### Live trading terminal
+
+<p align="center">
+  <img src="./imgs/live-trading-terminal-demo.png" alt="Live trading terminal" width="100%">
+</p>
+
+The per-instance live terminal. Streams the bot's decisions as they
+happen — every tick's vote breakdown, every order the broker loop
+fires, every fill confirmation from the brokerage — alongside the
+running equity curve and open positions. The same view that's used
+to watch a paper-mode dry run before flipping the same instance to
+live capital.
 
 ### Backtests
 
@@ -233,8 +246,8 @@ new-user signup until you generate a replacement.
 ## Quick start (TL;DR)
 
 ```bash
-git clone https://github.com/Th3-H4xx0r/IntelliStock-V4.git
-cd IntelliStock-V4
+git clone https://github.com/Th3-H4xx0r/IntelliStock.git
+cd IntelliStock
 
 # Bring up the full stack (rethinkdb, neo4j, backend, api, frontend,
 # price-service, backtest-engine, credential-service, optional discord-bot)
@@ -733,8 +746,8 @@ The full documentation tree lives under [`docs/`](./docs/README.md).
 ## From source (development)
 
 ```bash
-git clone https://github.com/Th3-H4xx0r/IntelliStock-V4.git
-cd IntelliStock-V4
+git clone https://github.com/Th3-H4xx0r/IntelliStock.git
+cd IntelliStock
 
 # Backend (Python 3.11+ recommended)
 python -m venv .venv
@@ -760,7 +773,7 @@ ports (28015 / 7687).
 
 - `main` — release branch (matches the deployed image tag).
 - `keys-on-baseline` — active development.
-- Issues and PRs: [GitHub Issues](https://github.com/Th3-H4xx0r/IntelliStock-V4/issues).
+- Issues and PRs: [GitHub Issues](https://github.com/Th3-H4xx0r/IntelliStock/issues).
 
 ## Configuration
 
@@ -927,13 +940,13 @@ credits roll, not a manifest.
 
 ## Star history
 
-<a href="https://star-history.com/#Th3-H4xx0r/IntelliStock-V4&Date">
-  <img src="https://api.star-history.com/svg?repos=Th3-H4xx0r/IntelliStock-V4&type=Date" alt="Star history">
+<a href="https://star-history.com/#Th3-H4xx0r/IntelliStock&Date">
+  <img src="https://api.star-history.com/svg?repos=Th3-H4xx0r/IntelliStock&type=Date" alt="Star history">
 </a>
 
 ## Activity
 
-![Activity](https://repobeats.axiom.co/api/embed/Th3-H4xx0r-IntelliStock-V4.svg "Repobeats analytics image")
+![Activity](https://repobeats.axiom.co/api/embed/Th3-H4xx0r-IntelliStock.svg "Repobeats analytics image")
 
 ## Attribution
 
