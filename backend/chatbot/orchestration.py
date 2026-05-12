@@ -287,6 +287,19 @@ def _llm_messages_for_call(history: List[Dict[str, Any]], system: str) -> List[D
     return out
 
 
+_CLAUDE_CLI_NO_TOOLS_SUFFIX = (
+    "\n\n=== IMPORTANT — pure-text mode ===\n"
+    "Function calling and tools are DISABLED in this conversation. You may "
+    "see tools described above for context, but you cannot invoke them. "
+    "Reply with plain natural-language text only. Do NOT emit JSON shaped "
+    'like {"type":"tool_use"}, function-call blocks, or any other tool '
+    "invocation syntax — those will appear to the user as garbled text. "
+    "If a user request would normally call a tool (e.g. \"show me the chart "
+    "for X\"), instead describe what you would do, ask for the data you'd "
+    "need, or suggest the user switch to a tool-capable model.\n"
+)
+
+
 def _call_llm(
     model_cfg: Dict[str, Any],
     history: List[Dict[str, Any]],
@@ -301,11 +314,18 @@ def _call_llm(
         # CLI itself holds history, and we currently run it in pure-text
         # mode (no tools) — so we always pass with_tools=False here even
         # if the caller asked for tools.
+        #
+        # IntelliStock's normal system prompt advertises the chatbot's
+        # tool catalogue. With CC spawned under --tools "" the model has
+        # no tools available, so it falls back to emitting raw
+        # ``{"type":"tool_use"}`` JSON as text when the user asks for
+        # something tool-like. Append a loud override so the model
+        # answers in plain text instead.
         from chatbot.claude_cli_provider import call_claude_cli_chat
         return call_claude_cli_chat(
             conversation_id=conversation_id or "",
             messages=_llm_messages_for_call(history, system),
-            system_prompt=system,
+            system_prompt=(system or "") + _CLAUDE_CLI_NO_TOOLS_SUFFIX,
             model=model_cfg["model"],
             cli_path=model_cfg.get("cli_path") or "claude",
             extra_args=model_cfg.get("extra_args") or [],
