@@ -32,7 +32,7 @@ uvicorn[standard]
 bcrypt
 pyjwt
 discord.py>=2.3.0
-aiohttp>=3.8.0
+aiohttp>=3.13.5
 neo4j>=5.15.0
 sec-edgar-downloader>=5.0.0
 beautifulsoup4>=4.12.0
@@ -40,11 +40,11 @@ beautifulsoup4>=4.12.0
 spacy>=3.0.0
 rapidfuzz>=3.0.0
 # After install, run: python -m spacy download en_core_web_lg
-lxml>=4.9.0
+lxml>=6.1.0
 TA-Lib
 # For Google News RSS fetching (graph nexus macro news):
 scrapling>=0.2.0
-feedparser>=6.0.0
+feedparser>=6.0.12
 json-repair
 # TOON format: compact token-efficient encoding for LLM prompts (~40% fewer tokens vs JSON)
 toon-format
@@ -58,4 +58,4 @@ pydantic-ai-slim[google,openai]==1.0.18
 # - exchange_calendars: NYSE market calendar with holidays + early closes (live_calendar.py)
 alpaca-py>=0.43.0
 cryptography>=41.0.0
-exchange_calendars>=4.0.0
+exchange_calendars>=4.13.2
