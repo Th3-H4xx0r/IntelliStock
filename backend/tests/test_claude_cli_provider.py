@@ -273,12 +273,12 @@ class TestArgvBuilders:
         assert "--strict-mcp-config" in argv
         assert "--no-session-persistence" in argv
         assert "--disable-slash-commands" in argv
-        # No --permission-mode flag — CC's default in -p mode plus
-        # --allowedTools mcp__* lets MCP calls through, where every
-        # named permission mode either trips the root check (bypass /
-        # dangerously-skip) or silently blocks MCP invocation (acceptEdits).
+        # --dangerously-skip-permissions is the only flag verified to
+        # let MCP tool invocations actually go through. CC refuses it
+        # when running as root, so the spawner drops privileges via
+        # Popen(user=...) — see ``CLAUDE_CLI_RUNTIME_USER`` env.
+        assert "--dangerously-skip-permissions" in argv
         assert "--permission-mode" not in argv
-        assert "--dangerously-skip-permissions" not in argv
         assert "--allowedTools" in argv
         assert argv[argv.index("--allowedTools") + 1] == "mcp__*"
 

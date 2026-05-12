@@ -312,8 +312,130 @@ _MCP_FLAGS_TEMPLATE = [
     "--strict-mcp-config",
     "--no-session-persistence",
     "--disable-slash-commands",
+    "--dangerously-skip-permissions",
     "--allowedTools", "mcp__*",
 ]
+
+
+# Drop privileges to this OS user when spawning the ``claude`` CLI
+# (CC refuses --dangerously-skip-permissions when running as root, and
+# every other permission-mode either trips the same root check or
+# silently blocks MCP tool invocation). The Dockerfile creates
+# ``claudeuser`` (UID 1000) for this purpose. ``None`` disables the
+# drop — the bare Python process's existing UID is used — which is
+# the right default for non-Docker / dev environments where the
+# operator already runs as a non-root user.
+_CC_RUNTIME_USER = (os.environ.get("CLAUDE_CLI_RUNTIME_USER") or "").strip() or None
+_CC_RUNTIME_UID_ENV = (os.environ.get("CLAUDE_CLI_RUNTIME_UID") or "").strip()
+
+
+def _runtime_user_kwargs() -> Dict[str, Any]:
+    """Popen kwargs that drop privileges to ``CLAUDE_CLI_RUNTIME_USER``
+    (or its numeric UID via ``CLAUDE_CLI_RUNTIME_UID``). Returns ``{}``
+    when no drop is configured — the bare process UID is used."""
+    if sys.platform == "win32":
+        # No POSIX user/group switching on Windows.
+        return {}
+    # Python 3.9+ accepts ``user=`` for Popen; both string usernames
+    # and integer UIDs are valid.
+    target: Any = None
+    if _CC_RUNTIME_UID_ENV:
+        try:
+            target = int(_CC_RUNTIME_UID_ENV)
+        except ValueError:
+            target = _CC_RUNTIME_USER
+    elif _CC_RUNTIME_USER:
+        target = _CC_RUNTIME_USER
+    if target is None:
+        return {}
+    return {"user": target}
+
+
+def _drop_user_uid() -> Optional[int]:
+    """Return the numeric UID we drop to, or ``None`` if no drop is set."""
+    if sys.platform == "win32":
+        return None
+    if _CC_RUNTIME_UID_ENV:
+        try:
+            return int(_CC_RUNTIME_UID_ENV)
+        except ValueError:
+            pass
+    if _CC_RUNTIME_USER:
+        try:
+            import pwd
+            return pwd.getpwnam(_CC_RUNTIME_USER).pw_uid
+        except Exception:
+            return None
+    return None
+
+
+def _prepare_runtime_home(sess: "_Session") -> str:
+    """Copy the operator's ``~/.claude`` from the parent process's HOME
+    into a fresh temp directory owned by the runtime user. Returns the
+    absolute path to use as ``HOME`` for the spawned CC subprocess.
+
+    Why copy: the bind-mounted host ``~/.claude`` is typically mode
+    0700 owned by host root. When we drop to UID 1000, that user
+    cannot read the credentials. Copying with chowned ownership gives
+    the subprocess a readable view without altering the host files.
+
+    When no runtime user drop is configured (e.g. local dev as a
+    non-root user), we return the parent process's HOME unchanged.
+    """
+    import shutil
+    import stat
+    import tempfile
+    target_uid = _drop_user_uid()
+    src = os.environ.get("HOME") or "/root"
+    src_claude = os.path.join(src, ".claude")
+    if target_uid is None or not os.path.isdir(src_claude):
+        return src
+    try:
+        runtime_dir = tempfile.mkdtemp(
+            prefix=f"cc-home-{sess.conversation_id[:8]}-",
+            dir="/tmp",
+        )
+    except Exception as e:
+        _log(f"failed to allocate runtime home: {e}", "yellow")
+        return src
+    dst_claude = os.path.join(runtime_dir, ".claude")
+    try:
+        shutil.copytree(src_claude, dst_claude, symlinks=True)
+        # Recursively chown to the runtime user so the dropped
+        # subprocess can read everything. mode is left as-is from the
+        # source.
+        for root_dir, dirs, files in os.walk(runtime_dir):
+            try:
+                os.chown(root_dir, target_uid, target_uid)
+            except Exception:
+                pass
+            for f in files:
+                try:
+                    os.chown(os.path.join(root_dir, f), target_uid, target_uid)
+                except Exception:
+                    pass
+        # Ensure the top-level home is +rx so the user can resolve it.
+        os.chmod(runtime_dir, 0o755)
+    except Exception as e:
+        _log(f"failed to populate runtime home: {e}", "yellow")
+        try:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return src
+    return runtime_dir
+
+
+def _cleanup_runtime_home(path: str) -> None:
+    if not path or path == (os.environ.get("HOME") or "/root"):
+        return
+    if not path.startswith("/tmp/cc-home-"):
+        return
+    try:
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _mcp_runtime_dir() -> str:
@@ -365,7 +487,12 @@ def _mcp_callback_url() -> str:
 def _write_session_mcp_config(sess: "_Session") -> str:
     """Materialise a per-session ``.mcp.json`` registering the
     IntelliStock MCP server with the session's token/conv-id env. The
-    file is written 0600 and removed when the session is closed."""
+    file is written 0600 and removed when the session is closed.
+
+    When a runtime-user drop is configured, the file is also chowned to
+    that UID so the dropped subprocess can read it. The auth token
+    stays restricted (0600) — only the runtime user can read it.
+    """
     cmd = _mcp_server_command_args()
     config = {
         "mcpServers": {
@@ -395,6 +522,13 @@ def _write_session_mcp_config(sess: "_Session") -> str:
             os.close(fd)
     except Exception as e:
         raise ClaudeCliError(f"failed to write per-session MCP config: {e}") from e
+    # Chown to the runtime user so the dropped subprocess can read it.
+    runtime_uid = _drop_user_uid()
+    if runtime_uid is not None:
+        try:
+            os.chown(path, runtime_uid, runtime_uid)
+        except Exception as e:
+            _log(f"chown of mcp-config to UID {runtime_uid} failed: {e}", "yellow")
     return path
 
 
@@ -634,6 +768,10 @@ class _Session:
     # Path to the per-session ``.mcp.json`` we write at spawn time; cleaned
     # up at close. Empty when MCP is disabled.
     mcp_config_path: str = ""
+    # Temp HOME dir we materialise for the dropped-privilege subprocess
+    # (copy of the operator's ~/.claude, chowned to the runtime UID).
+    # Empty when no privilege drop is configured.
+    runtime_home: str = ""
     extra_args_signature: str = ""    # tuple-as-string for change detection
     process: Optional[subprocess.Popen] = None
     state: SessionState = SessionState.SPAWNING
@@ -942,12 +1080,18 @@ class ClaudeCliSessionManager:
         # lookup), an absolute path whose basename is ``claude``/``claude.exe``,
         # or anything explicitly allowed via ``CLAUDE_CLI_ALLOWED_BINARIES``.
         resolved_cli = _resolve_cli_path(sess.cli_path)
+        # Prepare a per-session HOME dir (copy of the operator's ~/.claude
+        # chowned to the runtime user) so the dropped subprocess can read
+        # its credentials. No-op when no privilege drop is configured.
+        sess.runtime_home = _prepare_runtime_home(sess)
         # Materialise the per-session MCP config BEFORE the semaphore so a
         # disk failure doesn't burn a slot.
         sess.mcp_config_path = _write_session_mcp_config(sess)
         if not _GLOBAL_SPAWN_SEM.acquire(timeout=self._spawn_timeout_sec):
             # Drop the config we just wrote; we won't be exec'ing.
             _cleanup_session_mcp_config(sess)
+            _cleanup_runtime_home(sess.runtime_home)
+            sess.runtime_home = ""
             raise ClaudeCliError(
                 f"global subprocess cap ({CLAUDE_CLI_MAX_CONCURRENT}) reached; "
                 "another call is hogging the budget."
@@ -959,6 +1103,14 @@ class ClaudeCliSessionManager:
             extra_args=extra_args,
             mcp_config_path=sess.mcp_config_path,
         )
+        # Build the env for the child. We override HOME so CC reads the
+        # chowned copy of ~/.claude that the runtime user can access, and
+        # we keep PATH so claude / node / python still resolve.
+        child_env = os.environ.copy()
+        if sess.runtime_home:
+            child_env["HOME"] = sess.runtime_home
+        spawn_kwargs: Dict[str, Any] = dict(_platform_popen_kwargs())
+        spawn_kwargs.update(_runtime_user_kwargs())
         try:
             proc = subprocess.Popen(
                 argv,
@@ -969,14 +1121,18 @@ class ClaudeCliSessionManager:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                **_platform_popen_kwargs(),
+                env=child_env,
+                cwd=sess.runtime_home or None,
+                **spawn_kwargs,
             )
         except FileNotFoundError as e:
             # Semaphore was acquired above — release it before raising so
             # a missing binary doesn't permanently shrink the pool. Also
-            # clean up the per-session MCP config we just wrote.
+            # clean up the per-session MCP config + runtime HOME we wrote.
             _release_spawn_sem_safely()
             _cleanup_session_mcp_config(sess)
+            _cleanup_runtime_home(sess.runtime_home)
+            sess.runtime_home = ""
             raise ClaudeCliNotInstalledError(
                 f"claude binary not found at {sess.cli_path!r}. "
                 "Install with: npm i -g @anthropic-ai/claude-code"
@@ -984,6 +1140,8 @@ class ClaudeCliSessionManager:
         except Exception as e:
             _release_spawn_sem_safely()
             _cleanup_session_mcp_config(sess)
+            _cleanup_runtime_home(sess.runtime_home)
+            sess.runtime_home = ""
             raise ClaudeCliError(f"failed to spawn claude: {e}") from e
 
         # Spawn succeeded — record ownership so _close_session releases
@@ -1017,10 +1175,13 @@ class ClaudeCliSessionManager:
         # ``finally`` block recognises this is a graceful close rather than
         # a crash (which would otherwise flip CLOSED → CRASHED).
         sess.state = SessionState.CLOSED
-        # Always tear down the per-session MCP config — it contains an
-        # auth token, and we don't want stale credentials accumulating in
-        # the runtime dir.
+        # Always tear down the per-session MCP config + runtime home —
+        # both contain copies of operator credentials and we don't want
+        # them lingering in the runtime/temp dirs.
         _cleanup_session_mcp_config(sess)
+        if sess.runtime_home:
+            _cleanup_runtime_home(sess.runtime_home)
+            sess.runtime_home = ""
         proc = sess.process
         if proc is None:
             # Never spawned; nothing to release.

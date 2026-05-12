@@ -22,6 +22,17 @@ RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# Non-root user that ``claude`` subprocess invocations run as. The CLI
+# hard-refuses ``--dangerously-skip-permissions`` (and any equivalent
+# permission-mode) when running as root, so the chatbot's claude
+# subprocesses drop privileges via Popen(user=...) at spawn time. The
+# Python servers themselves keep running as root (the rest of the
+# codebase assumes that). UID 1000 is the conventional first non-system
+# user on Debian-based images.
+RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
+        useradd -m -u 1000 -s /bin/bash claudeuser 2>/dev/null || true; \
+    fi
+
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \

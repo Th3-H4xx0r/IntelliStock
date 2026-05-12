@@ -92,6 +92,12 @@ services:
       # (instance brokers, AI agent, daily digest, discover engine, graph
       # nexus). See server.py::_claude_home_mount.
       - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
+      # Drop privileges to this user when spawning ``claude``. CC refuses
+      # to bypass permissions when running as root, and our Python server
+      # process runs as root. Defaults to the ``claudeuser`` (UID 1000)
+      # the Dockerfile creates. Set to empty to disable (then operator
+      # is expected to run the whole service as non-root).
+      - CLAUDE_CLI_RUNTIME_USER=${CLAUDE_CLI_RUNTIME_USER:-claudeuser}
 
   api:
     image: intellistock-backend
@@ -178,6 +184,12 @@ services:
       # broker containers (see backtest_engine.py) so claude-cli strategy
       # calls can reach the operator's logged-in subscription.
       - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
+      # Drop privileges to this user when spawning ``claude``. CC refuses
+      # to bypass permissions when running as root, and our Python server
+      # process runs as root. Defaults to the ``claudeuser`` (UID 1000)
+      # the Dockerfile creates. Set to empty to disable (then operator
+      # is expected to run the whole service as non-root).
+      - CLAUDE_CLI_RUNTIME_USER=${CLAUDE_CLI_RUNTIME_USER:-claudeuser}
 
   # AI backtesting agent is NOT started here. The backend (server.py) starts and stops it via the Docker API
   # when AgentControl.running is set to true/false (e.g. via API or CLI "agent start" / "agent stop").
