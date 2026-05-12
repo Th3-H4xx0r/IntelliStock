@@ -684,15 +684,25 @@ class ClaudeCliSessionManager:
         with self._sessions_lock:
             existing = self._sessions.get(conversation_id)
             if existing is not None:
+                # Reuse only depends on ``(model, extra_args)``. We
+                # deliberately ignore ``system_prompt`` here because
+                # IntelliStock's chatbot rebuilds it every turn and bakes
+                # in dynamic context (workspace counts, settings) that
+                # drift between adjacent messages. Matching exactly on
+                # system_prompt would force a respawn on every turn,
+                # killing the whole point of the persistent-process
+                # design (and adding ~3 s of startup per message). The CC
+                # subprocess keeps whatever system prompt it spawned
+                # with for the conversation's lifetime; refreshing
+                # workspace context that frequently isn't worth the cost.
                 if (
                     existing.state in (SessionState.IDLE, SessionState.AWAITING, SessionState.SPAWNING)
                     and existing.model == model
-                    and existing.system_prompt == system_prompt
                     and existing.extra_args_signature == extra_sig
                 ):
                     return existing
-                # Stale or mismatched (model / system_prompt / extra_args
-                # changed since this conversation last ran). Drop & respawn.
+                # Stale or mismatched (model / extra_args changed since
+                # this conversation last ran). Drop & respawn.
                 self._sessions.pop(conversation_id, None)
             sess = _Session(
                 conversation_id=conversation_id,
@@ -841,7 +851,17 @@ class ClaudeCliSessionManager:
     # ── Internal: I/O ──
 
     def _write_user_messages(self, sess: _Session, messages: List[Dict[str, Any]]) -> None:
-        """Push one NDJSON user event per message to stdin."""
+        """Push one NDJSON user event per message to stdin.
+
+        Content is serialised as a list of content blocks — the canonical
+        Anthropic format ``[{type: "text", text: "..."}]`` — rather than
+        a bare string. When tools are disabled the CLI's input validator
+        unconditionally calls ``.some()`` on ``message.content`` looking
+        for ``tool_use`` blocks; passing a string makes that throw a
+        TypeError inside the JS bundle ("content.some is not a function").
+        Wrapping in blocks satisfies the validator and works in every
+        CC version we've tested.
+        """
         proc = sess.process
         if proc is None or proc.stdin is None or proc.stdin.closed:
             raise ClaudeCliCrashError("subprocess stdin is closed")
@@ -849,15 +869,21 @@ class ClaudeCliSessionManager:
         out = []
         for m in messages:
             role = (m.get("role") or "").lower()
-            content = _coerce_text(m.get("content"))
+            text = _coerce_text(m.get("content"))
+            if not text:
+                # The CLI's validators iterate over content blocks; an
+                # empty array still trips checks like ``"tool_use_id" in W``
+                # on each block, so we just skip blank messages entirely.
+                continue
+            blocks = [{"type": "text", "text": text}]
             if role == "user":
-                line = json.dumps({"type": "user", "message": {"role": "user", "content": content}}, ensure_ascii=False)
+                line = json.dumps({"type": "user", "message": {"role": "user", "content": blocks}}, ensure_ascii=False)
                 out.append(line)
             elif role == "assistant":
                 # When replaying history after a crash we re-introduce
                 # prior assistant turns so the CLI rebuilds context. CC's
                 # stream-json input accepts assistant events.
-                line = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": content}}, ensure_ascii=False)
+                line = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": blocks}}, ensure_ascii=False)
                 out.append(line)
             elif role == "tool":
                 # Should not occur in pure-text mode (we never enable tools)
