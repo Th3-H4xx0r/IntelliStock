@@ -513,6 +513,33 @@ def _prepare_runtime_home(sess: "_Session") -> str:
                 pass
         # Ensure the top-level home is +rx so the user can resolve it.
         os.chmod(runtime_dir, 0o755)
+        # Diagnostic: log what's actually in the .claude dir post-copy so
+        # we can tell whether credentials are present and readable by the
+        # runtime user. Auth lives in either ``.credentials.json`` (older
+        # builds) or ``credentials.json`` (newer) — both surface here.
+        try:
+            entries = sorted(os.listdir(dst_claude))
+            cred_path = None
+            for name in (".credentials.json", "credentials.json"):
+                p = os.path.join(dst_claude, name)
+                if os.path.isfile(p):
+                    cred_path = p
+                    break
+            cred_info = "no credentials file found"
+            if cred_path:
+                st = os.stat(cred_path)
+                cred_info = (
+                    f"{os.path.basename(cred_path)}: "
+                    f"size={st.st_size} mode={oct(st.st_mode & 0o777)} "
+                    f"uid={st.st_uid}"
+                )
+            _log(
+                f"runtime_home contents: dirs/files={entries[:10]}"
+                f"{'…' if len(entries) > 10 else ''}; {cred_info}",
+                "cyan",
+            )
+        except Exception as e:
+            _log(f"runtime_home introspection failed: {e}", "yellow")
     except Exception as e:
         _log(f"failed to populate runtime home: {e}", "yellow")
         try:
@@ -1497,6 +1524,16 @@ class ClaudeCliSessionManager:
                 sess._buffered_text = text or "".join(sess._accumulated)
                 return
             if is_error:
+                # Log the raw CC error envelope so operators can see the
+                # real reason behind a generic ``Not logged in`` mapping
+                # (auth-state corruption, MCP config mismatch, expired
+                # tokens — CC's wording usually points right at it).
+                raw_err = str(result_text or "")[:500]
+                _log(
+                    f"[{sess.conversation_id[:8]}] CC is_error result: "
+                    f"{raw_err!r}",
+                    "yellow",
+                )
                 slot.result.error = _classify_error_text(str(result_text or "claude error"))
                 slot.event.set()
                 return
