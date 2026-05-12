@@ -15,4 +15,4 @@ export const isPreviewMode = () => RAW === 'true' || RAW === '1'
 
 // Repo URL for the "View on GitHub" CTA. Centralised so changing the
 // repo location is a one-file edit.
-export const GITHUB_URL = 'https://github.com/Th3-H4xx0r/IntelliStock-V4'
+export const GITHUB_URL = 'https://github.com/Th3-H4xx0r/IntelliStock'

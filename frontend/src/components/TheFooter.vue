@@ -33,7 +33,7 @@ import { GITHUB_URL } from '../utils/preview.js'
       Built with love by Pranav Krishna ·
       Free and open source ·
       <a
-        href="https://github.com/Th3-H4xx0r/IntelliStock-V4/blob/main/LICENSE"
+        href="https://github.com/Th3-H4xx0r/IntelliStock/blob/main/LICENSE"
         target="_blank"
         rel="noopener"
         class="hover:text-primary transition-colors"
