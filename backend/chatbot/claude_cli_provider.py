@@ -454,8 +454,8 @@ def _prepare_runtime_home(sess: "_Session") -> str:
     When no runtime user drop is configured (e.g. local dev as a
     non-root user), we return the parent process's HOME unchanged.
     """
+    import glob
     import shutil
-    import stat
     import tempfile
     target_uid = _drop_user_uid()
     src = os.environ.get("HOME") or "/root"
@@ -473,6 +473,23 @@ def _prepare_runtime_home(sess: "_Session") -> str:
     dst_claude = os.path.join(runtime_dir, ".claude")
     try:
         shutil.copytree(src_claude, dst_claude, symlinks=True)
+        # CC also reads ``$HOME/.claude.json`` (the per-user project /
+        # session config file — distinct from .claude/ the directory).
+        # If it exists at the operator's HOME, copy it too. If it's
+        # missing but a backup exists, recover from the most recent
+        # backup automatically — saves the operator from running the
+        # manual ``cp`` the CLI tells them about in stderr.
+        src_claude_json = os.path.join(src, ".claude.json")
+        if os.path.isfile(src_claude_json):
+            shutil.copy2(src_claude_json, os.path.join(runtime_dir, ".claude.json"))
+        else:
+            backups = sorted(
+                glob.glob(os.path.join(src_claude, "backups", ".claude.json.backup.*")),
+                reverse=True,   # most recent first (timestamps in filename)
+            )
+            if backups:
+                _log(f"restoring .claude.json from backup: {backups[0]}", "cyan")
+                shutil.copy2(backups[0], os.path.join(runtime_dir, ".claude.json"))
         # Recursively chown to the runtime user so the dropped
         # subprocess can read everything. mode is left as-is from the
         # source.
@@ -486,6 +503,14 @@ def _prepare_runtime_home(sess: "_Session") -> str:
                     os.chown(os.path.join(root_dir, f), target_uid, target_uid)
                 except Exception:
                     pass
+        # Top-level files (.claude.json) — chown explicitly in case
+        # they weren't caught by the walk above.
+        cj = os.path.join(runtime_dir, ".claude.json")
+        if os.path.isfile(cj):
+            try:
+                os.chown(cj, target_uid, target_uid)
+            except Exception:
+                pass
         # Ensure the top-level home is +rx so the user can resolve it.
         os.chmod(runtime_dir, 0o755)
     except Exception as e:
