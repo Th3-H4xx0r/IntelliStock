@@ -22,7 +22,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -1124,6 +1124,108 @@ def api_chatbot_tools(current_user: dict = Depends(get_current_user)):
     """Return the curated tool catalog for display in the chatbot settings."""
     from chatbot.tools import tool_catalog
     return {"tools": tool_catalog()}
+
+
+# --- Claude Code CLI MCP bridge ---
+
+
+class _McpToolsListBody(BaseModel):
+    conversation_id: str = Field(..., min_length=1)
+    user_id: Optional[str] = ""
+
+
+class _McpToolCallBody(BaseModel):
+    conversation_id: str = Field(..., min_length=1)
+    user_id: Optional[str] = ""
+    tool_name: str = Field(..., min_length=1)
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    confirm_wait_timeout_sec: Optional[int] = 0
+
+
+class _McpConfirmBody(BaseModel):
+    message_id: str = Field(..., min_length=1)
+    approved: bool
+
+
+def _resolve_mcp_session(request, conv_id: str):
+    """Validate the inbound MCP token and return the matching live
+    session. Raises 401 if unrecognised, 403 if the token doesn't own
+    the supplied ``conv_id``. Lets the IntelliStock backend trust that
+    only the spawned MCP server (which has the token in its env) can
+    drive tool execution on this conversation."""
+    token = request.headers.get("X-IntelliStock-MCP-Token") or ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing X-IntelliStock-MCP-Token header.")
+    from chatbot.claude_cli_provider import get_session_manager
+    mgr = get_session_manager()
+    sess = mgr.lookup_by_token(token)
+    if sess is None:
+        raise HTTPException(status_code=401, detail="MCP token not recognised.")
+    if sess.conversation_id != conv_id:
+        raise HTTPException(status_code=403, detail="MCP token does not own this conversation.")
+    return sess
+
+
+@app.post("/chatbot/internal/mcp-tools-list", response_class=JSONResponse)
+def api_mcp_tools_list(
+    body: _McpToolsListBody,
+    request: Request,
+    conn=Depends(conn_dependency),
+):
+    """List the tool catalog for an MCP-driven CC session. Auth'd by the
+    per-session token the IntelliStock backend wrote into the spawned
+    CC's ``--mcp-config`` env."""
+    _resolve_mcp_session(request, body.conversation_id)
+    from chatbot.tools import openai_tool_definitions
+    return {"tools": openai_tool_definitions()}
+
+
+@app.post("/chatbot/internal/mcp-tool-call", response_class=JSONResponse)
+def api_mcp_tool_call(
+    body: _McpToolCallBody,
+    request: Request,
+    conn=Depends(conn_dependency),
+):
+    """Execute one tool on behalf of an MCP-driven CC session.
+
+    Safe / render-only tools run synchronously and the result returns
+    immediately. Non-safe (write / destructive) tools instead append a
+    ``pending_confirmation`` message to the conversation and return a
+    ``pending`` envelope to CC so the model can acknowledge the queued
+    action; the user then approves or declines via
+    ``/chatbot/conversations/{id}/mcp-confirm``.
+    """
+    sess = _resolve_mcp_session(request, body.conversation_id)
+    from chatbot.mcp_bridge import dispatch_mcp_tool_call
+    return dispatch_mcp_tool_call(
+        conn=conn,
+        user_id=sess.user_id or body.user_id or "",
+        conversation_id=body.conversation_id,
+        tool_name=body.tool_name,
+        arguments=body.arguments,
+    )
+
+
+@app.post("/chatbot/conversations/{conv_id}/mcp-confirm", response_class=JSONResponse)
+def api_mcp_confirm(
+    conv_id: str,
+    body: _McpConfirmBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """User-side confirm/decline for a queued MCP tool call. Executes
+    the tool (on approve) or records a declined-result message (on
+    decline) and returns the new messages so the frontend can render
+    the outcome alongside the conversation."""
+    from chatbot.mcp_bridge import resolve_mcp_pending
+    try:
+        appended = resolve_mcp_pending(
+            conn=conn, user=current_user, conversation_id=conv_id,
+            message_id=body.message_id, approved=bool(body.approved),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"messages": appended}
 
 
 # --- Config & Tickers (all protected) ---

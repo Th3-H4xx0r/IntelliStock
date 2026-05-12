@@ -287,16 +287,21 @@ def _llm_messages_for_call(history: List[Dict[str, Any]], system: str) -> List[D
     return out
 
 
-_CLAUDE_CLI_NO_TOOLS_SUFFIX = (
-    "\n\n=== IMPORTANT — pure-text mode ===\n"
-    "Function calling and tools are DISABLED in this conversation. You may "
-    "see tools described above for context, but you cannot invoke them. "
-    "Reply with plain natural-language text only. Do NOT emit JSON shaped "
-    'like {"type":"tool_use"}, function-call blocks, or any other tool '
-    "invocation syntax — those will appear to the user as garbled text. "
-    "If a user request would normally call a tool (e.g. \"show me the chart "
-    "for X\"), instead describe what you would do, ask for the data you'd "
-    "need, or suggest the user switch to a tool-capable model.\n"
+_CLAUDE_CLI_MCP_HINT = (
+    "\n\n=== Tool calling via Claude Code (MCP bridge) ===\n"
+    "IntelliStock's chatbot tools are exposed to you through an MCP "
+    "server. Their names appear in your tool list prefixed with "
+    "``mcp__intellistock__`` (e.g. ``mcp__intellistock__fetch_quote``). "
+    "Call them like any other tool when the user's request needs live "
+    "data, charts, navigation, or backend state.\n\n"
+    "Safe / read-only tools execute immediately and the result returns "
+    "synchronously. Non-safe tools (write, destructive — placing trades, "
+    "starting instances, deleting backtests, etc.) are *queued* for "
+    "user confirmation: the call returns an error saying the action "
+    "was queued. When you see that error, briefly acknowledge to the "
+    "user that you've requested the action and that they need to "
+    "approve or decline it in the UI; do NOT retry the call in the "
+    "same turn — the user has to act first.\n"
 )
 
 
@@ -307,26 +312,24 @@ def _call_llm(
     with_tools: bool = True,
     *,
     conversation_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     provider = (model_cfg.get("provider") or "").strip().lower()
     if provider == "claude-cli":
-        # claude-cli uses a persistent subprocess per conversation. The
-        # CLI itself holds history, and we currently run it in pure-text
-        # mode (no tools) — so we always pass with_tools=False here even
-        # if the caller asked for tools.
-        #
-        # IntelliStock's normal system prompt advertises the chatbot's
-        # tool catalogue. With CC spawned under --tools "" the model has
-        # no tools available, so it falls back to emitting raw
-        # ``{"type":"tool_use"}`` JSON as text when the user asks for
-        # something tool-like. Append a loud override so the model
-        # answers in plain text instead.
+        # claude-cli runs as a persistent subprocess per conversation
+        # with the IntelliStock MCP server attached, so CC can call our
+        # tools via ``mcp__intellistock__*`` and get IntelliStock to
+        # dispatch them. We append a short hint to the system prompt
+        # describing the queue-on-confirm semantics — without it, the
+        # model retries non-safe tools in a loop on every "tool was
+        # queued" error.
         from chatbot.claude_cli_provider import call_claude_cli_chat
         return call_claude_cli_chat(
             conversation_id=conversation_id or "",
             messages=_llm_messages_for_call(history, system),
-            system_prompt=(system or "") + _CLAUDE_CLI_NO_TOOLS_SUFFIX,
+            system_prompt=(system or "") + _CLAUDE_CLI_MCP_HINT,
             model=model_cfg["model"],
+            user_id=user_id or "",
             cli_path=model_cfg.get("cli_path") or "claude",
             extra_args=model_cfg.get("extra_args") or [],
             reasoning_effort=model_cfg.get("reasoning_effort"),
@@ -368,9 +371,13 @@ def _run_loop(
     # the right persistent subprocess. Fall back to the doc id if the
     # caller didn't pass it explicitly.
     conv_id_eff = conv_id or convo.get("id") or ""
+    user_id_eff = str(user.get("id") or "")
     for _ in range(MAX_TOOL_ROUNDS):
         try:
-            result = _call_llm(model_cfg, history, system, with_tools=True, conversation_id=conv_id_eff)
+            result = _call_llm(
+                model_cfg, history, system, with_tools=True,
+                conversation_id=conv_id_eff, user_id=user_id_eff,
+            )
         except Exception as e:
             _log.warning("chatbot LLM call failed: %s", e, exc_info=False)
             err_msg = conv_store.new_message(

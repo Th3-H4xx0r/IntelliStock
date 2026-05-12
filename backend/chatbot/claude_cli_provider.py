@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import subprocess
 import sys
@@ -282,6 +283,109 @@ _SAFETY_FLAGS = [
 ]
 
 
+# Argv that opens up the IntelliStock MCP server (and ONLY the
+# IntelliStock MCP server — CC's built-in Bash / Read / Edit / etc. stay
+# disabled). The session populates ``--mcp-config`` with the per-session
+# path at spawn time. ``mcp__intellistock__*`` is the name CC assigns to
+# every tool exposed by the ``intellistock`` MCP server we register.
+_MCP_FLAGS_TEMPLATE = [
+    "--strict-mcp-config",
+    "--no-session-persistence",
+    "--disable-slash-commands",
+    "--permission-mode", "bypassPermissions",   # bypass interactive prompts
+    "--allowedTools", "mcp__intellistock__*",
+]
+
+
+def _mcp_runtime_dir() -> str:
+    """Directory where per-session ``.mcp.json`` files live.
+    Configurable via ``CLAUDE_CLI_MCP_DIR``; defaults to the OS temp dir
+    plus an ``intellistock-mcp`` subdirectory we create on demand."""
+    base = (os.environ.get("CLAUDE_CLI_MCP_DIR") or "").strip()
+    if not base:
+        import tempfile
+        base = os.path.join(tempfile.gettempdir(), "intellistock-mcp")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return base
+
+
+def _mcp_server_command_args() -> List[str]:
+    """How to invoke the IntelliStock MCP server. Defaults to running
+    ``python <path-to-intellistock_mcp_server.py>``; the path resolves
+    relative to this file so it works inside the container regardless
+    of cwd."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intellistock_mcp_server.py")
+    # Allow operator override (e.g. a wrapper that activates a venv first).
+    override = (os.environ.get("CLAUDE_CLI_MCP_COMMAND") or "").strip()
+    if override:
+        return shlex.split(override) + [script]
+    return [sys.executable or "python", script]
+
+
+def _mcp_callback_url() -> str:
+    """Base URL the MCP server uses to call back into IntelliStock.
+    Defaults to the in-container ``http://api:<port>`` (matches the
+    Docker service name and the ``api`` service's exposed port)."""
+    explicit = (os.environ.get("CLAUDE_CLI_MCP_CALLBACK_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    port = (os.environ.get("API_PORT") or "8011").strip() or "8011"
+    return f"http://api:{port}"
+
+
+def _write_session_mcp_config(sess: "_Session") -> str:
+    """Materialise a per-session ``.mcp.json`` registering the
+    IntelliStock MCP server with the session's token/conv-id env. The
+    file is written 0600 and removed when the session is closed."""
+    cmd = _mcp_server_command_args()
+    config = {
+        "mcpServers": {
+            "intellistock": {
+                "command": cmd[0],
+                "args": cmd[1:],
+                "env": {
+                    "INTELLISTOCK_MCP_URL": _mcp_callback_url(),
+                    "INTELLISTOCK_MCP_TOKEN": sess.mcp_token,
+                    "INTELLISTOCK_CONVERSATION_ID": sess.conversation_id,
+                    "INTELLISTOCK_USER_ID": sess.user_id or "",
+                },
+            }
+        }
+    }
+    runtime_dir = _mcp_runtime_dir()
+    path = os.path.join(
+        runtime_dir,
+        f"mcp-{sess.conversation_id[:8]}-{secrets.token_hex(4)}.json",
+    )
+    try:
+        # Restrictive perms — file contains an auth token.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(config, ensure_ascii=False).encode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception as e:
+        raise ClaudeCliError(f"failed to write per-session MCP config: {e}") from e
+    return path
+
+
+def _cleanup_session_mcp_config(sess: "_Session") -> None:
+    path = sess.mcp_config_path
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log(f"failed to remove stale MCP config {path}: {e}", "yellow")
+    finally:
+        sess.mcp_config_path = ""
+
+
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 
 
@@ -319,16 +423,31 @@ def _build_chat_argv(
     system_prompt: str,
     extra_args: List[str],
     effort: Optional[str] = None,
+    mcp_config_path: Optional[str] = None,
 ) -> List[str]:
-    """Argv for a long-lived chatbot subprocess (stream-json in & out)."""
+    """Argv for a long-lived chatbot subprocess (stream-json in & out).
+
+    When ``mcp_config_path`` is provided, CC is launched with the
+    IntelliStock MCP server attached and tools restricted to
+    ``mcp__intellistock__*`` — CC's built-in Bash/Read/Edit/etc.
+    remain disabled. Without a config path, CC runs in pure-text mode
+    (no tools at all).
+    """
     effective_extra = _merge_extra_args_with_effort(extra_args, _normalize_effort(effort))
+    if mcp_config_path:
+        safety = [
+            "--mcp-config", mcp_config_path,
+            *_MCP_FLAGS_TEMPLATE,
+        ]
+    else:
+        safety = list(_SAFETY_FLAGS)
     argv = [
         cli_path, "-p", "--verbose",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--model", model,
         "--system-prompt", system_prompt,
-        *_SAFETY_FLAGS,
+        *safety,
         *effective_extra,
     ]
     return argv
@@ -479,6 +598,16 @@ class _Session:
     model: str
     cli_path: str
     system_prompt: str
+    # Identifies the IntelliStock user that owns this conversation, so the
+    # MCP server can dispatch tools with the right principal. Threaded in
+    # by ``call_claude_cli_chat``.
+    user_id: str = ""
+    # Ephemeral token the spawned MCP server presents back to IntelliStock's
+    # /chatbot/internal/mcp-* endpoints. Generated per session; never logged.
+    mcp_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
+    # Path to the per-session ``.mcp.json`` we write at spawn time; cleaned
+    # up at close. Empty when MCP is disabled.
+    mcp_config_path: str = ""
     extra_args_signature: str = ""    # tuple-as-string for change detection
     process: Optional[subprocess.Popen] = None
     state: SessionState = SessionState.SPAWNING
@@ -566,6 +695,7 @@ class ClaudeCliSessionManager:
         model: str,
         cli_path: str,
         extra_args: List[str],
+        user_id: str = "",
         timeout_sec: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send one chatbot turn and return the normalised response shape.
@@ -589,6 +719,7 @@ class ClaudeCliSessionManager:
                 system_prompt=system_prompt,
                 extra_args=extra_args,
                 extra_sig=extra_sig,
+                user_id=user_id,
             )
             with sess.send_lock:
                 # Re-verify the session we locked is still the live one in
@@ -703,6 +834,20 @@ class ClaudeCliSessionManager:
         if sess is not None:
             self._close_session(sess)
 
+    def lookup_by_token(self, token: str) -> Optional["_Session"]:
+        """Return the session whose ``mcp_token`` matches the supplied
+        value, or ``None``. Used by the IntelliStock backend to
+        authenticate inbound MCP tool-call requests from a spawned CC
+        subprocess. Constant-time-ish compare to defeat trivial token
+        guessing (the search itself is linear; tokens are 256 bits)."""
+        if not token:
+            return None
+        with self._sessions_lock:
+            for sess in self._sessions.values():
+                if secrets.compare_digest(sess.mcp_token, token):
+                    return sess
+        return None
+
     # ── Internal: spawn / lifecycle ──
 
     def _get_or_spawn(
@@ -714,6 +859,7 @@ class ClaudeCliSessionManager:
         system_prompt: str,
         extra_args: List[str],
         extra_sig: str,
+        user_id: str = "",
     ) -> _Session:
         with self._sessions_lock:
             existing = self._sessions.get(conversation_id)
@@ -744,6 +890,7 @@ class ClaudeCliSessionManager:
                 cli_path=cli_path,
                 system_prompt=system_prompt,
                 extra_args_signature=extra_sig,
+                user_id=user_id,
             )
             self._sessions[conversation_id] = sess
 
@@ -769,7 +916,12 @@ class ClaudeCliSessionManager:
         # lookup), an absolute path whose basename is ``claude``/``claude.exe``,
         # or anything explicitly allowed via ``CLAUDE_CLI_ALLOWED_BINARIES``.
         resolved_cli = _resolve_cli_path(sess.cli_path)
+        # Materialise the per-session MCP config BEFORE the semaphore so a
+        # disk failure doesn't burn a slot.
+        sess.mcp_config_path = _write_session_mcp_config(sess)
         if not _GLOBAL_SPAWN_SEM.acquire(timeout=self._spawn_timeout_sec):
+            # Drop the config we just wrote; we won't be exec'ing.
+            _cleanup_session_mcp_config(sess)
             raise ClaudeCliError(
                 f"global subprocess cap ({CLAUDE_CLI_MAX_CONCURRENT}) reached; "
                 "another call is hogging the budget."
@@ -779,6 +931,7 @@ class ClaudeCliSessionManager:
             model=sess.model,
             system_prompt=sess.system_prompt,
             extra_args=extra_args,
+            mcp_config_path=sess.mcp_config_path,
         )
         try:
             proc = subprocess.Popen(
@@ -794,14 +947,17 @@ class ClaudeCliSessionManager:
             )
         except FileNotFoundError as e:
             # Semaphore was acquired above — release it before raising so
-            # a missing binary doesn't permanently shrink the pool.
+            # a missing binary doesn't permanently shrink the pool. Also
+            # clean up the per-session MCP config we just wrote.
             _release_spawn_sem_safely()
+            _cleanup_session_mcp_config(sess)
             raise ClaudeCliNotInstalledError(
                 f"claude binary not found at {sess.cli_path!r}. "
                 "Install with: npm i -g @anthropic-ai/claude-code"
             ) from e
         except Exception as e:
             _release_spawn_sem_safely()
+            _cleanup_session_mcp_config(sess)
             raise ClaudeCliError(f"failed to spawn claude: {e}") from e
 
         # Spawn succeeded — record ownership so _close_session releases
@@ -835,6 +991,10 @@ class ClaudeCliSessionManager:
         # ``finally`` block recognises this is a graceful close rather than
         # a crash (which would otherwise flip CLOSED → CRASHED).
         sess.state = SessionState.CLOSED
+        # Always tear down the per-session MCP config — it contains an
+        # auth token, and we don't want stale credentials accumulating in
+        # the runtime dir.
+        _cleanup_session_mcp_config(sess)
         proc = sess.process
         if proc is None:
             # Never spawned; nothing to release.
@@ -1230,6 +1390,7 @@ def call_claude_cli_chat(
     messages: List[Dict[str, Any]],
     system_prompt: str,
     model: str,
+    user_id: str = "",
     cli_path: str = "claude",
     extra_args: Optional[List[str]] = None,
     reasoning_effort: Optional[str] = None,
@@ -1241,6 +1402,11 @@ def call_claude_cli_chat(
     reuse the warm process. Returns the normalised
     ``{content, tool_calls, finish_reason, raw}`` shape that the chatbot's
     provider abstraction expects.
+
+    ``user_id`` identifies the IntelliStock user for MCP tool dispatch —
+    when a tool call comes back from CC, the backend executes it as this
+    user. Required for the MCP bridge to be useful; chats without a
+    user_id will still work but the model's tool calls will fail.
 
     ``reasoning_effort`` (if set to one of ``low|medium|high|xhigh|max``)
     is injected as ``--effort <level>`` on the spawned CLI. Folded into
@@ -1267,6 +1433,7 @@ def call_claude_cli_chat(
         model=model,
         cli_path=cli_path or "claude",
         extra_args=extra_args,
+        user_id=user_id or "",
         timeout_sec=timeout_sec,
     )
 

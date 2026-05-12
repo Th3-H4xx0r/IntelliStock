@@ -240,6 +240,40 @@ class TestArgvBuilders:
         assert argv[i + 1] == "low"
         assert argv.count("--effort") == 1
 
+    def test_chat_argv_no_mcp_config_uses_pure_text_safety(self):
+        argv = _build_chat_argv(
+            cli_path="claude", model="x", system_prompt="hi",
+            extra_args=[],
+        )
+        # Pure-text mode: --tools "" disables every built-in.
+        assert "--tools" in argv
+        assert argv[argv.index("--tools") + 1] == ""
+        # No MCP wiring.
+        assert "--mcp-config" not in argv
+        assert "--allowedTools" not in argv
+
+    def test_chat_argv_with_mcp_config_switches_to_allowedtools(self):
+        argv = _build_chat_argv(
+            cli_path="claude", model="x", system_prompt="hi",
+            extra_args=[],
+            mcp_config_path="/tmp/test-mcp.json",
+        )
+        # MCP path: --mcp-config provided + --allowedTools restricted to mcp__*
+        assert "--mcp-config" in argv
+        assert argv[argv.index("--mcp-config") + 1] == "/tmp/test-mcp.json"
+        assert "--allowedTools" in argv
+        assert argv[argv.index("--allowedTools") + 1] == "mcp__intellistock__*"
+        # And the bare "--tools ''" gate is NOT present (it would
+        # silently override --allowedTools).
+        if "--tools" in argv:
+            # The only legit reason to see --tools in MCP mode would be a
+            # caller-supplied extra_args entry, not our builder.
+            assert False, "MCP-mode argv shouldn't contain --tools"
+        # Safety baseline still on.
+        assert "--strict-mcp-config" in argv
+        assert "--no-session-persistence" in argv
+        assert "--disable-slash-commands" in argv
+
     def test_structured_argv_has_json_schema(self):
         argv = _build_structured_argv(
             cli_path="claude",
