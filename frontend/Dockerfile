@@ -25,7 +25,7 @@ ENV VITE_PREVIEW_MODE=$VITE_PREVIEW_MODE
 RUN npm run build
 
 # ─── Stage 2: Serve ───────────────────────────────────────────────────────────
-FROM nginx:1.27-alpine
+FROM nginx:1.29-alpine
 
 # Remove default config
 RUN rm /etc/nginx/conf.d/default.conf
