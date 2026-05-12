@@ -1,8 +1,10 @@
 <script setup>
+import { computed } from 'vue'
 import {
   LLM_PROVIDER_OPTIONS,
   LLM_REASONING_EFFORT_OPTIONS,
   NVIDIA_REASONING_EFFORT_OPTIONS,
+  CLAUDE_CLI_EFFORT_OPTIONS,
   getLlmProviderLabel,
 } from '../utils/strategyConfig.js'
 
@@ -17,6 +19,12 @@ const emit = defineEmits(['update:draft'])
 function update(field, value) {
   emit('update:draft', { ...props.draft, [field]: value })
 }
+
+const effortOptions = computed(() => {
+  if (props.draft.provider === 'nvidia') return NVIDIA_REASONING_EFFORT_OPTIONS
+  if (props.draft.provider === 'claude-cli') return CLAUDE_CLI_EFFORT_OPTIONS
+  return LLM_REASONING_EFFORT_OPTIONS
+})
 
 function onProviderChange(value) {
   const next = { ...props.draft, provider: value }
@@ -100,7 +108,7 @@ function onProviderChange(value) {
       </div>
     </template>
 
-    <div v-if="draft.provider === 'azure' || draft.provider === 'openai' || draft.provider === 'nvidia'">
+    <div v-if="['azure', 'openai', 'nvidia', 'claude-cli'].includes(draft.provider)">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">Reasoning Effort</label>
       <select
         :value="draft.reasoningEffort"
@@ -109,7 +117,7 @@ function onProviderChange(value) {
         class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
       >
         <option
-          v-for="option in draft.provider === 'nvidia' ? NVIDIA_REASONING_EFFORT_OPTIONS : LLM_REASONING_EFFORT_OPTIONS"
+          v-for="option in effortOptions"
           :key="option.value || 'default'"
           :value="option.value"
         >{{ option.label }}</option>
@@ -117,6 +125,9 @@ function onProviderChange(value) {
       <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
         <template v-if="draft.provider === 'nvidia'">
           Controls NVIDIA Super's reasoning mode. None disables thinking tokens, Low/Medium/High enable reasoning with increasing budget.
+        </template>
+        <template v-else-if="draft.provider === 'claude-cli'">
+          Maps to <span class="font-mono">--effort</span> on the claude CLI. Higher levels let the model reason longer. Default leaves CC's behaviour unchanged.
         </template>
         <template v-else-if="draft.reasoningEffort">
           Lower is faster. Cached/history model references will be stored like

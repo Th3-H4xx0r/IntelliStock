@@ -208,6 +208,38 @@ class TestArgvBuilders:
         assert "--fallback-model" in argv
         assert "claude-haiku-4-5" in argv
 
+    def test_chat_argv_injects_effort_when_set(self):
+        argv = _build_chat_argv(
+            cli_path="claude", model="x", system_prompt="hi",
+            extra_args=[], effort="high",
+        )
+        i = argv.index("--effort")
+        assert argv[i + 1] == "high"
+
+    def test_chat_argv_skips_effort_when_blank(self):
+        argv = _build_chat_argv(
+            cli_path="claude", model="x", system_prompt="hi",
+            extra_args=[], effort="",
+        )
+        assert "--effort" not in argv
+
+    def test_chat_argv_skips_effort_when_invalid(self):
+        argv = _build_chat_argv(
+            cli_path="claude", model="x", system_prompt="hi",
+            extra_args=[], effort="nuclear",  # not in enum
+        )
+        assert "--effort" not in argv
+
+    def test_chat_argv_user_extra_args_effort_wins(self):
+        argv = _build_chat_argv(
+            cli_path="claude", model="x", system_prompt="hi",
+            extra_args=["--effort", "low"], effort="high",
+        )
+        # User-typed value takes precedence; no duplicate flag.
+        i = argv.index("--effort")
+        assert argv[i + 1] == "low"
+        assert argv.count("--effort") == 1
+
     def test_structured_argv_has_json_schema(self):
         argv = _build_structured_argv(
             cli_path="claude",

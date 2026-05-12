@@ -1016,6 +1016,16 @@ def _call_claude_cli_plain(
             pass
         return ""
 
+    # Map reasoning_effort → --effort. Empty/invalid values produce no
+    # flag so CC runs with its default.
+    effort = str(cfg.get("reasoning_effort") or "").strip().lower()
+    if effort not in ("low", "medium", "high", "xhigh", "max"):
+        effort = ""
+    effort_args = ["--effort", effort] if effort else []
+    # If extra_args already contains --effort, the user-typed value wins.
+    if any(tok == "--effort" for tok in extra_args):
+        effort_args = []
+
     import subprocess as _subprocess
     timeout = _coerce_timeout_sec(timeout_sec)
     last_err = ""
@@ -1028,6 +1038,7 @@ def _call_claude_cli_plain(
             "--strict-mcp-config",
             "--no-session-persistence",
             "--disable-slash-commands",
+            *effort_args,
             *extra_args,
         ]
         try:
@@ -1200,6 +1211,7 @@ def _call_claude_cli_structured_from_strategy(
                 output_schema=output_type,
                 cli_path=cli_path,
                 extra_args=extra_args,
+                reasoning_effort=cfg.get("reasoning_effort"),
                 timeout_sec=timeout_sec,
             )
             _LAST_STRUCTURED_LLM_CALL.data = {

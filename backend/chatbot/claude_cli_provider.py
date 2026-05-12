@@ -282,14 +282,46 @@ _SAFETY_FLAGS = [
 ]
 
 
+_VALID_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
+
+
+def _normalize_effort(value: Optional[str]) -> Optional[str]:
+    """Coerce a reasoning_effort value to a valid CC ``--effort`` level
+    or ``None`` if blank/invalid. Lets the UI's empty-string "Default"
+    cleanly become "no flag passed"."""
+    if not value:
+        return None
+    v = str(value).strip().lower()
+    if v in _VALID_EFFORT_LEVELS:
+        return v
+    return None
+
+
+def _merge_extra_args_with_effort(extra_args: List[str], effort: Optional[str]) -> List[str]:
+    """If the caller passed a separate ``effort`` value (typically from
+    the Models table's ``reasoning_effort`` field), inject ``--effort
+    <value>`` into argv. If the user *also* manually wrote ``--effort``
+    into ``extra_args``, the user-typed value wins (more specific
+    intent); we just don't double-emit the flag."""
+    if not effort:
+        return list(extra_args)
+    # If --effort is already present, leave the user's value alone.
+    for i, tok in enumerate(extra_args):
+        if tok == "--effort":
+            return list(extra_args)
+    return ["--effort", effort] + list(extra_args)
+
+
 def _build_chat_argv(
     *,
     cli_path: str,
     model: str,
     system_prompt: str,
     extra_args: List[str],
+    effort: Optional[str] = None,
 ) -> List[str]:
     """Argv for a long-lived chatbot subprocess (stream-json in & out)."""
+    effective_extra = _merge_extra_args_with_effort(extra_args, _normalize_effort(effort))
     argv = [
         cli_path, "-p", "--verbose",
         "--input-format", "stream-json",
@@ -297,7 +329,7 @@ def _build_chat_argv(
         "--model", model,
         "--system-prompt", system_prompt,
         *_SAFETY_FLAGS,
-        *extra_args,
+        *effective_extra,
     ]
     return argv
 
@@ -309,8 +341,10 @@ def _build_structured_argv(
     system_prompt: str,
     json_schema: str,
     extra_args: List[str],
+    effort: Optional[str] = None,
 ) -> List[str]:
     """Argv for a spawn-per-call structured-output run."""
+    effective_extra = _merge_extra_args_with_effort(extra_args, _normalize_effort(effort))
     argv = [
         cli_path, "-p",
         "--output-format", "json",
@@ -318,7 +352,7 @@ def _build_structured_argv(
         "--system-prompt", system_prompt,
         "--json-schema", json_schema,
         *_SAFETY_FLAGS,
-        *extra_args,
+        *effective_extra,
     ]
     return argv
 
@@ -1198,6 +1232,7 @@ def call_claude_cli_chat(
     model: str,
     cli_path: str = "claude",
     extra_args: Optional[List[str]] = None,
+    reasoning_effort: Optional[str] = None,
     timeout_sec: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Send one chatbot turn to a persistent ``claude`` subprocess.
@@ -1206,12 +1241,24 @@ def call_claude_cli_chat(
     reuse the warm process. Returns the normalised
     ``{content, tool_calls, finish_reason, raw}`` shape that the chatbot's
     provider abstraction expects.
+
+    ``reasoning_effort`` (if set to one of ``low|medium|high|xhigh|max``)
+    is injected as ``--effort <level>`` on the spawned CLI. Folded into
+    ``extra_args`` via the spawn-argv builder so the session-reuse
+    signature picks up changes — bumping effort mid-conversation will
+    transparently respawn the subprocess with the new flag.
     """
     if not conversation_id:
         raise ValueError("conversation_id is required for claude-cli chatbot calls")
     if not model:
         raise ValueError("model is required")
     extra_args = list(extra_args or [])
+    effort = _normalize_effort(reasoning_effort)
+    if effort:
+        # Inline the --effort pair into extra_args so the session-reuse
+        # ``extra_args_signature`` reflects the value and a UI change
+        # forces a clean respawn.
+        extra_args = _merge_extra_args_with_effort(extra_args, effort)
     mgr = get_session_manager()
     return mgr.send_turn(
         conversation_id=conversation_id,
@@ -1235,6 +1282,7 @@ def call_claude_cli_structured(
     output_schema: Any,                # type[BaseModel] but we avoid the import
     cli_path: str = "claude",
     extra_args: Optional[List[str]] = None,
+    reasoning_effort: Optional[str] = None,
     timeout_sec: Optional[int] = None,
 ) -> Any:
     """Spawn-per-call structured-output run. ``output_schema`` must be a
@@ -1242,12 +1290,19 @@ def call_claude_cli_structured(
 
     Returns a validated instance of ``output_schema`` on success. Raises one
     of the ``ClaudeCli*Error`` types on failure.
+
+    Optional ``reasoning_effort`` (``low|medium|high|xhigh|max``) is
+    mapped to CC's ``--effort`` flag. Blank/invalid values are silently
+    ignored so the CLI runs with its built-in default.
     """
     if not model:
         raise ValueError("model is required")
     if output_schema is None:
         raise ValueError("output_schema is required")
     extra_args = list(extra_args or [])
+    effort = _normalize_effort(reasoning_effort)
+    if effort:
+        extra_args = _merge_extra_args_with_effort(extra_args, effort)
     timeout = timeout_sec or CLAUDE_CLI_TURN_TIMEOUT_SEC
     # Resolve+validate cli_path BEFORE acquiring the global semaphore so
     # an invalid binary doesn't burn a slot. Raises if path doesn't

@@ -323,6 +323,17 @@ export const NVIDIA_REASONING_EFFORT_OPTIONS = [
   { value: 'high', label: 'High (full reasoning)' },
 ]
 
+// Maps to the claude CLI's `--effort` flag. CC supports five levels;
+// the default ("") lets CC decide.
+export const CLAUDE_CLI_EFFORT_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' },
+  { value: 'max', label: 'Max' },
+]
+
 const KNOWN_LLM_ROLE_LABELS = {
   '': 'Default LLM',
   'sentiment_': 'Daily Sentiment LLM',

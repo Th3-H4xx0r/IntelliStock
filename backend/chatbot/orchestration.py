@@ -329,6 +329,7 @@ def _call_llm(
             model=model_cfg["model"],
             cli_path=model_cfg.get("cli_path") or "claude",
             extra_args=model_cfg.get("extra_args") or [],
+            reasoning_effort=model_cfg.get("reasoning_effort"),
             timeout_sec=LLM_TIMEOUT_SEC,
         )
     return call_chat_with_tools(
