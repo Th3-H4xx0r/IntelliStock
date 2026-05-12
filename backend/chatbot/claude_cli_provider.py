@@ -286,14 +286,32 @@ _SAFETY_FLAGS = [
 # Argv that opens up the IntelliStock MCP server (and ONLY the
 # IntelliStock MCP server — CC's built-in Bash / Read / Edit / etc. stay
 # disabled). The session populates ``--mcp-config`` with the per-session
-# path at spawn time. ``mcp__intellistock__*`` is the name CC assigns to
-# every tool exposed by the ``intellistock`` MCP server we register.
+# path at spawn time.
+#
+# Two specific syntax choices that matter:
+#
+#   * ``--permission-mode bypassPermissions`` rather than
+#     ``--dangerously-skip-permissions``. The latter has a hard refusal
+#     when CC detects it's running as root (Docker containers commonly
+#     run as root and we can't easily switch). The former achieves the
+#     same effect — auto-grant every tool call — without the root
+#     check. JarvisClaw's note about ``acceptEdits`` silently blocking
+#     Bash mid-turn does NOT apply to ``bypassPermissions`` and is
+#     moot anyway since we expose only MCP tools, never Bash.
+#
+#   * ``--allowedTools mcp__*`` (broad MCP glob) rather than
+#     ``mcp__intellistock__*``. CC's allowedTools parser supports the
+#     ``mcp__*`` pattern but not all CC versions handle the more
+#     specific ``mcp__<server>__*`` form; ``mcp__*`` is the safer
+#     across-versions choice. With ``--strict-mcp-config`` pointing
+#     only at our config, this is functionally equivalent to
+#     restricting to IntelliStock tools.
 _MCP_FLAGS_TEMPLATE = [
     "--strict-mcp-config",
     "--no-session-persistence",
     "--disable-slash-commands",
-    "--permission-mode", "bypassPermissions",   # bypass interactive prompts
-    "--allowedTools", "mcp__intellistock__*",
+    "--permission-mode", "bypassPermissions",
+    "--allowedTools", "mcp__*",
 ]
 
 

@@ -262,7 +262,7 @@ class TestArgvBuilders:
         assert "--mcp-config" in argv
         assert argv[argv.index("--mcp-config") + 1] == "/tmp/test-mcp.json"
         assert "--allowedTools" in argv
-        assert argv[argv.index("--allowedTools") + 1] == "mcp__intellistock__*"
+        assert argv[argv.index("--allowedTools") + 1] == "mcp__*"
         # And the bare "--tools ''" gate is NOT present (it would
         # silently override --allowedTools).
         if "--tools" in argv:
@@ -273,6 +273,12 @@ class TestArgvBuilders:
         assert "--strict-mcp-config" in argv
         assert "--no-session-persistence" in argv
         assert "--disable-slash-commands" in argv
+        # bypassPermissions via --permission-mode (we can't use
+        # --dangerously-skip-permissions because CC refuses to run it
+        # as root, which Docker containers commonly are).
+        assert "--permission-mode" in argv
+        assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+        assert "--dangerously-skip-permissions" not in argv
 
     def test_structured_argv_has_json_schema(self):
         argv = _build_structured_argv(
