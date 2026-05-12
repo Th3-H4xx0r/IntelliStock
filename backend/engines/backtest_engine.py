@@ -682,6 +682,13 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         # Read-only mount: CC only needs to read the operator's OAuth
         # state, never to mutate it during a backtest.
         container_volumes[claude_host_home] = {'bind': '/root/.claude', 'mode': 'ro'}
+        # CC also requires $HOME/.claude.json (sibling of .claude/) in
+        # MCP mode — missing it surfaces a misleading "Not logged in"
+        # error even with valid creds in .claude/. Mount it too when
+        # the operator has configured CLAUDE_HOST_CONFIG.
+        claude_host_config = (os.environ.get('CLAUDE_HOST_CONFIG') or '').strip()
+        if claude_host_config:
+            container_volumes[claude_host_config] = {'bind': '/root/.claude.json', 'mode': 'ro'}
 
     try:
         client = _get_docker_client()

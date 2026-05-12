@@ -52,6 +52,13 @@ services:
       # Docker creates an empty dir; claude will report "Not logged in"
       # via the /models/{id}/test-cli endpoint until you log in on the host.
       - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
+      # CC also reads ``~/.claude.json`` (the sibling config file — distinct
+      # from the .claude/ directory). In MCP mode CC treats this as a hard
+      # auth requirement: missing it ⇒ "Claude Code is not logged in" even
+      # though credentials in .claude/ are intact. Bind-mounting it makes
+      # the container see the same auth state as the host. Override
+      # CLAUDE_HOST_CONFIG if your config lives elsewhere.
+      - ${CLAUDE_HOST_CONFIG:-~/.claude.json}:/root/.claude.json:ro
     restart: unless-stopped
     depends_on:
       - rethinkdb
@@ -92,6 +99,10 @@ services:
       # (instance brokers, AI agent, daily digest, discover engine, graph
       # nexus). See server.py::_claude_home_mount.
       - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
+      # HOST-side path to ~/.claude.json — sibling of .claude/, required
+      # by CC's MCP mode. Forwarded alongside CLAUDE_HOST_HOME into
+      # spawned containers.
+      - CLAUDE_HOST_CONFIG=${CLAUDE_HOST_CONFIG:-}
       # Drop privileges to this user when spawning ``claude``. CC refuses
       # to bypass permissions when running as root, and our Python server
       # process runs as root. Defaults to the ``claudeuser`` (UID 1000)
@@ -113,6 +124,7 @@ services:
       # Share the host's claude login (used by the chatbot when a user
       # picks a "claude-cli" model). See backend service notes above.
       - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
+      - ${CLAUDE_HOST_CONFIG:-~/.claude.json}:/root/.claude.json:ro
     env_file:
       - .env
     environment:
@@ -157,6 +169,7 @@ services:
       # ml_news, ai_trading_decision) that select a claude-cli model can
       # reach the operator's Pro/Max subscription. See backend notes above.
       - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
+      - ${CLAUDE_HOST_CONFIG:-~/.claude.json}:/root/.claude.json:ro
     # R19 (2026-04-25): backtest-engine spawns ephemeral broker containers and
     # must forward INTELLISTOCK_CRED_KEY into them so the broker can decrypt
     # Fernet-encrypted BrokerageAccounts rows. Without env_file the engine's
@@ -184,6 +197,9 @@ services:
       # broker containers (see backtest_engine.py) so claude-cli strategy
       # calls can reach the operator's logged-in subscription.
       - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
+      # HOST-side path to ~/.claude.json — sibling config file CC needs
+      # in MCP mode. Forwarded alongside CLAUDE_HOST_HOME.
+      - CLAUDE_HOST_CONFIG=${CLAUDE_HOST_CONFIG:-}
       # Drop privileges to this user when spawning ``claude``. CC refuses
       # to bypass permissions when running as root, and our Python server
       # process runs as root. Defaults to the ``claudeuser`` (UID 1000)

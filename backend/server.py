@@ -201,26 +201,38 @@ def _detect_container_network(client):
 
 
 def _claude_home_mount():
-    """Return the host->container claude-auth bind-mount as a dict suitable
+    """Return the host->container claude-auth bind-mounts as a dict suitable
     for the Docker SDK, or ``None`` if the operator hasn't configured a
     ``CLAUDE_HOST_HOME`` path.
 
     Spawned containers (live trading instances, AI backtesting agent,
     daily digest, graph nexus) reuse the parent service's claude login
-    by bind-mounting the same host directory at ``/root/.claude``. With
-    no env var set, we skip the mount — claude-cli calls in the child
-    will surface a clean "Not logged in" error instead of failing
-    obscurely on a missing volume.
+    by bind-mounting:
+      - the host's ``~/.claude`` dir   at ``/root/.claude``
+      - the host's ``~/.claude.json`` file at ``/root/.claude.json``
+
+    Both are required for CC's MCP mode (the bare directory mount alone
+    triggers a misleading "Not logged in" error because CC also reads
+    the sibling config file at ``$HOME/.claude.json``). With no env var
+    set, we skip the mounts — claude-cli calls in the child will surface
+    a clean "Not logged in" error instead of failing obscurely on a
+    missing volume.
 
     Mounted **read-only** so a compromised CC subprocess can't tamper
-    with the host's auth state. CC only reads ``.credentials.json`` and
-    ``settings.json`` from this dir; it doesn't write back during the
-    short-lived calls we make.
+    with the host's auth state. CC only reads ``.credentials.json``,
+    ``settings.json``, and ``.claude.json`` from this dir; it doesn't
+    write back during the short-lived calls we make.
     """
-    host_path = (os.environ.get('CLAUDE_HOST_HOME') or '').strip()
-    if not host_path:
+    host_home = (os.environ.get('CLAUDE_HOST_HOME') or '').strip()
+    if not host_home:
         return None
-    return {host_path: {'bind': '/root/.claude', 'mode': 'ro'}}
+    mounts: Dict[str, Dict[str, str]] = {
+        host_home: {'bind': '/root/.claude', 'mode': 'ro'},
+    }
+    host_config = (os.environ.get('CLAUDE_HOST_CONFIG') or '').strip()
+    if host_config:
+        mounts[host_config] = {'bind': '/root/.claude.json', 'mode': 'ro'}
+    return mounts
 
 
 def _augment_volumes_with_claude(volumes):
@@ -239,10 +251,9 @@ def _augment_volumes_with_claude(volumes):
     Read-only is fine for claude's auth state (the CLI only reads
     ``.credentials.json`` / ``settings.json``).
     """
-    mount = _claude_home_mount()
-    if not mount:
+    mounts = _claude_home_mount()
+    if not mounts:
         return volumes
-    host_path, spec = next(iter(mount.items()))
     # Convert any input shape to a dict.
     out: Dict[str, Dict[str, str]] = {}
     if isinstance(volumes, dict):
@@ -262,7 +273,8 @@ def _augment_volumes_with_claude(volumes):
                 # Single-token volume name — leave it for the SDK to
                 # interpret (this branch shouldn't be hit in our code).
                 out[entry] = {"bind": "/data", "mode": "rw"}
-    out[host_path] = spec
+    for host_path, spec in mounts.items():
+        out[host_path] = spec
     return out
 
 
