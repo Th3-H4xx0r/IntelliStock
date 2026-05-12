@@ -348,13 +348,20 @@ def _mcp_server_command_args() -> List[str]:
 
 def _mcp_callback_url() -> str:
     """Base URL the MCP server uses to call back into IntelliStock.
-    Defaults to the in-container ``http://api:<port>`` (matches the
-    Docker service name and the ``api`` service's exposed port)."""
+
+    Defaults to ``http://127.0.0.1:<port>``: the MCP server is spawned
+    by CC which is in turn spawned by the chatbot handler running in
+    the api container, so the server-side endpoint is co-resident. The
+    loopback path bypasses Docker's internal DNS (which is flaky inside
+    a container calling its own service name on some setups) and works
+    regardless of the ``api`` service name. Operators can override with
+    ``CLAUDE_CLI_MCP_CALLBACK_URL`` for split deployments.
+    """
     explicit = (os.environ.get("CLAUDE_CLI_MCP_CALLBACK_URL") or "").strip()
     if explicit:
         return explicit.rstrip("/")
     port = (os.environ.get("API_PORT") or "8011").strip() or "8011"
-    return f"http://api:{port}"
+    return f"http://127.0.0.1:{port}"
 
 
 def _write_session_mcp_config(sess: "_Session") -> str:

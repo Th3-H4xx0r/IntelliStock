@@ -22,6 +22,7 @@ attribution see the right principal.
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,33 @@ from auth_utils import get_user_by_id          # type: ignore[import-not-found]
 
 from chatbot import conversations as conv_store
 from chatbot.tools import get_tool
+
+
+def _log(msg: str, color: str = "white") -> None:
+    try:
+        from intellistock_logger import intellistock_logger
+        intellistock_logger.log(msg, color, service="McpBridge")
+    except Exception:
+        try:
+            print(f"[McpBridge] {msg}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
+# CC's MCP integration sometimes calls tools with the namespaced
+# ``mcp__<server>__<name>`` shape (the form the model sees), other
+# times with the bare ``<name>``. Strip the namespace prefix
+# defensively so our registry lookup works regardless of which form
+# came in.
+_MCP_NAME_PREFIX = "mcp__intellistock__"
+
+
+def _normalize_tool_name(name: str) -> str:
+    if not name:
+        return ""
+    if name.startswith(_MCP_NAME_PREFIX):
+        return name[len(_MCP_NAME_PREFIX):]
+    return name
 
 
 # ── Public dispatch ───────────────────────────────────────────────────────
@@ -51,7 +79,15 @@ def dispatch_mcp_tool_call(
         message so it can apologise / inform the user.
       * ``{ok: false, error: "..."}`` — unknown tool / executor crash.
     """
-    tool = get_tool(tool_name)
+    normalized = _normalize_tool_name(tool_name)
+    tool = get_tool(normalized)
+    _log(
+        f"dispatch tool_name={tool_name!r} normalized={normalized!r} "
+        f"user_id={user_id!r} conv={conversation_id[:8]} "
+        f"tool_found={tool is not None} "
+        f"safety={tool.safety if tool else 'n/a'}",
+        "cyan",
+    )
     if tool is None:
         return {"ok": False, "error": f"unknown tool: {tool_name!r}"}
 
@@ -63,7 +99,9 @@ def dispatch_mcp_tool_call(
         }
 
     if tool.safety == "safe":
-        return _execute_tool(conn=conn, user=user, tool_name=tool_name, arguments=arguments)
+        result = _execute_tool(conn=conn, user=user, tool_name=normalized, arguments=arguments)
+        _log(f"safe-tool result ok={result.get('ok')} keys={list(result.keys())}", "cyan")
+        return result
 
     # Non-safe: queue a pending_confirmation row on the conversation and
     # return a "pending" envelope to CC. The user will approve/decline
@@ -78,7 +116,7 @@ def dispatch_mcp_tool_call(
 
     pending_payload = {
         "tool_call_id": f"mcp-{uuid.uuid4().hex[:12]}",
-        "name": tool_name,
+        "name": normalized,
         "arguments": arguments,
         "safety": tool.safety,
         "description": tool.description,
@@ -87,26 +125,31 @@ def dispatch_mcp_tool_call(
     pending_msg = conv_store.new_message(
         "assistant",
         content=(
-            f"⚠️ I tried to run the **{tool_name}** tool ({tool.safety}); "
+            f"⚠️ I tried to run the **{normalized}** tool ({tool.safety}); "
             "this requires your confirmation before it can execute. "
             "Approve or decline below to continue."
         ),
         tool_calls=[{
             "id": pending_payload["tool_call_id"],
-            "name": tool_name,
+            "name": normalized,
             "arguments": arguments,
         }],
         pending_tool=pending_payload,
         status="pending_confirmation",
     )
     conv_store.append_messages(conn, user["id"], conversation_id, [pending_msg])
+    _log(
+        f"queued tool={normalized} safety={tool.safety} "
+        f"pending_id={pending_msg.get('id')!r}",
+        "yellow",
+    )
 
     return {
         "ok": False,
         "pending": True,
         "message_id": pending_msg.get("id"),
         "error": (
-            f"Tool {tool_name} is queued for user confirmation. "
+            f"Tool {normalized} is queued for user confirmation. "
             "The action has been surfaced to the user; tell them the "
             "request was logged and that they need to approve or decline."
         ),
