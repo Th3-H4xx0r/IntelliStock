@@ -460,6 +460,20 @@ _CLAUDE_STATE_INIT_LOCK = threading.Lock()
 # OWN per-conversation runtime_home — these are independent.
 _STRUCTURED_RUNTIME_HOME: str = ""
 _STRUCTURED_RUNTIME_HOME_LOCK = threading.Lock()
+# Per-call spawn-id counter so concurrent worker logs are distinguishable.
+# Sonnet+reasoning_effort=high routinely takes 30-90s per structured call;
+# without per-spawn entry/exit logs the broker appears frozen while 4
+# workers run in parallel. The counter pairs entry/exit lines.
+_STRUCTURED_SPAWN_COUNTER: int = 0
+_STRUCTURED_SPAWN_LOCK = threading.Lock()
+# Toggle full-stdout dumps to the log for diagnosing model-output issues.
+# Currently DEFAULT-ON while we're debugging CC's structured-output
+# format compliance — the diagnostic value of seeing the actual model
+# response outweighs the log-volume cost. Set
+# CLAUDE_CLI_DUMP_STRUCTURED_STDOUT=0 (or false) to disable.
+_DUMP_STRUCTURED_STDOUT = str(
+    os.environ.get("CLAUDE_CLI_DUMP_STRUCTURED_STDOUT", "1")
+).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def _init_claude_state_once() -> None:
@@ -2022,10 +2036,27 @@ def call_claude_cli_structured(
     if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
         child_env["HOME"] = runtime_home
 
+    # Per-call counter so concurrent spawns are distinguishable in logs.
+    # Sonnet+reasoning_effort=high routinely takes 30-90s per structured
+    # call; without per-spawn entry/exit logs the broker appears frozen
+    # while 4 workers run in parallel. The counter lets the operator
+    # match a "spawn N" line to its matching "completed N in Xs" line.
+    global _STRUCTURED_SPAWN_COUNTER
+    with _STRUCTURED_SPAWN_LOCK:
+        _STRUCTURED_SPAWN_COUNTER += 1
+        spawn_id = _STRUCTURED_SPAWN_COUNTER
+
     if not _GLOBAL_SPAWN_SEM.acquire(timeout=CLAUDE_CLI_SPAWN_TIMEOUT_SEC):
         raise ClaudeCliError(
             f"global subprocess cap ({CLAUDE_CLI_MAX_CONCURRENT}) reached"
         )
+    _spawn_t0 = time.monotonic()
+    _log(
+        f"structured spawn #{spawn_id}: model={model} effort={effort or 'default'} "
+        f"prompt_chars={len(user_prompt or '')} schema_fields={len(schema_dict.get('properties') or {}) if isinstance(schema_dict, dict) else '?'} "
+        f"timeout={timeout}s",
+        "cyan",
+    )
     try:
         try:
             proc = subprocess.run(
@@ -2041,10 +2072,20 @@ def call_claude_cli_structured(
                 **_platform_popen_kwargs(),
             )
         except FileNotFoundError as e:
+            _log(
+                f"structured spawn #{spawn_id}: FileNotFoundError after "
+                f"{time.monotonic() - _spawn_t0:.1f}s — claude binary missing",
+                "red",
+            )
             raise ClaudeCliNotInstalledError(
                 f"claude binary not found at {resolved_cli!r}"
             ) from e
         except subprocess.TimeoutExpired as e:
+            _log(
+                f"structured spawn #{spawn_id}: TIMEOUT after "
+                f"{time.monotonic() - _spawn_t0:.1f}s (timeout_sec={timeout})",
+                "red",
+            )
             raise ClaudeCliTimeoutError(
                 f"claude structured call timed out after {timeout}s"
             ) from e
@@ -2052,6 +2093,30 @@ def call_claude_cli_structured(
         _release_spawn_sem_safely()
         # NOTE: do NOT cleanup runtime_home — it's shared across all
         # structured calls and lives for the lifetime of the process.
+
+    _elapsed = time.monotonic() - _spawn_t0
+    _log(
+        f"structured spawn #{spawn_id}: completed in {_elapsed:.1f}s "
+        f"(exit={proc.returncode}, stdout_chars={len(proc.stdout or '')}, "
+        f"stderr_chars={len(proc.stderr or '')})",
+        "cyan" if proc.returncode == 0 else "yellow",
+    )
+    # Diagnostic dump of CC's full envelope so the operator can see
+    # exactly what the model produced (markdown vs JSON, partial vs
+    # complete, etc.). Off by default; enable with
+    # CLAUDE_CLI_DUMP_STRUCTURED_STDOUT=1 in the container env.
+    if _DUMP_STRUCTURED_STDOUT:
+        _stdout_preview = (proc.stdout or "")[:1500]
+        _stderr_preview = (proc.stderr or "")[:600]
+        _log(
+            f"structured spawn #{spawn_id} STDOUT[:1500]={_stdout_preview!r}",
+            "yellow",
+        )
+        if _stderr_preview:
+            _log(
+                f"structured spawn #{spawn_id} STDERR[:600]={_stderr_preview!r}",
+                "yellow",
+            )
 
     stdout = (proc.stdout or "").strip()
     if not stdout:
