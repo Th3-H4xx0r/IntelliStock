@@ -2843,6 +2843,11 @@ def _historic_lookback_resume_dates(instance_id_value, lookback_opens):
 def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, portfolio_emulator, time_increment, alpaca_key, alpaca_secret):
     if mode != MODE_BACKTEST or not run_once_specs or start_dt is None:
         return
+    # Diagnostic: this prep block was running silently for 60-90s
+    # before the first "Historic Lookback Start" log appeared. Surface
+    # each major step so operators can see where time is being spent.
+    _lb_prep_t0 = time.time()
+    _log("Historic lookback prep: scanning run-once specs for graph_nexus_analysis...", "cyan")
     eligible_specs = []
     for spec in (run_once_specs or []):
         name = str((spec or {}).get("strategy") or "").strip()
@@ -2856,24 +2861,63 @@ def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, por
             continue
         eligible_specs.append((spec, lookback_days))
     if not eligible_specs:
+        _log("Historic lookback prep: no eligible strategies — skipping.", "yellow")
         return
+    _log(
+        f"Historic lookback prep: {len(eligible_specs)} eligible strategy(ies) found in {time.time() - _lb_prep_t0:.2f}s.",
+        "cyan",
+    )
 
     base_symbols = list(symbols or [])
     for spec, lookback_days in eligible_specs:
         spec_name = str((spec or {}).get("strategy") or "").strip() or "run_once"
         spec_settings = _merged_strategy_settings(spec)
         base_runtime_instance_id = str(spec_settings.get("base_instance_id") or spec_settings.get("instance_id") or instance_id or "").strip() or "default"
+        _id_t0 = time.time()
+        _log(
+            f"Historic lookback prep: resolving runtime identity for {spec_name} "
+            f"(base={base_runtime_instance_id}, lookback_days={lookback_days})...",
+            "cyan",
+        )
         _base_instance_id, history_scope_id, scoped_runtime_instance_id, _history_model_stamp = _resolve_nexus_runtime_identity(
             base_runtime_instance_id,
             spec_settings,
         )
+        _log(
+            f"Historic lookback prep: runtime identity resolved in {time.time() - _id_t0:.2f}s "
+            f"| scope={history_scope_id[:12]}...",
+            "cyan",
+        )
         lookback_start_dt = start_dt - datetime.timedelta(days=lookback_days)
         lookback_end_dt = start_dt - datetime.timedelta(days=1)
+        _cal_t0 = time.time()
+        _log(
+            f"Historic lookback prep: enumerating trading sessions "
+            f"{lookback_start_dt.strftime('%Y-%m-%d')} → {lookback_end_dt.strftime('%Y-%m-%d')} "
+            "(exchange-calendars NYSE)...",
+            "cyan",
+        )
         lookback_opens = _iter_backtest_trading_session_opens(lookback_start_dt, lookback_end_dt)
+        _log(
+            f"Historic lookback prep: enumerated {len(lookback_opens)} trading session(s) "
+            f"in {time.time() - _cal_t0:.2f}s.",
+            "cyan",
+        )
         if not lookback_opens:
             _log(f"Historic lookback skipped for {spec_name}: no prior trading sessions in window.", "yellow")
             continue
+        _resume_t0 = time.time()
+        _log(
+            f"Historic lookback prep: querying GraphNexusTradeContexts for resume dates "
+            f"(scope={history_scope_id[:12]}..., {len(lookback_opens)} candidate days)...",
+            "cyan",
+        )
         resume_opens = _historic_lookback_resume_dates(scoped_runtime_instance_id, lookback_opens)
+        _log(
+            f"Historic lookback prep: resume-date query done in {time.time() - _resume_t0:.2f}s "
+            f"({len(resume_opens)}/{len(lookback_opens)} days still need processing).",
+            "cyan",
+        )
         existing_days = max(0, len(lookback_opens) - len(resume_opens))
         if not resume_opens:
             _log(
