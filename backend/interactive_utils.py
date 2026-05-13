@@ -7941,10 +7941,27 @@ def action_edit_model(conn, model_id, **kwargs):
     # If the conversation is using a claude-cli session with this model,
     # the session manager will close + respawn on the next turn when it
     # notices the model/system_prompt/extra_args signature changed.
-    # Invalidate runtime cache
+    # Invalidate runtime cache (model_resolver doc cache + llm_utils
+    # terminal-failure cache). Without the latter, a user who fixed a
+    # misconfigured provider+model would keep hitting the suppression
+    # short-circuit until the worker restarted — the very symptom we're
+    # trying to avoid by surfacing terminal errors clearly.
     try:
         from model_resolver import invalidate_model_cache
         invalidate_model_cache(model_id)
+    except Exception:
+        pass
+    try:
+        from llm_utils import invalidate_terminal_failure_cache
+        prev_provider = (doc.get("provider") or "").strip().lower()
+        prev_model = (doc.get("model") or "").strip()
+        invalidate_terminal_failure_cache(prev_provider, prev_model)
+        # Also clear by the NEW values in case the user swapped to a
+        # different combo that itself had been terminal previously.
+        new_provider = (updated.get("provider") or "").strip().lower()
+        new_model = (updated.get("model") or "").strip()
+        if (new_provider, new_model) != (prev_provider, prev_model):
+            invalidate_terminal_failure_cache(new_provider, new_model)
     except Exception:
         pass
     return {"updated": True, "model": _mask_model_doc(updated)}
@@ -8026,6 +8043,14 @@ def action_delete_model(conn, model_id, force=False):
     try:
         from model_resolver import invalidate_model_cache
         invalidate_model_cache(model_id)
+    except Exception:
+        pass
+    try:
+        from llm_utils import invalidate_terminal_failure_cache
+        invalidate_terminal_failure_cache(
+            (doc.get("provider") or "").strip().lower(),
+            (doc.get("model") or "").strip(),
+        )
     except Exception:
         pass
     return {"deleted": True, "id": model_id}

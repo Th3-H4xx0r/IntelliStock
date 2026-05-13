@@ -3026,7 +3026,22 @@ def _classify_company_article_chunk(
         if not _has_real_data:
             _log(f"Company article LLM returned skeleton output ({len(raw.articles)} refs, no classifications field) — treating as failure", "yellow")
             raw = None
-    if raw is None and len(chunk) == 1:
+    # If the call failed with a TERMINAL error (model 404, deployment
+    # missing, etc.), splitting the batch or retrying the single-article
+    # path won't help — every sub-call hits the same configuration
+    # problem. Bail out of both fallback paths so a misconfigured Model
+    # doesn't cost ~25s per cycle in retry thrash. The first call's
+    # terminal classification is also cached in llm_utils so subsequent
+    # calls in this run skip the round-trip entirely.
+    _last_meta = get_last_structured_llm_call_metadata() if raw is None else {}
+    _llm_call_was_terminal = bool(_last_meta.get("is_terminal"))
+    if _llm_call_was_terminal:
+        _log(
+            f"Company article LLM: terminal provider error — skipping single-article "
+            f"and chunk-split fallback. Reason: {_last_meta.get('error', '')[:200]}",
+            "red",
+        )
+    if raw is None and not _llm_call_was_terminal and len(chunk) == 1:
         single_row = chunk_rows[0]
         single_prompt = (
             f"Today is {date_key}.\n"
@@ -3048,7 +3063,7 @@ def _classify_company_article_chunk(
             prefer_raw_json=_normalize_llm_provider(provider) == "azure",
         )
         prompt = single_prompt
-    if raw is None and len(chunk) > 1 and _split_depth < 2:
+    if raw is None and not _llm_call_was_terminal and len(chunk) > 1 and _split_depth < 2:
         mid = max(1, len(chunk) // 2)
         _log(f"Company article LLM chunk fallback: splitting batch of {len(chunk)} article(s) into {mid}+{len(chunk)-mid}", "yellow")
         split_kwargs = dict(
@@ -3210,7 +3225,18 @@ def _classify_macro_article_chunk(
         if not _has_real_data:
             _log(f"Macro article LLM returned skeleton output ({len(raw.articles)} refs, no data) — treating as failure", "yellow")
             raw = None
-    if raw is None and len(chunk) == 1:
+    # Same terminal-error guard as the company-article path — a permanent
+    # provider 404 won't resolve by splitting the batch or singling out
+    # one article. Bail out so the run doesn't burn ~25s/cycle thrashing.
+    _last_meta = get_last_structured_llm_call_metadata() if raw is None else {}
+    _llm_call_was_terminal = bool(_last_meta.get("is_terminal"))
+    if _llm_call_was_terminal:
+        _log(
+            f"Macro article LLM: terminal provider error — skipping single-article "
+            f"and chunk-split fallback. Reason: {_last_meta.get('error', '')[:200]}",
+            "red",
+        )
+    if raw is None and not _llm_call_was_terminal and len(chunk) == 1:
         single_row = chunk_rows[0]
         single_prompt = (
             f"Today is {date_key}.\n"
@@ -3237,7 +3263,7 @@ def _classify_macro_article_chunk(
             prefer_raw_json=_normalize_llm_provider(provider) == "azure",
         )
         prompt = single_prompt
-    if raw is None and len(chunk) > 1 and _split_depth < 2:
+    if raw is None and not _llm_call_was_terminal and len(chunk) > 1 and _split_depth < 2:
         mid = max(1, len(chunk) // 2)
         _log(f"Macro article LLM chunk fallback: splitting batch of {len(chunk)} article(s) into {mid}+{len(chunk)-mid}", "yellow")
         split_kwargs = dict(

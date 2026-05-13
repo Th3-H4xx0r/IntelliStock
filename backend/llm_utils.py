@@ -479,31 +479,110 @@ def _is_transient_http_error(error_text: str) -> bool:
 
 
 def _is_terminal_provider_not_found(provider: str, exc: Exception) -> bool:
-    p = (provider or "").strip().lower()
-    if p != "azure":
-        return False
+    """Return True if the exception means the model genuinely doesn't exist
+    on this provider (a wrong-model-name configuration error), as opposed
+    to a transient outage. Terminal errors should NOT be retried, and
+    callers that batch-and-split prompts should NOT split on this — every
+    sub-batch would fail with the identical error.
+
+    Covered patterns:
+      * Azure: 404, resource-not-found, deployment-not-found
+      * Gemini: 404 NOT_FOUND with "models/X is not found" or
+        "is not supported for generateContent"
+      * OpenAI: 404 with "model_not_found" / "does not exist"
+      * Anthropic: 404 with "not_found_error"
+    """
     text = str(exc or "")
     lowered = text.lower()
+    p = (provider or "").strip().lower()
+    if p == "azure":
+        return (
+            "status_code: 404" in lowered
+            or "resource not found" in lowered
+            or "deploymentnotfound" in lowered
+            or "model not found" in lowered
+        )
+    if p in ("gemini", "google", "google-gemini"):
+        return (
+            "404 not_found" in lowered
+            or ("404" in lowered and "is not found" in lowered)
+            or ("404" in lowered and "is not supported for generatecontent" in lowered)
+            or "models/" in lowered and "is not found" in lowered
+        )
+    if p in ("openai", "nvidia"):
+        return (
+            "model_not_found" in lowered
+            or ("404" in lowered and "does not exist" in lowered)
+            or ("404" in lowered and "the model" in lowered)
+        )
+    if p in ("anthropic", "claude"):
+        return (
+            "not_found_error" in lowered
+            # Require a specific "model doesn't exist" phrase, not just
+            # any 404 that mentions "model" (which could be a URL path).
+            or ("404" in lowered and ("not_found_error" in lowered or "model:" in lowered and "does not exist" in lowered))
+        )
+    # Generic fallback: require a specific "model doesn't exist" phrase.
+    # We INTENTIONALLY don't match on the bare substring "model" — many
+    # transient 404s from CDNs/gateways include the request path
+    # (e.g. "/v1/models/foo") and would otherwise be cached as
+    # permanently terminal, suppressing all future calls.
     return (
-        "status_code: 404" in lowered
-        or "resource not found" in lowered
-        or "deploymentnotfound" in lowered
-        or "model not found" in lowered
+        "404" in lowered
+        and (
+            "model_not_found" in lowered
+            or "is not found for" in lowered
+            or "is not supported for generatecontent" in lowered
+            or "deploymentnotfound" in lowered
+            or "deployment not found" in lowered
+            or "the model" in lowered and "does not exist" in lowered
+        )
     )
 
 
 def _terminal_provider_not_found_hint(provider: str, model: str, provider_config: dict[str, Any] | None = None) -> str:
-    if (provider or "").strip().lower() != "azure":
-        return ""
-    resolved = _resolve_provider_config(provider, provider_config)
-    endpoint = str(resolved.get("azure_endpoint") or "")
-    return (
-        "Azure 404 usually means the Azure endpoint root or deployment name is wrong. "
-        "For this backend, set azure_openai_endpoint to the resource root like "
-        "'https://<resource>.services.ai.azure.com' or 'https://<resource>.openai.azure.com', "
-        f"not a full '/models/chat/completions' or '/openai/v1/' URL. Use the deployment name as llm_model "
-        f"(current: {model!r}). Resolved endpoint: {endpoint!r}."
-    )
+    p = (provider or "").strip().lower()
+    if p == "azure":
+        resolved = _resolve_provider_config(provider, provider_config)
+        endpoint = str(resolved.get("azure_endpoint") or "")
+        return (
+            "Azure 404 usually means the Azure endpoint root or deployment name is wrong. "
+            "For this backend, set azure_openai_endpoint to the resource root like "
+            "'https://<resource>.services.ai.azure.com' or 'https://<resource>.openai.azure.com', "
+            f"not a full '/models/chat/completions' or '/openai/v1/' URL. Use the deployment name as llm_model "
+            f"(current: {model!r}). Resolved endpoint: {endpoint!r}."
+        )
+    name = (model or "").strip()
+    # Detect obvious provider-model mismatches so the operator sees the
+    # likely root cause rather than digging through retry logs.
+    lower_model = name.lower()
+    cross_provider_hint = ""
+    if p in ("gemini", "google", "google-gemini") and (
+        lower_model.startswith("claude") or lower_model.startswith("gpt") or lower_model.startswith("o1") or lower_model.startswith("o3")
+    ):
+        cross_provider_hint = (
+            f" The model name {name!r} doesn't belong to Gemini — it looks like a "
+            "Claude/OpenAI model. Edit the Model record so provider matches: "
+            "use 'anthropic' or 'claude-cli' for Claude, 'openai' for GPT/o-series."
+        )
+    elif p in ("openai", "nvidia") and lower_model.startswith("claude"):
+        cross_provider_hint = (
+            f" The model name {name!r} looks like a Claude model but the provider "
+            "is OpenAI. Change provider to 'anthropic' or 'claude-cli'."
+        )
+    elif p in ("openai", "nvidia") and lower_model.startswith("gemini"):
+        cross_provider_hint = (
+            f" The model name {name!r} looks like a Gemini model but the provider "
+            "is OpenAI. Change provider to 'gemini'."
+        )
+    elif p in ("anthropic", "claude") and (lower_model.startswith("gpt") or lower_model.startswith("gemini")):
+        cross_provider_hint = (
+            f" The model name {name!r} doesn't belong to Anthropic — change "
+            "provider to match (openai or gemini)."
+        )
+    if cross_provider_hint:
+        return cross_provider_hint.strip()
+    return f"Provider {provider!r} returned 404 for model {name!r}. Check the model name spelling and the provider's available models."
 
 
 def _structured_model_name(provider: str, model: str) -> str:
@@ -1261,6 +1340,10 @@ def _call_claude_cli_structured_from_strategy(
             last_err = e
             break
 
+    # ``ClaudeCliNotLoggedInError`` is permanent until the operator runs
+    # ``claude`` on the host — surface it as terminal so callers that batch-
+    # and-split prompts don't thrash through 14 sub-calls per article batch.
+    _is_terminal_cc = isinstance(last_err, ClaudeCliNotLoggedInError)
     _LAST_STRUCTURED_LLM_CALL.data = {
         "provider": "claude-cli",
         "requested_model": model,
@@ -1274,6 +1357,7 @@ def _call_claude_cli_structured_from_strategy(
         "error": str(last_err or "claude-cli structured call failed"),
         "usage": {},
         "suppressed": False,
+        "is_terminal": _is_terminal_cc,
     }
     return None
 
@@ -1396,6 +1480,9 @@ def call_structured_llm_by_provider(
             "error": cached_failure,
             "usage": {},
             "suppressed": True,
+            # A cached failure is by definition a previously-classified
+            # terminal error. Surface it on the same flag callers check.
+            "is_terminal": True,
         }
         return None
     timeout = float(_coerce_timeout_sec(timeout_sec))
@@ -1560,6 +1647,11 @@ def call_structured_llm_by_provider(
                         "ok": False,
                         "error": error_text,
                         "usage": {},
+                        # Surface the terminal-error signal so batched
+                        # callers (chunk-fallback, retry loops) can stop
+                        # splitting/retrying on a permanent 404 instead
+                        # of hammering the API hundreds of times per cycle.
+                        "is_terminal": True,
                     })
                     break
                 if _is_transient_http_error(error_text) and http_attempt < http_retries:
@@ -1639,6 +1731,45 @@ def call_structured_llm_by_provider(
             flush=True,
         )
     return None
+
+
+def invalidate_terminal_failure_cache(provider: str | None = None, model: str | None = None) -> int:
+    """Drop entries from the per-process terminal-failure cache.
+
+    The cache (``_TERMINAL_LLM_FAILURES``) remembers provider+model combos
+    that returned a permanent error (404 model-not-found, etc.) so we
+    don't re-call them. WITHOUT explicit invalidation, the cache outlives
+    a user fixing the offending Model row in the UI — every call would
+    stay suppressed until the worker process restarts.
+
+    Call this whenever a Model row is edited or deleted. Without args,
+    drops everything. With args, drops entries whose key starts with the
+    matching provider/model prefix (failure keys include other metadata,
+    so we match on prefix rather than equality).
+
+    Returns the number of entries removed.
+    """
+    with _TERMINAL_LLM_FAILURES_LOCK:
+        if not provider and not model:
+            count = len(_TERMINAL_LLM_FAILURES)
+            _TERMINAL_LLM_FAILURES.clear()
+            return count
+        provider_norm = (provider or "").strip().lower()
+        model_norm = (model or "").strip()
+        to_drop = []
+        for key in _TERMINAL_LLM_FAILURES:
+            # Failure keys are produced by ``_terminal_llm_failure_cache_key``
+            # which embeds provider + model + provider_config. Match on
+            # substring presence rather than parsing the format so this
+            # stays robust to key-format changes.
+            if provider_norm and provider_norm not in key.lower():
+                continue
+            if model_norm and model_norm.lower() not in key.lower():
+                continue
+            to_drop.append(key)
+        for key in to_drop:
+            _TERMINAL_LLM_FAILURES.pop(key, None)
+        return len(to_drop)
 
 
 def get_last_structured_llm_call_metadata() -> dict[str, Any]:
