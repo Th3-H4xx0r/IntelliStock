@@ -1935,8 +1935,20 @@ def call_claude_cli_structured(
         json_schema=schema_json,
         extra_args=extra_args,
     )
+    # Apply the same auth-state prep + privilege drop the chatbot's
+    # persistent session uses. Without this, the spawn-per-call subprocess
+    # runs as container root and CC's API call fails with
+    # ``401 Invalid authentication credentials`` because the local Pro/Max
+    # session is keyed to the runtime user we set up at install time.
+    _init_claude_state_once()
+    runtime_home = _prepare_runtime_home_for_id("structured")
+    argv = _wrap_argv_for_runtime_user(argv)
+    child_env = os.environ.copy()
+    if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
+        child_env["HOME"] = runtime_home
 
     if not _GLOBAL_SPAWN_SEM.acquire(timeout=CLAUDE_CLI_SPAWN_TIMEOUT_SEC):
+        _cleanup_runtime_home(runtime_home)
         raise ClaudeCliError(
             f"global subprocess cap ({CLAUDE_CLI_MAX_CONCURRENT}) reached"
         )
@@ -1950,6 +1962,8 @@ def call_claude_cli_structured(
                 timeout=timeout,
                 encoding="utf-8",
                 errors="replace",
+                env=child_env,
+                cwd=runtime_home or None,
                 **_platform_popen_kwargs(),
             )
         except FileNotFoundError as e:
@@ -1962,6 +1976,11 @@ def call_claude_cli_structured(
             ) from e
     finally:
         _release_spawn_sem_safely()
+        # Per-call temp HOME — drop it whether success/timeout/error.
+        try:
+            _cleanup_runtime_home(runtime_home)
+        except Exception:
+            pass
 
     stdout = (proc.stdout or "").strip()
     if not stdout:
