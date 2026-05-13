@@ -1404,10 +1404,19 @@ def _build_llm_trace(role: str, provider: str, model: str, prompt: str, system_p
         "system_prompt_preview_truncated": len(system_prompt_text) > system_head_chars,
         "logged_at": datetime.utcnow().isoformat() + "Z",
     }
+    # Include the underlying error reason on failures so operators can
+    # see WHY the call failed (timeout, validation, terminal-not-found,
+    # subprocess crash, etc.) without having to dig into the engine
+    # container's stderr — which isn't included in the per-backtest log.
+    err_suffix = ""
+    if not trace["ok"]:
+        err_text = trace.get("error") or ""
+        if err_text:
+            err_suffix = f" error={err_text[:220]!r}"
     _log(
         f"LLM/{role}: provider={trace['provider']} model={trace['effective_model']} ok={trace['ok']} "
         f"fallback={trace['fallback_used']} raw_json_fallback={trace['raw_json_fallback_used']} "
-        f"prompt={trace['prompt_hash'][:10]}...",
+        f"prompt={trace['prompt_hash'][:10]}...{err_suffix}",
         "cyan" if trace["ok"] else "yellow",
     )
     return trace

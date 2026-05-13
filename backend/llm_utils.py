@@ -1192,6 +1192,7 @@ def _call_claude_cli_structured_from_strategy(
     provider_config: dict[str, Any] | None = None,
     timeout_sec: int | None = None,
     retries: int = 1,
+    output_retries: int | None = None,
     use_prompt_cache: bool = False,
 ) -> Any:
     """Adapter that lets the strategies' ``call_structured_llm_by_provider``
@@ -1278,9 +1279,15 @@ def _call_claude_cli_structured_from_strategy(
 
     last_err: Exception | None = None
     _attempted: list[str] = []
-    # Honour the same retry contract as the rest of the function. Each retry
-    # gets a backoff to avoid hammering CC on a transient failure.
-    for attempt in range(max(1, int(retries or 1) + 1)):
+    # Honour the same retry contract as the rest of the function. The
+    # dispatcher's ``output_retries`` is conceptually retries on Pydantic-
+    # validation failure (vs ``retries`` on HTTP/connection failure). For
+    # claude-cli the same retry loop covers BOTH classes, so use the max
+    # of the two budgets — otherwise strategies that pass output_retries=2
+    # silently get only 1 retry, masking validation failures behind too
+    # few attempts (#632192 root cause).
+    _retry_budget = max(int(retries or 1), int(output_retries or 0))
+    for attempt in range(max(1, _retry_budget + 1)):
         _attempted.append(model)
         try:
             result = call_claude_cli_structured(
@@ -1326,13 +1333,13 @@ def _call_claude_cli_structured_from_strategy(
             break
         except (ClaudeCliValidationError, ClaudeCliRateLimitError) as e:
             last_err = e
-            if attempt < retries:
+            if attempt < _retry_budget:
                 time.sleep(_backoff_sleep_seconds(attempt, base=2.0, cap=60.0))
                 continue
             break
         except ClaudeCliError as e:
             last_err = e
-            if attempt < retries:
+            if attempt < _retry_budget:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
             break
@@ -1405,6 +1412,7 @@ def call_structured_llm_by_provider(
             provider_config=provider_config,
             timeout_sec=timeout_sec,
             retries=retries,
+            output_retries=output_retries,
             use_prompt_cache=use_prompt_cache,
         )
     if not _PYDANTIC_AI_AVAILABLE or not api_key or not model or output_type is None:

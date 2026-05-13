@@ -2000,8 +2000,18 @@ def call_claude_cli_structured(
     try:
         return output_schema.model_validate(payload)
     except Exception as e:
+        # Include a preview of what CC returned so operators can see the
+        # specific shape mismatch — without this the error is just
+        # "missing field X" / "type Y vs Z" with no concrete context.
+        # CC's --json-schema enforces SHAPE; Pydantic enforces
+        # constraints (regex, min/max, discriminated unions) on top,
+        # so the model can satisfy CC and still fail here.
+        try:
+            payload_preview = json.dumps(payload, default=str)[:400]
+        except Exception:
+            payload_preview = str(payload)[:400]
         raise ClaudeCliValidationError(
-            f"claude output failed Pydantic validation: {e}"
+            f"claude output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
         ) from e
 
 
