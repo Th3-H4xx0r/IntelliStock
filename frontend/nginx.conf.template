@@ -9,16 +9,18 @@ server {
     # 'wasm-unsafe-eval' covers ApexCharts. Tighten further if you swap out
     # those libraries.
     #
-    # ``connect-src`` defaults to ``'self'`` plus the two third-party widgets
-    # the landing page hits (star-history, repobeats). When you build the
-    # frontend with ``VITE_API_URL=https://api.example.com`` (split
-    # frontend/API hosts), the page also needs to fetch from that domain —
-    # otherwise the browser blocks every API call with a CSP violation
-    # which surfaces as ``Load failed`` on iOS Safari. Add the API
-    # origin (and any websocket origin) via the ``CSP_CONNECT_SRC_EXTRA``
-    # env var passed to this container, e.g.
-    # ``CSP_CONNECT_SRC_EXTRA="https://api.example.com wss://api.example.com"``.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://api.star-history.com https://repobeats.axiom.co ${CSP_CONNECT_SRC_EXTRA}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+    # ``connect-src`` allows any HTTPS / WSS endpoint by default so split
+    # frontend/API deployments work out of the box — e.g. frontend on
+    # ``app.example.com`` calling ``api.example.com``. The previous
+    # allowlist-only policy meant a misconfigured operator would see
+    # ``Load failed`` on iOS Safari with no obvious cause.
+    #
+    # ``script-src`` is still locked to ``'self'`` so this can't be abused
+    # for exfiltration by an injected script — there's no script-injection
+    # vector to begin with. Operators with stricter requirements can
+    # override the policy by editing this file or layering a tighter
+    # CSP at the reverse-proxy / CDN.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https: wss: https://api.star-history.com https://repobeats.axiom.co ${CSP_CONNECT_SRC_EXTRA}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
