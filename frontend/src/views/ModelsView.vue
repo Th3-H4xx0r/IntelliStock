@@ -339,43 +339,47 @@ onMounted(fetchModels)
                 <template v-else>{{ m.api_key || '—' }}</template>
               </td>
               <td class="px-5 py-3.5 text-slate-500 text-xs">{{ fmtDate(m.created_at) }}</td>
-              <td class="px-5 py-3.5 text-right whitespace-nowrap">
-                <button
-                  v-if="m.provider === 'claude-cli'"
-                  @click="testCliConnection(m.id)"
-                  :disabled="testCliStates[m.id]?.loading"
-                  class="text-slate-500 hover:text-primary transition-colors mr-2 disabled:opacity-40"
-                  title="Test connection"
-                >
-                  <span class="material-symbols-outlined text-base" :class="{ 'animate-spin': testCliStates[m.id]?.loading }">
-                    {{ testCliStates[m.id]?.loading ? 'progress_activity' : 'cable' }}
-                  </span>
-                </button>
-                <button
-                  @click="openEditModal(m)"
-                  class="text-slate-500 hover:text-primary transition-colors mr-2"
-                  title="Edit"
-                >
-                  <span class="material-symbols-outlined text-base">edit</span>
-                </button>
-                <button
-                  @click="deleteModel(m.id, m.name)"
-                  class="text-slate-500 hover:text-red-400 transition-colors"
-                  title="Delete"
-                >
-                  <span class="material-symbols-outlined text-base">delete</span>
-                </button>
-                <Transition name="fade">
-                  <div
-                    v-if="testCliStates[m.id]?.message && !testCliStates[m.id]?.loading"
-                    class="mt-2 inline-block max-w-xs text-left rounded-md px-2 py-1.5 text-[11px] leading-relaxed border"
-                    :class="testCliStates[m.id]?.ok
-                      ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
-                      : 'border-red-500/20 bg-red-500/10 text-red-300'"
-                  >
-                    {{ testCliStates[m.id].message }}
+              <td class="px-5 py-3.5 text-right align-top">
+                <div class="flex flex-col items-end gap-2">
+                  <div class="flex items-center justify-end whitespace-nowrap">
+                    <button
+                      v-if="m.provider === 'claude-cli'"
+                      @click="testCliConnection(m.id)"
+                      :disabled="testCliStates[m.id]?.loading"
+                      class="text-slate-500 hover:text-primary transition-colors mr-2 disabled:opacity-40"
+                      title="Test connection"
+                    >
+                      <span class="material-symbols-outlined text-base" :class="{ 'animate-spin': testCliStates[m.id]?.loading }">
+                        {{ testCliStates[m.id]?.loading ? 'progress_activity' : 'cable' }}
+                      </span>
+                    </button>
+                    <button
+                      @click="openEditModal(m)"
+                      class="text-slate-500 hover:text-primary transition-colors mr-2"
+                      title="Edit"
+                    >
+                      <span class="material-symbols-outlined text-base">edit</span>
+                    </button>
+                    <button
+                      @click="deleteModel(m.id, m.name)"
+                      class="text-slate-500 hover:text-red-400 transition-colors"
+                      title="Delete"
+                    >
+                      <span class="material-symbols-outlined text-base">delete</span>
+                    </button>
                   </div>
-                </Transition>
+                  <Transition name="fade">
+                    <div
+                      v-if="testCliStates[m.id]?.message && !testCliStates[m.id]?.loading"
+                      class="max-w-[240px] text-left whitespace-normal break-words rounded-md px-2 py-1.5 text-[11px] leading-relaxed border"
+                      :class="testCliStates[m.id]?.ok
+                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
+                        : 'border-red-500/20 bg-red-500/10 text-red-300'"
+                    >
+                      {{ testCliStates[m.id].message }}
+                    </div>
+                  </Transition>
+                </div>
               </td>
             </tr>
           </tbody>
