@@ -125,8 +125,8 @@ def dispatch_mcp_tool_call(
                 result = {**result, "result": {"ok": True, "navigated_to": payload.get("route")}}
             if block:
                 try:
-                    from chatbot.claude_cli_provider import _get_manager
-                    recorded = _get_manager().record_block(mcp_token, block)
+                    from chatbot.claude_cli_provider import get_session_manager
+                    recorded = get_session_manager().record_block(mcp_token, block)
                     _log(
                         f"recorded block type={block.get('type')!r} "
                         f"on session via token: {recorded}",
