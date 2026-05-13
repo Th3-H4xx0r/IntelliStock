@@ -16505,6 +16505,25 @@ class GraphNexusAnalysis:
                 )
                 strategy_cache["_nexus_dual_cadence_warned_subhour"] = True
             _dual_cadence_active = False
+        # Daily (or coarser) granularity already runs once per bar — the
+        # whole point of the dual-cadence gate (prevent multiple FULL
+        # cycles per day at sub-hourly ticks) doesn't apply. At 86400s,
+        # ``current_time`` typically lands at exactly close_pt (e.g.
+        # 17:00 PT), which trips the post-session ``>=`` check on every
+        # bar and silently skips every day of the backtest. Bypass the
+        # gate so the strategy actually runs.
+        if _dual_cadence_active and _ti_seconds and _ti_seconds > 3600:
+            if isinstance(strategy_cache, dict) and not strategy_cache.get(
+                "_nexus_dual_cadence_warned_daily"
+            ):
+                _log(
+                    f"Dual-cadence gate disabled at granularity {_ti_seconds}s "
+                    f"(> 3600s) — runs once per bar already; session windowing "
+                    f"would skip every bar that lands at/after close_pt.",
+                    "yellow",
+                )
+                strategy_cache["_nexus_dual_cadence_warned_daily"] = True
+            _dual_cadence_active = False
 
         if _dual_cadence_active:
             try:

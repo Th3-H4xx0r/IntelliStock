@@ -7868,6 +7868,60 @@ def _validate_claude_cli_extra_args(extra_args):
     return s
 
 
+_PROVIDER_MODEL_INCOMPAT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "gemini": ("claude-", "gpt-", "o1-", "o3-", "o4-"),
+    "openai": ("claude-", "gemini-"),
+    "nvidia": ("claude-", "gemini-"),
+    "anthropic": ("gpt-", "gemini-", "o1-", "o3-", "o4-"),
+    "claude-cli": ("gpt-", "gemini-", "o1-", "o3-", "o4-"),
+    # Azure deliberately omitted — deployment names are operator-defined
+    # and can legitimately be any string.
+}
+
+
+def _validate_provider_model_compat(provider: str, model: str) -> None:
+    """Reject obviously-incompatible provider+model combinations at save
+    time so the operator can't ship a row like ``provider=gemini`` paired
+    with ``model=claude-sonnet-4-6`` (which produces 404 NOT_FOUND on
+    every call). See ``_PROVIDER_MODEL_INCOMPAT_PREFIXES`` for the per-
+    provider blocklist.
+
+    Skips validation for unrecognized providers (forward-compat) and for
+    azure (deployment names are arbitrary). Empty values pass — callers
+    have separate emptiness handling.
+
+    Raises ValueError with a user-facing hint about the likely correct
+    provider for the model.
+    """
+    p = (provider or "").strip().lower()
+    m = (model or "").strip().lower()
+    if not p or not m:
+        return
+    blocklist = _PROVIDER_MODEL_INCOMPAT_PREFIXES.get(p)
+    if not blocklist:
+        return
+    for prefix in blocklist:
+        if m.startswith(prefix):
+            # Suggest the likely correct provider given the model prefix.
+            suggestion_map = {
+                "claude-": "'anthropic' or 'claude-cli'",
+                "gpt-": "'openai' or 'azure'",
+                "o1-": "'openai' or 'azure'",
+                "o3-": "'openai' or 'azure'",
+                "o4-": "'openai' or 'azure'",
+                "gemini-": "'gemini'",
+            }
+            suggestion = suggestion_map.get(prefix, "the appropriate vendor")
+            raise ValueError(
+                f"Incompatible provider+model: provider={p!r} does not "
+                f"serve models named {model!r} (prefix {prefix!r}). "
+                f"Change provider to {suggestion}, or change the model "
+                f"name to match {p}. (Azure deployments are exempt — "
+                f"if you're using an Azure deployment named like a Claude "
+                f"or GPT model, set provider='azure'.)"
+            )
+
+
 def action_create_model(conn, name, provider, model, api_key=None,
                         openai_base_url=None, nvidia_base_url=None,
                         azure_openai_endpoint=None, azure_openai_api_version=None,
@@ -7875,6 +7929,7 @@ def action_create_model(conn, name, provider, model, api_key=None,
                         cli_path=None, extra_args=None):
     _ensure_models_table(conn)
     provider_n = (provider or "").strip().lower()
+    _validate_provider_model_compat(provider_n, model)
     extra_args_clean = ""
     if provider_n == "claude-cli":
         extra_args_clean = _validate_claude_cli_extra_args(extra_args)
@@ -7914,6 +7969,17 @@ def action_edit_model(conn, model_id, **kwargs):
     # flag persisted because validation only ran when ``extra_args`` itself
     # was in kwargs.
     new_provider = (kwargs.get("provider") or doc.get("provider") or "").strip().lower()
+    # Validate the EFFECTIVE provider+model combination after applying
+    # incoming kwargs over the existing doc. Without this, an operator
+    # could edit just one of the two fields and leave the row in an
+    # incompatible state (e.g. flip provider to 'gemini' while keeping
+    # model='claude-sonnet-4-6'). Mirrors the extra_args validator
+    # immediately below.
+    effective_model = (
+        kwargs["model"] if ("model" in kwargs and kwargs["model"] is not None)
+        else doc.get("model")
+    )
+    _validate_provider_model_compat(new_provider, effective_model)
     if new_provider == "claude-cli":
         effective_extra = (
             kwargs["extra_args"] if ("extra_args" in kwargs and kwargs["extra_args"] is not None)

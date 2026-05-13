@@ -292,7 +292,11 @@ def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]
     if provider == "nvidia":
         config["base_url"] = "https://integrate.api.nvidia.com/v1"
     reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
-    if provider in {"openai", "azure", "nvidia"} and reasoning_effort:
+    # claude-cli accepts ``--effort`` (low/medium/high/xhigh/max) too —
+    # its session manager folds it into the spawn argv. Drop the value
+    # only for providers where the LLM dispatcher doesn't actually
+    # forward it (gemini/deepseek/anthropic-direct as of today).
+    if provider in {"openai", "azure", "nvidia", "claude-cli"} and reasoning_effort:
         config["reasoning_effort"] = reasoning_effort
     return config
 
