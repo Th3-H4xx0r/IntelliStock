@@ -1350,7 +1350,16 @@ def _call_claude_cli_structured_from_strategy(
     # ``ClaudeCliNotLoggedInError`` is permanent until the operator runs
     # ``claude`` on the host — surface it as terminal so callers that batch-
     # and-split prompts don't thrash through 14 sub-calls per article batch.
-    _is_terminal_cc = isinstance(last_err, ClaudeCliNotLoggedInError)
+    # ``ClaudeCliValidationError`` after retry-budget exhaustion is also
+    # terminal-for-this-shape: Pydantic validation is deterministic on the
+    # prompt+schema combination, so splitting the batch into halves just
+    # re-runs the same shape failure against sub-prompts. Marking it
+    # terminal collapses worst-case chunk-split amplification (4 workers
+    # × 4 leaves = 16 concurrent spawns) back to 1.
+    _is_terminal_cc = isinstance(
+        last_err,
+        (ClaudeCliNotLoggedInError, ClaudeCliValidationError),
+    )
     _LAST_STRUCTURED_LLM_CALL.data = {
         "provider": "claude-cli",
         "requested_model": model,
