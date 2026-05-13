@@ -1203,6 +1203,7 @@ def api_mcp_tool_call(
         conversation_id=body.conversation_id,
         tool_name=body.tool_name,
         arguments=body.arguments,
+        mcp_token=sess.mcp_token,
     )
 
 

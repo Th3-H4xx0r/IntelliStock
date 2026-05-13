@@ -69,6 +69,7 @@ def dispatch_mcp_tool_call(
     conversation_id: str,
     tool_name: str,
     arguments: Dict[str, Any],
+    mcp_token: str = "",
 ) -> Dict[str, Any]:
     """Entry point for the MCP server. Returns one of:
 
@@ -101,6 +102,38 @@ def dispatch_mcp_tool_call(
     if tool.safety == "safe":
         result = _execute_tool(conn=conn, user=user, tool_name=normalized, arguments=arguments)
         _log(f"safe-tool result ok={result.get('ok')} keys={list(result.keys())}", "cyan")
+        # Render-only tools (charts, tables, navigate, ...) return a
+        # ``{"type": "block", "block": {...}}`` payload. Forward the
+        # block to the live CC session so the orchestration can attach
+        # it to the assistant message — without this, the chart/table
+        # lives only in CC's textual tool-result and never renders in
+        # the UI. Replace the block in the response with a flat
+        # ``{rendered: <type>}`` so CC sees a short, useful summary
+        # rather than a wall of base64 image data.
+        payload = result.get("result") if result.get("ok") else None
+        if isinstance(payload, dict) and mcp_token:
+            block: Optional[Dict[str, Any]] = None
+            if payload.get("type") == "block":
+                block = payload.get("block")
+                summary = {
+                    "ok": True,
+                    "rendered": (block or {}).get("type") or "block",
+                }
+                result = {**result, "result": summary}
+            elif payload.get("type") == "navigate":
+                block = {"type": "navigate", "route": payload.get("route")}
+                result = {**result, "result": {"ok": True, "navigated_to": payload.get("route")}}
+            if block:
+                try:
+                    from chatbot.claude_cli_provider import _get_manager
+                    recorded = _get_manager().record_block(mcp_token, block)
+                    _log(
+                        f"recorded block type={block.get('type')!r} "
+                        f"on session via token: {recorded}",
+                        "cyan",
+                    )
+                except Exception as e:
+                    _log(f"failed to record block on session: {e}", "yellow")
         return result
 
     # Non-safe: queue a pending_confirmation row on the conversation and

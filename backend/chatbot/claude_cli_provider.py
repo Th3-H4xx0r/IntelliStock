@@ -450,6 +450,73 @@ def _drop_user_uid() -> Optional[int]:
     return None
 
 
+# One-time, process-wide path to the ``.claude.json`` source we'll copy
+# into each session's runtime HOME. Resolved once on manager start by
+# ``_init_claude_state_once``. Empty when no privilege drop is set up.
+_CLAUDE_JSON_SOURCE: str = ""
+
+
+def _init_claude_state_once() -> None:
+    """Resolve the canonical ``.claude.json`` source path ONCE per process.
+
+    If the operator's HOME has a live ``$HOME/.claude.json`` (bind-mounted
+    or whatever), use that. Otherwise, restore the most recent backup
+    from ``.claude/backups/.claude.json.backup.*`` into a stable local
+    cache file and use the cache from then on. This avoids the noisy
+    per-call "restoring .claude.json from backup" log line and shaves
+    a glob + copy off the hot path of every CC spawn.
+
+    Idempotent. Safe to call multiple times — the first call wins.
+    """
+    global _CLAUDE_JSON_SOURCE
+    if _CLAUDE_JSON_SOURCE:
+        return
+    src = os.environ.get("HOME") or "/root"
+    live = os.path.join(src, ".claude.json")
+    if os.path.isfile(live):
+        _CLAUDE_JSON_SOURCE = live
+        _log(f"claude.json source = live host file at {live!r}", "cyan")
+        return
+    # No live file — try to restore the most recent backup.
+    import glob
+    src_claude = os.path.join(src, ".claude")
+    backups = sorted(
+        glob.glob(os.path.join(src_claude, "backups", ".claude.json.backup.*")),
+        reverse=True,
+    )
+    if not backups:
+        _log(
+            f"no .claude.json at {live!r} and no backups in "
+            f"{os.path.join(src_claude, 'backups')!r} — CC will likely "
+            "report 'Not logged in'. Run `claude` on the host to "
+            "regenerate auth state.",
+            "yellow",
+        )
+        return
+    # Materialise a stable cache file owned by the process so per-session
+    # prep can copy it without re-running the glob. /tmp is fine — the
+    # file lives only as long as this container process.
+    cache_dir = "/tmp/cc-claude-state"
+    try:
+        os.makedirs(cache_dir, mode=0o755, exist_ok=True)
+    except Exception as e:
+        _log(f"failed to create cache dir {cache_dir!r}: {e}", "yellow")
+        return
+    cache_path = os.path.join(cache_dir, ".claude.json")
+    try:
+        import shutil
+        shutil.copy2(backups[0], cache_path)
+        os.chmod(cache_path, 0o644)
+        _CLAUDE_JSON_SOURCE = cache_path
+        _log(
+            f"restored .claude.json from {backups[0]!r} to cache "
+            f"{cache_path!r} (one-time, at startup)",
+            "cyan",
+        )
+    except Exception as e:
+        _log(f"failed to restore .claude.json from backup: {e}", "yellow")
+
+
 def _prepare_runtime_home(sess: "_Session") -> str:
     """Copy the operator's ``~/.claude`` from the parent process's HOME
     into a fresh temp directory owned by the runtime user. Returns the
@@ -463,7 +530,6 @@ def _prepare_runtime_home(sess: "_Session") -> str:
     When no runtime user drop is configured (e.g. local dev as a
     non-root user), we return the parent process's HOME unchanged.
     """
-    import glob
     import shutil
     import tempfile
     target_uid = _drop_user_uid()
@@ -482,23 +548,14 @@ def _prepare_runtime_home(sess: "_Session") -> str:
     dst_claude = os.path.join(runtime_dir, ".claude")
     try:
         shutil.copytree(src_claude, dst_claude, symlinks=True)
-        # CC also reads ``$HOME/.claude.json`` (the per-user project /
-        # session config file — distinct from .claude/ the directory).
-        # If it exists at the operator's HOME, copy it too. If it's
-        # missing but a backup exists, recover from the most recent
-        # backup automatically — saves the operator from running the
-        # manual ``cp`` the CLI tells them about in stderr.
-        src_claude_json = os.path.join(src, ".claude.json")
-        if os.path.isfile(src_claude_json):
-            shutil.copy2(src_claude_json, os.path.join(runtime_dir, ".claude.json"))
-        else:
-            backups = sorted(
-                glob.glob(os.path.join(src_claude, "backups", ".claude.json.backup.*")),
-                reverse=True,   # most recent first (timestamps in filename)
-            )
-            if backups:
-                _log(f"restoring .claude.json from backup: {backups[0]}", "cyan")
-                shutil.copy2(backups[0], os.path.join(runtime_dir, ".claude.json"))
+        # CC also reads ``$HOME/.claude.json`` (sibling of .claude/).
+        # The source path was resolved once at manager startup by
+        # ``_init_claude_state_once`` — either the live host file or
+        # a cached restoration from the latest backup. Empty string
+        # means neither was available, in which case we let CC error
+        # naturally rather than restoring a stale backup per call.
+        if _CLAUDE_JSON_SOURCE:
+            shutil.copy2(_CLAUDE_JSON_SOURCE, os.path.join(runtime_dir, ".claude.json"))
         # Recursively chown to the runtime user so the dropped
         # subprocess can read everything. mode is left as-is from the
         # source.
@@ -928,6 +985,13 @@ class _Session:
     # buffer the reader silently drops the event, and the caller times out.
     _buffered_result: Optional[Dict[str, Any]] = None
     _buffered_text: str = ""
+    # UI render blocks (charts, tables, navigate, ...) produced by MCP
+    # tools during the in-flight turn. The MCP bridge appends here when
+    # CC invokes a safe render-only tool; ``send_turn`` drains and clears
+    # the list on turn completion so blocks land in the conversation as
+    # part of the final assistant message. Lock-free append is safe — only
+    # one in-flight turn per session and no concurrent reader.
+    pending_blocks: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -967,6 +1031,10 @@ class ClaudeCliSessionManager:
         """Start the idle sweeper thread. Idempotent."""
         if self._sweeper_thread and self._sweeper_thread.is_alive():
             return
+        # Resolve the .claude.json source ONCE so per-session spawn
+        # doesn't have to scan for a backup every call. No-op on
+        # subsequent ``start()`` invocations.
+        _init_claude_state_once()
         self._shutdown.clear()
         t = threading.Thread(
             target=self._sweeper_loop, name="claude-cli-sweeper", daemon=True,
@@ -1072,6 +1140,9 @@ class ClaudeCliSessionManager:
             sess._buffered_text = ""
             sess._pending = slot
             sess._accumulated = []
+        # Clear any blocks left over from a prior failed/aborted turn so
+        # they don't bleed into this turn's response.
+        sess.pending_blocks.clear()
         sess.state = SessionState.AWAITING
 
         try:
@@ -1117,9 +1188,16 @@ class ClaudeCliSessionManager:
             sess.state = SessionState.CRASHED
             raise err
         sess.state = SessionState.IDLE
+        # Drain UI render blocks accumulated during this turn (charts,
+        # tables, navigate, ...) so the orchestration can attach them
+        # to the assistant message. Reset the list afterwards so the
+        # NEXT turn starts clean — blocks are per-turn, not per-session.
+        blocks = sess.pending_blocks[:]
+        sess.pending_blocks.clear()
         return {
             "content": content,
             "tool_calls": [],
+            "blocks": blocks,
             "finish_reason": finish_reason,
             "raw": raw,
         }
@@ -1130,6 +1208,20 @@ class ClaudeCliSessionManager:
             sess = self._sessions.pop(conversation_id, None)
         if sess is not None:
             self._close_session(sess)
+
+    def record_block(self, token: str, block: Dict[str, Any]) -> bool:
+        """Stash a UI render block (chart, table, navigate, ...) on the
+        session matching ``token``. Called by the MCP bridge when a safe
+        tool returns a render-only payload — without this, the block
+        lives only in CC's transient view of the tool result and never
+        reaches the IntelliStock UI. Returns True if the session was
+        found and the block was recorded.
+        """
+        sess = self.lookup_by_token(token)
+        if sess is None:
+            return False
+        sess.pending_blocks.append(block)
+        return True
 
     def lookup_by_token(self, token: str) -> Optional["_Session"]:
         """Return the session whose ``mcp_token`` matches the supplied

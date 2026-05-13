@@ -397,6 +397,12 @@ def _run_loop(
         tool_calls = result.get("tool_calls") or []
         text = (result.get("content") or "").strip()
         finish_reason = (result.get("finish_reason") or "").strip().lower()
+        # Render blocks (charts, tables, navigate, ...) populated by the
+        # claude-cli MCP path. The OpenAI-style provider returns no blocks
+        # here (tools get a dedicated round of orchestration); for CC,
+        # MCP tool execution happens inside the provider's persistent
+        # subprocess, so the blocks come back attached to the final result.
+        provider_blocks = list(result.get("blocks") or [])
 
         if not tool_calls:
             # Empty content + no tool calls is almost always a token-budget
@@ -416,6 +422,8 @@ def _run_loop(
                 )
             else:
                 asst = conv_store.new_message("assistant", content=text)
+            if provider_blocks:
+                asst["blocks"] = provider_blocks
             appended.append(asst)
             history.append(asst)
             break
