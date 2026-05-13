@@ -171,6 +171,12 @@ async function submitModel() {
       provider: d.provider,
       model: d.model.trim(),
     }
+    // Reasoning effort applies to every provider whose form exposes the
+    // dropdown (openai/azure/nvidia + claude-cli where it maps to
+    // ``--effort``). Send for both branches so saving 'High' on a
+    // claude-cli model actually persists — the previous CLI branch
+    // dropped it silently, so the row kept the prior value.
+    payload.reasoning_effort = (d.reasoningEffort || '').trim() || undefined
     if (isCli) {
       payload.cli_path = d.cliPath.trim() || undefined
       payload.extra_args = d.extraArgs.trim() || undefined
@@ -179,7 +185,6 @@ async function submitModel() {
       payload.nvidia_base_url = d.nvidiaBaseUrl.trim() || undefined
       payload.azure_openai_endpoint = d.azureEndpoint.trim() || undefined
       payload.azure_openai_api_version = d.azureApiVersion.trim() || undefined
-      payload.reasoning_effort = (d.reasoningEffort || '').trim() || undefined
       // Clear any leftover CLI fields when switching provider away from claude-cli
       payload.cli_path = undefined
       payload.extra_args = undefined
@@ -328,7 +333,7 @@ onMounted(fetchModels)
               <td class="px-5 py-3.5 font-medium text-slate-200">{{ m.name }}</td>
               <td class="px-5 py-3.5 text-slate-400">{{ getLlmProviderLabel(m.provider) }}</td>
               <td class="px-5 py-3.5 text-slate-400 font-mono text-xs">{{ m.model }}</td>
-              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.provider === 'claude-cli' ? '—' : (m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : 'Default') }}</td>
+              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : (m.provider === 'claude-cli' ? '—' : 'Default') }}</td>
               <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">
                 <template v-if="m.provider === 'claude-cli'">{{ m.cli_path || 'claude' }}</template>
                 <template v-else>{{ m.api_key || '—' }}</template>

@@ -517,6 +517,17 @@ def _init_claude_state_once() -> None:
         _log(f"failed to restore .claude.json from backup: {e}", "yellow")
 
 
+def _prepare_runtime_home_for_id(id_hint: str) -> str:
+    """Same as ``_prepare_runtime_home`` but takes a free-form id_hint
+    used only for the temp-dir prefix. Lets non-session callers (test
+    endpoint, structured-output one-shot) reuse the same auth-prep path
+    so they share the operator's login the same way the chatbot does.
+    """
+    class _Stub:
+        conversation_id = (id_hint or "adhoc")[:24] or "adhoc"
+    return _prepare_runtime_home(_Stub())  # type: ignore[arg-type]
+
+
 def _prepare_runtime_home(sess: "_Session") -> str:
     """Copy the operator's ``~/.claude`` from the parent process's HOME
     into a fresh temp directory owned by the runtime user. Returns the
@@ -2056,26 +2067,50 @@ def test_claude_cli(
     version = (ver.stdout or "").strip().splitlines()[0] if ver.stdout else None
 
     # 2) Tiny prompt round-trip — detects login + verifies the model alias.
+    # Reuse the same runtime-home prep + runuser wrap the chatbot spawn
+    # path uses. WITHOUT this, the test runs as container root with
+    # HOME=/root, where ``/root/.claude.json`` isn't present (no bind
+    # mount for the sibling file) and CC reports ``Not logged in`` even
+    # though the chatbot path (which copies the cached restoration into
+    # a per-call HOME) authenticates fine. The mismatch is what surfaces
+    # as "no output from claude" on the model card.
+    _init_claude_state_once()
+    runtime_home = _prepare_runtime_home_for_id("test-cli")
     argv = [
         resolved_cli, "-p",
         "--output-format", "json",
         "--model", model,
         *_SAFETY_FLAGS,
     ]
+    argv = _wrap_argv_for_runtime_user(argv)
+    child_env = os.environ.copy()
+    if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
+        child_env["HOME"] = runtime_home
     try:
-        proc = subprocess.run(
-            argv,
-            input="ok\n",
-            capture_output=True, text=True, timeout=timeout_sec,
-            encoding="utf-8", errors="replace",
-            **_platform_popen_kwargs(),
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False, "version": version, "logged_in": False, "model_response": None,
-            "error": f"claude -p timed out after {timeout_sec}s",
-            "elapsed_ms": int((time.monotonic() - started) * 1000),
-        }
+        try:
+            proc = subprocess.run(
+                argv,
+                input="ok\n",
+                capture_output=True, text=True, timeout=timeout_sec,
+                encoding="utf-8", errors="replace",
+                env=child_env,
+                cwd=runtime_home or None,
+                **_platform_popen_kwargs(),
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False, "version": version, "logged_in": False, "model_response": None,
+                "error": f"claude -p timed out after {timeout_sec}s",
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+    finally:
+        # Per-test temp HOME — drop it whether the call succeeded or not.
+        # ``_cleanup_runtime_home`` is a no-op when runtime_home equals
+        # the process HOME (i.e. the "no privilege drop" case).
+        try:
+            _cleanup_runtime_home(runtime_home)
+        except Exception:
+            pass
 
     stdout = (proc.stdout or "").strip()
     if not stdout:
