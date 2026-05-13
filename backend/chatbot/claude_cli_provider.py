@@ -2136,30 +2136,44 @@ def call_claude_cli_structured(
         err = _classify_error_text(str(result_envelope.get("result") or ""))
         raise err
 
-    # The model's structured answer is nested inside .result as a string.
-    raw_result = result_envelope.get("result")
-    if raw_result is None:
-        raise ClaudeCliError("claude result envelope missing `result` field")
-
+    # CC's --json-schema flag puts the validated structured output in
+    # a SEPARATE ``structured_output`` field on the envelope when the
+    # model honored it. The ``result`` field then either contains the
+    # model's natural-language reply (often empty) or — when CC didn't
+    # enforce the schema — the model's freeform response (markdown,
+    # narration, etc.). Discovered via diagnostic dump on backtest
+    # #513520: spawn #3 had ``result=""`` and the actual schema-matching
+    # JSON only in ``structured_output``. Prefer that field when present.
+    structured_output = result_envelope.get("structured_output")
     payload: Any
-    if isinstance(raw_result, str):
-        try:
-            payload = json.loads(raw_result)
-        except json.JSONDecodeError:
-            # CC's ``--json-schema`` doesn't actually enforce strict JSON
-            # output on every model — the response is often markdown
-            # with the JSON object embedded (e.g. fenced code block, or
-            # narration around it). Use the same JSON-extraction logic
-            # the OpenAI/Azure raw-JSON fallback uses to pull the JSON
-            # out of the surrounding prose.
-            extracted = _try_extract_payload_from_text(output_schema, raw_result)
-            if extracted is not None:
-                return extracted
-            raise ClaudeCliValidationError(
-                f"claude result is not valid JSON: {str(raw_result)[:200]!r}"
-            )
+    if isinstance(structured_output, (dict, list)):
+        payload = structured_output
     else:
-        payload = raw_result
+        raw_result = result_envelope.get("result")
+        if raw_result is None:
+            raise ClaudeCliError("claude result envelope missing `result` field")
+        if isinstance(raw_result, str):
+            stripped = raw_result.strip()
+            if not stripped:
+                raise ClaudeCliValidationError(
+                    "claude returned empty result and no structured_output field"
+                )
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                # CC didn't enforce --json-schema — the model returned
+                # prose / markdown. Use the same JSON-extraction logic
+                # the OpenAI/Azure raw-JSON fallback uses to pull the
+                # JSON out of the surrounding text.
+                extracted = _try_extract_payload_from_text(output_schema, stripped)
+                if extracted is not None:
+                    return extracted
+                raise ClaudeCliValidationError(
+                    f"claude result is not valid JSON and no structured_output field: "
+                    f"{stripped[:200]!r}"
+                )
+        else:
+            payload = raw_result
 
     try:
         return output_schema.model_validate(payload)
