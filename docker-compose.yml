@@ -21,6 +21,14 @@ services:
     environment:
       # nginx proxy fallback: if JS uses /api (VITE_API_URL not set), nginx routes here
       - API_URL=${API_URL:-http://intellistock-api:${API_PORT:-8011}}
+      # Extra origins added to the CSP ``connect-src`` directive. REQUIRED
+      # when the frontend bundle was built with ``VITE_API_URL=https://api.example.com``
+      # so the page can actually fetch from that host — otherwise iOS Safari
+      # (and any standards-compliant browser) blocks every API call as a
+      # CSP violation and surfaces it as ``Load failed``. Space-separated
+      # list of origins, e.g.
+      # CSP_CONNECT_SRC_EXTRA="https://api.example.com wss://api.example.com"
+      - CSP_CONNECT_SRC_EXTRA=${CSP_CONNECT_SRC_EXTRA:-}
     restart: unless-stopped
     depends_on:
       - api

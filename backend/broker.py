@@ -4735,6 +4735,26 @@ if mode == MODE_BACKTEST:
                 break
     except Exception:
         _dc_bt_sim = False
+    # The dual-cadence harness only makes sense at sub-hourly cadence —
+    # the gate it's simulating fires per intraday tick and is decoupled
+    # from daily-bar persistence. At daily granularity (e.g. 86400s) the
+    # gate would never activate, so the harness adds no signal and the
+    # preflight unconditionally rejects. Gracefully degrade to a plain
+    # backtest with a one-line warning rather than failing the whole run.
+    if _dc_bt_sim:
+        try:
+            _ti_check = int(time_increment)
+        except (TypeError, ValueError):
+            _ti_check = -1
+        if _ti_check < 30 or _ti_check > 3600:
+            _log(
+                f"nexus_dual_cadence_backtest_simulation=True but granularity_sec={_ti_check} "
+                f"is outside the harness's supported [30, 3600] range — running as a plain "
+                f"single-cadence backtest. Use 30s-1h granularity to actually exercise the "
+                f"dual-cadence gate.",
+                "yellow",
+            )
+            _dc_bt_sim = False
     if _dc_bt_sim:
         from dual_cadence_preflight import (
             dual_cadence_backtest_preflight as _dc_preflight,
