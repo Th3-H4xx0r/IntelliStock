@@ -867,6 +867,15 @@ def _build_chat_argv(
     return argv
 
 
+_JSON_ONLY_SYSTEM_SUFFIX = (
+    "\n\n--- OUTPUT FORMAT (HARD CONSTRAINT) ---\n"
+    "Your reply MUST be a single JSON object matching the schema above. "
+    "Do NOT wrap it in markdown code fences. Do NOT add narration, headers, "
+    "summaries, tables, or any prose before or after the JSON. "
+    "Do NOT include the schema itself. Output ONLY the JSON value."
+)
+
+
 def _build_structured_argv(
     *,
     cli_path: str,
@@ -876,13 +885,22 @@ def _build_structured_argv(
     extra_args: List[str],
     effort: Optional[str] = None,
 ) -> List[str]:
-    """Argv for a spawn-per-call structured-output run."""
+    """Argv for a spawn-per-call structured-output run.
+
+    CC's ``--json-schema`` flag does NOT reliably force the model to
+    output strict JSON in practice — Sonnet/Haiku frequently render a
+    markdown table or narration around (or instead of) the JSON object.
+    Append a hard ``OUTPUT FORMAT`` constraint to the system prompt so
+    the model has an unambiguous instruction, in addition to the schema
+    flag.
+    """
     effective_extra = _merge_extra_args_with_effort(extra_args, _normalize_effort(effort))
+    augmented_system_prompt = (system_prompt or "").rstrip() + _JSON_ONLY_SYSTEM_SUFFIX
     argv = [
         cli_path, "-p",
         "--output-format", "json",
         "--model", model,
-        "--system-prompt", system_prompt,
+        "--system-prompt", augmented_system_prompt,
         "--json-schema", json_schema,
         *_SAFETY_FLAGS,
         *effective_extra,
@@ -2062,10 +2080,19 @@ def call_claude_cli_structured(
     if isinstance(raw_result, str):
         try:
             payload = json.loads(raw_result)
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
+            # CC's ``--json-schema`` doesn't actually enforce strict JSON
+            # output on every model — the response is often markdown
+            # with the JSON object embedded (e.g. fenced code block, or
+            # narration around it). Use the same JSON-extraction logic
+            # the OpenAI/Azure raw-JSON fallback uses to pull the JSON
+            # out of the surrounding prose.
+            extracted = _try_extract_payload_from_text(output_schema, raw_result)
+            if extracted is not None:
+                return extracted
             raise ClaudeCliValidationError(
                 f"claude result is not valid JSON: {str(raw_result)[:200]!r}"
-            ) from e
+            )
     else:
         payload = raw_result
 
@@ -2092,6 +2119,42 @@ def call_claude_cli_structured(
         raise ClaudeCliValidationError(
             f"claude output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
         ) from e
+
+
+def _try_extract_payload_from_text(output_schema: Any, raw_text: str) -> Any:
+    """When CC returns prose with an embedded JSON object (e.g. markdown
+    code fences, narration around the JSON), pull the JSON out and try
+    the full validate-then-repair pipeline against each candidate.
+
+    Returns the validated Pydantic instance on success, or ``None`` if
+    nothing usable was found. Lazy-imports the candidate-extraction
+    helper from ``llm_utils`` to avoid a module-load circular import.
+    """
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+    try:
+        from llm_utils import _raw_json_candidates
+    except Exception:
+        return None
+    candidates: list[Any] = []
+    try:
+        for cand_text in _raw_json_candidates(raw_text):
+            if not cand_text:
+                continue
+            try:
+                candidates.append(json.loads(cand_text))
+            except Exception:
+                continue
+    except Exception:
+        return None
+    for payload in candidates:
+        try:
+            return output_schema.model_validate(payload)
+        except Exception:
+            repaired = _try_repair_payload_for_schema(output_schema, payload)
+            if repaired is not None:
+                return repaired
+    return None
 
 
 def _try_repair_payload_for_schema(output_schema: Any, payload: Any) -> Any:
