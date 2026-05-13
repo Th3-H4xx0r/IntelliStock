@@ -2000,12 +2000,19 @@ def call_claude_cli_structured(
     try:
         return output_schema.model_validate(payload)
     except Exception as e:
+        # Strict validation failed. CC's ``--json-schema`` enforces only
+        # SHAPE — Pydantic enforces stricter constraints (regex, min/max,
+        # discriminated unions, custom validators) on top. Before giving
+        # up, try the same repair pipeline the OpenAI/Azure raw-JSON
+        # fallback uses: shape coercion, nested-list unwrap, single-key
+        # inner-JSON unwrap. None of these mutate the underlying model
+        # output; they just present alternative wrappings to Pydantic.
+        repaired = _try_repair_payload_for_schema(output_schema, payload)
+        if repaired is not None:
+            return repaired
         # Include a preview of what CC returned so operators can see the
         # specific shape mismatch — without this the error is just
         # "missing field X" / "type Y vs Z" with no concrete context.
-        # CC's --json-schema enforces SHAPE; Pydantic enforces
-        # constraints (regex, min/max, discriminated unions) on top,
-        # so the model can satisfy CC and still fail here.
         try:
             payload_preview = json.dumps(payload, default=str)[:400]
         except Exception:
@@ -2013,6 +2020,62 @@ def call_claude_cli_structured(
         raise ClaudeCliValidationError(
             f"claude output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
         ) from e
+
+
+def _try_repair_payload_for_schema(output_schema: Any, payload: Any) -> Any:
+    """Try to coerce CC's parsed JSON into something the strict Pydantic
+    schema will accept. Returns the validated instance on success, or
+    ``None`` if no repair worked (caller should raise the original
+    validation error). Lazy-imports the repair helpers from ``llm_utils``
+    to avoid a module-load circular import.
+    """
+    try:
+        from llm_utils import (
+            _coerce_structured_output_shape,
+            _unwrap_nested_lists,
+        )
+    except Exception:
+        return None
+    # Try a small ladder of alternative shapes, ordered cheapest-first.
+    candidates: list[Any] = []
+    try:
+        candidates.append(_coerce_structured_output_shape(output_schema, payload))
+    except Exception:
+        pass
+    try:
+        unwrapped = _unwrap_nested_lists(payload)
+        if unwrapped is not payload:
+            candidates.append(unwrapped)
+            try:
+                candidates.append(_coerce_structured_output_shape(output_schema, unwrapped))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # ``{"final": "{\"ok\":true,...}"}`` — CC wraps the schema-conforming
+    # JSON inside a single-key envelope. Unwrap and validate inner.
+    if isinstance(payload, dict) and len(payload) == 1:
+        inner_val = next(iter(payload.values()))
+        if isinstance(inner_val, str) and inner_val.strip().startswith("{"):
+            try:
+                inner_parsed = json.loads(inner_val)
+                candidates.append(inner_parsed)
+                try:
+                    candidates.append(_coerce_structured_output_shape(output_schema, inner_parsed))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    seen: set[int] = set()
+    for candidate in candidates:
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        try:
+            return output_schema.model_validate(candidate)
+        except Exception:
+            continue
+    return None
 
 
 # ── Connection test (/api/models/{id}/test-cli) ────────────────────────────

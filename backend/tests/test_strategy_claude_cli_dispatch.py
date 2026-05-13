@@ -242,3 +242,44 @@ def test_build_llm_test_provider_config_includes_reasoning_effort_for_claude_cli
     )
     cfg = _build_llm_test_provider_config(body)
     assert cfg.get("reasoning_effort") == "high"
+
+
+# ── 6) Output-repair pipeline ────────────────────────────────────────────
+
+
+class _Wrapper(BaseModel):
+    items: list[_DummyOutput]
+
+
+def test_repair_unwraps_single_key_inner_json():
+    """CC sometimes wraps the schema-conforming JSON inside a single-key
+    envelope like ``{"final": "{\"text\":...}"}``. The repair pipeline
+    should unwrap it before raising Pydantic validation error."""
+    from chatbot.claude_cli_provider import _try_repair_payload_for_schema
+
+    payload = {"final": '{"text": "hello", "score": 0.42}'}
+    out = _try_repair_payload_for_schema(_DummyOutput, payload)
+    assert out is not None
+    assert out.text == "hello"
+    assert out.score == 0.42
+
+
+def test_repair_coerces_bare_list_into_wrapper_schema():
+    """``_coerce_structured_output_shape`` wraps a bare list into the
+    expected single-field wrapper schema."""
+    from chatbot.claude_cli_provider import _try_repair_payload_for_schema
+
+    raw_list = [{"text": "a", "score": 1.0}, {"text": "b", "score": 2.0}]
+    out = _try_repair_payload_for_schema(_Wrapper, raw_list)
+    assert out is not None
+    assert len(out.items) == 2
+    assert out.items[0].text == "a"
+
+
+def test_repair_returns_none_when_no_strategy_works():
+    """Genuinely broken payloads should return None so the caller raises
+    the original ClaudeCliValidationError with the payload preview."""
+    from chatbot.claude_cli_provider import _try_repair_payload_for_schema
+
+    out = _try_repair_payload_for_schema(_DummyOutput, {"completely": "wrong"})
+    assert out is None
