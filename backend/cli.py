@@ -533,7 +533,7 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
     conditions: optional dict to also fill with strategy-level conditions. Earnings uses config for alpaca_key/alpaca_secret."""
     def _normalize_llm_provider(provider):
         name = (provider or 'gemini').strip().lower()
-        return name if name in ('gemini', 'deepseek', 'openai', 'azure', 'nvidia') else 'gemini'
+        return name if name in ('gemini', 'deepseek', 'openai', 'azure', 'nvidia', 'claude-cli', 'anthropic') else 'gemini'
 
     def _default_llm_model(provider, gemini_model='gemini-3-flash-preview', deepseek_model='deepseek-chat'):
         provider = _normalize_llm_provider(provider)
@@ -545,6 +545,8 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             return os.environ.get('AZURE_OPENAI_DEPLOYMENT', '').strip() or os.environ.get('AZURE_OPENAI_MODEL', '').strip() or 'gpt-4.1-mini'
         if provider == 'nvidia':
             return 'nvidia/nemotron-3-super-120b-a12b'
+        if provider in ('claude-cli', 'anthropic'):
+            return 'claude-sonnet-4-6'
         return gemini_model
 
     def _provider_key_env(provider):
@@ -557,6 +559,13 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             return 'AZURE_OPENAI_API_KEY'
         if provider == 'nvidia':
             return 'NVIDIA_API_KEY'
+        if provider == 'anthropic':
+            return 'ANTHROPIC_API_KEY'
+        if provider == 'claude-cli':
+            # claude-cli authenticates via the local binary, not an env-var
+            # API key. Return a placeholder name to keep the function's
+            # type consistent; callers should never actually read this.
+            return ''
         return 'GEMINI_API_KEY'
 
     def _prompt_llm_provider_settings(

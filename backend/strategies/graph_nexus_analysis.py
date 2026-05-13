@@ -571,7 +571,7 @@ _NEXUS_OVERLAY_LLM_WORKERS = 10
 _NEXUS_COMPANY_PROMPT_BUDGET_CHARS = 6000
 _NEXUS_MACRO_PROMPT_BUDGET_CHARS = 8000
 
-_NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia"}
+_NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic"}
 _NEXUS_GOVERNMENT_ACTION_TYPES = {
     "monetary_policy", "fiscal_policy", "interest_rate_hike", "interest_rate_cut",
     "inflation_policy", "trade_policy", "tariffs", "sanctions", "war_declared",
@@ -692,6 +692,8 @@ def _default_model_for_provider(provider: str) -> str:
         return "gpt-4.1-mini"
     if provider == "nvidia":
         return "nvidia/nemotron-3-super-120b-a12b"
+    if provider in ("claude-cli", "anthropic"):
+        return "claude-sonnet-4-6"
     return "gemini-3-flash-preview"
 
 
@@ -705,6 +707,15 @@ def _default_api_key_for_provider(provider: str) -> str:
         return os.environ.get("OPENAI_API_KEY", "").strip()
     if provider == "nvidia":
         return os.environ.get("NVIDIA_API_KEY", "").strip()
+    if provider == "anthropic":
+        return os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if provider == "claude-cli":
+        # claude-cli authenticates via the locally-installed binary (Pro/Max
+        # subscription) — no API key. Return a sentinel non-empty value so
+        # the ``if not api_key`` short-circuit in role callers doesn't skip
+        # the entire pipeline. The downstream LLM dispatcher accepts an
+        # empty api_key for this provider.
+        return "claude-cli-no-api-key"
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
@@ -10855,7 +10866,7 @@ def _build_private_entity_alias_lookup(alias_index: list[dict]) -> dict[str, lis
 
 def _hierarchy_llm_config() -> tuple[str, str, str]:
     provider = (os.environ.get("GRAPH_NEXUS_HIERARCHY_LLM_PROVIDER", "deepseek") or "deepseek").strip().lower()
-    if provider not in ("gemini", "deepseek", "openai", "azure"):
+    if provider not in _NEXUS_VALID_PROVIDERS:
         provider = "deepseek"
     model = (os.environ.get("GRAPH_NEXUS_HIERARCHY_LLM_MODEL", "") or "").strip()
     if not model:

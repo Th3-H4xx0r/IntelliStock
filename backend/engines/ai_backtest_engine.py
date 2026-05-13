@@ -375,7 +375,7 @@ def _env(key: str, default: str = "") -> str:
 
 def _normalize_llm_provider(provider: str) -> str:
     name = (provider or "gemini").strip().lower()
-    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia") else "gemini"
+    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic") else "gemini"
 
 
 def _default_model_for_provider(provider: str) -> str:
@@ -388,6 +388,8 @@ def _default_model_for_provider(provider: str) -> str:
         return (_env("AZURE_OPENAI_DEPLOYMENT") or _env("AZURE_OPENAI_MODEL") or "gpt-4.1-mini").strip()
     if provider == "nvidia":
         return "nvidia/nemotron-3-super-120b-a12b"
+    if provider in ("claude-cli", "anthropic"):
+        return "claude-sonnet-4-6"
     return "gemini-3-flash-preview"
 
 
@@ -401,6 +403,12 @@ def _default_api_key_for_provider(provider: str) -> str:
         return _env("AZURE_OPENAI_API_KEY")
     if provider == "nvidia":
         return _env("NVIDIA_API_KEY")
+    if provider == "anthropic":
+        return _env("ANTHROPIC_API_KEY")
+    if provider == "claude-cli":
+        # Sentinel so ``if not api_key`` short-circuits don't skip the
+        # whole pipeline — claude-cli authenticates via the local binary.
+        return "claude-cli-no-api-key"
     return _env("GEMINI_API_KEY")
 
 
