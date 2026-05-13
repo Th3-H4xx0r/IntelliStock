@@ -454,6 +454,12 @@ def _drop_user_uid() -> Optional[int]:
 # into each session's runtime HOME. Resolved once on manager start by
 # ``_init_claude_state_once``. Empty when no privilege drop is set up.
 _CLAUDE_JSON_SOURCE: str = ""
+_CLAUDE_STATE_INIT_LOCK = threading.Lock()
+# Process-wide shared runtime HOME for spawn-per-call paths
+# (call_claude_cli_structured). The chatbot's persistent session has its
+# OWN per-conversation runtime_home — these are independent.
+_STRUCTURED_RUNTIME_HOME: str = ""
+_STRUCTURED_RUNTIME_HOME_LOCK = threading.Lock()
 
 
 def _init_claude_state_once() -> None:
@@ -466,55 +472,102 @@ def _init_claude_state_once() -> None:
     per-call "restoring .claude.json from backup" log line and shaves
     a glob + copy off the hot path of every CC spawn.
 
-    Idempotent. Safe to call multiple times — the first call wins.
+    Thread-safe and idempotent — first caller wins, subsequent callers
+    return immediately. Without the lock, multiple workers race past the
+    fast-path guard and the "restored from backup" log fires once per
+    worker on cold start.
     """
     global _CLAUDE_JSON_SOURCE
     if _CLAUDE_JSON_SOURCE:
         return
-    src = os.environ.get("HOME") or "/root"
-    live = os.path.join(src, ".claude.json")
-    if os.path.isfile(live):
-        _CLAUDE_JSON_SOURCE = live
-        _log(f"claude.json source = live host file at {live!r}", "cyan")
-        return
-    # No live file — try to restore the most recent backup.
-    import glob
-    src_claude = os.path.join(src, ".claude")
-    backups = sorted(
-        glob.glob(os.path.join(src_claude, "backups", ".claude.json.backup.*")),
-        reverse=True,
-    )
-    if not backups:
-        _log(
-            f"no .claude.json at {live!r} and no backups in "
-            f"{os.path.join(src_claude, 'backups')!r} — CC will likely "
-            "report 'Not logged in'. Run `claude` on the host to "
-            "regenerate auth state.",
-            "yellow",
+    with _CLAUDE_STATE_INIT_LOCK:
+        # Re-check inside the lock — another thread may have populated
+        # while we were waiting.
+        if _CLAUDE_JSON_SOURCE:
+            return
+        src = os.environ.get("HOME") or "/root"
+        live = os.path.join(src, ".claude.json")
+        if os.path.isfile(live):
+            _CLAUDE_JSON_SOURCE = live
+            _log(f"claude.json source = live host file at {live!r}", "cyan")
+            return
+        # No live file — try to restore the most recent backup.
+        import glob
+        src_claude = os.path.join(src, ".claude")
+        backups = sorted(
+            glob.glob(os.path.join(src_claude, "backups", ".claude.json.backup.*")),
+            reverse=True,
         )
-        return
-    # Materialise a stable cache file owned by the process so per-session
-    # prep can copy it without re-running the glob. /tmp is fine — the
-    # file lives only as long as this container process.
-    cache_dir = "/tmp/cc-claude-state"
-    try:
-        os.makedirs(cache_dir, mode=0o755, exist_ok=True)
-    except Exception as e:
-        _log(f"failed to create cache dir {cache_dir!r}: {e}", "yellow")
-        return
-    cache_path = os.path.join(cache_dir, ".claude.json")
-    try:
-        import shutil
-        shutil.copy2(backups[0], cache_path)
-        os.chmod(cache_path, 0o644)
-        _CLAUDE_JSON_SOURCE = cache_path
-        _log(
-            f"restored .claude.json from {backups[0]!r} to cache "
-            f"{cache_path!r} (one-time, at startup)",
-            "cyan",
-        )
-    except Exception as e:
-        _log(f"failed to restore .claude.json from backup: {e}", "yellow")
+        if not backups:
+            _log(
+                f"no .claude.json at {live!r} and no backups in "
+                f"{os.path.join(src_claude, 'backups')!r} — CC will likely "
+                "report 'Not logged in'. Run `claude` on the host to "
+                "regenerate auth state.",
+                "yellow",
+            )
+            return
+        # Materialise a stable cache file owned by the process so per-session
+        # prep can copy it without re-running the glob. /tmp is fine — the
+        # file lives only as long as this container process.
+        cache_dir = "/tmp/cc-claude-state"
+        try:
+            os.makedirs(cache_dir, mode=0o755, exist_ok=True)
+        except Exception as e:
+            _log(f"failed to create cache dir {cache_dir!r}: {e}", "yellow")
+            return
+        cache_path = os.path.join(cache_dir, ".claude.json")
+        try:
+            import shutil
+            shutil.copy2(backups[0], cache_path)
+            os.chmod(cache_path, 0o644)
+            _CLAUDE_JSON_SOURCE = cache_path
+            _log(
+                f"restored .claude.json from {backups[0]!r} to cache "
+                f"{cache_path!r} (one-time, at startup)",
+                "cyan",
+            )
+        except Exception as e:
+            _log(f"failed to restore .claude.json from backup: {e}", "yellow")
+
+
+def _get_structured_runtime_home() -> str:
+    """Process-wide shared runtime HOME for the spawn-per-call structured
+    path. Created once on first use, reused by every subsequent call.
+
+    Without this, every ``call_claude_cli_structured`` did a full
+    ``shutil.copytree`` of ``~/.claude/`` (~50MB) per call, which on a
+    backtest with thousands of LLM calls dominates wall time and burns
+    disk IO. The persistent-session chatbot path doesn't have this
+    problem because it copies ONCE per session and reuses.
+
+    Thread-safe. Returns process HOME unchanged when no privilege drop
+    is configured (i.e. ``_drop_user_uid()`` returns None).
+    """
+    global _STRUCTURED_RUNTIME_HOME
+    if _STRUCTURED_RUNTIME_HOME:
+        return _STRUCTURED_RUNTIME_HOME
+    target_uid = _drop_user_uid()
+    if target_uid is None:
+        # No privilege drop — caller will pass process HOME through.
+        return os.environ.get("HOME") or "/root"
+    with _STRUCTURED_RUNTIME_HOME_LOCK:
+        if _STRUCTURED_RUNTIME_HOME:
+            return _STRUCTURED_RUNTIME_HOME
+        # _prepare_runtime_home_for_id creates a fresh tmp HOME with the
+        # full copytree. We do that ONCE and stash it.
+        path = _prepare_runtime_home_for_id("shared-structured")
+        if path and path.startswith("/tmp/cc-home-"):
+            _STRUCTURED_RUNTIME_HOME = path
+            _log(
+                f"structured runtime HOME materialised at {path!r} "
+                "(shared across all spawn-per-call structured-output calls)",
+                "cyan",
+            )
+        else:
+            # _prepare_runtime_home returned process HOME (no drop) — use it.
+            _STRUCTURED_RUNTIME_HOME = path
+        return _STRUCTURED_RUNTIME_HOME
 
 
 def _prepare_runtime_home_for_id(id_hint: str) -> str:
@@ -1940,15 +1993,18 @@ def call_claude_cli_structured(
     # runs as container root and CC's API call fails with
     # ``401 Invalid authentication credentials`` because the local Pro/Max
     # session is keyed to the runtime user we set up at install time.
+    # We use a PROCESS-WIDE shared runtime HOME (created once, reused for
+    # every structured call) instead of one per call — without sharing,
+    # every call would do a ~50MB shutil.copytree, which dominates the
+    # wall time of a backtest with thousands of LLM dispatches.
     _init_claude_state_once()
-    runtime_home = _prepare_runtime_home_for_id("structured")
+    runtime_home = _get_structured_runtime_home()
     argv = _wrap_argv_for_runtime_user(argv)
     child_env = os.environ.copy()
     if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
         child_env["HOME"] = runtime_home
 
     if not _GLOBAL_SPAWN_SEM.acquire(timeout=CLAUDE_CLI_SPAWN_TIMEOUT_SEC):
-        _cleanup_runtime_home(runtime_home)
         raise ClaudeCliError(
             f"global subprocess cap ({CLAUDE_CLI_MAX_CONCURRENT}) reached"
         )
@@ -1976,11 +2032,8 @@ def call_claude_cli_structured(
             ) from e
     finally:
         _release_spawn_sem_safely()
-        # Per-call temp HOME — drop it whether success/timeout/error.
-        try:
-            _cleanup_runtime_home(runtime_home)
-        except Exception:
-            pass
+        # NOTE: do NOT cleanup runtime_home — it's shared across all
+        # structured calls and lives for the lifetime of the process.
 
     stdout = (proc.stdout or "").strip()
     if not stdout:
