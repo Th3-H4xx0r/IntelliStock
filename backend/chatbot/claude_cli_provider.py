@@ -391,10 +391,17 @@ def _wrap_argv_for_runtime_user(argv: List[str]) -> List[str]:
     refusing ``--dangerously-skip-permissions``.
 
     Picks the first available wrapper:
-      1. ``runuser -u <user> --``  (util-linux, always available on
+      1. ``runuser -p -u <user> --``  (util-linux, always available on
          python:3.11-slim Debian-based images)
-      2. ``su -s /bin/sh -c "<argv>" <user>``  (fallback; requires
+      2. ``su -p -s /bin/sh -c "<argv>" <user>``  (fallback; requires
          quoting the argv into a single shell command)
+
+    ``-p`` / ``--preserve-environment`` is critical: WITHOUT it,
+    runuser/su reset HOME to the target user's home (``/home/claudeuser``
+    on our image). Our ``HOME=/tmp/cc-home-<sess>`` env on Popen is
+    overridden, so CC looks for credentials in ``/home/claudeuser/.claude``
+    — which is empty — and reports ``Not logged in``. Preserving the
+    env keeps the per-session runtime home visible to the subprocess.
 
     Returns the argv unchanged if no runtime user is configured or if
     we're on Windows.
@@ -408,12 +415,14 @@ def _wrap_argv_for_runtime_user(argv: List[str]) -> List[str]:
     if runuser_path:
         # ``--`` terminates runuser's own option parsing so flags in
         # argv (e.g. ``--strict-mcp-config``) are passed through.
-        return [runuser_path, "-u", _CC_RUNTIME_USER, "--", *argv]
+        # ``-p`` preserves HOME / USER / SHELL / LOGNAME from our
+        # Popen ``env={...}`` so the per-session runtime HOME lands.
+        return [runuser_path, "-p", "-u", _CC_RUNTIME_USER, "--", *argv]
     # Fallback to su; quote argv into a single -c argument.
     su_path = shutil.which("su")
     if su_path:
         quoted = " ".join(shlex.quote(a) for a in argv)
-        return [su_path, "-s", "/bin/sh", "-c", quoted, _CC_RUNTIME_USER]
+        return [su_path, "-p", "-s", "/bin/sh", "-c", quoted, _CC_RUNTIME_USER]
     # Neither available — return as-is and let Popen's user= take over.
     _log(
         "no runuser/su available; relying on Popen(user=) which may "
