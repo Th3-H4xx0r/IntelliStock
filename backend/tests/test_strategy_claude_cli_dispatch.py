@@ -510,3 +510,48 @@ def test_envelope_error_path_emits_discord_alert():
         ccp._emit_rate_limit_discord_alert(envelope["result"])
 
     assert len(enqueue_calls) == 1
+
+
+def test_daemon_conversation_id_differs_per_schema(monkeypatch):
+    """Bug #2 fix: two output schemas with the same model+system_prompt+thread
+    must NOT collide on conversation_id. Otherwise the second schema reuses
+    the first schema's frozen system prompt inside the daemon subprocess."""
+    from pydantic import BaseModel
+
+    class SchemaA(BaseModel):
+        a: str
+
+    class SchemaB(BaseModel):
+        b: int
+        c: int
+
+    monkeypatch.setenv("CLAUDE_CLI_DAEMON_FOR_STRUCTURED", "1")
+    seen_ids: list[str] = []
+
+    def fake_chat_structured(**kwargs):
+        seen_ids.append(kwargs["conversation_id"])
+        return kwargs["output_schema"](
+            **({"a": "x"} if kwargs["output_schema"] is SchemaA else {"b": 1, "c": 2})
+        )
+
+    from llm_utils import call_structured_llm_by_provider
+    with patch(
+        "chatbot.claude_cli_provider.call_claude_cli_chat_structured",
+        side_effect=fake_chat_structured,
+    ):
+        call_structured_llm_by_provider(
+            "claude-cli", "k", "claude-sonnet-4-6",
+            prompt="p", output_type=SchemaA,
+            provider_config={"cli_path": "claude"},
+        )
+        call_structured_llm_by_provider(
+            "claude-cli", "k", "claude-sonnet-4-6",
+            prompt="p", output_type=SchemaB,
+            provider_config={"cli_path": "claude"},
+        )
+
+    assert len(seen_ids) == 2
+    assert seen_ids[0] != seen_ids[1], (
+        f"Schema A and B must yield different conversation_ids; got {seen_ids}"
+    )
+    assert "schema" in seen_ids[0] and "schema" in seen_ids[1]

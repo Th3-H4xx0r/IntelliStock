@@ -1288,9 +1288,28 @@ def _call_claude_cli_structured_from_strategy(
     _use_daemon_path = daemon_for_structured_enabled()
     _conversation_id = ""
     if _use_daemon_path:
-        _sys_hash = hashlib.sha256((sys_str or "").encode("utf-8", errors="replace")).hexdigest()[:12]
+        _sys_hash = hashlib.sha256(
+            (sys_str or "").encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+        # Bug #2 fix: include a schema fingerprint so two different output
+        # schemas (e.g., company-classification vs macro-classification)
+        # never collide on conversation_id. Without this, the daemon
+        # subprocess keeps the first schema's system suffix forever
+        # because _get_or_spawn deliberately ignores subsequent
+        # system_prompt values when reusing a session.
+        try:
+            _schema_json = json.dumps(
+                output_type.model_json_schema(), sort_keys=True
+            )
+        except Exception:
+            _schema_json = f"{output_type.__module__}.{output_type.__qualname__}"
+        _schema_hash = hashlib.sha256(
+            _schema_json.encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
         _tid = threading.get_ident()
-        _conversation_id = f"nexus-structured-{model}-{_sys_hash}-tid{_tid}"
+        _conversation_id = (
+            f"nexus-structured-{model}-{_sys_hash}-schema{_schema_hash}-tid{_tid}"
+        )
 
     last_err: Exception | None = None
     _attempted: list[str] = []
