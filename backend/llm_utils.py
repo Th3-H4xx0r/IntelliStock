@@ -1398,6 +1398,18 @@ def _call_claude_cli_structured_from_strategy(
                     f"validation error in {round(_backoff, 1)}s: {str(e)[:120]}",
                     file=sys.stderr, flush=True,
                 )
+                # Daemon subprocess may have died or returned garbage —
+                # clear our cached history for this conversation_id so the
+                # retry starts from a clean slate. The session manager
+                # will respawn if needed.
+                if _use_daemon_path and _conversation_id:
+                    try:
+                        from chatbot.claude_cli_provider import (
+                            _clear_structured_history,
+                        )
+                        _clear_structured_history(_conversation_id)
+                    except Exception:
+                        pass  # best-effort; never block the retry on cleanup
                 time.sleep(_backoff)
                 continue
             break
@@ -1410,6 +1422,18 @@ def _call_claude_cli_structured_from_strategy(
                     f"transient error in {round(_backoff, 1)}s: {str(e)[:120]}",
                     file=sys.stderr, flush=True,
                 )
+                # Daemon subprocess may have died or returned garbage —
+                # clear our cached history for this conversation_id so the
+                # retry starts from a clean slate. The session manager
+                # will respawn if needed.
+                if _use_daemon_path and _conversation_id:
+                    try:
+                        from chatbot.claude_cli_provider import (
+                            _clear_structured_history,
+                        )
+                        _clear_structured_history(_conversation_id)
+                    except Exception:
+                        pass  # best-effort; never block the retry on cleanup
                 time.sleep(_backoff)
                 continue
             break

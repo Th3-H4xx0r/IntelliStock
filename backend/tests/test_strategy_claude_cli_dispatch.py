@@ -592,3 +592,82 @@ def test_daemon_history_accumulates_across_calls():
     assert seen_message_lists[1][0]["role"] == "user"
     assert seen_message_lists[1][1]["role"] == "assistant"
     assert seen_message_lists[1][2]["role"] == "user"
+
+
+def test_daemon_history_cleared_between_retries(monkeypatch):
+    """Bug #1 follow-up: when a dispatch raises ClaudeCliValidationError
+    and the retry loop sleeps + retries, the scaffold's per-conversation
+    history must be cleared so the next attempt doesn't replay stale
+    messages against a possibly-respawned subprocess."""
+    from chatbot.claude_cli_provider import (
+        ClaudeCliValidationError,
+        _clear_structured_history,
+        _structured_history,
+    )
+
+    monkeypatch.setenv("CLAUDE_CLI_DAEMON_FOR_STRUCTURED", "1")
+    _clear_structured_history()
+
+    calls = {"n": 0}
+
+    def fake_chat_structured(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ClaudeCliValidationError("synthetic invalid output")
+        return _DummyOutput(text="ok", score=0.5)
+
+    from llm_utils import call_structured_llm_by_provider
+    with patch(
+        "chatbot.claude_cli_provider.call_claude_cli_chat_structured",
+        side_effect=fake_chat_structured,
+    ):
+        out = call_structured_llm_by_provider(
+            "claude-cli", "k", "claude-sonnet-4-6",
+            prompt="p", output_type=_DummyOutput,
+            provider_config={"cli_path": "claude"},
+            output_retries=1,
+        )
+
+    assert out is not None
+    assert calls["n"] == 2
+    for conv_id, hist in _structured_history.items():
+        assert len(hist) <= 2, (
+            f"History for {conv_id} should be reset between retries; got {hist!r}"
+        )
+
+
+def test_daemon_history_rolls_back_on_validation_failure():
+    """Bug #1 follow-up: if call_claude_cli_chat succeeds but JSON
+    parsing or Pydantic validation fails inside the scaffold, the
+    optimistic user message must be rolled back so retries see a
+    clean slate."""
+    from chatbot.claude_cli_provider import (
+        ClaudeCliValidationError,
+        _clear_structured_history,
+        _structured_history,
+        call_claude_cli_chat_structured,
+    )
+
+    _clear_structured_history()
+
+    def fake_chat(**kwargs):
+        return {"content": "not json at all"}
+
+    with patch("chatbot.claude_cli_provider.call_claude_cli_chat", side_effect=fake_chat):
+        try:
+            call_claude_cli_chat_structured(
+                conversation_id="rollback-1",
+                model="claude-sonnet-4-6",
+                system_prompt="sys",
+                user_prompt="u",
+                output_schema=_DummyOutput,
+            )
+        except ClaudeCliValidationError:
+            pass
+        else:
+            raise AssertionError("expected ClaudeCliValidationError")
+
+    assert "rollback-1" not in _structured_history, (
+        f"Expected rollback-1 removed after validation failure; "
+        f"history={_structured_history.get('rollback-1')!r}"
+    )

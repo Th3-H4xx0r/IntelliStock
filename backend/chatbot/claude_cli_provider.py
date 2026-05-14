@@ -2488,48 +2488,63 @@ def call_claude_cli_chat_structured(
                 _structured_history.pop(conversation_id, None)
         raise
 
-    # Use ``_coerce_text`` for symmetry with the rest of the provider —
-    # ``call_claude_cli_chat`` returns ``content`` as a plain string today,
-    # but a future CLI version could ship a content-blocks list and the
-    # spawn path's coercer handles both.
-    raw_content = chat_result.get("content") if isinstance(chat_result, dict) else None
-    content = _coerce_text(raw_content) if raw_content is not None else ""
-    if not isinstance(content, str) or not content.strip():
-        raise ClaudeCliValidationError(
-            "claude daemon returned empty content"
-        )
-
-    stripped = content.strip()
-    validated: Any = None
-    payload: Any = None
+    # Wrap the post-call success path (coerce → parse → extract/repair →
+    # validate) in a rollback try/except. If ANY of these steps raise
+    # (including the empty-content guard, JSON parse failure, or Pydantic
+    # validation failure), we must drop the optimistic user message we
+    # appended above — symmetric with the call_claude_cli_chat failure
+    # rollback — so retries don't replay stale state.
     try:
-        payload = json.loads(stripped)
-    except json.JSONDecodeError:
-        # Model returned prose / fenced JSON / narration around the JSON.
-        # Reuse the same extraction pipeline the spawn path uses so behavior
-        # stays consistent across the two routes.
-        extracted = _try_extract_payload_from_text(output_schema, stripped)
-        if extracted is not None:
-            validated = extracted
-        else:
+        # Use ``_coerce_text`` for symmetry with the rest of the provider —
+        # ``call_claude_cli_chat`` returns ``content`` as a plain string today,
+        # but a future CLI version could ship a content-blocks list and the
+        # spawn path's coercer handles both.
+        raw_content = chat_result.get("content") if isinstance(chat_result, dict) else None
+        content = _coerce_text(raw_content) if raw_content is not None else ""
+        if not isinstance(content, str) or not content.strip():
             raise ClaudeCliValidationError(
-                f"claude daemon content is not valid JSON: {stripped[:200]!r}"
+                "claude daemon returned empty content"
             )
-    else:
+
+        stripped = content.strip()
+        validated: Any = None
+        payload: Any = None
         try:
-            validated = output_schema.model_validate(payload)
-        except Exception as e:
-            repaired = _try_repair_payload_for_schema(output_schema, payload)
-            if repaired is not None:
-                validated = repaired
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            # Model returned prose / fenced JSON / narration around the JSON.
+            # Reuse the same extraction pipeline the spawn path uses so behavior
+            # stays consistent across the two routes.
+            extracted = _try_extract_payload_from_text(output_schema, stripped)
+            if extracted is not None:
+                validated = extracted
             else:
-                try:
-                    payload_preview = json.dumps(payload, default=str)[:400]
-                except Exception:
-                    payload_preview = str(payload)[:400]
                 raise ClaudeCliValidationError(
-                    f"claude daemon output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
-                ) from e
+                    f"claude daemon content is not valid JSON: {stripped[:200]!r}"
+                )
+        else:
+            try:
+                validated = output_schema.model_validate(payload)
+            except Exception as e:
+                repaired = _try_repair_payload_for_schema(output_schema, payload)
+                if repaired is not None:
+                    validated = repaired
+                else:
+                    try:
+                        payload_preview = json.dumps(payload, default=str)[:400]
+                    except Exception:
+                        payload_preview = str(payload)[:400]
+                    raise ClaudeCliValidationError(
+                        f"claude daemon output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
+                    ) from e
+    except Exception:
+        with _structured_history_lock:
+            hist = _structured_history.get(conversation_id, [])
+            if hist and hist[-1].get("role") == "user":
+                hist.pop()
+            if not hist:
+                _structured_history.pop(conversation_id, None)
+        raise
 
     # Successful response — record the assistant turn so the next call
     # on this conversation_id can slice past it.
