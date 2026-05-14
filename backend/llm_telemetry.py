@@ -44,3 +44,38 @@ def load_pricing_yaml(path: str) -> Dict[str, Dict[str, Any]]:
             flush=True,
         )
         return {}
+
+
+_LLM_USAGE_TABLE = "LLMUsage"
+_LLM_USAGE_DAILY_TABLE = "LLMUsageDaily"
+
+_LLM_USAGE_INDEXES = ("ts", "provider", "model", "backtest_id", "instance_id")
+_LLM_USAGE_DAILY_INDEXES = ("date",)
+
+
+def ensure_llm_usage_tables(*, conn, r, db_name: str) -> None:
+    """Idempotently create the LLMUsage + LLMUsageDaily tables and their
+    secondary indexes. Safe to call on every process start.
+    """
+    if db_name not in list(r.db_list().run(conn)):
+        r.db_create(db_name).run(conn)
+    existing = list(r.db(db_name).table_list().run(conn))
+    if _LLM_USAGE_TABLE not in existing:
+        r.db(db_name).table_create(_LLM_USAGE_TABLE).run(conn)
+    if _LLM_USAGE_DAILY_TABLE not in existing:
+        r.db(db_name).table_create(_LLM_USAGE_DAILY_TABLE).run(conn)
+
+    def _ensure_indexes(table: str, indexes: tuple[str, ...]) -> None:
+        existing_idx = list(r.db(db_name).table(table).index_list().run(conn))
+        for idx in indexes:
+            if idx not in existing_idx:
+                try:
+                    r.db(db_name).table(table).index_create(idx).run(conn)
+                except Exception as e:
+                    print(
+                        f"[llm_telemetry] index_create {table}.{idx} failed: {e}",
+                        flush=True,
+                    )
+
+    _ensure_indexes(_LLM_USAGE_TABLE, _LLM_USAGE_INDEXES)
+    _ensure_indexes(_LLM_USAGE_DAILY_TABLE, _LLM_USAGE_DAILY_INDEXES)
