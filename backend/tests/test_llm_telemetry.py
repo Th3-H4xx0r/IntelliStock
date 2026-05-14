@@ -92,3 +92,76 @@ def test_ensure_llm_usage_table_creates_table_and_indexes():
     assert "ts" in created_indexes
     assert "provider" in created_indexes
     assert "date" in created_indexes
+
+
+def test_compute_cost_from_yaml():
+    from llm_telemetry import compute_cost
+    pricing = {
+        "claude-sonnet-4-6": {
+            "input_per_1m": 3.00,
+            "output_per_1m": 15.00,
+            "cache_creation_per_1m": 3.75,
+            "cache_read_per_1m": 0.30,
+        }
+    }
+    usage = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 500_000,
+        "cache_creation_input_tokens": 200_000,
+        "cache_read_input_tokens": 100_000,
+    }
+    cost = compute_cost(
+        model="claude-sonnet-4-6",
+        usage=usage,
+        pricing_yaml=pricing,
+        models_override=None,
+    )
+    assert cost["input_cost_usd"] == 3.00
+    assert cost["output_cost_usd"] == 7.50
+    assert cost["cache_creation_cost_usd"] == pytest.approx(0.75)
+    assert cost["cache_read_cost_usd"] == pytest.approx(0.03)
+    assert cost["total_cost_usd"] == pytest.approx(11.28)
+    assert cost["cost_source"] == "yaml"
+
+
+def test_compute_cost_models_table_override():
+    from llm_telemetry import compute_cost
+    pricing = {"foo-model": {"input_per_1m": 5.0, "output_per_1m": 10.0}}
+    override = {
+        "input_cost_per_1m": 1.0,   # cheaper than YAML
+        "output_cost_per_1m": 2.0,
+    }
+    cost = compute_cost(
+        model="foo-model",
+        usage={"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+        pricing_yaml=pricing,
+        models_override=override,
+    )
+    assert cost["input_cost_usd"] == 1.0
+    assert cost["output_cost_usd"] == 2.0
+    assert cost["cost_source"] == "models_override"
+
+
+def test_compute_cost_envelope_override():
+    from llm_telemetry import compute_cost
+    cost = compute_cost(
+        model="claude-cli",
+        usage={"input_tokens": 100, "output_tokens": 50},
+        pricing_yaml={},
+        models_override=None,
+        cost_usd_override=0.42,
+    )
+    assert cost["total_cost_usd"] == 0.42
+    assert cost["cost_source"] == "envelope"
+
+
+def test_compute_cost_unknown_model():
+    from llm_telemetry import compute_cost
+    cost = compute_cost(
+        model="never-heard-of-it",
+        usage={"input_tokens": 1000, "output_tokens": 500},
+        pricing_yaml={},
+        models_override=None,
+    )
+    assert cost["total_cost_usd"] == 0.0
+    assert cost["cost_source"] == "unknown"
