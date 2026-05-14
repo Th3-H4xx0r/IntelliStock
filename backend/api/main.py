@@ -225,6 +225,89 @@ def api_startup_ensure_default_admin():
             time.sleep(2)
 
 
+@app.on_event("startup")
+def _startup_init_telemetry():
+    """Wire the LLM telemetry sink into the FastAPI lifecycle.
+
+    The sink runs a background flusher that batches LLMUsage rows to
+    RethinkDB. Pricing comes from backend/llm_pricing.yaml with optional
+    per-model overrides via the Models table (see Task 10). The sink is
+    idempotent — calling configure() twice just re-applies the last set
+    of parameters; the flusher thread is reused.
+    """
+    import logging
+    log = logging.getLogger("uvicorn.error")
+    try:
+        import llm_telemetry
+        from interactive_utils import (
+            r as _r_iu,
+            RETHINKDB_HOST as _RDB_HOST,
+            RETHINKDB_PORT as _RDB_PORT,
+        )
+
+        def _conn_factory():
+            # Fresh, short-lived connection per flush attempt. Mirrors the
+            # interactive_utils.get_conn pattern with the same 10s socket
+            # timeout to avoid half-open hangs.
+            return _r_iu.connect(host=_RDB_HOST, port=_RDB_PORT, timeout=10)
+
+        def _models_override_lookup(model_id):
+            """Return any cost-override fields set on the Models row for
+            ``model_id``, else None. Used by the cost computer to prefer
+            user-set per-model pricing over the YAML defaults."""
+            if not model_id:
+                return None
+            conn = None
+            try:
+                conn = _conn_factory()
+                row = _r_iu.db("IntelliStock").table("Models").get(model_id).run(conn)
+                if not row:
+                    return None
+                keys = (
+                    "input_cost_per_1m",
+                    "output_cost_per_1m",
+                    "cache_creation_cost_per_1m",
+                    "cache_read_cost_per_1m",
+                )
+                out = {k: row.get(k) for k in keys if row.get(k) is not None}
+                return out or None
+            except Exception:
+                return None
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        pricing_path = os.path.join(_backend_dir, "llm_pricing.yaml")
+        llm_telemetry.configure(
+            db_conn_factory=_conn_factory,
+            enabled=True,
+            flush_interval_s=5.0,
+            max_buffer=50,
+            pricing_yaml_path=pricing_path,
+            r_module=_r_iu,
+            db_name="IntelliStock",
+            models_override_lookup=_models_override_lookup,
+        )
+        try:
+            from llm_telemetry import ensure_llm_usage_tables
+            setup_conn = _conn_factory()
+            try:
+                ensure_llm_usage_tables(conn=setup_conn, r=_r_iu, db_name="IntelliStock")
+            finally:
+                try:
+                    setup_conn.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("llm telemetry table setup failed: %s", e)
+    except Exception as e:
+        # Telemetry must never block API startup.
+        log.warning("llm telemetry init failed: %s", e)
+
+
 @app.on_event("shutdown")
 def api_shutdown_close_claude_cli_sessions():
     """Gracefully close any persistent ``claude`` subprocesses still alive
@@ -2609,6 +2692,234 @@ def api_llm_output_get(output_id: str):
         except Exception:
             result["output"] = raw_json
     return result
+
+
+# -- LLM Usage telemetry endpoints --------------------------------------------
+
+
+@app.get("/llm-usage/summary", response_class=JSONResponse)
+def api_llm_usage_summary(
+    range: str = "24h",
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    return _llm_usage_summary(range_str=range, conn=conn)
+
+
+@app.get("/llm-usage/timeseries", response_class=JSONResponse)
+def api_llm_usage_timeseries(
+    range: str = "24h",
+    bucket: str = "hour",
+    provider: str = "",
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    return _llm_usage_timeseries(
+        range_str=range, bucket=bucket, provider=provider or None, conn=conn,
+    )
+
+
+@app.get("/llm-usage/top-spenders", response_class=JSONResponse)
+def api_llm_usage_top_spenders(
+    range: str = "24h",
+    group_by: str = "model",
+    limit: int = 10,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    return _llm_usage_top_spenders(
+        range_str=range, group_by=group_by, limit=limit, conn=conn,
+    )
+
+
+@app.get("/llm-usage/calls", response_class=JSONResponse)
+def api_llm_usage_calls(
+    limit: int = 50,
+    offset: int = 0,
+    range: str = "now",
+    provider: str = "",
+    model: str = "",
+    backtest_id: str = "",
+    strategy: str = "",
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    import llm_telemetry
+    if (
+        range == "now"
+        and offset == 0
+        and not provider
+        and not model
+        and not backtest_id
+        and not strategy
+    ):
+        # Fast path: serve from in-memory ring buffer (no DB round-trip).
+        return llm_telemetry.get_recent_calls(limit)
+    return _llm_usage_calls_db(
+        limit=limit,
+        offset=offset,
+        range_str=range,
+        provider=provider or None,
+        model=model or None,
+        backtest_id=backtest_id or None,
+        strategy=strategy or None,
+        conn=conn,
+    )
+
+
+@app.get("/llm-usage/health", response_class=JSONResponse)
+def api_llm_usage_health(current_user: dict = Depends(get_current_user)):
+    import llm_telemetry
+    return {
+        "buffer_depth": llm_telemetry.get_buffer_depth(),
+        "last_flush_ts": llm_telemetry._state.get("last_flush_ts", 0),
+        "write_errors_24h": llm_telemetry._state.get("write_errors_24h", 0),
+    }
+
+
+def _range_to_ms_window(range_str: str) -> tuple:
+    now_ms = int(time.time() * 1000)
+    if range_str == "24h":
+        return now_ms - 24 * 3600 * 1000, now_ms
+    if range_str == "7d":
+        return now_ms - 7 * 24 * 3600 * 1000, now_ms
+    if range_str == "30d":
+        return now_ms - 30 * 24 * 3600 * 1000, now_ms
+    return now_ms - 24 * 3600 * 1000, now_ms
+
+
+def _llm_usage_summary(*, range_str: str, conn) -> dict:
+    import llm_telemetry
+    start, end = _range_to_ms_window(range_str)
+    rows: list = []
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("LLMUsage")
+            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end))
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+
+    by_key: dict = {}
+    total_tokens = 0
+    total_cost = 0.0
+    cli_cost_for_max_est = 0.0
+    for row in rows:
+        key = (row.get("provider"), row.get("model"))
+        b = by_key.setdefault(key, {
+            "provider": key[0], "model": key[1],
+            "calls": 0, "tokens": 0, "cost_usd": 0.0,
+        })
+        b["calls"] += 1
+        tk = int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
+        b["tokens"] += tk
+        c = float(row.get("total_cost_usd", 0.0) or 0.0)
+        b["cost_usd"] += c
+        total_tokens += tk
+        total_cost += c
+        if row.get("provider") in ("claude-cli", "claude-cli-chat"):
+            cli_cost_for_max_est += c
+
+    cli_usage_file = llm_telemetry.probe_local_cli_usage_file()
+    last_flush_ts = llm_telemetry._state.get("last_flush_ts", 0)
+    last_flush_age_s = max(0, int((int(time.time() * 1000) - last_flush_ts) / 1000)) if last_flush_ts else 0
+    return {
+        "period_start": start,
+        "period_end": end,
+        "total_calls": len(rows),
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_cost, 6),
+        "by_provider": list(by_key.values()),
+        "max_plan_estimate_usd": round(cli_cost_for_max_est, 6) if cli_cost_for_max_est else None,
+        "cli_usage_file": cli_usage_file,
+        "telemetry_health": {
+            "buffer_depth": llm_telemetry.get_buffer_depth(),
+            "last_flush_age_s": last_flush_age_s,
+            "write_errors_24h": llm_telemetry._state.get("write_errors_24h", 0),
+        },
+    }
+
+
+def _llm_usage_timeseries(*, range_str, bucket, provider, conn) -> list:
+    start, end = _range_to_ms_window(range_str)
+    bucket_ms = 3600_000 if bucket == "hour" else 86400_000
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("LLMUsage")
+            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end))
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+    if provider:
+        rows = [x for x in rows if x.get("provider") == provider]
+    by_key: dict = {}
+    for row in rows:
+        bucket_start = (int(row.get("ts", 0)) // bucket_ms) * bucket_ms
+        key = (bucket_start, row.get("provider"), row.get("model"))
+        b = by_key.setdefault(key, {
+            "bucket_start_ts": bucket_start,
+            "provider": key[1],
+            "model": key[2],
+            "tokens": 0,
+            "cost_usd": 0.0,
+        })
+        b["tokens"] += int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
+        b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
+    return sorted(by_key.values(), key=lambda x: x["bucket_start_ts"])
+
+
+def _llm_usage_top_spenders(*, range_str, group_by, limit, conn) -> list:
+    start, end = _range_to_ms_window(range_str)
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("LLMUsage")
+            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end))
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+    key_field = group_by if group_by in ("model", "strategy", "call_site", "provider") else "model"
+    by_key: dict = {}
+    for row in rows:
+        key = row.get(key_field) or "(unset)"
+        b = by_key.setdefault(key, {"key": key, "calls": 0, "tokens": 0, "cost_usd": 0.0})
+        b["calls"] += 1
+        b["tokens"] += int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
+        b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
+    out = sorted(by_key.values(), key=lambda x: x["cost_usd"], reverse=True)
+    return out[: max(1, int(limit))]
+
+
+def _llm_usage_calls_db(*, limit, offset, range_str, provider, model,
+                        backtest_id, strategy, conn) -> list:
+    start, end = _range_to_ms_window(range_str if range_str != "now" else "24h")
+    try:
+        q = _r_auth.db("IntelliStock").table("LLMUsage").filter(
+            lambda x: (x["ts"] >= start) & (x["ts"] < end)
+        )
+        rows = list(
+            q.order_by(_r_auth.desc("ts"))
+            .skip(int(offset))
+            .limit(int(limit))
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+
+    def _keep(row):
+        if provider and row.get("provider") != provider:
+            return False
+        if model and row.get("model") != model:
+            return False
+        if backtest_id and row.get("backtest_id") != backtest_id:
+            return False
+        if strategy and row.get("strategy") != strategy:
+            return False
+        return True
+
+    return [x for x in rows if _keep(x)]
 
 
 # Host/port from env (used when running this module; uvicorn CLI can override with --host/--port)
