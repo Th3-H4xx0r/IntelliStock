@@ -722,3 +722,78 @@ def test_daemon_history_rolls_back_on_validation_failure():
         f"Expected rollback-1 removed after validation failure; "
         f"history={_structured_history.get('rollback-1')!r}"
     )
+
+
+def test_daemon_tpe_worker_reuse_does_not_break(monkeypatch):
+    """Bug #3 regression: a ThreadPoolExecutor worker that handles two
+    consecutive structured-call tasks must not fail on the second one.
+    Before the fix, both tasks hit the same conversation_id (same tid)
+    and the second tripped bug #1's empty-slice error.
+    """
+    import concurrent.futures
+    from chatbot.claude_cli_provider import _clear_structured_history
+
+    monkeypatch.setenv("CLAUDE_CLI_DAEMON_FOR_STRUCTURED", "1")
+    _clear_structured_history()
+
+    call_count = {"n": 0}
+
+    def fake_chat_structured(**kwargs):
+        call_count["n"] += 1
+        return _DummyOutput(text=f"ok-{call_count['n']}", score=0.5)
+
+    from llm_utils import call_structured_llm_by_provider
+    with patch(
+        "chatbot.claude_cli_provider.call_claude_cli_chat_structured",
+        side_effect=fake_chat_structured,
+    ):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            # 3 sequential tasks on a single worker — same tid for all 3.
+            futures = [
+                pool.submit(
+                    call_structured_llm_by_provider,
+                    "claude-cli", "k", "claude-sonnet-4-6",
+                    prompt=f"p{i}", output_type=_DummyOutput,
+                    provider_config={"cli_path": "claude"},
+                )
+                for i in range(3)
+            ]
+            results = [f.result(timeout=10) for f in futures]
+
+    assert call_count["n"] == 3
+    assert all(r is not None for r in results)
+    assert results[0].text == "ok-1"
+    assert results[2].text == "ok-3"
+
+
+def test_daemon_history_dict_bounded():
+    """Memory-safety guard: the scaffold's history dict must never grow
+    beyond _STRUCTURED_HISTORY_MAX_CONVERSATIONS, even across long
+    backtests with many distinct (model, sys, schema, tid) triples."""
+    from chatbot.claude_cli_provider import (
+        _clear_structured_history,
+        _structured_history,
+        _STRUCTURED_HISTORY_MAX_CONVERSATIONS,
+        call_claude_cli_chat_structured,
+    )
+
+    _clear_structured_history()
+
+    def fake_chat(**kwargs):
+        return {"content": json.dumps({"text": "ok", "score": 0.5})}
+
+    with patch("chatbot.claude_cli_provider.call_claude_cli_chat", side_effect=fake_chat):
+        n = int(_STRUCTURED_HISTORY_MAX_CONVERSATIONS * 1.2)
+        for i in range(n):
+            call_claude_cli_chat_structured(
+                conversation_id=f"probe-{i}",
+                model="claude-sonnet-4-6",
+                system_prompt="sys",
+                user_prompt="u",
+                output_schema=_DummyOutput,
+            )
+
+    assert len(_structured_history) <= _STRUCTURED_HISTORY_MAX_CONVERSATIONS, (
+        f"Dict grew to {len(_structured_history)}, "
+        f"cap is {_STRUCTURED_HISTORY_MAX_CONVERSATIONS}"
+    )
