@@ -253,3 +253,4 @@ ehthumbs.db
 
 # Vite cache
 frontend/.vite/
+.sessions/

@@ -468,12 +468,12 @@ _STRUCTURED_RUNTIME_HOME_LOCK = threading.Lock()
 _STRUCTURED_SPAWN_COUNTER: int = 0
 _STRUCTURED_SPAWN_LOCK = threading.Lock()
 # Toggle full-stdout dumps to the log for diagnosing model-output issues.
-# Currently DEFAULT-ON while we're debugging CC's structured-output
-# format compliance — the diagnostic value of seeing the actual model
-# response outweighs the log-volume cost. Set
-# CLAUDE_CLI_DUMP_STRUCTURED_STDOUT=0 (or false) to disable.
+# DEFAULT-OFF in prod — the structured_output reader fix (40ff345) is
+# stable, so the per-spawn ~1500-char repr() dumps add log volume + I/O
+# without diagnostic value during a normal backtest. Set
+# CLAUDE_CLI_DUMP_STRUCTURED_STDOUT=1 to re-enable when debugging.
 _DUMP_STRUCTURED_STDOUT = str(
-    os.environ.get("CLAUDE_CLI_DUMP_STRUCTURED_STDOUT", "1")
+    os.environ.get("CLAUDE_CLI_DUMP_STRUCTURED_STDOUT", "0")
 ).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
@@ -2315,6 +2315,160 @@ def call_claude_cli_structured(
             payload_preview = str(payload)[:400]
         raise ClaudeCliValidationError(
             f"claude output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
+        ) from e
+
+
+def daemon_for_structured_enabled() -> bool:
+    """True iff the experimental daemon path is opt-in via env. Read at every
+    call so flipping the flag in tests / runtime takes effect without a
+    process restart. Cheap (one ``os.environ.get`` per call). Default OFF.
+
+    See ``call_claude_cli_chat_structured`` for KNOWN ISSUES before flipping.
+    """
+    return str(
+        os.environ.get("CLAUDE_CLI_DAEMON_FOR_STRUCTURED", "0")
+    ).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def call_claude_cli_chat_structured(
+    *,
+    conversation_id: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    output_schema: Any,                # Pydantic v2 BaseModel — avoid the import here
+    cli_path: str = "claude",
+    extra_args: Optional[List[str]] = None,
+    reasoning_effort: Optional[str] = None,
+    timeout_sec: Optional[int] = None,
+    user_id: str = "",
+) -> Any:
+    """EXPERIMENTAL: structured-output via the long-lived chatbot daemon.
+
+    Sends a single user-prompt turn to a persistent ``claude`` subprocess
+    (keyed by ``conversation_id``) and parses the assistant text as JSON
+    against ``output_schema``.
+
+    KNOWN ISSUES — DO NOT enable in prod without addressing these first:
+
+    1. Second-call failure (HARD BUG): ``ClaudeCliSessionManager`` tracks
+       ``messages_sent`` and on turn N it sends ``messages[messages_sent:]``.
+       This wrapper passes ``messages=[user_prompt]`` (length 1) every call,
+       so on call #2 the slice is empty and ``_send_one_turn_locked`` raises
+       ``"send_turn called with no new messages to deliver."`` The fix is
+       either (a) accumulate full conversation history per conversation_id
+       (grows context, bad for cost), (b) rotate conversation_id per call
+       (defeats the warm-process goal), or (c) add a "structured-mode" path
+       to the session manager that bypasses ``messages_sent`` slicing.
+
+    2. System prompt is frozen at first spawn (``_get_or_spawn``). Different
+       schemas reaching the same conversation_id will see the FIRST schema's
+       instruction, not their own. The conversation_id should include a
+       schema fingerprint to avoid silent collisions.
+
+    3. ``ThreadPoolExecutor`` worker reuse: ``threading.get_ident()`` is
+       stable for the OS thread, so two consecutive tasks on the same
+       worker share a conversation. Combined with #1, every batch worker
+       hits the "no new messages" error on its second dispatch.
+
+    The default flag (``CLAUDE_CLI_DAEMON_FOR_STRUCTURED``) is OFF so the
+    spawn path remains the production default. The scaffold lands so the
+    follow-up work (fixing the session manager + benchmarking) can build
+    on it.
+
+    The trade-off vs ``call_claude_cli_structured``:
+      * No ``--json-schema`` enforcement — relies on the JSON-only system
+        suffix (same one ``_build_structured_argv`` uses) plus the same
+        repair pipeline (``_try_extract_payload_from_text`` /
+        ``_try_repair_payload_for_schema``) the spawn path uses.
+      * Concurrent callers MUST use distinct ``conversation_id`` values
+        — one persistent subprocess per conversation, single-threaded
+        within that conversation.
+
+    Returns a validated instance of ``output_schema`` or raises one of
+    the typed ``ClaudeCli*Error`` exceptions.
+    """
+    if not conversation_id:
+        raise ValueError("conversation_id is required for the daemon-structured path")
+    if not model:
+        raise ValueError("model is required")
+    if output_schema is None:
+        raise ValueError("output_schema is required")
+
+    try:
+        schema_dict = output_schema.model_json_schema()
+    except Exception as e:
+        raise ClaudeCliError(
+            f"output_schema must be a Pydantic v2 BaseModel "
+            f"with model_json_schema(): {e}"
+        ) from e
+    # ``sort_keys=True`` so the schema serialization is byte-identical for
+    # the same ``output_schema``. Anthropic prompt caching needs an exact
+    # prefix match; without sort_keys, dict ordering changes (across Python
+    # versions or after schema-class edits) silently invalidate the cache.
+    schema_json = json.dumps(schema_dict, ensure_ascii=False, sort_keys=True)
+
+    # Same JSON-only suffix the spawn path appends so the model gets a
+    # consistent instruction across both paths. Including the schema
+    # inline gives the model something concrete to honor — without
+    # ``--json-schema`` enforcement, this is the only contract.
+    augmented_system_prompt = (
+        (system_prompt or "").rstrip()
+        + "\n\n--- TARGET JSON SCHEMA (HARD CONSTRAINT) ---\n"
+        + schema_json
+        + _JSON_ONLY_SYSTEM_SUFFIX
+    )
+
+    chat_result = call_claude_cli_chat(
+        conversation_id=conversation_id,
+        messages=[{"role": "user", "content": user_prompt or ""}],
+        system_prompt=augmented_system_prompt,
+        model=model,
+        user_id=user_id or "",
+        cli_path=cli_path or "claude",
+        extra_args=extra_args,
+        reasoning_effort=reasoning_effort,
+        timeout_sec=timeout_sec,
+    )
+
+    # Use ``_coerce_text`` for symmetry with the rest of the provider —
+    # ``call_claude_cli_chat`` returns ``content`` as a plain string today,
+    # but a future CLI version could ship a content-blocks list and the
+    # spawn path's coercer handles both.
+    raw_content = chat_result.get("content") if isinstance(chat_result, dict) else None
+    content = _coerce_text(raw_content) if raw_content is not None else ""
+    if not isinstance(content, str) or not content.strip():
+        raise ClaudeCliValidationError(
+            "claude daemon returned empty content"
+        )
+
+    stripped = content.strip()
+    payload: Any
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        # Model returned prose / fenced JSON / narration around the JSON.
+        # Reuse the same extraction pipeline the spawn path uses so behavior
+        # stays consistent across the two routes.
+        extracted = _try_extract_payload_from_text(output_schema, stripped)
+        if extracted is not None:
+            return extracted
+        raise ClaudeCliValidationError(
+            f"claude daemon content is not valid JSON: {stripped[:200]!r}"
+        )
+
+    try:
+        return output_schema.model_validate(payload)
+    except Exception as e:
+        repaired = _try_repair_payload_for_schema(output_schema, payload)
+        if repaired is not None:
+            return repaired
+        try:
+            payload_preview = json.dumps(payload, default=str)[:400]
+        except Exception:
+            payload_preview = str(payload)[:400]
+        raise ClaudeCliValidationError(
+            f"claude daemon output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
         ) from e
 
 

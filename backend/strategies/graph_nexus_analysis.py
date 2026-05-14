@@ -4131,8 +4131,12 @@ def _maintain_active_events(
 
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
         batch_results = []
-        # In lookback mode, cap parallelism to 2 workers to reduce resource pressure
-        _maint_max_workers = min(2, n_batches) if _is_lookback else n_batches
+        # In lookback mode, cap parallelism. Provider here is azure (gpt-oss-120b),
+        # not subject to the CLAUDE_CLI_MAX_CONCURRENT semaphore. Old cap was 2,
+        # which serialised 6 batches into 3 rounds and let the bg-thread join
+        # block the foreground for 170s+. Cap=6 lets all batches run in one
+        # round; azure handles its own per-key TPM throttling.
+        _maint_max_workers = min(6, n_batches) if _is_lookback else n_batches
         if n_batches == 1:
             batch_results.append(_run_maint_batch(candidate_batches[0]))
         else:
@@ -13048,6 +13052,39 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
             f"Graph: {n_seed} seed tickers | as_of={date_key or 'latest'} | 1-hop rels: {rels_1hop or '(none)'} | 2-hop rels: {rels_2hop or '(none)'} | sector: {'yes' if 'IN_SECTOR' in available else 'no'} | macro-flow: {'yes' if 'SUPPLIES_TO_SECTOR' in available else 'no'} | institutional: {'yes' if 'HOLDS' in available else 'no'}",
             "cyan",
         )
+        # ── Kick off the slow institutional co-holdings query as a bg future
+        # so it overlaps with the cheap 1-hop / sector / 2-hop queries below.
+        # In backtest 419346 this query was 37s of the 41s Neo4j budget; the
+        # rest collectively were ~4s. Each thread needs its OWN driver.session()
+        # — neo4j-python sessions are not thread-safe.
+        use_inst = config.get("use_institutional_correlation", True)
+        _inst_co_holdings_fut = None
+        _inst_seed_cap = int(config.get("institutional_seed_cap", 50) or 50)
+        if use_inst and "HOLDS" in available and config.get("_inst_co_holdings_cache") is None:
+            _INST_EXCLUDE_EVENTS = {"trend_momentum"}
+            _inst_seeds = {
+                t for t, d in sentiment_data.items()
+                if d.get("sentiment", 0) != 0
+                and d.get("event", "") not in _INST_EXCLUDE_EVENTS
+            }
+            _inst_pre_filter = len(_inst_seeds)
+            if len(_inst_seeds) > _inst_seed_cap:
+                _inst_seeds = set(sorted(_inst_seeds)[:_inst_seed_cap])
+            _log(
+                f"  Institutional co-holdings query: start (bg) | "
+                f"seeds={len(_inst_seeds)} (filtered={_inst_pre_filter} of {len(mentioned)} mentioned"
+                f"{', capped' if _inst_pre_filter > _inst_seed_cap else ''})",
+                "cyan",
+            )
+            def _inst_co_holdings_worker(_seeds=_inst_seeds, _dk=date_key):
+                # New session per thread — neo4j-python sessions are not thread-safe.
+                with driver.session() as _bg_inst_session:
+                    return _query_institutional_co_holdings(_bg_inst_session, _seeds, as_of_date=_dk)
+            from concurrent.futures import ThreadPoolExecutor as _InstTPE
+            _inst_executor = _InstTPE(max_workers=1)
+            _inst_co_holdings_fut = _inst_executor.submit(_inst_co_holdings_worker)
+            _inst_executor.shutdown(wait=False)
+
         # ── 1-hop: relationship-aware directional propagation ──────────────
         _log(f"  1-hop query out: start | seeds={len(mentioned)} | rels={len(rels_1hop)}", "cyan")
         out_edges = _query_1hop(session, mentioned, "out", rels_1hop, as_of_date=date_key)
@@ -13217,36 +13254,38 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
             _log("  2-hop: skipped (no 2-hop relationship types in graph)", "cyan")
 
         # ── Institutional co-holding (only if HOLDS exists) ──────────────────
-        use_inst = config.get("use_institutional_correlation", True)
+        # `use_inst` was computed above (alongside the bg future kickoff).
         if use_inst and "HOLDS" in available:
             _inst_cache = config.get("_inst_co_holdings_cache")
             if _inst_cache is not None:
                 inst_edges = _inst_cache
                 _log(f"  Institutional co-holdings: reused cache | edges={len(inst_edges)}", "cyan")
+            elif _inst_co_holdings_fut is not None:
+                # Future was kicked off above — just collect the result. Most
+                # of the time it's already done because the 1-hop / sector /
+                # 2-hop queries take ~4s and the institutional query is ~37s.
+                try:
+                    inst_edges = _inst_co_holdings_fut.result(timeout=120)
+                except Exception as _inst_exc:
+                    _log(f"  Institutional co-holdings query failed: {_inst_exc}", "yellow")
+                    inst_edges = []
+                _log(f"  Institutional co-holdings query: done | edges={len(inst_edges)}", "cyan")
             else:
-                # Only query for tickers with non-zero sentiment AND real
-                # signal events — the universal momentum watchlist inflated
-                # sentiment_data with ~250+ "trend_momentum" entries (V31)
-                # causing combinatorial explosion in the 2-hop HOLDS traversal.
-                # Exclude trend_momentum: these are pure tracking with no
-                # LLM/news signal; institutional propagation from them is
-                # redundant (0.03 factor vs 0.20 sector 1-hop).
-                # Do NOT cache results — each day re-queries with its own
-                # seed set for full-quality edges.
+                # Defensive fallback — sentiment_data became empty between the
+                # bg-kickoff branch and here, or HOLDS lookup changed. Inline.
                 _INST_EXCLUDE_EVENTS = {"trend_momentum"}
                 inst_seeds = {
                     t for t, d in sentiment_data.items()
                     if d.get("sentiment", 0) != 0
                     and d.get("event", "") not in _INST_EXCLUDE_EVENTS
                 }
-                _inst_pre_filter = len(inst_seeds)
-                _inst_seed_cap = int(config.get("institutional_seed_cap", 50) or 50)
+                _fallback_pre = len(inst_seeds)
                 if len(inst_seeds) > _inst_seed_cap:
                     inst_seeds = set(sorted(inst_seeds)[:_inst_seed_cap])
                 _log(
-                    f"  Institutional co-holdings query: start | "
-                    f"seeds={len(inst_seeds)} (filtered={_inst_pre_filter} of {len(mentioned)} mentioned"
-                    f"{', capped' if _inst_pre_filter > _inst_seed_cap else ''})",
+                    f"  Institutional co-holdings query: start (inline fallback) | "
+                    f"seeds={len(inst_seeds)} (filtered={_fallback_pre} of {len(mentioned)} mentioned"
+                    f"{', capped' if _fallback_pre > _inst_seed_cap else ''})",
                     "cyan",
                 )
                 inst_edges = _query_institutional_co_holdings(session, inst_seeds, as_of_date=date_key)
@@ -17627,6 +17666,82 @@ class GraphNexusAnalysis:
             _gn_fetch_future = _gn_executor.submit(_google_news_fetch)
             _gn_executor.shutdown(wait=False)
 
+        # Launch Google News fetch IMMEDIATELY so the macro pipeline can start
+        # alongside company classification (the two phases used to serialise:
+        # 125s of company → 178s of macro). The later _launch_google_news_fetch_bg()
+        # calls (alpaca / zero-alpaca paths) are now no-ops because the closure
+        # short-circuits on _gn_fetch_future being set.
+        _launch_google_news_fetch_bg()
+
+        # Background pipeline that resolves the GN fetch, applies the backtest
+        # time-filter, and runs macro classification — all in parallel with the
+        # foreground company classification. Combined CC concurrency is 4 (company)
+        # + 4 (macro) = 8, well under CLAUDE_CLI_MAX_CONCURRENT=10.
+        _macro_pipeline_fut = None
+        if _gn_fetch_future is not None:
+            def _macro_pipeline_worker():
+                try:
+                    _gn_to = max(60, int(config.get("google_news_fetch_timeout", 120)))
+                    _bg_gn_result = _gn_fetch_future.result(timeout=_gn_to)
+                except TimeoutError:
+                    _log(f"Macro pipeline: Google News fetch timed out after {_gn_to}s — skipping", "yellow")
+                    return [], [], [], []
+                except Exception as _bg_gn_exc:
+                    _log(f"Macro pipeline: Google News fetch failed: {_bg_gn_exc}", "yellow")
+                    return [], [], [], []
+                _bg_google_articles = _bg_gn_result.get("google_articles", []) if isinstance(_bg_gn_result, dict) else []
+                _bg_gn_normalized = _bg_gn_result.get("normalized", []) if isinstance(_bg_gn_result, dict) else []
+                if not isinstance(_bg_google_articles, list):
+                    _bg_google_articles = []
+                if not isinstance(_bg_gn_normalized, list):
+                    _bg_gn_normalized = []
+                # Backtest safety: same time-filter as the original foreground block.
+                if isinstance(current_time, datetime) and _bg_google_articles and not _is_daily:
+                    _bg_ct_iso = current_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _bg_pre = len(_bg_google_articles)
+                    _bg_kept_idx = set()
+                    for _bg_gi, _bg_ga in enumerate(_bg_google_articles):
+                        _bg_pub = _bg_ga.get("published_date") or _bg_ga.get("created_at") or ""
+                        if hasattr(_bg_pub, "strftime"):
+                            _bg_pub = _bg_pub.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if str(_bg_pub) <= _bg_ct_iso:
+                            _bg_kept_idx.add(_bg_gi)
+                    if len(_bg_kept_idx) < _bg_pre:
+                        _bg_google_articles = [_bg_google_articles[i] for i in sorted(_bg_kept_idx)]
+                        _bg_gn_normalized = [_bg_gn_normalized[i] for i in sorted(_bg_kept_idx) if i < len(_bg_gn_normalized)]
+                        _log(f"Backtest time filter: removed {_bg_pre - len(_bg_google_articles)} Google articles published after {_bg_ct_iso}", "cyan")
+                if not _bg_gn_normalized:
+                    return [], [], _bg_google_articles, _bg_gn_normalized
+                # Macro classification owns its own RethinkDB connection — _classify_*
+                # uses conn for response-cache hits, and the main `conn` belongs to
+                # the foreground thread.
+                _bg_macro_conn = None
+                try:
+                    _bg_macro_conn = _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT, timeout=10) if (_nexus_db_available and _r is not None) else None
+                except Exception as _bg_conn_exc:
+                    _log(f"Macro pipeline: RethinkDB connection unavailable, classifying without cache: {_bg_conn_exc}", "yellow")
+                    _bg_macro_conn = None
+                try:
+                    with _timed_stage("Macro article classification", start_details=f"articles={len(_bg_gn_normalized)}"):
+                        _bg_macro_rows, _bg_macro_traces = _classify_macro_article_records(
+                            _bg_gn_normalized, config, date_key=date_key, conn=_bg_macro_conn, instance_id=instance_id,
+                        )
+                    if not isinstance(_bg_macro_rows, list):
+                        _bg_macro_rows = []
+                    if not isinstance(_bg_macro_traces, list):
+                        _bg_macro_traces = []
+                    return _bg_macro_rows, _bg_macro_traces, _bg_google_articles, _bg_gn_normalized
+                finally:
+                    if _bg_macro_conn is not None:
+                        try:
+                            _bg_macro_conn.close()
+                        except Exception as _bg_close_exc:
+                            _log(f"Macro pipeline WARN: failed to close DB connection: {_bg_close_exc}", "yellow")
+            from concurrent.futures import ThreadPoolExecutor as _MacroPipelineTPE
+            _macro_pipeline_executor = _MacroPipelineTPE(max_workers=1)
+            _macro_pipeline_fut = _macro_pipeline_executor.submit(_macro_pipeline_worker)
+            _macro_pipeline_executor.shutdown(wait=False)
+
         with _timed_stage("Alpaca article normalization", start_details=f"articles={len(articles)}"):
             normalized_alpaca_articles = _store_nexus_news_raw(conn, date_key, "alpaca", articles, instance_id=instance_id, config=config)
         if not isinstance(normalized_alpaca_articles, list):
@@ -18157,54 +18272,34 @@ class GraphNexusAnalysis:
             if len(symbols_list) > len(symbols or []):
                 _log(f"Symbols expanded: {len(symbols or [])} → {len(symbols_list)} (includes {len(symbols_list) - len(symbols or [])} discovered)", "cyan")
 
-        # ── 2a) Google News: collect fetched articles, run macro LLM on main thread ──
+        # ── 2a) Google News + macro classification: results from the bg pipeline
+        # that started alongside company classification. Joining here costs only
+        # the tail (max(macro, company) - company), not the full macro time.
         google_articles: list[dict] = []
         _gn_normalized: list[dict] = []
-        if _gn_fetch_future is not None:
-            if not _gn_fetch_future.done():
-                _log("Waiting for Google News fetch to finish...", "cyan")
+        if _macro_pipeline_fut is not None:
             try:
-                _gn_timeout = max(60, int(config.get("google_news_fetch_timeout", 120)))
-                _gn_fetch_result = _gn_fetch_future.result(timeout=_gn_timeout)
-                google_articles = _gn_fetch_result.get("google_articles", [])
-                _gn_normalized = _gn_fetch_result.get("normalized", [])
-                if not isinstance(google_articles, list):
-                    google_articles = []
-                if not isinstance(_gn_normalized, list):
-                    _gn_normalized = []
-                # Backtest safety: filter out Google articles published after current_time (intraday only)
-                if isinstance(current_time, datetime) and google_articles and not _is_daily:
-                    ct_iso = current_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    _pre_gn = len(google_articles)
-                    _kept_idx = set()
-                    for _gi, _ga in enumerate(google_articles):
-                        _pub = _ga.get("published_date") or _ga.get("created_at") or ""
-                        if hasattr(_pub, "strftime"):
-                            _pub = _pub.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        if str(_pub) <= ct_iso:
-                            _kept_idx.add(_gi)
-                    if len(_kept_idx) < _pre_gn:
-                        google_articles = [google_articles[i] for i in sorted(_kept_idx)]
-                        _gn_normalized = [_gn_normalized[i] for i in sorted(_kept_idx) if i < len(_gn_normalized)]
-                        _log(f"Backtest time filter: removed {_pre_gn - len(google_articles)} Google articles published after {ct_iso}", "cyan")
-            except TimeoutError:
-                _log(f"Google News fetch timed out after {_gn_timeout}s — skipping", "yellow")
-                _gn_fetch_future.cancel()
-            except Exception as _gn_exc:
-                _log(f"Google News fetch failed: {_gn_exc}", "yellow")
-        # Run macro classification, then event maintenance + Google macro resolution in parallel.
-        # _maintain_active_events only writes to RethinkDB (no Neo4j) — safe to run concurrently
-        # with the Google macro Neo4j + LLM call.
-        if _gn_normalized:
-            with _timed_stage("Macro article classification", start_details=f"articles={len(_gn_normalized)}"):
-                macro_rows, _gn_macro_traces = _classify_macro_article_records(
-                    _gn_normalized, config, date_key=date_key, conn=conn, instance_id=instance_id,
-                )
+                with _timed_stage("Macro pipeline (join)", start_details="waiting for background macro classification"):
+                    macro_rows, _gn_macro_traces, google_articles, _gn_normalized = _macro_pipeline_fut.result(timeout=600)
                 if not isinstance(macro_rows, list):
                     macro_rows = []
                 if not isinstance(_gn_macro_traces, list):
                     _gn_macro_traces = []
+                if not isinstance(google_articles, list):
+                    google_articles = []
+                if not isinstance(_gn_normalized, list):
+                    _gn_normalized = []
                 llm_traces_global.extend(_gn_macro_traces)
+            except Exception as _macro_join_exc:
+                _log(f"Macro pipeline error (non-fatal): {_macro_join_exc}", "yellow")
+                macro_rows = []
+                _gn_macro_traces = []
+                google_articles = []
+                _gn_normalized = []
+        # Run event maintenance + Google macro resolution in parallel.
+        # _maintain_active_events only writes to RethinkDB (no Neo4j) — safe to run concurrently
+        # with the Google macro Neo4j + LLM call.
+        if _gn_normalized:
             # Submit event maintenance to a background thread.
             # RethinkDB connections are not thread-safe — the worker creates its own connection.
             def _maint_worker(_cfg=config, _iid=instance_id, _dk=date_key, _rows=macro_rows):

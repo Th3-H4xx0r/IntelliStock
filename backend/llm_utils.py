@@ -1271,11 +1271,26 @@ def _call_claude_cli_structured_from_strategy(
 
     from chatbot.claude_cli_provider import (
         call_claude_cli_structured,
+        call_claude_cli_chat_structured,
+        daemon_for_structured_enabled,
         ClaudeCliError,
         ClaudeCliRateLimitError,
         ClaudeCliNotLoggedInError,
         ClaudeCliValidationError,
     )
+
+    # Opt-in: when CLAUDE_CLI_DAEMON_FOR_STRUCTURED=1, route through the
+    # long-lived chatbot subprocess. Each thread + (model, sys_hash) gets a
+    # stable conversation_id so concurrent batch workers don't interleave on
+    # one daemon and within-thread calls reuse the warm process. Default OFF
+    # — the spawn-per-call path remains the production default until this
+    # path is benchmarked.
+    _use_daemon_path = daemon_for_structured_enabled()
+    _conversation_id = ""
+    if _use_daemon_path:
+        _sys_hash = hashlib.sha256((sys_str or "").encode("utf-8", errors="replace")).hexdigest()[:12]
+        _tid = threading.get_ident()
+        _conversation_id = f"nexus-structured-{model}-{_sys_hash}-tid{_tid}"
 
     last_err: Exception | None = None
     _attempted: list[str] = []
@@ -1290,16 +1305,29 @@ def _call_claude_cli_structured_from_strategy(
     for attempt in range(max(1, _retry_budget + 1)):
         _attempted.append(model)
         try:
-            result = call_claude_cli_structured(
-                model=model,
-                system_prompt=sys_str,
-                user_prompt=prompt or "",
-                output_schema=output_type,
-                cli_path=cli_path,
-                extra_args=extra_args,
-                reasoning_effort=cfg.get("reasoning_effort"),
-                timeout_sec=timeout_sec,
-            )
+            if _use_daemon_path:
+                result = call_claude_cli_chat_structured(
+                    conversation_id=_conversation_id,
+                    model=model,
+                    system_prompt=sys_str,
+                    user_prompt=prompt or "",
+                    output_schema=output_type,
+                    cli_path=cli_path,
+                    extra_args=extra_args,
+                    reasoning_effort=cfg.get("reasoning_effort"),
+                    timeout_sec=timeout_sec,
+                )
+            else:
+                result = call_claude_cli_structured(
+                    model=model,
+                    system_prompt=sys_str,
+                    user_prompt=prompt or "",
+                    output_schema=output_type,
+                    cli_path=cli_path,
+                    extra_args=extra_args,
+                    reasoning_effort=cfg.get("reasoning_effort"),
+                    timeout_sec=timeout_sec,
+                )
             _LAST_STRUCTURED_LLM_CALL.data = {
                 "provider": "claude-cli",
                 "requested_model": model,
@@ -1341,13 +1369,29 @@ def _call_claude_cli_structured_from_strategy(
         except ClaudeCliValidationError as e:
             last_err = e
             if attempt < _retry_budget:
-                time.sleep(_backoff_sleep_seconds(attempt, base=2.0, cap=60.0))
+                _backoff = _backoff_sleep_seconds(attempt, base=2.0, cap=60.0)
+                # Surface the retry in the log — without this, a successful
+                # retry rolls up as ok=True and hides the wasted spawn time
+                # from the per-day breakdown. Spawn #21 in backtest 419346
+                # was the canonical case: 20s of failed spawn invisible.
+                print(
+                    f"[llm_utils] claude-cli retry {attempt + 1}/{_retry_budget} after "
+                    f"validation error in {round(_backoff, 1)}s: {str(e)[:120]}",
+                    file=sys.stderr, flush=True,
+                )
+                time.sleep(_backoff)
                 continue
             break
         except ClaudeCliError as e:
             last_err = e
             if attempt < _retry_budget:
-                time.sleep(_backoff_sleep_seconds(attempt))
+                _backoff = _backoff_sleep_seconds(attempt)
+                print(
+                    f"[llm_utils] claude-cli retry {attempt + 1}/{_retry_budget} after "
+                    f"transient error in {round(_backoff, 1)}s: {str(e)[:120]}",
+                    file=sys.stderr, flush=True,
+                )
+                time.sleep(_backoff)
                 continue
             break
         except Exception as e:
