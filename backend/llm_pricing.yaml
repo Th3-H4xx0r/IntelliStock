@@ -1,0 +1,47 @@
+# USD per 1M tokens. Per-model entries in the Models table override these.
+# Update when providers change pricing.
+
+claude-sonnet-4-6:
+  provider: anthropic
+  input_per_1m: 3.00
+  output_per_1m: 15.00
+  cache_creation_per_1m: 3.75
+  cache_read_per_1m: 0.30
+
+claude-opus-4-7:
+  provider: anthropic
+  input_per_1m: 15.00
+  output_per_1m: 75.00
+  cache_creation_per_1m: 18.75
+  cache_read_per_1m: 1.50
+
+claude-haiku-4-5:
+  provider: anthropic
+  input_per_1m: 1.00
+  output_per_1m: 5.00
+  cache_creation_per_1m: 1.25
+  cache_read_per_1m: 0.10
+
+gpt-5-mini:
+  provider: azure
+  input_per_1m: 0.25
+  output_per_1m: 2.00
+
+gpt-oss-120b:
+  provider: azure
+  input_per_1m: 0.0
+  output_per_1m: 0.0
+
+gemini-2-5-pro:
+  provider: gemini
+  input_per_1m: 1.25
+  output_per_1m: 10.00
+
+deepseek-chat:
+  provider: deepseek
+  input_per_1m: 0.27
+  output_per_1m: 1.10
+
+_unknown_:
+  input_per_1m: null
+  output_per_1m: null
