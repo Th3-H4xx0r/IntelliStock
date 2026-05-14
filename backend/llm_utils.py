@@ -60,6 +60,22 @@ except Exception:
     ModelSettings = None
     _PYDANTIC_AI_AVAILABLE = False
 
+# Telemetry — defensive import so a missing/broken module never blocks LLM calls.
+try:
+    from llm_telemetry import record_llm_call as _telemetry_record
+except Exception:
+    def _telemetry_record(**_kwargs):
+        return None
+
+
+def _safe_record(**kwargs) -> None:
+    """Best-effort telemetry. Never raises out."""
+    try:
+        _telemetry_record(**kwargs)
+    except Exception:
+        pass
+
+
 # Gemini REST
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _STRUCTURED_LLM_PROVIDER_LOCKS: dict[str, threading.Lock] = {
@@ -1200,6 +1216,7 @@ def _call_claude_cli_structured_from_strategy(
     PydanticAI entirely — CC enforces structure via its native
     ``--json-schema`` flag and we re-validate with Pydantic on receipt.
     """
+    _t0 = time.monotonic()
     if not model or output_type is None:
         return None
 
@@ -1232,6 +1249,16 @@ def _call_claude_cli_structured_from_strategy(
                 "usage": {},
                 "suppressed": False,
             }
+            _safe_record(
+                provider="claude-cli",
+                model=model,
+                usage={},
+                ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=0,
+                error=f"invalid extra_args: {str(e)[:200]}",
+                model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+            )
             return None
     elif isinstance(raw_extra, (list, tuple)):
         extra_args = [str(x) for x in raw_extra]
@@ -1267,6 +1294,16 @@ def _call_claude_cli_structured_from_strategy(
                     "suppressed": False,
                     "prompt_cache_hit": True,
                 }
+                _safe_record(
+                    provider="claude-cli",
+                    model=model,
+                    usage={},
+                    ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=0,
+                    error=None,
+                    model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+                )
                 return _cached_obj
 
     from chatbot.claude_cli_provider import (
@@ -1374,6 +1411,22 @@ def _call_claude_cli_structured_from_strategy(
                     _store_prompt_cache(prompt, model, cache_effort, raw_json, force_cache=True)
                 except Exception:
                     pass
+            try:
+                _cc_usage = (
+                    getattr(_LAST_STRUCTURED_LLM_CALL, "data", {}) or {}
+                ).get("usage", {}) or {}
+            except Exception:
+                _cc_usage = {}
+            _safe_record(
+                provider="claude-cli",
+                model=model,
+                usage=_cc_usage,
+                ok=True,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=max(0, len(_attempted) - 1),
+                error=None,
+                model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+            )
             return result
         except ClaudeCliNotLoggedInError as e:
             # Terminal — retrying won't help.
@@ -1480,6 +1533,16 @@ def _call_claude_cli_structured_from_strategy(
         "suppressed": False,
         "is_terminal": _is_terminal_cc,
     }
+    _safe_record(
+        provider="claude-cli",
+        model=model,
+        usage={},
+        ok=False,
+        duration_ms=int((time.monotonic() - _t0) * 1000),
+        retry_count=max(0, len(_attempted) - 1),
+        error=(str(last_err)[:200] if last_err else "claude-cli structured call failed"),
+        model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+    )
     return None
 
 
@@ -2028,6 +2091,7 @@ def _call_gemini(
     response_mime_type: str | None = None,
 ) -> str:
     """Call Gemini generateContent REST API. Returns response text or empty string."""
+    _t0 = time.monotonic()
     if not api_key:
         return ""
     url = f"{GEMINI_BASE}/models/{model}:generateContent"
@@ -2072,11 +2136,22 @@ def _call_gemini(
                     f"Set LLM_REQUEST_TIMEOUT to increase.",
                     file=sys.stderr, flush=True,
                 )
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt,
+                    error=f"timeout after {attempt_timeout}s", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             status = getattr(r, "status_code", None)
@@ -2107,14 +2182,27 @@ def _call_gemini(
                         f"[llm_utils] Gemini HTTP {status} (model={model!r}): {err_msg}",
                         file=sys.stderr, flush=True,
                     )
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt,
+                    error=(f"HTTP {status}: {err_msg}"[:200] if err_msg else f"HTTP {status}"),
+                    model_id=None,
+                )
                 return ""
 
             try:
                 data = r.json()
-            except Exception:
+            except Exception as _json_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=f"json parse: {str(_json_e)[:180]}",
+                    model_id=None,
+                )
                 return ""
 
             _log_token_usage("gemini", model, data)
@@ -2123,6 +2211,11 @@ def _call_gemini(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no candidates", model_id=None,
+                )
                 return ""
 
             parts = (candidates[0].get("content") or {}).get("parts") or []
@@ -2130,18 +2223,51 @@ def _call_gemini(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no parts", model_id=None,
+                )
                 return ""
 
             text_parts = [(p.get("text") or "") for p in parts if isinstance(p, dict)]
             out = (" ".join(t for t in text_parts if t)).strip()
             if out:
+                _gem_usage = data.get("usageMetadata") if isinstance(data, dict) else None
+                _u = {}
+                if isinstance(_gem_usage, dict):
+                    _u = {
+                        "input_tokens": int(_gem_usage.get("promptTokenCount", 0) or 0),
+                        "output_tokens": int(_gem_usage.get("candidatesTokenCount", 0) or 0),
+                        "reasoning_tokens": int(_gem_usage.get("thoughtsTokenCount", 0) or 0),
+                    }
+                _safe_record(
+                    provider="gemini",
+                    model=model,
+                    usage=_u,
+                    ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt,
+                    error=None,
+                    model_id=None,
+                )
                 return out
 
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="gemini", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty response", model_id=None,
+            )
             return ""
 
+        _safe_record(
+            provider="gemini", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
     except Exception as _e:
         import sys
@@ -2152,6 +2278,11 @@ def _call_gemini(
             if isinstance(_e, requests.exceptions.Timeout):
                 timeout = _coerce_timeout_sec(timeout_sec)
                 print(f"[llm_utils] Gemini timeout after {timeout}s (model={model!r}). Set LLM_REQUEST_TIMEOUT to increase.", file=sys.stderr, flush=True)
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=0, error=f"timeout after {timeout}s", model_id=None,
+                )
                 return ""
         except Exception:
             pass
@@ -2164,6 +2295,11 @@ def _call_gemini(
                 f"[llm_utils] Gemini HTTP {_e.response.status_code} (model={model!r}): {err_msg}",
                 file=sys.stderr, flush=True,
             )
+        _safe_record(
+            provider="gemini", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_e)[:200], model_id=None,
+        )
         return ""
 
 
@@ -2177,8 +2313,25 @@ def _call_deepseek(
 ) -> str:
     """Call DeepSeek chat/completions API. Returns response text or empty string.
     For deepseek-reasoner: uses message.content (final answer); if empty, falls back to reasoning_content."""
+    _t0 = time.monotonic()
     if not api_key:
         return ""
+
+    def _ds_usage_from_data(data: dict) -> dict:
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return {}
+        details = u.get("completion_tokens_details") or {}
+        prompt_details = u.get("prompt_tokens_details") or {}
+        return {
+            "input_tokens": int(u.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(u.get("completion_tokens", 0) or 0),
+            "reasoning_tokens": int((details or {}).get("reasoning_tokens", 0) or 0),
+            "cache_read_input_tokens": int(
+                (prompt_details or {}).get("cached_tokens", 0) or 0
+            ),
+        }
+
     try:
         import requests
         url = "https://api.deepseek.com/v1/chat/completions"
@@ -2203,11 +2356,21 @@ def _call_deepseek(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="deepseek", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="timeout", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="deepseek", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
@@ -2220,6 +2383,7 @@ def _call_deepseek(
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("deepseek", model, data)
@@ -2228,21 +2392,55 @@ def _call_deepseek(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="deepseek", model=model,
+                    usage=_ds_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no choices", model_id=None,
+                )
                 return ""
             message = choices[0].get("message") or {}
             content = (message.get("content") or "").strip()
             if content:
+                _safe_record(
+                    provider="deepseek", model=model,
+                    usage=_ds_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return content
             reasoning = (message.get("reasoning_content") or "").strip()
             if reasoning:
+                _safe_record(
+                    provider="deepseek", model=model,
+                    usage=_ds_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return reasoning
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="deepseek", model=model,
+                usage=_ds_usage_from_data(data), ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty content", model_id=None,
+            )
             return ""
 
+        _safe_record(
+            provider="deepseek", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
-    except Exception:
+    except Exception as _e:
+        _safe_record(
+            provider="deepseek", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_e)[:200], model_id=None,
+        )
         return ""
 
 
@@ -2257,8 +2455,25 @@ def _call_openai(
     response_mime_type: str | None = None,
     reasoning_effort: str = "",
 ) -> str:
+    _t0 = time.monotonic()
     if not api_key:
         return ""
+
+    def _oa_usage_from_data(data: dict) -> dict:
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return {}
+        details = u.get("completion_tokens_details") or {}
+        prompt_details = u.get("prompt_tokens_details") or {}
+        return {
+            "input_tokens": int(u.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(u.get("completion_tokens", 0) or 0),
+            "reasoning_tokens": int((details or {}).get("reasoning_tokens", 0) or 0),
+            "cache_read_input_tokens": int(
+                (prompt_details or {}).get("cached_tokens", 0) or 0
+            ),
+        }
+
     try:
         import requests
         url = (base_url or "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
@@ -2292,11 +2507,21 @@ def _call_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="openai", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="timeout", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="openai", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
@@ -2309,6 +2534,7 @@ def _call_openai(
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("openai", model, data)
@@ -2317,18 +2543,46 @@ def _call_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="openai", model=model,
+                    usage=_oa_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no choices", model_id=None,
+                )
                 return ""
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                _safe_record(
+                    provider="openai", model=model,
+                    usage=_oa_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return text
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="openai", model=model,
+                usage=_oa_usage_from_data(data), ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty text", model_id=None,
+            )
             return ""
+        _safe_record(
+            provider="openai", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        _safe_record(
+            provider="openai", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_exc)[:200], model_id=None,
+        )
         return ""
 
 
@@ -2448,8 +2702,25 @@ def _call_azure_openai(
     response_mime_type: str | None = None,
     reasoning_effort: str = "",
 ) -> str:
+    _t0 = time.monotonic()
     if not api_key or not deployment_name or not azure_endpoint:
         return ""
+
+    def _az_usage_from_data(data: dict) -> dict:
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return {}
+        details = u.get("completion_tokens_details") or {}
+        prompt_details = u.get("prompt_tokens_details") or {}
+        return {
+            "input_tokens": int(u.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(u.get("completion_tokens", 0) or 0),
+            "reasoning_tokens": int((details or {}).get("reasoning_tokens", 0) or 0),
+            "cache_read_input_tokens": int(
+                (prompt_details or {}).get("cached_tokens", 0) or 0
+            ),
+        }
+
     try:
         import requests
         endpoint = azure_endpoint.rstrip("/")
@@ -2489,11 +2760,21 @@ def _call_azure_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="azure", model=deployment_name, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="timeout", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="azure", model=deployment_name, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
@@ -2506,6 +2787,7 @@ def _call_azure_openai(
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("azure", deployment_name, data)
@@ -2514,12 +2796,24 @@ def _call_azure_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no choices", model_id=None,
+                )
                 return ""
             # Check finish_reason — content_filter means retrying is pointless
             _finish_reason = str((choices[0].get("finish_reason") or "")).strip().lower()
             if _finish_reason == "content_filter":
                 import sys
                 print(f"[llm_utils] Content filter triggered for {deployment_name!r} — skipping retries, returning empty.", file=sys.stderr, flush=True)
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="content_filter", model_id=None,
+                )
                 return ""
             # Detect empty responses by completion token count
             _completion_tokens = int((data.get("usage") or {}).get("completion_tokens", 999))
@@ -2533,18 +2827,46 @@ def _call_azure_openai(
                     continue
                 # Exhausted low-token retries — brief cooldown, return empty to trigger split fallback
                 time.sleep(3.0)
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="low-token exhausted", model_id=None,
+                )
                 return ""
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return text
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="azure", model=deployment_name,
+                usage=_az_usage_from_data(data), ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty text", model_id=None,
+            )
             return ""
+        _safe_record(
+            provider="azure", model=deployment_name, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        _safe_record(
+            provider="azure", model=deployment_name, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_exc)[:200], model_id=None,
+        )
         return ""
 
 

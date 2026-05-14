@@ -45,6 +45,21 @@ from queue import Empty, Queue
 from typing import Any, Dict, List, Optional
 
 
+# Telemetry — defensive import so a missing/broken module never blocks LLM calls.
+try:
+    from llm_telemetry import record_llm_call as _telemetry_record
+except Exception:
+    def _telemetry_record(**_kwargs):
+        return None
+
+
+def _safe_record(**kwargs) -> None:
+    try:
+        _telemetry_record(**kwargs)
+    except Exception:
+        pass
+
+
 # ── Configuration (env-overridable) ────────────────────────────────────────
 
 CLAUDE_CLI_MAX_CONCURRENT = int(os.environ.get("CLAUDE_CLI_MAX_CONCURRENT", "10"))
@@ -1807,6 +1822,38 @@ class ClaudeCliSessionManager:
                 "total_cost_usd": event.get("total_cost_usd"),
                 "usage": event.get("usage"),
             }
+            # Telemetry: record this chat turn (token counts + envelope cost).
+            try:
+                event_usage = event.get("usage") or {}
+                if not isinstance(event_usage, dict):
+                    event_usage = {}
+                event_total_cost_usd = event.get("total_cost_usd")
+                _safe_record(
+                    provider="claude-cli-chat",
+                    model=sess.model,
+                    usage={
+                        "input_tokens": int(event_usage.get("input_tokens", 0) or 0),
+                        "output_tokens": int(event_usage.get("output_tokens", 0) or 0),
+                        "cache_creation_input_tokens": int(
+                            event_usage.get("cache_creation_input_tokens", 0) or 0
+                        ),
+                        "cache_read_input_tokens": int(
+                            event_usage.get("cache_read_input_tokens", 0) or 0
+                        ),
+                    },
+                    ok=True,
+                    duration_ms=int(event.get("duration_ms") or 0),
+                    retry_count=0,
+                    error=None,
+                    cost_usd_override=(
+                        float(event_total_cost_usd)
+                        if event_total_cost_usd is not None
+                        else None
+                    ),
+                    model_id=None,
+                )
+            except Exception:
+                pass
         slot.event.set()
 
     def _fail_pending(self, sess: _Session, err: Exception) -> None:
