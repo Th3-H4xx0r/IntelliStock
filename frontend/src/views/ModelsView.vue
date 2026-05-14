@@ -37,6 +37,12 @@ const formDraft = ref({
   reasoningEffort: '',
   cliPath: '',
   extraArgs: '',
+  // Optional per-model pricing override ($/1M tokens). null = use
+  // backend llm_pricing.yaml defaults.
+  inputCostPer1m: null,
+  outputCostPer1m: null,
+  cacheCreationCostPer1m: null,
+  cacheReadCostPer1m: null,
 })
 
 const testCliStates = ref({})
@@ -95,6 +101,10 @@ function openCreateModal() {
     reasoningEffort: '',
     cliPath: '',
     extraArgs: '',
+    inputCostPer1m: null,
+    outputCostPer1m: null,
+    cacheCreationCostPer1m: null,
+    cacheReadCostPer1m: null,
   }
   submitting.value = false
   submitMsg.value = ''
@@ -117,6 +127,11 @@ function openEditModal(m) {
     reasoningEffort: m.reasoning_effort || '',
     cliPath: m.cli_path || '',
     extraArgs: m.extra_args || '',
+    // Pricing override: row stores snake_case; null/undefined → blank input.
+    inputCostPer1m: (m.input_cost_per_1m ?? null),
+    outputCostPer1m: (m.output_cost_per_1m ?? null),
+    cacheCreationCostPer1m: (m.cache_creation_cost_per_1m ?? null),
+    cacheReadCostPer1m: (m.cache_read_cost_per_1m ?? null),
   }
   submitting.value = false
   submitMsg.value = ''
@@ -193,6 +208,15 @@ async function submitModel() {
         payload.api_key = d.apiKey.trim()
       }
     }
+
+    // Pricing override ($/1M tokens). Convert camelCase → snake_case and
+    // send only when a finite number was entered (empty/null = "no
+    // override; fall back to llm_pricing.yaml" on the backend).
+    const _costOrUndef = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+    payload.input_cost_per_1m = _costOrUndef(d.inputCostPer1m)
+    payload.output_cost_per_1m = _costOrUndef(d.outputCostPer1m)
+    payload.cache_creation_cost_per_1m = _costOrUndef(d.cacheCreationCostPer1m)
+    payload.cache_read_cost_per_1m = _costOrUndef(d.cacheReadCostPer1m)
 
     const url = editMode.value ? `${API_BASE}/models/${editId.value}` : `${API_BASE}/models`
     const method = editMode.value ? 'PUT' : 'POST'
@@ -426,6 +450,70 @@ onMounted(fetchModels)
               @update:draft="formDraft = $event"
               :disabled="submitting"
             />
+
+            <!-- Pricing override (optional). When any of these are set,
+                 telemetry's cost computation will use them instead of
+                 backend/llm_pricing.yaml. Leaving them blank keeps the
+                 YAML defaults. -->
+            <details class="border border-border-subtle rounded-lg bg-surface px-3 py-2">
+              <summary class="cursor-pointer text-xs font-medium text-slate-300">
+                Pricing override (optional)
+              </summary>
+              <p class="text-[11px] text-slate-500 mt-2 mb-3 leading-relaxed">
+                Leave blank to use the backend <span class="font-mono">llm_pricing.yaml</span> defaults.
+                Values are dollars per 1M tokens.
+              </p>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Input cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.inputCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 3.00"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Output cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.outputCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 15.00"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Cache creation cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.cacheCreationCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 3.75"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Cache read cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.cacheReadCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 0.30"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+              </div>
+            </details>
 
             <!-- Status message -->
             <div

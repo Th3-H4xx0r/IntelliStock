@@ -474,6 +474,13 @@ class CreateModelBody(BaseModel):
     # repetition; the allowlist itself caps token count too.
     cli_path: Optional[str] = Field(default=None, max_length=256)
     extra_args: Optional[str] = Field(default=None, max_length=1024)
+    # Optional per-model pricing override ($/1M tokens). When set, these
+    # win over backend/llm_pricing.yaml at telemetry-cost time. Leave
+    # None to fall back to the YAML defaults.
+    input_cost_per_1m: Optional[float] = Field(default=None, ge=0)
+    output_cost_per_1m: Optional[float] = Field(default=None, ge=0)
+    cache_creation_cost_per_1m: Optional[float] = Field(default=None, ge=0)
+    cache_read_cost_per_1m: Optional[float] = Field(default=None, ge=0)
 
 
 class EditModelBody(BaseModel):
@@ -488,6 +495,10 @@ class EditModelBody(BaseModel):
     reasoning_effort: Optional[str] = Field(default=None, max_length=16)
     cli_path: Optional[str] = Field(default=None, max_length=256)
     extra_args: Optional[str] = Field(default=None, max_length=1024)
+    input_cost_per_1m: Optional[float] = Field(default=None, ge=0)
+    output_cost_per_1m: Optional[float] = Field(default=None, ge=0)
+    cache_creation_cost_per_1m: Optional[float] = Field(default=None, ge=0)
+    cache_read_cost_per_1m: Optional[float] = Field(default=None, ge=0)
 
 
 class BenzingaTestBody(BaseModel):
@@ -1712,6 +1723,10 @@ def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), curre
             reasoning_effort=body.reasoning_effort,
             cli_path=body.cli_path,
             extra_args=body.extra_args,
+            input_cost_per_1m=body.input_cost_per_1m,
+            output_cost_per_1m=body.output_cost_per_1m,
+            cache_creation_cost_per_1m=body.cache_creation_cost_per_1m,
+            cache_read_cost_per_1m=body.cache_read_cost_per_1m,
         )
     except ValueError as e:
         # claude-cli extra_args allowlist rejections surface here.

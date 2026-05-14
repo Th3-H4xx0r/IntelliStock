@@ -7926,7 +7926,10 @@ def action_create_model(conn, name, provider, model, api_key=None,
                         openai_base_url=None, nvidia_base_url=None,
                         azure_openai_endpoint=None, azure_openai_api_version=None,
                         reasoning_effort=None,
-                        cli_path=None, extra_args=None):
+                        cli_path=None, extra_args=None,
+                        input_cost_per_1m=None, output_cost_per_1m=None,
+                        cache_creation_cost_per_1m=None,
+                        cache_read_cost_per_1m=None):
     _ensure_models_table(conn)
     provider_n = (provider or "").strip().lower()
     _validate_provider_model_compat(provider_n, model)
@@ -7946,6 +7949,12 @@ def action_create_model(conn, name, provider, model, api_key=None,
         "reasoning_effort": (reasoning_effort or "").strip(),
         "cli_path": (cli_path or "").strip(),
         "extra_args": extra_args_clean,
+        # Optional per-model pricing override ($/1M tokens). None means
+        # "use llm_pricing.yaml defaults" at cost-computation time.
+        "input_cost_per_1m": input_cost_per_1m,
+        "output_cost_per_1m": output_cost_per_1m,
+        "cache_creation_cost_per_1m": cache_creation_cost_per_1m,
+        "cache_read_cost_per_1m": cache_read_cost_per_1m,
         "created_at": now,
         "updated_at": now,
     }
@@ -7994,7 +8003,9 @@ def action_edit_model(conn, model_id, **kwargs):
     for field in ("name", "provider", "model", "api_key", "openai_base_url",
                   "nvidia_base_url", "azure_openai_endpoint",
                   "azure_openai_api_version", "reasoning_effort",
-                  "cli_path", "extra_args"):
+                  "cli_path", "extra_args",
+                  "input_cost_per_1m", "output_cost_per_1m",
+                  "cache_creation_cost_per_1m", "cache_read_cost_per_1m"):
         if field in kwargs and kwargs[field] is not None:
             val = kwargs[field]
             if isinstance(val, str):
