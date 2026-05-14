@@ -347,3 +347,23 @@ def test_rollup_aggregates_today(monkeypatch):
     keys = {row["id"] for row in upserted if isinstance(row, dict) and "id" in row}
     assert "2026-05-06_azure_gpt-4o" in keys
     assert "2026-05-06_claude-cli_sonnet-4-6" in keys
+
+
+def test_probe_local_cli_usage_file_returns_none_when_missing(tmp_path, monkeypatch):
+    from llm_telemetry import probe_local_cli_usage_file
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    result = probe_local_cli_usage_file()
+    assert result is None
+
+
+def test_probe_local_cli_usage_file_reads_json(tmp_path, monkeypatch):
+    from llm_telemetry import probe_local_cli_usage_file
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "usage.json").write_text('{"total_cost_usd": 12.34}')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    result = probe_local_cli_usage_file()
+    assert result is not None
+    assert result.get("total_cost_usd") == 12.34

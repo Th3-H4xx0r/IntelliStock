@@ -484,3 +484,24 @@ def rollup_daily(
     if out:
         r.db(db_name).table(_LLM_USAGE_DAILY_TABLE).insert(out, conflict="replace").run(conn)
     return len(out)
+
+
+def probe_local_cli_usage_file() -> Optional[Dict[str, Any]]:
+    """Best-effort: read claude CLI's local usage file if it exists.
+    Returns None if nothing found.
+    """
+    candidates = [
+        os.path.expanduser("~/.claude/usage.json"),
+        os.path.expanduser("~/.claude/.usage"),
+        os.path.expanduser("~/.config/claude/usage.json"),
+    ]
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                import json as _json
+                return _json.load(f)
+        except Exception:
+            continue
+    return None
