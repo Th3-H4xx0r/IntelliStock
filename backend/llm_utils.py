@@ -1273,6 +1273,7 @@ def _call_claude_cli_structured_from_strategy(
         call_claude_cli_structured,
         call_claude_cli_chat_structured,
         daemon_for_structured_enabled,
+        _clear_structured_history,
         ClaudeCliError,
         ClaudeCliRateLimitError,
         ClaudeCliNotLoggedInError,
@@ -1404,12 +1405,13 @@ def _call_claude_cli_structured_from_strategy(
                 # will respawn if needed.
                 if _use_daemon_path and _conversation_id:
                     try:
-                        from chatbot.claude_cli_provider import (
-                            _clear_structured_history,
-                        )
                         _clear_structured_history(_conversation_id)
-                    except Exception:
-                        pass  # best-effort; never block the retry on cleanup
+                    except Exception as _cleanup_err:
+                        print(
+                            f"[llm_utils] history cleanup failed (continuing retry): "
+                            f"{_cleanup_err}",
+                            file=sys.stderr, flush=True,
+                        )
                 time.sleep(_backoff)
                 continue
             break
@@ -1428,12 +1430,13 @@ def _call_claude_cli_structured_from_strategy(
                 # will respawn if needed.
                 if _use_daemon_path and _conversation_id:
                     try:
-                        from chatbot.claude_cli_provider import (
-                            _clear_structured_history,
-                        )
                         _clear_structured_history(_conversation_id)
-                    except Exception:
-                        pass  # best-effort; never block the retry on cleanup
+                    except Exception as _cleanup_err:
+                        print(
+                            f"[llm_utils] history cleanup failed (continuing retry): "
+                            f"{_cleanup_err}",
+                            file=sys.stderr, flush=True,
+                        )
                 time.sleep(_backoff)
                 continue
             break

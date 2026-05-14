@@ -95,6 +95,22 @@ def _clear_structured_history(conversation_id: Optional[str] = None) -> None:
             _structured_history.pop(conversation_id, None)
 
 
+def _rollback_optimistic_user(conversation_id: str) -> None:
+    """Drop the optimistic user message appended at the start of this turn.
+
+    Called from both the pre-chat exception path (``call_claude_cli_chat``
+    raised) and the post-chat exception path (response failed JSON or
+    Pydantic validation). Preserves the invariant that
+    ``_structured_history`` only contains successfully-exchanged turns.
+    """
+    with _structured_history_lock:
+        hist = _structured_history.get(conversation_id, [])
+        if hist and hist[-1].get("role") == "user":
+            hist.pop()
+        if not hist:
+            _structured_history.pop(conversation_id, None)
+
+
 # ── Exceptions ─────────────────────────────────────────────────────────────
 
 
@@ -2480,12 +2496,7 @@ def call_claude_cli_chat_structured(
         # The daemon subprocess may have died or rejected the turn —
         # drop the user message we optimistically appended so the next
         # retry doesn't pass the same prompt twice.
-        with _structured_history_lock:
-            hist = _structured_history.get(conversation_id, [])
-            if hist and hist[-1].get("role") == "user":
-                hist.pop()
-            if not hist:
-                _structured_history.pop(conversation_id, None)
+        _rollback_optimistic_user(conversation_id)
         raise
 
     # Wrap the post-call success path (coerce → parse → extract/repair →
@@ -2538,12 +2549,7 @@ def call_claude_cli_chat_structured(
                         f"claude daemon output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
                     ) from e
     except Exception:
-        with _structured_history_lock:
-            hist = _structured_history.get(conversation_id, [])
-            if hist and hist[-1].get("role") == "user":
-                hist.pop()
-            if not hist:
-                _structured_history.pop(conversation_id, None)
+        _rollback_optimistic_user(conversation_id)
         raise
 
     # Successful response — record the assistant turn so the next call

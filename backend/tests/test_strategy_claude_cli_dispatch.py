@@ -595,32 +595,60 @@ def test_daemon_history_accumulates_across_calls():
 
 
 def test_daemon_history_cleared_between_retries(monkeypatch):
-    """Bug #1 follow-up: when a dispatch raises ClaudeCliValidationError
-    and the retry loop sleeps + retries, the scaffold's per-conversation
-    history must be cleared so the next attempt doesn't replay stale
-    messages against a possibly-respawned subprocess."""
+    """Bug #1 follow-up: the llm_utils retry-loop must clear scaffold history
+    between attempts so a respawned daemon doesn't replay stale messages.
+
+    This test patches the TRANSPORT (call_claude_cli_chat) rather than the
+    scaffold so the real call_claude_cli_chat_structured runs end-to-end,
+    populating _structured_history. On attempt 1 the transport returns
+    bad JSON to trigger ClaudeCliValidationError -> the retry-loop runs
+    cleanup. On attempt 2 we assert:
+
+      (a) the transport sees a clean 1-message slate (proving the
+          observable end-state is clean), AND
+      (b) ``_clear_structured_history`` was called by the retry-loop with
+          a non-empty conversation_id matching the active dispatch
+          (proving the llm_utils cleanup branch ACTUALLY EXECUTED — this
+          is the load-bearing assertion that fails if the cleanup block
+          is removed).
+
+    Assertion (b) is needed because the scaffold ALSO performs its own
+    rollback on the bad-JSON path, so (a) alone passes even without the
+    retry-loop cleanup. (b) directly observes the retry-loop's call into
+    the cleanup helper, which is what this test exists to protect.
+    """
+    from chatbot import claude_cli_provider as ccp
     from chatbot.claude_cli_provider import (
-        ClaudeCliValidationError,
         _clear_structured_history,
-        _structured_history,
     )
 
     monkeypatch.setenv("CLAUDE_CLI_DAEMON_FOR_STRUCTURED", "1")
     _clear_structured_history()
 
-    calls = {"n": 0}
+    seen_message_lists: list[list] = []
+    call_n = {"n": 0}
 
-    def fake_chat_structured(**kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ClaudeCliValidationError("synthetic invalid output")
-        return _DummyOutput(text="ok", score=0.5)
+    def fake_chat(**kwargs):
+        call_n["n"] += 1
+        seen_message_lists.append(list(kwargs.get("messages", [])))
+        if call_n["n"] == 1:
+            return {"content": "not json at all"}  # forces validation failure
+        return {"content": json.dumps({"text": "ok", "score": 0.5})}
+
+    # Spy on the cleanup helper so we can verify the retry-loop in
+    # llm_utils invokes it with the active conversation_id. We wrap the
+    # real impl so behavior is unchanged.
+    cleanup_calls: list = []
+    real_clear = ccp._clear_structured_history
+
+    def spy_clear(conversation_id=None):
+        cleanup_calls.append(conversation_id)
+        return real_clear(conversation_id)
+
+    monkeypatch.setattr(ccp, "_clear_structured_history", spy_clear)
 
     from llm_utils import call_structured_llm_by_provider
-    with patch(
-        "chatbot.claude_cli_provider.call_claude_cli_chat_structured",
-        side_effect=fake_chat_structured,
-    ):
+    with patch("chatbot.claude_cli_provider.call_claude_cli_chat", side_effect=fake_chat):
         out = call_structured_llm_by_provider(
             "claude-cli", "k", "claude-sonnet-4-6",
             prompt="p", output_type=_DummyOutput,
@@ -629,11 +657,34 @@ def test_daemon_history_cleared_between_retries(monkeypatch):
         )
 
     assert out is not None
-    assert calls["n"] == 2
-    for conv_id, hist in _structured_history.items():
-        assert len(hist) <= 2, (
-            f"History for {conv_id} should be reset between retries; got {hist!r}"
-        )
+    assert call_n["n"] == 2
+    # Attempt #1: just one user turn.
+    assert len(seen_message_lists[0]) == 1
+    assert seen_message_lists[0][0]["role"] == "user"
+    # Attempt #2: with cleanup it must be exactly 1: the retry's fresh
+    # user turn. (The scaffold's own rollback also clears state on the
+    # bad-JSON path, so this assertion alone is necessary but not
+    # sufficient — see the load-bearing assertion below.)
+    assert len(seen_message_lists[1]) == 1, (
+        f"Retry should see clean slate; got {seen_message_lists[1]!r}"
+    )
+    assert seen_message_lists[1][0]["role"] == "user"
+
+    # LOAD-BEARING: the retry-loop in llm_utils MUST have invoked the
+    # cleanup helper between attempts 1 and 2 with a non-empty
+    # conversation_id (the daemon-path conv_id built from model/sys/schema).
+    # If the cleanup block is deleted, this list will be empty.
+    assert len(cleanup_calls) >= 1, (
+        "Retry-loop never called _clear_structured_history between "
+        "attempts; the cleanup block in llm_utils may have regressed."
+    )
+    assert any(
+        isinstance(cid, str) and cid.startswith("nexus-structured-")
+        for cid in cleanup_calls
+    ), (
+        f"Cleanup was called but not with the daemon-path conversation_id: "
+        f"{cleanup_calls!r}"
+    )
 
 
 def test_daemon_history_rolls_back_on_validation_failure():
