@@ -555,3 +555,40 @@ def test_daemon_conversation_id_differs_per_schema(monkeypatch):
         f"Schema A and B must yield different conversation_ids; got {seen_ids}"
     )
     assert "schema" in seen_ids[0] and "schema" in seen_ids[1]
+
+
+def test_daemon_history_accumulates_across_calls():
+    """Bug #1 fix: the chat-path session manager slices messages by
+    sess.messages_sent, so the scaffold must pass cumulative history,
+    not a single user turn. After two structured calls on the same
+    conversation_id, the second invocation of call_claude_cli_chat
+    must see at least 3 messages (user1, assistant1, user2)."""
+    from chatbot.claude_cli_provider import (
+        call_claude_cli_chat_structured,
+        _clear_structured_history,
+    )
+
+    seen_message_lists: list[list] = []
+
+    def fake_chat(**kwargs):
+        seen_message_lists.append(list(kwargs.get("messages", [])))
+        return {"content": json.dumps({"text": "ok", "score": 0.5})}
+
+    _clear_structured_history()  # ensure clean slate
+    with patch("chatbot.claude_cli_provider.call_claude_cli_chat", side_effect=fake_chat):
+        for _ in range(2):
+            call_claude_cli_chat_structured(
+                conversation_id="probe-1",
+                model="claude-sonnet-4-6",
+                system_prompt="sys",
+                user_prompt="u",
+                output_schema=_DummyOutput,
+            )
+
+    assert len(seen_message_lists) == 2
+    assert len(seen_message_lists[0]) == 1
+    assert seen_message_lists[0][0]["role"] == "user"
+    assert len(seen_message_lists[1]) >= 3
+    assert seen_message_lists[1][0]["role"] == "user"
+    assert seen_message_lists[1][1]["role"] == "assistant"
+    assert seen_message_lists[1][2]["role"] == "user"

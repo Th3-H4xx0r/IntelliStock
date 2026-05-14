@@ -57,6 +57,44 @@ CLAUDE_CLI_SWEEPER_INTERVAL_SEC = int(os.environ.get("CLAUDE_CLI_SWEEPER_INTERVA
 _GLOBAL_SPAWN_SEM = threading.BoundedSemaphore(value=max(1, CLAUDE_CLI_MAX_CONCURRENT))
 
 
+# ── Scaffold-side history accumulation for the structured daemon path ──
+#
+# The chat-path session manager (ClaudeCliSessionManager._send_one_turn_locked)
+# requires callers to pass cumulative history each call; it slices
+# ``messages[sess.messages_sent:]`` to compute the diff. The structured
+# scaffold (call_claude_cli_chat_structured) originally passed a single
+# user turn, which made every call after the first fail with
+# "send_turn called with no new messages to deliver" (bug #1 in the
+# function's docstring).
+#
+# We fix this scaffold-side: maintain a small history dict keyed on
+# conversation_id, append user+assistant turns per call, and pass the
+# accumulated list to call_claude_cli_chat. We retain only the last
+# (user, assistant) pair per conversation_id so memory stays bounded
+# even across multi-day backtests; the session manager only needs
+# "len(messages) > messages_sent" to be true, which a single pair
+# satisfies.
+_structured_history: Dict[str, List[Dict[str, str]]] = {}
+_structured_history_lock = threading.Lock()
+_STRUCTURED_HISTORY_MAX_CONVERSATIONS = 512
+_STRUCTURED_HISTORY_KEEP_PAIRS = 1  # keep last user/assistant pair per conv_id
+
+
+def _clear_structured_history(conversation_id: Optional[str] = None) -> None:
+    """Drop the scaffold's per-conversation history.
+
+    Called by the retry path in ``llm_utils`` when the daemon subprocess
+    dies mid-batch — the subprocess loses its context on respawn, so
+    our cached history would be stale relative to the new session.
+    Pass ``conversation_id=None`` to drop everything (used by tests).
+    """
+    with _structured_history_lock:
+        if conversation_id is None:
+            _structured_history.clear()
+        else:
+            _structured_history.pop(conversation_id, None)
+
+
 # ── Exceptions ─────────────────────────────────────────────────────────────
 
 
@@ -2419,17 +2457,36 @@ def call_claude_cli_chat_structured(
         + _JSON_ONLY_SYSTEM_SUFFIX
     )
 
-    chat_result = call_claude_cli_chat(
-        conversation_id=conversation_id,
-        messages=[{"role": "user", "content": user_prompt or ""}],
-        system_prompt=augmented_system_prompt,
-        model=model,
-        user_id=user_id or "",
-        cli_path=cli_path or "claude",
-        extra_args=extra_args,
-        reasoning_effort=reasoning_effort,
-        timeout_sec=timeout_sec,
-    )
+    # Bug #1 fix: pass cumulative history per conversation_id. See module
+    # comment on _structured_history for the contract this satisfies.
+    with _structured_history_lock:
+        history = _structured_history.setdefault(conversation_id, [])
+        history.append({"role": "user", "content": user_prompt or ""})
+        messages_snapshot = list(history)
+
+    try:
+        chat_result = call_claude_cli_chat(
+            conversation_id=conversation_id,
+            messages=messages_snapshot,
+            system_prompt=augmented_system_prompt,
+            model=model,
+            user_id=user_id or "",
+            cli_path=cli_path or "claude",
+            extra_args=extra_args,
+            reasoning_effort=reasoning_effort,
+            timeout_sec=timeout_sec,
+        )
+    except Exception:
+        # The daemon subprocess may have died or rejected the turn —
+        # drop the user message we optimistically appended so the next
+        # retry doesn't pass the same prompt twice.
+        with _structured_history_lock:
+            hist = _structured_history.get(conversation_id, [])
+            if hist and hist[-1].get("role") == "user":
+                hist.pop()
+            if not hist:
+                _structured_history.pop(conversation_id, None)
+        raise
 
     # Use ``_coerce_text`` for symmetry with the rest of the provider —
     # ``call_claude_cli_chat`` returns ``content`` as a plain string today,
@@ -2443,7 +2500,8 @@ def call_claude_cli_chat_structured(
         )
 
     stripped = content.strip()
-    payload: Any
+    validated: Any = None
+    payload: Any = None
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
@@ -2452,24 +2510,49 @@ def call_claude_cli_chat_structured(
         # stays consistent across the two routes.
         extracted = _try_extract_payload_from_text(output_schema, stripped)
         if extracted is not None:
-            return extracted
-        raise ClaudeCliValidationError(
-            f"claude daemon content is not valid JSON: {stripped[:200]!r}"
-        )
-
-    try:
-        return output_schema.model_validate(payload)
-    except Exception as e:
-        repaired = _try_repair_payload_for_schema(output_schema, payload)
-        if repaired is not None:
-            return repaired
+            validated = extracted
+        else:
+            raise ClaudeCliValidationError(
+                f"claude daemon content is not valid JSON: {stripped[:200]!r}"
+            )
+    else:
         try:
-            payload_preview = json.dumps(payload, default=str)[:400]
-        except Exception:
-            payload_preview = str(payload)[:400]
-        raise ClaudeCliValidationError(
-            f"claude daemon output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
-        ) from e
+            validated = output_schema.model_validate(payload)
+        except Exception as e:
+            repaired = _try_repair_payload_for_schema(output_schema, payload)
+            if repaired is not None:
+                validated = repaired
+            else:
+                try:
+                    payload_preview = json.dumps(payload, default=str)[:400]
+                except Exception:
+                    payload_preview = str(payload)[:400]
+                raise ClaudeCliValidationError(
+                    f"claude daemon output failed Pydantic validation: {e} | payload_preview={payload_preview!r}"
+                ) from e
+
+    # Successful response — record the assistant turn so the next call
+    # on this conversation_id can slice past it.
+    with _structured_history_lock:
+        hist = _structured_history.get(conversation_id)
+        if hist is not None:
+            hist.append({"role": "assistant", "content": stripped})
+            # Eviction: keep only the most recent N pairs. We don't
+            # need true multi-turn — we only need len(history) > 0
+            # at dispatch time so messages_sent slicing yields a
+            # non-empty list. Constant memory per conversation_id.
+            cap = _STRUCTURED_HISTORY_KEEP_PAIRS * 2
+            if len(hist) > cap:
+                _structured_history[conversation_id] = hist[-cap:]
+            # Bound the dict size to prevent unbounded growth across
+            # long backtests with many distinct (model, sys, schema,
+            # tid) triples. Drop the oldest 10% in insertion order.
+            if len(_structured_history) > _STRUCTURED_HISTORY_MAX_CONVERSATIONS:
+                drop_n = max(1, _STRUCTURED_HISTORY_MAX_CONVERSATIONS // 10)
+                for k in list(_structured_history.keys())[:drop_n]:
+                    _structured_history.pop(k, None)
+
+    return validated
 
 
 def _try_extract_payload_from_text(output_schema: Any, raw_text: str) -> Any:
