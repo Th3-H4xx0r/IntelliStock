@@ -2792,52 +2792,19 @@ def _log_historic_lookback_banner(*, start=True, spec_name="", start_date=None, 
 
 
 def _load_nexus_processed_trade_context_dates(instance_id_value, date_keys):
-    if not date_keys or not instance_id_value:
-        return set()
-    try:
-        conn = get_conn()
-    except Exception:
-        return set()
-    try:
-        tables = set(r.db(DB_NAME).table_list().run(conn))
-        if "GraphNexusTradeContexts" not in tables:
-            return set()
-        rows = list(
-            r.db(DB_NAME)
-            .table("GraphNexusTradeContexts")
-            .filter(
-                lambda doc: (doc["instance_id"] == instance_id_value)
-                & r.expr(date_keys).contains(doc["date_key"])
-            )
-            .pluck("date_key")
-            .run(conn)
-        )
-        return {str(row.get("date_key") or "").strip() for row in rows if row.get("date_key")}
-    except Exception:
-        return set()
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    """Thin shim — delegates to ``nexus_lookback_db`` (extracted so the
+    helpers are importable from tests; broker.py argparses at module
+    load so it can't be imported standalone)."""
+    from nexus_lookback_db import load_nexus_processed_trade_context_dates
+    return load_nexus_processed_trade_context_dates(instance_id_value, date_keys)
 
 
 def _historic_lookback_resume_dates(instance_id_value, lookback_opens):
-    if not lookback_opens:
-        return []
-    ordered = list(lookback_opens)
-    date_keys = [dt.strftime("%Y-%m-%d") for dt in ordered]
-    processed = _load_nexus_processed_trade_context_dates(instance_id_value, date_keys)
-    if not processed:
-        return ordered
-    first_missing_idx = None
-    for idx, dt in enumerate(ordered):
-        if dt.strftime("%Y-%m-%d") not in processed:
-            first_missing_idx = idx
-            break
-    if first_missing_idx is None:
-        return []
-    return ordered[first_missing_idx:]
+    """Thin shim — delegates to ``nexus_lookback_db`` so the resume-date
+    logic has a single home (the legacy duplicate here was diverging
+    from the extracted module after the index refactor)."""
+    from nexus_lookback_db import historic_lookback_resume_dates
+    return historic_lookback_resume_dates(instance_id_value, lookback_opens)
 
 
 def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, portfolio_emulator, time_increment, alpaca_key, alpaca_secret):

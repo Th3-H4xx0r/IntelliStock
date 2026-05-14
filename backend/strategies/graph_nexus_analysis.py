@@ -480,10 +480,28 @@ def _ensure_learning_cache_table(conn):
         _log(f"Could not ensure learning cache table: {e}", "yellow")
 
 
-def _ensure_nexus_history_table(conn, table_name: str) -> None:
+def _ensure_nexus_history_table(
+    conn,
+    table_name: str,
+    *,
+    indexes: tuple[str, ...] = (),
+) -> None:
+    """Ensure the table exists AND each named simple-field index is built.
+
+    ``indexes`` lets writers declare which secondary indexes the table
+    needs. The first call per (table, index) pair triggers
+    ``index_create`` + ``index_wait`` — on a heavy existing table this
+    can take a few minutes, but it runs at most once per process and
+    every subsequent startup pays nothing. Without the index, the
+    instance-scoped ``filter()`` queries the broker runs at lookback
+    prep time degrade to multi-minute full-table scans
+    (backtest 953929 stalled ~4 min on this exact query)."""
     if conn is None or not table_name:
         return
-    if table_name in _nexus_history_tables_ensured:
+    needs_index_check = bool(indexes) and not all(
+        f"{table_name}::{idx}" in _nexus_history_tables_ensured for idx in indexes
+    )
+    if table_name in _nexus_history_tables_ensured and not needs_index_check:
         return
     try:
         dbs = list(_r.db_list().run(conn))
@@ -493,6 +511,29 @@ def _ensure_nexus_history_table(conn, table_name: str) -> None:
         if table_name not in tables:
             _r.db(DB_NAME).table_create(table_name).run(conn)
         _nexus_history_tables_ensured.add(table_name)
+        if indexes:
+            existing = set(
+                _r.db(DB_NAME).table(table_name).index_list().run(conn)
+            )
+            for idx in indexes:
+                marker = f"{table_name}::{idx}"
+                if idx in existing:
+                    _nexus_history_tables_ensured.add(marker)
+                    continue
+                _log(
+                    f"Creating index '{idx}' on {table_name} "
+                    f"(one-time; may take a few minutes on first run)...",
+                    "cyan",
+                )
+                _t0 = perf_counter()
+                _r.db(DB_NAME).table(table_name).index_create(idx).run(conn)
+                _r.db(DB_NAME).table(table_name).index_wait(idx).run(conn)
+                _log(
+                    f"Index '{idx}' on {table_name} ready in "
+                    f"{perf_counter() - _t0:.1f}s",
+                    "cyan",
+                )
+                _nexus_history_tables_ensured.add(marker)
     except Exception as exc:
         _log(f"Could not ensure table {table_name}: {exc}", "yellow")
 
@@ -6979,13 +7020,21 @@ def _compute_macro_risk_scale(
 def _retrieve_historical_analogs(conn, instance_id: str, as_of_date: str, candidate: dict) -> list[dict]:
     if conn is None:
         return []
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     gov_action = str(candidate.get("government_action_type") or "").strip().lower()
     event_type = str(candidate.get("dominant_event_type") or "").strip().lower()
     try:
-        cursor = _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["entry_date"].lt(as_of_date))
-        ).order_by(_r.desc("latest_observation_date")).limit(80).run(conn)
+        cursor = (
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_OUTCOMES_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(lambda doc: doc["entry_date"].lt(as_of_date))
+            .order_by(_r.desc("latest_observation_date"))
+            .limit(80)
+            .run(conn)
+        )
         analogs = []
         for doc in cursor:
             if gov_action and str(doc.get("government_action_type") or "").strip().lower() == gov_action:
@@ -7234,8 +7283,12 @@ def _save_trade_contexts_and_outcomes(
 ) -> None:
     if conn is None:
         return
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_CONTEXTS_TABLE)
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_CONTEXTS_TABLE, indexes=("instance_id",)
+    )
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     base_instance_id = str(config.get("base_instance_id") or "").strip() or str(instance_id or "").strip()
     history_scope_id = str(config.get("history_scope_id") or "").strip()
     history_model_stamp = dict(config.get("history_model_stamp") or {})
@@ -7324,11 +7377,18 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
     if conn is None or not prices:
         return
     _ensure_nexus_history_table(conn, NEXUS_OUTCOME_SERIES_TABLE)
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     try:
-        cursor = _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["entry_date"].lt(date_key))
-        ).limit(500).run(conn)
+        cursor = (
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_OUTCOMES_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(lambda doc: doc["entry_date"].lt(date_key))
+            .limit(500)
+            .run(conn)
+        )
         series_docs = []
         for doc in cursor:
             symbol = str(doc.get("symbol") or "").strip().upper()
@@ -7383,16 +7443,37 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
 def _load_training_rows(conn, instance_id: str, date_key: str, lookback_days: int) -> list[dict]:
     if conn is None:
         return []
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_CONTEXTS_TABLE)
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_CONTEXTS_TABLE, indexes=("instance_id",)
+    )
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     try:
         start_key = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=max(1, int(lookback_days or 90)))).strftime("%Y-%m-%d")
-        contexts = list(_r.db(DB_NAME).table(NEXUS_TRADE_CONTEXTS_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["date_key"].ge(start_key)) & (doc["date_key"].lt(date_key))
-        ).run(conn))
-        outcomes = list(_r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["entry_date"].ge(start_key)) & (doc["entry_date"].lt(date_key))
-        ).run(conn))
+        # get_all(...) on the instance_id index scopes the scan to rows
+        # for this instance only — same shape as the old filter() but
+        # O(rows-for-this-instance) instead of O(everything in table).
+        contexts = list(
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_CONTEXTS_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(
+                lambda doc: doc["date_key"].ge(start_key)
+                & doc["date_key"].lt(date_key)
+            )
+            .run(conn)
+        )
+        outcomes = list(
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_OUTCOMES_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(
+                lambda doc: doc["entry_date"].ge(start_key)
+                & doc["entry_date"].lt(date_key)
+            )
+            .run(conn)
+        )
     except Exception:
         return []
     outcome_by_id = {str(doc.get("id")): dict(doc) for doc in outcomes if doc.get("id")}
