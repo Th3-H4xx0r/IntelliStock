@@ -299,3 +299,51 @@ def test_telemetry_disabled_is_noop():
 
     record_llm_call(provider="x", model="y", usage={"input_tokens": 1, "output_tokens": 1})
     assert get_buffer_depth() == 0
+
+
+def test_rollup_aggregates_today(monkeypatch):
+    """Given a handful of LLMUsage rows on the same date, the rollup creates
+    one LLMUsageDaily row per (date, provider, model) with summed counts."""
+    from llm_telemetry import rollup_daily
+
+    seed_rows = [
+        {"ts": 1715000000000, "provider": "azure", "model": "gpt-4o",
+         "input_tokens": 100, "output_tokens": 50,
+         "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+         "reasoning_tokens": 0, "total_cost_usd": 0.01},
+        {"ts": 1715000010000, "provider": "azure", "model": "gpt-4o",
+         "input_tokens": 200, "output_tokens": 100,
+         "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+         "reasoning_tokens": 0, "total_cost_usd": 0.02},
+        {"ts": 1715000020000, "provider": "claude-cli", "model": "sonnet-4-6",
+         "input_tokens": 50, "output_tokens": 25,
+         "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+         "reasoning_tokens": 0, "total_cost_usd": 0.003},
+    ]
+
+    upserted = []
+    class _Q:
+        def __init__(self, rows=None): self.rows = rows
+        def run(self, conn): return list(seed_rows) if self.rows is None else None
+        def filter(self, *_a, **_k): return self
+        def between(self, *_a, **_k): return self
+        def get_all(self, *_a, **_k): return self
+        def insert(self, rows, **_k):
+            upserted.extend(rows if isinstance(rows, list) else [rows]); return self
+        def replace(self, rows): upserted.append(rows); return self
+        def index_create(self, *_a, **_k): return self
+    class _Db:
+        def table(self, _n): return _Q()
+        def table_list(self): return _Q()
+    class _R:
+        def db(self, _n): return _Db()
+        def db_list(self): return _Q()
+        epoch_time = staticmethod(lambda x: x)
+
+    rollup_daily(conn=object(), r=_R(), db_name="IntelliStock",
+                 date_iso="2026-05-06",
+                 _seed_rows_for_test=seed_rows)
+
+    keys = {row["id"] for row in upserted if isinstance(row, dict) and "id" in row}
+    assert "2026-05-06_azure_gpt-4o" in keys
+    assert "2026-05-06_claude-cli_sonnet-4-6" in keys

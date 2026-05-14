@@ -433,3 +433,54 @@ def _start_flusher() -> None:
                              daemon=True)
         _state["flusher_thread"] = t
     t.start()
+
+
+def rollup_daily(
+    *,
+    conn,
+    r,
+    db_name: str,
+    date_iso: str,
+    _seed_rows_for_test: Optional[List[Dict[str, Any]]] = None,
+) -> int:
+    """Aggregate LLMUsage rows for `date_iso` (YYYY-MM-DD) into LLMUsageDaily
+    upserts (one per (date, provider, model)). Idempotent.
+    Returns number of buckets written.
+    """
+    if _seed_rows_for_test is not None:
+        rows = list(_seed_rows_for_test)
+    else:
+        # Pull rows for the target date.
+        import datetime as _dt
+        start = int(_dt.datetime.fromisoformat(date_iso + "T00:00:00").timestamp() * 1000)
+        end = start + 24 * 3600 * 1000
+        rows = list(
+            r.db(db_name).table(_LLM_USAGE_TABLE)
+            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end)).run(conn)
+        )
+
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        provider = row.get("provider") or "unknown"
+        model = row.get("model") or "unknown"
+        bucket_id = f"{date_iso}_{provider}_{model}"
+        b = buckets.setdefault(bucket_id, {
+            "id": bucket_id, "date": date_iso, "provider": provider, "model": model,
+            "call_count": 0, "input_tokens": 0, "output_tokens": 0,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            "reasoning_tokens": 0, "total_cost_usd": 0.0,
+        })
+        b["call_count"] += 1
+        for fld in ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                    "cache_read_input_tokens", "reasoning_tokens"):
+            b[fld] += int(row.get(fld, 0) or 0)
+        b["total_cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
+
+    now_ms = int(time.time() * 1000)
+    out = []
+    for bucket_id, b in buckets.items():
+        b["last_updated_ts"] = now_ms
+        out.append(b)
+    if out:
+        r.db(db_name).table(_LLM_USAGE_DAILY_TABLE).insert(out, conflict="replace").run(conn)
+    return len(out)
