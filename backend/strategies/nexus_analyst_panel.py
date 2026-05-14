@@ -52,6 +52,14 @@ except ImportError:
         normalize_reasoning_effort,
         get_last_structured_llm_call_metadata,
     )
+
+try:
+    from llm_telemetry import llm_call_context
+except Exception:
+    from contextlib import contextmanager
+    @contextmanager
+    def llm_call_context(**_kwargs):
+        yield
 try:
     from strategies.graph_nexus_analysis import (
         _resolve_role_llm_config, _resolve_role_llm_provider_config,
@@ -348,13 +356,14 @@ def _run_single_agent(sys_prompt: str, user_prompt: str, out_type: type, config:
     # ~3 HTTP calls x timeout = 180s per agent. With 10 parallel agents, the as_completed
     # deadline of timeout+15s (75s) ensures the round never exceeds ~75s wall clock.
     try:
-        resp = call_structured_llm_by_provider(
-            provider, api_key, model, user_prompt, output_type=out_type,
-            system_prompt=sys_prompt, max_output_tokens=0,
-            timeout_sec=timeout, temperature=0.4, provider_config=prov_cfg,
-            retries=1, output_retries=1, http_retries=1,
-            prefer_raw_json=is_azure,
-            use_prompt_cache=_panel_cache_enabled)
+        with llm_call_context(strategy="NexusAnalystPanel", call_site="main"):
+            resp = call_structured_llm_by_provider(
+                provider, api_key, model, user_prompt, output_type=out_type,
+                system_prompt=sys_prompt, max_output_tokens=0,
+                timeout_sec=timeout, temperature=0.4, provider_config=prov_cfg,
+                retries=1, output_retries=1, http_retries=1,
+                prefer_raw_json=is_azure,
+                use_prompt_cache=_panel_cache_enabled)
         if _panel_cache_enabled and resp is not None:
             try:
                 _meta = get_last_structured_llm_call_metadata()
@@ -371,12 +380,13 @@ def _run_single_agent(sys_prompt: str, user_prompt: str, out_type: type, config:
         if resp is not None and _is_skeleton_response(resp):
             _log(f"PANEL agent '{role_label}' R{round_num}: skeleton response, retrying with shorter prompt", "yellow")
             short_prompt = user_prompt[:len(user_prompt) * 2 // 3] + "\n\nProvide concrete stock ratings and directional outlook. Do NOT return neutral/empty."
-            resp = call_structured_llm_by_provider(
-                provider, api_key, model, short_prompt, output_type=out_type,
-                system_prompt=sys_prompt, max_output_tokens=0,
-                timeout_sec=timeout, temperature=0.5, provider_config=prov_cfg,
-                retries=0, output_retries=0, http_retries=0, prefer_raw_json=is_azure,
-                use_prompt_cache=_panel_cache_enabled)
+            with llm_call_context(strategy="NexusAnalystPanel", call_site="main"):
+                resp = call_structured_llm_by_provider(
+                    provider, api_key, model, short_prompt, output_type=out_type,
+                    system_prompt=sys_prompt, max_output_tokens=0,
+                    timeout_sec=timeout, temperature=0.5, provider_config=prov_cfg,
+                    retries=0, output_retries=0, http_retries=0, prefer_raw_json=is_azure,
+                    use_prompt_cache=_panel_cache_enabled)
             if _panel_cache_enabled and resp is not None:
                 try:
                     _meta = get_last_structured_llm_call_metadata()

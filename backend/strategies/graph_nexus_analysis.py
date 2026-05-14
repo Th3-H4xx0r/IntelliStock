@@ -104,6 +104,13 @@ except ImportError:
     )
 
 try:
+    from llm_telemetry import llm_call_context
+except Exception:
+    @contextmanager
+    def llm_call_context(**_kwargs):
+        yield
+
+try:
     from strategies.ml_news import _score_finbert_batch as _ml_news_score_finbert_batch
 except ImportError:
     try:
@@ -3063,20 +3070,25 @@ def _classify_company_article_chunk(
         '{"articles":[{"ref":"a1","classifications":[{"t":"AAPL","et":"earnings","id":"bullish","is":0.8,"rs":0.9,"re":"Beat Q3"}]}]}\n'
         f"Articles: {prompt_payload_text}"
     )
-    raw = call_structured_llm_by_provider(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _CompanyArticleBatchResponse,
-        system_prompt=system_prompt,
-        retries=2,
-        output_retries=output_retries,
-        max_output_tokens=_batch_output_tokens,
-        timeout_sec=120,
-        provider_config=provider_config,
-        prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-    )
+    with llm_call_context(
+        backtest_id=instance_id,
+        strategy="GraphNexusAnalysis",
+        call_site="company_classification",
+    ):
+        raw = call_structured_llm_by_provider(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _CompanyArticleBatchResponse,
+            system_prompt=system_prompt,
+            retries=2,
+            output_retries=output_retries,
+            max_output_tokens=_batch_output_tokens,
+            timeout_sec=120,
+            provider_config=provider_config,
+            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+        )
     # Detect skeleton output — model returned refs but no classifications field at all.
     # Empty classifications:[] is valid (article has no company-specific content).
     if raw is not None and hasattr(raw, "articles") and raw.articles:
@@ -3109,20 +3121,25 @@ def _classify_company_article_chunk(
             "Classify the company-level impact of this financial news article for the supplied tickers.\n"
             f"Article: {_to_prompt_payload(_article_prompt_entry(single_row, include_symbols=True, prompt_role='company'), use_toon=use_toon)}"
         )
-        raw = call_structured_llm_by_provider(
-            provider,
-            api_key,
-            model,
-            single_prompt,
-            _CompanyArticleClassificationResponse,
-            system_prompt=system_prompt,
-            retries=2,
-            output_retries=output_retries,
-            max_output_tokens=0,
-            timeout_sec=120,
-            provider_config=provider_config,
-            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-        )
+        with llm_call_context(
+            backtest_id=instance_id,
+            strategy="GraphNexusAnalysis",
+            call_site="company_classification",
+        ):
+            raw = call_structured_llm_by_provider(
+                provider,
+                api_key,
+                model,
+                single_prompt,
+                _CompanyArticleClassificationResponse,
+                system_prompt=system_prompt,
+                retries=2,
+                output_retries=output_retries,
+                max_output_tokens=0,
+                timeout_sec=120,
+                provider_config=provider_config,
+                prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+            )
         prompt = single_prompt
     if raw is None and not _llm_call_was_terminal and len(chunk) > 1 and _split_depth < 2:
         mid = max(1, len(chunk) // 2)
@@ -3254,20 +3271,25 @@ def _classify_macro_article_chunk(
         '{"articles":[{"ref":"a1","rt":"macro","mt":"trade_policy","gt":"tariff","gb":"USTR","id":"bearish","is":0.7,"as":["Technology"],"re":"New tariffs"}]}\n'
         f"Articles: {_to_prompt_payload(prompt_payload, use_toon=use_toon)}"
     )
-    raw = call_structured_llm_by_provider(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _MacroArticleBatchResponse,
-        system_prompt=system_prompt,
-        retries=2,
-        output_retries=output_retries,
-        max_output_tokens=0,
-        timeout_sec=90,
-        provider_config=provider_config,
-        prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-    )
+    with llm_call_context(
+        backtest_id=instance_id,
+        strategy="GraphNexusAnalysis",
+        call_site="macro_classification",
+    ):
+        raw = call_structured_llm_by_provider(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _MacroArticleBatchResponse,
+            system_prompt=system_prompt,
+            retries=2,
+            output_retries=output_retries,
+            max_output_tokens=0,
+            timeout_sec=90,
+            provider_config=provider_config,
+            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+        )
     # Detect skeleton output — model returned refs but no actual classification data
     if raw is not None and hasattr(raw, "articles") and raw.articles:
         def _macro_article_has_data(a: Any) -> bool:
@@ -3309,20 +3331,25 @@ def _classify_macro_article_chunk(
             "- id (impact_direction): MUST be one of: bullish, bearish, neutral\n"
             f"Article: {_to_prompt_payload(_article_prompt_entry(single_row, include_symbols=False, prompt_role='macro'), use_toon=use_toon)}"
         )
-        raw = call_structured_llm_by_provider(
-            provider,
-            api_key,
-            model,
-            single_prompt,
-            _MacroArticleClassificationResponse,
-            system_prompt=system_prompt,
-            retries=2,
-            output_retries=output_retries,
-            max_output_tokens=0,
-            timeout_sec=90,
-            provider_config=provider_config,
-            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-        )
+        with llm_call_context(
+            backtest_id=instance_id,
+            strategy="GraphNexusAnalysis",
+            call_site="macro_classification",
+        ):
+            raw = call_structured_llm_by_provider(
+                provider,
+                api_key,
+                model,
+                single_prompt,
+                _MacroArticleClassificationResponse,
+                system_prompt=system_prompt,
+                retries=2,
+                output_retries=output_retries,
+                max_output_tokens=0,
+                timeout_sec=90,
+                provider_config=provider_config,
+                prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+            )
         prompt = single_prompt
     if raw is None and not _llm_call_was_terminal and len(chunk) > 1 and _split_depth < 2:
         mid = max(1, len(chunk) // 2)
@@ -4100,17 +4127,22 @@ def _maintain_active_events(
                     'Output example: {"updates":[{"a":"confirm","ck":"tariff-china-2026","en":"China tariff hike","et":"tariff","s":"live","c":0.8,"as":["Technology"],"re":"Confirmed by USTR"}]}\n'
                     "Return updates that create, confirm, narrow, broaden, end, or invalidate events."
                 )
-                r = call_structured_llm_by_provider(
-                    provider, api_key, model, batch_prompt,
-                    _ActiveEventMaintenanceResponse,
-                    system_prompt=system_prompt,
-                    max_output_tokens=0,
-                    retries=2,
-                    output_retries=2,
-                    timeout_sec=_maint_timeout,
-                    provider_config=provider_config,
-                    prefer_raw_json=True,
-                )
+                with llm_call_context(
+                    backtest_id=instance_id,
+                    strategy="GraphNexusAnalysis",
+                    call_site="active_event_maintenance",
+                ):
+                    r = call_structured_llm_by_provider(
+                        provider, api_key, model, batch_prompt,
+                        _ActiveEventMaintenanceResponse,
+                        system_prompt=system_prompt,
+                        max_output_tokens=0,
+                        retries=2,
+                        output_retries=2,
+                        timeout_sec=_maint_timeout,
+                        provider_config=provider_config,
+                        prefer_raw_json=True,
+                    )
                 t = _build_llm_trace("event_maintenance", provider, model, batch_prompt, system_prompt, prompt_version, r is not None)
                 if r is not None:
                     break
@@ -11823,26 +11855,35 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             f"Daily sentiment LLM: prompt ~{_est_prompt_tokens:,} tokens | headlines={len(headlines)} | max_output={_max_output_tokens if _max_output_tokens > 0 else 'unlimited'}",
             "cyan",
         )
-        raw = call_structured_llm_by_provider(
-            provider,
-            api_key,
-            model,
-            prompt,
-            _EnhancedSentimentResponse,
-            system_prompt=(
-                "Return only structured financial headline classifications as minimal JSON. "
-                "Use the short alias keys (t, s, e, sp, d, r). "
-                "Omit fields with default values, empty arrays/objects, and omit sp when it equals 1.0. "
-                "Max 5 words per reason/desc. Do NOT add explanations or commentary. "
-                "Target under 1500 total output tokens."
-            ),
-            max_output_tokens=_max_output_tokens,
-            retries=1 if sentiment_limits["is_gpt_oss"] else 2,
-            output_retries=1 if sentiment_limits["is_gpt_oss"] else 3,
-            timeout_sec=180 if sentiment_limits["is_gpt_oss"] else 360,
-            provider_config=provider_config,
-            prefer_raw_json=bool(sentiment_limits["is_gpt_oss"]),
+        _sent_instance_id = (
+            str((config or {}).get("runtime_instance_id") or "").strip()
+            or str((config or {}).get("instance_id") or "").strip()
         )
+        with llm_call_context(
+            backtest_id=_sent_instance_id,
+            strategy="GraphNexusAnalysis",
+            call_site="sentiment",
+        ):
+            raw = call_structured_llm_by_provider(
+                provider,
+                api_key,
+                model,
+                prompt,
+                _EnhancedSentimentResponse,
+                system_prompt=(
+                    "Return only structured financial headline classifications as minimal JSON. "
+                    "Use the short alias keys (t, s, e, sp, d, r). "
+                    "Omit fields with default values, empty arrays/objects, and omit sp when it equals 1.0. "
+                    "Max 5 words per reason/desc. Do NOT add explanations or commentary. "
+                    "Target under 1500 total output tokens."
+                ),
+                max_output_tokens=_max_output_tokens,
+                retries=1 if sentiment_limits["is_gpt_oss"] else 2,
+                output_retries=1 if sentiment_limits["is_gpt_oss"] else 3,
+                timeout_sec=180 if sentiment_limits["is_gpt_oss"] else 360,
+                provider_config=provider_config,
+                prefer_raw_json=bool(sentiment_limits["is_gpt_oss"]),
+            )
         _build_llm_trace("enhanced_sentiment", provider, model, prompt, (
             "Return only structured financial headline classifications. "
             "Use the schema fields exactly; omit markdown and free-form wrappers."

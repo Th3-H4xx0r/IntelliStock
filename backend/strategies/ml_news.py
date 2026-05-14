@@ -74,6 +74,14 @@ except ImportError:
     except ImportError:
         call_llm_with_prompt_cache = None
 
+try:
+    from llm_telemetry import llm_call_context
+except Exception:
+    from contextlib import contextmanager
+    @contextmanager
+    def llm_call_context(**_kwargs):
+        yield
+
 # ── RethinkDB ──────────────────────────────────────────────────────────────
 try:
     from rethinkdb import RethinkDB
@@ -546,11 +554,12 @@ def _classify_llm_batch(high_impulse_articles: list[dict], provider: str,
         )
 
         try:
-            raw, from_cache = call_llm_with_prompt_cache(
-                provider, api_key, model, prompt,
-                max_output_tokens=0, provider_config=provider_config, db_conn=conn,
-                db_name=DB_NAME, prompt_cache_table="MlNewsLLMPromptCache",
-            )
+            with llm_call_context(strategy="MLNews", call_site="main"):
+                raw, from_cache = call_llm_with_prompt_cache(
+                    provider, api_key, model, prompt,
+                    max_output_tokens=0, provider_config=provider_config, db_conn=conn,
+                    db_name=DB_NAME, prompt_cache_table="MlNewsLLMPromptCache",
+                )
             if from_cache:
                 _log(f"LLM classify cache hit: {headline[:50]}", "cyan")
 

@@ -59,6 +59,14 @@ except Exception:
     def _log(msg, color="white"):
         print(f"[EarningsStrategy] {msg}")
 
+try:
+    from llm_telemetry import llm_call_context
+except Exception:
+    from contextlib import contextmanager
+    @contextmanager
+    def llm_call_context(**_kwargs):
+        yield
+
 # ── RethinkDB persistent cache ──────────────────────────────────────────────
 try:
     from rethinkdb import RethinkDB
@@ -1264,17 +1272,18 @@ Reply with ONLY a JSON object, one key per ticker (e.g. "AAPL", "MSFT"). Each va
 Example: {{"AAPL": {{"sentiment": "POSITIVE", "allocation_pct": 60, "confidence": 0.74}}, "MSFT": {{"sentiment": "NEGATIVE", "allocation_pct": 0, "confidence": 0.68, "avoid": true, "avoid_reason": "high earnings volatility"}}}}"""
 
         try:
-            raw, from_cache = call_llm_with_prompt_cache(
-                provider,
-                api_key,
-                model,
-                prompt,
-                max_output_tokens=0,
-                provider_config=provider_config,
-                db_conn=db_conn,
-                db_name=DB_NAME,
-                prompt_cache_table="EarningsLLMPromptCache",
-            )
+            with llm_call_context(strategy="Earnings", call_site="main"):
+                raw, from_cache = call_llm_with_prompt_cache(
+                    provider,
+                    api_key,
+                    model,
+                    prompt,
+                    max_output_tokens=0,
+                    provider_config=provider_config,
+                    db_conn=db_conn,
+                    db_name=DB_NAME,
+                    prompt_cache_table="EarningsLLMPromptCache",
+                )
             raw_response = raw or ""
             if from_cache and raw:
                 parsed = _parse_sentiment_raw_response(raw)
