@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -1731,7 +1732,10 @@ class ClaudeCliSessionManager:
                     f"{raw_err!r}",
                     "yellow",
                 )
-                slot.result.error = _classify_error_text(str(result_text or "claude error"))
+                classified = _classify_error_envelope(event)
+                if isinstance(classified, ClaudeCliRateLimitError):
+                    _emit_rate_limit_discord_alert(str(result_text or ""))
+                slot.result.error = classified
                 slot.event.set()
                 return
             # Prefer the event's own result; fall back to streamed
@@ -1848,24 +1852,134 @@ _RATE_LIMIT_NEEDLES = (
     "too many requests",
     "usage limit",
     "subscription limit",
+    # CC Pro/Max subscription wording observed in backtest #336915 logs:
+    # "You've hit your limit · resets 11:50pm (UTC)". None of the earlier
+    # needles match it, so the 429 was being mis-classified as a generic
+    # ClaudeCliError and retried indefinitely.
+    "hit your limit",
+    "hit my limit",
+    "you've hit",
+    "you have hit",
 )
+
+# Pulls "11:50pm (UTC)" out of CC's "resets 11:50pm (UTC)." phrasing so
+# the Discord alert can quote the reset time directly.
+_RESET_TIME_RE = re.compile(r"resets?\s+([^.\n]+?)(?:\s*[\.\n]|$)", re.I)
+
+
+def _looks_like_rate_limit(text: str) -> bool:
+    """Pure-text rate-limit heuristic. Used as a fallback when the
+    envelope lacks ``api_error_status``."""
+    if not text:
+        return False
+    lower = text.lower()
+    return any(needle in lower for needle in _RATE_LIMIT_NEEDLES)
 
 
 def _classify_error_text(text: str) -> ClaudeCliError:
     """Map a CC error-result string to the right exception class."""
     t = (text or "").strip()
-    lower = t.lower()
     if any(needle in t for needle in _NOT_LOGGED_IN_NEEDLES):
         return ClaudeCliNotLoggedInError(
             "Claude Code is not logged in on this server. SSH in and run "
             "`claude` to log in, then retry."
         )
-    if any(needle in lower for needle in _RATE_LIMIT_NEEDLES):
+    if _looks_like_rate_limit(t):
         return ClaudeCliRateLimitError(
-            f"Claude Code subscription quota hit — retry in a few minutes "
-            f"({t[:120]})"
+            f"Claude Code subscription quota hit — retry later "
+            f"({t[:200]})"
         )
     return ClaudeCliError(t[:300])
+
+
+def _classify_error_envelope(envelope: Dict[str, Any]) -> ClaudeCliError:
+    """Map a CC error envelope to the right exception class.
+
+    Prefers ``api_error_status`` over text matching. CC sometimes returns
+    a 429 with a body whose phrasing doesn't match any of our text needles
+    (e.g. ``"You've hit your limit · resets 11:50pm (UTC)"``); classifying
+    on status code first ensures we never miss a real rate-limit again
+    (root cause of the unbounded retry storm in backtest #336915)."""
+    text = str(envelope.get("result") or "").strip()
+    status = envelope.get("api_error_status")
+    if isinstance(status, str):
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            status = None
+    if status == 429 or _looks_like_rate_limit(text):
+        return ClaudeCliRateLimitError(
+            f"Claude Code subscription quota hit — retry later "
+            f"({text[:200]})"
+        )
+    return _classify_error_text(text)
+
+
+# Process-wide dedupe for Discord rate-limit alerts. CC subscription
+# quota resets at a fixed wall-clock time, so spamming a notification per
+# spawn (a backtest can hit the wall 20+ times in seconds while chunk-
+# fallback fans out) would be useless noise. Key by the reset substring
+# so the operator sees one alert per quota window.
+_RATE_LIMIT_ALERT_LOCK = threading.Lock()
+_RATE_LIMIT_ALERTS_SENT: set[str] = set()
+
+
+def _emit_rate_limit_discord_alert(raw_text: str) -> None:
+    """Enqueue a Discord notification when CC reports the subscription
+    rate limit. Dedupes per (process, reset-time) so chunk-fallback
+    fan-out can't spam the channel. Any failure to enqueue is logged but
+    must never propagate — Discord outages should not break a backtest."""
+    if not raw_text:
+        return
+    reset_match = _RESET_TIME_RE.search(raw_text)
+    reset_time = reset_match.group(1).strip() if reset_match else ""
+    dedupe_key = reset_time or raw_text[:80]
+    with _RATE_LIMIT_ALERT_LOCK:
+        if dedupe_key in _RATE_LIMIT_ALERTS_SENT:
+            return
+        _RATE_LIMIT_ALERTS_SENT.add(dedupe_key)
+    try:
+        from interactive_utils import get_conn  # lazy import to avoid a cycle
+        from discord_sender import enqueue_discord_message
+
+        conn = get_conn()
+        try:
+            embed = {
+                "title": "Claude Code rate limit hit",
+                "description": (
+                    f"Claude Code subscription quota exhausted.\n\n"
+                    f"**Reset:** {reset_time or 'see message below'}\n\n"
+                    f"Strategies using `claude-cli` will skip the affected "
+                    f"bars until the quota refreshes."
+                ),
+                "color": 0xE67E22,  # orange — warning, not fatal
+                "fields": [
+                    {
+                        "name": "Raw message",
+                        "value": raw_text[:1024] or "(empty)",
+                        "inline": False,
+                    },
+                ],
+            }
+            enqueue_discord_message(conn, "notifications", "", embed=embed)
+            _log(
+                f"Discord rate-limit alert enqueued (reset={reset_time or '?'})",
+                "yellow",
+            )
+        finally:
+            try:
+                conn.close(noreply_wait=False)
+            except Exception:
+                pass
+    except Exception as exc:
+        _log(f"failed to enqueue Discord rate-limit alert: {exc}", "yellow")
+
+
+def _reset_rate_limit_alert_dedupe_for_tests() -> None:
+    """Hook for tests — clears the per-process dedupe set so each test
+    starts from a clean state."""
+    with _RATE_LIMIT_ALERT_LOCK:
+        _RATE_LIMIT_ALERTS_SENT.clear()
 
 
 def _coerce_text(content: Any) -> str:
@@ -2133,7 +2247,11 @@ def call_claude_cli_structured(
         ) from e
 
     if result_envelope.get("is_error"):
-        err = _classify_error_text(str(result_envelope.get("result") or ""))
+        err = _classify_error_envelope(result_envelope)
+        if isinstance(err, ClaudeCliRateLimitError):
+            _emit_rate_limit_discord_alert(
+                str(result_envelope.get("result") or "")
+            )
         raise err
 
     # CC's --json-schema flag puts the validated structured output in

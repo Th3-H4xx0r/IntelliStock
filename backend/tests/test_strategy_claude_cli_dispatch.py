@@ -13,6 +13,7 @@ connection.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import types
@@ -283,3 +284,229 @@ def test_repair_returns_none_when_no_strategy_works():
 
     out = _try_repair_payload_for_schema(_DummyOutput, {"completely": "wrong"})
     assert out is None
+
+
+# ── 7) Rate-limit detection + Discord alert dedupe ───────────────────────
+
+
+def test_classify_envelope_with_429_status_returns_ratelimit_even_without_needle():
+    """REGRESSION: CC's actual rate-limit body is
+    ``"You've hit your limit · resets 11:50pm (UTC)"`` and none of the old
+    text-only needles matched it. Backtest #336915 burned ~25 s per cycle
+    on misclassified 429s. Status-code-first classification fixes this."""
+    from chatbot.claude_cli_provider import (
+        ClaudeCliRateLimitError,
+        _classify_error_envelope,
+    )
+
+    envelope = {
+        "is_error": True,
+        "api_error_status": 429,
+        # Deliberately a phrase that has none of the legacy needles —
+        # if the classifier still picks RateLimitError, the fix works.
+        "result": "Service unavailable, try again later",
+    }
+    err = _classify_error_envelope(envelope)
+    assert isinstance(err, ClaudeCliRateLimitError)
+
+
+def test_classify_envelope_with_hit_your_limit_text_returns_ratelimit():
+    """Even without ``api_error_status``, the new text needle
+    ``hit your limit`` must catch CC's actual phrasing."""
+    from chatbot.claude_cli_provider import (
+        ClaudeCliRateLimitError,
+        _classify_error_envelope,
+    )
+
+    envelope = {
+        "is_error": True,
+        "result": "You've hit your limit · resets 11:50pm (UTC)",
+    }
+    err = _classify_error_envelope(envelope)
+    assert isinstance(err, ClaudeCliRateLimitError)
+
+
+def test_classify_envelope_status_as_string_429_still_classifies_correctly():
+    """Some serializers emit ``api_error_status`` as a string. Coerce
+    before comparing — otherwise ``"429" == 429`` is False in Python."""
+    from chatbot.claude_cli_provider import (
+        ClaudeCliRateLimitError,
+        _classify_error_envelope,
+    )
+
+    envelope = {"is_error": True, "api_error_status": "429", "result": "nope"}
+    err = _classify_error_envelope(envelope)
+    assert isinstance(err, ClaudeCliRateLimitError)
+
+
+def test_classify_envelope_non_429_falls_back_to_text_classifier():
+    """500s and other non-429 statuses must fall through to the existing
+    text-based classifier so we don't mis-classify generic CC failures
+    as rate limits."""
+    from chatbot.claude_cli_provider import (
+        ClaudeCliError,
+        ClaudeCliRateLimitError,
+        _classify_error_envelope,
+    )
+
+    envelope = {
+        "is_error": True,
+        "api_error_status": 500,
+        "result": "internal server error",
+    }
+    err = _classify_error_envelope(envelope)
+    assert isinstance(err, ClaudeCliError)
+    assert not isinstance(err, ClaudeCliRateLimitError)
+
+
+def test_emit_rate_limit_discord_alert_dedupes_within_process():
+    """Chunk-fallback can fire 14+ doomed spawns inside a few seconds.
+    The Discord alert must dedupe by the parsed reset time so the
+    operator gets a single notification per quota window."""
+    from chatbot import claude_cli_provider as ccp
+
+    ccp._reset_rate_limit_alert_dedupe_for_tests()
+
+    enqueue_calls = []
+
+    def _fake_enqueue(conn, channel, content, embed=None, **_kw):
+        enqueue_calls.append((channel, embed))
+        return {"id": "fake", "channel": channel, "status": "pending"}
+
+    fake_conn = MagicMock()
+    fake_conn.close = MagicMock()
+
+    with patch("interactive_utils.get_conn", return_value=fake_conn), patch(
+        "discord_sender.enqueue_discord_message", side_effect=_fake_enqueue
+    ):
+        msg = "You've hit your limit · resets 11:50pm (UTC)"
+        ccp._emit_rate_limit_discord_alert(msg)
+        ccp._emit_rate_limit_discord_alert(msg)  # same reset → skip
+        ccp._emit_rate_limit_discord_alert(msg)  # same reset → skip
+
+    assert len(enqueue_calls) == 1, (
+        f"Expected exactly one Discord enqueue for the same reset window, "
+        f"got {len(enqueue_calls)}"
+    )
+    channel, embed = enqueue_calls[0]
+    assert channel == "notifications"
+    assert "rate limit" in (embed.get("title") or "").lower()
+    # Reset time must surface in the embed so the operator knows when to
+    # expect normal operation to resume.
+    embed_text = json.dumps(embed)
+    assert "11:50pm" in embed_text
+
+
+def test_emit_rate_limit_discord_alert_sends_again_for_different_reset_time():
+    """Each fresh reset window deserves its own alert — otherwise the
+    operator gets stuck on a stale one if quota refreshes and then hits
+    the wall again."""
+    from chatbot import claude_cli_provider as ccp
+
+    ccp._reset_rate_limit_alert_dedupe_for_tests()
+
+    enqueue_calls = []
+
+    def _fake_enqueue(conn, channel, content, embed=None, **_kw):
+        enqueue_calls.append((channel, embed))
+        return {"id": "fake", "channel": channel, "status": "pending"}
+
+    fake_conn = MagicMock()
+    fake_conn.close = MagicMock()
+
+    with patch("interactive_utils.get_conn", return_value=fake_conn), patch(
+        "discord_sender.enqueue_discord_message", side_effect=_fake_enqueue
+    ):
+        ccp._emit_rate_limit_discord_alert(
+            "You've hit your limit · resets 11:50pm (UTC)"
+        )
+        ccp._emit_rate_limit_discord_alert(
+            "You've hit your limit · resets 4:30am (UTC)"
+        )
+
+    assert len(enqueue_calls) == 2
+
+
+def test_emit_rate_limit_discord_alert_swallows_db_failures():
+    """If RethinkDB is down, the alert helper must NOT raise — a Discord
+    outage cannot be allowed to break a backtest."""
+    from chatbot import claude_cli_provider as ccp
+
+    ccp._reset_rate_limit_alert_dedupe_for_tests()
+
+    with patch(
+        "interactive_utils.get_conn", side_effect=RuntimeError("rdb down")
+    ):
+        # Must not raise.
+        ccp._emit_rate_limit_discord_alert(
+            "You've hit your limit · resets 11:50pm (UTC)"
+        )
+
+
+def test_llm_utils_marks_ratelimit_as_terminal_and_does_not_retry():
+    """If the dispatcher hits a rate-limit, retrying immediately just
+    burns more 429s before reset. Must record ``is_terminal=True`` and
+    issue only ONE underlying call no matter the retry budget."""
+    from chatbot.claude_cli_provider import ClaudeCliRateLimitError
+    from llm_utils import (
+        call_structured_llm_by_provider,
+        get_last_structured_llm_call_metadata,
+    )
+
+    with patch("chatbot.claude_cli_provider.call_claude_cli_structured") as m:
+        m.side_effect = ClaudeCliRateLimitError(
+            "You've hit your limit · resets 11:50pm (UTC)"
+        )
+        out = call_structured_llm_by_provider(
+            "claude-cli",
+            "ignored",
+            "claude-sonnet-4-6",
+            prompt="…",
+            output_type=_DummyOutput,
+            provider_config={"cli_path": "claude"},
+            retries=3,
+            output_retries=3,
+        )
+
+    assert out is None
+    # Single call — no retry burst.
+    assert m.call_count == 1
+    meta = get_last_structured_llm_call_metadata()
+    assert meta.get("is_terminal") is True
+    assert meta.get("ok") is False
+
+
+# ── 8) End-to-end: envelope → classify → raise → alert ────────────────────
+
+
+def test_envelope_error_path_emits_discord_alert():
+    """Integration check: a structured-call envelope with is_error=True
+    and api_error_status=429 should raise RateLimitError AND fire exactly
+    one Discord alert."""
+    from chatbot import claude_cli_provider as ccp
+
+    ccp._reset_rate_limit_alert_dedupe_for_tests()
+
+    enqueue_calls = []
+
+    def _fake_enqueue(conn, channel, content, embed=None, **_kw):
+        enqueue_calls.append((channel, embed))
+        return {"id": "fake", "channel": channel, "status": "pending"}
+
+    fake_conn = MagicMock()
+    fake_conn.close = MagicMock()
+
+    envelope = {
+        "is_error": True,
+        "api_error_status": 429,
+        "result": "You've hit your limit · resets 11:50pm (UTC)",
+    }
+    err = ccp._classify_error_envelope(envelope)
+    assert isinstance(err, ccp.ClaudeCliRateLimitError)
+
+    with patch("interactive_utils.get_conn", return_value=fake_conn), patch(
+        "discord_sender.enqueue_discord_message", side_effect=_fake_enqueue
+    ):
+        ccp._emit_rate_limit_discord_alert(envelope["result"])
+
+    assert len(enqueue_calls) == 1

@@ -1331,7 +1331,14 @@ def _call_claude_cli_structured_from_strategy(
             # Terminal — retrying won't help.
             last_err = e
             break
-        except (ClaudeCliValidationError, ClaudeCliRateLimitError) as e:
+        except ClaudeCliRateLimitError as e:
+            # Terminal for this attempt window. CC's subscription quota
+            # resets at a fixed wall-clock time (often hours away), so
+            # retrying immediately just burns more 429s. The Discord alert
+            # was already emitted at the provider layer.
+            last_err = e
+            break
+        except ClaudeCliValidationError as e:
             last_err = e
             if attempt < _retry_budget:
                 time.sleep(_backoff_sleep_seconds(attempt, base=2.0, cap=60.0))
@@ -1356,9 +1363,17 @@ def _call_claude_cli_structured_from_strategy(
     # re-runs the same shape failure against sub-prompts. Marking it
     # terminal collapses worst-case chunk-split amplification (4 workers
     # × 4 leaves = 16 concurrent spawns) back to 1.
+    # ``ClaudeCliRateLimitError`` is terminal-until-reset: CC's Pro/Max
+    # subscription quota resets at a fixed wall-clock time, so chunk
+    # splitting just creates more 429s. The provider layer already emits
+    # a Discord notification once per reset window.
     _is_terminal_cc = isinstance(
         last_err,
-        (ClaudeCliNotLoggedInError, ClaudeCliValidationError),
+        (
+            ClaudeCliNotLoggedInError,
+            ClaudeCliValidationError,
+            ClaudeCliRateLimitError,
+        ),
     )
     _LAST_STRUCTURED_LLM_CALL.data = {
         "provider": "claude-cli",
