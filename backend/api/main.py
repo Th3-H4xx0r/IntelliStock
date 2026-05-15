@@ -2739,7 +2739,7 @@ def api_llm_output_get(output_id: str):
 def api_llm_usage_summary(
     range: str = "24h",
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
     return _llm_usage_summary(range_str=range, conn=conn)
 
@@ -2750,7 +2750,7 @@ def api_llm_usage_timeseries(
     bucket: str = "hour",
     provider: str = "",
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
     return _llm_usage_timeseries(
         range_str=range, bucket=bucket, provider=provider or None, conn=conn,
@@ -2763,7 +2763,7 @@ def api_llm_usage_top_spenders(
     group_by: str = "model",
     limit: int = 10,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
     return _llm_usage_top_spenders(
         range_str=range, group_by=group_by, limit=limit, conn=conn,
@@ -2780,7 +2780,7 @@ def api_llm_usage_calls(
     backtest_id: str = "",
     strategy: str = "",
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
     import llm_telemetry
     if (
@@ -2823,7 +2823,7 @@ def api_llm_usage_calls(
 
 
 @app.get("/llm-usage/health", response_class=JSONResponse)
-def api_llm_usage_health(current_user: dict = Depends(require_admin)):
+def api_llm_usage_health(current_user: dict = Depends(get_current_user)):
     import llm_telemetry
     return {
         "buffer_depth": llm_telemetry.get_buffer_depth(),

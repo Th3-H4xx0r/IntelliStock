@@ -7,6 +7,7 @@ hooks, which would try to talk to RethinkDB.
 """
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 
@@ -178,3 +179,21 @@ def test_range_to_ms_window_handles_each_range():
     assert e30 - s30 == 30 * 24 * 3600 * 1000
     # Unknown range defaults to 24h.
     assert e24 - s_default == 24 * 3600 * 1000
+
+
+def test_llm_usage_endpoints_require_auth_but_not_admin():
+    """Token-usage endpoints should be available to any authenticated user,
+    not just admins. Guard this at the dependency layer."""
+    import api.main as main_mod
+
+    endpoints = (
+        main_mod.api_llm_usage_summary,
+        main_mod.api_llm_usage_timeseries,
+        main_mod.api_llm_usage_top_spenders,
+        main_mod.api_llm_usage_calls,
+        main_mod.api_llm_usage_health,
+    )
+
+    for endpoint in endpoints:
+        dep = inspect.signature(endpoint).parameters["current_user"].default.dependency
+        assert dep is main_mod.get_current_user
