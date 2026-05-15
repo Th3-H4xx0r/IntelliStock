@@ -66,6 +66,7 @@ const navItems = [
   { label: 'Nexus Graph', icon: 'hub',             to: '/nexus'       },
   { label: 'Strategies',  icon: 'schema',          to: '/strategies'  },
   { label: 'Models',      icon: 'psychology',       to: '/models'      },
+  { label: 'Token Usage', icon: 'payments',         to: '/token-usage' },
 ]
 
 watch(

@@ -94,6 +94,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/token-usage',
+    name: 'token-usage',
+    component: () => import('../views/TokenUsageView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/animation',
     name: 'animation',
     component: () => import('../views/AnimationView.vue'),
