@@ -2791,8 +2791,25 @@ def api_llm_usage_calls(
         and not backtest_id
         and not strategy
     ):
-        # Fast path: serve from in-memory ring buffer (no DB round-trip).
-        return llm_telemetry.get_recent_calls(limit)
+        # Multi-process fix: the API process ring buffer only sees calls made
+        # in this process. Merge persisted rows so active backtests show up
+        # after their worker flushes.
+        fast_rows = llm_telemetry.get_recent_calls(limit)
+        db_rows = _llm_usage_calls_db(
+            limit=max(50, int(limit) * 2),
+            offset=0,
+            range_str="now",
+            provider=None,
+            model=None,
+            backtest_id=None,
+            strategy=None,
+            conn=conn,
+        )
+        return _merge_recent_usage_rows(
+            limit=limit,
+            in_memory_rows=fast_rows,
+            db_rows=db_rows,
+        )
     return _llm_usage_calls_db(
         limit=limit,
         offset=offset,
@@ -2931,6 +2948,26 @@ def _llm_usage_top_spenders(*, range_str, group_by, limit, conn) -> list:
         b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
     out = sorted(by_key.values(), key=lambda x: x["cost_usd"], reverse=True)
     return out[: max(1, int(limit))]
+
+
+def _merge_recent_usage_rows(*, limit, in_memory_rows, db_rows) -> list:
+    merged: dict = {}
+    for row in list(in_memory_rows or []) + list(db_rows or []):
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id") or (
+            f"{row.get('ts')}:{row.get('provider')}:{row.get('model')}:"
+            f"{row.get('strategy')}:{row.get('call_site')}"
+        )
+        existing = merged.get(row_id)
+        if existing is None or int(row.get("ts", 0) or 0) > int(existing.get("ts", 0) or 0):
+            merged[row_id] = row
+    out = sorted(
+        merged.values(),
+        key=lambda item: int(item.get("ts", 0) or 0),
+        reverse=True,
+    )
+    return out[: max(0, int(limit))]
 
 
 def _llm_usage_calls_db(*, limit, offset, range_str, provider, model,

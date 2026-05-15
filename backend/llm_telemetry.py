@@ -425,6 +425,7 @@ def _do_flush() -> None:
     if conn_factory is None or r_module is None:
         # Not configured for DB writes - drop silently (test scenario).
         return
+    conn = None
     try:
         conn = conn_factory()
         r_module.db(db_name).table(_LLM_USAGE_TABLE).insert(rows).run(conn)
@@ -445,6 +446,12 @@ def _do_flush() -> None:
             remaining_capacity = max(0, hard_cap - len(_buffer))
             if remaining_capacity > 0:
                 _buffer.extendleft(reversed(rows[-remaining_capacity:]))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _flusher_loop() -> None:

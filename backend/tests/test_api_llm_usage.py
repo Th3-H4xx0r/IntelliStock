@@ -70,6 +70,46 @@ def test_recent_calls_endpoint_returns_ring(seed_recent_calls):
     assert data[0]["provider"] == "azure"
 
 
+def test_recent_calls_endpoint_merges_ring_and_db_rows(monkeypatch, seed_recent_calls):
+    """The fast path should still include persisted rows from other
+    processes, not just the API process ring buffer."""
+    import api.main as main_mod
+
+    ring_top = seed_recent_calls.get_recent_calls(1)[0]
+    persisted = {
+        "id": "persisted-row",
+        "ts": int(ring_top["ts"]) + 1000,
+        "provider": "claude-cli",
+        "model": "claude-sonnet-4-6",
+        "input_tokens": 321,
+        "output_tokens": 123,
+        "total_cost_usd": 0.4567,
+        "strategy": "GraphNexusAnalysis",
+        "call_site": "sentiment",
+    }
+
+    monkeypatch.setattr(
+        main_mod,
+        "_llm_usage_calls_db",
+        lambda **_kwargs: [persisted, dict(ring_top)],
+    )
+
+    data = main_mod.api_llm_usage_calls(
+        limit=10,
+        offset=0,
+        range="now",
+        provider="",
+        model="",
+        backtest_id="",
+        strategy="",
+        conn=None,
+        current_user={"id": "u"},
+    )
+
+    assert data[0]["id"] == "persisted-row"
+    assert sum(1 for row in data if row["id"] == ring_top["id"]) == 1
+
+
 def test_summary_endpoint_returns_zero_when_empty(empty_telemetry):
     """Summary with no rows in DB and no buffer activity returns a zero-totals
     object, not 404 — the UI should always be able to render the page."""

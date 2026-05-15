@@ -19,11 +19,19 @@ import hashlib
 import json
 import re
 import dotenv
+from contextlib import contextmanager
 from typing import Any, Optional
 from portfolio_emulator import PortfolioEmulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason
+
+try:
+    from llm_telemetry import llm_call_context as telemetry_llm_call_context
+except Exception:
+    @contextmanager
+    def telemetry_llm_call_context(**_kwargs):
+        yield
 
 # Live-mode modules (imported lazily inside functions where sensible to keep
 # backtest cold-start light, but we expose the names at module scope for clarity).
@@ -1711,6 +1719,76 @@ except Exception:
     def should_keep_alive():
         return True
 
+
+def _init_llm_telemetry() -> None:
+    """Best-effort telemetry setup for broker/backtest worker processes."""
+    if r is None:
+        return
+    try:
+        import llm_telemetry
+
+        def _models_override_lookup(model_id):
+            if not model_id:
+                return None
+            conn = None
+            try:
+                conn = get_conn()
+                row = r.db(DB_NAME).table("Models").get(model_id).run(conn)
+                if not row:
+                    return None
+                keys = (
+                    "input_cost_per_1m",
+                    "output_cost_per_1m",
+                    "cache_creation_cost_per_1m",
+                    "cache_read_cost_per_1m",
+                )
+                out = {key: row.get(key) for key in keys if row.get(key) is not None}
+                return out or None
+            except Exception:
+                return None
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        pricing_path = os.path.join(os.path.dirname(__file__), "llm_pricing.yaml")
+        llm_telemetry.configure(
+            db_conn_factory=get_conn,
+            enabled=True,
+            flush_interval_s=2.0,
+            max_buffer=50,
+            pricing_yaml_path=pricing_path,
+            r_module=r,
+            db_name=DB_NAME,
+            models_override_lookup=_models_override_lookup,
+        )
+        try:
+            from llm_telemetry import ensure_llm_usage_tables
+            setup_conn = get_conn()
+            try:
+                ensure_llm_usage_tables(conn=setup_conn, r=r, db_name=DB_NAME)
+            finally:
+                try:
+                    setup_conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            _live_atexit.register(llm_telemetry.flush)
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            print(f"[BROKER] llm telemetry init failed: {exc}", flush=True)
+        except Exception:
+            pass
+
+
+_init_llm_telemetry()
+
 # ---------------------------------------------------------------------------
 # Strategies: load from DB, run from backend/strategies/<name>.py by execution_position
 # ---------------------------------------------------------------------------
@@ -2574,12 +2652,18 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
         strategy_cache = cache_store.setdefault(name, {})
         try:
             instance = cls()
-            raw = instance.run_once(
-                list(symbols), prices, current_time, config, conditions,
-                data=data, portfolio_emulator=portfolio_emulator,
-                strategy_cache=strategy_cache, time_increment=time_increment,
-                mode=mode,
-            )
+            broker_backtest_id = str(backtest_row_id).strip() if backtest_row_id is not None else None
+            broker_instance_id = str(instance_id).strip() if instance_id is not None else None
+            with telemetry_llm_call_context(
+                backtest_id=broker_backtest_id or None,
+                instance_id=broker_instance_id or None,
+            ):
+                raw = instance.run_once(
+                    list(symbols), prices, current_time, config, conditions,
+                    data=data, portfolio_emulator=portfolio_emulator,
+                    strategy_cache=strategy_cache, time_increment=time_increment,
+                    mode=mode,
+                )
             if isinstance(raw, dict):
                 out_scores = {}
                 out_reasons = {}
