@@ -9227,6 +9227,15 @@ def _discover_stocks_from_momentum(
         return []
     min_20d = float(config.get("momentum_discovery_min_20d_return", 20.0))
     min_60d = float(config.get("momentum_discovery_min_60d_return", 50.0))
+    # Z1.1 (2026-05-15): add parabolic ceiling — backtest 299903 surfaced AIOS
+    # at +5,200% YTD and the strategy bought it at $22.33, then watched it
+    # drop to $17.44 for a -$400 loss. No ceiling existed before; with
+    # backstop defaults below (and intent to recompute from rolling 3yr
+    # cross-sectional distribution annually), parabolic candidates are
+    # rejected at discovery time. Use 0 to disable. Mirrors
+    # _rediscover_momentum_comebacks:9320-9325 which already has these.
+    max_20d = float(config.get("momentum_discovery_max_20d_return", 80.0) or 0.0)
+    max_60d = float(config.get("momentum_discovery_max_60d_return", 200.0) or 0.0)
     max_per_day = int(config.get("momentum_discovery_max_per_day", 3))
     max_discovered = int(config.get("max_discovered_stocks", 50))
     _ensure_discovered_stocks_table(conn)
@@ -9260,6 +9269,14 @@ def _discover_stocks_from_momentum(
             r20 = features.get("recent_return_20", 0.0)
             r60 = features.get("recent_return_60", 0.0)
             if r20 >= min_20d or r60 >= min_60d:
+                # Z1.1: skip parabolic candidates
+                if (max_20d > 0 and r20 > max_20d) or (max_60d > 0 and r60 > max_60d):
+                    _log(
+                        f"  Momentum ceiling block: {sym} 20d={r20:+.1f}% 60d={r60:+.1f}% "
+                        f"(caps 20d={max_20d:.0f}%, 60d={max_60d:.0f}%)",
+                        "yellow",
+                    )
+                    continue
                 candidates.append((sym, r20, r60))
 
     # Source 2: overlay bars universe — catches ETFs and popular momentum stocks
@@ -9288,6 +9305,14 @@ def _discover_stocks_from_momentum(
                 r20 = ((latest - closes[-21]) / closes[-21] * 100.0) if len(closes) > 21 and closes[-21] > 0 else 0.0
                 r60 = ((latest - closes[-61]) / closes[-61] * 100.0) if len(closes) > 61 and closes[-61] > 0 else 0.0
                 if r20 >= min_20d or r60 >= min_60d:
+                    # Z1.1: skip parabolic candidates
+                    if (max_20d > 0 and r20 > max_20d) or (max_60d > 0 and r60 > max_60d):
+                        _log(
+                            f"  Momentum ceiling block: {sym} 20d={r20:+.1f}% 60d={r60:+.1f}% "
+                            f"(caps 20d={max_20d:.0f}%, 60d={max_60d:.0f}%)",
+                            "yellow",
+                        )
+                        continue
                     candidates.append((sym, r20, r60))
 
     # Sort by strongest momentum first; ticker ASC tiebreak for full determinism
@@ -16082,10 +16107,23 @@ def _apply_sector_concentration_limit(
                 break
             survivors.append(item)
         survivor_set = {str(item.get("ticker") or "").strip().upper() for item in survivors}
+        # Z4.2 (2026-05-15): soft sector cap with priority override. Allow
+        # high-conviction buys (raw_net_score >= cap AND n_paths >= path floor)
+        # to bypass the sector cap. Backtest 299903 had ALAB/CRWD/NET stuck
+        # in queue despite Base=+1.0 / 22 paths because the hard sector cap
+        # blocked them outright. Configurable so operators can tighten.
+        _z42_raw_cap = float(config.get("sector_cap_override_raw_net_score", 0.8) or 0.8)
+        _z42_path_min = int(config.get("sector_cap_override_min_paths", 5) or 5)
         demoted_names: list[str] = []
+        bypassed_names: list[str] = []
         for item in ranked:
             sym = str(item.get("ticker") or "").strip().upper()
             if sym in survivor_set:
+                continue
+            _item_raw = float(item.get("raw_net_score", 0.0) or 0.0)
+            _item_paths = int(item.get("n_paths", 0) or 0)
+            if _item_raw >= _z42_raw_cap and _item_paths >= _z42_path_min:
+                bypassed_names.append(f"{sym}(raw={_item_raw:.2f},p={_item_paths})")
                 continue
             sc = scores.get(sym) or {}
             sc["score"] = 0
@@ -16097,6 +16135,13 @@ def _apply_sector_concentration_limit(
             )[:1500]
             demoted.append((sym, sector))
             demoted_names.append(sym)
+        if bypassed_names:
+            _log(
+                f"Sector concentration override (Z4.2): {sector} allowed "
+                f"{len(bypassed_names)} high-conviction buy(s): "
+                f"{', '.join(bypassed_names[:8])}",
+                "cyan",
+            )
         if demoted_names:
             protected_names = [str(item.get("ticker") or "").strip().upper() for item in survivors if str(item.get("ticker") or "").strip()]
             protected_logs.append(f"{sector}: kept {', '.join(protected_names[:max_per_sector])} | demoted {', '.join(demoted_names[:max_per_sector])}")
