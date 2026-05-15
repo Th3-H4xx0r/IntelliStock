@@ -5413,6 +5413,80 @@ def _spy_20d_return(strategy_cache: dict | None, date_key: str) -> float | None:
         return None
 
 
+def _realized_vol_20d(prices: list[float]) -> float:
+    """Z3.x: return per-symbol 20-day annualized realized volatility as a
+    fraction (e.g. 0.30 for 30% annualized).
+
+    Used by Z3.1 (vol-scaled loss floor) and Z3.2 (vol-scaled trailing-stop
+    activation) so AORT (high-vol biotech) gets different thresholds than
+    AZN (low-vol large-cap pharma). Returns 0.0 when too few bars to
+    compute, so callers can fall back to their absolute default thresholds.
+    """
+    try:
+        if not prices or len(prices) < 5:
+            return 0.0
+        series = [float(p) for p in (prices[-20:] if len(prices) >= 20 else prices) if p and float(p) > 0]
+        if len(series) < 5:
+            return 0.0
+        import math as _math
+        returns = []
+        for i in range(1, len(series)):
+            if series[i-1] > 0 and series[i] > 0:
+                returns.append(_math.log(series[i] / series[i-1]))
+        if len(returns) < 4:
+            return 0.0
+        mean = sum(returns) / len(returns)
+        var = sum((r - mean) ** 2 for r in returns) / len(returns)
+        return _math.sqrt(var) * _math.sqrt(252)
+    except Exception:
+        return 0.0
+
+
+def _recent_closes_for_symbol(
+    sym: str,
+    price_history: dict | None,
+    portfolio_emulator=None,
+) -> list[float]:
+    """Pull recent close prices for a single symbol from the available
+    price history. Used by Z3.1 / Z3.2 to feed _realized_vol_20d.
+    """
+    closes: list[float] = []
+    try:
+        if isinstance(price_history, dict):
+            bars = price_history.get(sym) or []
+            if isinstance(bars, list):
+                for b in bars:
+                    if isinstance(b, dict):
+                        c = b.get("c", b.get("close", 0))
+                        try:
+                            cv = float(c) if c is not None else 0.0
+                        except (TypeError, ValueError):
+                            continue
+                        if cv > 0:
+                            closes.append(cv)
+                    elif isinstance(b, (int, float)):
+                        cv = float(b)
+                        if cv > 0:
+                            closes.append(cv)
+        if not closes and portfolio_emulator is not None:
+            ph = getattr(portfolio_emulator, "_price_history", None)
+            if isinstance(ph, dict):
+                bars = ph.get(sym) or []
+                if isinstance(bars, list):
+                    for b in bars:
+                        if isinstance(b, dict):
+                            c = b.get("c", b.get("close", 0))
+                            try:
+                                cv = float(c) if c is not None else 0.0
+                            except (TypeError, ValueError):
+                                continue
+                            if cv > 0:
+                                closes.append(cv)
+    except Exception:
+        return closes
+    return closes
+
+
 def _entry_marker_from_value(value: Any) -> str:
     if isinstance(value, str):
         return value[:32]
@@ -13670,10 +13744,33 @@ def _evaluate_position_risk(
                         fresh_score = 0
                         fresh_reason = f"Winner protection: +{_unrealized_pct:.1f}% gain, raw={_prop_raw:.3f} insufficient to sell"
                 _max_open_loss_pct = float(config.get("max_open_loss_pct", -15.0))
-                if _unrealized_pct <= _max_open_loss_pct:
+                # Z3.1 (2026-05-15): vol-scale the loss floor per-symbol.
+                # Low-vol names get a TIGHTER floor than the absolute default
+                # (a -10% move on a 5% vol name is genuinely unusual and
+                # bearish). High-vol names retain the absolute floor (their
+                # normal daily noise is large; tighter floor would whipsaw).
+                # Set max_open_loss_vol_multiplier=0 to disable vol scaling.
+                _z31_vol_mult = float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0)
+                _z31_floor_effective = _max_open_loss_pct
+                if _z31_vol_mult > 0:
+                    _z31_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
+                    _z31_vol = _realized_vol_20d(_z31_closes)
+                    if _z31_vol > 0:
+                        _z31_vol_floor_pct = -_z31_vol_mult * _z31_vol * 100.0
+                        # Pick the TIGHTER (less negative) of the two floors.
+                        # max() of two negatives selects the one closer to zero.
+                        _z31_floor_effective = max(_max_open_loss_pct, _z31_vol_floor_pct)
+                if _unrealized_pct <= _z31_floor_effective:
                     fresh_score = -1
-                    fresh_reason = f"Circuit breaker: {_unrealized_pct:.1f}% loss hit hard floor {_max_open_loss_pct:.0f}%"
-                    _log(f"[sell-gate] {sym} | gate=circuit_breaker | unrealized={_unrealized_pct:.1f}% | floor={_max_open_loss_pct:.0f}% | result=fired", "red")
+                    fresh_reason = (
+                        f"Circuit breaker: {_unrealized_pct:.1f}% loss hit floor {_z31_floor_effective:.1f}% "
+                        f"(default={_max_open_loss_pct:.0f}%, vol-scaled active)"
+                    )
+                    _log(
+                        f"[sell-gate] {sym} | gate=circuit_breaker | unrealized={_unrealized_pct:.1f}% | "
+                        f"floor={_z31_floor_effective:.1f}% (default={_max_open_loss_pct:.0f}%) | result=fired",
+                        "red",
+                    )
 
                 _peak_protected = False
                 _peak_pnl_pct_for_log = 0.0
@@ -13752,7 +13849,18 @@ def _evaluate_position_risk(
                                 _fl_blacklist[sym] = {"date": date_key, "bars_remaining": int(config.get("fast_loser_blacklist_days", 20)), "_created_this_bar": True}
                                 _log(f"Fast loser BLACKLIST: {sym} blocked for {_fl_blacklist[sym]['bars_remaining']} bars", "red")
 
-                _ts_activation = float(config.get("trailing_stop_activation_pct", 10.0))
+                # Z3.2 (2026-05-15): default activation lowered from 10% to 5%
+                # AND vol-scaled per-symbol. Spec: activation = max(5%, 0.75 * vol).
+                # High-vol names (SOXL) need a bigger gain before trail activates
+                # to avoid whipsaw; low-vol names trail tightly. Set
+                # trailing_stop_activation_vol_multiplier=0 to disable vol scaling.
+                _ts_activation = float(config.get("trailing_stop_activation_pct", 5.0))
+                _z32_vol_mult = float(config.get("trailing_stop_activation_vol_multiplier", 0.75) or 0.0)
+                if _z32_vol_mult > 0:
+                    _z32_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
+                    _z32_vol = _realized_vol_20d(_z32_closes)
+                    if _z32_vol > 0:
+                        _ts_activation = max(_ts_activation, _z32_vol_mult * _z32_vol * 100.0)
                 _default_trailing_pct = float(config.get("trailing_stop_pct", 8.0))
                 if sym in _COMMODITY_ETF_TICKERS:
                     _ts_drop = float(config.get("trailing_stop_commodity_etf_pct", 12.0))
@@ -15568,7 +15676,12 @@ def _apply_ml_and_overlay_to_scores(
         # Codex fix v2: use original entry price for P&L check (not most recent add-on),
         # and use peak tracking for drawdown check. Avoids expensive snapshot call.
         if final_score == -1 and not base.get("_forced_exit") and bool(config.get("winner_sell_protection_enabled", True)):
-            _wp_min_pnl = float(config.get("winner_sell_protection_min_pnl_pct", 10.0))
+            # Z3.3 (2026-05-15): default min_pnl lowered from 10% to 5%.
+            # Backtest 299903 sold AMD at +5% (locked) and SOXL at +10%
+            # — neither hit the 10% protection threshold, so weak negative
+            # signals were enough to sell. At 5%, AMD/SOXL would have
+            # required a real drawdown OR strong negative sentiment to exit.
+            _wp_min_pnl = float(config.get("winner_sell_protection_min_pnl_pct", 5.0))
             _wp_max_drawdown = float(config.get("winner_sell_protection_max_drawdown_pct", 8.0))
             # Use original entry price for true position P&L (not last add-on)
             _wp_orig = _get_open_position_entry_trade(portfolio_emulator, sym) if portfolio_emulator else None
