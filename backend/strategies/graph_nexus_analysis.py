@@ -4491,15 +4491,21 @@ def _v32_momentum_ath_or_mcap_block(
     Either fail-open when data missing (never blocks on unknown-mcap or thin history).
     """
     # T1-c near-ATH gate
-    if bool(config.get("portfolio_swap_ath_gate_enabled", False)):
+    # Z1.2 (2026-05-15): default flipped to True. Backtest 299903 showed AIOS
+    # bought at $22.33 after +5,200% YTD parabolic; this gate already existed
+    # and would have blocked AIOS but was disabled by default.
+    if bool(config.get("portfolio_swap_ath_gate_enabled", True)):
         try:
-            ath_max_delta = float(config.get("portfolio_swap_ath_gate_max_pct", 0.02) or 0.02)
+            # Z1.2: widened from 2% to 5% (matches the spec target band)
+            ath_max_delta = float(config.get("portfolio_swap_ath_gate_max_pct", 0.05) or 0.05)
         except Exception:
-            ath_max_delta = 0.02
+            ath_max_delta = 0.05
         try:
-            bypass_raw = float(config.get("portfolio_swap_ath_gate_bypass_raw", 1.80) or 1.80)
+            # Z1.2: bypass raised from 1.80 to 2.50 so only extraordinary
+            # conviction can override the near-ATH block
+            bypass_raw = float(config.get("portfolio_swap_ath_gate_bypass_raw", 2.50) or 2.50)
         except Exception:
-            bypass_raw = 1.80
+            bypass_raw = 2.50
         try:
             lookback = int(config.get("portfolio_swap_ath_gate_lookback", 60) or 60)
         except Exception:
@@ -4519,11 +4525,14 @@ def _v32_momentum_ath_or_mcap_block(
                         pass
                 return True, reason
     # T2-a market-cap gate on momentum lanes
-    if bool(config.get("momentum_watchlist_mcap_prefilter_enabled", False)):
+    # Z1.3 (2026-05-15): default flipped to True. min_market_cap raised from
+    # $500M to $2B so micro-caps (AIOS-class) can't enter via momentum
+    # watchlist rotation.
+    if bool(config.get("momentum_watchlist_mcap_prefilter_enabled", True)):
         try:
-            min_mcap = float(config.get("momentum_watchlist_min_market_cap", 500_000_000) or 500_000_000)
+            min_mcap = float(config.get("momentum_watchlist_min_market_cap", 2_000_000_000) or 2_000_000_000)
         except Exception:
-            min_mcap = 500_000_000.0
+            min_mcap = 2_000_000_000.0
         mc = _v32_get_market_cap(symbol, strategy_cache, config)
         if mc is not None and mc > 0 and mc < min_mcap:
             reason = (
