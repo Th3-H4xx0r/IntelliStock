@@ -3034,7 +3034,12 @@ def _classify_company_article_chunk(
     system_prompt: str,
     _split_depth: int = 0,
 ) -> tuple[list[dict], list[dict]]:
-    output_retries = 0 if _normalize_llm_provider(provider) == "azure" else 2
+    # 2026-05-15: azure used to special-case to 0 retries but that meant
+    # skeleton-output responses (model returns article refs with no
+    # classifications) were discarded without retry. gpt-5-mini-MEDIUM
+    # frequently produces these on the first try then succeeds on the
+    # second. Match the other providers at 2 retries.
+    output_retries = 2
     # Scale output tokens with batch size: ~4000 tokens per article (accounts for
     # reasoning model overhead where thinking tokens eat into completion budget),
     # minimum 8192 for single articles.
@@ -3251,7 +3256,12 @@ def _classify_macro_article_chunk(
     system_prompt: str,
     _split_depth: int = 0,
 ) -> tuple[list[dict], list[dict]]:
-    output_retries = 0 if _normalize_llm_provider(provider) == "azure" else 2
+    # 2026-05-15: azure used to special-case to 0 retries but that meant
+    # skeleton-output responses (model returns article refs with no
+    # classifications) were discarded without retry. gpt-5-mini-MEDIUM
+    # frequently produces these on the first try then succeeds on the
+    # second. Match the other providers at 2 retries.
+    output_retries = 2
     model_ref = _llm_model_ref(model, provider_config)
     chunk_rows = [row for row, _ in chunk]
     prompt_ref_map = { _prompt_ref_for_index(idx): str(row.get("article_hash") or "").strip() for idx, row in enumerate(chunk_rows) }
