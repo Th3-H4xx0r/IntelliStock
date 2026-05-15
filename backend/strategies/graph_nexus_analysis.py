@@ -4145,16 +4145,14 @@ def _maintain_active_events(
                         provider, api_key, model, batch_prompt,
                         _ActiveEventMaintenanceResponse,
                         system_prompt=system_prompt,
-                        # 2026-05-15: raised 1024 -> 4096 because reasoning
-                        # models (azure/gpt-5-mini-MEDIUM, claude-sonnet w/
-                        # extended thinking) consume the full output budget
-                        # on internal reasoning at 1024, leaving zero tokens
-                        # for the JSON response. Observed in the field as
-                        # "LLM call returned empty response" with
-                        # reasoning=1024 output=1024 (entire budget burnt on
-                        # reasoning). Successful daily_sentiment calls on
-                        # the same model use ~4000 output tokens.
-                        max_output_tokens=4096,
+                        # 2026-05-15: raised 1024 -> 4096 -> 8192. The 4096
+                        # cap still wasn't enough: 2 of 3 maintenance batches
+                        # were pinning at output=4096 reasoning=4096 (entire
+                        # budget burnt on reasoning, zero left for JSON).
+                        # Observed batch reasoning needs: 3520, 3520, 4096+.
+                        # 8192 gives ~4k headroom for reasoning AND ~4k for
+                        # the actual updates JSON.
+                        max_output_tokens=8192,
                         retries=2,
                         output_retries=2,
                         timeout_sec=_maint_timeout,
