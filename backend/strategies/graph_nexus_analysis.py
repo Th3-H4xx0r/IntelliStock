@@ -1194,6 +1194,13 @@ def _get_event_maintenance_prompt_limits(config: dict | None) -> dict[str, Any]:
             effective_batch_size = oss_batch_size
             auto_reduced = True
 
+    is_claude_cli = str(provider or "").strip().lower() == "claude-cli"
+    if is_claude_cli and lookback:
+        claude_cli_max_events = 30
+        if effective_max_events > claude_cli_max_events:
+            effective_max_events = claude_cli_max_events
+            auto_reduced = True
+
     return {
         "provider": str(provider or "").strip().lower(),
         "model_ref": model_ref,
@@ -4122,6 +4129,10 @@ def _maintain_active_events(
         _is_lookback = bool(config.get("historical_lookback_mode", False))
         _maint_timeout = 90 if _is_lookback else 120
         _maint_outer_retries = 1 if _is_lookback else 2
+        # Event maintenance is simple JSON classification — extended thinking
+        # (reasoning_effort=medium/high) adds 80-120s of latency for no gain
+        # and causes consistent 90s timeout expiry in lookback mode.
+        _maint_provider_config = {k: v for k, v in (provider_config or {}).items() if k != "reasoning_effort"}
 
         def _run_maint_batch(batch_candidates: list, max_outer_retries: int = _maint_outer_retries) -> tuple:
             stripped_candidates = [_trim_event_for_prompt(c, _MAINT_STRIP_KEYS) for c in batch_candidates]
@@ -4149,7 +4160,7 @@ def _maintain_active_events(
                         retries=2,
                         output_retries=2,
                         timeout_sec=_maint_timeout,
-                        provider_config=provider_config,
+                        provider_config=_maint_provider_config,
                         prefer_raw_json=True,
                         use_prompt_cache=True,
                     )
