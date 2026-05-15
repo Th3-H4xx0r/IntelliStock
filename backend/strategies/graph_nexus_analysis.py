@@ -5366,6 +5366,44 @@ def _detect_market_regime(
         return "bull"
 
 
+def _spy_20d_return(strategy_cache: dict | None, date_key: str) -> float | None:
+    """Z2.3: return SPY's 20-day return as a fraction (e.g. +0.0374 for +3.74%),
+    or None if not enough data. Used by ``_compute_macro_risk_scale`` to gate
+    the macro-bearish haircut on price-action corroboration.
+    """
+    try:
+        if not isinstance(strategy_cache, dict):
+            return None
+        bars_cache = strategy_cache.get("_overlay_bars_raw") or {}
+        if not isinstance(bars_cache, dict):
+            return None
+        for candidate in ("SPY", "QQQ", "VOO"):
+            bars = bars_cache.get(candidate)
+            if not isinstance(bars, list) or not bars:
+                continue
+            date_str = str(date_key or "")[:10]
+            closes: list[float] = []
+            for b in bars:
+                if not isinstance(b, dict):
+                    continue
+                ts = b.get("t", b.get("date", ""))
+                ts_str = str(ts or "")[:10]
+                if ts_str > date_str:
+                    continue
+                c_raw = b.get("c", 0)
+                try:
+                    c_val = float(c_raw) if c_raw is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                if c_val > 0:
+                    closes.append(c_val)
+            if len(closes) >= 21 and closes[-21] > 0:
+                return (closes[-1] - closes[-21]) / closes[-21]
+        return None
+    except Exception:
+        return None
+
+
 def _entry_marker_from_value(value: Any) -> str:
     if isinstance(value, str):
         return value[:32]
@@ -5851,10 +5889,13 @@ def _compute_backfill_budget_partition(
     if total <= 0.0 or not has_pending_queue:
         return total, 0.0
     # V26 Fix C: when the queue contains a high-conviction item (raw >= 1.5),
-    # bump the reserve from 0.20 -> backfill_budget_reserve_pct_high_conviction
-    # (default 0.35) so SNDK/MU/LITE-style names actually have cash to execute
-    # against. Self-disabling: when no high-conviction item is in queue, this
-    # reverts to the standard 0.20 reserve.
+    # bump the reserve so SNDK/MU/LITE-style names actually have cash to
+    # execute against. Self-disabling: when no high-conviction item is in
+    # queue, this reverts to the standard reserve.
+    # Z4.4 (2026-05-15): defaults lowered (0.35→0.25 HC, 0.20→0.10 standard)
+    # because backtest 299903 showed reserves perpetually held against
+    # queues that didn't drain due to TTL/headroom limits — Z4.3 + Z4.1
+    # address the drain mechanics, so the reserve cushion can be smaller.
     if has_high_conviction_in_queue:
         reserve_pct = max(
             0.0,
@@ -5863,14 +5904,14 @@ def _compute_backfill_budget_partition(
                 float(
                     config.get(
                         "backfill_budget_reserve_pct_high_conviction",
-                        0.35,
+                        0.25,
                     )
-                    or 0.35
+                    or 0.25
                 ),
             ),
         )
     else:
-        reserve_pct = max(0.0, min(0.95, float(config.get("backfill_budget_reserve_pct", 0.20) or 0.20)))
+        reserve_pct = max(0.0, min(0.95, float(config.get("backfill_budget_reserve_pct", 0.10) or 0.10)))
     reserve_budget = total * reserve_pct
     primary_budget = max(0.0, total - reserve_budget)
     return primary_budget, reserve_budget
@@ -7021,7 +7062,19 @@ def _compute_macro_risk_scale(
     macro_rows: list[dict] | None,
     active_events: list[dict] | None,
     config: dict | None = None,
+    spy_20d_return: float | None = None,
 ) -> tuple[float, dict[str, float]]:
+    """Compute a buy-budget haircut from macro-event news flow.
+
+    Z2.3 fix: previously this used ``max(0.5, confidence)`` which made every
+    macro row contribute at least 0.5 even when its actual confidence was
+    lower — producing false-bearish readings on news-heavy but
+    fundamentally bullish tapes (backtest 299903: net=-12.9 on a +3.74% SPY
+    move). The floor is removed; low-confidence rows now contribute their
+    actual weight. Additionally, when ``spy_20d_return`` is provided and
+    >= 0, the haircut is suppressed entirely — macro pessimism must be
+    corroborated by price action before reducing buy budget.
+    """
     config = config or {}
     if not bool(config.get("macro_risk_scaling_enabled", True)):
         return 1.0, {
@@ -7035,14 +7088,18 @@ def _compute_macro_risk_scale(
     bearish_score = 0.0
     for row in macro_rows or []:
         direction = str(row.get("impact_direction") or "").strip().lower()
-        weight = max(0.5, float(row.get("confidence", 0.0) or 0.0))
+        weight = float(row.get("confidence", 0.0) or 0.0)
+        if weight <= 0:
+            continue
         if direction == "bullish":
             bullish_score += weight
         elif direction == "bearish":
             bearish_score += weight
     for event in active_events or []:
         direction = str(event.get("impact_direction") or "").strip().lower()
-        weight = max(0.5, float(event.get("confidence", 0.0) or 0.0)) * 1.25
+        weight = float(event.get("confidence", 0.0) or 0.0) * 1.25
+        if weight <= 0:
+            continue
         if direction == "bullish":
             bullish_score += weight
         elif direction == "bearish":
@@ -7053,13 +7110,19 @@ def _compute_macro_risk_scale(
     scale_min = max(0.0, min(1.0, float(config.get("macro_risk_scale_min", 0.60) or 0.60)))
     scale = 1.0
     if net_score < 0:
-        scale = max(scale_min, 1.0 - (abs(net_score) * scale_step))
+        # Z2.3: require price-action corroboration before applying the haircut.
+        # If SPY 20d return is positive, the bearish macro flow is contradicted
+        # by the tape — don't haircut. Only apply the scale when both signals
+        # agree (macro negative AND SPY 20d negative).
+        if spy_20d_return is None or spy_20d_return < 0:
+            scale = max(scale_min, 1.0 - (abs(net_score) * scale_step))
 
     return scale, {
         "bullish_score": round(bullish_score, 4),
         "bearish_score": round(bearish_score, 4),
         "net_score": round(net_score, 4),
         "scale": round(scale, 4),
+        "spy_20d_return": round(spy_20d_return, 4) if spy_20d_return is not None else None,
     }
 
 
@@ -16547,11 +16610,16 @@ class GraphNexusAnalysis:
         # same 10 bars is only ~3.3 hours, well below V28 leader-lock
         # rotation latency. Scale the configured value (and the literal
         # priority floor of 15) to preserve wall-clock semantics.
-        _bfq_max_bars = _scale_bars(int(config.get("backfill_queue_max_bars", 10)), config)
+        # Z4.3: backstop TTL minimums so dual-cadence collapse doesn't kill
+        # the queue. At 1200s granularity _scale_bars(10) was returning ~2
+        # bars in backtest 299903, expiring 20 queued names per bar. Floor
+        # the regular TTL at 5 bars and the priority TTL at 10 bars so
+        # high-conviction items get a real chance to fill before aging out.
+        _bfq_max_bars = max(5, _scale_bars(int(config.get("backfill_queue_max_bars", 10)), config))
         _bfq_reserved_priority_slots = int(config.get("backfill_queue_reserved_priority_slots", 10) or 10)
         _bfq_min_displace_delta = float(config.get("backfill_queue_min_displacement_delta", 0.3))
         _bfq_recurrence_bonus = float(config.get("backfill_queue_recurrence_bonus", 0.1))
-        _bfq_priority_max_bars = max(_bfq_max_bars, _scale_bars(15, config))
+        _bfq_priority_max_bars = max(_bfq_max_bars, max(10, _scale_bars(15, config)))
         _bfq_min_score = float(config.get("backfill_queue_min_score", 0.20))
         _bfq_staleness_pct = float(config.get("backfill_queue_staleness_pct", 20.0))
 
@@ -19231,17 +19299,27 @@ class GraphNexusAnalysis:
                 f"(open_positions={_count_open_positions(portfolio_emulator)}, min_positions={int(config.get('cash_reserve_hard_min_positions', 5) or 5)})",
                 "yellow",
             )
-        _macro_risk_scale, _macro_risk_meta = _compute_macro_risk_scale(macro_rows, active_events, config)
+        _spy_20d = _spy_20d_return(strategy_cache, date_key)
+        _macro_risk_scale, _macro_risk_meta = _compute_macro_risk_scale(
+            macro_rows, active_events, config, spy_20d_return=_spy_20d
+        )
         if _available_buy_budget > 0 and _macro_risk_scale < 0.999:
             _scaled_buy_budget = _available_buy_budget * _macro_risk_scale
             _log(
                 f"Macro risk scaling: bearish={_macro_risk_meta.get('bearish_score', 0.0):.2f} "
                 f"bullish={_macro_risk_meta.get('bullish_score', 0.0):.2f} "
                 f"net={_macro_risk_meta.get('net_score', 0.0):+.2f} "
+                f"spy_20d={_spy_20d if _spy_20d is None else f'{_spy_20d*100:+.2f}%'} "
                 f"-> buy budget ${_available_buy_budget:.0f} -> ${_scaled_buy_budget:.0f}",
                 "yellow",
             )
             _available_buy_budget = _scaled_buy_budget
+        elif _available_buy_budget > 0 and _spy_20d is not None and _spy_20d >= 0:
+            _log(
+                f"Macro risk scaling: SUPPRESSED (SPY 20d={_spy_20d*100:+.2f}% >= 0, "
+                f"price action contradicts macro net={_macro_risk_meta.get('net_score', 0.0):+.2f})",
+                "cyan",
+            )
 
         # ── Buy budget floor: never let budget fall below X% of portfolio ──
         _buy_floor_pct = float(config.get("buy_budget_floor_pct", 0) or 0)
