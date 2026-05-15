@@ -4066,18 +4066,11 @@ def _maintain_active_events(
             return reused
     if api_key and (current_events or candidates):
         system_prompt = (
-            "Maintain the lifecycle of active macro/government events. "
-            "Return only structured updates as minimal JSON. End or invalidate events only when today's evidence clearly warrants it. "
-            "Use short alias keys: a (action), ck (event_cluster_key), en (event_name), et (event_type), "
-            "gt (government_action_type), s (status), ed (expected_end_date), c (confidence), "
-            "as (affected_sectors), at (affected_themes), ac (affected_commodities), aa (affected_agencies), "
-            "ak (affected_tickers), re (reason). "
-            "Omit fields with default/empty values. Keep event_name under 8 words, reason under 10 words. "
-            "Max 3 items per affected_* list. Minimize total output tokens. "
-            "Output compact minified JSON — no indentation, no extra spaces, no newlines. "
-            "Do NOT wrap the JSON in any container object. "
-            "Do NOT use wrapper keys like 'final', 'result', 'output', 'answer', or 'response'. "
-            "Your response must begin with { and end with } — nothing else."
+            "Maintain active macro/government events. Return minified JSON updates only; no wrapper keys. "
+            "End or invalidate events only when today's evidence clearly warrants it. "
+            "Alias keys: a, ck, en, et, gt, s, ed, c, as, at, ac, aa, ak, re. "
+            "Omit empty fields. Names ≤8 words, reasons ≤10 words, lists ≤3 items. "
+            "Response must begin with { and end with }."
         )
         _maint_limits = _get_event_maintenance_prompt_limits(config)
         _MAINT_CANDIDATE_BATCH = int(_maint_limits["candidate_batch_size"])
@@ -4085,6 +4078,7 @@ def _maintain_active_events(
             "supporting_article_hashes", "article_hash", "history_scope_id",
             "base_instance_id", "history_model_stamp", "strategy_config_hash",
             "feature_version", "cache_scope_id", "instance_id",
+            "actual_end_date",
         }
         candidate_batches = [candidates[i:i + _MAINT_CANDIDATE_BATCH] for i in range(0, max(1, len(candidates)), _MAINT_CANDIDATE_BATCH)] if candidates else [[]]
         n_batches = len(candidate_batches)
@@ -4100,7 +4094,22 @@ def _maintain_active_events(
                 key=lambda e: (e.get("last_confirmed_date", ""), float(e.get("confidence") or 0)),
                 reverse=True,
             )[:_max_events_in_prompt]
-        current_capped = [{k: v for k, v in ev.items() if k not in _MAINT_STRIP_KEYS} for ev in _prompt_events]
+        _MAINT_LIST_FIELDS = {"affected_sectors", "affected_themes", "affected_commodities", "affected_agencies", "affected_tickers"}
+
+        def _trim_event_for_prompt(ev: dict, strip_keys: set) -> dict:
+            out = {}
+            for k, v in ev.items():
+                if k in strip_keys:
+                    continue
+                if k == "confidence":
+                    out[k] = round(float(v or 0), 1)
+                elif k in _MAINT_LIST_FIELDS and isinstance(v, list):
+                    out[k] = v[:3]
+                else:
+                    out[k] = v
+            return out
+
+        current_capped = [_trim_event_for_prompt(ev, _MAINT_STRIP_KEYS) for ev in _prompt_events]
         if _maint_limits["auto_reduced"]:
             _log(
                 f"Active-event maintenance: auto-reduced prompt context for {_maint_limits['model_ref']} | "
@@ -4115,7 +4124,7 @@ def _maintain_active_events(
         _maint_outer_retries = 1 if _is_lookback else 2
 
         def _run_maint_batch(batch_candidates: list, max_outer_retries: int = _maint_outer_retries) -> tuple:
-            stripped_candidates = [{k: v for k, v in c.items() if k not in _MAINT_STRIP_KEYS} for c in batch_candidates]
+            stripped_candidates = [_trim_event_for_prompt(c, _MAINT_STRIP_KEYS) for c in batch_candidates]
             batch_prompt_events = list(current_capped)
             _min_retry_events = 20 if _maint_limits["is_gpt_oss"] else 30
             r, t = None, None
@@ -4136,12 +4145,13 @@ def _maintain_active_events(
                         provider, api_key, model, batch_prompt,
                         _ActiveEventMaintenanceResponse,
                         system_prompt=system_prompt,
-                        max_output_tokens=0,
+                        max_output_tokens=256,
                         retries=2,
                         output_retries=2,
                         timeout_sec=_maint_timeout,
                         provider_config=provider_config,
                         prefer_raw_json=True,
+                        use_prompt_cache=True,
                     )
                 t = _build_llm_trace("event_maintenance", provider, model, batch_prompt, system_prompt, prompt_version, r is not None)
                 if r is not None:
