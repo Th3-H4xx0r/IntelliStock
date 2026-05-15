@@ -8456,6 +8456,33 @@ while not shutdown_requested:
                         primary_strategy = primary_entry.get("strategy")
                         primary_action_intent = primary_entry.get("action_intent")
                         final_reason = str(primary_entry.get("reason") or "").strip()[:1500]
+
+                    # Z2.1 phase 1 (log-only): observe ghost-sells where action
+                    # is "sell" but the primary strategy never declared a sell
+                    # intent — these were the root cause of AMD/SOXL early exits
+                    # in backtest 299903 (sells fired without any documented
+                    # sentiment-driven trigger). Whitelist the legitimate
+                    # sell intents; anything outside is flagged but NOT blocked.
+                    _Z21_SELL_INTENT_WHITELIST = {
+                        "sell", "sell_override", "stop_loss", "circuit_breaker",
+                        "v11_deep_loser_protect", "trend_reversal_forced",
+                        "fast_loser_cut", "trailing_stop", "max_hold_exceeded",
+                        "drawdown_halt", "max_open_loss",
+                    }
+                    if (
+                        action == "sell"
+                        and not override_applied
+                        and (
+                            primary_action_intent is None
+                            or str(primary_action_intent).strip().lower() not in _Z21_SELL_INTENT_WHITELIST
+                        )
+                    ):
+                        _log(
+                            f"[ghost_sell_observation] symbol={symbol} intent={primary_action_intent!r} "
+                            f"reason={final_reason[:120]!r} would_block_in_phase2=True",
+                            "yellow",
+                        )
+
                     _backtest_decisions.append({
                         "timestamp": current_time.isoformat() if hasattr(current_time, "isoformat") else str(current_time),
                         "symbol": symbol,

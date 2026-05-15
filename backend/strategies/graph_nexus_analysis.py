@@ -13892,6 +13892,13 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     Direct LLM sentiment takes priority; graph-propagated scores use configurable thresholds.
     Pending future trades are combined with the fresh analysis as additional votes.
     portfolio_emulator: optional PortfolioEmulator — used for hold-limit exit logic.
+
+    Z2.2 (2026-05-15): union currently-held positions into symbols_list so every
+    held name produces a decision record each bar. Backtest 299903 had AORT
+    in only 2 of 9 decision records (buy + final sell) — the strategy never
+    re-evaluated it during the -33% drawdown. With this change, held names
+    not in the active discovery universe still get scored, enabling the
+    stop-loss / drawdown logic to fire on every bar.
     """
     import datetime as _dt
     if strategy_cache is None:
@@ -13900,6 +13907,26 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     sell_thresh = float(config.get("sell_threshold", _DEFAULT_SELL_THRESHOLD))
     max_hold_days = int(config.get("max_hold_days", 90) or 90)
     pending_by_symbol = pending_by_symbol or {}
+
+    # Z2.2: union held positions into the scored universe
+    if portfolio_emulator is not None:
+        try:
+            _held_positions = portfolio_emulator._positions or {}
+            _existing_set = set(symbols_list or [])
+            _held_added: list[str] = []
+            for _sym, _qty in _held_positions.items():
+                if _qty and _qty > 0 and _sym and _sym not in _existing_set:
+                    symbols_list = list(symbols_list) + [_sym]
+                    _existing_set.add(_sym)
+                    _held_added.append(_sym)
+            if _held_added:
+                _log(
+                    f"Held-position re-eval (Z2.2): added {len(_held_added)} held name(s) to scoring "
+                    f"universe: {', '.join(_held_added[:10])}{'...' if len(_held_added) > 10 else ''}",
+                    "cyan",
+                )
+        except Exception as _z22_err:
+            _log(f"Z2.2 held-position union skipped: {_z22_err}", "yellow")
 
     # Build per-ticker entry date of the CURRENT open position from portfolio emulator trade history.
     # "Entry date" = earliest buy AFTER the most recent sell (or earliest buy ever if never sold).
