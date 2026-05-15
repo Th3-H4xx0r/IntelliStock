@@ -5375,6 +5375,39 @@ def _detect_market_regime(
         return "bull"
 
 
+def _nexus_regime_classify(
+    spy_20d_return: float | None,
+    v31_regime: str | None,
+    vix: float | None = None,
+    *,
+    spy_intraday_drop_pct: float | None = None,
+) -> str:
+    """Z4.1 + Section 5: classify the package-wide regime as one of
+    bull / chop / bear / crash. Used to gate capacity, position sizing,
+    and momentum-driven discovery lanes per the spec.
+
+    Precedence (most defensive first):
+    - crash: VIX > 40 OR SPY -8% intraday
+    - bear:  V31=bear OR SPY 20d < -5%
+    - bull:  V31=bull AND SPY 20d > +2%
+    - chop:  otherwise
+    """
+    try:
+        if vix is not None and vix > 40:
+            return "crash"
+        if spy_intraday_drop_pct is not None and spy_intraday_drop_pct <= -0.08:
+            return "crash"
+        v31 = str(v31_regime or "").strip().lower()
+        spy = spy_20d_return if spy_20d_return is not None else 0.0
+        if v31 == "bear" or spy < -0.05:
+            return "bear"
+        if v31 == "bull" and spy > 0.02:
+            return "bull"
+        return "chop"
+    except Exception:
+        return "chop"
+
+
 def _spy_20d_return(strategy_cache: dict | None, date_key: str) -> float | None:
     """Z2.3: return SPY's 20-day return as a fraction (e.g. +0.0374 for +3.74%),
     or None if not enough data. Used by ``_compute_macro_risk_scale`` to gate
@@ -19996,6 +20029,32 @@ class GraphNexusAnalysis:
                 # Held adds and rotation TRIMS (sell side) still flow so the portfolio
                 # can naturally shrink toward the cap.
                 _max_positions = int(config.get("max_positions", 15) or 15)
+                # Z4.1 + Section 5 (2026-05-15): apply regime-based caps so
+                # capacity contracts in adverse markets without operator
+                # intervention. Defaults preserve current behavior in bull;
+                # chop halves the cap, bear quarters, crash halts new buys.
+                # Set nexus_regime_capacity_gating_enabled=false to disable.
+                if bool(config.get("nexus_regime_capacity_gating_enabled", True)):
+                    _z41_spy_20d = _spy_20d_return(strategy_cache, date_key)
+                    _z41_v31 = str((strategy_cache or {}).get("_market_regime") or "bull")
+                    _z41_vix = (strategy_cache or {}).get("_vix_latest") if isinstance(strategy_cache, dict) else None
+                    _z41_regime = _nexus_regime_classify(_z41_spy_20d, _z41_v31, _z41_vix)
+                    _z41_caps = {
+                        "bull":  int(config.get("max_positions_bull",  _max_positions) or _max_positions),
+                        "chop":  int(config.get("max_positions_chop",  min(_max_positions, 8)) or 8),
+                        "bear":  int(config.get("max_positions_bear",  min(_max_positions, 4)) or 4),
+                        "crash": int(config.get("max_positions_crash", 0) or 0),
+                    }
+                    _z41_capped = _z41_caps.get(_z41_regime, _max_positions)
+                    if _z41_capped != _max_positions:
+                        _log(
+                            f"Regime capacity gate (Z4.1): regime={_z41_regime} "
+                            f"max_positions {_max_positions}->{_z41_capped} "
+                            f"(spy_20d={_z41_spy_20d if _z41_spy_20d is None else f'{_z41_spy_20d*100:+.2f}%'}, "
+                            f"v31={_z41_v31})",
+                            "cyan",
+                        )
+                        _max_positions = _z41_capped
                 _current_positions = len(portfolio_emulator.get_positions()) if portfolio_emulator and hasattr(portfolio_emulator, 'get_positions') else 0
                 _blocked_buys = []
                 # V28.8.1 (Codex-corrected): breach detection + strategy_cache flag
