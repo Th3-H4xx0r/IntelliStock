@@ -4131,7 +4131,11 @@ def _maintain_active_events(
         _log(f"Active-event maintenance: {n_batches} parallel batch(es) | current={len(current_events)} (prompt={len(_prompt_events)}) candidates={len(candidates)}", "cyan")
 
         _is_lookback = bool(config.get("historical_lookback_mode", False))
-        _maint_timeout = 90 if _is_lookback else 120
+        # 2026-05-15: 90/120 -> 180/240. With max_output_tokens uncapped and
+        # HIGH-effort reasoning models, individual calls routinely take
+        # 70-90s. The 90s lookback timeout was firing on every batch and
+        # the retry path didn't help because retries also timed out.
+        _maint_timeout = int(config.get("event_maintenance_timeout_sec", 180 if _is_lookback else 240) or (180 if _is_lookback else 240))
         _maint_outer_retries = 1 if _is_lookback else 2
         def _run_maint_batch(batch_candidates: list, max_outer_retries: int = _maint_outer_retries) -> tuple:
             stripped_candidates = [_trim_event_for_prompt(c, _MAINT_STRIP_KEYS) for c in batch_candidates]
