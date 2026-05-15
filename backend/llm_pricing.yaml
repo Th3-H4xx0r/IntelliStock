@@ -27,6 +27,11 @@ gpt-5-mini:
   input_per_1m: 0.25
   output_per_1m: 2.00
 
+gpt-5.4-mini:
+  provider: azure
+  input_per_1m: 0.25
+  output_per_1m: 2.00
+
 gpt-oss-120b:
   provider: azure
   input_per_1m: 0.0
