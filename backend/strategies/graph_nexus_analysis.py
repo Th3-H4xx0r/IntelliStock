@@ -4155,14 +4155,16 @@ def _maintain_active_events(
                         provider, api_key, model, batch_prompt,
                         _ActiveEventMaintenanceResponse,
                         system_prompt=system_prompt,
-                        # 2026-05-15: raised 1024 -> 4096 -> 8192. The 4096
-                        # cap still wasn't enough: 2 of 3 maintenance batches
-                        # were pinning at output=4096 reasoning=4096 (entire
-                        # budget burnt on reasoning, zero left for JSON).
-                        # Observed batch reasoning needs: 3520, 3520, 4096+.
-                        # 8192 gives ~4k headroom for reasoning AND ~4k for
-                        # the actual updates JSON.
-                        max_output_tokens=8192,
+                        # 2026-05-15: 1024 -> 4096 -> 8192 -> 0 (uncapped).
+                        # Each ceiling was insufficient because reasoning
+                        # models (gpt-5-mini-MEDIUM/HIGH, claude-sonnet w/
+                        # extended thinking) consume their entire budget on
+                        # reasoning and leave nothing for the response.
+                        # 8192 still hit the cap on HIGH effort
+                        # (output=8192 reasoning=8192). Matching the
+                        # macro_classification call site which also uses 0
+                        # (uncapped) — let the model decide its own budget.
+                        max_output_tokens=0,
                         retries=2,
                         output_retries=2,
                         timeout_sec=_maint_timeout,
