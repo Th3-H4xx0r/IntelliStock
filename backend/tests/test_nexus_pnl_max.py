@@ -105,8 +105,20 @@ def test_regime_crash_takes_precedence_over_bear():
 
 
 def test_regime_handles_none_spy():
-    # No SPY data — defaults to chop, never crashes
+    # No SPY data with neutral v31 — defaults to chop, never crashes
     assert _nexus_regime_classify(None, "neutral", None) == "chop"
+
+
+def test_regime_backcompat_none_spy_with_bull_v31_returns_bull():
+    # Snapshot-loader backcompat: when SPY data is missing (cold start)
+    # but V31 says bull, return bull instead of chop so live runs don't
+    # silently halve max_positions on the first bar.
+    assert _nexus_regime_classify(None, "bull", None) == "bull"
+
+
+def test_regime_backcompat_does_not_override_bear_when_spy_none():
+    # Even with V31=bear and SPY=None, we still respect bear
+    assert _nexus_regime_classify(None, "bear", None) == "bear"
 
 
 # ── _recent_closes_for_symbol ────────────────────────────────────────

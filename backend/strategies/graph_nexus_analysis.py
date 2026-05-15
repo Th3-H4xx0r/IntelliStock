@@ -5398,6 +5398,13 @@ def _nexus_regime_classify(
         if spy_intraday_drop_pct is not None and spy_intraday_drop_pct <= -0.08:
             return "crash"
         v31 = str(v31_regime or "").strip().lower()
+        # Snapshot-loader backcompat: when SPY 20d return is unavailable
+        # (cold start, old strategy_cache before _overlay_bars_raw was
+        # populated) AND V31 says bull, default to bull rather than chop —
+        # otherwise the first bar of a live run would silently halve
+        # max_positions before the overlay bars cache backfills.
+        if spy_20d_return is None and v31 == "bull":
+            return "bull"
         spy = spy_20d_return if spy_20d_return is not None else 0.0
         if v31 == "bear" or spy < -0.05:
             return "bear"
@@ -6818,7 +6825,8 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "sell_enforcement_min_hold_days": int(config.get("sell_enforcement_min_hold_days", 5) or 5),
         "sell_enforcement_hysteresis_threshold": float(config.get("sell_enforcement_hysteresis_threshold", -0.50) or -0.50),
         "sell_enforcement_consecutive_neutral_days": int(config.get("sell_enforcement_consecutive_neutral_days", 3) or 3),
-        "backfill_budget_reserve_pct": float(config.get("backfill_budget_reserve_pct", 0.20) or 0.20),
+        "backfill_budget_reserve_pct": float(config.get("backfill_budget_reserve_pct", 0.10) or 0.10),
+        "backfill_budget_reserve_pct_high_conviction": float(config.get("backfill_budget_reserve_pct_high_conviction", 0.25) or 0.25),
         "portfolio_drawdown_halt_pct": float(config.get("portfolio_drawdown_halt_pct", 15.0) or 15.0),
         "portfolio_drawdown_resume_up_days": int(config.get("portfolio_drawdown_resume_up_days", 2) or 2),
         "portfolio_drawdown_halt_backfill_budget_pct": float(config.get("portfolio_drawdown_halt_backfill_budget_pct", 0.50) or 0.50),
@@ -6828,6 +6836,18 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "benzinga_lookahead_days": int(config.get("benzinga_lookahead_days", 0) or 0),
         "quality_filter_missing_metadata_policy": missing_meta_policy,
         "quality_market_cap_mode": "warn-only" if missing_meta_policy == "warn" else missing_meta_policy,
+        # Z1-Z5 (2026-05-15 P&L max package): surface new knobs to diagnostic
+        "momentum_discovery_max_20d_return": float(config.get("momentum_discovery_max_20d_return", 80.0) or 0.0),
+        "momentum_discovery_max_60d_return": float(config.get("momentum_discovery_max_60d_return", 200.0) or 0.0),
+        "portfolio_swap_ath_gate_enabled": bool(config.get("portfolio_swap_ath_gate_enabled", True)),
+        "momentum_watchlist_mcap_prefilter_enabled": bool(config.get("momentum_watchlist_mcap_prefilter_enabled", True)),
+        "momentum_watchlist_min_market_cap": float(config.get("momentum_watchlist_min_market_cap", 2_000_000_000) or 2_000_000_000),
+        "max_open_loss_vol_multiplier": float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0),
+        "trailing_stop_activation_vol_multiplier": float(config.get("trailing_stop_activation_vol_multiplier", 0.75) or 0.0),
+        "trailing_stop_activation_vol_cap_pct": float(config.get("trailing_stop_activation_vol_cap_pct", 15.0) or 15.0),
+        "sector_cap_override_raw_net_score": float(config.get("sector_cap_override_raw_net_score", 0.8) or 0.8),
+        "sector_cap_override_min_paths": int(config.get("sector_cap_override_min_paths", 5) or 5),
+        "nexus_regime_capacity_gating_enabled": bool(config.get("nexus_regime_capacity_gating_enabled", True)),
         "backfill_queue_grace_bars": int(config.get("backfill_queue_grace_bars", 3) or 3),
         "backfill_queue_priority_grace_bars": int(config.get("backfill_queue_priority_grace_bars", 8) or 8),
         "backfill_queue_reserved_priority_slots": int(config.get("backfill_queue_reserved_priority_slots", 10) or 10),
@@ -13883,17 +13903,23 @@ def _evaluate_position_risk(
                                 _log(f"Fast loser BLACKLIST: {sym} blocked for {_fl_blacklist[sym]['bars_remaining']} bars", "red")
 
                 # Z3.2 (2026-05-15): default activation lowered from 10% to 5%
-                # AND vol-scaled per-symbol. Spec: activation = max(5%, 0.75 * vol).
-                # High-vol names (SOXL) need a bigger gain before trail activates
-                # to avoid whipsaw; low-vol names trail tightly. Set
-                # trailing_stop_activation_vol_multiplier=0 to disable vol scaling.
+                # AND vol-scaled per-symbol with an upper cap so high-vol
+                # names don't need an unreasonable gain before trail kicks in.
+                # Spec: activation = clamp(max(5%, 0.75*vol), 5%, 15%).
+                # The 15% ceiling is critical — AMD ~40% vol would otherwise
+                # need +30% gain before trail engaged, defeating the
+                # purpose of the early-activation fix.
                 _ts_activation = float(config.get("trailing_stop_activation_pct", 5.0))
                 _z32_vol_mult = float(config.get("trailing_stop_activation_vol_multiplier", 0.75) or 0.0)
+                _z32_vol_cap = float(config.get("trailing_stop_activation_vol_cap_pct", 15.0) or 15.0)
                 if _z32_vol_mult > 0:
                     _z32_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
                     _z32_vol = _realized_vol_20d(_z32_closes)
                     if _z32_vol > 0:
-                        _ts_activation = max(_ts_activation, _z32_vol_mult * _z32_vol * 100.0)
+                        _z32_target = _z32_vol_mult * _z32_vol * 100.0
+                        # Pick the larger of default and vol-scaled, capped
+                        # at the vol_cap_pct ceiling.
+                        _ts_activation = min(_z32_vol_cap, max(_ts_activation, _z32_target))
                 _default_trailing_pct = float(config.get("trailing_stop_pct", 8.0))
                 if sym in _COMMODITY_ETF_TICKERS:
                     _ts_drop = float(config.get("trailing_stop_commodity_etf_pct", 12.0))
@@ -14083,23 +14109,34 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     max_hold_days = int(config.get("max_hold_days", 90) or 90)
     pending_by_symbol = pending_by_symbol or {}
 
-    # Z2.2: union held positions into the scored universe
+    # Z2.2: union held positions into the scored universe so every held
+    # name produces a decision record each bar (enables stop-loss / drawdown
+    # logic to fire continuously). Use the public get_positions() accessor
+    # for thread-safety when running in live mode; fall back to the private
+    # attribute when get_positions() isn't available (older tests/mocks).
     if portfolio_emulator is not None:
         try:
-            _held_positions = portfolio_emulator._positions or {}
+            if hasattr(portfolio_emulator, "get_positions"):
+                _held_positions = portfolio_emulator.get_positions() or {}
+            else:
+                _held_positions = getattr(portfolio_emulator, "_positions", None) or {}
             _existing_set = set(symbols_list or [])
             _held_added: list[str] = []
             for _sym, _qty in _held_positions.items():
                 if _qty and _qty > 0 and _sym and _sym not in _existing_set:
-                    symbols_list = list(symbols_list) + [_sym]
                     _existing_set.add(_sym)
                     _held_added.append(_sym)
+            # Build the new list once outside the loop (was O(n^2) per spawn).
             if _held_added:
-                _log(
-                    f"Held-position re-eval (Z2.2): added {len(_held_added)} held name(s) to scoring "
-                    f"universe: {', '.join(_held_added[:10])}{'...' if len(_held_added) > 10 else ''}",
-                    "cyan",
-                )
+                symbols_list = list(symbols_list) + _held_added
+                # Z2.2 telemetry: log only when verbose mode is set so we
+                # don't drown BacktestResults.logs (500-line truncation).
+                if bool(config.get("nexus_held_reeval_verbose", False)):
+                    _log(
+                        f"Held-position re-eval (Z2.2): added {len(_held_added)} held name(s) to scoring "
+                        f"universe: {', '.join(_held_added[:10])}{'...' if len(_held_added) > 10 else ''}",
+                        "cyan",
+                    )
         except Exception as _z22_err:
             _log(f"Z2.2 held-position union skipped: {_z22_err}", "yellow")
 
@@ -14244,7 +14281,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
             out[sym] = {
                 "score": final_score,
                 "reason": f"{fresh_reason} | scheduled: {ft_reasons}",
-                "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit"])),
+                "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
             }
             if "Profit take" in fresh_reason and final_score == -1:
                 out[sym]["sell_fraction"] = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
@@ -14252,7 +14289,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
             out[sym] = {
                 "score": fresh_score,
                 "reason": fresh_reason,
-                "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit"])),
+                "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
             }
             if "Profit take" in fresh_reason and fresh_score == -1:
                 out[sym]["sell_fraction"] = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
@@ -16581,7 +16618,7 @@ class GraphNexusAnalysis:
                     and _epr_reason
                     and any(
                         x in _epr_reason
-                        for x in ["Fast loser", "Trailing stop", "Hold-limit"]
+                        for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"]
                     )
                 ),
             }
@@ -19541,7 +19578,15 @@ class GraphNexusAnalysis:
                 "yellow",
             )
             _available_buy_budget = _scaled_buy_budget
-        elif _available_buy_budget > 0 and _spy_20d is not None and _spy_20d >= 0:
+        elif (
+            _available_buy_budget > 0
+            and _spy_20d is not None
+            and _spy_20d >= 0
+            and float(_macro_risk_meta.get("net_score", 0.0) or 0.0) < 0
+        ):
+            # Only log SUPPRESSED when macro WOULD have wanted to haircut
+            # (net_score < 0) but SPY 20d disagreed. Avoids per-bar spam
+            # on healthy bull tapes with bullish macro.
             _log(
                 f"Macro risk scaling: SUPPRESSED (SPY 20d={_spy_20d*100:+.2f}% >= 0, "
                 f"price action contradicts macro net={_macro_risk_meta.get('net_score', 0.0):+.2f})",
@@ -19631,11 +19676,11 @@ class GraphNexusAnalysis:
         if _reserved_backfill_budget > 0:
             _effective_reserve_pct = (
                 float(
-                    config.get("backfill_budget_reserve_pct_high_conviction", 0.35)
-                    or 0.35
+                    config.get("backfill_budget_reserve_pct_high_conviction", 0.25)
+                    or 0.25
                 )
                 if _has_hc_in_queue
-                else float(config.get("backfill_budget_reserve_pct", 0.20) or 0.20)
+                else float(config.get("backfill_budget_reserve_pct", 0.10) or 0.10)
             )
             _log(
                 f"Backfill budget reserve: holding ${_reserved_backfill_budget:.0f} "

@@ -8377,6 +8377,42 @@ while not shutdown_requested:
                             # but short-circuiting here avoids the round-trip
                             # and gives operators a clear log trail.
                             _side_word = "buy" if decision == 1 else "sell"
+
+                            # Z2.1 phase 1 (log-only): observe ghost-sells in
+                            # BOTH live and backtest modes. Action is "sell"
+                            # but no legitimate sell intent in the strategy
+                            # summary. The whitelist matches _VALID_ACTION_INTENTS
+                            # sell-side enum values in
+                            # backend/strategies/graph_nexus_analysis.py:554.
+                            # Phase 1 only logs; phase 2 will enforce.
+                            if _side_word == "sell":
+                                try:
+                                    _z21_intents = {
+                                        str(_s.get("action_intent", "")).strip().lower()
+                                        for _s in (strategy_summary or [])
+                                        if _s.get("decision") == decision
+                                    }
+                                except Exception:
+                                    _z21_intents = set()
+                                _Z21_SELL_WHITELIST = {
+                                    "sell", "sell_override",
+                                    "rotation_sell", "trend_reversal_sell",
+                                    "fast_loser_cut", "trailing_stop_sell",
+                                    "circuit_breaker_sell", "hold_limit_sell",
+                                    "deep_loser_protect", "forced_exit",
+                                    "downtrend_protection_sell",
+                                    "consecutive_neutral_pruning",
+                                    "panel_sell", "etf_sell",
+                                }
+                                if not (_z21_intents & _Z21_SELL_WHITELIST):
+                                    _z21_pre = (pre_override_action if 'pre_override_action' in locals() else None)
+                                    _log(
+                                        f"[ghost_sell_observation] symbol={symbol} "
+                                        f"intents={sorted(_z21_intents)!r} pre_action={_z21_pre!r} "
+                                        f"would_block_in_phase2=True",
+                                        "yellow",
+                                    )
+
                             try:
                                 _already = (
                                     mode == MODE_LIVE
@@ -8456,32 +8492,6 @@ while not shutdown_requested:
                         primary_strategy = primary_entry.get("strategy")
                         primary_action_intent = primary_entry.get("action_intent")
                         final_reason = str(primary_entry.get("reason") or "").strip()[:1500]
-
-                    # Z2.1 phase 1 (log-only): observe ghost-sells where action
-                    # is "sell" but the primary strategy never declared a sell
-                    # intent — these were the root cause of AMD/SOXL early exits
-                    # in backtest 299903 (sells fired without any documented
-                    # sentiment-driven trigger). Whitelist the legitimate
-                    # sell intents; anything outside is flagged but NOT blocked.
-                    _Z21_SELL_INTENT_WHITELIST = {
-                        "sell", "sell_override", "stop_loss", "circuit_breaker",
-                        "v11_deep_loser_protect", "trend_reversal_forced",
-                        "fast_loser_cut", "trailing_stop", "max_hold_exceeded",
-                        "drawdown_halt", "max_open_loss",
-                    }
-                    if (
-                        action == "sell"
-                        and not override_applied
-                        and (
-                            primary_action_intent is None
-                            or str(primary_action_intent).strip().lower() not in _Z21_SELL_INTENT_WHITELIST
-                        )
-                    ):
-                        _log(
-                            f"[ghost_sell_observation] symbol={symbol} intent={primary_action_intent!r} "
-                            f"reason={final_reason[:120]!r} would_block_in_phase2=True",
-                            "yellow",
-                        )
 
                     _backtest_decisions.append({
                         "timestamp": current_time.isoformat() if hasattr(current_time, "isoformat") else str(current_time),
