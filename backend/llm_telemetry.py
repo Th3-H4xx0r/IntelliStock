@@ -149,8 +149,6 @@ def compute_cost(
         yaml_entry = pricing_yaml.get(model)
         if yaml_entry is not None:
             source = "yaml"
-            for yaml_k in _USAGE_TO_PRICE_KEY.values():
-                pass  # noqa - iterate below
             for yaml_k, _, _ in _USAGE_TO_PRICE_KEY.values():
                 price_keys[yaml_k] = yaml_entry.get(yaml_k)
 
@@ -160,7 +158,14 @@ def compute_cost(
         price_per_1m = price_keys.get(yaml_k)
         if price_per_1m is None:
             continue
-        component = (tokens / 1_000_000.0) * float(price_per_1m)
+        # Defensive cast: a malformed YAML entry (e.g., price set to a dict
+        # or list by accident) would otherwise raise TypeError here, which
+        # the caller swallows and drops the whole row. Skip the component
+        # silently and keep the row with zero cost.
+        try:
+            component = (tokens / 1_000_000.0) * float(price_per_1m)
+        except (TypeError, ValueError):
+            continue
         result[cost_k] = component
         total += component
     result["total_cost_usd"] = total
@@ -278,12 +283,29 @@ def configure(
 
 
 def _reset_for_tests() -> None:
-    """Tear down all state. ONLY for use from tests."""
+    """Tear down all state. ONLY for use from tests.
+
+    Properly signals + joins the flusher thread if one is running so
+    repeated reset/configure cycles in a test suite don't leak daemon
+    threads. The thread is captured under the lock, then joined OUTSIDE
+    the lock so the flusher can acquire the lock to read the stop flag.
+    """
+    with _state_lock:
+        thread_to_stop = _state.get("flusher_thread")
+        if thread_to_stop is not None:
+            _state["stop_flusher"] = True
+    if thread_to_stop is not None:
+        try:
+            # The flusher sleeps in flush_interval_s chunks, so join up to
+            # one interval + a safety margin. The thread is daemon=True, so
+            # even if we time out the test process can still exit cleanly.
+            interval = float(_state.get("flush_interval_s") or 5.0)
+            thread_to_stop.join(timeout=interval + 1.0)
+        except Exception:
+            pass
     with _state_lock:
         _buffer.clear()
         _ring_buffer.clear()
-        if _state.get("flusher_thread"):
-            _state["stop_flusher"] = True
         _state.update({
             "enabled": False, "db_conn_factory": None, "r_module": None,
             "pricing_yaml": {}, "models_override_lookup": None,
@@ -411,8 +433,18 @@ def _do_flush() -> None:
     except Exception as e:
         print(f"[llm_telemetry] flush failed ({len(rows)} rows): {e}",
               file=sys.stderr, flush=True)
+        # Re-queue the failed batch so the next flush retries instead of
+        # silently dropping the rows. Without this, a 30-second RethinkDB
+        # outage at 50 rows/flush burns ~300 records. We bound the re-queue
+        # by the hard cap so a permanently-down DB can't OOM the process —
+        # if the buffer is already full of newer rows, drop the oldest of
+        # the failed batch first (preserving the most recent activity).
         with _state_lock:
             _state["write_errors_24h"] = int(_state.get("write_errors_24h", 0)) + 1
+            hard_cap = int(_state.get("max_buffer_hard_cap", 5000))
+            remaining_capacity = max(0, hard_cap - len(_buffer))
+            if remaining_capacity > 0:
+                _buffer.extendleft(reversed(rows[-remaining_capacity:]))
 
 
 def _flusher_loop() -> None:

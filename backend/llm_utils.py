@@ -1385,6 +1385,17 @@ def _call_claude_cli_structured_from_strategy(
                     reasoning_effort=cfg.get("reasoning_effort"),
                     timeout_sec=timeout_sec,
                 )
+            # Pull the envelope's real usage block out of the claude-cli
+            # provider's thread-local capture. Without this, every successful
+            # structured call here would record an empty usage dict, and the
+            # token-usage dashboard would always show zero for the project's
+            # primary provider. The capture is set on success paths only;
+            # falling back to {} for the rare race / shim case is safe.
+            try:
+                from chatbot.claude_cli_provider import get_last_struct_envelope_usage
+                _envelope_usage = get_last_struct_envelope_usage()
+            except Exception:
+                _envelope_usage = {}
             _LAST_STRUCTURED_LLM_CALL.data = {
                 "provider": "claude-cli",
                 "requested_model": model,
@@ -1396,7 +1407,7 @@ def _call_claude_cli_structured_from_strategy(
                 "raw_json_fallback_used": False,
                 "ok": True,
                 "error": "",
-                "usage": {},
+                "usage": _envelope_usage,
                 "suppressed": False,
             }
             # Store in prompt cache if requested.

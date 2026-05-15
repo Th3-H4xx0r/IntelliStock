@@ -1736,8 +1736,31 @@ def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), curre
 @app.put("/models/{model_id}", response_class=JSONResponse)
 def api_edit_model(model_id: str, body: EditModelBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Edit a Model record. Open to any authenticated user; same safety
-    reasoning as create (cli_path + extra_args allowlists)."""
-    kwargs = {k: v for k, v in body.dict().items() if v is not None}
+    reasoning as create (cli_path + extra_args allowlists).
+
+    For the four pricing-override fields, an explicit ``null`` in the
+    request body clears the override on the row (forces YAML fallback).
+    Without this special-case, the generic ``v is not None`` filter below
+    would silently drop the field, and once a user set a pricing override
+    they could never remove it. We use Pydantic v2's ``model_fields_set``
+    to distinguish "field was provided as null" (clear) from "field was
+    omitted entirely" (leave unchanged).
+    """
+    _PRICING_FIELDS = (
+        "input_cost_per_1m", "output_cost_per_1m",
+        "cache_creation_cost_per_1m", "cache_read_cost_per_1m",
+    )
+    body_dict = body.dict()
+    set_fields = getattr(body, "model_fields_set", None) or set(body_dict.keys())
+    kwargs = {}
+    for k, v in body_dict.items():
+        if k in _PRICING_FIELDS:
+            # If the caller explicitly sent the field (even as null), include
+            # it so action_edit_model can clear the doc field.
+            if k in set_fields:
+                kwargs[k] = v
+        elif v is not None:
+            kwargs[k] = v
     try:
         return _run(action_edit_model, conn, model_id, **kwargs)
     except ValueError as e:
@@ -2716,7 +2739,7 @@ def api_llm_output_get(output_id: str):
 def api_llm_usage_summary(
     range: str = "24h",
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
     return _llm_usage_summary(range_str=range, conn=conn)
 
@@ -2727,7 +2750,7 @@ def api_llm_usage_timeseries(
     bucket: str = "hour",
     provider: str = "",
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
     return _llm_usage_timeseries(
         range_str=range, bucket=bucket, provider=provider or None, conn=conn,
@@ -2740,7 +2763,7 @@ def api_llm_usage_top_spenders(
     group_by: str = "model",
     limit: int = 10,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
     return _llm_usage_top_spenders(
         range_str=range, group_by=group_by, limit=limit, conn=conn,
@@ -2757,7 +2780,7 @@ def api_llm_usage_calls(
     backtest_id: str = "",
     strategy: str = "",
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
     import llm_telemetry
     if (
@@ -2783,7 +2806,7 @@ def api_llm_usage_calls(
 
 
 @app.get("/llm-usage/health", response_class=JSONResponse)
-def api_llm_usage_health(current_user: dict = Depends(get_current_user)):
+def api_llm_usage_health(current_user: dict = Depends(require_admin)):
     import llm_telemetry
     return {
         "buffer_depth": llm_telemetry.get_buffer_depth(),
@@ -2808,9 +2831,12 @@ def _llm_usage_summary(*, range_str: str, conn) -> dict:
     start, end = _range_to_ms_window(range_str)
     rows: list = []
     try:
+        # Use the `ts` secondary index (created by ensure_llm_usage_tables)
+        # so the dashboard stays sub-second at 100K+ rows. The .filter()
+        # alternative forces a full table scan.
         rows = list(
             _r_auth.db("IntelliStock").table("LLMUsage")
-            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end))
+            .between(start, end, index="ts")
             .run(conn)
         )
     except Exception:
@@ -2862,7 +2888,7 @@ def _llm_usage_timeseries(*, range_str, bucket, provider, conn) -> list:
     try:
         rows = list(
             _r_auth.db("IntelliStock").table("LLMUsage")
-            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end))
+            .between(start, end, index="ts")
             .run(conn)
         )
     except Exception:
@@ -2890,7 +2916,7 @@ def _llm_usage_top_spenders(*, range_str, group_by, limit, conn) -> list:
     try:
         rows = list(
             _r_auth.db("IntelliStock").table("LLMUsage")
-            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end))
+            .between(start, end, index="ts")
             .run(conn)
         )
     except Exception:
@@ -2911,30 +2937,28 @@ def _llm_usage_calls_db(*, limit, offset, range_str, provider, model,
                         backtest_id, strategy, conn) -> list:
     start, end = _range_to_ms_window(range_str if range_str != "now" else "24h")
     try:
-        q = _r_auth.db("IntelliStock").table("LLMUsage").filter(
-            lambda x: (x["ts"] >= start) & (x["ts"] < end)
-        )
+        # Push the time-range + filters + ordering INTO the query so we
+        # never materialize the whole window. between(index="ts") uses the
+        # secondary index; order_by(index=r.desc("ts")) reverses the scan.
+        q = _r_auth.db("IntelliStock").table("LLMUsage").between(
+            start, end, index="ts"
+        ).order_by(index=_r_auth.desc("ts"))
+        if provider:
+            q = q.filter({"provider": provider})
+        if model:
+            q = q.filter({"model": model})
+        if backtest_id:
+            q = q.filter({"backtest_id": backtest_id})
+        if strategy:
+            q = q.filter({"strategy": strategy})
         rows = list(
-            q.order_by(_r_auth.desc("ts"))
-            .skip(int(offset))
+            q.skip(int(offset))
             .limit(int(limit))
             .run(conn)
         )
     except Exception:
         rows = []
-
-    def _keep(row):
-        if provider and row.get("provider") != provider:
-            return False
-        if model and row.get("model") != model:
-            return False
-        if backtest_id and row.get("backtest_id") != backtest_id:
-            return False
-        if strategy and row.get("strategy") != strategy:
-            return False
-        return True
-
-    return [x for x in rows if _keep(x)]
+    return rows
 
 
 # Host/port from env (used when running this module; uvicorn CLI can override with --host/--port)

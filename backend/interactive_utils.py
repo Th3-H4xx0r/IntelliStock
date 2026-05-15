@@ -7999,6 +7999,14 @@ def action_edit_model(conn, model_id, **kwargs):
             # Persist the canonical (validator-emitted) value so any
             # numeric/enum rewrites land in the doc.
             kwargs["extra_args"] = validated
+    # The four cost-override fields special-case explicit None as "clear
+    # the override" so a user can remove a previously-set pricing override
+    # from the UI. All other fields treat None as "leave unchanged" (the
+    # historical contract; callers omit fields they don't want to touch).
+    _PRICING_FIELDS = (
+        "input_cost_per_1m", "output_cost_per_1m",
+        "cache_creation_cost_per_1m", "cache_read_cost_per_1m",
+    )
     update = {"updated_at": datetime.datetime.utcnow().isoformat() + "Z"}
     for field in ("name", "provider", "model", "api_key", "openai_base_url",
                   "nvidia_base_url", "azure_openai_endpoint",
@@ -8006,13 +8014,20 @@ def action_edit_model(conn, model_id, **kwargs):
                   "cli_path", "extra_args",
                   "input_cost_per_1m", "output_cost_per_1m",
                   "cache_creation_cost_per_1m", "cache_read_cost_per_1m"):
-        if field in kwargs and kwargs[field] is not None:
-            val = kwargs[field]
-            if isinstance(val, str):
-                val = val.strip()
-                if field == "provider":
-                    val = val.lower()
-            update[field] = val
+        if field not in kwargs:
+            continue
+        val = kwargs[field]
+        if val is None:
+            if field in _PRICING_FIELDS:
+                # Clear the override.
+                update[field] = None
+            # Otherwise leave the doc field untouched.
+            continue
+        if isinstance(val, str):
+            val = val.strip()
+            if field == "provider":
+                val = val.lower()
+        update[field] = val
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).update(update).run(conn)
     updated = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     # If the conversation is using a claude-cli session with this model,

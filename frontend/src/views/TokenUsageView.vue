@@ -43,25 +43,30 @@ function fmtTime(ms) {
 async function fetchAll() {
   loading.value = true
   loadError.value = ''
-  try {
-    const headers = authHeaders()
-    const [s, ts, tm, tc, calls] = await Promise.all([
-      fetch(`${API_BASE}/llm-usage/summary?range=${range.value}`, { headers }).then(r => r.json()),
-      fetch(`${API_BASE}/llm-usage/timeseries?range=${range.value}&bucket=${range.value === '24h' ? 'hour' : 'day'}`, { headers }).then(r => r.json()),
-      fetch(`${API_BASE}/llm-usage/top-spenders?range=${range.value}&group_by=model&limit=10`, { headers }).then(r => r.json()),
-      fetch(`${API_BASE}/llm-usage/top-spenders?range=${range.value}&group_by=call_site&limit=10`, { headers }).then(r => r.json()),
-      fetch(`${API_BASE}/llm-usage/calls?limit=50&range=now`, { headers }).then(r => r.json()),
-    ])
-    summary.value = s
-    timeseries.value = Array.isArray(ts) ? ts : []
-    topByModel.value = Array.isArray(tm) ? tm : []
-    topByCallSite.value = Array.isArray(tc) ? tc : []
-    recentCalls.value = Array.isArray(calls) ? calls : []
-  } catch (e) {
-    loadError.value = `Failed to load: ${e.message}`
-  } finally {
-    loading.value = false
-  }
+  // Use Promise.allSettled so one failing endpoint doesn't blank the whole
+  // dashboard. Each section degrades independently — the widgets show stale
+  // data, the chart shows "no data", the recent-calls table goes empty.
+  const headers = authHeaders()
+  const bucket = range.value === '24h' ? 'hour' : 'day'
+  const reqs = [
+    fetch(`${API_BASE}/llm-usage/summary?range=${range.value}`, { headers }).then(r => r.json()),
+    fetch(`${API_BASE}/llm-usage/timeseries?range=${range.value}&bucket=${bucket}`, { headers }).then(r => r.json()),
+    fetch(`${API_BASE}/llm-usage/top-spenders?range=${range.value}&group_by=model&limit=10`, { headers }).then(r => r.json()),
+    fetch(`${API_BASE}/llm-usage/top-spenders?range=${range.value}&group_by=call_site&limit=10`, { headers }).then(r => r.json()),
+    fetch(`${API_BASE}/llm-usage/calls?limit=50&range=now`, { headers }).then(r => r.json()),
+  ]
+  const results = await Promise.allSettled(reqs)
+  const [s, ts, tm, tc, calls] = results
+  if (s.status === 'fulfilled') summary.value = s.value
+  if (ts.status === 'fulfilled') timeseries.value = Array.isArray(ts.value) ? ts.value : []
+  if (tm.status === 'fulfilled') topByModel.value = Array.isArray(tm.value) ? tm.value : []
+  if (tc.status === 'fulfilled') topByCallSite.value = Array.isArray(tc.value) ? tc.value : []
+  if (calls.status === 'fulfilled') recentCalls.value = Array.isArray(calls.value) ? calls.value : []
+  const failures = results.filter(r => r.status === 'rejected')
+  loadError.value = failures.length
+    ? `${failures.length} of 5 endpoints failed: ${failures[0].reason?.message || 'unknown'}`
+    : ''
+  loading.value = false
 }
 
 const chartSeries = computed(() => {
@@ -89,10 +94,14 @@ const chartOptions = computed(() => ({
   tooltip: { y: { formatter: (v) => fmtUSD(v) } },
 }))
 
+// The Claude Max plan budget, in USD. Hard-coded for now; if we ever
+// support multiple plans this should come from the summary endpoint.
+const MAX_PLAN_BUDGET_USD = 100.0
+
 const maxPlanPct = computed(() => {
   const est = summary.value?.max_plan_estimate_usd
-  if (!est) return 0
-  return Math.min(100, Math.round((est / 100.0) * 100))
+  if (!est || MAX_PLAN_BUDGET_USD <= 0) return 0
+  return Math.min(100, Math.round((est / MAX_PLAN_BUDGET_USD) * 100))
 })
 
 onMounted(() => {
@@ -208,7 +217,7 @@ onUnmounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in recentCalls" :key="row.id" class="border-t cursor-pointer hover:bg-slate-50" @click="selectedCall = row">
+            <tr v-for="(row, idx) in recentCalls" :key="row.id || `${row.ts}-${idx}`" class="border-t cursor-pointer hover:bg-slate-50" @click="selectedCall = row">
               <td>{{ fmtTime(row.ts) }}</td>
               <td>{{ row.provider }}</td>
               <td>{{ row.model }}</td>

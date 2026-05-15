@@ -536,6 +536,25 @@ _STRUCTURED_RUNTIME_HOME_LOCK = threading.Lock()
 # workers run in parallel. The counter pairs entry/exit lines.
 _STRUCTURED_SPAWN_COUNTER: int = 0
 _STRUCTURED_SPAWN_LOCK = threading.Lock()
+
+# Thread-local capture of the most recent structured-call envelope's usage
+# block. Telemetry reads this in llm_utils._call_claude_cli_structured_from_strategy
+# so the LLMUsage row gets real input_tokens/output_tokens/cache_*_tokens instead
+# of an empty dict. Without this, the dashboard would show zero tokens for the
+# project's primary provider (claude-cli) because the envelope's usage block is
+# parsed and discarded inside this module.
+_LAST_STRUCT_ENVELOPE_USAGE = threading.local()
+
+
+def get_last_struct_envelope_usage() -> Dict[str, Any]:
+    """Return the most recent structured-call envelope usage dict for the
+    current thread. Returns ``{}`` if no call has happened yet, or if the
+    envelope didn't carry a usage block. The thread-local is overwritten at
+    the end of every ``call_claude_cli_structured`` invocation (success path
+    only — failure paths leave the previous value, but callers gate reads on
+    their own success flag so stale data isn't observable as success).
+    """
+    return getattr(_LAST_STRUCT_ENVELOPE_USAGE, "data", {}) or {}
 # Toggle full-stdout dumps to the log for diagnosing model-output issues.
 # DEFAULT-OFF in prod — the structured_output reader fix (40ff345) is
 # stable, so the per-spawn ~1500-char repr() dumps add log volume + I/O
@@ -2354,6 +2373,18 @@ def call_claude_cli_structured(
                 str(result_envelope.get("result") or "")
             )
         raise err
+
+    # Capture the envelope's usage block on a thread-local so the upstream
+    # telemetry layer (llm_utils -> record_llm_call) can read real token
+    # counts. Without this, claude-cli rows in LLMUsage would always show
+    # input_tokens=0/output_tokens=0 because the envelope is parsed locally
+    # and never propagated. The block is set BEFORE the success path returns
+    # so even validation-repair returns capture the right usage.
+    _env_usage = result_envelope.get("usage")
+    if isinstance(_env_usage, dict):
+        _LAST_STRUCT_ENVELOPE_USAGE.data = dict(_env_usage)
+    else:
+        _LAST_STRUCT_ENVELOPE_USAGE.data = {}
 
     # CC's --json-schema flag puts the validated structured output in
     # a SEPARATE ``structured_output`` field on the envelope when the
