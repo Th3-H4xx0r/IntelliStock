@@ -4145,7 +4145,7 @@ def _maintain_active_events(
                         provider, api_key, model, batch_prompt,
                         _ActiveEventMaintenanceResponse,
                         system_prompt=system_prompt,
-                        max_output_tokens=256,
+                        max_output_tokens=1024,
                         retries=2,
                         output_retries=2,
                         timeout_sec=_maint_timeout,
