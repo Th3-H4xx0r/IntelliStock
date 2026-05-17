@@ -5550,6 +5550,258 @@ def _recent_closes_for_symbol(
     return closes
 
 
+# ── Tier-3 P&L max: conviction-aware loss floor matrix ──────────────────────
+# 2026-05-17: Backtest 901920 revealed an 80% false-positive rate on the
+# circuit-breaker -15% floor (SNDK -18.3% → +487% missed, FGL -22.8% → +338%
+# missed, ROLR -22.5% → +77% missed, ORLA -16.3% → +34% missed). CAR was the
+# only vindicated exit. Tier-3 spec A1 introduces a conviction-tier resolver:
+# HIGH-conviction positions (mcap > $50B OR raw_score >= 1.5) get a wider
+# absolute floor (-25%) with vol-scaling disabled. MID-conviction get -20%.
+# LOW-conviction retain the current -15% behavior.
+# See docs/superpowers/specs/2026-05-17-nexus-tier3-missed-rally-fixes-design.md
+
+
+def _resolve_position_market_cap(
+    sym: str,
+    strategy_cache: dict | None,
+) -> float | None:
+    """Return cached market cap in USD for ``sym`` or None if unknown.
+
+    Reads from the existing `_yf_market_cap_cache` (already populated by
+    `_get_quality_metadata_for_ticker` and Benzinga). Returns None if the
+    cache miss makes the conviction tier undecidable (caller treats as MID).
+    """
+    if not isinstance(strategy_cache, dict):
+        return None
+    cache = strategy_cache.get("_yf_market_cap_cache") or {}
+    try:
+        v = cache.get(str(sym or "").strip().upper())
+        if v is None:
+            return None
+        return float(v) if float(v) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_conviction_tier_at_exit(
+    sym: str,
+    config: dict,
+    strategy_cache: dict | None,
+    propagated: dict | None,
+) -> str:
+    """Return ``"HIGH"`` / ``"MID"`` / ``"LOW"`` for ``sym``.
+
+    HIGH triggers (any of):
+      * Market cap >= ``circuit_breaker_high_conviction_mcap_threshold_usd`` (50B default)
+      * Current raw_net_score from ``propagated[sym]`` >= ``circuit_breaker_high_conviction_raw_score_threshold`` (1.5 default)
+
+    MID trigger:
+      * Current raw_net_score >= ``circuit_breaker_mid_conviction_raw_score_threshold`` (0.5 default)
+
+    LOW: default fallback. This mirrors the pre-Tier-3 behavior (no widening).
+
+    NOTE: This uses the CURRENT bar's propagated score as a proxy for entry-time
+    conviction. Phase 3 telemetry will measure whether entry-time caching is
+    needed; for now the proxy is acceptable because conviction tends to be
+    sticky over ~14 day holds.
+    """
+    sym = str(sym or "").strip().upper()
+    if not sym:
+        return "LOW"
+    try:
+        mcap_threshold = float(
+            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 50e9) or 50e9
+        )
+    except (TypeError, ValueError):
+        mcap_threshold = 50e9
+    try:
+        raw_high = float(
+            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.5) or 1.5
+        )
+    except (TypeError, ValueError):
+        raw_high = 1.5
+    try:
+        raw_mid = float(
+            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.5) or 0.5
+        )
+    except (TypeError, ValueError):
+        raw_mid = 0.5
+
+    mcap = _resolve_position_market_cap(sym, strategy_cache)
+    if mcap is not None and mcap >= mcap_threshold:
+        return "HIGH"
+
+    raw_score = 0.0
+    if isinstance(propagated, dict):
+        entry = propagated.get(sym) or {}
+        if isinstance(entry, dict):
+            try:
+                raw_score = float(entry.get("raw_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                raw_score = 0.0
+
+    if raw_score >= raw_high:
+        return "HIGH"
+    if raw_score >= raw_mid:
+        return "MID"
+    return "LOW"
+
+
+def _get_conviction_aware_floor(
+    tier: str,
+    config: dict,
+    *,
+    regime: str | None = None,
+) -> tuple[float, float, float]:
+    """Return ``(floor_pct, vol_mult, low_vol_disable_threshold)`` for ``tier``.
+
+    ``floor_pct``: absolute loss floor (e.g. -25.0 for HIGH).
+    ``vol_mult``: vol-scaling multiplier. HIGH disables vol scaling (0.0) so
+        the absolute floor dominates. MID/LOW use the existing
+        ``max_open_loss_vol_multiplier`` config (default 2.0).
+    ``low_vol_disable_threshold``: realized-vol below which vol scaling is
+        skipped entirely (default 0.08 = 8% annualized). SNDK's 5-7% vol made
+        the Tier-2 vol-scaled floor TIGHTER than the absolute default; this
+        threshold prevents that pathology.
+
+    ``regime`` is optional (Tier-3 Phase 2b A2). When provided as
+    ``"bull"``/``"chop"``/``"bear"``/``"crash"``, applies the regime
+    adjustment. ``"crash"`` returns a special floor of 0.0 to indicate
+    emergency-exit (caller treats as immediate sell).
+    """
+    tier = str(tier or "LOW").upper()
+    if tier == "HIGH":
+        floor = float(
+            config.get("circuit_breaker_floor_high_conviction_pct", -25.0) or -25.0
+        )
+        vol_mult = 0.0  # disable vol scaling — absolute floor dominates
+    elif tier == "MID":
+        floor = float(
+            config.get("circuit_breaker_floor_mid_conviction_pct", -20.0) or -20.0
+        )
+        vol_mult = float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0)
+    else:
+        floor = float(
+            config.get("circuit_breaker_floor_low_conviction_pct", -15.0) or -15.0
+        )
+        vol_mult = float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0)
+
+    low_vol_threshold = float(
+        config.get("circuit_breaker_low_vol_disable_threshold_pct", 0.08) or 0.08
+    )
+
+    # Phase 2b A2: regime adjustment. Bull widens (lets winners breathe); bear
+    # tightens (capital preservation); crash forces emergency exit.
+    if regime is not None:
+        regime_lower = str(regime or "").strip().lower()
+        if regime_lower == "crash":
+            return 0.0, 0.0, low_vol_threshold  # sentinel: caller treats as exit
+        try:
+            bull_pp = float(
+                config.get("circuit_breaker_regime_adjustment_bull_pp", 5.0) or 5.0
+            )
+        except (TypeError, ValueError):
+            bull_pp = 5.0
+        try:
+            bear_pp = float(
+                config.get("circuit_breaker_regime_adjustment_bear_pp", -5.0) or -5.0
+            )
+        except (TypeError, ValueError):
+            bear_pp = -5.0
+        if regime_lower == "bull":
+            floor = floor + bull_pp  # widens floor (less negative)
+        elif regime_lower == "bear":
+            floor = floor + bear_pp  # tightens floor (more negative)
+        # chop / unknown: no adjustment
+
+    return floor, vol_mult, low_vol_threshold
+
+
+def _get_scaled_cash_reserve_floor_pct(
+    config: dict,
+    initial_value: float,
+) -> float:
+    """Return the cash-reserve floor pct scaled by account size.
+
+    Tier-3 B1: small accounts ($7K-$50K) had 10% × $7K = $700 permanently
+    reserved, making it impossible to fund late-arriving high-conviction
+    signals (LITE raw=1.500). Scale down for small accounts.
+    """
+    try:
+        small_threshold = float(
+            config.get("cash_reserve_floor_threshold_small_usd", 50_000.0) or 50_000.0
+        )
+        mid_threshold = float(
+            config.get("cash_reserve_floor_threshold_mid_usd", 200_000.0) or 200_000.0
+        )
+        small_pct = float(config.get("cash_reserve_floor_small_pct", 0.05) or 0.05)
+        mid_pct = float(config.get("cash_reserve_floor_mid_pct", 0.075) or 0.075)
+        large_pct = float(config.get("cash_reserve_floor_large_pct", 0.10) or 0.10)
+    except (TypeError, ValueError):
+        # Fallback to current behavior on bad config
+        return float(config.get("cash_reserve_floor_pct", 0.10) or 0.10)
+
+    # Explicit override always wins (back-compat).
+    explicit = config.get("cash_reserve_floor_pct")
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        iv = float(initial_value or 0.0)
+    except (TypeError, ValueError):
+        iv = 0.0
+    if iv < small_threshold:
+        return small_pct
+    if iv < mid_threshold:
+        return mid_pct
+    return large_pct
+
+
+def _get_scaled_max_new_stock_buys(
+    config: dict,
+    initial_value: float,
+) -> int:
+    """Return the per-cycle new-buy budget cap scaled by account size.
+
+    Tier-3 B2: small accounts need more diversification per cycle to escape
+    the LITE/MU starvation pattern. Defaults: small=6, mid=8, large=12.
+    """
+    # Explicit override wins (back-compat).
+    explicit = config.get("allocation_max_new_stock_buys")
+    if explicit is not None:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+    try:
+        small_threshold = float(
+            config.get("allocation_max_new_stock_buys_small_threshold_usd", 50_000.0)
+            or 50_000.0
+        )
+        mid_threshold = float(
+            config.get("allocation_max_new_stock_buys_mid_threshold_usd", 500_000.0)
+            or 500_000.0
+        )
+        small_max = int(config.get("allocation_max_new_stock_buys_small", 6) or 6)
+        mid_max = int(config.get("allocation_max_new_stock_buys_mid", 8) or 8)
+        large_max = int(config.get("allocation_max_new_stock_buys_large", 12) or 12)
+    except (TypeError, ValueError):
+        return 4  # back-compat fallback
+
+    try:
+        iv = float(initial_value or 0.0)
+    except (TypeError, ValueError):
+        iv = 0.0
+    if iv < small_threshold:
+        return max(1, small_max)
+    if iv < mid_threshold:
+        return max(1, mid_max)
+    return max(1, large_max)
+
+
 def _entry_marker_from_value(value: Any) -> str:
     if isinstance(value, str):
         return value[:32]
@@ -5679,8 +5931,10 @@ def _rotation_winner_lock_active(
         return False, "disabled"
     if not is_equity:
         return False, "non_equity"
-    min_hold_days = max(0, int(config.get("rotation_winner_lock_min_hold_days", 5) or 5))
-    min_pnl_pct = float(config.get("rotation_winner_lock_min_pnl_pct", 3.0) or 3.0)
+    # Tier-3 B3: relaxed defaults so LITE-class high-conviction late-arrivers
+    # can displace marginal winners. 5d→3d hold, 3%→2% pnl gate.
+    min_hold_days = max(0, int(config.get("rotation_winner_lock_min_hold_days", 3) or 3))
+    min_pnl_pct = float(config.get("rotation_winner_lock_min_pnl_pct", 2.0) or 2.0)
     min_raw_score = float(config.get("rotation_winner_lock_min_raw_score", -0.10) or -0.10)
     max_peak_drawdown_pct = float(config.get("rotation_winner_lock_max_peak_drawdown_pct", 8.0) or 8.0)
     if held_days is None or int(held_days) < min_hold_days:
@@ -6342,13 +6596,16 @@ def _rotation_candidate_allowed(
         min_hold_days = max(0, int(config.get("rotation_min_hold_days", 10) or 10))
         profitable_full_exit_min_hold_days = max(0, int(_cfg("rotation_profitable_full_exit_min_hold_days", 20)))
     min_delta = _cfg("rotation_min_delta", 0.15)
-    profitable_min_delta = _cfg("rotation_profitable_min_delta", 1.50)
+    # Tier-3 B3: relax rotation thresholds so high-conviction late-arrivers
+    # (LITE raw=1.500 in BT901920) can displace marginal winners.
+    profitable_min_delta = _cfg("rotation_profitable_min_delta", 1.00)
     # V11: Widen rotation loss threshold from -3.0 to -0.5
     replace_loss_threshold_pct = _cfg("rotation_replace_loss_threshold_pct", -0.5)
     min_score = _cfg("rotation_min_score", 0.40)
     profitable_min_incoming_raw_score = _cfg("rotation_profitable_min_incoming_raw_score", 2.0)
     break_glass_raw_score = _cfg("rotation_break_glass_raw_score", 2.75)
-    break_glass_delta = _cfg("rotation_break_glass_delta", 2.25)
+    # Tier-3 B3: lower break-glass delta so raw=1.500 signals can break locks.
+    break_glass_delta = _cfg("rotation_break_glass_delta", 1.50)
     delta = float(incoming_rotation_score or 0.0) - float(held_rotation_score or 0.0)
 
     if float(incoming_raw_score or 0.0) < min_score:
@@ -6519,7 +6776,16 @@ def _plan_executable_stock_buy_slate(
     blocked_tickers: set[str] | None = None,
 ) -> tuple[list[dict], list[str], dict[str, Any]]:
     profile = str(config.get("allocation_profile", "balanced") or "balanced").strip().lower()
-    max_new_stock_buys = max(1, int(config.get("allocation_max_new_stock_buys", 4) or 4))
+    # Tier-3 B2: scale per-cycle new-buy cap by account size. Explicit override wins.
+    _alloc_initial_value = 0.0
+    try:
+        # portfolio_emulator may not be in scope here; fall through to default if so.
+        _alloc_initial_value = float(
+            (config.get("_account_initial_value") if isinstance(config, dict) else None) or 0.0
+        )
+    except (TypeError, ValueError):
+        _alloc_initial_value = 0.0
+    max_new_stock_buys = _get_scaled_max_new_stock_buys(config, _alloc_initial_value)
     # V20: Add reserved propagation slots so propagation-discovered stocks
     # can get executed even when the generic slate is full.
     _prop_reserved = int(config.get("propagation_execution_reserved_slots", 2) or 0)
@@ -6876,12 +7142,12 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "backfill_queue_reserved_priority_slots": int(config.get("backfill_queue_reserved_priority_slots", 10) or 10),
         "backfill_queue_max_size": int(config.get("backfill_queue_max_size", 30) or 30),
         "rotation_min_hold_days": int(config.get("rotation_min_hold_days", 10) or 10),
-        "rotation_profitable_min_delta": float(config.get("rotation_profitable_min_delta", 1.50) or 1.50),
+        "rotation_profitable_min_delta": float(config.get("rotation_profitable_min_delta", 1.00) or 1.00),
         "rotation_profitable_full_exit_min_hold_days": int(config.get("rotation_profitable_full_exit_min_hold_days", 20) or 20),
         "rotation_profitable_min_incoming_raw_score": float(config.get("rotation_profitable_min_incoming_raw_score", 2.0) or 2.0),
         "rotation_winner_lock_enabled": bool(config.get("rotation_winner_lock_enabled", True)),
-        "rotation_winner_lock_min_hold_days": int(config.get("rotation_winner_lock_min_hold_days", 5) or 5),
-        "rotation_winner_lock_min_pnl_pct": float(config.get("rotation_winner_lock_min_pnl_pct", 3.0) or 3.0),
+        "rotation_winner_lock_min_hold_days": int(config.get("rotation_winner_lock_min_hold_days", 3) or 3),
+        "rotation_winner_lock_min_pnl_pct": float(config.get("rotation_winner_lock_min_pnl_pct", 2.0) or 2.0),
         "rotation_winner_lock_min_raw_score": float(-0.10 if (v := config.get("rotation_winner_lock_min_raw_score")) is None else v),
         "rotation_winner_lock_max_peak_drawdown_pct": float(config.get("rotation_winner_lock_max_peak_drawdown_pct", 8.0) or 8.0),
         # V28.6: BFQ winner-lock bypass — release valve for post-cascade drainage deadlock
@@ -6893,7 +7159,7 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "backfill_rotation_winner_lock_bypass_min_held_pnl_pct": float(config.get("backfill_rotation_winner_lock_bypass_min_held_pnl_pct", 5.0) or 5.0),
         "backfill_rotation_winner_lock_bypass_min_held_hold_days": int(config.get("backfill_rotation_winner_lock_bypass_min_held_hold_days", 5) or 5),
         "rotation_break_glass_raw_score": float(config.get("rotation_break_glass_raw_score", 2.75) or 2.75),
-        "rotation_break_glass_delta": float(config.get("rotation_break_glass_delta", 2.25) or 2.25),
+        "rotation_break_glass_delta": float(config.get("rotation_break_glass_delta", 1.50) or 1.50),
         "rotation_break_glass_sell_fraction": float(config.get("rotation_break_glass_sell_fraction", 0.50) or 0.50),
         "rotation_replace_loss_threshold_pct": float(-0.5 if (v := config.get("rotation_replace_loss_threshold_pct")) is None else v),
         "propagation_floor_requires_min_paths": bool(config.get("propagation_floor_requires_min_paths", True)),
@@ -6932,6 +7198,65 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "sentiment_llm_model_ref": str(sentiment_limits["model_ref"] or ""),
         "sentiment_prompt_auto_reduced": bool(sentiment_limits["auto_reduced"]),
         "sector_watchlist_keys": watchlist_keys,
+        # Tier-3 (2026-05-17 missed-rally fixes): surface all new knobs
+        # A1 conviction-aware loss floor matrix:
+        "circuit_breaker_floor_high_conviction_pct": float(
+            config.get("circuit_breaker_floor_high_conviction_pct", -25.0) or -25.0
+        ),
+        "circuit_breaker_floor_mid_conviction_pct": float(
+            config.get("circuit_breaker_floor_mid_conviction_pct", -20.0) or -20.0
+        ),
+        "circuit_breaker_floor_low_conviction_pct": float(
+            config.get("circuit_breaker_floor_low_conviction_pct", -15.0) or -15.0
+        ),
+        "circuit_breaker_high_conviction_mcap_threshold_usd": float(
+            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 50e9) or 50e9
+        ),
+        "circuit_breaker_high_conviction_raw_score_threshold": float(
+            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.5) or 1.5
+        ),
+        "circuit_breaker_mid_conviction_raw_score_threshold": float(
+            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.5) or 0.5
+        ),
+        "circuit_breaker_low_vol_disable_threshold_pct": float(
+            config.get("circuit_breaker_low_vol_disable_threshold_pct", 0.08) or 0.08
+        ),
+        # A2 regime-gated floor adjustments (active when Phase 2b ships):
+        "circuit_breaker_regime_gating_enabled": bool(
+            config.get("circuit_breaker_regime_gating_enabled", True)
+        ),
+        "circuit_breaker_regime_adjustment_bull_pp": float(
+            config.get("circuit_breaker_regime_adjustment_bull_pp", 5.0) or 5.0
+        ),
+        "circuit_breaker_regime_adjustment_bear_pp": float(
+            config.get("circuit_breaker_regime_adjustment_bear_pp", -5.0) or -5.0
+        ),
+        # B1 account-size-scaled cash reserve floor:
+        "cash_reserve_floor_small_pct": float(
+            config.get("cash_reserve_floor_small_pct", 0.05) or 0.05
+        ),
+        "cash_reserve_floor_mid_pct": float(
+            config.get("cash_reserve_floor_mid_pct", 0.075) or 0.075
+        ),
+        "cash_reserve_floor_large_pct": float(
+            config.get("cash_reserve_floor_large_pct", 0.10) or 0.10
+        ),
+        "cash_reserve_floor_threshold_small_usd": float(
+            config.get("cash_reserve_floor_threshold_small_usd", 50_000.0) or 50_000.0
+        ),
+        "cash_reserve_floor_threshold_mid_usd": float(
+            config.get("cash_reserve_floor_threshold_mid_usd", 200_000.0) or 200_000.0
+        ),
+        # B2 account-size-scaled max new buys per cycle:
+        "allocation_max_new_stock_buys_small": int(
+            config.get("allocation_max_new_stock_buys_small", 6) or 6
+        ),
+        "allocation_max_new_stock_buys_mid": int(
+            config.get("allocation_max_new_stock_buys_mid", 8) or 8
+        ),
+        "allocation_max_new_stock_buys_large": int(
+            config.get("allocation_max_new_stock_buys_large", 12) or 12
+        ),
     }
 
 def _get_deployment_ramp_caps(config: dict) -> list[float]:
@@ -7006,7 +7331,9 @@ def _compute_available_buy_budget(
     )
     cash_after_sells = cash_now + sell_proceeds
     initial_value = float(getattr(portfolio_emulator, "_initial_value", 0.0) or 0.0)
-    floor_pct = float(config.get("cash_reserve_floor_pct", 0.10) or 0.10)
+    # Tier-3 B1: scale cash-reserve floor by account size. Small accounts
+    # (<$50K) get 5% floor; mid 7.5%; large 10%. Explicit override wins.
+    floor_pct = _get_scaled_cash_reserve_floor_pct(config, initial_value)
     cash_floor = max(0.0, initial_value * floor_pct)
     cash_after_floor = max(0.0, cash_after_sells - cash_floor)
 
@@ -13819,34 +14146,82 @@ def _evaluate_position_risk(
                     elif _unrealized_pct >= 10 and _prop_raw > (-0.15 + _time_decay):
                         fresh_score = 0
                         fresh_reason = f"Winner protection: +{_unrealized_pct:.1f}% gain, raw={_prop_raw:.3f} insufficient to sell"
-                _max_open_loss_pct = float(config.get("max_open_loss_pct", -15.0))
-                # Z3.1 (2026-05-15): vol-scale the loss floor per-symbol.
-                # Low-vol names get a TIGHTER floor than the absolute default
-                # (a -10% move on a 5% vol name is genuinely unusual and
-                # bearish). High-vol names retain the absolute floor (their
-                # normal daily noise is large; tighter floor would whipsaw).
-                # Set max_open_loss_vol_multiplier=0 to disable vol scaling.
-                _z31_vol_mult = float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0)
-                _z31_floor_effective = _max_open_loss_pct
-                if _z31_vol_mult > 0:
+                # Tier-3 A1 (2026-05-17): conviction-aware floor matrix.
+                # Pre-Tier-3 was a constant -15% with vol-scaling that ineffectively
+                # tightened low-vol names (SNDK 5-7% vol → vol-scaled -10% > -15%
+                # absolute, so absolute dominated; cut at -18% missed +487% rally).
+                # New scheme: resolve HIGH/MID/LOW tier from mcap + raw_score,
+                # then pick floor per tier. HIGH disables vol scaling entirely.
+                # Phase 2b A2 layers regime adjustment (bull widens, bear tightens,
+                # crash forces emergency exit).
+                _cb_regime = (
+                    str((strategy_cache or {}).get("_market_regime") or "")
+                    if isinstance(strategy_cache, dict)
+                    else ""
+                )
+                _cb_regime_gated = bool(
+                    config.get("circuit_breaker_regime_gating_enabled", True)
+                )
+                _cb_tier = _resolve_conviction_tier_at_exit(
+                    sym, config, strategy_cache, propagated
+                )
+                _cb_floor_pct, _cb_vol_mult, _cb_low_vol_thresh = _get_conviction_aware_floor(
+                    _cb_tier, config, regime=(_cb_regime if _cb_regime_gated else None)
+                )
+                # Back-compat: explicit max_open_loss_pct config overrides the
+                # tier-resolved floor (used by tests / operator overrides).
+                _legacy_override = config.get("max_open_loss_pct")
+                if _legacy_override is not None:
+                    try:
+                        _cb_floor_pct = float(_legacy_override)
+                    except (TypeError, ValueError):
+                        pass
+                _legacy_vol_mult = config.get("max_open_loss_vol_multiplier")
+                if _legacy_vol_mult is not None and _cb_tier != "HIGH":
+                    # Operator override only applies to MID/LOW; HIGH always disables.
+                    try:
+                        _cb_vol_mult = float(_legacy_vol_mult)
+                    except (TypeError, ValueError):
+                        pass
+                # crash regime: sentinel 0.0 from helper means emergency exit
+                _cb_crash_emergency = False
+                if _cb_regime_gated and str(_cb_regime).strip().lower() == "crash":
+                    _cb_crash_emergency = True
+                _z31_floor_effective = _cb_floor_pct
+                if not _cb_crash_emergency and _cb_vol_mult > 0:
                     _z31_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
                     _z31_vol = _realized_vol_20d(_z31_closes)
-                    if _z31_vol > 0:
-                        _z31_vol_floor_pct = -_z31_vol_mult * _z31_vol * 100.0
+                    # Low-vol disable: skip vol-scaling on quiet names so the
+                    # absolute floor governs (fixes SNDK pathology).
+                    if _z31_vol > 0 and _z31_vol >= _cb_low_vol_thresh:
+                        _z31_vol_floor_pct = -_cb_vol_mult * _z31_vol * 100.0
                         # Pick the TIGHTER (less negative) of the two floors.
                         # max() of two negatives selects the one closer to zero.
-                        _z31_floor_effective = max(_max_open_loss_pct, _z31_vol_floor_pct)
-                if _unrealized_pct <= _z31_floor_effective:
+                        _z31_floor_effective = max(_cb_floor_pct, _z31_vol_floor_pct)
+                if _cb_crash_emergency or _unrealized_pct <= _z31_floor_effective:
                     fresh_score = -1
-                    fresh_reason = (
-                        f"Circuit breaker: {_unrealized_pct:.1f}% loss hit floor {_z31_floor_effective:.1f}% "
-                        f"(default={_max_open_loss_pct:.0f}%, vol-scaled active)"
-                    )
-                    _log(
-                        f"[sell-gate] {sym} | gate=circuit_breaker | unrealized={_unrealized_pct:.1f}% | "
-                        f"floor={_z31_floor_effective:.1f}% (default={_max_open_loss_pct:.0f}%) | result=fired",
-                        "red",
-                    )
+                    if _cb_crash_emergency:
+                        fresh_reason = (
+                            f"Circuit breaker: crash regime emergency exit "
+                            f"({_unrealized_pct:.1f}% unrealized)"
+                        )
+                        _log(
+                            f"[sell-gate] {sym} | gate=circuit_breaker | regime=crash | "
+                            f"unrealized={_unrealized_pct:.1f}% | result=emergency_exit",
+                            "red",
+                        )
+                    else:
+                        fresh_reason = (
+                            f"Circuit breaker: {_unrealized_pct:.1f}% loss hit floor "
+                            f"{_z31_floor_effective:.1f}% (tier={_cb_tier} "
+                            f"base={_cb_floor_pct:.0f}% regime={_cb_regime or 'n/a'})"
+                        )
+                        _log(
+                            f"[sell-gate] {sym} | gate=circuit_breaker | tier={_cb_tier} | "
+                            f"regime={_cb_regime or 'n/a'} | unrealized={_unrealized_pct:.1f}% | "
+                            f"floor={_z31_floor_effective:.1f}% (base={_cb_floor_pct:.0f}%) | result=fired",
+                            "red",
+                        )
 
                 _peak_protected = False
                 _peak_pnl_pct_for_log = 0.0
