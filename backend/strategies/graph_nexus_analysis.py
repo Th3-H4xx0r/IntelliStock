@@ -5647,6 +5647,55 @@ def _resolve_conviction_tier_at_exit(
     return "LOW"
 
 
+def _compute_conviction_score(
+    sym: str,
+    config: dict,
+    strategy_cache: dict | None,
+    propagated: dict | None,
+) -> float:
+    """Tier-3 Phase 3: compute a continuous conviction score [0.0, 1.0] for
+    telemetry. NOT yet used for behavior decisions (Phase 1 uses discrete
+    tier resolution). After 30 days of backtest telemetry the score
+    distribution will be inspected and the score can be bound to A1's
+    floor matrix as a continuous knob.
+
+    Components (capped at 1.0):
+      raw_score quartile contribution (0..0.35)
+      mcap log contribution (0..0.25)
+      llm sentiment (0..0.20) — placeholder; uses propagated.sentiment if present
+      catalyst hint (0..0.20) — placeholder; uses propagated.is_catalyst if present
+    """
+    sym = str(sym or "").strip().upper()
+    if not sym:
+        return 0.0
+    raw_score = 0.0
+    sentiment = 0.0
+    has_catalyst = False
+    if isinstance(propagated, dict):
+        entry = propagated.get(sym) or {}
+        if isinstance(entry, dict):
+            try:
+                raw_score = float(entry.get("raw_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                raw_score = 0.0
+            try:
+                sentiment = float(entry.get("sentiment", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sentiment = 0.0
+            has_catalyst = bool(entry.get("is_catalyst") or entry.get("has_benzinga_catalyst"))
+    raw_component = max(0.0, min(0.35, raw_score / 4.0 * 0.35))  # raw=4.0 → cap
+    mcap = _resolve_position_market_cap(sym, strategy_cache) or 0.0
+    mcap_component = 0.0
+    if mcap > 0:
+        import math as _math
+        # log10($50B)=10.7, log10($1B)=9 → normalize ~9..11 → 0..0.25
+        log_mcap = _math.log10(max(1e6, mcap))
+        mcap_component = max(0.0, min(0.25, (log_mcap - 9.0) / 2.0 * 0.25))
+    sent_component = max(0.0, min(0.20, max(0.0, sentiment) * 0.20))
+    cat_component = 0.20 if has_catalyst else 0.0
+    return round(raw_component + mcap_component + sent_component + cat_component, 4)
+
+
 def _get_conviction_aware_floor(
     tier: str,
     config: dict,
@@ -7310,6 +7359,13 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         ),
         "post_sell_reentry_size_fraction": float(
             config.get("post_sell_reentry_size_fraction", 0.50) or 0.50
+        ),
+        # A5 post-sell cooldown lift threshold + Phase 3 telemetry:
+        "post_sell_cooldown_lift_threshold_pct": float(
+            config.get("post_sell_cooldown_lift_threshold_pct", 0.10) or 0.10
+        ),
+        "conviction_telemetry_enabled": bool(
+            config.get("conviction_telemetry_enabled", True)
         ),
     }
 
@@ -14419,6 +14475,29 @@ def _evaluate_position_risk(
                 _cb_tier = _resolve_conviction_tier_at_exit(
                     sym, config, strategy_cache, propagated
                 )
+                # Tier-3 Phase 3 (A5): record per-evaluation conviction telemetry
+                # for offline analysis. Disabled by default once 30 days of data
+                # is collected; the score will then be considered for binding to
+                # the floor matrix as a continuous knob.
+                if bool(config.get("conviction_telemetry_enabled", True)):
+                    try:
+                        _conv_score = _compute_conviction_score(
+                            sym, config, strategy_cache, propagated
+                        )
+                        if isinstance(strategy_cache, dict):
+                            _conv_log = strategy_cache.setdefault(
+                                "_nexus_conviction_telemetry", []
+                            )
+                            if isinstance(_conv_log, list) and len(_conv_log) < 2000:
+                                _conv_log.append({
+                                    "sym": sym,
+                                    "date": date_key,
+                                    "tier": _cb_tier,
+                                    "score": _conv_score,
+                                    "unrealized_pct": round(_unrealized_pct, 2),
+                                })
+                    except Exception:
+                        pass
                 _cb_floor_pct, _cb_vol_mult, _cb_low_vol_thresh = _get_conviction_aware_floor(
                     _cb_tier, config, regime=(_cb_regime if _cb_regime_gated else None)
                 )
@@ -20601,14 +20680,36 @@ class GraphNexusAnalysis:
                                     # Prior fail-safe=PASS allowed false breakouts when
                                     # volume data was missing (reviewer-flagged).
                                     _ps_vol_ok = (_ps_vol_avg > 0) and (_ps_cur_vol >= _ps_vol_avg * _ps_vol_mult)
-                                    if _ps_breakout and _ps_vol_ok:
+                                    # Tier-3 A5 (2026-05-17): add a sell-price-recovery
+                                    # shortcut. SNDK exited at $195.77 → V31.4 only
+                                    # lifted when price > 20d_high × 1.05 (~$275),
+                                    # missing 80% of the recovery. The recovery
+                                    # shortcut fires when cur >= sell_price × (1 +
+                                    # post_sell_cooldown_lift_threshold_pct) (default
+                                    # 10%) so the cooldown lifts as soon as the dip
+                                    # measurably reverses, letting Tier-3 A4's
+                                    # re-entry pipeline take over earlier.
+                                    _ps_sell_price = float(_ps_info.get("sell_price", 0) or 0.0)
+                                    _ps_lift_thresh = float(
+                                        config.get("post_sell_cooldown_lift_threshold_pct", 0.10)
+                                        or 0.10
+                                    )
+                                    _ps_recovery_shortcut = bool(
+                                        _ps_sell_price > 0
+                                        and _ps_cur >= _ps_sell_price * (1.0 + _ps_lift_thresh)
+                                    )
+                                    if (_ps_breakout and _ps_vol_ok) or _ps_recovery_shortcut:
                                         _ps_blocked_lift.add(_ps_tk)
                                         _ps_reentry_cd[_ps_tk] = _ps_reentry_cd_days
                                         _ps_fires += 1
+                                        _ps_trigger = (
+                                            "recovery_shortcut" if _ps_recovery_shortcut and not (_ps_breakout and _ps_vol_ok)
+                                            else "20d_high_breakout"
+                                        )
                                         _log(
-                                            f"V31.4 post-sell breakout: lift cooldown for {_ps_tk} "
+                                            f"V31.4 post-sell breakout ({_ps_trigger}): lift cooldown for {_ps_tk} "
                                             f"(20d_high={_ps_20d_high:.2f}, cur={_ps_cur:.2f}, "
-                                            f"sold={_ps_info.get('sell_price', 0):.2f})",
+                                            f"sold={_ps_sell_price:.2f})",
                                             "magenta",
                                         )
                                 # Lift cooldown for identified breakout tickers.
