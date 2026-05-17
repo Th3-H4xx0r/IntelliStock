@@ -7289,6 +7289,28 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "momentum_execution_reserved_slots": int(
             config.get("momentum_execution_reserved_slots", 2) or 2
         ),
+        # A4 post-sell watch + re-entry:
+        "post_sell_watch_enabled": bool(
+            config.get("post_sell_watch_enabled", True)
+        ),
+        "post_sell_watch_window_days": int(
+            config.get("post_sell_watch_window_days", 60) or 60
+        ),
+        "post_sell_recovery_threshold_pct": float(
+            config.get("post_sell_recovery_threshold_pct", 0.05) or 0.05
+        ),
+        "post_sell_resistance_break_pct": float(
+            config.get("post_sell_resistance_break_pct", 0.005) or 0.005
+        ),
+        "post_sell_resistance_lookback_days": int(
+            config.get("post_sell_resistance_lookback_days", 10) or 10
+        ),
+        "post_sell_reentry_min_raw_score": float(
+            config.get("post_sell_reentry_min_raw_score", 0.40) or 0.40
+        ),
+        "post_sell_reentry_size_fraction": float(
+            config.get("post_sell_reentry_size_fraction", 0.50) or 0.50
+        ),
     }
 
 def _get_deployment_ramp_caps(config: dict) -> list[float]:
@@ -10063,26 +10085,61 @@ def _update_discovered_stock_sell_streak(conn, instance_id: str, ticker: str, da
         return 0
 
 
-def _mark_discovered_stock_sold(conn, instance_id: str, ticker: str, reason: str = "", date_key: str = ""):
-    """Mark a discovered stock as sold."""
+def _mark_discovered_stock_sold(
+    conn,
+    instance_id: str,
+    ticker: str,
+    reason: str = "",
+    date_key: str = "",
+    *,
+    forced_exit: bool = False,
+    exit_price: float | None = None,
+    entry_conviction_tier: str | None = None,
+):
+    """Mark a discovered stock as sold or post_sell_watch (Tier-3 A4).
+
+    ``forced_exit=True`` writes ``status="post_sell_watch"`` plus the
+    ``exit_price`` and ``entry_conviction_tier`` so the daily re-entry
+    eligibility check (Tier-3 A4) can observe whether the ticker recovers
+    past ``exit_price * (1 + post_sell_recovery_threshold_pct)`` within
+    ``post_sell_watch_window_days``. Normal (non-forced) sells continue to
+    write ``status="sold"`` per pre-Tier-3 behavior so the existing
+    discovery-cooldown logic (`_get_recently_sold_discovered_tickers`)
+    keeps working.
+    """
     if conn is None or _r is None:
         return
     _ensure_discovered_stocks_table(conn)
     doc_id = f"{instance_id}_{ticker}"
     try:
         update = {
-            "status": "sold",
+            "status": "post_sell_watch" if forced_exit else "sold",
             "sell_reason": (reason or "Trend reversal")[:200],
         }
         if date_key:
             update["sold_date"] = date_key
+        if forced_exit:
+            if exit_price is not None:
+                try:
+                    update["exit_price"] = float(exit_price)
+                except (TypeError, ValueError):
+                    pass
+            if entry_conviction_tier:
+                update["entry_conviction_tier"] = str(entry_conviction_tier)[:8]
         _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update(update).run(conn)
     except Exception:
         pass
 
 
 def _get_recently_sold_discovered_tickers(conn, instance_id: str, date_key: str, cooldown_days: int = 7) -> set[str]:
-    """Return tickers sold within the last `cooldown_days` to prevent immediate re-discovery."""
+    """Return tickers sold within the last `cooldown_days` to prevent immediate re-discovery.
+
+    Tier-3 A4 (2026-05-17): include ``post_sell_watch`` rows so forced-exit
+    cooldowns still apply during the watch window. Re-entry happens via the
+    separate `_get_post_sell_watch_candidates` flow which examines recovery
+    triggers — pure re-discovery (which doesn't know the ticker is being
+    monitored) must continue to be cooldown-blocked.
+    """
     if conn is None or _r is None or not date_key:
         return set()
     _ensure_discovered_stocks_table(conn)
@@ -10090,13 +10147,147 @@ def _get_recently_sold_discovered_tickers(conn, instance_id: str, date_key: str,
         cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
         cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
             lambda doc: (doc["instance_id"] == instance_id)
-            & (doc["status"] == "sold")
+            & ((doc["status"] == "sold") | (doc["status"] == "post_sell_watch"))
             & (doc.has_fields("sold_date"))
             & (doc["sold_date"] >= cutoff)
         ).run(conn)
         return {doc["ticker"] for doc in cursor if doc.get("ticker")}
     except Exception:
         return set()
+
+
+def _get_post_sell_watch_candidates(
+    conn,
+    instance_id: str,
+    date_key: str,
+    window_days: int = 60,
+) -> list[dict]:
+    """Return list of {ticker, exit_price, exit_date, entry_conviction_tier}
+    for tickers currently in post_sell_watch status within ``window_days``.
+
+    Tier-3 A4: feeds the daily re-entry eligibility check. Rows older than
+    ``window_days`` should already have been transitioned to "forgotten" by
+    the TTL sweep; this filter is a safety net.
+    """
+    out: list[dict] = []
+    if conn is None or _r is None or not date_key or not instance_id:
+        return out
+    try:
+        _ensure_discovered_stocks_table(conn)
+    except Exception:
+        return out
+    try:
+        cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=int(window_days))).strftime("%Y-%m-%d")
+    except Exception:
+        return out
+    try:
+        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
+            lambda doc: (doc["instance_id"] == instance_id)
+            & (doc["status"] == "post_sell_watch")
+            & (doc.has_fields("sold_date"))
+            & (doc["sold_date"] >= cutoff)
+        ).run(conn)
+        for doc in cursor:
+            ticker = doc.get("ticker")
+            if not ticker:
+                continue
+            try:
+                exit_price = float(doc.get("exit_price") or 0.0)
+            except (TypeError, ValueError):
+                exit_price = 0.0
+            out.append({
+                "ticker": str(ticker).strip().upper(),
+                "exit_price": exit_price,
+                "exit_date": str(doc.get("sold_date") or ""),
+                "entry_conviction_tier": str(doc.get("entry_conviction_tier") or "LOW"),
+                "sell_reason": str(doc.get("sell_reason") or ""),
+            })
+    except Exception:
+        return out
+    return out
+
+
+def _is_post_sell_reentry_eligible(
+    *,
+    current_price: float,
+    exit_price: float,
+    fresh_raw_score: float,
+    config: dict,
+    recent_high_after_exit: float | None = None,
+) -> tuple[bool, str]:
+    """Decide whether a post_sell_watch ticker qualifies for re-entry now.
+
+    Tier-3 A4 triggers (any of):
+      1. ``current_price >= exit_price * (1 + post_sell_recovery_threshold_pct)``
+      2. ``current_price >= recent_high_after_exit * (1 + post_sell_resistance_break_pct)``
+
+    Mandatory filter (in both cases):
+      * ``fresh_raw_score >= post_sell_reentry_min_raw_score`` — prevents
+        pure-bounce re-entries. SNDK rallied because thesis was sound; the
+        score should re-confirm the buy. ROLR/FGL similar.
+
+    Returns ``(eligible, reason_text)``.
+    """
+    if exit_price <= 0 or current_price <= 0:
+        return False, "missing price data"
+
+    min_score = float(config.get("post_sell_reentry_min_raw_score", 0.40) or 0.40)
+    if fresh_raw_score < min_score:
+        return False, (
+            f"fresh raw_score {fresh_raw_score:.3f} < min {min_score:.2f} "
+            f"(prevents pure-bounce re-entry)"
+        )
+
+    recovery_pct = float(config.get("post_sell_recovery_threshold_pct", 0.05) or 0.05)
+    if current_price >= exit_price * (1.0 + recovery_pct):
+        return True, (
+            f"recovery_threshold hit: cur=${current_price:.2f} >= "
+            f"exit×{1.0 + recovery_pct:.3f}=${exit_price * (1.0 + recovery_pct):.2f} "
+            f"(score={fresh_raw_score:.2f})"
+        )
+
+    if recent_high_after_exit is not None and recent_high_after_exit > 0:
+        break_pct = float(config.get("post_sell_resistance_break_pct", 0.005) or 0.005)
+        if current_price >= recent_high_after_exit * (1.0 + break_pct):
+            return True, (
+                f"resistance_break: cur=${current_price:.2f} >= "
+                f"10d_high×{1.0 + break_pct:.3f}=${recent_high_after_exit * (1.0 + break_pct):.2f} "
+                f"(score={fresh_raw_score:.2f})"
+            )
+
+    return False, (
+        f"no trigger fired (cur=${current_price:.2f}, exit=${exit_price:.2f}, "
+        f"recovery_needed=${exit_price * (1.0 + recovery_pct):.2f})"
+    )
+
+
+def _mark_discovered_stock_re_entered(conn, instance_id: str, ticker: str, date_key: str = ""):
+    """Transition a post_sell_watch row back to ``status="active"`` after
+    successful re-entry. Caller (run_once) sets this when the planner has
+    actually allocated cash to the ticker, not just identified it as eligible.
+    """
+    if conn is None or _r is None:
+        return
+    doc_id = f"{instance_id}_{ticker}"
+    try:
+        update = {"status": "active", "re_entered_date": date_key} if date_key else {"status": "active"}
+        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update(update).run(conn)
+    except Exception:
+        pass
+
+
+def _mark_discovered_stock_forgotten(conn, instance_id: str, ticker: str):
+    """TTL sweep: transition post_sell_watch rows past the watch window to
+    ``status="forgotten"`` so they no longer block re-discovery via the
+    cooldown filter and don't accumulate as stale state.
+    """
+    if conn is None or _r is None:
+        return
+    doc_id = f"{instance_id}_{ticker}"
+    try:
+        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update({"status": "forgotten"}).run(conn)
+    except Exception:
+        pass
 
 
 # ── Trend-to-Signal conversion ─────────────────────────────────────────────
@@ -22150,6 +22341,11 @@ class GraphNexusAnalysis:
         # so they cannot be overridden by broker aggregation, circuit breaker, or post-decision strategies.
         # Forced exits OVERRIDE momentum watchlist protection — a trailing stop or fast loser
         # must fire even for momentum-held positions.
+        # Tier-3 A4 (2026-05-17): also write status="post_sell_watch" to the
+        # GraphNexusDiscoveredStocks table so the daily re-entry eligibility
+        # check can monitor recovery. Only writes when forced_exit=True and the
+        # post_sell_watch feature is enabled.
+        _psw_enabled = bool(config.get("post_sell_watch_enabled", True))
         for _fe_sym, _fe_data in scores.items():
             if isinstance(_fe_data, dict) and _fe_data.get("_forced_exit") and _fe_data.get("score") == -1:
                 if _fe_sym not in (nexus_sell_enforcement or set()):
@@ -22160,6 +22356,27 @@ class GraphNexusAnalysis:
                 entry = nexus_position_sizes.get(_fe_sym, {})
                 entry["sell_fraction"] = 1.0
                 nexus_position_sizes[_fe_sym] = entry
+                # Tier-3 A4: record post_sell_watch row for daily eligibility scan.
+                if _psw_enabled and conn_trends is not None:
+                    try:
+                        _psw_exit_price = _resolve_symbol_price(
+                            _fe_sym, prices, data, portfolio_emulator=portfolio_emulator,
+                        )
+                        _psw_tier = _resolve_conviction_tier_at_exit(
+                            _fe_sym, config, strategy_cache, propagated,
+                        )
+                        _mark_discovered_stock_sold(
+                            conn_trends,
+                            instance_id,
+                            _fe_sym,
+                            reason=str(_fe_data.get("reason", "forced_exit"))[:200],
+                            date_key=date_key,
+                            forced_exit=True,
+                            exit_price=float(_psw_exit_price or 0.0),
+                            entry_conviction_tier=_psw_tier,
+                        )
+                    except Exception as _psw_exc:
+                        _log(f"post_sell_watch write error: {_fe_sym}: {_psw_exc}", "yellow")
 
         # ── Two-phase rediscovery confirmation ──────────────────────
         # Rediscovered tickers were set to 'rediscovery_pending'. Now that
