@@ -6425,7 +6425,11 @@ def _should_reject_backfill_candidate(
     # 2026-05-07 granularity-scaling: grace bars protect a queued candidate
     # from rejection while its score recovers; the wall-clock window must
     # match the baseline regardless of bar cadence.
-    grace_bars = max(0, _scale_bars(int(config.get("backfill_queue_grace_bars", 3) or 3), config))
+    # Tier-3 B5 (2026-05-17): grace bars 3 → 7. MU expired from the backfill
+    # queue after 11 bars in BT901920 without cash materializing; 7-bar grace
+    # combined with B1 scaled cash reserve + B2 scaled max-new-buys should
+    # let high-conviction late-arrivers (raw=0.650 like MU) actually execute.
+    grace_bars = max(0, _scale_bars(int(config.get("backfill_queue_grace_bars", 7) or 7), config))
     priority_grace_bars = max(grace_bars, _scale_bars(int(config.get("backfill_queue_priority_grace_bars", 8) or 8), config))
     bars_in_queue = max(0, int(queue_item.get("bars_in_queue", 0) or 0))
     signal_source = str(queue_item.get("signal_source") or "").strip().lower()
@@ -6774,17 +6778,23 @@ def _plan_executable_stock_buy_slate(
     min_position_size: float,
     config: dict,
     blocked_tickers: set[str] | None = None,
+    initial_value: float = 0.0,
 ) -> tuple[list[dict], list[str], dict[str, Any]]:
     profile = str(config.get("allocation_profile", "balanced") or "balanced").strip().lower()
     # Tier-3 B2: scale per-cycle new-buy cap by account size. Explicit override wins.
+    # ``initial_value`` is the broker's _initial_value (passed by run_once caller).
+    # Falls back to ``config["_account_initial_value"]`` for callers that prefer
+    # to thread the value via config.
     _alloc_initial_value = 0.0
     try:
-        # portfolio_emulator may not be in scope here; fall through to default if so.
-        _alloc_initial_value = float(
-            (config.get("_account_initial_value") if isinstance(config, dict) else None) or 0.0
-        )
+        _alloc_initial_value = float(initial_value or 0.0)
     except (TypeError, ValueError):
         _alloc_initial_value = 0.0
+    if _alloc_initial_value <= 0 and isinstance(config, dict):
+        try:
+            _alloc_initial_value = float(config.get("_account_initial_value") or 0.0)
+        except (TypeError, ValueError):
+            _alloc_initial_value = 0.0
     max_new_stock_buys = _get_scaled_max_new_stock_buys(config, _alloc_initial_value)
     # V20: Add reserved propagation slots so propagation-discovered stocks
     # can get executed even when the generic slate is full.
@@ -6792,6 +6802,20 @@ def _plan_executable_stock_buy_slate(
     _prop_count = sum(1 for c in candidates if bool((c or {}).get("is_propagation_expansion")))
     if _prop_count > 0 and _prop_reserved > 0:
         max_new_stock_buys = max(max_new_stock_buys, max_new_stock_buys + min(_prop_reserved, _prop_count))
+    # Tier-3 B4 (2026-05-17): tiered momentum budget. Reserve N slots that
+    # ONLY momentum-source candidates can fill, so propagation candidates
+    # don't monopolize the slate. MU (raw=0.08, momentum #2) was crowded out
+    # in BT901920 because propagation filled the 4-slot budget first.
+    _mom_reserved = int(config.get("momentum_execution_reserved_slots", 2) or 0)
+    _momentum_sources = ("momentum_watchlist", "momentum", "momentum_rediscovery", "price_momentum")
+    _mom_count = sum(
+        1
+        for c in candidates
+        if str((c or {}).get("signal_source") or "").lower() in _momentum_sources
+        and not bool((c or {}).get("is_propagation_expansion"))
+    )
+    if _mom_count > 0 and _mom_reserved > 0:
+        max_new_stock_buys = max(max_new_stock_buys, max_new_stock_buys + min(_mom_reserved, _mom_count))
     execute_min_raw_score = float(config.get("allocation_execute_min_raw_score", 0.35) or 0.35)
     top2_min_raw_score = float(config.get("allocation_top2_min_raw_score", 0.50) or 0.50)
     priority_min_position_size = max(0.0, float(config.get("priority_min_position_size", 100.0) or 100.0))
@@ -7137,10 +7161,10 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "sector_cap_override_raw_net_score": float(config.get("sector_cap_override_raw_net_score", 0.8) or 0.8),
         "sector_cap_override_min_paths": int(config.get("sector_cap_override_min_paths", 5) or 5),
         "nexus_regime_capacity_gating_enabled": bool(config.get("nexus_regime_capacity_gating_enabled", True)),
-        "backfill_queue_grace_bars": int(config.get("backfill_queue_grace_bars", 3) or 3),
+        "backfill_queue_grace_bars": int(config.get("backfill_queue_grace_bars", 7) or 7),
         "backfill_queue_priority_grace_bars": int(config.get("backfill_queue_priority_grace_bars", 8) or 8),
         "backfill_queue_reserved_priority_slots": int(config.get("backfill_queue_reserved_priority_slots", 10) or 10),
-        "backfill_queue_max_size": int(config.get("backfill_queue_max_size", 30) or 30),
+        "backfill_queue_max_size": int(config.get("backfill_queue_max_size", 50) or 50),
         "rotation_min_hold_days": int(config.get("rotation_min_hold_days", 10) or 10),
         "rotation_profitable_min_delta": float(config.get("rotation_profitable_min_delta", 1.00) or 1.00),
         "rotation_profitable_full_exit_min_hold_days": int(config.get("rotation_profitable_full_exit_min_hold_days", 20) or 20),
@@ -7256,6 +7280,14 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         ),
         "allocation_max_new_stock_buys_large": int(
             config.get("allocation_max_new_stock_buys_large", 12) or 12
+        ),
+        # A3 macro override:
+        "macro_supersedes_sentiment_enabled": bool(
+            config.get("macro_supersedes_sentiment_enabled", True)
+        ),
+        # B4 tiered momentum budget:
+        "momentum_execution_reserved_slots": int(
+            config.get("momentum_execution_reserved_slots", 2) or 2
         ),
     }
 
@@ -10583,6 +10615,37 @@ _SECTOR_ETF_TICKERS = frozenset({
     "XLK", "XLP", "XLY", "XLU", "XLRE", "XLC", "XLB",
     "QQQ", "SPY", "DIA", "IWM", "VTI", "VOO",
 })
+
+# Tier-3 A3 (2026-05-17): macro-event reasons that supersede LLM-sentiment
+# veto on pending future trades. Backtest 901920 cancelled SNDK's 2025-11-28
+# scheduled buy ("S&P 500 entry" signal) because fresh LLM sentiment was
+# negative; SNDK then rallied +487%. These reasons are objectively verifiable
+# (index addition is a public event), so LLM sentiment can't be more right
+# than the macro signal. Matched case-insensitively as substrings.
+_MACRO_OVERRIDE_REASON_KEYWORDS: tuple[str, ...] = (
+    "s&p 500",
+    "s&p500",
+    "index addition",
+    "index entry",
+    "index reweight",
+    "russell",
+    "nasdaq 100",
+    "buyout",
+    "acquisition target",
+    "m&a",
+    "merger",
+    "tender offer",
+    "insider buy",
+    "strong benzinga",
+)
+
+
+def _macro_event_supersedes_sentiment(reason: str) -> bool:
+    """True if ``reason`` matches a macro event that LLM sentiment cannot veto."""
+    if not reason:
+        return False
+    text = str(reason).lower()
+    return any(kw in text for kw in _MACRO_OVERRIDE_REASON_KEYWORDS)
 
 # Neo4j driver handle (set by run_once, used by module-level helpers)
 _shared_neo4j_driver = None
@@ -17265,7 +17328,9 @@ class GraphNexusAnalysis:
         etf_portfolio_pct = float(config.get("etf_portfolio_pct", 0.10))
         # Backfill queue config
         _bfq_enabled = bool(config.get("backfill_queue_enabled", True))
-        _bfq_max_size = int(config.get("backfill_queue_max_size", 30))
+        # Tier-3 B5: queue size 30 → 50 so propagation + momentum candidates
+        # can both wait without flushing each other.
+        _bfq_max_size = int(config.get("backfill_queue_max_size", 50))
         # 2026-05-07 granularity-scaling: BFQ TTL is the headline regression
         # site for the 1200s-vs-3600s divergence. At 3600s a 10-bar TTL
         # gives a queued buy ~10 trading hours to find a slot; at 1200s the
@@ -19205,7 +19270,25 @@ class GraphNexusAnalysis:
                     # - Pending buy (+1) but fresh sentiment is negative (-1)
                     # - Pending sell (-1) but fresh sentiment is positive (+1)
                     if fresh_sent != 0 and fresh_sent == -sig and cancel_trades:
-                        reason = trade.get("reason", "")[:40]
+                        reason = trade.get("reason", "")[:60]
+                        # Tier-3 A3 (2026-05-17): macro-event whitelist supersedes
+                        # sentiment veto. SNDK's 2025-11-28 "S&P 500 entry" scheduled
+                        # buy was cancelled by negative LLM sentiment in BT901920 and
+                        # the strategy missed +487% upside. Macro reasons are objectively
+                        # verifiable; LLM can warn but cannot veto. Operator can disable
+                        # this override with macro_supersedes_sentiment_enabled=False.
+                        if (
+                            bool(config.get("macro_supersedes_sentiment_enabled", True))
+                            and sig == 1  # only protect BUYS — sell cancels stay sentiment-driven
+                            and _macro_event_supersedes_sentiment(reason)
+                        ):
+                            _log(
+                                f"  Macro supersedes sentiment: keeping pending buy for {sym} on "
+                                f"{target_date} (reason='{reason}' — objectively verifiable; LLM "
+                                f"contra-sentiment={fresh_sent} ignored)",
+                                "green",
+                            )
+                            continue
                         removed = cancel_trades(strategy_cache, sym, target_date=target_date)
                         if removed:
                             cancelled_count += len(removed)
@@ -21436,6 +21519,9 @@ class GraphNexusAnalysis:
                     min_position_size=_min_position_size,
                     config=config,
                     blocked_tickers=_v31_blocked_set,
+                    # Tier-3 B2: thread broker's _initial_value so scaled new-buy
+                    # cap can pick the right account-size bucket.
+                    initial_value=float(getattr(portfolio_emulator, "_initial_value", 0.0) or 0.0),
                 )
                 # V31 Section 4.3: vol-adjusted sizing — reweight slate so high-vol
                 # names get smaller positions and low-vol names get larger ones,
