@@ -5665,6 +5665,10 @@ def _compute_conviction_score(
       llm sentiment (0..0.20) — placeholder; uses propagated.sentiment if present
       catalyst hint (0..0.20) — placeholder; uses propagated.is_catalyst if present
     """
+    # Bug-sweep 2026-05-17: defensive None guard so callers passing config=None
+    # don't crash. Original implementation assumed dict-like config.
+    if not isinstance(config, dict):
+        config = {}
     sym = str(sym or "").strip().upper()
     if not sym:
         return 0.0
@@ -7300,6 +7304,13 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         ),
         "circuit_breaker_regime_adjustment_bull_pp": float(
             config.get("circuit_breaker_regime_adjustment_bull_pp", 5.0) or 5.0
+        ),
+        "circuit_breaker_regime_adjustment_chop_pp": float(
+            # Surfaced for operator tuning; default 0 (chop = no adjustment).
+            # The helper currently treats unrecognized/chop regime as no-op;
+            # this knob is reserved for future binding when chop deserves a
+            # distinct adjustment. Bug-sweep finding 2026-05-17.
+            config.get("circuit_breaker_regime_adjustment_chop_pp", 0.0) or 0.0
         ),
         "circuit_breaker_regime_adjustment_bear_pp": float(
             config.get("circuit_breaker_regime_adjustment_bear_pp", -5.0) or -5.0
@@ -14488,14 +14499,25 @@ def _evaluate_position_risk(
                             _conv_log = strategy_cache.setdefault(
                                 "_nexus_conviction_telemetry", []
                             )
-                            if isinstance(_conv_log, list) and len(_conv_log) < 2000:
-                                _conv_log.append({
-                                    "sym": sym,
-                                    "date": date_key,
-                                    "tier": _cb_tier,
-                                    "score": _conv_score,
-                                    "unrealized_pct": round(_unrealized_pct, 2),
-                                })
+                            if isinstance(_conv_log, list):
+                                if len(_conv_log) < 2000:
+                                    _conv_log.append({
+                                        "sym": sym,
+                                        "date": date_key,
+                                        "tier": _cb_tier,
+                                        "score": _conv_score,
+                                        "unrealized_pct": round(_unrealized_pct, 2),
+                                    })
+                                elif not strategy_cache.get("_nexus_conviction_telemetry_capped_logged"):
+                                    # Log once when the cap is hit so operators
+                                    # see why the buffer stopped growing.
+                                    _log(
+                                        "Conviction telemetry buffer capped at 2000 entries — "
+                                        "older entries will not be overwritten; clear "
+                                        "_nexus_conviction_telemetry from strategy_cache to reset.",
+                                        "yellow",
+                                    )
+                                    strategy_cache["_nexus_conviction_telemetry_capped_logged"] = True
                     except Exception:
                         pass
                 _cb_floor_pct, _cb_vol_mult, _cb_low_vol_thresh = _get_conviction_aware_floor(
@@ -22444,9 +22466,14 @@ class GraphNexusAnalysis:
         # must fire even for momentum-held positions.
         # Tier-3 A4 (2026-05-17): also write status="post_sell_watch" to the
         # GraphNexusDiscoveredStocks table so the daily re-entry eligibility
-        # check can monitor recovery. Only writes when forced_exit=True and the
-        # post_sell_watch feature is enabled.
-        _psw_enabled = bool(config.get("post_sell_watch_enabled", True))
+        # check can monitor recovery. Live-mode only; gated to avoid polluting
+        # the shared GraphNexusDiscoveredStocks table during backtest re-runs
+        # or historical-lookback pre-pass (bug-sweep finding 2026-05-17).
+        _psw_enabled = (
+            bool(config.get("post_sell_watch_enabled", True))
+            and bool(globals().get("_GN_LIVE_MODE_FLAG", False))
+            and not bool(config.get("historical_lookback_mode", False))
+        )
         for _fe_sym, _fe_data in scores.items():
             if isinstance(_fe_data, dict) and _fe_data.get("_forced_exit") and _fe_data.get("score") == -1:
                 if _fe_sym not in (nexus_sell_enforcement or set()):

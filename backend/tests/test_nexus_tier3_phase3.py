@@ -96,3 +96,24 @@ def test_post_sell_cooldown_lift_threshold_override():
     """Operator can tune the recovery shortcut percentage."""
     cfg = gna._get_effective_nexus_config({"post_sell_cooldown_lift_threshold_pct": 0.20})
     assert cfg["post_sell_cooldown_lift_threshold_pct"] == 0.20
+
+
+# ── Bug-sweep additions (2026-05-17) ────────────────────────────────────────
+
+
+def test_conviction_score_handles_none_config():
+    """config=None must not crash _compute_conviction_score (defensive guard)."""
+    score = gna._compute_conviction_score(
+        "AAPL", config=None, strategy_cache={}, propagated={}
+    )
+    assert isinstance(score, float)
+    assert 0.0 <= score <= 1.0
+
+
+def test_conviction_score_none_config_with_cache():
+    """Even with strategy_cache populated, config=None still works."""
+    cache = {"_yf_market_cap_cache": {"NVDA": 1_500_000_000_000}}
+    score = gna._compute_conviction_score(
+        "NVDA", config=None, strategy_cache=cache, propagated={}
+    )
+    assert score > 0.0  # mcap component should contribute

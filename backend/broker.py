@@ -5207,6 +5207,17 @@ elif mode == MODE_LIVE:
                         "_deployment_last_bar_key",
                         "_backfill_queue",
                         "_strategy_start_alert_date",
+                        # Tier-3 Phase 3 (2026-05-17): observation-only telemetry
+                        # buffer; safe to clear on account migration so the new
+                        # account starts with a clean rolling window.
+                        "_nexus_conviction_telemetry",
+                        "_nexus_conviction_telemetry_capped_logged",
+                        # Tier-3 Phase 2b (2026-05-17): momentum post-sell tracker.
+                        # Stale entries reference symbols held in the prior
+                        # account; clear so the new account doesn't lift cooldowns
+                        # on prior tickers' breakouts.
+                        "_post_sell_breakout_history",
+                        "_post_sell_breakout_reentry_cooldown",
                     )
                     if _auto_reset:
                         for _k in _migration_reset_keys:

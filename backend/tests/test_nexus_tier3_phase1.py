@@ -279,3 +279,51 @@ def test_position_market_cap_zero_returns_none():
     """Zero mcap (yfinance miss sentinel) returns None, not 0.0."""
     cache = {"_yf_market_cap_cache": {"X": 0}}
     assert gna._resolve_position_market_cap("X", cache) is None
+
+
+# ── Bug-sweep additions (2026-05-17) ────────────────────────────────────────
+
+
+def test_conviction_tier_mcap_boundary_exactly_50b():
+    """Boundary: mcap == 50B exactly should map to HIGH (>=, not >)."""
+    cache = {"_yf_market_cap_cache": {"BOUND": 50_000_000_000}}
+    tier = gna._resolve_conviction_tier_at_exit(
+        "BOUND", config={}, strategy_cache=cache, propagated={}
+    )
+    assert tier == "HIGH"
+
+
+def test_conviction_tier_mcap_just_below_50b():
+    """Boundary: mcap just under 50B should NOT map to HIGH via mcap path."""
+    cache = {"_yf_market_cap_cache": {"BOUND": 49_999_999_999}}
+    tier = gna._resolve_conviction_tier_at_exit(
+        "BOUND", config={}, strategy_cache=cache, propagated={}
+    )
+    # No raw_score either → LOW
+    assert tier == "LOW"
+
+
+def test_max_new_stock_buys_bad_string_config_falls_back():
+    """Bad string for allocation_max_new_stock_buys falls back without crash."""
+    result = gna._get_scaled_max_new_stock_buys(
+        {"allocation_max_new_stock_buys": "not-a-number"}, 7_000.0
+    )
+    # Should fall through explicit-override try/except and use scaled default.
+    assert isinstance(result, int)
+    assert result >= 1
+
+
+def test_cash_reserve_bad_string_threshold_falls_back():
+    """Bad threshold values in config fall back without crash."""
+    result = gna._get_scaled_cash_reserve_floor_pct(
+        {"cash_reserve_floor_threshold_small_usd": "bad"}, 7_000.0
+    )
+    assert isinstance(result, float)
+    assert 0.0 <= result <= 1.0
+
+
+def test_chop_regime_adjustment_knob_surfaced():
+    """Bug-sweep: chop adjustment knob is exposed for operator tuning."""
+    cfg = gna._get_effective_nexus_config({})
+    assert "circuit_breaker_regime_adjustment_chop_pp" in cfg
+    assert cfg["circuit_breaker_regime_adjustment_chop_pp"] == 0.0

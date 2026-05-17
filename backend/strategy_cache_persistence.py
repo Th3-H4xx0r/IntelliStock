@@ -45,6 +45,12 @@ _BLACKLIST_PREFIXES = (
     "_bz_bulk_",
     "_overlay_bars_raw",
     "_overlay_bars_range",
+    # Tier-3 Phase 3 (2026-05-17): observation-only telemetry buffer. Grows
+    # up to 2000 list-of-dicts entries during run_once evaluations and is
+    # consumed offline for post-hoc analysis. Persisting bloats the cache
+    # row by ~100KB+ per account without improving correctness.
+    "_nexus_conviction_telemetry",
+    "_nexus_conviction_telemetry_capped_logged",
 )
 
 _MAX_DICT_ENTRIES = 500
