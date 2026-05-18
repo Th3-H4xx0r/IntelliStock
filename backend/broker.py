@@ -5224,6 +5224,12 @@ elif mode == MODE_LIVE:
                         # the new account starts fresh.
                         "_post_sell_watch_inmem",
                         "_yf_market_cap_cache_preseeded",
+                        # Phase α.2 (BT109429 follow-up, 2026-05-18): Neo4j
+                        # query snapshot cache + its hit/miss telemetry.
+                        # Per-backtest-run constructs; carrying them across
+                        # an account migration would surface stale results.
+                        "_neo4j_snapshot",
+                        "_neo4j_snapshot_stats",
                     )
                     if _auto_reset:
                         for _k in _migration_reset_keys:
@@ -5627,15 +5633,44 @@ if mode == MODE_BACKTEST:
     import random
     import numpy as _np_backtest
     backtest_start_time = time.time()
-    # Optional seed for reproducible backtests (e.g. BACKTEST_SEED=42 in .env)
-    _backtest_seed = os.environ.get("BACKTEST_SEED")
-    if _backtest_seed:
-        try:
-            _s = int(_backtest_seed)
-            random.seed(_s)
-            _np_backtest.random.seed(_s)
-        except (TypeError, ValueError):
-            pass
+    # Phase α.3 (2026-05-18, BT109429 follow-up): always seed the process-
+    # global RNGs in backtest mode for paired re-run determinism. The
+    # variance/robustness agent attributed ~5% of the 4.8x same-code spread
+    # to RNG drift across paired runs (LLM-jitter timing, set ordering when
+    # combined with dict insertion variance). Explicit BACKTEST_SEED env
+    # var still wins for back-compat. Derivation extracted to
+    # backend._phase_alpha_helpers.derive_backtest_seed for unit testability.
+    from backend._phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
+    _seed_int, _seed_source = _derive_backtest_seed(
+        backtest_row_id,
+        symbols,
+        env_seed=os.environ.get("BACKTEST_SEED"),
+    )
+    _log(f"RNG seed: {_seed_int} ({_seed_source})", "cyan")
+    try:
+        random.seed(_seed_int)
+        # numpy seed must fit uint32; safe to mask. 31-bit derived seeds
+        # are already within range, so this is a no-op for them and a
+        # narrowing for raw BACKTEST_SEED env values >= 2**32.
+        _np_backtest.random.seed(_seed_int & 0xFFFFFFFF)
+    except Exception as _seed_apply_exc:
+        _log(f"RNG seed apply failed: {_seed_apply_exc!r}", "yellow")
+    # Set-iteration variance reminder: Python's set ordering depends on
+    # PYTHONHASHSEED, which must be exported BEFORE the interpreter starts —
+    # setting it inside this process is too late (Python has already cached
+    # the hash randomization for the duration of the run).
+    _ph_seed = os.environ.get("PYTHONHASHSEED")
+    if _ph_seed in (None, "", "random"):
+        _log(
+            "RNG seed: PYTHONHASHSEED is unset or 'random' — set "
+            "PYTHONHASHSEED=0 in the BACKTEST ENGINE's launch env "
+            "(Docker `environment:` block or .env, BEFORE the broker "
+            "subprocess starts) for full set-ordering determinism "
+            "across paired re-runs (Phase alpha.3).",
+            "yellow",
+        )
+    else:
+        _log(f"RNG seed: PYTHONHASHSEED={_ph_seed} (confirmed)", "cyan")
     # Engine creates BacktestResults row with status running; we update it with full stub
     backtest_id_raw = backtest_row_id
     _backtest_result_id = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else backtest_id_raw

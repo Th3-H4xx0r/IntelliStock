@@ -57,6 +57,12 @@ _BLACKLIST_PREFIXES = (
     # similarly per-run.
     "_post_sell_watch_inmem",
     "_yf_market_cap_cache_preseeded",
+    # Phase α.2 (BT109429 follow-up, 2026-05-18): Neo4j query snapshot
+    # for variance containment. Per-backtest-run; persisting would mix
+    # snapshots across runs with different universes and dates. The
+    # stats counters are also per-run telemetry.
+    "_neo4j_snapshot",
+    "_neo4j_snapshot_stats",
 )
 
 _MAX_DICT_ENTRIES = 500

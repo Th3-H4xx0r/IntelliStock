@@ -5601,22 +5601,44 @@ def _preseed_mcap_cache_from_universe(
     (~$36B) defaulted to LOW conviction tier in BT136708 and got the -15%
     floor → cut at -18.3% → missed +619% recovery.
 
+    Phase α.4 (BT109429 follow-up, 2026-05-18): the original ``if populated:``
+    log gate silently hid the ``populated=0`` outcome in prod (yfinance
+    returned 0 marketCap for all 8 BT109429 tickers — likely rate-limit or
+    missing ``info`` dict — and the except swallowed the exception). Always
+    log the per-source counters now (neo4j/yf hits/zeros/failures) regardless
+    of outcome. Added 3-retry exponential backoff for yfinance fetches.
+
     Sources (in order):
       1. ``_neo4j_market_cap_cache`` (already populated at module load)
-      2. yfinance (one-time per ticker), gated on
+      2. yfinance (one-time per ticker, with retry), gated on
          ``mcap_preseed_use_yfinance`` config flag (default True).
 
+    Config knobs (all optional):
+      * ``mcap_preseed_use_yfinance`` (default True)
+      * ``mcap_preseed_yfinance_max_attempts`` (default 3)
+      * ``mcap_preseed_yfinance_base_delay_sec`` (default 0.5)
+
     Idempotent via ``_yf_market_cap_cache_preseeded`` flag on strategy_cache.
-    Returns the count of tickers populated this call.
+    Returns the count of tickers populated this call (neo4j_hits + yf_hits).
     """
     if not isinstance(strategy_cache, dict):
+        _log("mcap pre-seed: skipped — strategy_cache not a dict", "yellow")
         return 0
     if strategy_cache.get("_yf_market_cap_cache_preseeded"):
+        # Idempotent short-circuit: prior call already completed (with
+        # `populated > 0` or no transient yfinance failure — see flag-set
+        # condition at function end).
         return 0
     if not symbols_list:
+        _log("mcap pre-seed: skipped — empty symbols_list", "yellow")
         return 0
     cache = strategy_cache.setdefault("_yf_market_cap_cache", {})
-    populated = 0
+    n_total = sum(1 for s in symbols_list if str(s or "").strip())
+    neo4j_hits = 0
+    yf_hits = 0
+    yf_zeros = 0
+    yf_failures = 0
+    yf_attempted = 0
     # Phase 1: neo4j cache (cheap, no network)
     for sym in symbols_list:
         sym_u = str(sym).strip().upper()
@@ -5628,32 +5650,103 @@ def _preseed_mcap_cache_from_universe(
             neo_mc = 0.0
         if neo_mc > 0:
             cache[sym_u] = neo_mc
-            populated += 1
+            neo4j_hits += 1
     # Phase 2: yfinance for misses (network — only in backtest pre-seed path)
-    if bool(config.get("mcap_preseed_use_yfinance", True)):
+    use_yf = bool(config.get("mcap_preseed_use_yfinance", True))
+    try:
+        max_attempts = max(1, int(config.get("mcap_preseed_yfinance_max_attempts", 3) or 3))
+    except (TypeError, ValueError):
+        max_attempts = 3
+    try:
+        base_delay = max(0.0, float(config.get("mcap_preseed_yfinance_base_delay_sec", 0.5) or 0.5))
+    except (TypeError, ValueError):
+        base_delay = 0.5
+    if use_yf:
         try:
             import yfinance as _yf_mod
-        except Exception:
+        except Exception as _imp_exc:
             _yf_mod = None
+            _log(
+                f"mcap pre-seed: yfinance import failed ({_imp_exc!r}); "
+                "skipping network fetch",
+                "yellow",
+            )
         if _yf_mod is not None:
+            import time as _time_mod_yf
             for sym in symbols_list:
                 sym_u = str(sym).strip().upper()
                 if not sym_u or sym_u in cache:
                     continue
-                try:
-                    info = _yf_mod.Ticker(sym_u).info or {}
-                    mc = float(info.get("marketCap") or 0)
-                except Exception:
-                    mc = 0.0
-                cache[sym_u] = mc
-                if mc > 0:
-                    populated += 1
-    strategy_cache["_yf_market_cap_cache_preseeded"] = True
-    if populated:
+                yf_attempted += 1
+                mc = 0.0
+                last_exc: BaseException | None = None
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        info = _yf_mod.Ticker(sym_u).info or {}
+                        mc = float(info.get("marketCap") or 0)
+                        last_exc = None
+                        break
+                    except Exception as _yf_exc:
+                        last_exc = _yf_exc
+                        if attempt < max_attempts:
+                            sleep_for = base_delay * (2 ** (attempt - 1))
+                            _log(
+                                f"mcap pre-seed: yfinance attempt {attempt}/{max_attempts} "
+                                f"failed for {sym_u}: {_yf_exc!r}; retrying in {sleep_for:.2f}s",
+                                "yellow",
+                            )
+                            # Bug-sweep 2026-05-18: time.sleep() only raises
+                            # KeyboardInterrupt (BaseException), which propagates
+                            # past `except Exception:`. The narrow OSError guard
+                            # below covers rare-but-real signal-induced EINTR.
+                            try:
+                                _time_mod_yf.sleep(sleep_for)
+                            except OSError:
+                                pass
+                if last_exc is not None:
+                    yf_failures += 1
+                    # Bug-sweep 2026-05-18: don't pollute cache with 0.0 on
+                    # hard failure — leaves the slot open for a later code
+                    # path that may successfully resolve mcap via Benzinga
+                    # or another network probe.
+                    _log(
+                        f"mcap pre-seed: yfinance exhausted {max_attempts} retries "
+                        f"for {sym_u}: {last_exc!r}",
+                        "yellow",
+                    )
+                else:
+                    cache[sym_u] = mc
+                    if mc > 0:
+                        yf_hits += 1
+                    else:
+                        # yfinance returned but marketCap was 0/missing — common
+                        # signal for rate-limit (empty .info dict).
+                        yf_zeros += 1
+    # Bug-sweep 2026-05-18: only mark preseed complete when we either had
+    # genuine success (populated > 0) OR yfinance was disabled/never
+    # attempted. If ALL yfinance fetches failed in a row (rate limit at
+    # backtest start), don't lock the flag — later code paths can retry.
+    if (neo4j_hits + yf_hits) > 0 or yf_failures == 0:
+        strategy_cache["_yf_market_cap_cache_preseeded"] = True
+    populated = neo4j_hits + yf_hits
+    # Phase α.4: ALWAYS log the per-source counters. The prior `if populated:`
+    # gate hid the silent-fail mode in BT109429 (populated=0 → no log line →
+    # inert Phase 1 fixes).
+    color = "cyan" if populated > 0 else "red"
+    _log(
+        f"mcap pre-seed: {populated}/{n_total} populated "
+        f"(neo4j_hits={neo4j_hits}, yf_hits={yf_hits}, yf_zeros={yf_zeros}, "
+        f"yf_failures={yf_failures}, yf_attempted={yf_attempted})",
+        color,
+    )
+    if populated == 0 and n_total > 0:
         _log(
-            f"_yf_market_cap_cache pre-seeded: {populated}/{len(symbols_list)} "
-            f"tickers populated (neo4j + yfinance)",
-            "cyan",
+            "mcap pre-seed: 0 tickers populated — Tier-3 A1 conviction-tier "
+            "resolution will fall back to raw_score path for all symbols, "
+            "demoting mega-caps to LOW (the BT109429 silent-fail mode). "
+            "Check Neo4j ingestion (_neo4j_market_cap_cache) and yfinance "
+            "reachability.",
+            "red",
         )
     return populated
 
@@ -7484,6 +7577,26 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         # BT136708 fix: A4 daily re-entry execution wiring (P1.7)
         "post_sell_watch_reentry_execution_enabled": bool(
             config.get("post_sell_watch_reentry_execution_enabled", False)
+        ),
+        # Phase α (BT109429 follow-up, 2026-05-18): variance-containment knobs
+        "mcap_preseed_use_yfinance": bool(
+            config.get("mcap_preseed_use_yfinance", True)
+        ),
+        "mcap_preseed_yfinance_max_attempts": int(
+            config.get("mcap_preseed_yfinance_max_attempts", 3) or 3
+        ),
+        "mcap_preseed_yfinance_base_delay_sec": float(
+            config.get("mcap_preseed_yfinance_base_delay_sec", 0.5) or 0.5
+        ),
+        "nexus_sentiment_cache_force_in_backtest": bool(
+            config.get("nexus_sentiment_cache_force_in_backtest", True)
+        ),
+        "nexus_neo4j_snapshot_granularity": str(
+            config.get("nexus_neo4j_snapshot_granularity", "weekly") or "weekly"
+        ).strip().lower(),
+        "nexus_neo4j_snapshot_lru_cap": int(
+            config.get("nexus_neo4j_snapshot_lru_cap", _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP)
+            or _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP
         ),
     }
 
@@ -14220,7 +14333,101 @@ def _query_conglomerate_exposure(session, tickers: set, as_of_date: str = "") ->
 # Contagion propagation engine
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list, config: dict, date_key: str = "") -> dict:
+_NEO4J_SNAPSHOT_DEFAULT_LRU_CAP = 256
+
+
+def _neo4j_cached_query(
+    strategy_cache: dict | None,
+    config: dict,
+    query_name: str,
+    seeds,
+    date_key: str,
+    query_fn,
+):
+    """Phase α.2 (2026-05-18, BT109429 follow-up): cache Neo4j query
+    results to reduce cross-bar variance in paired backtest re-runs.
+
+    The variance/robustness agent attributed 25-35% of the 4.8x same-code
+    spread to graph-propagation seed sensitivity. If Neo4j is mutated
+    externally (e.g., a re-index running concurrently with a backtest),
+    per-bar queries drift. Snapshotting per ISO week locks the propagation
+    graph against external mutation across the snapshot window.
+
+    Snapshot granularity (``nexus_neo4j_snapshot_granularity`` config):
+      * ``"weekly"`` (default): one snapshot per ISO-week of ``date_key``.
+      * ``"once"``: one snapshot for the entire backtest run.
+      * ``"off"``: no snapshot — pass-through to ``query_fn``.
+
+    Live mode (``_GN_LIVE_MODE_FLAG=True``) ALWAYS bypasses the snapshot
+    so production trading sees fresh graph state.
+
+    Cache lives at ``strategy_cache["_neo4j_snapshot"]`` (an ``OrderedDict``
+    with LRU eviction, default cap 256 — tunable via
+    ``nexus_neo4j_snapshot_lru_cap``). Cleared per backtest restart via
+    persistence blacklist + migration_reset_keys.
+
+    **Mutation contract**: callers MUST treat the returned list/dict as
+    read-only. The helper does not deep-copy — mutating the result
+    pollutes the snapshot for subsequent same-key calls. All current
+    consumers in ``_compute_propagated_scores`` only iterate; if a new
+    caller needs to mutate, they must shallow-copy first.
+    """
+    if _GN_LIVE_MODE_FLAG or not isinstance(strategy_cache, dict):
+        return query_fn()
+    from backend._phase_alpha_helpers import neo4j_snapshot_key as _neo4j_snapshot_key
+    key_pair = _neo4j_snapshot_key(query_name, seeds, date_key, config)
+    if key_pair is None:
+        # granularity="off" OR broken iterable — bypass cache.
+        return query_fn()
+    cache_key, _granularity = key_pair
+    import collections as _collections_local
+    snapshot = strategy_cache.setdefault("_neo4j_snapshot", _collections_local.OrderedDict())
+    # If a prior helper version stored a plain dict, migrate to OrderedDict
+    # in place so LRU semantics work going forward.
+    if not isinstance(snapshot, _collections_local.OrderedDict):
+        snapshot = _collections_local.OrderedDict(snapshot)
+        strategy_cache["_neo4j_snapshot"] = snapshot
+    if cache_key in snapshot:
+        # LRU hit: bump to MRU end.
+        try:
+            snapshot.move_to_end(cache_key, last=True)
+        except KeyError:  # pragma: no cover — racy delete; treat as miss
+            pass
+        else:
+            stats = strategy_cache.setdefault("_neo4j_snapshot_stats", {"hits": 0, "misses": 0})
+            stats["hits"] = int(stats.get("hits", 0) or 0) + 1
+            return snapshot[cache_key]
+    result = query_fn()
+    snapshot[cache_key] = result
+    # LRU eviction: pop oldest if over cap. Default 256 entries is generous
+    # — a 6-month backtest produces ~26 weeks * 11 query types = ~286
+    # entries; 256 fits the common case without spilling, and overflow
+    # weeks evict cleanly. Operators can tune via the config knob.
+    try:
+        cap = max(8, int(config.get(
+            "nexus_neo4j_snapshot_lru_cap",
+            _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP,
+        ) or _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP))
+    except (TypeError, ValueError):
+        cap = _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP
+    while len(snapshot) > cap:
+        try:
+            snapshot.popitem(last=False)
+        except KeyError:  # pragma: no cover
+            break
+    stats = strategy_cache.setdefault("_neo4j_snapshot_stats", {"hits": 0, "misses": 0})
+    stats["misses"] = int(stats.get("misses", 0) or 0) + 1
+    return result
+
+
+def _compute_propagated_scores(
+    driver,
+    sentiment_data: dict,
+    symbols_list: list,
+    config: dict,
+    date_key: str = "",
+    strategy_cache: dict | None = None,
+) -> dict:
     """
     Full graph contagion engine. Takes LLM sentiment data, traverses Neo4j graph
     through multiple relationship types and hops, applies directional and event-aware
@@ -14231,6 +14438,11 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         sentiment_data: dict[ticker -> {"sentiment": int, "event": str}]
         symbols_list: list of tickers in the trading universe
         config: strategy configuration
+        date_key: ISO date for the bar being scored (drives Phase α.2
+            ISO-week snapshot keying).
+        strategy_cache: optional run_once-level cache. When provided in
+            backtest mode, enables the Phase α.2 Neo4j snapshot
+            (cleared per backtest restart). Pass-through in live mode.
 
     Returns:
         dict[ticker -> {"raw_score": float, "reasons": list[str]}]
@@ -14264,7 +14476,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
     with driver.session() as session:
         # Discover which relationship types exist in the DB; use only those (avoids "not available" warnings)
         _log("Graph metadata: relationship type discovery start", "cyan")
-        available = _get_available_relationship_types(session)
+        available = _neo4j_cached_query(
+            strategy_cache, config, "available_rels", None, date_key,
+            lambda: _get_available_relationship_types(session),
+        )
         _log(f"Graph metadata: relationship type discovery done | count={len(available)}", "cyan")
         rels_1hop = [r for r in _REL_TYPES_1HOP if r in available]
         rels_2hop = [r for r in _REL_TYPES_2HOP if r in available]
@@ -14279,6 +14494,7 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         # — neo4j-python sessions are not thread-safe.
         use_inst = config.get("use_institutional_correlation", True)
         _inst_co_holdings_fut = None
+        _inst_snapshot_key: str | None = None  # set when α.2 snapshot is in play
         _inst_seed_cap = int(config.get("institutional_seed_cap", 50) or 50)
         if use_inst and "HOLDS" in available and config.get("_inst_co_holdings_cache") is None:
             _INST_EXCLUDE_EVENTS = {"trend_momentum"}
@@ -14290,27 +14506,59 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
             _inst_pre_filter = len(_inst_seeds)
             if len(_inst_seeds) > _inst_seed_cap:
                 _inst_seeds = set(sorted(_inst_seeds)[:_inst_seed_cap])
-            _log(
-                f"  Institutional co-holdings query: start (bg) | "
-                f"seeds={len(_inst_seeds)} (filtered={_inst_pre_filter} of {len(mentioned)} mentioned"
-                f"{', capped' if _inst_pre_filter > _inst_seed_cap else ''})",
-                "cyan",
-            )
-            def _inst_co_holdings_worker(_seeds=_inst_seeds, _dk=date_key):
-                # New session per thread — neo4j-python sessions are not thread-safe.
-                with driver.session() as _bg_inst_session:
-                    return _query_institutional_co_holdings(_bg_inst_session, _seeds, as_of_date=_dk)
-            from concurrent.futures import ThreadPoolExecutor as _InstTPE
-            _inst_executor = _InstTPE(max_workers=1)
-            _inst_co_holdings_fut = _inst_executor.submit(_inst_co_holdings_worker)
-            _inst_executor.shutdown(wait=False)
+            # Phase α.2 bug-sweep follow-up (2026-05-18): the institutional bg
+            # query was originally uncached and contributed ~15-25% of the
+            # remaining graph variance. Snapshot lookup BEFORE the bg launch:
+            # cache hit → set `_inst_co_holdings_cache` (which retrieval at
+            # line ~14681 already honors) and skip the thread; cache miss →
+            # launch as before and store after retrieval.
+            _inst_snap_pair = None
+            if not _GN_LIVE_MODE_FLAG and isinstance(strategy_cache, dict):
+                from backend._phase_alpha_helpers import (
+                    neo4j_snapshot_key as _neo4j_snapshot_key_local,
+                )
+                _inst_snap_pair = _neo4j_snapshot_key_local(
+                    "inst_co_holdings", _inst_seeds, date_key, config,
+                )
+            if _inst_snap_pair is not None:
+                _inst_snapshot_key, _ = _inst_snap_pair
+                _inst_snap_dict = strategy_cache.get("_neo4j_snapshot") if isinstance(strategy_cache, dict) else None
+                if _inst_snap_dict is not None and _inst_snapshot_key in _inst_snap_dict:
+                    config["_inst_co_holdings_cache"] = _inst_snap_dict[_inst_snapshot_key]
+                    _log(
+                        f"  Institutional co-holdings query: snapshot cache HIT "
+                        f"(seeds={len(_inst_seeds)})",
+                        "cyan",
+                    )
+                    _inst_co_holdings_fut = None
+            if config.get("_inst_co_holdings_cache") is None:
+                _log(
+                    f"  Institutional co-holdings query: start (bg) | "
+                    f"seeds={len(_inst_seeds)} (filtered={_inst_pre_filter} of {len(mentioned)} mentioned"
+                    f"{', capped' if _inst_pre_filter > _inst_seed_cap else ''})",
+                    "cyan",
+                )
+                def _inst_co_holdings_worker(_seeds=_inst_seeds, _dk=date_key):
+                    # New session per thread — neo4j-python sessions are not thread-safe.
+                    with driver.session() as _bg_inst_session:
+                        return _query_institutional_co_holdings(_bg_inst_session, _seeds, as_of_date=_dk)
+                from concurrent.futures import ThreadPoolExecutor as _InstTPE
+                _inst_executor = _InstTPE(max_workers=1)
+                _inst_co_holdings_fut = _inst_executor.submit(_inst_co_holdings_worker)
+                _inst_executor.shutdown(wait=False)
 
         # ── 1-hop: relationship-aware directional propagation ──────────────
         _log(f"  1-hop query out: start | seeds={len(mentioned)} | rels={len(rels_1hop)}", "cyan")
-        out_edges = _query_1hop(session, mentioned, "out", rels_1hop, as_of_date=date_key)
+        out_edges = _neo4j_cached_query(
+            strategy_cache, config, "1hop_out", mentioned, date_key,
+            lambda: _query_1hop(session, mentioned, "out", rels_1hop, as_of_date=date_key),
+        )
         _log(f"  1-hop query out: done | edges={len(out_edges)}", "cyan")
         _log(f"  1-hop query in: start | seeds={len(mentioned)} | rels={len(rels_1hop)}", "cyan")
-        in_edges = _query_1hop(session, mentioned, "in", rels_1hop, as_of_date=date_key)
+        in_edges = _neo4j_cached_query(
+            strategy_cache, config, "1hop_in", mentioned, date_key,
+            lambda: _query_1hop(session, mentioned, "in", rels_1hop, as_of_date=date_key),
+        )
         _log(f"  1-hop query in: done | edges={len(in_edges)}", "cyan")
         all_1hop = out_edges + in_edges
 
@@ -14381,7 +14629,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         sector_edges = []
         if "IN_SECTOR" in available:
             _log(f"  Sector peer query: start | seeds={len(mentioned)}", "cyan")
-            sector_edges = _query_sector_peers(session, mentioned, as_of_date=date_key)
+            sector_edges = _neo4j_cached_query(
+                strategy_cache, config, "sector_peers", mentioned, date_key,
+                lambda: _query_sector_peers(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Sector peer query: done | edges={len(sector_edges)}", "cyan")
         else:
             _log("  Sector peers: skipped (IN_SECTOR not in graph)", "cyan")
@@ -14407,7 +14658,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         macro_edges = []
         if "SUPPLIES_TO_SECTOR" in available and "IN_SECTOR" in available:
             _log(f"  Macro sector flow query: start | seeds={len(mentioned)}", "cyan")
-            macro_edges = _query_macro_sector_flow(session, mentioned, as_of_date=date_key)
+            macro_edges = _neo4j_cached_query(
+                strategy_cache, config, "macro_sector_flow", mentioned, date_key,
+                lambda: _query_macro_sector_flow(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Macro sector flow query: done | edges={len(macro_edges)}", "cyan")
             # Normalize flow_value: find max to scale relative importance
             max_flow = max((e["flow_value"] for e in macro_edges), default=1.0) or 1.0
@@ -14438,10 +14692,16 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         max_hops = int(config.get("max_hops", 2))
         if max_hops >= 2 and rels_2hop:
             _log(f"  2-hop query out: start | seeds={len(mentioned)} | rels={len(rels_2hop)}", "cyan")
-            hop2_out = _query_2hop_chains(session, mentioned, "out", rels_2hop, as_of_date=date_key)
+            hop2_out = _neo4j_cached_query(
+                strategy_cache, config, "2hop_out", mentioned, date_key,
+                lambda: _query_2hop_chains(session, mentioned, "out", rels_2hop, as_of_date=date_key),
+            )
             _log(f"  2-hop query out: done | edges={len(hop2_out)}", "cyan")
             _log(f"  2-hop query in: start | seeds={len(mentioned)} | rels={len(rels_2hop)}", "cyan")
-            hop2_in = _query_2hop_chains(session, mentioned, "in", rels_2hop, as_of_date=date_key)
+            hop2_in = _neo4j_cached_query(
+                strategy_cache, config, "2hop_in", mentioned, date_key,
+                lambda: _query_2hop_chains(session, mentioned, "in", rels_2hop, as_of_date=date_key),
+            )
             _log(f"  2-hop query in: done | edges={len(hop2_in)}", "cyan")
             all_2hop = hop2_out + hop2_in
 
@@ -14490,6 +14750,20 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
                     _log(f"  Institutional co-holdings query failed: {_inst_exc}", "yellow")
                     inst_edges = []
                 _log(f"  Institutional co-holdings query: done | edges={len(inst_edges)}", "cyan")
+                # Phase α.2 bug-sweep follow-up: store the bg result in the
+                # snapshot so subsequent same-week bars hit cache (the bg
+                # query was the largest single uncached variance source).
+                if (
+                    _inst_snapshot_key
+                    and not _GN_LIVE_MODE_FLAG
+                    and isinstance(strategy_cache, dict)
+                ):
+                    _inst_snap_store = strategy_cache.setdefault("_neo4j_snapshot", None)
+                    if _inst_snap_store is None:
+                        import collections as _collections_inst
+                        _inst_snap_store = _collections_inst.OrderedDict()
+                        strategy_cache["_neo4j_snapshot"] = _inst_snap_store
+                    _inst_snap_store[_inst_snapshot_key] = inst_edges
             else:
                 # Defensive fallback — sentiment_data became empty between the
                 # bg-kickoff branch and here, or HOLDS lookup changed. Inline.
@@ -14508,7 +14782,12 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
                     f"{', capped' if _fallback_pre > _inst_seed_cap else ''})",
                     "cyan",
                 )
-                inst_edges = _query_institutional_co_holdings(session, inst_seeds, as_of_date=date_key)
+                # Phase α.2 bug-sweep: wrap the inline-fallback branch too.
+                inst_edges = _neo4j_cached_query(
+                    strategy_cache, config, "inst_co_holdings",
+                    inst_seeds, date_key,
+                    lambda: _query_institutional_co_holdings(session, inst_seeds, as_of_date=date_key),
+                )
                 _log(f"  Institutional co-holdings query: done | edges={len(inst_edges)}", "cyan")
 
             for edge in inst_edges:
@@ -14551,7 +14830,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         if "SUPPLIER_OF" in available:
             all_affected = mentioned | {e["target"] for e in all_1hop}
             _log(f"  Supply chain concentration query: start | tickers={len(all_affected)}", "cyan")
-            sc_conc = _query_supply_chain_concentration(session, all_affected, as_of_date=date_key)
+            sc_conc = _neo4j_cached_query(
+                strategy_cache, config, "supply_chain_conc", all_affected, date_key,
+                lambda: _query_supply_chain_concentration(session, all_affected, as_of_date=date_key),
+            )
             _log(f"  Supply chain concentration query: done | tickers={len(sc_conc)}", "cyan")
             for ticker, counts in sc_conc.items():
                 if ticker not in contributions:
@@ -14570,7 +14852,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         # Competitors who share suppliers: negative news on one benefits the other more strongly
         if "COMPETES_WITH" in available and "SUPPLIER_OF" in available:
             _log(f"  Competitive overlap query: start | seeds={len(mentioned)}", "cyan")
-            comp_overlap = _query_competitive_overlap(session, mentioned, as_of_date=date_key)
+            comp_overlap = _neo4j_cached_query(
+                strategy_cache, config, "competitive_overlap", mentioned, date_key,
+                lambda: _query_competitive_overlap(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Competitive overlap query: done | edges={len(comp_overlap)}", "cyan")
             for edge in comp_overlap:
                 src_data = sentiment_data.get(edge["source"])
@@ -14590,7 +14875,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         # Subsidiaries of the same parent: news at one sibling signals parent-level issues
         if "PARENT_OF" in available or "CONTROLS" in available:
             _log(f"  Conglomerate sibling query: start | seeds={len(mentioned)}", "cyan")
-            sibling_edges = _query_conglomerate_exposure(session, mentioned, as_of_date=date_key)
+            sibling_edges = _neo4j_cached_query(
+                strategy_cache, config, "conglomerate", mentioned, date_key,
+                lambda: _query_conglomerate_exposure(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Conglomerate sibling query: done | edges={len(sibling_edges)}", "cyan")
             for edge in sibling_edges:
                 src_data = sentiment_data.get(edge["source"])
@@ -14609,7 +14897,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         # institutional herding means the stock moves more on sentiment shifts
         if use_inst and "HOLDS" in available:
             _log(f"  Institutional momentum query: start | seeds={len(mentioned)}", "cyan")
-            holder_counts = _query_institutional_holders_count(session, mentioned, as_of_date=date_key)
+            holder_counts = _neo4j_cached_query(
+                strategy_cache, config, "inst_holders_count", mentioned, date_key,
+                lambda: _query_institutional_holders_count(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Institutional momentum query: done | tickers={len(holder_counts)}", "cyan")
             for ticker, count in holder_counts.items():
                 if ticker not in contributions or count < 10:
@@ -14636,10 +14927,39 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         reasons = [r for _, r in contribs[:5]]
         aggregated[ticker] = {"raw_score": total, "reasons": reasons, "n_paths": len(contribs)}
 
+    # Bug-sweep 2026-05-18: ALWAYS log aggregation outcome. The prior
+    # `if aggregated:` gate hid the zero-tickers case (same antipattern as
+    # the α.4 mcap-preseed silent-fail). Zero-aggregated could mean "no
+    # seeds had nonzero sentiment", "all edges filtered out", or "no
+    # relationship types in graph" — operators need to distinguish.
     if aggregated:
         top = sorted(aggregated.items(), key=lambda x: abs(x[1]["raw_score"]), reverse=True)[:5]
         parts = [f"{t}={v['raw_score']:+.3f}({v['n_paths']}p)" for t, v in top]
         _log(f"Aggregated: {len(aggregated)} tickers with paths | top raw: {', '.join(parts)}", "cyan")
+    else:
+        _log(
+            f"Aggregated: 0 tickers with paths "
+            f"(n_seed={n_seed}, mentioned={len(mentioned)}, "
+            f"1hop_edges={len(all_1hop)}, contributions_dict={len(contributions)})",
+            "red",
+        )
+    # Phase α.2 bug-sweep follow-up: emit snapshot stats once per bar so
+    # operators can audit cache hit-rate without per-call log spam (11
+    # queries × ~125 bars would be ~1400 lines/backtest otherwise).
+    if isinstance(strategy_cache, dict):
+        _snap_stats = strategy_cache.get("_neo4j_snapshot_stats")
+        _snap_dict = strategy_cache.get("_neo4j_snapshot")
+        if _snap_stats:
+            _h = int(_snap_stats.get("hits", 0) or 0)
+            _m = int(_snap_stats.get("misses", 0) or 0)
+            _total = _h + _m
+            _hit_rate = (_h / _total) if _total else 0.0
+            _size = len(_snap_dict) if isinstance(_snap_dict, dict) else 0
+            _log(
+                f"neo4j snapshot: {_h}/{_total} hits ({_hit_rate:.0%}), "
+                f"{_size} entries cached",
+                "cyan",
+            )
     return aggregated
 
 
@@ -17868,7 +18188,29 @@ class GraphNexusAnalysis:
         num_articles = max_daily_alpaca_articles
         num_articles_for_llm = int(config.get("num_articles_for_llm") or max_daily_alpaca_articles or 30)
         use_llm = config.get("use_llm_sentiment", True)
-        use_sentiment_cache = config.get("use_sentiment_cache", True)
+        # Phase α.1 (2026-05-18, BT109429 follow-up): force-enable sentiment
+        # cache in any non-live context for paired re-run determinism. The
+        # variance/robustness agent attributed 40-60% of the 4.8x same-code
+        # spread (BT901920 +247.6% / BT136708 +171.3% / BT109429 +51.9%) to
+        # LLM non-determinism (gpt-5.4-mini omits temperature -> OpenAI
+        # default 1.0). With the cache mandatory in backtest, the LLM only
+        # fires on (date, ticker, articles_hash) cache miss; subsequent
+        # paired runs hit the cache and emit identical sentiment. Live mode
+        # (live=True AND lookback=False) honors operator config. The
+        # (live=True AND lookback=True) "live with lookback pre-pass" path
+        # still hits the cache — pre-pass is deterministic-prep regardless.
+        # Logic extracted to backend._phase_alpha_helpers.resolve_use_sentiment_cache.
+        from backend._phase_alpha_helpers import (
+            resolve_use_sentiment_cache as _resolve_use_sentiment_cache,
+        )
+        use_sentiment_cache, _alpha1_forced = _resolve_use_sentiment_cache(config)
+        if _alpha1_forced:
+            _log(
+                "Phase alpha.1: forcing use_sentiment_cache=True in backtest mode "
+                "(operator config had False; set "
+                "`nexus_sentiment_cache_force_in_backtest=False` to opt out)",
+                "yellow",
+            )
         llm_provider, llm_key, llm_model, _ = _resolve_role_llm_config(config, "")
         llm_provider_config = _resolve_role_llm_provider_config(config, "")
         llm_model_ref = _llm_model_ref(llm_model, llm_provider_config)
@@ -19967,7 +20309,14 @@ class GraphNexusAnalysis:
                         max_connection_pool_size=10,
                     )
                     _log("Neo4j: driver reconnected successfully", "green")
-                propagated = _compute_propagated_scores(_shared_neo4j_driver, sentiment_data, symbols_list, config, date_key=date_key)
+                propagated = _compute_propagated_scores(
+                    _shared_neo4j_driver,
+                    sentiment_data,
+                    symbols_list,
+                    config,
+                    date_key=date_key,
+                    strategy_cache=strategy_cache,
+                )
         except Exception as e:
             _log(f"Neo4j error: {e}", "yellow")
         # Persist institutional cache to in-memory strategy_cache and RethinkDB for cross-session reuse
