@@ -311,3 +311,39 @@ For each phase, the gate before merging to `claude-code-integration` (let alone 
 ---
 
 *Spec v1 draft. Awaiting operator review before writing the implementation plan.*
+
+---
+
+## 13. Addendum: BT136708 follow-up calibration (2026-05-18, P1.7-P1.8)
+
+The Tier-3 spec was validated against BT901920's premature-exit cohort. BT136708 (same universe pattern, different period, post-V32 stack) ended at +171.3% — a 76pp gap vs BT901920's +247.6%. An 8-agent investigation traced the gap to three cascading failures: max_positions cap at 8 created a 60-deep BFQ graveyard; the A1 conviction-tier resolver returned LOW for all 18 evaluations because the raw_score≥1.5 threshold was too tight AND `_yf_market_cap_cache` was empty in backtest; A4 re-entry was data-plumbed but never wired into `run_once`. The BT136708 fix plan (`docs/superpowers/plans/2026-05-18-bt136708-fix-implementation.md`) addressed all three. This section documents the cross-cutting interactions surfaced during implementation.
+
+### A4 re-entry ↔ sentiment veto
+
+A4 re-entry candidates injected into `scores` follow the same pipeline as fresh discovery buys, so they ARE subject to the existing sentiment-veto path at the future-trade-review block (graph_nexus_analysis.py ~19560-19583). A3's macro-override whitelist applies to pending scheduled buys, not directly to A4 re-entries — but if an A4 re-entry coincides with a scheduled buy on the same ticker, the macro-override behaviour applies to the scheduled buy independently. There is no special A4 bypass of sentiment veto; if the operator wants A4 to be immune to sentiment veto, that would be a separate Phase 2 design item.
+
+### A4 re-entry ↔ rotation
+
+A4 re-entries compete for buy slots like any other buy candidate. The slate planner sees them via `scores[sym]["score"] == 1` with `_is_post_sell_reentry=True` marker. They flow through the same rotation logic, max_positions cap (now 12 in chop after P1.2), BFQ queue, and price-floor gate (P1.3 propagation-tier $3.50 floor applies if reason text contains "propagation" or "expansion"; A4 reasons don't, so re-entries get the primary $5 floor unless the operator lowers `buy_price_floor`).
+
+### A4 re-entry ↔ max_positions cap
+
+A4 candidates are constrained by the same chop=12/bear=8 cap (after P1.2). If at cap, A4 re-entries fall through to BFQ like any other deferred buy. The priority TTL (15 bars after P1.4) gives them a fair chance to fill before aging out. The BFQ "_is_propagation_expansion" priority flag is NOT set on A4 entries by default — if Tier-3 wants A4 to compete with elevated priority, that's a Phase 2 follow-up.
+
+### A4 re-entry ↔ sizing fraction
+
+The Tier-3 spec called for 50% sizing on re-entries (`post_sell_reentry_size_fraction=0.50`). The P1.7 implementation marks the score entry with `_reentry_size_fraction` but the slate planner does NOT currently honor it — A4 re-entries fund at 100% of the normal slate cash. This is a known incomplete piece; the marker is in place so a future Phase 2 patch can plumb the fraction through `_plan_executable_stock_buy_slate`. Operator can compensate by lowering global allocation caps in the interim.
+
+### A3 macro-override status
+
+Per the BT136708 investigation, A3 fired 0 times. Initial review suggested A3 was dead code; on closer inspection (graph_nexus_analysis.py ~19566-19583) the path is wired correctly — it only fires when (a) a scheduled future trade exists, (b) fresh sentiment contradicts it, (c) the trade is a BUY, and (d) the article reason matches the 14-keyword whitelist. BT136708 had no such confluence. **A3 is retained**, not removed. The keyword list could be expanded if a future backtest reveals miss patterns.
+
+### A1 mcap pre-seed dependency
+
+`_yf_market_cap_cache` is empty in backtest against a static universe because `_get_quality_metadata_for_ticker` only populates it during fresh discovery. P1.1 added a one-time pre-seed via the new `_preseed_mcap_cache_from_universe` helper, called early in `run_once`. Source order: `_neo4j_market_cap_cache` first (cheap, no network), yfinance as fallback (gated on `mcap_preseed_use_yfinance`, default True). The pre-seed runs once per backtest (idempotent via `_yf_market_cap_cache_preseeded` flag) and is on the migration-reset + persistence-blacklist lists so a new backtest run starts fresh.
+
+### Backtest exercise of A4
+
+The A4 sell-side write was originally gated on `_GN_LIVE_MODE_FLAG` only. To exercise the re-entry pipeline in backtest WITHOUT polluting the shared `GraphNexusDiscoveredStocks` table, P1.7 added an in-memory mirror keyed on `strategy_cache["_post_sell_watch_inmem"]`. Live mode writes to DB exclusively; backtest writes to in-memory exclusively; historical-lookback pre-pass writes to neither. The reader `_get_post_sell_watch_candidates_combined` merges both sources (in-memory wins via dedupe). This pattern can be reused for other state that needs backtest exercise without DB pollution.
+
+

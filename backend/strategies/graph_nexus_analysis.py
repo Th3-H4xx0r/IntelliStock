@@ -5555,10 +5555,15 @@ def _recent_closes_for_symbol(
 # circuit-breaker -15% floor (SNDK -18.3% → +487% missed, FGL -22.8% → +338%
 # missed, ROLR -22.5% → +77% missed, ORLA -16.3% → +34% missed). CAR was the
 # only vindicated exit. Tier-3 spec A1 introduces a conviction-tier resolver:
-# HIGH-conviction positions (mcap > $50B OR raw_score >= 1.5) get a wider
-# absolute floor (-25%) with vol-scaling disabled. MID-conviction get -20%.
-# LOW-conviction retain the current -15% behavior.
+# HIGH-conviction positions get a wider absolute floor (-25%) with vol-scaling
+# disabled. MID-conviction get -20%. LOW-conviction retain the current -15%.
+#
+# 2026-05-18 (BT136708 P1.5): thresholds lowered after BT136708 returned LOW
+# for 18/18 evaluations under the original 50B/1.5 thresholds. New defaults:
+# HIGH = (mcap >= $30B OR raw_score >= 1.0); MID = (mcap >= $10B OR raw_score
+# >= 0.6); LOW = else. SNDK (~$36B) now resolves to HIGH and gets -25% floor.
 # See docs/superpowers/specs/2026-05-17-nexus-tier3-missed-rally-fixes-design.md
+# §13 addendum for the BT136708 calibration details.
 
 
 def _resolve_position_market_cap(
@@ -5583,6 +5588,76 @@ def _resolve_position_market_cap(
         return None
 
 
+def _preseed_mcap_cache_from_universe(
+    symbols_list: list,
+    strategy_cache: dict | None,
+    config: dict,
+) -> int:
+    """Pre-populate ``_yf_market_cap_cache`` for a static backtest universe.
+
+    BT136708 calibration (2026-05-18): without this, the cache stays empty in
+    backtest (no fresh discovery happens against a static universe), and the
+    Tier-3 A1 HIGH-tier resolution via mcap never fires for mega-caps. SNDK
+    (~$36B) defaulted to LOW conviction tier in BT136708 and got the -15%
+    floor → cut at -18.3% → missed +619% recovery.
+
+    Sources (in order):
+      1. ``_neo4j_market_cap_cache`` (already populated at module load)
+      2. yfinance (one-time per ticker), gated on
+         ``mcap_preseed_use_yfinance`` config flag (default True).
+
+    Idempotent via ``_yf_market_cap_cache_preseeded`` flag on strategy_cache.
+    Returns the count of tickers populated this call.
+    """
+    if not isinstance(strategy_cache, dict):
+        return 0
+    if strategy_cache.get("_yf_market_cap_cache_preseeded"):
+        return 0
+    if not symbols_list:
+        return 0
+    cache = strategy_cache.setdefault("_yf_market_cap_cache", {})
+    populated = 0
+    # Phase 1: neo4j cache (cheap, no network)
+    for sym in symbols_list:
+        sym_u = str(sym).strip().upper()
+        if not sym_u or sym_u in cache:
+            continue
+        try:
+            neo_mc = float(_neo4j_market_cap_cache.get(sym_u, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            neo_mc = 0.0
+        if neo_mc > 0:
+            cache[sym_u] = neo_mc
+            populated += 1
+    # Phase 2: yfinance for misses (network — only in backtest pre-seed path)
+    if bool(config.get("mcap_preseed_use_yfinance", True)):
+        try:
+            import yfinance as _yf_mod
+        except Exception:
+            _yf_mod = None
+        if _yf_mod is not None:
+            for sym in symbols_list:
+                sym_u = str(sym).strip().upper()
+                if not sym_u or sym_u in cache:
+                    continue
+                try:
+                    info = _yf_mod.Ticker(sym_u).info or {}
+                    mc = float(info.get("marketCap") or 0)
+                except Exception:
+                    mc = 0.0
+                cache[sym_u] = mc
+                if mc > 0:
+                    populated += 1
+    strategy_cache["_yf_market_cap_cache_preseeded"] = True
+    if populated:
+        _log(
+            f"_yf_market_cap_cache pre-seeded: {populated}/{len(symbols_list)} "
+            f"tickers populated (neo4j + yfinance)",
+            "cyan",
+        )
+    return populated
+
+
 def _resolve_conviction_tier_at_exit(
     sym: str,
     config: dict,
@@ -5592,40 +5667,49 @@ def _resolve_conviction_tier_at_exit(
     """Return ``"HIGH"`` / ``"MID"`` / ``"LOW"`` for ``sym``.
 
     HIGH triggers (any of):
-      * Market cap >= ``circuit_breaker_high_conviction_mcap_threshold_usd`` (50B default)
-      * Current raw_net_score from ``propagated[sym]`` >= ``circuit_breaker_high_conviction_raw_score_threshold`` (1.5 default)
+      * Market cap >= ``circuit_breaker_high_conviction_mcap_threshold_usd`` (30B default)
+      * Current raw_net_score >= ``circuit_breaker_high_conviction_raw_score_threshold`` (1.0 default)
 
-    MID trigger:
-      * Current raw_net_score >= ``circuit_breaker_mid_conviction_raw_score_threshold`` (0.5 default)
+    MID triggers (any of):
+      * Market cap >= ``circuit_breaker_mid_conviction_mcap_threshold_usd`` (10B default)
+      * Current raw_net_score >= ``circuit_breaker_mid_conviction_raw_score_threshold`` (0.6 default)
 
-    LOW: default fallback. This mirrors the pre-Tier-3 behavior (no widening).
+    LOW: default fallback.
 
-    NOTE: This uses the CURRENT bar's propagated score as a proxy for entry-time
-    conviction. Phase 3 telemetry will measure whether entry-time caching is
-    needed; for now the proxy is acceptable because conviction tends to be
-    sticky over ~14 day holds.
+    BT136708 calibration (2026-05-18): the original HIGH thresholds (50B mcap,
+    1.5 raw) returned LOW for 18/18 evaluations — SNDK (~$36B mcap) got the
+    -15% floor and was cut at -18.3% missing the +619% recovery to $1407.
+    Lowered to 30B / 1.0 + added a MID mcap path (10B) so structurally
+    lower-vol mid/mega-caps get a wider floor than pure micro-cap propagation
+    picks.
     """
     sym = str(sym or "").strip().upper()
     if not sym:
         return "LOW"
     try:
         mcap_threshold = float(
-            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 50e9) or 50e9
+            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 30e9) or 30e9
         )
     except (TypeError, ValueError):
-        mcap_threshold = 50e9
+        mcap_threshold = 30e9
+    try:
+        mcap_mid_threshold = float(
+            config.get("circuit_breaker_mid_conviction_mcap_threshold_usd", 10e9) or 10e9
+        )
+    except (TypeError, ValueError):
+        mcap_mid_threshold = 10e9
     try:
         raw_high = float(
-            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.5) or 1.5
+            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.0) or 1.0
         )
     except (TypeError, ValueError):
-        raw_high = 1.5
+        raw_high = 1.0
     try:
         raw_mid = float(
-            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.5) or 0.5
+            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.6) or 0.6
         )
     except (TypeError, ValueError):
-        raw_mid = 0.5
+        raw_mid = 0.6
 
     mcap = _resolve_position_market_cap(sym, strategy_cache)
     if mcap is not None and mcap >= mcap_threshold:
@@ -5639,9 +5723,16 @@ def _resolve_conviction_tier_at_exit(
                 raw_score = float(entry.get("raw_score", 0.0) or 0.0)
             except (TypeError, ValueError):
                 raw_score = 0.0
+            # Bug-sweep 2026-05-18: NaN/inf would silently make all comparisons
+            # False and demote HIGH→LOW. Coerce non-finite to 0.0.
+            import math as _math_local
+            if not _math_local.isfinite(raw_score):
+                raw_score = 0.0
 
     if raw_score >= raw_high:
         return "HIGH"
+    if mcap is not None and mcap >= mcap_mid_threshold:
+        return "MID"
     if raw_score >= raw_mid:
         return "MID"
     return "LOW"
@@ -7216,6 +7307,7 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "nexus_regime_capacity_gating_enabled": bool(config.get("nexus_regime_capacity_gating_enabled", True)),
         "backfill_queue_grace_bars": int(config.get("backfill_queue_grace_bars", 7) or 7),
         "backfill_queue_priority_grace_bars": int(config.get("backfill_queue_priority_grace_bars", 8) or 8),
+        "backfill_queue_priority_max_bars_floor": int(config.get("backfill_queue_priority_max_bars_floor", 15) or 15),
         "backfill_queue_reserved_priority_slots": int(config.get("backfill_queue_reserved_priority_slots", 10) or 10),
         "backfill_queue_max_size": int(config.get("backfill_queue_max_size", 50) or 50),
         "rotation_min_hold_days": int(config.get("rotation_min_hold_days", 10) or 10),
@@ -7287,13 +7379,16 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
             config.get("circuit_breaker_floor_low_conviction_pct", -15.0) or -15.0
         ),
         "circuit_breaker_high_conviction_mcap_threshold_usd": float(
-            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 50e9) or 50e9
+            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 30e9) or 30e9
+        ),
+        "circuit_breaker_mid_conviction_mcap_threshold_usd": float(
+            config.get("circuit_breaker_mid_conviction_mcap_threshold_usd", 10e9) or 10e9
         ),
         "circuit_breaker_high_conviction_raw_score_threshold": float(
-            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.5) or 1.5
+            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.0) or 1.0
         ),
         "circuit_breaker_mid_conviction_raw_score_threshold": float(
-            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.5) or 0.5
+            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.6) or 0.6
         ),
         "circuit_breaker_low_vol_disable_threshold_pct": float(
             config.get("circuit_breaker_low_vol_disable_threshold_pct", 0.08) or 0.08
@@ -7377,6 +7472,18 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         ),
         "conviction_telemetry_enabled": bool(
             config.get("conviction_telemetry_enabled", True)
+        ),
+        # BT136708 fix: price floor tiering (P1.3)
+        "buy_price_floor": float(config.get("buy_price_floor", 5.0) or 0.0),
+        "buy_price_floor_propagation": float(
+            config.get("buy_price_floor_propagation", 3.50) or 0.0
+        ),
+        "buy_price_floor_absolute_min": float(
+            config.get("buy_price_floor_absolute_min", 2.00) or 0.0
+        ),
+        # BT136708 fix: A4 daily re-entry execution wiring (P1.7)
+        "post_sell_watch_reentry_execution_enabled": bool(
+            config.get("post_sell_watch_reentry_execution_enabled", False)
         ),
     }
 
@@ -10355,6 +10462,173 @@ def _mark_discovered_stock_forgotten(conn, instance_id: str, ticker: str):
         _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update({"status": "forgotten"}).run(conn)
     except Exception:
         pass
+
+
+# ── A4 in-memory post_sell_watch (BT136708 fix P1.7, 2026-05-18) ──────────
+# Backtest mode currently gates the post_sell_watch DB write off via
+# _GN_LIVE_MODE_FLAG so backtest re-runs don't pollute the shared
+# GraphNexusDiscoveredStocks table. To exercise the daily re-entry pipeline
+# in backtest WITHOUT writing to the live DB, mirror the writes to an
+# in-memory dict on strategy_cache. Lives only for the duration of one
+# backtest run (cleared between runs by broker.py migration-reset list).
+_POST_SELL_WATCH_INMEM_KEY = "_post_sell_watch_inmem"
+
+
+def _post_sell_watch_inmem_write(
+    strategy_cache: dict | None,
+    ticker: str,
+    *,
+    exit_price: float,
+    entry_conviction_tier: str,
+    sell_reason: str,
+    date_key: str,
+) -> None:
+    """Mirror an A4 sell-side write to strategy_cache for backtest exercise.
+
+    Bug-sweep 2026-05-18: rows with exit_price <= 0 cause downstream silent
+    skips in `_is_post_sell_reentry_eligible` (which requires exit_price > 0).
+    Skip the write entirely so a useless row doesn't accumulate.
+    """
+    if not isinstance(strategy_cache, dict):
+        return
+    sym = str(ticker or "").strip().upper()
+    if not sym or not date_key:
+        return
+    try:
+        _ep = float(exit_price or 0.0)
+    except (TypeError, ValueError):
+        _ep = 0.0
+    if _ep <= 0:
+        _log(
+            f"A4 post_sell_watch write skipped: {sym} has exit_price=0 — "
+            f"re-entry would be silently blocked. Investigate sell-side price resolution.",
+            "yellow",
+        )
+        return
+    bucket = strategy_cache.setdefault(_POST_SELL_WATCH_INMEM_KEY, {})
+    bucket[sym] = {
+        "ticker": sym,
+        "status": "post_sell_watch",
+        "exit_price": _ep,
+        "entry_conviction_tier": str(entry_conviction_tier or "LOW")[:8],
+        "sell_reason": str(sell_reason or "")[:200],
+        "sold_date": str(date_key),
+    }
+
+
+def _post_sell_watch_inmem_get_candidates(
+    strategy_cache: dict | None,
+    date_key: str,
+    window_days: int = 60,
+) -> list[dict]:
+    """Read in-memory post_sell_watch candidates within ``window_days``."""
+    out: list[dict] = []
+    if not isinstance(strategy_cache, dict) or not date_key:
+        return out
+    bucket = strategy_cache.get(_POST_SELL_WATCH_INMEM_KEY) or {}
+    if not isinstance(bucket, dict) or not bucket:
+        return out
+    try:
+        cutoff = (
+            datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=int(window_days))
+        ).strftime("%Y-%m-%d")
+    except Exception:
+        return out
+    for sym, doc in bucket.items():
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("status") != "post_sell_watch":
+            continue
+        sold_date = str(doc.get("sold_date") or "")
+        if not sold_date or sold_date < cutoff:
+            continue
+        out.append({
+            "ticker": str(sym),
+            "exit_price": float(doc.get("exit_price") or 0.0),
+            "exit_date": sold_date,
+            "entry_conviction_tier": str(doc.get("entry_conviction_tier") or "LOW"),
+            "sell_reason": str(doc.get("sell_reason") or ""),
+        })
+    return out
+
+
+def _post_sell_watch_inmem_mark_re_entered(
+    strategy_cache: dict | None, ticker: str, date_key: str = ""
+) -> None:
+    """Transition an in-memory row back to active after successful re-entry."""
+    if not isinstance(strategy_cache, dict):
+        return
+    bucket = strategy_cache.get(_POST_SELL_WATCH_INMEM_KEY) or {}
+    sym = str(ticker or "").strip().upper()
+    doc = bucket.get(sym) if isinstance(bucket, dict) else None
+    if not isinstance(doc, dict):
+        return
+    doc["status"] = "active"
+    if date_key:
+        doc["re_entered_date"] = date_key
+
+
+def _post_sell_watch_inmem_forget_expired(
+    strategy_cache: dict | None, date_key: str, window_days: int = 60
+) -> int:
+    """TTL sweep: drop rows older than ``window_days`` from in-memory storage.
+
+    Bug-sweep 2026-05-18: a silent return on malformed date_key would let
+    rows accumulate indefinitely; log a warning so operator sees the leak.
+    """
+    if not isinstance(strategy_cache, dict) or not date_key:
+        return 0
+    bucket = strategy_cache.get(_POST_SELL_WATCH_INMEM_KEY)
+    if not isinstance(bucket, dict) or not bucket:
+        return 0
+    try:
+        cutoff = (
+            datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=int(window_days))
+        ).strftime("%Y-%m-%d")
+    except Exception as _ttl_exc:
+        _log(
+            f"A4 TTL sweep skipped: malformed date_key={date_key!r} ({_ttl_exc}). "
+            f"In-memory post_sell_watch rows will not be expired this cycle.",
+            "yellow",
+        )
+        return 0
+    removed = 0
+    for sym in list(bucket.keys()):
+        doc = bucket.get(sym)
+        if not isinstance(doc, dict):
+            continue
+        if str(doc.get("sold_date") or "") < cutoff and doc.get("status") == "post_sell_watch":
+            doc["status"] = "forgotten"
+            removed += 1
+    return removed
+
+
+def _get_post_sell_watch_candidates_combined(
+    conn,
+    strategy_cache: dict | None,
+    instance_id: str,
+    date_key: str,
+    *,
+    window_days: int = 60,
+) -> list[dict]:
+    """Merge DB-backed and in-memory post_sell_watch candidates.
+
+    Live mode: DB-backed (`_get_post_sell_watch_candidates`).
+    Backtest mode: in-memory (`_post_sell_watch_inmem_get_candidates`).
+    Live + in-memory tolerated (in-memory wins via dict-merge dedupe).
+    """
+    by_sym: dict[str, dict] = {}
+    for src in (
+        _get_post_sell_watch_candidates(conn, instance_id, date_key, window_days=window_days)
+        if conn is not None
+        else [],
+        _post_sell_watch_inmem_get_candidates(strategy_cache, date_key, window_days=window_days),
+    ):
+        for item in src or []:
+            sym = str(item.get("ticker") or "").strip().upper()
+            if sym:
+                by_sym[sym] = item
+    return list(by_sym.values())
 
 
 # ── Trend-to-Signal conversion ─────────────────────────────────────────────
@@ -16687,28 +16961,57 @@ def _apply_buy_price_floor(
     portfolio_emulator,
     config: dict,
 ) -> dict:
-    price_floor = float(config.get("buy_price_floor", 5.0) or 0.0)
-    if price_floor <= 0.0:
+    """Demote sub-floor buy signals.
+
+    BT136708 calibration (2026-05-18): the uniform $8 effective floor blocked
+    912 post-quality buys (65% rejection) including confirmed micro-cap
+    winners STRO ($0.81→$39, +4731%), FGL ($0.44→$1.91, +334%), MLEC
+    ($0.65→$8.34, +1146%). Added a tiered floor: propagation-discovered
+    signals (where the parent thesis is sound but the picked name is sub-$8)
+    get a lower floor (default $3.50) while primary discovery keeps the
+    higher floor. An absolute ABS_MIN gate still blocks pure penny-stock
+    dumpster picks under $2.
+    """
+    primary_floor = float(config.get("buy_price_floor", 5.0) or 0.0)
+    prop_floor = float(config.get("buy_price_floor_propagation", 3.50) or 0.0)
+    abs_min_floor = float(config.get("buy_price_floor_absolute_min", 2.00) or 0.0)
+    if primary_floor <= 0.0 and prop_floor <= 0.0 and abs_min_floor <= 0.0:
         return scores
 
-    demoted: list[tuple[str, float]] = []
+    demoted: list[tuple[str, float, float]] = []
     for sym in symbols_list:
         sc = scores.get(sym)
         if not isinstance(sc, dict) or sc.get("score") != 1:
             continue
         current_price = _resolve_symbol_price(sym, prices, price_history, portfolio_emulator=portfolio_emulator)
-        if current_price <= 0.0 or current_price >= price_floor:
+        if current_price <= 0.0:
+            continue
+        reason_lc = str(sc.get("reason") or "").lower()
+        is_propagation = (
+            "propagation" in reason_lc
+            or "expansion" in reason_lc
+            or bool(sc.get("is_propagation_expansion"))
+        )
+        effective_floor = prop_floor if (is_propagation and prop_floor > 0.0) else primary_floor
+        # Hard absolute minimum — pure penny-stock dumpster picks never buy.
+        if abs_min_floor > 0.0 and effective_floor < abs_min_floor:
+            effective_floor = abs_min_floor
+        if effective_floor <= 0.0 or current_price >= effective_floor:
             continue
         sc["score"] = 0
         sc["action_intent"] = "hold"
         orig_reason = str(sc.get("reason") or "")
-        sc["reason"] = f"PRICE_FLOOR: {sym} at ${current_price:.2f} is below ${price_floor:.2f} minimum | {orig_reason}"[:1500]
-        demoted.append((sym, current_price))
+        sc["reason"] = (
+            f"PRICE_FLOOR: {sym} at ${current_price:.2f} is below "
+            f"${effective_floor:.2f} {'(prop)' if is_propagation else '(primary)'} | {orig_reason}"
+        )[:1500]
+        demoted.append((sym, current_price, effective_floor))
 
     if demoted:
         _log(
-            f"Price floor: blocked {len(demoted)} sub-${price_floor:.0f} buy(s): "
-            f"{', '.join(f'{sym} (${price:.2f})' for sym, price in demoted[:8])}",
+            f"Price floor: blocked {len(demoted)} sub-floor buy(s) "
+            f"(primary=${primary_floor:.2f}, prop=${prop_floor:.2f}): "
+            f"{', '.join(f'{sym} (${price:.2f}<${floor:.2f})' for sym, price, floor in demoted[:8])}",
             "yellow",
         )
 
@@ -17615,6 +17918,18 @@ class GraphNexusAnalysis:
         sentiment_cache_scope_doc = _enhanced_sentiment_cache_scope_doc(config, instance_id)
         active_event_history_scope_id = _active_event_history_scope_id(config)
         historical_lookback_mode = bool(config.get("historical_lookback_mode", False))
+        # BT136708 calibration (2026-05-18, P1.1): pre-seed _yf_market_cap_cache
+        # so the Tier-3 conviction-tier resolver can return HIGH for mega-caps
+        # in backtest. Without this, the cache is empty against a static
+        # universe (no fresh discovery runs), and SNDK-class mega-caps default
+        # to LOW conviction. Skip during the historical_lookback_mode pre-pass
+        # — only seed for actual runs. Idempotent: subsequent run_once calls
+        # short-circuit via _yf_market_cap_cache_preseeded.
+        if isinstance(strategy_cache, dict) and not historical_lookback_mode:
+            try:
+                _preseed_mcap_cache_from_universe(symbols_list, strategy_cache, config)
+            except Exception as _ps_exc:
+                _log(f"mcap pre-seed error (non-fatal): {_ps_exc}", "yellow")
         # Position sizing: fraction of portfolio assigned to nexus stock buys / ETF buys
         nexus_portfolio_pct = float(config.get("nexus_portfolio_pct", 0.90))
         etf_portfolio_pct = float(config.get("etf_portfolio_pct", 0.10))
@@ -17638,7 +17953,12 @@ class GraphNexusAnalysis:
         _bfq_reserved_priority_slots = int(config.get("backfill_queue_reserved_priority_slots", 10) or 10)
         _bfq_min_displace_delta = float(config.get("backfill_queue_min_displacement_delta", 0.3))
         _bfq_recurrence_bonus = float(config.get("backfill_queue_recurrence_bonus", 0.1))
-        _bfq_priority_max_bars = max(_bfq_max_bars, max(10, _scale_bars(15, config)))
+        # BT136708 calibration (2026-05-18): MU expired from BFQ at bar 11 of
+        # 10 (priority TTL floor was 10 daily bars). Raised the floor to 15
+        # via backfill_queue_priority_max_bars_floor so MU-class mega-caps get
+        # a real chance to fill before aging out of the queue.
+        _bfq_priority_max_bars_floor = int(config.get("backfill_queue_priority_max_bars_floor", 15) or 15)
+        _bfq_priority_max_bars = max(_bfq_max_bars, max(_bfq_priority_max_bars_floor, _scale_bars(15, config)))
         _bfq_min_score = float(config.get("backfill_queue_min_score", 0.20))
         _bfq_staleness_pct = float(config.get("backfill_queue_staleness_pct", 20.0))
 
@@ -20052,6 +20372,106 @@ class GraphNexusAnalysis:
             date_key,
         )
         _drawdown_halt_active = bool((((strategy_cache or {}).get("_portfolio_drawdown_state")) or {}).get("halt_active", False))
+
+        # ── A4 post_sell_watch re-entry phase (BT136708 P1.7, 2026-05-18) ────
+        # The Tier-3 spec defined the data plumbing for forced-exit re-entry
+        # but never wired the daily eligibility scan into the buy slate. As a
+        # result, SNDK's Nov-21 forced-exit had no auto-re-entry path; the
+        # eventual re-buy came 47 days late via momentum rotation and missed
+        # the +619% recovery to $1407. This phase reads post_sell_watch rows
+        # (DB in live, in-memory in backtest), checks recovery eligibility
+        # (current_price >= exit×1.05 OR 10d resistance break) AND fresh
+        # raw_score >= 0.40, and injects eligible candidates into the buy
+        # scoring dict so the existing slate planner picks them up.
+        # Feature-flagged OFF by default — operator enables with
+        # post_sell_watch_reentry_execution_enabled=True for A/B validation.
+        if (
+            bool(config.get("post_sell_watch_reentry_execution_enabled", False))
+            and not bool(config.get("historical_lookback_mode", False))
+        ):
+            try:
+                _a4_window_days = int(config.get("post_sell_watch_window_days", 60) or 60)
+                _a4_held_set = {
+                    str(_sym).strip().upper()
+                    for _sym, _qty in ((portfolio_emulator._positions or {}).items()
+                                       if portfolio_emulator is not None else [])
+                    if float(_qty or 0.0) > 0.0
+                }
+                _a4_candidates = _get_post_sell_watch_candidates_combined(
+                    conn_trends, strategy_cache, instance_id, date_key,
+                    window_days=_a4_window_days,
+                )
+                _a4_reentries: list[str] = []
+                _a4_skipped_held = 0
+                _a4_skipped_eligibility = 0
+                for _a4 in _a4_candidates:
+                    _a4_sym = str(_a4.get("ticker") or "").strip().upper()
+                    if not _a4_sym:
+                        continue
+                    if _a4_sym in _a4_held_set:
+                        _a4_skipped_held += 1
+                        continue
+                    _a4_existing = scores.get(_a4_sym)
+                    if isinstance(_a4_existing, dict) and int(_a4_existing.get("score", 0) or 0) != 0:
+                        # Already has a buy or sell signal from regular pipeline — skip.
+                        continue
+                    _a4_cur_price = _resolve_symbol_price(
+                        _a4_sym, prices, data, portfolio_emulator=portfolio_emulator,
+                    )
+                    try:
+                        _a4_cur_price_f = float(_a4_cur_price or 0.0)
+                    except (TypeError, ValueError):
+                        _a4_cur_price_f = 0.0
+                    if _a4_cur_price_f <= 0:
+                        continue
+                    _a4_fresh_raw = 0.0
+                    _a4_prop = (propagated or {}).get(_a4_sym) or {}
+                    if isinstance(_a4_prop, dict):
+                        try:
+                            _a4_fresh_raw = float(_a4_prop.get("raw_score", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            _a4_fresh_raw = 0.0
+                    _a4_ok, _a4_reason_text = _is_post_sell_reentry_eligible(
+                        current_price=_a4_cur_price_f,
+                        exit_price=float(_a4.get("exit_price") or 0.0),
+                        fresh_raw_score=_a4_fresh_raw,
+                        config=config,
+                        recent_high_after_exit=None,
+                    )
+                    if not _a4_ok:
+                        _a4_skipped_eligibility += 1
+                        continue
+                    scores[_a4_sym] = {
+                        "score": 1,
+                        "reason": f"A4 re-entry: {_a4_reason_text} (exited={_a4.get('exit_date', '?')})"[:1500],
+                        "raw_net_score": _a4_fresh_raw,
+                        "n_paths": int((_a4_existing or {}).get("n_paths", 0) or 0) if isinstance(_a4_existing, dict) else 0,
+                        "action_intent": "buy",
+                        "_is_post_sell_reentry": True,
+                        "_reentry_exit_price": float(_a4.get("exit_price") or 0.0),
+                        "_reentry_size_fraction": float(
+                            config.get("post_sell_reentry_size_fraction", 0.50) or 0.50
+                        ),
+                    }
+                    if _a4_sym not in symbols_list:
+                        symbols_list.append(_a4_sym)
+                    _a4_reentries.append(_a4_sym)
+                if _a4_reentries:
+                    _log(
+                        f"A4 re-entry phase: added {len(_a4_reentries)} candidate(s) to buy "
+                        f"slate: {', '.join(_a4_reentries[:8])} "
+                        f"(skipped_held={_a4_skipped_held}, skipped_eligibility={_a4_skipped_eligibility})",
+                        "magenta",
+                    )
+                # TTL sweep on in-memory storage so old rows don't linger past
+                # the watch window. DB sweep happens elsewhere (live cooldown).
+                if not _GN_LIVE_MODE_FLAG:
+                    _post_sell_watch_inmem_forget_expired(
+                        strategy_cache, date_key, window_days=_a4_window_days,
+                    )
+            except Exception as _a4_exc:
+                _log(f"A4 re-entry phase error (non-fatal): {_a4_exc}", "yellow")
+
         buys = sum(1 for v in scores.values() if (v.get("score") if isinstance(v, dict) else v) == 1)
         sells = sum(1 for v in scores.values() if (v.get("score") if isinstance(v, dict) else v) == -1)
         holds = len(symbols_list) - buys - sells
@@ -20879,10 +21299,15 @@ class GraphNexusAnalysis:
                     _z41_v31 = str((strategy_cache or {}).get("_market_regime") or "bull")
                     _z41_vix = (strategy_cache or {}).get("_vix_latest") if isinstance(strategy_cache, dict) else None
                     _z41_regime = _nexus_regime_classify(_z41_spy_20d, _z41_v31, _z41_vix)
+                    # BT136708 calibration (2026-05-18): chop default 8 caused
+                    # 9-10/8 V28.8.1 breach for ~95% of the run (BFQ stuck at
+                    # 48-60 for 175 days, avg 1.98 buys/day vs 6+ capacity).
+                    # Raised chop default 8→12 and bear default 4→8 so the
+                    # backfill queue can drain.
                     _z41_caps = {
                         "bull":  int(config.get("max_positions_bull",  _max_positions) or _max_positions),
-                        "chop":  int(config.get("max_positions_chop",  min(_max_positions, 8)) or 8),
-                        "bear":  int(config.get("max_positions_bear",  min(_max_positions, 4)) or 4),
+                        "chop":  int(config.get("max_positions_chop",  min(_max_positions, 12)) or 12),
+                        "bear":  int(config.get("max_positions_bear",  min(_max_positions, 8)) or 8),
                         "crash": int(config.get("max_positions_crash", 0) or 0),
                     }
                     _z41_capped = _z41_caps.get(_z41_regime, _max_positions)
@@ -22370,7 +22795,11 @@ class GraphNexusAnalysis:
                     _mw_ba_min_free = float(config.get("momentum_breakout_min_free_cash", 200.0) or 200.0)
                     _mw_ba_min_pos = float(config.get("min_position_size", 100.0) or 100.0)
                     _mw_ba_max_per_bar = int(config.get("momentum_breakout_max_per_bar", 1) or 1)
-                    _mw_ba_max_positions = int(config.get("max_positions", 8) or 8)
+                    # BT136708 bug-sweep 2026-05-18: fallback default 8 conflicted with the
+                    # main path's max_positions default of 15 (line 21121). Normalise to 15
+                    # so a missing config key doesn't silently throttle the momentum-watchlist
+                    # breakout-add path below the global cap.
+                    _mw_ba_max_positions = int(config.get("max_positions", 15) or 15)
                     _mw_ba_buy_price_floor = float(config.get("buy_price_floor", 8.0) or 8.0)
                     _mw_ba_current_positions = len(_mw_open_set)
                     # V31.1 bug-sweep fix: count only NEW-entry buys (tickers not
@@ -22464,16 +22893,19 @@ class GraphNexusAnalysis:
         # so they cannot be overridden by broker aggregation, circuit breaker, or post-decision strategies.
         # Forced exits OVERRIDE momentum watchlist protection — a trailing stop or fast loser
         # must fire even for momentum-held positions.
-        # Tier-3 A4 (2026-05-17): also write status="post_sell_watch" to the
-        # GraphNexusDiscoveredStocks table so the daily re-entry eligibility
-        # check can monitor recovery. Live-mode only; gated to avoid polluting
-        # the shared GraphNexusDiscoveredStocks table during backtest re-runs
-        # or historical-lookback pre-pass (bug-sweep finding 2026-05-17).
-        _psw_enabled = (
-            bool(config.get("post_sell_watch_enabled", True))
-            and bool(globals().get("_GN_LIVE_MODE_FLAG", False))
-            and not bool(config.get("historical_lookback_mode", False))
-        )
+        # Tier-3 A4 (2026-05-17): also write status="post_sell_watch" so the
+        # daily re-entry eligibility check can monitor recovery.
+        #   Live mode + DB available → write to GraphNexusDiscoveredStocks.
+        #   Backtest mode             → mirror to strategy_cache in-memory
+        #                               storage (BT136708 P1.7, 2026-05-18) so
+        #                               re-entry pipeline can exercise without
+        #                               polluting the shared live DB.
+        #   Historical-lookback pre-pass → neither (suppressed entirely).
+        _psw_master = bool(config.get("post_sell_watch_enabled", True))
+        _psw_in_lookback = bool(config.get("historical_lookback_mode", False))
+        _psw_live = bool(globals().get("_GN_LIVE_MODE_FLAG", False))
+        _psw_db_write = _psw_master and _psw_live and not _psw_in_lookback
+        _psw_inmem_write = _psw_master and not _psw_live and not _psw_in_lookback
         for _fe_sym, _fe_data in scores.items():
             if isinstance(_fe_data, dict) and _fe_data.get("_forced_exit") and _fe_data.get("score") == -1:
                 if _fe_sym not in (nexus_sell_enforcement or set()):
@@ -22485,7 +22917,7 @@ class GraphNexusAnalysis:
                 entry["sell_fraction"] = 1.0
                 nexus_position_sizes[_fe_sym] = entry
                 # Tier-3 A4: record post_sell_watch row for daily eligibility scan.
-                if _psw_enabled and conn_trends is not None:
+                if _psw_db_write or _psw_inmem_write:
                     try:
                         _psw_exit_price = _resolve_symbol_price(
                             _fe_sym, prices, data, portfolio_emulator=portfolio_emulator,
@@ -22493,16 +22925,28 @@ class GraphNexusAnalysis:
                         _psw_tier = _resolve_conviction_tier_at_exit(
                             _fe_sym, config, strategy_cache, propagated,
                         )
-                        _mark_discovered_stock_sold(
-                            conn_trends,
-                            instance_id,
-                            _fe_sym,
-                            reason=str(_fe_data.get("reason", "forced_exit"))[:200],
-                            date_key=date_key,
-                            forced_exit=True,
-                            exit_price=float(_psw_exit_price or 0.0),
-                            entry_conviction_tier=_psw_tier,
-                        )
+                        _psw_reason = str(_fe_data.get("reason", "forced_exit"))[:200]
+                        _psw_exit_price_f = float(_psw_exit_price or 0.0)
+                        if _psw_db_write and conn_trends is not None:
+                            _mark_discovered_stock_sold(
+                                conn_trends,
+                                instance_id,
+                                _fe_sym,
+                                reason=_psw_reason,
+                                date_key=date_key,
+                                forced_exit=True,
+                                exit_price=_psw_exit_price_f,
+                                entry_conviction_tier=_psw_tier,
+                            )
+                        if _psw_inmem_write:
+                            _post_sell_watch_inmem_write(
+                                strategy_cache,
+                                _fe_sym,
+                                exit_price=_psw_exit_price_f,
+                                entry_conviction_tier=_psw_tier,
+                                sell_reason=_psw_reason,
+                                date_key=date_key,
+                            )
                     except Exception as _psw_exc:
                         _log(f"post_sell_watch write error: {_fe_sym}: {_psw_exc}", "yellow")
 

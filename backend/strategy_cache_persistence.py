@@ -51,6 +51,12 @@ _BLACKLIST_PREFIXES = (
     # row by ~100KB+ per account without improving correctness.
     "_nexus_conviction_telemetry",
     "_nexus_conviction_telemetry_capped_logged",
+    # BT136708 P1.7 (2026-05-18): A4 in-memory post_sell_watch mirror is a
+    # per-backtest-run construct; persisting it across restarts would carry
+    # stale exit prices into a fresh backtest. The mcap pre-seed marker is
+    # similarly per-run.
+    "_post_sell_watch_inmem",
+    "_yf_market_cap_cache_preseeded",
 )
 
 _MAX_DICT_ENTRIES = 500

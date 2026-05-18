@@ -34,7 +34,7 @@ def test_conviction_tier_high_via_mcap():
 
 
 def test_conviction_tier_high_via_raw_score():
-    """raw_score >= 1.5 → HIGH even on small-cap."""
+    """raw_score >= 1.0 (after BT136708 P1.5) → HIGH even on small-cap."""
     cache = {"_yf_market_cap_cache": {"LITE": 5_000_000_000}}
     propagated = {"LITE": {"raw_score": 1.5}}
     tier = gna._resolve_conviction_tier_at_exit(
@@ -44,7 +44,7 @@ def test_conviction_tier_high_via_raw_score():
 
 
 def test_conviction_tier_mid_via_raw_score():
-    """raw_score in [0.5, 1.5) → MID."""
+    """raw_score in [0.6, 1.0) (after BT136708 P1.5) → MID."""
     propagated = {"FOO": {"raw_score": 0.8}}
     tier = gna._resolve_conviction_tier_at_exit(
         "FOO", config={}, strategy_cache={}, propagated=propagated
@@ -243,6 +243,7 @@ def test_effective_nexus_config_surfaces_tier3_a1_knobs():
         "circuit_breaker_floor_mid_conviction_pct",
         "circuit_breaker_floor_low_conviction_pct",
         "circuit_breaker_high_conviction_mcap_threshold_usd",
+        "circuit_breaker_mid_conviction_mcap_threshold_usd",  # BT136708 P1.5
         "circuit_breaker_high_conviction_raw_score_threshold",
         "circuit_breaker_mid_conviction_raw_score_threshold",
         "circuit_breaker_low_vol_disable_threshold_pct",
@@ -257,6 +258,12 @@ def test_effective_nexus_config_surfaces_tier3_a1_knobs():
         "allocation_max_new_stock_buys_small",
         "allocation_max_new_stock_buys_mid",
         "allocation_max_new_stock_buys_large",
+        # BT136708 P1.3 + P1.4 + P1.7 knobs (2026-05-18)
+        "buy_price_floor",
+        "buy_price_floor_propagation",
+        "buy_price_floor_absolute_min",
+        "backfill_queue_priority_max_bars_floor",
+        "post_sell_watch_reentry_execution_enabled",
     ):
         assert key in cfg, f"Tier-3 knob missing from diagnostic dump: {key}"
 
@@ -284,22 +291,76 @@ def test_position_market_cap_zero_returns_none():
 # ── Bug-sweep additions (2026-05-17) ────────────────────────────────────────
 
 
-def test_conviction_tier_mcap_boundary_exactly_50b():
-    """Boundary: mcap == 50B exactly should map to HIGH (>=, not >)."""
-    cache = {"_yf_market_cap_cache": {"BOUND": 50_000_000_000}}
+def test_conviction_tier_mcap_boundary_exactly_30b():
+    """Boundary: mcap == 30B (new HIGH default after BT136708 P1.5) maps to HIGH."""
+    cache = {"_yf_market_cap_cache": {"BOUND": 30_000_000_000}}
     tier = gna._resolve_conviction_tier_at_exit(
         "BOUND", config={}, strategy_cache=cache, propagated={}
     )
     assert tier == "HIGH"
 
 
-def test_conviction_tier_mcap_just_below_50b():
-    """Boundary: mcap just under 50B should NOT map to HIGH via mcap path."""
-    cache = {"_yf_market_cap_cache": {"BOUND": 49_999_999_999}}
+def test_conviction_tier_mcap_just_below_30b():
+    """Boundary: mcap just under 30B should NOT be HIGH but falls to MID via mcap."""
+    cache = {"_yf_market_cap_cache": {"BOUND": 29_999_999_999}}
     tier = gna._resolve_conviction_tier_at_exit(
         "BOUND", config={}, strategy_cache=cache, propagated={}
     )
-    # No raw_score either → LOW
+    # 29.99B is below HIGH (30B) but above MID (10B) → MID
+    assert tier == "MID"
+
+
+def test_conviction_tier_mcap_just_below_10b_is_low():
+    """Boundary: mcap just under 10B (new MID floor) with no raw_score → LOW."""
+    cache = {"_yf_market_cap_cache": {"BOUND": 9_999_999_999}}
+    tier = gna._resolve_conviction_tier_at_exit(
+        "BOUND", config={}, strategy_cache=cache, propagated={}
+    )
+    assert tier == "LOW"
+
+
+def test_conviction_tier_mcap_10b_is_mid():
+    """Boundary: mcap == 10B (new MID default after BT136708 P1.5) → MID."""
+    cache = {"_yf_market_cap_cache": {"BOUND": 10_000_000_000}}
+    tier = gna._resolve_conviction_tier_at_exit(
+        "BOUND", config={}, strategy_cache=cache, propagated={}
+    )
+    assert tier == "MID"
+
+
+def test_conviction_tier_sndk_class_36b_is_high():
+    """SNDK class (~$36B) should resolve to HIGH (BT136708 P1.5 regression check)."""
+    cache = {"_yf_market_cap_cache": {"SNDK": 36_000_000_000}}
+    tier = gna._resolve_conviction_tier_at_exit(
+        "SNDK", config={}, strategy_cache=cache, propagated={}
+    )
+    assert tier == "HIGH"
+
+
+def test_conviction_tier_raw_score_one_is_high():
+    """raw_score == 1.0 (new HIGH default after BT136708 P1.5) → HIGH."""
+    tier = gna._resolve_conviction_tier_at_exit(
+        "ANY", config={}, strategy_cache=None,
+        propagated={"ANY": {"raw_score": 1.0}},
+    )
+    assert tier == "HIGH"
+
+
+def test_conviction_tier_raw_score_p6_is_mid():
+    """raw_score == 0.6 (new MID default) → MID."""
+    tier = gna._resolve_conviction_tier_at_exit(
+        "ANY", config={}, strategy_cache=None,
+        propagated={"ANY": {"raw_score": 0.6}},
+    )
+    assert tier == "MID"
+
+
+def test_conviction_tier_raw_score_p59_is_low():
+    """raw_score == 0.59 (just below new MID floor) → LOW."""
+    tier = gna._resolve_conviction_tier_at_exit(
+        "ANY", config={}, strategy_cache=None,
+        propagated={"ANY": {"raw_score": 0.59}},
+    )
     assert tier == "LOW"
 
 

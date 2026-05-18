@@ -5218,6 +5218,12 @@ elif mode == MODE_LIVE:
                         # on prior tickers' breakouts.
                         "_post_sell_breakout_history",
                         "_post_sell_breakout_reentry_cooldown",
+                        # BT136708 P1.7 (2026-05-18): A4 in-memory post_sell_watch
+                        # mirror for backtest exercise + the mcap pre-seed flag.
+                        # Both reference state from the prior account; clear so
+                        # the new account starts fresh.
+                        "_post_sell_watch_inmem",
+                        "_yf_market_cap_cache_preseeded",
                     )
                     if _auto_reset:
                         for _k in _migration_reset_keys:
