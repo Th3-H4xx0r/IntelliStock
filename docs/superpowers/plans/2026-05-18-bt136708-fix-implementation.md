@@ -306,3 +306,78 @@ Ship P1.1 → P1.2 → P1.3 → P1.4 → P1.5 → P1.6 → P1.7 (flagged OFF) �
 - Tier-3 plan (parent context): `docs/superpowers/plans/2026-05-17-nexus-tier3-missed-rally-fixes-implementation.md`
 - Tier-3 handoff: `.sessions/2026-05-17-220000-tier3-missed-rally-fixes-and-deferred-live-mode-spec.md`
 - Strategy file: `backend/strategies/graph_nexus_analysis.py`
+
+---
+
+## 11. Addendum: BT109429 findings + reversed sequencing (2026-05-18)
+
+After commit `6c16c70` was deployed, the operator ran backtest 109429 (8-ticker seed: ADBE/AIQ/ARKQ/BOTZ/JNJ/NKE/UBOT/WTAI, same 2025-11-10 → 2026-05-17 window). It ended at **+51.88%** vs BT136708's +171.3% — a **120pp gap** that initially looked like a regression caused by these fixes. A 7-parallel-agent investigation + adversarial review of the proposed recovery plan produced findings that invalidate the original Phase 1+1b sequencing and replace it with a variance-first approach.
+
+### Findings (1-line each)
+
+- **Most P1 fixes ran but were INERT in BT109429.** P1.1 `_preseed_mcap_cache_from_universe` silently populated 0 tickers (its log was gated on `if populated:`, so the failure was invisible). Without mcap data, P1.5's conviction-tier resolver fell back to the raw_score path; SNDK's exit-time raw_score < 0.6 → still resolves to LOW → still cut at -18.3% (identical pre-fix behavior).
+- **P1.3 price floor tiering was the only fix that fired visibly**, but the propagation-discovered names it was meant to admit (STRO $0.81, FGL $0.44, MLEC $0.67) are all sub-$3.50 anyway — they got blocked under the new tier just like before. Zero new admits.
+- **P1.2 chop cap 8→12 has no visible Z4.1 log evidence** in BT109429. The capacity agent flagged BT109429 was MORE constrained than BT136708 (mean BFQ 54.3 vs 47.1; queue=60 cap hit 2.3× more often), suggesting either the regime was bull (cap not engaged), or the change didn't take effect.
+- **The 120pp gap is variance, not regression.** Variance/robustness agent's decomposition: LLM non-determinism 40-60%, graph-propagation seed sensitivity 25-35%, article volume 10-20%, portfolio mechanics 5-10%. Same-code spread across BT901920 / BT136708 / BT109429: +247.6% / +171.3% / +51.9% = **4.8× spread**.
+- **Adversarial review verdict on the original "re-run BT136708 with flag ON to validate" plan: scientifically unsound.** Variance floor (±100pp) exceeds the signal floor (+30-50pp target). A single re-run produces an unreadable result.
+
+### Reversed sequencing: Phase α (variance) → Phase β (validated Phase 1)
+
+The original §6 Phase 1 sequencing is **superseded** by this two-phase approach:
+
+#### Phase α — Variance containment (must complete first)
+
+| # | Item | Description | Variance reduction |
+|---|---|---|---|
+| α.1 | Mandatory sentiment cache in backtest | Flip `use_sentiment_cache` from optional to mandatory when `historical_lookback_mode=True` or `_nexus_is_live_mode=False`. LLM calls only on cache miss; cache fills deterministically by `(date, ticker, article_source)` key. | 40-60% |
+| α.2 | Frozen Neo4j graph state in backtest | Snapshot graph (Companies + relationships) at backtest start_date; propagate against frozen snapshot; no per-bar Neo4j refresh. | 25-35% |
+| α.3 | Deterministic RNG seeding | Seed Python's random + any tie-breaking with `hash(backtest_id + start_date + universe_hash)`. | 5% |
+| α.4 | P1.1 visibility patch | Replace `if populated: _log(...)` with always-on log `mcap pre-seed: {neo4j_hits}/{n} from neo4j, {yf_hits}/{n} from yfinance, {yf_failures} failures`. Add 3-retry loop with backoff for yfinance failures. | (diagnostic — exposes the silent-fail) |
+
+**Validation gate Φ.1**: run BT136708 **3 times** with Phase α applied. Same seed universe, same window. Target: P&L spread across the 3 runs < 1.5× (i.e., all within ±15pp of median). If variance compresses, Phase β is valid. If not, dig deeper — there's another non-determinism source.
+
+#### Phase β — Validated Phase 1 (conditional on Phase α passing)
+
+Critical change from original Phase 1 sequencing: **per-fix flags, not a grouped flag**. Adversarial reviewer's serious finding: grouping P1.2 + P1.3 + P1.5 under one flag means future regressions can't be attributed back to a single fix.
+
+| # | Item | Config flag | Default |
+|---|---|---|---|
+| β.1 | P1.1 (mcap pre-seed) | (no flag — bug fix, always on) | ON |
+| β.2 | P1.4 (BFQ TTL floor 15) | (no flag — config knob, already operator-tunable) | 15 bars |
+| β.3 | P1.5 (conviction-tier thresholds 30B/10B/1.0/0.6) | `enable_conviction_tier_recalibration` | OFF |
+| β.4 | P1.2 (max_positions chop 12 / bear 8) | `enable_regime_capacity_scaling` | OFF |
+| β.5 | P1.3 (price floor tiering) | `enable_price_floor_tiering` | OFF |
+| β.6 | P1.7 (A4 re-entry) | `post_sell_watch_reentry_execution_enabled` (existing) | OFF |
+
+**Validation gate Φ.2** (per-flag): run BT136708 with each flag ON individually (4 runs). Measure isolated P&L lift per flag. Reject any flag whose lift is < 5pp (within noise).
+
+**Validation gate Φ.3** (combined): run BT136708 with all surviving flags ON. Expected: sum-of-individuals ≈ combined lift (interactions small). If combined < sum-of-individuals by > 20pp, there's a destructive interaction → investigate.
+
+**Validation gate Φ.4** (out-of-sample): run BT136708 + Phase α + all flags ON on a second universe (10-15 different seed tickers) to check overfit.
+
+Only after Φ.4 passes, ship as defaults via a new commit.
+
+### What's NOT changing
+
+- **Commit `6c16c70` stays in place.** Rolling it back loses 1,291 LOC + 24 tests + Tier-3 §13 addendum for no proven benefit. The fixes aren't actively harming; they're inert.
+- **All current defaults that are pre-fix-equivalent stay.** P1.5 and P1.2 are inert by design until their flag is flipped (Phase β).
+
+### Open issues surfaced but deferred
+
+1. **Audit other gated-log antipatterns** (`if <count>: _log(...)`) across the codebase. P1.1's silent failure mode may exist elsewhere.
+2. **Z4.1 regime classification**: did the chop cap actually fire in BT109429? If logs show bull dominated, the cap didn't engage; that's data, not fix inertness. Side-by-side log diff against BT136708 is the next investigation.
+3. **Robust live-deployment readiness**: variance agent estimates 6-month live range -20% to +115% with no buffer. Phase α + β alone may not be enough; consider position sizing throttle based on signal-count variance.
+
+### P&L impact estimates (revised)
+
+| Phase | Items | Estimated lift on BT136708 | Variance after |
+|---|---|---|---|
+| Phase α alone | α.1-α.4 | $0 (no behavior change) | 1.0-1.5× spread (was 4.8×) |
+| Phase α + β (P1.1 + P1.5 only) | β.1 + β.3 | +$400-$800 (SNDK + ROLR saved) | 1.0-1.5× |
+| Phase α + β (all flags ON) | β.1-β.6 | **+$3,200-$7,700 (+46-110pp)** — same as the original target, now actually validatable | 1.0-1.5× |
+
+### References (BT109429 investigation)
+
+- BT109429 logs: `.tmp_bt109429/logs_via_api.log` (~67K lines at 88% progress)
+- Adversarial review of Path A: see this session's task-notification record (agent ID `ac2109fc4c1de2029`)
+- Variance agent decomposition: see task-notification record (agent ID `a84ea44de1fe69198`)
