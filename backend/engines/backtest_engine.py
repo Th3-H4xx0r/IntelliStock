@@ -603,6 +603,19 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         'USE_NNPACK': '0',
         'GLOG_minloglevel': '2',
     }
+    # Phase α.3 (2026-05-18, BT109429 follow-up): forward determinism env
+    # vars into the spawned broker container. PYTHONHASHSEED must be set
+    # in the container env BEFORE python starts (the interpreter reads it
+    # at startup; setting it from inside the process is too late) — passing
+    # it via the `env` dict to `docker run` does exactly that. BACKTEST_SEED
+    # is also forwarded so operators can pin a specific RNG seed across
+    # paired re-runs of the same backtest_id.
+    _ph_seed = (os.environ.get('PYTHONHASHSEED') or '').strip()
+    if _ph_seed:
+        env['PYTHONHASHSEED'] = _ph_seed
+    _bt_seed = (os.environ.get('BACKTEST_SEED') or '').strip()
+    if _bt_seed:
+        env['BACKTEST_SEED'] = _bt_seed
     if avg_difficulty is not None:
         env['BACKTEST_DIFFICULTY'] = str(avg_difficulty)
     neo4j_uri = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
