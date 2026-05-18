@@ -5639,8 +5639,9 @@ if mode == MODE_BACKTEST:
     # to RNG drift across paired runs (LLM-jitter timing, set ordering when
     # combined with dict insertion variance). Explicit BACKTEST_SEED env
     # var still wins for back-compat. Derivation extracted to
-    # backend._phase_alpha_helpers.derive_backtest_seed for unit testability.
-    from backend._phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
+    # _phase_alpha_helpers.derive_backtest_seed for unit testability. Bare
+    # import (not `backend.`) because prod Docker layout is flat at /app/.
+    from _phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
     _seed_int, _seed_source = _derive_backtest_seed(
         backtest_row_id,
         symbols,

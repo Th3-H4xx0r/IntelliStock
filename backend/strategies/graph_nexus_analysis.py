@@ -14374,7 +14374,8 @@ def _neo4j_cached_query(
     """
     if _GN_LIVE_MODE_FLAG or not isinstance(strategy_cache, dict):
         return query_fn()
-    from backend._phase_alpha_helpers import neo4j_snapshot_key as _neo4j_snapshot_key
+    # Bare import (not `backend.`) because prod Docker layout is flat at /app/.
+    from _phase_alpha_helpers import neo4j_snapshot_key as _neo4j_snapshot_key
     key_pair = _neo4j_snapshot_key(query_name, seeds, date_key, config)
     if key_pair is None:
         # granularity="off" OR broken iterable — bypass cache.
@@ -14514,7 +14515,8 @@ def _compute_propagated_scores(
             # launch as before and store after retrieval.
             _inst_snap_pair = None
             if not _GN_LIVE_MODE_FLAG and isinstance(strategy_cache, dict):
-                from backend._phase_alpha_helpers import (
+                # Bare import (not `backend.`) because prod Docker is flat at /app/.
+                from _phase_alpha_helpers import (
                     neo4j_snapshot_key as _neo4j_snapshot_key_local,
                 )
                 _inst_snap_pair = _neo4j_snapshot_key_local(
@@ -18199,8 +18201,9 @@ class GraphNexusAnalysis:
         # (live=True AND lookback=False) honors operator config. The
         # (live=True AND lookback=True) "live with lookback pre-pass" path
         # still hits the cache — pre-pass is deterministic-prep regardless.
-        # Logic extracted to backend._phase_alpha_helpers.resolve_use_sentiment_cache.
-        from backend._phase_alpha_helpers import (
+        # Logic extracted to _phase_alpha_helpers.resolve_use_sentiment_cache.
+        # Bare import (not `backend.`) because prod Docker layout is flat at /app/.
+        from _phase_alpha_helpers import (
             resolve_use_sentiment_cache as _resolve_use_sentiment_cache,
         )
         use_sentiment_cache, _alpha1_forced = _resolve_use_sentiment_cache(config)
