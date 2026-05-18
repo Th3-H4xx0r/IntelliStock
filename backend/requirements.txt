@@ -33,7 +33,7 @@ bcrypt
 pyjwt
 discord.py>=2.3.0
 aiohttp>=3.13.5
-neo4j>=5.15.0
+neo4j>=6.2.0
 sec-edgar-downloader>=5.0.0
 beautifulsoup4>=4.12.0
 # For SEC EDGAR supply chain NER and fuzzy matching:
