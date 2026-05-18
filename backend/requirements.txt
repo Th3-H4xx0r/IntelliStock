@@ -38,7 +38,7 @@ sec-edgar-downloader>=5.0.0
 beautifulsoup4>=4.12.0
 # For SEC EDGAR supply chain NER and fuzzy matching:
 spacy>=3.0.0
-rapidfuzz>=3.0.0
+rapidfuzz>=3.14.5
 # After install, run: python -m spacy download en_core_web_lg
 lxml>=6.1.0
 TA-Lib
