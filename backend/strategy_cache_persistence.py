@@ -55,8 +55,14 @@ _BLACKLIST_PREFIXES = (
     # per-backtest-run construct; persisting it across restarts would carry
     # stale exit prices into a fresh backtest. The mcap pre-seed marker is
     # similarly per-run.
+    # Phase γ.1 (2026-05-18, BT232179 follow-up): the bool flag
+    # `_yf_market_cap_cache_preseeded` is replaced by a set[str]
+    # `_yf_market_cap_cache_preseeded_tickers`. Both prefixes are explicit
+    # here for clarity even though the legacy bool form would also match
+    # via prefix; keep both for one release while live state migrates.
     "_post_sell_watch_inmem",
     "_yf_market_cap_cache_preseeded",
+    "_yf_market_cap_cache_preseeded_tickers",
     # Phase α.2 (BT109429 follow-up, 2026-05-18): Neo4j query snapshot
     # for variance containment. Per-backtest-run; persisting would mix
     # snapshots across runs with different universes and dates. The

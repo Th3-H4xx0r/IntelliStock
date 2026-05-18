@@ -566,8 +566,15 @@ def test_rotation_candidate_requires_stronger_delta_for_profitable_hold():
 
 
 def test_rotation_winner_lock_blocks_healthy_profitable_winner():
+    # Phase γ.4 (BT232179 follow-up, 2026-05-18): the γ.4 bypass admits
+    # raw>=1.8 candidates against winner_lock'd holds with pnl<10% (so the
+    # original 4.3% held_pnl no longer triggers winner_lock blocking under
+    # the new behavior — it returns gamma_winner_lock_bypass instead). To
+    # preserve this test's intent ("true profitable winners ARE protected
+    # by winner_lock"), bump the held_pnl to 12% (above γ.4's 10% cap).
+    # The γ.4 bypass test with held_pnl=4.3 lives in test_phase_alpha_variance.
     allow, delta, reason = _rotation_candidate_allowed(
-        held_pnl_pct=4.3,
+        held_pnl_pct=12.0,
         held_rotation_score=0.444,
         held_days=6,
         held_raw_score=0.31,

@@ -5222,8 +5222,14 @@ elif mode == MODE_LIVE:
                         # mirror for backtest exercise + the mcap pre-seed flag.
                         # Both reference state from the prior account; clear so
                         # the new account starts fresh.
+                        # Phase γ.1 (2026-05-18, BT232179 follow-up): the bool flag
+                        # `_yf_market_cap_cache_preseeded` is replaced by a set[str]
+                        # `_yf_market_cap_cache_preseeded_tickers`. Reset both
+                        # forms during migration so stale seeded-state from the
+                        # prior account doesn't carry across.
                         "_post_sell_watch_inmem",
                         "_yf_market_cap_cache_preseeded",
+                        "_yf_market_cap_cache_preseeded_tickers",
                         # Phase α.2 (BT109429 follow-up, 2026-05-18): Neo4j
                         # query snapshot cache + its hit/miss telemetry.
                         # Per-backtest-run constructs; carrying them across
@@ -5633,6 +5639,34 @@ if mode == MODE_BACKTEST:
     import random
     import numpy as _np_backtest
     backtest_start_time = time.time()
+    # Engine creates BacktestResults row with status running; we update it with full stub
+    backtest_id_raw = backtest_row_id
+    _backtest_result_id = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else backtest_id_raw
+    # Start capturing logs to buffer (last 500 lines) for live DB progress writes
+    _backtest_log_buffer = []
+    try:
+        from intellistock_logger import intellistock_logger
+        intellistock_logger.set_backtest_log_buffer(_backtest_log_buffer, max_lines=500)
+        # Also open persistent log file on the shared Docker volume (unlimited full log)
+        import os as _os
+        _log_dir = _os.environ.get('BACKTEST_LOG_DIR', '/app/backtest_logs')
+        try:
+            _os.makedirs(_log_dir, exist_ok=True)
+            _log_file_path = _os.path.join(_log_dir, f"{_backtest_result_id}.log")
+            _log_file_obj = open(_log_file_path, 'w', buffering=1, encoding='utf-8')
+            intellistock_logger.set_backtest_log_file(_log_file_obj)
+        except Exception:
+            pass
+    except Exception:
+        _backtest_log_buffer = []
+    # Phase γ.2 (2026-05-18, BT232179 follow-up): the α.3 seed-log block
+    # below MUST emit AFTER the log buffer + file sink are wired so the
+    # `RNG seed: ...` and PYTHONHASHSEED confirmation lines land in the
+    # operator-pulled audit log (not just stdout). Buffer and file are
+    # independent — `intellistock_logger.log` fans out to whichever
+    # contexts are currently attached, so the seed block writes to
+    # whatever wiring succeeded above (buffer + file, just file, or
+    # neither, in which case the lines still hit stdout).
     # Phase α.3 (2026-05-18, BT109429 follow-up): always seed the process-
     # global RNGs in backtest mode for paired re-run determinism. The
     # variance/robustness agent attributed ~5% of the 4.8x same-code spread
@@ -5672,26 +5706,6 @@ if mode == MODE_BACKTEST:
         )
     else:
         _log(f"RNG seed: PYTHONHASHSEED={_ph_seed} (confirmed)", "cyan")
-    # Engine creates BacktestResults row with status running; we update it with full stub
-    backtest_id_raw = backtest_row_id
-    _backtest_result_id = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else backtest_id_raw
-    # Start capturing logs to buffer (last 500 lines) for live DB progress writes
-    _backtest_log_buffer = []
-    try:
-        from intellistock_logger import intellistock_logger
-        intellistock_logger.set_backtest_log_buffer(_backtest_log_buffer, max_lines=500)
-        # Also open persistent log file on the shared Docker volume (unlimited full log)
-        import os as _os
-        _log_dir = _os.environ.get('BACKTEST_LOG_DIR', '/app/backtest_logs')
-        try:
-            _os.makedirs(_log_dir, exist_ok=True)
-            _log_file_path = _os.path.join(_log_dir, f"{_backtest_result_id}.log")
-            _log_file_obj = open(_log_file_path, 'w', buffering=1, encoding='utf-8')
-            intellistock_logger.set_backtest_log_file(_log_file_obj)
-        except Exception:
-            pass
-    except Exception:
-        _backtest_log_buffer = []
     try:
         conn = get_conn_retry(max_attempts=5, delay=2)
         if conn is None:

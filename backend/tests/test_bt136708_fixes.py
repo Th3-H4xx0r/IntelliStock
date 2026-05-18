@@ -36,16 +36,36 @@ def test_preseed_skipped_when_disabled_yfinance_and_no_neo4j():
         ["SNDK", "MU", "LITE"], cache, {"mcap_preseed_use_yfinance": False}
     )
     assert populated == 0
-    assert cache.get("_yf_market_cap_cache_preseeded") is True
+    # γ.1: idempotency contract is now a set[str], not a bool. After a
+    # successful call, every ticker we touched ends up in the set so the
+    # next call's diff-based path skips them.
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers")
+    assert isinstance(seeded, set)
+    # When yfinance is disabled and neo4j is cold, the function still
+    # records the tickers as "attempted" via the neo4j short-circuit path
+    # (cache writes don't happen, so set membership is empty — see γ.1
+    # behavior: set marks tickers that REACHED the cache, not just ones
+    # we tried). Confirm the new bool flag is NOT present.
+    assert "_yf_market_cap_cache_preseeded" not in cache
 
 
-def test_preseed_idempotent():
-    """Second call short-circuits via _yf_market_cap_cache_preseeded flag."""
-    cache: dict = {"_yf_market_cap_cache_preseeded": True}
+def test_preseed_legacy_bool_flag_still_short_circuits():
+    """γ.1 back-compat: pre-γ.1 persisted state may have the bool flag.
+    Function honors it for one call (returns 0) and migrates to set[str]."""
+    cache: dict = {
+        "_yf_market_cap_cache_preseeded": True,
+        "_yf_market_cap_cache": {"SNDK": 36e9},
+    }
     populated = gna._preseed_mcap_cache_from_universe(
         ["SNDK"], cache, {"mcap_preseed_use_yfinance": False}
     )
-    assert populated == 0  # short-circuit fires
+    assert populated == 0  # legacy short-circuit
+    # Migration leaves the new set populated from existing cache keys
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers")
+    assert isinstance(seeded, set)
+    assert "SNDK" in seeded
+    # Bool flag is consumed/removed
+    assert "_yf_market_cap_cache_preseeded" not in cache
 
 
 def test_preseed_skips_empty_universe():

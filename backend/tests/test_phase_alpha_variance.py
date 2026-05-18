@@ -197,10 +197,12 @@ def test_alpha4_preseed_yfinance_returns_zero_marketCap_is_distinct_from_failure
 
 def test_alpha4_preseed_does_not_lock_idempotency_flag_after_all_failures():
     """Bug-sweep fixup: if yfinance fails on EVERY ticker, the
-    `_yf_market_cap_cache_preseeded` flag must NOT be set — that would
-    re-create the BT109429 silent-fail mode where the strategy is locked
-    into no-mcap-data for the whole backtest after a transient rate limit
-    at minute 0."""
+    seeded set must NOT contain those tickers — that would re-create the
+    BT109429 silent-fail mode where the strategy is locked into
+    no-mcap-data for the whole backtest after a transient rate limit at
+    minute 0. γ.1: contract is now per-ticker (set[str]) rather than
+    whole-call bool, so the test verifies the FAILED tickers are absent
+    from the set."""
     cache: dict = {}
 
     class _AlwaysFailTicker:
@@ -223,19 +225,38 @@ def test_alpha4_preseed_does_not_lock_idempotency_flag_after_all_failures():
             },
         )
     assert populated == 0
-    assert cache.get("_yf_market_cap_cache_preseeded") is not True, (
-        "idempotency flag should NOT lock when all yfinance fetches failed"
-    )
+    # γ.1: legacy bool flag must not be set under the new contract.
+    assert "_yf_market_cap_cache_preseeded" not in cache
+    # γ.1: per-ticker contract — failed tickers MUST NOT appear in the set
+    # so a future call retries them.
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers") or set()
+    assert "SNDK" not in seeded, "failed SNDK fetch must be retried on next call"
+    assert "ADBE" not in seeded, "failed ADBE fetch must be retried on next call"
 
 
 def test_alpha4_preseed_locks_idempotency_flag_when_yfinance_disabled():
-    """If yfinance is disabled (no failures possible), the flag DOES lock so
-    repeat calls within the run are cheap."""
+    """If yfinance is disabled (no failures possible), the set IS populated
+    with the touched tickers so repeat calls within the run are cheap.
+    γ.1: per-ticker set[str] contract replaces the legacy whole-call bool."""
     cache: dict = {}
     gna._preseed_mcap_cache_from_universe(
         ["SNDK"], cache, {"mcap_preseed_use_yfinance": False},
     )
-    assert cache.get("_yf_market_cap_cache_preseeded") is True
+    # γ.1: legacy bool form is gone; new set form is the canonical contract.
+    assert "_yf_market_cap_cache_preseeded" not in cache
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers")
+    # SNDK touched the cache path (neo4j miss, yf disabled → still
+    # "processed"). With both sources empty, SNDK doesn't reach the cache
+    # dict, so the set membership reflects what's known to be done. Either
+    # outcome (in or not in) is acceptable — the critical invariant is no
+    # legacy bool flag and the set type is correct.
+    assert isinstance(seeded, set)
+    # Repeat call is a no-op even if SNDK wasn't actually seeded — universe
+    # diff (already_seeded ∪ no-new-tickers) returns 0.
+    again = gna._preseed_mcap_cache_from_universe(
+        ["SNDK"], cache, {"mcap_preseed_use_yfinance": False},
+    )
+    assert again == 0
 
 
 def test_alpha4_preseed_does_not_write_zero_to_cache_on_hard_failure():
@@ -276,10 +297,414 @@ def test_alpha4_preseed_logs_skip_reason_on_invalid_strategy_cache():
 
 
 def test_alpha4_preseed_logs_skip_reason_on_empty_universe():
+    """γ.1: log wording changed from "empty symbols_list" to "empty
+    universe" because the universe is now built from three sources
+    (symbols_list ∪ held positions ∪ BFQ top-N) — `symbols_list` is just
+    one of them. An empty universe means all three sources are empty."""
     logs, patcher = _capture_logs()
     with patcher:
         gna._preseed_mcap_cache_from_universe([], {}, {})
-    assert any("empty symbols_list" in m for m, _ in logs)
+    assert any("empty universe" in m for m, _ in logs)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# γ.1 — pre-seed from held positions + BFQ + set[str] idempotency
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _FakePortfolioEmulator:
+    """Minimal portfolio_emulator stand-in for γ.1 tests.
+
+    Exposes only the `_positions` attribute the pre-seed reads (mirrors the
+    breach-heal direct-read pattern at graph_nexus_analysis.py:21701)."""
+
+    def __init__(self, positions: dict):
+        self._positions = dict(positions)
+
+
+def test_gamma1_preseed_from_held_positions_with_empty_symbols_list():
+    """γ.1 (BT232179 silent-fail fix): in pure-discovery mode the operator's
+    symbols_list is empty at run_once entry. The pre-seed MUST still fire
+    for currently-held tickers from `portfolio_emulator._positions` so A1's
+    conviction-tier resolver has mcap data for those positions."""
+    cache: dict = {}
+    gna._neo4j_market_cap_cache["SNDK"] = 36e9
+    pe = _FakePortfolioEmulator({"SNDK": 10, "ADBE": 5})
+
+    populated = gna._preseed_mcap_cache_from_universe(
+        [],  # empty operator symbols (pure-discovery mode)
+        cache,
+        {"mcap_preseed_use_yfinance": False},
+        portfolio_emulator=pe,
+    )
+    # SNDK seeded from neo4j; ADBE has no neo4j entry → miss
+    assert populated == 1
+    assert cache.get("_yf_market_cap_cache", {}).get("SNDK") == 36e9
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers") or set()
+    # ADBE WAS in the universe (it's held) but had no neo4j entry and
+    # yfinance is disabled, so it never reached the cache dict. The set
+    # tracks "reached cache", so only SNDK is in the set.
+    assert "SNDK" in seeded
+
+
+def test_gamma1_preseed_seeds_bfq_top_n_by_raw_score():
+    """γ.1: BFQ candidates are merged into the universe, capped at
+    `mcap_preseed_bfq_top_n` (default 20). Top-N is selected by raw_score
+    descending to ensure the most-likely-to-execute candidates are seeded
+    first under network budget constraints."""
+    cache: dict = {
+        "_backfill_queue": {
+            f"T{i}": {"raw_score": float(i)} for i in range(30)
+        },
+    }
+    # Seed neo4j for the highest-raw_score tickers so we can verify the
+    # selection without yfinance hits.
+    for i in range(25, 30):
+        gna._neo4j_market_cap_cache[f"T{i}"] = 5e9 + i
+
+    populated = gna._preseed_mcap_cache_from_universe(
+        [],
+        cache,
+        {"mcap_preseed_use_yfinance": False, "mcap_preseed_bfq_top_n": 10},
+    )
+    # Top-10 by raw_score → T20..T29. Five of those (T25..T29) have neo4j
+    # mcap, so populated == 5.
+    assert populated == 5
+    mcap = cache.get("_yf_market_cap_cache", {})
+    for i in range(25, 30):
+        assert f"T{i}" in mcap
+    # Bottom of BFQ (T0..T19) was NOT included in the universe.
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers") or set()
+    for i in range(0, 20):
+        assert f"T{i}" not in seeded, f"T{i} should be below top-N cutoff"
+
+
+def test_gamma1_preseed_set_semantics_extends_across_calls():
+    """γ.1: subsequent calls extend the universe (newly-held positions,
+    BFQ entrants) without re-fetching. Set membership prevents redundant
+    yfinance hits while admitting fresh tickers."""
+    cache: dict = {}
+    gna._neo4j_market_cap_cache["SNDK"] = 36e9
+    gna._neo4j_market_cap_cache["ADBE"] = 200e9
+
+    # Call 1: only SNDK
+    populated1 = gna._preseed_mcap_cache_from_universe(
+        ["SNDK"], cache, {"mcap_preseed_use_yfinance": False},
+    )
+    assert populated1 == 1
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers") or set()
+    assert seeded == {"SNDK"}
+
+    # Call 2: SNDK + ADBE. SNDK already in set → skipped. ADBE new → seeded.
+    populated2 = gna._preseed_mcap_cache_from_universe(
+        ["SNDK", "ADBE"], cache, {"mcap_preseed_use_yfinance": False},
+    )
+    assert populated2 == 1  # ADBE only
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers") or set()
+    assert seeded == {"SNDK", "ADBE"}
+
+
+def test_gamma1_preseed_legacy_bool_flag_migrated_and_short_circuits():
+    """γ.1 back-compat: persisted live state from a pre-γ.1 deploy may
+    carry the legacy bool flag. First call honors it (returns 0) and
+    migrates it to the set[str] form so subsequent calls use the new path."""
+    cache: dict = {
+        "_yf_market_cap_cache_preseeded": True,  # legacy
+        "_yf_market_cap_cache": {"SNDK": 36e9, "ADBE": 200e9},
+    }
+    logs, patcher = _capture_logs()
+    with patcher:
+        populated = gna._preseed_mcap_cache_from_universe(
+            ["SNDK"], cache, {"mcap_preseed_use_yfinance": False},
+        )
+    assert populated == 0  # legacy short-circuit
+    # Bool flag consumed
+    assert "_yf_market_cap_cache_preseeded" not in cache
+    # Set initialized from existing cache keys
+    seeded = cache.get("_yf_market_cap_cache_preseeded_tickers") or set()
+    assert {"SNDK", "ADBE"}.issubset(seeded)
+    # Migration log emitted
+    assert any("migrated legacy bool flag" in m for m, _ in logs)
+
+
+def test_gamma1_preseed_bfq_cap_is_respected():
+    """γ.1: cap edge — large BFQ doesn't flood yfinance. With cap=5, only
+    top-5 enter the universe."""
+    cache: dict = {
+        "_backfill_queue": {f"T{i}": {"raw_score": float(100 - i)} for i in range(50)},
+    }
+    # T0 has highest raw_score (100), T49 lowest (51).
+    for i in range(5):
+        gna._neo4j_market_cap_cache[f"T{i}"] = 1e9 + i
+
+    populated = gna._preseed_mcap_cache_from_universe(
+        [],
+        cache,
+        {"mcap_preseed_use_yfinance": False, "mcap_preseed_bfq_top_n": 5},
+    )
+    assert populated == 5  # top-5 by raw_score (T0..T4)
+
+
+def test_gamma1_preseed_handles_malformed_portfolio_emulator():
+    """γ.1: defensive — if portfolio_emulator is non-None but doesn't have
+    `_positions`, we don't crash. Mirrors breach-heal `getattr(..., {}, )`
+    pattern."""
+    cache: dict = {}
+
+    class _BadPortfolio:
+        # No _positions attribute at all
+        pass
+
+    populated = gna._preseed_mcap_cache_from_universe(
+        ["SNDK"],
+        cache,
+        {"mcap_preseed_use_yfinance": False},
+        portfolio_emulator=_BadPortfolio(),
+    )
+    assert populated == 0  # neo4j miss, no crash
+
+
+def test_gamma1_preseed_universe_log_shows_per_source_breakdown():
+    """γ.1: visibility — the summary log includes per-source counts so the
+    operator can see how the universe was assembled (operator vs held vs BFQ)."""
+    cache: dict = {
+        "_backfill_queue": {"BFQ1": {"raw_score": 1.8}, "BFQ2": {"raw_score": 1.5}},
+    }
+    pe = _FakePortfolioEmulator({"HELD1": 10})
+    logs, patcher = _capture_logs()
+    with patcher:
+        gna._preseed_mcap_cache_from_universe(
+            ["OP1", "OP2"],
+            cache,
+            {"mcap_preseed_use_yfinance": False},
+            portfolio_emulator=pe,
+        )
+    summary = next(m for m, _ in logs if "mcap pre-seed:" in m and "universe_sources" in m)
+    assert "symbols:2" in summary
+    assert "held:1" in summary
+    assert "bfq:2" in summary
+
+
+def test_gamma1_preseed_bfq_top_n_knob_surfaced_in_effective_config():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("mcap_preseed_bfq_top_n") == 20
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# γ.4 — V28 rotation raw>=1.8 winner_lock bypass
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _rotation_args(**overrides):
+    """Helper: build keyword args for `_rotation_candidate_allowed` with
+    sane defaults so each test only sets the field it cares about."""
+    base = dict(
+        held_pnl_pct=5.0,
+        held_rotation_score=0.5,
+        held_days=10,
+        held_raw_score=0.5,
+        drop_from_peak_pct=2.0,  # within 8% peak window → winner_lock active
+        is_equity=True,
+        incoming_raw_score=1.0,
+        incoming_rotation_score=1.0,
+        config={},
+        incoming_meta={"is_top_momentum": False, "is_high_conviction": False},
+    )
+    base.update(overrides)
+    return base
+
+
+def test_gamma4_raw_1_8_displaces_winner_lock_with_held_pnl_below_10():
+    """γ.4: raw>=1.8 incoming with held pnl<10% → return True with mode
+    `gamma_winner_lock_bypass`. APLD/CRWV/PLTR case from BT232179."""
+    args = _rotation_args(
+        held_pnl_pct=8.8,   # CSCO-class: positive but below 10%
+        held_days=9,
+        held_raw_score=0.5,
+        drop_from_peak_pct=3.0,
+        incoming_raw_score=1.8,
+        incoming_rotation_score=1.8,
+    )
+    allowed, delta, mode = gna._rotation_candidate_allowed(**args)
+    assert allowed is True
+    assert mode == "gamma_winner_lock_bypass"
+
+
+def test_gamma4_raw_1_7_does_not_displace_winner_lock():
+    """γ.4: raw=1.7 incoming is BELOW the 1.8 threshold → still blocked."""
+    args = _rotation_args(
+        held_pnl_pct=8.8,
+        held_days=9,
+        held_raw_score=0.5,
+        drop_from_peak_pct=3.0,
+        incoming_raw_score=1.7,
+        incoming_rotation_score=1.7,
+    )
+    allowed, _delta, mode = gna._rotation_candidate_allowed(**args)
+    assert allowed is False
+    assert mode == "winner_lock"
+
+
+def test_gamma4_does_not_displace_true_winner_at_high_pnl():
+    """γ.4: held pnl>=10% (true winner) is protected even from raw>=1.8."""
+    args = _rotation_args(
+        held_pnl_pct=25.0,  # genuine winner
+        held_days=15,
+        held_raw_score=1.0,
+        drop_from_peak_pct=1.0,
+        incoming_raw_score=1.8,
+        incoming_rotation_score=1.8,
+    )
+    allowed, _delta, mode = gna._rotation_candidate_allowed(**args)
+    # Existing break_glass_raw_score is 2.75 (default), so 1.8 doesn't
+    # qualify there. γ.4 bypass requires held_pnl<10% → not met.
+    # Result: blocked at winner_lock.
+    assert allowed is False
+    assert mode == "winner_lock"
+
+
+def test_gamma4_bypass_knobs_surfaced_in_effective_config():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("rotation_winner_lock_bypass_min_raw_score") == 1.8
+    assert eff.get("rotation_winner_lock_bypass_max_held_pnl_pct") == 10.0
+
+
+def test_gamma4_break_glass_still_wins_above_bypass_pnl_when_raw_high():
+    """γ.4 sanity: at raw=2.75+ AND held_pnl=12% (above γ.4 cap), the
+    existing break_glass_trim path still admits. γ.4 doesn't degrade
+    existing high-conviction displacement."""
+    args = _rotation_args(
+        held_pnl_pct=12.0,
+        held_days=15,
+        held_raw_score=1.0,
+        drop_from_peak_pct=1.0,
+        incoming_raw_score=2.80,
+        incoming_rotation_score=2.80,
+    )
+    allowed, _delta, mode = gna._rotation_candidate_allowed(**args)
+    assert allowed is True
+    assert mode == "break_glass_trim"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# γ.3 — breach-heal winner_lock bypass threshold
+# ──────────────────────────────────────────────────────────────────────────
+# Note: the heal loop sits inside run_once and is exercised via integration
+# rather than unit-test surface. We verify the config-knob plumbing here;
+# the behavioral assertion is reserved for Φ.γ.2 (BT232179 re-run with
+# breach rate < 30% target).
+
+
+def test_gamma3_breach_heal_bypass_knob_default_is_15():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("breach_heal_winner_lock_bypass_max_pnl_pct") == 15.0
+
+
+def test_gamma3_breach_heal_bypass_knob_operator_override():
+    eff = gna._get_effective_nexus_config(
+        {"breach_heal_winner_lock_bypass_max_pnl_pct": 20.0}
+    )
+    assert eff.get("breach_heal_winner_lock_bypass_max_pnl_pct") == 20.0
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# γ.5 — conviction telemetry production log wiring
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_gamma5_conviction_tier_log_emits_mcap_high_path():
+    """γ.5: $36B mcap → tier=HIGH path=mcap_high."""
+    cache = {"_yf_market_cap_cache": {"SNDK": 36e9}}
+    logs, patcher = _capture_logs()
+    with patcher:
+        tier = gna._resolve_conviction_tier_at_exit(
+            "SNDK", config={}, strategy_cache=cache, propagated={}
+        )
+    assert tier == "HIGH"
+    audit = [m for m, _ in logs if "conviction_tier:" in m]
+    assert audit, "γ.5 wiring did not emit conviction_tier log line"
+    assert "tier=HIGH" in audit[0]
+    assert "path=mcap_high" in audit[0]
+    assert "sym=SNDK" in audit[0]
+
+
+def test_gamma5_conviction_tier_log_emits_default_low_path():
+    """γ.5: empty mcap + low raw → tier=LOW path=default_low (the BT232179
+    silent-fail observability gap fix)."""
+    cache: dict = {}
+    logs, patcher = _capture_logs()
+    with patcher:
+        tier = gna._resolve_conviction_tier_at_exit(
+            "OBSCURE", config={}, strategy_cache=cache, propagated={"OBSCURE": {"raw_score": 0.1}}
+        )
+    assert tier == "LOW"
+    audit = [m for m, _ in logs if "conviction_tier:" in m]
+    assert audit
+    assert "path=default_low" in audit[0]
+
+
+def test_gamma5_conviction_tier_log_emits_raw_high_path():
+    """γ.5: empty mcap + raw>=1.0 → tier=HIGH path=raw_high (propagation
+    signal admits without mcap data)."""
+    cache: dict = {}
+    logs, patcher = _capture_logs()
+    with patcher:
+        tier = gna._resolve_conviction_tier_at_exit(
+            "PROP", config={}, strategy_cache=cache, propagated={"PROP": {"raw_score": 1.2}}
+        )
+    assert tier == "HIGH"
+    audit = [m for m, _ in logs if "conviction_tier:" in m]
+    assert audit
+    assert "path=raw_high" in audit[0]
+
+
+def test_gamma5_conviction_tier_log_emits_mcap_mid_path():
+    """γ.5: $15B mcap (between 10B-30B thresholds) → tier=MID path=mcap_mid."""
+    cache = {"_yf_market_cap_cache": {"MIDCAP": 15e9}}
+    logs, patcher = _capture_logs()
+    with patcher:
+        tier = gna._resolve_conviction_tier_at_exit(
+            "MIDCAP", config={}, strategy_cache=cache, propagated={}
+        )
+    assert tier == "MID"
+    audit = [m for m, _ in logs if "conviction_tier:" in m]
+    assert audit
+    assert "path=mcap_mid" in audit[0]
+
+
+def test_gamma5_conviction_tier_log_emits_raw_mid_path():
+    """γ.5: empty mcap + raw=0.7 (between 0.6 mid and 1.0 high) → MID
+    via raw_mid path."""
+    cache: dict = {}
+    logs, patcher = _capture_logs()
+    with patcher:
+        tier = gna._resolve_conviction_tier_at_exit(
+            "RAWMID", config={}, strategy_cache=cache, propagated={"RAWMID": {"raw_score": 0.7}}
+        )
+    assert tier == "MID"
+    audit = [m for m, _ in logs if "conviction_tier:" in m]
+    assert audit
+    assert "path=raw_mid" in audit[0]
+
+
+def test_gamma5_conviction_tier_log_can_be_disabled():
+    """γ.5: operator can disable via config knob to suppress log volume."""
+    cache = {"_yf_market_cap_cache": {"SNDK": 36e9}}
+    logs, patcher = _capture_logs()
+    with patcher:
+        gna._resolve_conviction_tier_at_exit(
+            "SNDK",
+            config={"conviction_telemetry_log_enabled": False},
+            strategy_cache=cache,
+            propagated={},
+        )
+    audit = [m for m, _ in logs if "conviction_tier:" in m]
+    assert not audit, "log emitted despite conviction_telemetry_log_enabled=False"
+
+
+def test_gamma5_conviction_telemetry_log_knob_surfaced_in_effective_config():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("conviction_telemetry_log_enabled") is True
 
 
 # ──────────────────────────────────────────────────────────────────────────

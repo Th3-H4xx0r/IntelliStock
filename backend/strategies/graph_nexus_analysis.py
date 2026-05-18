@@ -5592,8 +5592,10 @@ def _preseed_mcap_cache_from_universe(
     symbols_list: list,
     strategy_cache: dict | None,
     config: dict,
+    *,
+    portfolio_emulator=None,
 ) -> int:
-    """Pre-populate ``_yf_market_cap_cache`` for a static backtest universe.
+    """Pre-populate ``_yf_market_cap_cache`` for a backtest universe.
 
     BT136708 calibration (2026-05-18): without this, the cache stays empty in
     backtest (no fresh discovery happens against a static universe), and the
@@ -5608,7 +5610,30 @@ def _preseed_mcap_cache_from_universe(
     log the per-source counters now (neo4j/yf hits/zeros/failures) regardless
     of outcome. Added 3-retry exponential backoff for yfinance fetches.
 
-    Sources (in order):
+    Phase γ.1 (BT232179 follow-up, 2026-05-18): in pure-discovery mode
+    (operator's primary backtest configuration) the caller's ``symbols_list``
+    is EMPTY at run_once entry — the function correctly short-circuited but
+    A1 was left with an empty mcap cache for the whole run. Now the
+    pre-seed universe is built from THREE sources:
+
+      1. operator-provided ``symbols_list`` (legacy path, BT136708-style)
+      2. currently-held tickers from ``portfolio_emulator._positions`` (so
+         every position the A1 tier-resolver inspects has mcap)
+      3. top-N BFQ candidates from ``strategy_cache['_backfill_queue']``
+         (so the next-bar-execution candidates have mcap before they're
+         executed). Cap controlled by ``mcap_preseed_bfq_top_n`` (default 20).
+
+    Idempotency contract change: the prior ``bool`` flag
+    ``_yf_market_cap_cache_preseeded`` is replaced by a ``set[str]`` of
+    already-seeded tickers under ``_yf_market_cap_cache_preseeded_tickers``,
+    so subsequent calls can extend the universe (newly-held positions, BFQ
+    entrants) without re-fetching what was already seeded. A legacy bool
+    flag (left in persisted live state from a pre-γ.1 deploy) is migrated
+    on first encounter: its presence is honored as "everything previously
+    processed" — function returns 0 for that one call, and the new set
+    is initialized from the current ``_yf_market_cap_cache`` keys.
+
+    Sources (in order, per ticker):
       1. ``_neo4j_market_cap_cache`` (already populated at module load)
       2. yfinance (one-time per ticker, with retry), gated on
          ``mcap_preseed_use_yfinance`` config flag (default True).
@@ -5617,32 +5642,141 @@ def _preseed_mcap_cache_from_universe(
       * ``mcap_preseed_use_yfinance`` (default True)
       * ``mcap_preseed_yfinance_max_attempts`` (default 3)
       * ``mcap_preseed_yfinance_base_delay_sec`` (default 0.5)
+      * ``mcap_preseed_bfq_top_n`` (default 20, γ.1)
 
-    Idempotent via ``_yf_market_cap_cache_preseeded`` flag on strategy_cache.
     Returns the count of tickers populated this call (neo4j_hits + yf_hits).
     """
     if not isinstance(strategy_cache, dict):
         _log("mcap pre-seed: skipped — strategy_cache not a dict", "yellow")
         return 0
-    if strategy_cache.get("_yf_market_cap_cache_preseeded"):
-        # Idempotent short-circuit: prior call already completed (with
-        # `populated > 0` or no transient yfinance failure — see flag-set
-        # condition at function end).
+
+    # γ.1 (Phase γ, 2026-05-18): one-shot migration of the legacy bool flag
+    # to the new set[str] semantics. If the persisted live state (or an
+    # older test fixture) still carries the bool, honor its intent
+    # ("everything already processed") and short-circuit this call. The
+    # current `_yf_market_cap_cache` keys are carried forward as the set
+    # contents so subsequent calls naturally skip them.
+    legacy_flag = strategy_cache.pop("_yf_market_cap_cache_preseeded", None)
+    if legacy_flag:
+        _legacy_cache = strategy_cache.get("_yf_market_cap_cache") or {}
+        _legacy_keys = {
+            str(k or "").strip().upper()
+            for k in _legacy_cache.keys()
+            if str(k or "").strip()
+        }
+        _existing_set = strategy_cache.get("_yf_market_cap_cache_preseeded_tickers")
+        if isinstance(_existing_set, set):
+            _legacy_keys |= _existing_set
+        strategy_cache["_yf_market_cap_cache_preseeded_tickers"] = _legacy_keys
+        _log(
+            f"mcap pre-seed: migrated legacy bool flag → set[str] "
+            f"({len(_legacy_keys)} ticker(s) carried forward); honoring "
+            f"legacy short-circuit for this call (Phase γ.1).",
+            "yellow",
+        )
         return 0
-    if not symbols_list:
-        _log("mcap pre-seed: skipped — empty symbols_list", "yellow")
+
+    # γ.1: read (or initialize) the set[str] idempotency contract.
+    already_seeded_raw = strategy_cache.get("_yf_market_cap_cache_preseeded_tickers")
+    if isinstance(already_seeded_raw, set):
+        already_seeded = already_seeded_raw
+    else:
+        try:
+            already_seeded = set(already_seeded_raw or [])
+        except TypeError:
+            already_seeded = set()
+
+    # γ.1: build the pre-seed universe from operator symbols + held positions
+    # + top-N BFQ. BT232179 silent-inertness rooted here: α.4 never fired
+    # because operator's pure-discovery seed (8 tickers) makes symbols_list
+    # empty at the run_once entry point — the function correctly short-
+    # circuited but A1 ran the whole backtest with an empty mcap cache.
+    operator_tickers: set[str] = set()
+    for s in (symbols_list or []):
+        s_u = str(s or "").strip().upper()
+        if s_u:
+            operator_tickers.add(s_u)
+
+    held_tickers: set[str] = set()
+    if portfolio_emulator is not None:
+        try:
+            # Direct `_positions` read mirrors the breach-heal pattern at
+            # graph_nexus_analysis.py:21701 (defensive against unset attr).
+            _positions = getattr(portfolio_emulator, "_positions", {}) or {}
+            for t, q in _positions.items():
+                try:
+                    if float(q or 0) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                t_u = str(t or "").strip().upper()
+                if t_u:
+                    held_tickers.add(t_u)
+        except Exception as _held_exc:
+            _log(
+                f"mcap pre-seed: held-position read failed (non-fatal): {_held_exc!r}",
+                "yellow",
+            )
+            held_tickers = set()
+
+    bfq_tickers: set[str] = set()
+    try:
+        bfq = strategy_cache.get("_backfill_queue") or {}
+        if isinstance(bfq, dict) and bfq:
+            try:
+                bfq_cap = max(0, int(config.get("mcap_preseed_bfq_top_n", 20) or 20))
+            except (TypeError, ValueError):
+                bfq_cap = 20
+
+            def _bfq_raw(item):
+                v = item[1] if isinstance(item[1], dict) else {}
+                try:
+                    return float((v or {}).get("raw_score", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            bfq_sorted = sorted(bfq.items(), key=_bfq_raw, reverse=True)[:bfq_cap]
+            for t, _meta in bfq_sorted:
+                t_u = str(t or "").strip().upper()
+                if t_u:
+                    bfq_tickers.add(t_u)
+    except Exception as _bfq_exc:
+        _log(
+            f"mcap pre-seed: BFQ read failed (non-fatal): {_bfq_exc!r}",
+            "yellow",
+        )
+        bfq_tickers = set()
+
+    universe = operator_tickers | held_tickers | bfq_tickers
+    new_to_seed_set = universe - already_seeded
+    if not universe:
+        _log(
+            "mcap pre-seed: skipped — empty universe "
+            "(no operator symbols_list, no held positions, no BFQ "
+            "candidates; pure-discovery mode with cold start)",
+            "yellow",
+        )
         return 0
+    if not new_to_seed_set:
+        # All ticker sources already covered by a prior call this run — no-op.
+        return 0
+
+    # Deterministic iteration order for paired-rerun determinism (Phase α.3
+    # PYTHONHASHSEED handling makes plain set iteration deterministic too,
+    # but explicit sort costs O(n log n) on tiny inputs and removes the
+    # implicit dependency.).
+    new_to_seed = sorted(new_to_seed_set)
     cache = strategy_cache.setdefault("_yf_market_cap_cache", {})
-    n_total = sum(1 for s in symbols_list if str(s or "").strip())
+    n_total = len(new_to_seed)
     neo4j_hits = 0
     yf_hits = 0
     yf_zeros = 0
     yf_failures = 0
     yf_attempted = 0
+
     # Phase 1: neo4j cache (cheap, no network)
-    for sym in symbols_list:
-        sym_u = str(sym).strip().upper()
-        if not sym_u or sym_u in cache:
+    for sym_u in new_to_seed:
+        if sym_u in cache:
             continue
         try:
             neo_mc = float(_neo4j_market_cap_cache.get(sym_u, 0.0) or 0.0)
@@ -5651,6 +5785,7 @@ def _preseed_mcap_cache_from_universe(
         if neo_mc > 0:
             cache[sym_u] = neo_mc
             neo4j_hits += 1
+
     # Phase 2: yfinance for misses (network — only in backtest pre-seed path)
     use_yf = bool(config.get("mcap_preseed_use_yfinance", True))
     try:
@@ -5673,9 +5808,8 @@ def _preseed_mcap_cache_from_universe(
             )
         if _yf_mod is not None:
             import time as _time_mod_yf
-            for sym in symbols_list:
-                sym_u = str(sym).strip().upper()
-                if not sym_u or sym_u in cache:
+            for sym_u in new_to_seed:
+                if sym_u in cache:
                     continue
                 yf_attempted += 1
                 mc = 0.0
@@ -5722,21 +5856,30 @@ def _preseed_mcap_cache_from_universe(
                         # yfinance returned but marketCap was 0/missing — common
                         # signal for rate-limit (empty .info dict).
                         yf_zeros += 1
-    # Bug-sweep 2026-05-18: only mark preseed complete when we either had
-    # genuine success (populated > 0) OR yfinance was disabled/never
-    # attempted. If ALL yfinance fetches failed in a row (rate limit at
-    # backtest start), don't lock the flag — later code paths can retry.
-    if (neo4j_hits + yf_hits) > 0 or yf_failures == 0:
-        strategy_cache["_yf_market_cap_cache_preseeded"] = True
+
+    # γ.1: extend the idempotency set with every ticker that REACHED the
+    # cache this call (neo4j_hits OR yf_hits OR yf_zeros). yf_failures are
+    # NOT marked seeded so a future call can retry if network conditions
+    # improve. This preserves the Phase α.4 "don't lock under all-failures"
+    # behavior at finer granularity (per-ticker, not whole-call).
+    seeded_this_call: set[str] = set()
+    for sym_u in new_to_seed:
+        if sym_u in cache:
+            seeded_this_call.add(sym_u)
+    already_seeded |= seeded_this_call
+    strategy_cache["_yf_market_cap_cache_preseeded_tickers"] = already_seeded
+
     populated = neo4j_hits + yf_hits
     # Phase α.4: ALWAYS log the per-source counters. The prior `if populated:`
     # gate hid the silent-fail mode in BT109429 (populated=0 → no log line →
-    # inert Phase 1 fixes).
+    # inert Phase 1 fixes). Phase γ.1 extends with per-source universe counts
+    # so the operator can see exactly where the pre-seed input came from.
     color = "cyan" if populated > 0 else "red"
     _log(
         f"mcap pre-seed: {populated}/{n_total} populated "
         f"(neo4j_hits={neo4j_hits}, yf_hits={yf_hits}, yf_zeros={yf_zeros}, "
-        f"yf_failures={yf_failures}, yf_attempted={yf_attempted})",
+        f"yf_failures={yf_failures}, yf_attempted={yf_attempted}, "
+        f"universe_sources=symbols:{len(operator_tickers)}/held:{len(held_tickers)}/bfq:{len(bfq_tickers)})",
         color,
     )
     if populated == 0 and n_total > 0:
@@ -5775,6 +5918,15 @@ def _resolve_conviction_tier_at_exit(
     Lowered to 30B / 1.0 + added a MID mcap path (10B) so structurally
     lower-vol mid/mega-caps get a wider floor than pure micro-cap propagation
     picks.
+
+    Phase γ.5 (2026-05-18, BT232179 follow-up): wire per-resolution
+    `conviction_tier:` log line for production audit. BT232179 showed 5/5
+    LOW resolutions (0 HIGH, 0 MID) without ANY visibility into WHY each
+    one demoted — operator had to grep for downstream "circuit_breaker"
+    fires and reverse-engineer the tier. Now each call emits the resolved
+    tier + path (mcap_high / raw_high / mcap_mid / raw_mid / default_low)
+    so operators can audit A1 decisions post-hoc. Gated by
+    `conviction_telemetry_log_enabled` config knob (default True).
     """
     sym = str(sym or "").strip().upper()
     if not sym:
@@ -5805,9 +5957,6 @@ def _resolve_conviction_tier_at_exit(
         raw_mid = 0.6
 
     mcap = _resolve_position_market_cap(sym, strategy_cache)
-    if mcap is not None and mcap >= mcap_threshold:
-        return "HIGH"
-
     raw_score = 0.0
     if isinstance(propagated, dict):
         entry = propagated.get(sym) or {}
@@ -5822,13 +5971,35 @@ def _resolve_conviction_tier_at_exit(
             if not _math_local.isfinite(raw_score):
                 raw_score = 0.0
 
-    if raw_score >= raw_high:
-        return "HIGH"
-    if mcap is not None and mcap >= mcap_mid_threshold:
-        return "MID"
-    if raw_score >= raw_mid:
-        return "MID"
-    return "LOW"
+    # Phase γ.5: track resolution path so the telemetry log can disambiguate
+    # WHICH branch promoted the tier (mcap-mega vs raw-high vs default-low).
+    if mcap is not None and mcap >= mcap_threshold:
+        tier, path = "HIGH", "mcap_high"
+    elif raw_score >= raw_high:
+        tier, path = "HIGH", "raw_high"
+    elif mcap is not None and mcap >= mcap_mid_threshold:
+        tier, path = "MID", "mcap_mid"
+    elif raw_score >= raw_mid:
+        tier, path = "MID", "raw_mid"
+    else:
+        tier, path = "LOW", "default_low"
+
+    # Phase γ.5 (BT232179 follow-up, 2026-05-18): emit per-resolution audit
+    # log. Bounded volume: caller invokes once per (open position, bar) →
+    # ~max_positions * total_bars per backtest (~600 lines for an 8-position
+    # 75-bar run). Cheap relative to V28 ROT EVAL volume.
+    if bool(config.get("conviction_telemetry_log_enabled", True)):
+        try:
+            _mcap_m_str = f"{mcap / 1e6:.0f}" if (mcap is not None and mcap > 0) else "?"
+        except (TypeError, ValueError):
+            _mcap_m_str = "?"
+        _log(
+            f"conviction_tier: sym={sym} tier={tier} mcap={_mcap_m_str}M "
+            f"raw_score={raw_score:.3f} path={path}",
+            "cyan",
+        )
+
+    return tier
 
 
 def _compute_conviction_score(
@@ -6872,6 +7043,26 @@ def _rotation_candidate_allowed(
                     return True, delta, "top_momentum_break_glass"
             if float(incoming_raw_score or 0.0) >= break_glass_raw_score and delta >= break_glass_delta:
                 return True, delta, "break_glass_trim"
+            # Phase γ.4 (2026-05-18, BT232179 follow-up): raw>=1.8 displacement
+            # bypass. APLD/CRWV/PLTR/CEG/CLF/ON/WMT all surfaced at raw=1.800
+            # (the model's high-conviction ceiling) but were blocked by
+            # winner_lock against CSCO at +8.8%/9d held. Existing thresholds
+            # didn't fit: break_glass_raw_score is 2.75 (too strict for
+            # raw=1.8), top_momentum_break_glass requires is_top_momentum
+            # (APLD wasn't in the top-momentum set). Add a dedicated bypass:
+            # incoming raw>=1.8 AND held pnl<10% → full eviction. True
+            # winners (pnl>=10%) remain protected by the existing thresholds.
+            _g4_bypass_min_raw = float(
+                config.get("rotation_winner_lock_bypass_min_raw_score", 1.8) or 1.8
+            )
+            _g4_bypass_max_held_pnl = float(
+                config.get("rotation_winner_lock_bypass_max_held_pnl_pct", 10.0) or 10.0
+            )
+            if (
+                float(incoming_raw_score or 0.0) >= _g4_bypass_min_raw
+                and float(held_pnl_pct or 0.0) < _g4_bypass_max_held_pnl
+            ):
+                return True, delta, "gamma_winner_lock_bypass"
             return False, delta, "winner_lock"
         # V28.2: profitable hold WITHOUT winner_lock (e.g., pnl 0-3%, or held >= 5d
         # but raw_score went negative, or drop_from_peak > 8%). For HC inflows
@@ -7587,6 +7778,45 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         ),
         "mcap_preseed_yfinance_base_delay_sec": float(
             config.get("mcap_preseed_yfinance_base_delay_sec", 0.5) or 0.5
+        ),
+        # Phase γ.1 (BT232179 follow-up, 2026-05-18): BFQ top-N cap on the
+        # mcap pre-seed universe expansion. Bounds yfinance load per call;
+        # default 20 picked to cover the realistic propagation-fanout cone
+        # without flooding rate limits.
+        "mcap_preseed_bfq_top_n": int(
+            config.get("mcap_preseed_bfq_top_n", 20) or 20
+        ),
+        # Phase γ.3 (BT232179 follow-up, 2026-05-18): breach-heal winner_lock
+        # bypass threshold. Pre-γ.3 the heal loop skipped ALL winner_lock'd
+        # positions, which meant in early bars (5/5 LOW conviction, no true
+        # winners yet) the loop freed 0 slots on 79% of breaches. Now the
+        # skip only fires for held positions with pnl >= this threshold —
+        # modest (+2% to +15%) "winners" become eligible candidates.
+        "breach_heal_winner_lock_bypass_max_pnl_pct": float(
+            config.get("breach_heal_winner_lock_bypass_max_pnl_pct", 15.0) or 15.0
+        ),
+        # Phase γ.4 (BT232179 follow-up, 2026-05-18): V28 rotation winner_lock
+        # displacement bypass. Incoming candidates at raw>=1.8 (the model's
+        # high-conviction ceiling, observed across APLD/CRWV/PLTR/CEG/CLF/ON
+        # /WMT in BT232179) may displace a winner_lock'd held position if
+        # held pnl<10% (modest winner, not a true conviction-locked win).
+        # Existing break_glass thresholds (raw>=2.75, delta>=1.5) were too
+        # strict for raw=1.8 candidates; this bypass closes the gap.
+        "rotation_winner_lock_bypass_min_raw_score": float(
+            config.get("rotation_winner_lock_bypass_min_raw_score", 1.8) or 1.8
+        ),
+        "rotation_winner_lock_bypass_max_held_pnl_pct": float(
+            config.get("rotation_winner_lock_bypass_max_held_pnl_pct", 10.0) or 10.0
+        ),
+        # Phase γ.5 (BT232179 follow-up, 2026-05-18): per-resolution
+        # `conviction_tier:` log emission. Distinct from the prior
+        # `conviction_telemetry_enabled` (which gates the in-memory buffer
+        # at L15089-L15116 for offline analysis) — this one writes a single
+        # line to the live broker log per evaluation so operators can grep
+        # `tier=LOW` directly. BT232179 showed 5/5 LOW resolutions WITHOUT
+        # any audit trail; this closes the observability gap.
+        "conviction_telemetry_log_enabled": bool(
+            config.get("conviction_telemetry_log_enabled", True)
         ),
         "nexus_sentiment_cache_force_in_backtest": bool(
             config.get("nexus_sentiment_cache_force_in_backtest", True)
@@ -18268,11 +18498,23 @@ class GraphNexusAnalysis:
         # in backtest. Without this, the cache is empty against a static
         # universe (no fresh discovery runs), and SNDK-class mega-caps default
         # to LOW conviction. Skip during the historical_lookback_mode pre-pass
-        # — only seed for actual runs. Idempotent: subsequent run_once calls
-        # short-circuit via _yf_market_cap_cache_preseeded.
+        # — only seed for actual runs.
+        # Phase γ.1 (2026-05-18, BT232179 follow-up): also pass
+        # `portfolio_emulator` so the pre-seed pulls currently-held tickers
+        # AND top-N BFQ candidates into the universe. Without this, pure-
+        # discovery mode (empty symbols_list) silently no-op'd the whole
+        # pre-seed and A1 ran the run with an empty mcap cache (BT232179
+        # mcap pre-seed: 0/0 populated for 49/49 bars). Idempotency is now
+        # a per-ticker set rather than a whole-call bool so newly-held or
+        # newly-BFQ'd tickers in subsequent bars get seeded too.
         if isinstance(strategy_cache, dict) and not historical_lookback_mode:
             try:
-                _preseed_mcap_cache_from_universe(symbols_list, strategy_cache, config)
+                _preseed_mcap_cache_from_universe(
+                    symbols_list,
+                    strategy_cache,
+                    config,
+                    portfolio_emulator=portfolio_emulator,
+                )
             except Exception as _ps_exc:
                 _log(f"mcap pre-seed error (non-fatal): {_ps_exc}", "yellow")
         # Position sizing: fraction of portfolio assigned to nexus stock buys / ETF buys
@@ -21694,7 +21936,27 @@ class GraphNexusAnalysis:
                     _breach_auto_heal = bool(config.get("max_positions_breach_auto_rotate", True))
                     _breach_slots_to_free = max(1, _current_positions - _max_positions)
                     _breach_min_hold_days = int(config.get("max_positions_breach_heal_min_hold_days", 3) or 3)
+                    # Phase γ.3 (2026-05-18, BT232179 follow-up): adversarial review
+                    # of BT232179 found the breach-heal loop was firing on 78% of
+                    # bars but `auto-heal freed 0` on 79% of those — every candidate
+                    # was filtered out by the winner_lock skip. Root cause: the
+                    # winner_lock predicate fires for held positions at +2%/+3 days
+                    # (CSCO at +8.8%/9d in BT232179), which is far short of the
+                    # "true winner" intent. Relax the skip so positions that are
+                    # winner_lock'd BUT only marginally profitable (pnl < 15%) are
+                    # still eligible for breach-heal eviction. True winners (>=15%
+                    # pnl) remain protected. Bounded: heal loop still caps at
+                    # _breach_slots_to_free closes per breach (not aggressive
+                    # sell-down). Knob is operator-tunable for Phase β follow-up.
+                    try:
+                        _breach_wlock_max_pnl = float(
+                            config.get("breach_heal_winner_lock_bypass_max_pnl_pct", 15.0)
+                            or 15.0
+                        )
+                    except (TypeError, ValueError):
+                        _breach_wlock_max_pnl = 15.0
                     _breach_healed = 0
+                    _breach_wlock_bypassed = 0
                     if _breach_auto_heal and portfolio_emulator is not None:
                         _breach_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
                         _breach_candidates: list[tuple[str, float, int]] = []
@@ -21732,7 +21994,13 @@ class GraphNexusAnalysis:
                                 )
                                 if _bh_grace_in and not _bh_grace_esc:
                                     continue
-                                # Respect winner_lock — don't heal by evicting a locked winner
+                                # Respect winner_lock — don't heal by evicting a TRUE
+                                # winner. Phase γ.3: only short-circuit when the
+                                # held position is BOTH winner_lock'd AND truly
+                                # profitable (pnl >= breach_heal_winner_lock_bypass_max_pnl_pct,
+                                # default 15%). Modest +2%-to-15% "winners" remain
+                                # eligible so the heal loop can free a slot for
+                                # raw=1.8 incoming candidates.
                                 _bh_wlock, _ = _rotation_winner_lock_active(
                                     held_pnl_pct=_bh_pnl,
                                     held_days=_bh_held_days,
@@ -21741,8 +22009,13 @@ class GraphNexusAnalysis:
                                     is_equity=bool(_bh_snap.get("is_equity", True)),
                                     config=config,
                                 )
-                                if _bh_wlock:
+                                if _bh_wlock and float(_bh_pnl or 0.0) >= _breach_wlock_max_pnl:
                                     continue
+                                if _bh_wlock:
+                                    # Audit: this candidate would have been
+                                    # blocked pre-γ.3. Counter incremented so
+                                    # the operator can see the relaxation working.
+                                    _breach_wlock_bypassed += 1
                                 _breach_candidates.append((_bh_sym_u, _bh_pnl, int(_bh_held_days)))
                             except Exception as _bh_exc:
                                 _log(f"V31.3 breach heal candidate skip {_bh_sym_u}: {_bh_exc}", "yellow")
@@ -21775,6 +22048,17 @@ class GraphNexusAnalysis:
                                 "magenta",
                             )
                         _current_positions -= _breach_healed
+                        # Phase γ.3: emit per-bar audit on the winner_lock relaxation
+                        # so operators can confirm the heal loop is actually doing
+                        # work that pre-γ.3 was silently no-op'd.
+                        if _breach_wlock_bypassed > 0:
+                            _log(
+                                f"V31.3 breach auto-heal γ.3: "
+                                f"{_breach_wlock_bypassed} winner_lock'd candidate(s) "
+                                f"admitted (pnl < {_breach_wlock_max_pnl:.1f}% bypass "
+                                f"threshold).",
+                                "magenta",
+                            )
                     # Re-evaluate breach state after heal attempt
                     if _current_positions > _max_positions:
                         _position_breach_active = True
