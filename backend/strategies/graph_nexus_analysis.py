@@ -624,6 +624,9 @@ _NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia", "cl
 # log. Each (role, source_tag, masked_key) tuple is logged at most once
 # per process lifetime so operators can spot stale inline credentials.
 _LLM_KEY_SOURCE_LOG_SEEN: set[tuple[str, str, str]] = set()
+# Dedup cache for provider/model mismatch warnings (one log per
+# (role, provider, model) signature per process).
+_LLM_PROVIDER_MODEL_MISMATCH_SEEN: set[tuple[str, str, str]] = set()
 _NEXUS_GOVERNMENT_ACTION_TYPES = {
     "monetary_policy", "fiscal_policy", "interest_rate_hike", "interest_rate_cut",
     "inflation_policy", "trade_policy", "tariffs", "sanctions", "war_declared",
@@ -979,6 +982,50 @@ def _resolve_role_llm_config(config: dict, role: str) -> tuple[str, str, str, st
         or os.environ.get("GRAPH_NEXUS_LLM_MODEL", "").strip()
         or _default_model_for_provider(provider)
     )
+
+    # Provider/model sanity check. Strategies that switched providers
+    # without clearing the legacy `*_llm_model` value can land on a
+    # combination that looks valid (e.g. provider=nvidia + model=gpt-4o)
+    # but produces a 404 at request time. We don't auto-correct (the
+    # operator may have intentionally configured an OpenAI-compatible
+    # gateway), but we surface a one-time warning so the mismatch is
+    # discoverable from the backtest log.
+    _mismatch_sig = (role or "default", provider, str(model).strip().lower())
+    if _mismatch_sig not in _LLM_PROVIDER_MODEL_MISMATCH_SEEN:
+        _LLM_PROVIDER_MODEL_MISMATCH_SEEN.add(_mismatch_sig)
+        _model_lc = str(model).strip().lower()
+        _hint = None
+        if provider == "nvidia":
+            # NVIDIA NIM model ids generally look like "vendor/name" with a slash
+            # (moonshotai/kimi-k2.6, nvidia/llama-3.1-nemotron, ...). A bare
+            # "gpt-..." or "claude-..." string almost always means the model
+            # field was left over from a prior Azure/OpenAI/Anthropic config.
+            if _model_lc.startswith(("gpt-", "claude-", "gemini-", "deepseek")):
+                _hint = "looks like a non-NVIDIA model id"
+            elif "/" not in _model_lc:
+                _hint = "NVIDIA NIM ids usually contain a '/' (vendor/name)"
+        elif provider == "azure":
+            # Azure deployments are user-named strings; no canonical pattern,
+            # but they should not contain a '/' (that's NVIDIA-style).
+            if "/" in _model_lc:
+                _hint = "contains '/' — looks like an NVIDIA NIM id"
+        elif provider == "openai":
+            if _model_lc.startswith(("claude-", "gemini-", "moonshotai/", "nvidia/")):
+                _hint = "looks like a non-OpenAI model id"
+        elif provider == "anthropic":
+            if not _model_lc.startswith("claude-"):
+                _hint = "Anthropic ids start with 'claude-'"
+        elif provider == "gemini":
+            if not _model_lc.startswith(("gemini-", "models/gemini")):
+                _hint = "Gemini ids start with 'gemini-'"
+        if _hint:
+            _log(
+                f"LLM provider/model mismatch hint for role={role or 'default'}: "
+                f"provider={provider} model={model!r} — {_hint}. "
+                f"If 401/404 follows, clear the stale `{prefix}llm_model` / "
+                f"`lookback_{prefix}llm_model` field in the strategy config.",
+                "yellow",
+            )
     prompt_version = (
         (config.get(f"{prefix}llm_prompt_version") or "").strip()
         or (config.get("llm_overlay_prompt_version") or "").strip()
