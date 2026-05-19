@@ -167,3 +167,120 @@ def test_eta_a_respects_top_n_cap():
     assert seeded == 3
     assert {"A", "B", "C"} <= set(sd.keys())
     assert "D" not in sd
+
+
+# ─────────────────────────────────────────────────────────────────────
+# η.B' — post-aggregation sector augmentation tests
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _apply_eta_b_directly(aggregated: dict, mw_tickers: set, sector_map: dict, config: dict):
+    """Mirrors the spec §4.2 logic for unit-testing."""
+    if not config.get("eta_sector_augmentation_enabled", True):
+        return 0
+    thr = float(config.get("eta_augment_below_raw", 0.5) or 0.5)
+    fac = float(config.get("eta_augment_peer_factor", 0.3) or 0.3)
+    augmented = 0
+    for ticker in mw_tickers:
+        existing = aggregated.get(ticker, {"raw_score": 0.0, "reasons": [], "n_paths": 0})
+        if float(existing.get("raw_score", 0.0)) >= thr:
+            continue
+        ticker_sector = sector_map.get(ticker)
+        if not ticker_sector:
+            continue
+        peer_score = 0.0
+        for peer, peer_doc in aggregated.items():
+            if peer == ticker:
+                continue
+            if sector_map.get(peer) != ticker_sector:
+                continue
+            peer_raw = float(peer_doc.get("raw_score", 0.0))
+            if peer_raw > peer_score:
+                peer_score = peer_raw
+        if peer_score < thr:
+            continue
+        new_raw = float(existing.get("raw_score", 0.0)) + peer_score * fac
+        aggregated[ticker] = {
+            "raw_score": max(-1.0, min(1.0, new_raw)),
+            "reasons": (list(existing.get("reasons", [])) +
+                        [f"eta_b_aug(peer={peer_score:.2f}*{fac})"])[:5],
+            "n_paths": int(existing.get("n_paths", 0)) + 1,
+        }
+        augmented += 1
+    return augmented
+
+
+def test_eta_b_augments_low_raw_with_high_peer():
+    agg = {
+        "MU": {"raw_score": 0.2, "reasons": [], "n_paths": 1},
+        "NVDA": {"raw_score": 0.9, "reasons": [], "n_paths": 8},
+    }
+    sm = {"MU": "Technology", "NVDA": "Technology"}
+    n = _apply_eta_b_directly(agg, {"MU"}, sm, {})
+    assert n == 1
+    assert agg["MU"]["raw_score"] == pytest.approx(0.2 + 0.9 * 0.3, rel=1e-6)
+    assert agg["MU"]["n_paths"] == 2
+    assert any("eta_b_aug" in r for r in agg["MU"]["reasons"])
+
+
+def test_eta_b_skips_when_existing_raw_above_threshold():
+    agg = {
+        "MU": {"raw_score": 0.7, "reasons": [], "n_paths": 3},
+        "NVDA": {"raw_score": 0.9, "reasons": [], "n_paths": 8},
+    }
+    sm = {"MU": "Technology", "NVDA": "Technology"}
+    n = _apply_eta_b_directly(agg, {"MU"}, sm, {})
+    assert n == 0
+    assert agg["MU"]["raw_score"] == 0.7  # untouched
+
+
+def test_eta_b_skips_when_no_peer_above_threshold():
+    agg = {
+        "MU": {"raw_score": 0.2, "reasons": [], "n_paths": 1},
+        "NVDA": {"raw_score": 0.3, "reasons": [], "n_paths": 2},  # below 0.5
+    }
+    sm = {"MU": "Technology", "NVDA": "Technology"}
+    n = _apply_eta_b_directly(agg, {"MU"}, sm, {})
+    assert n == 0
+
+
+def test_eta_b_clamps_at_positive_one():
+    agg = {
+        "MU": {"raw_score": 0.9, "reasons": [], "n_paths": 1},
+        "NVDA": {"raw_score": 0.95, "reasons": [], "n_paths": 8},
+    }
+    sm = {"MU": "Technology", "NVDA": "Technology"}
+    n = _apply_eta_b_directly(agg, {"MU"}, sm, {})
+    # raw=0.9 > threshold 0.5 → skipped
+    assert n == 0
+    # Now retry with MU below threshold
+    agg2 = {
+        "MU": {"raw_score": 0.4, "reasons": [], "n_paths": 1},
+        "NVDA": {"raw_score": 0.95, "reasons": [], "n_paths": 8},
+    }
+    sm2 = {"MU": "Technology", "NVDA": "Technology"}
+    n2 = _apply_eta_b_directly(agg2, {"MU"}, sm2, {})
+    assert n2 == 1
+    # 0.4 + 0.95 * 0.3 = 0.685 — under 1.0, no clamp needed
+    assert agg2["MU"]["raw_score"] == pytest.approx(0.685, rel=1e-6)
+
+
+def test_eta_b_respects_kill_switch():
+    agg = {
+        "MU": {"raw_score": 0.2, "reasons": [], "n_paths": 1},
+        "NVDA": {"raw_score": 0.9, "reasons": [], "n_paths": 8},
+    }
+    sm = {"MU": "Technology", "NVDA": "Technology"}
+    n = _apply_eta_b_directly(agg, {"MU"}, sm, {"eta_sector_augmentation_enabled": False})
+    assert n == 0
+    assert agg["MU"]["raw_score"] == 0.2
+
+
+def test_eta_b_skips_when_sector_unknown():
+    agg = {
+        "MU": {"raw_score": 0.2, "reasons": [], "n_paths": 1},
+        "NVDA": {"raw_score": 0.9, "reasons": [], "n_paths": 8},
+    }
+    sm = {"NVDA": "Technology"}  # MU not in sector_map
+    n = _apply_eta_b_directly(agg, {"MU"}, sm, {})
+    assert n == 0

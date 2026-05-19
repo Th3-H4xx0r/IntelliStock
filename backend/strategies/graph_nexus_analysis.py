@@ -14914,6 +14914,67 @@ def _neo4j_cached_query(
     return result
 
 
+def _build_sector_map_for_aug(driver, tickers: set, strategy_cache) -> dict[str, str]:
+    """η.B' helper: return {ticker: sector_name} for the given tickers.
+
+    Cached per-run in strategy_cache["_eta_sector_map"]. Sectors don't
+    change mid-backtest so the cache is sound for the full run.
+    Returns empty dict if Neo4j unavailable.
+    """
+    if not tickers:
+        return {}
+    if isinstance(strategy_cache, dict):
+        _cached = strategy_cache.get("_eta_sector_map")
+        if isinstance(_cached, dict):
+            _need = [t for t in tickers if t not in _cached]
+            if not _need:
+                return {t: _cached[t] for t in tickers if t in _cached}
+        else:
+            strategy_cache["_eta_sector_map"] = {}
+        _cache_dict = strategy_cache["_eta_sector_map"]
+    else:
+        _cache_dict = {}
+        _need = list(tickers)
+    if not driver:
+        return {t: _cache_dict[t] for t in tickers if t in _cache_dict}
+    try:
+        with driver.session() as session:
+            result = session.run(
+                "MATCH (c:Company) WHERE c.ticker IN $tickers "
+                "MATCH (c)-[:IN_SECTOR]->(s) "
+                "RETURN c.ticker AS ticker, s.name AS sector",
+                tickers=list(_need),
+            )
+            for row in result:
+                tk = row.get("ticker")
+                sec = row.get("sector")
+                if isinstance(tk, str) and isinstance(sec, str):
+                    _cache_dict[tk] = sec
+    except Exception as e:
+        _log(f"[ETA.B] _build_sector_map_for_aug failed (fail-open): {e}", "yellow")
+    return {t: _cache_dict[t] for t in tickers if t in _cache_dict}
+
+
+def _max_peer_raw_in_sector(ticker: str, aggregated: dict, sector_map: dict) -> float:
+    """η.B' helper: return the maximum raw_score among aggregated entries
+    whose ticker is in the same sector as the input ticker (excluding the
+    ticker itself). Returns 0.0 if no peer or sector unknown.
+    """
+    sec = sector_map.get(ticker)
+    if not sec:
+        return 0.0
+    best = 0.0
+    for peer, doc in aggregated.items():
+        if peer == ticker:
+            continue
+        if sector_map.get(peer) != sec:
+            continue
+        raw = float(doc.get("raw_score", 0.0) or 0.0)
+        if raw > best:
+            best = raw
+    return best
+
+
 def _compute_propagated_scores(
     driver,
     sentiment_data: dict,
@@ -15421,6 +15482,64 @@ def _compute_propagated_scores(
         total = max(-1.0, min(1.0, total))
         reasons = [r for _, r in contribs[:5]]
         aggregated[ticker] = {"raw_score": total, "reasons": reasons, "n_paths": len(contribs)}
+
+    # η.B' — Phase η (2026-05-20): post-aggregation sector-peer
+    # augmentation for momentum_watchlist tickers whose geometric-sum
+    # raw_score landed below threshold. Defensive belt-and-suspenders
+    # on top of existing IN_SECTOR / COMPETES_WITH propagation. Tagged
+    # with distinct "eta_b_aug" reason to make telemetry grep-able.
+    if config.get("eta_sector_augmentation_enabled", True):
+        _eta_b_thr = float(config.get("eta_augment_below_raw", 0.5) or 0.5)
+        _eta_b_fac = float(config.get("eta_augment_peer_factor", 0.3) or 0.3)
+        _eta_b_top_n = int(config.get("eta_augment_top_n", 5) or 5)
+        _eta_b_mw_raw = (
+            strategy_cache.get("_momentum_watchlist", {})
+            if isinstance(strategy_cache, dict)
+            else {}
+        )
+        if isinstance(_eta_b_mw_raw, dict) and _eta_b_mw_raw:
+            _eta_b_mw = {
+                t for t, _d in sorted(
+                    _eta_b_mw_raw.items(),
+                    key=lambda kv: -float(kv[1].get("score", 0.0) or 0.0),
+                )[:_eta_b_top_n]
+                if isinstance(t, str) and t
+            }
+            _eta_b_sector_map = _build_sector_map_for_aug(
+                driver, _eta_b_mw, strategy_cache,
+            )
+            _eta_b_aug = 0
+            for _eta_b_tk in _eta_b_mw:
+                _eta_b_existing = aggregated.get(
+                    _eta_b_tk,
+                    {"raw_score": 0.0, "reasons": [], "n_paths": 0},
+                )
+                if float(_eta_b_existing.get("raw_score", 0.0)) >= _eta_b_thr:
+                    continue
+                _eta_b_peer = _max_peer_raw_in_sector(
+                    _eta_b_tk, aggregated, _eta_b_sector_map,
+                )
+                if _eta_b_peer < _eta_b_thr:
+                    continue
+                _eta_b_new_raw = (
+                    float(_eta_b_existing.get("raw_score", 0.0))
+                    + _eta_b_peer * _eta_b_fac
+                )
+                aggregated[_eta_b_tk] = {
+                    "raw_score": max(-1.0, min(1.0, _eta_b_new_raw)),
+                    "reasons": (
+                        list(_eta_b_existing.get("reasons", []))
+                        + [f"eta_b_aug(peer={_eta_b_peer:.2f}*{_eta_b_fac})"]
+                    )[:5],
+                    "n_paths": int(_eta_b_existing.get("n_paths", 0)) + 1,
+                }
+                _eta_b_aug += 1
+            if _eta_b_aug:
+                _log(
+                    f"[ETA.B] augmented {_eta_b_aug} momentum tickers "
+                    f"(threshold={_eta_b_thr}, factor={_eta_b_fac})",
+                    "cyan",
+                )
 
     # Bug-sweep 2026-05-18: ALWAYS log aggregation outcome. The prior
     # `if aggregated:` gate hid the zero-tickers case (same antipattern as
