@@ -16880,9 +16880,20 @@ def _reserve_momentum_slots(
             continue
         if len(picks) >= n_needed:
             break
+        # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
+        # Preserves natural-signal info inside the floored value so downstream
+        # tie-breaks (η.G swap eligibility) and telemetry can see the
+        # underlying technical-momentum strength.
+        _eta_e_floored = max(score, 1.50)
+        if config.get("eta_floor_differentiator_enabled", True):
+            _eta_e_diff = min(0.20, max(0.0, float(score)) * 0.5)
+            _eta_e_raw_net = _eta_e_floored + _eta_e_diff
+        else:
+            _eta_e_raw_net = _eta_e_floored
         picks.append({
             "ticker": sym,
-            "raw_net_score": max(score, 1.50),
+            "raw_net_score": _eta_e_raw_net,
+            "raw_net_natural": float(score),
             "signal_source": "momentum_watchlist",
             "is_watchlist_member": True,
             "is_watchlist_priority": True,
@@ -24053,11 +24064,19 @@ class GraphNexusAnalysis:
                             # remove it to prevent double-bookkeeping.
                             if _mw_pf_sell in _mw_held:
                                 del _mw_held[_mw_pf_sell]
+                            # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
+                            _eta_e_pf_floored = max(_mw_pf_score, 1.50)
+                            if config.get("eta_floor_differentiator_enabled", True):
+                                _eta_e_pf_diff = min(0.20, max(0.0, float(_mw_pf_score)) * 0.5)
+                                _eta_e_pf_raw_net = _eta_e_pf_floored + _eta_e_pf_diff
+                            else:
+                                _eta_e_pf_raw_net = _eta_e_pf_floored
                             nexus_position_sizes[_mw_pf_buy] = {
                                 "buy_cash": round(_mw_pf_alloc, 2),
                                 "high_conviction": True,
                                 "asset_class": "stock",
-                                "raw_net_score": round(max(_mw_pf_score, 1.50), 4),
+                                "raw_net_score": round(_eta_e_pf_raw_net, 4),
+                                "raw_net_natural": float(_mw_pf_score),
                                 "signal_source": "momentum_watchlist_portfolio_swap",
                                 "is_propagation_expansion": False,
                                 "is_watchlist_member": True,
@@ -24067,7 +24086,8 @@ class GraphNexusAnalysis:
                             if _mw_pf_buy not in scores:
                                 scores[_mw_pf_buy] = {}
                             scores[_mw_pf_buy]["score"] = 1
-                            scores[_mw_pf_buy]["raw_net_score"] = max(_mw_pf_score, 1.50)
+                            scores[_mw_pf_buy]["raw_net_score"] = _eta_e_pf_raw_net
+                            scores[_mw_pf_buy]["raw_net_natural"] = float(_mw_pf_score)
                             scores[_mw_pf_buy]["action_intent"] = "momentum_watchlist_portfolio_swap"
                             _mw_pf_cooldown_bars = _scale_bars(int(config.get("momentum_sell_cooldown_bars", 5) or 5), config)
                             if _mw_pf_cooldown_bars > 0 and isinstance(strategy_cache, dict):
@@ -24164,11 +24184,19 @@ class GraphNexusAnalysis:
                         _mw_ba_alloc = min(_mw_ba_free_cash * 0.95, max(_mw_ba_min_pos, _mw_ba_target))
                         if _mw_ba_alloc < _mw_ba_min_pos:
                             continue
+                        # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
+                        _eta_e_ba_floored = max(_mw_ba_score, 1.50)
+                        if config.get("eta_floor_differentiator_enabled", True):
+                            _eta_e_ba_diff = min(0.20, max(0.0, float(_mw_ba_score)) * 0.5)
+                            _eta_e_ba_raw_net = _eta_e_ba_floored + _eta_e_ba_diff
+                        else:
+                            _eta_e_ba_raw_net = _eta_e_ba_floored
                         nexus_position_sizes[_mw_ba_sym_u] = {
                             "buy_cash": round(_mw_ba_alloc, 2),
                             "high_conviction": True,
                             "asset_class": "stock",
-                            "raw_net_score": round(max(_mw_ba_score, 1.50), 4),
+                            "raw_net_score": round(_eta_e_ba_raw_net, 4),
+                            "raw_net_natural": float(_mw_ba_score),
                             "signal_source": "momentum_breakout_add",
                             "is_propagation_expansion": False,
                             "is_watchlist_member": True,
@@ -24178,7 +24206,8 @@ class GraphNexusAnalysis:
                         if _mw_ba_sym_u not in scores:
                             scores[_mw_ba_sym_u] = {}
                         scores[_mw_ba_sym_u]["score"] = 1
-                        scores[_mw_ba_sym_u]["raw_net_score"] = max(_mw_ba_score, 1.50)
+                        scores[_mw_ba_sym_u]["raw_net_score"] = _eta_e_ba_raw_net
+                        scores[_mw_ba_sym_u]["raw_net_natural"] = float(_mw_ba_score)
                         scores[_mw_ba_sym_u]["action_intent"] = "momentum_breakout_add"
                         _mw_held[_mw_ba_sym_u] = {
                             "bar_entered": _mw_bar,

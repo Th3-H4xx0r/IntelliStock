@@ -320,3 +320,71 @@ def test_eta_d_allows_low_tier_in_grace():
 
 def test_eta_d_respects_kill_switch():
     assert _eta_d_should_refuse("HIGH", in_grace=True, enabled=False) is False
+
+
+# ─────────────────────────────────────────────────────────────────────
+# η.E — Priority floor differentiator tests
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _apply_eta_e_floor(score: float, floor: float, enabled: bool = True) -> tuple[float, float]:
+    """Return (raw_net_score, raw_net_natural) per spec §4.4."""
+    floored = max(score, floor)
+    if enabled:
+        diff = min(0.20, max(0.0, score) * 0.5)
+        return (floored + diff, float(score))
+    return (floored, float(score))
+
+
+def test_eta_e_differentiator_zero_for_zero_score():
+    fs, nat = _apply_eta_e_floor(0.0, 1.5)
+    assert fs == 1.5  # 0.0 → diff=0.0
+    assert nat == 0.0
+
+
+def test_eta_e_differentiator_below_cap():
+    fs, nat = _apply_eta_e_floor(0.1, 1.5)
+    assert fs == pytest.approx(1.55, rel=1e-6)
+    assert nat == pytest.approx(0.1, rel=1e-6)
+
+
+def test_eta_e_differentiator_at_cap():
+    fs, nat = _apply_eta_e_floor(0.5, 1.5)
+    assert fs == pytest.approx(1.7, rel=1e-6)  # 0.5 * 0.5 = 0.25 → capped at 0.20
+    assert nat == pytest.approx(0.5, rel=1e-6)
+
+
+def test_eta_e_differentiator_natural_above_floor_passes_through():
+    # When natural is above floor, the floor is already a no-op
+    fs, nat = _apply_eta_e_floor(1.8, 1.5)
+    # max(1.8, 1.5) = 1.8, diff = min(0.20, 0.9) = 0.20, total = 2.0
+    assert fs == pytest.approx(2.0, rel=1e-6)
+    assert nat == pytest.approx(1.8, rel=1e-6)
+
+
+def test_eta_e_respects_kill_switch():
+    fs, nat = _apply_eta_e_floor(0.5, 1.5, enabled=False)
+    assert fs == 1.5
+    assert nat == pytest.approx(0.5, rel=1e-6)
+
+
+def test_eta_e_differentiator_negative_score_clamped_to_zero():
+    fs, nat = _apply_eta_e_floor(-0.5, 1.5)
+    assert fs == 1.5  # max(0.0, -0.5) * 0.5 = 0
+    assert nat == pytest.approx(-0.5, rel=1e-6)
+
+
+def test_eta_e_bt277953_calibration():
+    """Spec §4.4 validation calibration check."""
+    # MU mw_score=0.04 → final=1.520
+    fs_mu, _ = _apply_eta_e_floor(0.04, 1.5)
+    assert fs_mu == pytest.approx(1.52, rel=1e-6)
+    # PRAX mw_score=0.121 → final=1.5605
+    fs_prax, _ = _apply_eta_e_floor(0.121, 1.5)
+    assert fs_prax == pytest.approx(1.5605, rel=1e-6)
+    # LITE mw_score=0.135 → final=1.5675
+    fs_lite, _ = _apply_eta_e_floor(0.135, 1.5)
+    assert fs_lite == pytest.approx(1.5675, rel=1e-6)
+    # With η.A lifting raw to ~1.0 (via momentum_breakout seeding), MU jumps to 1.7
+    fs_mu_post_a, _ = _apply_eta_e_floor(1.0, 1.5)
+    assert fs_mu_post_a == pytest.approx(1.7, rel=1e-6)
