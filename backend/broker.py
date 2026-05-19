@@ -2582,6 +2582,36 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
     """
     if not specs:  # V7.3: removed `or not symbols` -- Nexus can discover from scratch
         return []
+    # Re-resolve *_llm_model_id references on every invocation so changes
+    # made via the Models UI (PUT /models/{id} or a fresh POST + strategy
+    # re-pointing) propagate to the running broker without a restart.
+    # Without this, credentials baked into spec["config"] at startup stay
+    # stale forever — the symptom was repeated NVIDIA 401 errors after a
+    # successful "Test & Save" in the UI. The model_resolver keeps a 5-min
+    # TTL doc cache so the steady-state cost is one dict update per spec.
+    # invalidate_model_cache() is called from action_edit_model, so the
+    # next call after a UI update fetches the fresh row from the DB.
+    try:
+        _needs_resolve = [
+            s for s in specs
+            if isinstance(s.get("config"), dict)
+            and any(k.endswith("llm_model_id") for k in s["config"])
+        ]
+        if _needs_resolve:
+            _resolve_conn = get_conn()
+            try:
+                for _s in _needs_resolve:
+                    _s["config"] = resolve_model_refs_in_config(_resolve_conn, _s["config"])
+            finally:
+                try:
+                    _resolve_conn.close()
+                except Exception:
+                    pass
+    except Exception as _resolve_e:
+        # Resolution failure (DB connectivity, malformed model row) is
+        # non-fatal — fall through to the baked-in credentials from the
+        # last successful resolution. Log so operators can spot it.
+        _log(f"Model re-resolution warning: {_resolve_e}", "yellow")
     results = []
     cache_store = strategy_caches if isinstance(strategy_caches, dict) else _strategy_cache
     for spec in specs:
