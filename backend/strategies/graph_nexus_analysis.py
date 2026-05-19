@@ -5402,10 +5402,23 @@ def _enforce_sector_portfolio_cap(
         return funded_slate
     # η.G — Phase η (2026-05-20): conditional-swap context.
     _eta_g_enabled = bool(config.get("eta_v31_swap_enabled", True))
-    _eta_g_sources = set(config.get(
-        "eta_v31_swap_eligible_sources",
-        ["momentum_watchlist", "propagation_expansion"],
-    ))
+    # Default eligible-source set covers all HIGH-conviction momentum
+    # and propagation-expansion paths so the swap can rescue any of
+    # them (bug-sweep H-1: original default omitted the η.E
+    # portfolio_swap and breakout_add sub-variants).
+    _eta_g_sources = {
+        str(s).strip().lower()
+        for s in config.get(
+            "eta_v31_swap_eligible_sources",
+            [
+                "momentum_watchlist",
+                "momentum_watchlist_portfolio_swap",
+                "momentum_breakout_add",
+                "propagation_expansion",
+            ],
+        )
+        if s
+    }
     _eta_g_min_hold = int(config.get("eta_v31_swap_min_hold_days", 3) or 3)
     _eta_g_max_pnl = float(config.get("eta_v31_swap_max_pnl", 0.15) or 0.15)
     _eta_g_can_run = (
@@ -5435,7 +5448,7 @@ def _enforce_sector_portfolio_cap(
                 continue
             # η.G — try conditional swap BEFORE demoting eligible items.
             if _eta_g_can_run:
-                _eta_g_item_source = str(item.get("signal_source") or "")
+                _eta_g_item_source = str(item.get("signal_source") or "").strip().lower()
                 if _eta_g_item_source in _eta_g_sources:
                     _eta_g_new_eff = float(item.get("raw_net_score", 0.0) or 0.0)
                     _eta_g_candidates: list[tuple[float, str, float]] = []
@@ -15038,7 +15051,15 @@ def _build_sector_map_for_aug(driver, tickers: set, strategy_cache) -> dict[str,
 
     Cached per-run in strategy_cache["_eta_sector_map"]. Sectors don't
     change mid-backtest so the cache is sound for the full run.
-    Returns empty dict if Neo4j unavailable.
+    Uses OPTIONAL MATCH so tickers without an IN_SECTOR edge get a
+    sentinel "" entry (rather than being absent and re-queried every
+    bar — the original implementation had a negative-cache trap that
+    caused permanent re-querying). `_max_peer_raw_in_sector` already
+    treats "" sector as "no peer" via `if not sec: return 0.0`.
+    Returns empty dict if Neo4j unavailable AND nothing cached.
+    Tracks failures in strategy_cache["_eta_sector_map_failed_calls"]
+    so a connectivity bug after the first successful query surfaces in
+    the per-bar telemetry instead of silently zeroing out η.B'.
     """
     if not tickers:
         return {}
@@ -15060,17 +15081,39 @@ def _build_sector_map_for_aug(driver, tickers: set, strategy_cache) -> dict[str,
         with driver.session() as session:
             result = session.run(
                 "MATCH (c:Company) WHERE c.ticker IN $tickers "
-                "MATCH (c)-[:IN_SECTOR]->(s) "
+                "OPTIONAL MATCH (c)-[:IN_SECTOR]->(s) "
                 "RETURN c.ticker AS ticker, s.name AS sector",
                 tickers=list(_need),
             )
+            _need_set = {str(t).strip().upper() for t in _need}
+            _seen: set[str] = set()
             for row in result:
                 tk = row.get("ticker")
                 sec = row.get("sector")
-                if isinstance(tk, str) and isinstance(sec, str):
-                    _cache_dict[tk] = sec
+                if not isinstance(tk, str):
+                    continue
+                _tk_u = tk.strip().upper()
+                _seen.add(_tk_u)
+                # OPTIONAL MATCH returns sec=None when no IN_SECTOR edge.
+                # Cache sentinel "" so we don't re-query this ticker.
+                _cache_dict[_tk_u] = sec if isinstance(sec, str) else ""
+            # Tickers absent from the result entirely (no Company node).
+            # Cache sentinel so they don't re-query indefinitely.
+            for _missing in _need_set - _seen:
+                _cache_dict[_missing] = ""
     except Exception as e:
-        _log(f"[ETA.B] _build_sector_map_for_aug failed (fail-open): {e}", "yellow")
+        if isinstance(strategy_cache, dict):
+            _fail_n = int(strategy_cache.get("_eta_sector_map_failed_calls", 0) or 0)
+            strategy_cache["_eta_sector_map_failed_calls"] = _fail_n + 1
+            if _fail_n == 0:
+                _log(
+                    f"[ETA.B] _build_sector_map_for_aug FAILED (fail-open, "
+                    f"first occurrence — subsequent failures counted in "
+                    f"strategy_cache._eta_sector_map_failed_calls): {e}",
+                    "red",
+                )
+        else:
+            _log(f"[ETA.B] _build_sector_map_for_aug failed (fail-open): {e}", "yellow")
     return {t: _cache_dict[t] for t in tickers if t in _cache_dict}
 
 
@@ -15171,7 +15214,12 @@ def _compute_propagated_scores(
         _inst_snapshot_key: str | None = None  # set when α.2 snapshot is in play
         _inst_seed_cap = int(config.get("institutional_seed_cap", 50) or 50)
         if use_inst and "HOLDS" in available and config.get("_inst_co_holdings_cache") is None:
-            _INST_EXCLUDE_EVENTS = {"trend_momentum"}
+            # Phase η bug-sweep: η.A seeds tickers with event="momentum_breakout"
+            # (a technical-momentum signal with no LLM news backing); treat it
+            # the same as its sibling "trend_momentum" for institutional-HOLDS
+            # propagation (i.e. excluded — institutional seeding should track
+            # news-derived sentiment, not engine-internal technical seeds).
+            _INST_EXCLUDE_EVENTS = {"trend_momentum", "momentum_breakout"}
             _inst_seeds = {
                 t for t, d in sentiment_data.items()
                 if d.get("sentiment", 0) != 0
@@ -15442,7 +15490,10 @@ def _compute_propagated_scores(
             else:
                 # Defensive fallback — sentiment_data became empty between the
                 # bg-kickoff branch and here, or HOLDS lookup changed. Inline.
-                _INST_EXCLUDE_EVENTS = {"trend_momentum"}
+                # Phase η bug-sweep: include "momentum_breakout" alongside
+                # "trend_momentum" — both are engine-internal technical
+                # seeds without LLM news backing.
+                _INST_EXCLUDE_EVENTS = {"trend_momentum", "momentum_breakout"}
                 inst_seeds = {
                     t for t, d in sentiment_data.items()
                     if d.get("sentiment", 0) != 0
@@ -15611,19 +15662,29 @@ def _compute_propagated_scores(
         _eta_b_thr = float(config.get("eta_augment_below_raw", 0.5) or 0.5)
         _eta_b_fac = float(config.get("eta_augment_peer_factor", 0.3) or 0.3)
         _eta_b_top_n = int(config.get("eta_augment_top_n", 5) or 5)
-        _eta_b_mw_raw = (
-            strategy_cache.get("_momentum_watchlist", {})
-            if isinstance(strategy_cache, dict)
-            else {}
+        # Production schema fix (bug-sweep): scores live in
+        # _momentum_ranked_cache (list[(ticker, score)] sorted desc), not
+        # in _momentum_watchlist values. Intersect ranked-cache with
+        # current watchlist membership to get the top-N momentum tickers.
+        _eta_b_mw_ranked = (
+            strategy_cache.get("_momentum_ranked_cache", []) or []
+            if isinstance(strategy_cache, dict) else []
         )
-        if isinstance(_eta_b_mw_raw, dict) and _eta_b_mw_raw:
-            _eta_b_mw = {
-                t for t, _d in sorted(
-                    _eta_b_mw_raw.items(),
-                    key=lambda kv: -float(kv[1].get("score", 0.0) or 0.0),
-                )[:_eta_b_top_n]
-                if isinstance(t, str) and t
-            }
+        _eta_b_mw_members = (
+            set((strategy_cache.get("_momentum_watchlist") or {}).keys())
+            if isinstance(strategy_cache, dict) else set()
+        )
+        if _eta_b_mw_ranked and _eta_b_mw_members:
+            _eta_b_mw: set[str] = set()
+            for _eta_b_entry in _eta_b_mw_ranked:
+                if len(_eta_b_mw) >= _eta_b_top_n:
+                    break
+                try:
+                    _eta_b_cand = str(_eta_b_entry[0] or "").strip().upper()
+                except (IndexError, TypeError):
+                    continue
+                if _eta_b_cand and _eta_b_cand in _eta_b_mw_members:
+                    _eta_b_mw.add(_eta_b_cand)
             _eta_b_sector_map = _build_sector_map_for_aug(
                 driver, _eta_b_mw, strategy_cache,
             )
@@ -15644,12 +15705,15 @@ def _compute_propagated_scores(
                     float(_eta_b_existing.get("raw_score", 0.0))
                     + _eta_b_peer * _eta_b_fac
                 )
+                # Prepend the eta_b_aug tag so it never gets truncated by
+                # the 5-reason cap (bug-sweep: appending then slicing[:5]
+                # would silently drop the tag when existing reasons==5).
                 aggregated[_eta_b_tk] = {
                     "raw_score": max(-1.0, min(1.0, _eta_b_new_raw)),
                     "reasons": (
-                        list(_eta_b_existing.get("reasons", []))
-                        + [f"eta_b_aug(peer={_eta_b_peer:.2f}*{_eta_b_fac})"]
-                    )[:5],
+                        [f"eta_b_aug(peer={_eta_b_peer:.2f}*{_eta_b_fac})"]
+                        + list(_eta_b_existing.get("reasons", []))[:4]
+                    ),
                     "n_paths": int(_eta_b_existing.get("n_paths", 0)) + 1,
                 }
                 _eta_b_aug += 1
@@ -20862,24 +20926,44 @@ class GraphNexusAnalysis:
             if config.get("eta_momentum_seeding_enabled", True):
                 _eta_mw_top_n = int(config.get("eta_momentum_seed_top_n", 5) or 5)
                 _eta_mw_min = float(config.get("eta_momentum_seed_min_score", 0.05) or 0.05)
-                _eta_mw = (
-                    strategy_cache.get("_momentum_watchlist", {})
-                    if isinstance(strategy_cache, dict)
-                    else {}
+                # Production schema fix (bug-sweep): _momentum_watchlist values
+                # are {"first_seen_bar": ..., "first_seen_price": ...} — NO
+                # "score" field. Scores live in _momentum_ranked_cache (a
+                # list[(ticker, score)] populated by _score_momentum_rank
+                # later in this same bar). On bar N, η.A reads bar (N-1)'s
+                # ranked cache, intersected with the current watchlist
+                # membership. Bar 1 is a cold-start no-op (ranked_cache empty),
+                # which is the desired behavior — no scored picks to seed.
+                _eta_mw_ranked = (
+                    strategy_cache.get("_momentum_ranked_cache", []) or []
+                    if isinstance(strategy_cache, dict) else []
+                )
+                _eta_mw_members = (
+                    set((strategy_cache.get("_momentum_watchlist") or {}).keys())
+                    if isinstance(strategy_cache, dict) else set()
                 )
                 _eta_seeded = 0
-                if isinstance(_eta_mw, dict) and _eta_mw:
-                    _eta_sorted = sorted(
-                        _eta_mw.items(),
-                        key=lambda kv: -float(kv[1].get("score", 0.0) or 0.0),
-                    )[:_eta_mw_top_n]
-                    for _eta_t, _eta_d in _eta_sorted:
-                        if not isinstance(_eta_t, str) or not _eta_t:
+                _eta_considered = 0
+                if _eta_mw_ranked and _eta_mw_members:
+                    # ranked_cache is sorted desc by score; filter to active
+                    # watchlist members, take top-N.
+                    _eta_sorted: list[tuple[str, float]] = []
+                    for _eta_entry in _eta_mw_ranked:
+                        if len(_eta_sorted) >= _eta_mw_top_n:
+                            break
+                        try:
+                            _eta_t = str(_eta_entry[0] or "").strip().upper()
+                            _eta_s_raw = _eta_entry[1]
+                        except (IndexError, TypeError):
                             continue
+                        if not _eta_t or _eta_t not in _eta_mw_members:
+                            continue
+                        _eta_sorted.append((_eta_t, float(_eta_s_raw or 0.0)))
+                    for _eta_t, _eta_s in _eta_sorted:
+                        _eta_considered += 1
                         _eta_existing = sentiment_data.get(_eta_t)
                         if _eta_existing and int(_eta_existing.get("sentiment", 0) or 0) != 0:
                             continue
-                        _eta_s = float(_eta_d.get("score", 0.0) or 0.0)
                         if _eta_s < _eta_mw_min:
                             continue
                         sentiment_data[_eta_t] = {
@@ -20888,12 +20972,16 @@ class GraphNexusAnalysis:
                         }
                         mentioned.add(_eta_t)
                         _eta_seeded += 1
-                if _eta_seeded:
-                    _log(
-                        f"[ETA.A] seeded {_eta_seeded} momentum_watchlist tickers "
-                        f"(top_n={_eta_mw_top_n}, min_score={_eta_mw_min})",
-                        "cyan",
-                    )
+                # Always-log per bug-sweep (Φ.η.0 validation needs to
+                # distinguish "feature ran, 0 qualified" from "feature
+                # gated off" from "ranked_cache empty").
+                _log(
+                    f"[ETA.A] seeded={_eta_seeded} considered={_eta_considered} "
+                    f"watchlist_members={len(_eta_mw_members)} "
+                    f"ranked_cache={len(_eta_mw_ranked)} "
+                    f"(top_n={_eta_mw_top_n}, min_score={_eta_mw_min})",
+                    "cyan",
+                )
 
             # Merge trend sell signals + build sell enforcement set
             # V9: Sell enforcement tuning — min hold period, confirmed downtrend,
@@ -22496,6 +22584,14 @@ class GraphNexusAnalysis:
                             if _mp_ticker not in scores:
                                 scores[_mp_ticker] = {}
                             scores[_mp_ticker]["raw_net_score"] = _mp["raw_net_score"]
+                            # Phase η bug-sweep: propagate raw_net_natural
+                            # (added by η.E) from picks → scores so
+                            # downstream consumers (η.G, telemetry) see
+                            # the natural-signal value, not just the
+                            # floored+differentiated raw_net_score.
+                            scores[_mp_ticker]["raw_net_natural"] = _mp.get(
+                                "raw_net_natural", _mp["raw_net_score"]
+                            )
                             scores[_mp_ticker]["score"] = 1
                             scores[_mp_ticker]["action_intent"] = "momentum_watchlist_buy"
                             scores[_mp_ticker]["momentum_watchlist_score"] = _mp.get("momentum_watchlist_score", 0.0)

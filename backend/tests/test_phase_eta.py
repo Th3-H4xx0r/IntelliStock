@@ -56,31 +56,53 @@ def test_eta_scaffold_imports_ok():
 
 
 def _seed_momentum_watchlist(strategy_cache: dict, entries: list[tuple[str, float]]):
-    strategy_cache["_momentum_watchlist"] = {t: {"score": s} for t, s in entries}
+    """Populate the production schema: _momentum_watchlist holds members
+    with {first_seen_bar, first_seen_price}; scores live in the parallel
+    _momentum_ranked_cache (list[(ticker, score)] sorted desc by score).
+    """
+    sorted_entries = sorted(entries, key=lambda kv: -float(kv[1]))
+    strategy_cache["_momentum_watchlist"] = {
+        t: {"first_seen_bar": 1, "first_seen_price": 100.0} for t, _ in entries
+    }
+    strategy_cache["_momentum_ranked_cache"] = [(t, float(s)) for t, s in sorted_entries]
 
 
 def _apply_eta_a_directly(sentiment_data: dict, mentioned: set, strategy_cache: dict, config: dict):
-    """Apply ONLY the η.A logic block as it will be inserted into
-    _compute_propagated_scores. Mirrors the spec §4.1 code exactly."""
+    """Mirrors the production η.A logic block — reads from
+    _momentum_ranked_cache (scores) intersected with _momentum_watchlist
+    (membership). Returns (seeded_count, considered_count).
+    """
     if not config.get("eta_momentum_seeding_enabled", True):
         return 0
     mw_top_n = int(config.get("eta_momentum_seed_top_n", 5) or 5)
     mw_min_score = float(config.get("eta_momentum_seed_min_score", 0.05) or 0.05)
-    mw = strategy_cache.get("_momentum_watchlist", {}) if isinstance(strategy_cache, dict) else {}
-    if not isinstance(mw, dict) or not mw:
+    ranked = (
+        strategy_cache.get("_momentum_ranked_cache", []) or []
+        if isinstance(strategy_cache, dict) else []
+    )
+    members = (
+        set((strategy_cache.get("_momentum_watchlist") or {}).keys())
+        if isinstance(strategy_cache, dict) else set()
+    )
+    if not ranked or not members:
         return 0
-    sorted_mw = sorted(
-        mw.items(),
-        key=lambda kv: -float(kv[1].get("score", 0.0) or 0.0),
-    )[:mw_top_n]
-    seeded = 0
-    for ticker, data in sorted_mw:
-        if not isinstance(ticker, str) or not ticker:
+    sorted_picks: list[tuple[str, float]] = []
+    for entry in ranked:
+        if len(sorted_picks) >= mw_top_n:
+            break
+        try:
+            t = str(entry[0] or "").strip().upper()
+            s = float(entry[1] or 0.0)
+        except (IndexError, TypeError):
             continue
+        if not t or t not in members:
+            continue
+        sorted_picks.append((t, s))
+    seeded = 0
+    for ticker, score in sorted_picks:
         existing = sentiment_data.get(ticker)
         if existing and int(existing.get("sentiment", 0) or 0) != 0:
             continue
-        score = float(data.get("score", 0.0) or 0.0)
         if score < mw_min_score:
             continue
         sentiment_data[ticker] = {"sentiment": 1, "event": "momentum_breakout"}
@@ -167,6 +189,39 @@ def test_eta_a_respects_top_n_cap():
     assert seeded == 3
     assert {"A", "B", "C"} <= set(sd.keys())
     assert "D" not in sd
+
+
+def test_eta_a_only_seeds_tickers_in_watchlist_membership():
+    """Production schema invariant: a ticker in _momentum_ranked_cache
+    that is NOT in _momentum_watchlist membership must NOT be seeded
+    (e.g. a stale ranked entry for a ticker that left the watchlist).
+    """
+    sd: dict = {}
+    mn: set = set()
+    sc = {
+        "_momentum_watchlist": {"MU": {"first_seen_bar": 1, "first_seen_price": 100.0}},
+        # ranked_cache has BOTH MU (in watchlist) and STALE (not in watchlist).
+        "_momentum_ranked_cache": [("STALE", 0.9), ("MU", 0.5)],
+    }
+    seeded = _apply_eta_a_directly(sd, mn, sc, {})
+    assert seeded == 1
+    assert "MU" in sd
+    assert "STALE" not in sd
+
+
+def test_eta_a_no_op_when_ranked_cache_empty():
+    """Bar 1 cold-start: watchlist populated but no scored ranking yet.
+    Must return 0 seeded without crashing.
+    """
+    sd: dict = {}
+    mn: set = set()
+    sc = {
+        "_momentum_watchlist": {"MU": {"first_seen_bar": 1, "first_seen_price": 100.0}},
+        "_momentum_ranked_cache": [],
+    }
+    seeded = _apply_eta_a_directly(sd, mn, sc, {})
+    assert seeded == 0
+    assert sd == {}
 
 
 # ─────────────────────────────────────────────────────────────────────
