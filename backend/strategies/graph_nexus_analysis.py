@@ -22929,6 +22929,40 @@ class GraphNexusAnalysis:
                                         _is_break_glass_mode = _is_partial_trim_mode or _rotation_mode in {
                                             "v28_hc_profitable_break_glass",
                                         }
+                                        # η.D — Phase η (2026-05-20): refuse V28.9/break-glass
+                                        # eviction of a HIGH-tier holding that is still inside
+                                        # its grace window. Closes the ε.B gap — ε.B added
+                                        # tier-aware grace floors at _in_initial_grace_period
+                                        # but the break-glass rotation path (this block) did
+                                        # not consult them. BT277953 day 5: SNDK was evicted
+                                        # via this code path while in grace.
+                                        if (
+                                            _is_break_glass_mode
+                                            and config.get("eta_v289_protect_high_grace_enabled", True)
+                                        ):
+                                            _eta_d_tier = _resolve_conviction_tier_at_exit(
+                                                _wt, config, strategy_cache, propagated
+                                            )
+                                            _eta_d_grace_in, _eta_d_grace_esc, _ = _in_initial_grace_period(
+                                                int(_held_days_value or 0),
+                                                float(_wd.get("unrealized_pct", 0.0) or 0.0),
+                                                config,
+                                                str((strategy_cache or {}).get("_market_regime") or "bull"),
+                                                conviction_tier=_eta_d_tier,
+                                            )
+                                            if (
+                                                _eta_d_tier == "HIGH"
+                                                and _eta_d_grace_in
+                                                and not _eta_d_grace_esc
+                                            ):
+                                                _log(
+                                                    f"[ETA.D] V28.9 refused pair: loser={_wt} "
+                                                    f"HIGH-tier in grace (held={_held_days_label}, "
+                                                    f"pnl={float(_wd.get('unrealized_pct', 0.0) or 0.0):+.1f}%, "
+                                                    f"mode={_rotation_mode}); trying next pair",
+                                                    "yellow",
+                                                )
+                                                continue
                                         # V28.6: v28_hc_profitable_break_glass remains FULL EXIT (V28.4 floor
                                         # protects winners >2% pnl); v28_hc_losing_break_glass reverts to
                                         # partial trim to soften V28.5's expanded eviction so displaced names

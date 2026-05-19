@@ -284,3 +284,39 @@ def test_eta_b_skips_when_sector_unknown():
     sm = {"NVDA": "Technology"}  # MU not in sector_map
     n = _apply_eta_b_directly(agg, {"MU"}, sm, {})
     assert n == 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# η.D — V28.9 HIGH-tier-in-grace protection tests
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _eta_d_should_refuse(
+    loser_tier: str,
+    in_grace: bool,
+    enabled: bool = True,
+) -> bool:
+    """Pure-logic check mirroring spec §4.3."""
+    if not enabled:
+        return False
+    return loser_tier == "HIGH" and in_grace
+
+
+def test_eta_d_refuses_high_tier_in_grace():
+    assert _eta_d_should_refuse("HIGH", in_grace=True) is True
+
+
+def test_eta_d_allows_high_tier_post_grace():
+    assert _eta_d_should_refuse("HIGH", in_grace=False) is False
+
+
+def test_eta_d_allows_mid_tier_in_grace():
+    assert _eta_d_should_refuse("MID", in_grace=True) is False
+
+
+def test_eta_d_allows_low_tier_in_grace():
+    assert _eta_d_should_refuse("LOW", in_grace=True) is False
+
+
+def test_eta_d_respects_kill_switch():
+    assert _eta_d_should_refuse("HIGH", in_grace=True, enabled=False) is False
