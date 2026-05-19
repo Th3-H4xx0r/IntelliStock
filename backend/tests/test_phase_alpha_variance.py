@@ -708,6 +708,147 @@ def test_gamma5_conviction_telemetry_log_knob_surfaced_in_effective_config():
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Phase δ — observability sweep: kill the remaining `if N: _log(...)` gates
+# ──────────────────────────────────────────────────────────────────────────
+# Background: BT109429 and BT232179 both shipped with silent-inertness
+# (Phase α.4 mcap pre-seed; α.3 RNG seed) gated behind `if count: _log(...)`
+# patterns that hid the populated=0 outcome. Phase δ kills 5 more such
+# gates so the next backtest investigation has full audit trails.
+
+
+def test_delta_benzinga_direct_signals_logs_empty_case():
+    """Phase δ: prior `if signals: _log(...)` hid empty-result case.
+    Now always logs, with bucket inspection for diagnosis."""
+    logs, patcher = _capture_logs()
+    with patcher:
+        signals = gna._extract_benzinga_direct_signals(
+            bz_data={"ratings": [], "insider_trades": [], "gov_trades": [], "ma": []},
+            symbols_set={"AAPL"},
+            date_key="2026-05-18",
+        )
+    assert signals == {}
+    empty_logs = [m for m, _ in logs if "Benzinga direct signals: 0 tickers" in m]
+    assert empty_logs, "δ patch did not emit empty-result log line"
+    # Must include bucket names so the operator can verify whether bz_data
+    # was actually populated or arrived empty.
+    assert "ratings" in empty_logs[0]
+
+
+def test_delta_benzinga_direct_signals_logs_populated_case_unchanged():
+    """Phase δ regression: existing populated case must still emit
+    the original green-color summary, just with the same shape."""
+    logs, patcher = _capture_logs()
+    with patcher:
+        signals = gna._extract_benzinga_direct_signals(
+            bz_data={
+                "ratings": [
+                    {"ticker": "AAPL", "action": "upgrade", "analyst": "Goldman"},
+                ],
+                "insider_trades": [],
+                "gov_trades": [],
+                "ma": [],
+            },
+            symbols_set={"AAPL"},
+            date_key="2026-05-18",
+        )
+    assert "AAPL" in signals
+    summary = next(m for m, _ in logs if "Benzinga direct signals:" in m)
+    assert "1 tickers" in summary
+    assert "1 bullish" in summary
+
+
+def test_delta_neo4j_market_cap_cache_load_logs_no_driver_case():
+    """Phase δ: prior silent return when driver=None left A1 mcap
+    failures undiagnosable upstream. Now logs the skip."""
+    # Snapshot + reset module state so this test is hermetic.
+    prev = dict(gna._neo4j_market_cap_cache)
+    gna._neo4j_market_cap_cache.clear()
+    try:
+        logs, patcher = _capture_logs()
+        with patcher:
+            gna._load_neo4j_market_cap_cache(None)
+        skip_logs = [m for m, _ in logs if "Neo4j market_cap cache: skipped" in m]
+        assert skip_logs, "δ patch did not emit driver-None skip log"
+    finally:
+        gna._neo4j_market_cap_cache.clear()
+        gna._neo4j_market_cap_cache.update(prev)
+
+
+def test_delta_neo4j_market_cap_cache_load_logs_exception_case():
+    """Phase δ: prior `except Exception: pass` swallowed driver errors,
+    leaving A1 silently degraded with no audit trail. Now surfaces the
+    exception in red so the operator can correlate downstream A1 misses
+    with the upstream load failure."""
+    prev = dict(gna._neo4j_market_cap_cache)
+    gna._neo4j_market_cap_cache.clear()
+
+    class _FailingDriver:
+        def session(self):
+            raise RuntimeError("simulated neo4j connection refused")
+
+    try:
+        logs, patcher = _capture_logs()
+        with patcher:
+            gna._load_neo4j_market_cap_cache(_FailingDriver())
+        err_logs = [m for m, c in logs if "Neo4j market_cap cache: load failed" in m and c == "red"]
+        assert err_logs, "δ patch did not emit red exception log"
+    finally:
+        gna._neo4j_market_cap_cache.clear()
+        gna._neo4j_market_cap_cache.update(prev)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# sentiment_cache_scope_salt audit
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_sentiment_cache_scope_id_deterministic_across_calls():
+    """Phase α.1 follow-up audit: scope_id is derived from operator-static
+    config fields (provider, model, prompt_version, salt, etc.). Two calls
+    with the SAME config must produce the SAME scope_id — that's the
+    contract α.1 relies on for paired-rerun cache hits."""
+    cfg = {
+        "history_scope_id": "test-scope",
+        "sentiment_cache_scope_salt": "v1",
+        "use_toon_format": True,
+        "num_articles_for_llm": 30,
+    }
+    id1 = gna._enhanced_sentiment_cache_scope_id(cfg, "main")
+    id2 = gna._enhanced_sentiment_cache_scope_id(cfg, "main")
+    assert id1 == id2
+
+
+def test_sentiment_cache_scope_id_changes_when_salt_rotates():
+    """Audit-locking test: confirm the salt IS part of the scope_id, so
+    a rotation would invalidate cache (this is the failure mode we're
+    auditing — salt is OPERATOR-controlled, NOT auto-rotated by code)."""
+    cfg_v1 = {
+        "history_scope_id": "test-scope",
+        "sentiment_cache_scope_salt": "v1",
+        "use_toon_format": True,
+    }
+    cfg_v2 = dict(cfg_v1, sentiment_cache_scope_salt="v2")
+    id1 = gna._enhanced_sentiment_cache_scope_id(cfg_v1, "main")
+    id2 = gna._enhanced_sentiment_cache_scope_id(cfg_v2, "main")
+    assert id1 != id2
+
+
+def test_sentiment_cache_scope_doc_includes_salt_field():
+    """Audit-locking: the scope doc must surface salt so the run-time
+    audit log can fingerprint it (broken salt rotation is visible)."""
+    cfg = {"sentiment_cache_scope_salt": "audit-test-salt"}
+    doc = gna._enhanced_sentiment_cache_scope_doc(cfg, "main")
+    assert doc.get("sentiment_cache_scope_salt") == "audit-test-salt"
+
+
+def test_sentiment_cache_scope_audit_flag_in_persistence_blacklist():
+    """Phase δ: the one-shot audit-emit flag must NOT be persisted —
+    operators want to re-see the audit line on every fresh run / restart."""
+    from backend.strategy_cache_persistence import _BLACKLIST_PREFIXES
+    assert "_sentiment_cache_scope_audit_emitted" in _BLACKLIST_PREFIXES
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # α.1 — mandatory sentiment cache (now via extracted helper)
 # ──────────────────────────────────────────────────────────────────────────
 

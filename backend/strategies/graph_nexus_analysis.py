@@ -1966,10 +1966,29 @@ def _extract_benzinga_direct_signals(
         if deal_type in ("acquisition", "merger", "takeover") and ticker not in signals:
             signals[ticker] = {"sentiment": 1, "event": f"ma_target:{r.get('acquirer', '')}", "source": "benzinga"}
 
-    if signals:
-        _log(f"Benzinga direct signals: {len(signals)} tickers "
-             f"({sum(1 for s in signals.values() if s['sentiment'] > 0)} bullish, "
-             f"{sum(1 for s in signals.values() if s['sentiment'] < 0)} bearish)", "green")
+    # Phase δ observability sweep (2026-05-18, BT232179 follow-up): the prior
+    # `if signals: _log(...)` gate hid the empty-result case. Always log the
+    # outcome — operators need to distinguish "Benzinga enabled but produced
+    # no signals today" from "Benzinga API error" from "Benzinga disabled".
+    _n_signals = len(signals)
+    if _n_signals > 0:
+        _log(
+            f"Benzinga direct signals: {_n_signals} tickers "
+            f"({sum(1 for s in signals.values() if s['sentiment'] > 0)} bullish, "
+            f"{sum(1 for s in signals.values() if s['sentiment'] < 0)} bearish)",
+            "green",
+        )
+    else:
+        # Yellow not red — empty results are common (most days have no
+        # qualifying ratings/insider/M&A clusters). Surfaces the case
+        # for audit without alarming the operator.
+        _log(
+            f"Benzinga direct signals: 0 tickers (no qualifying analyst "
+            f"actions / insider clusters / gov trades / M&A in "
+            f"bz_data buckets={list(bz_data.keys())[:6]} for "
+            f"date_key={date_key})",
+            "yellow",
+        )
     return signals
 
 
@@ -11536,9 +11555,26 @@ _neo4j_market_cap_cache: dict[str, float] = {}
 
 
 def _load_neo4j_market_cap_cache(driver) -> None:
-    """Load yf_market_cap from Neo4j Company nodes (set by graph engine Phase 1b)."""
+    """Load yf_market_cap from Neo4j Company nodes (set by graph engine Phase 1b).
+
+    Phase δ observability sweep (2026-05-18, BT232179 follow-up): the prior
+    `if _neo4j_market_cap_cache: _log(...)` gate + `except Exception: pass`
+    silent-swallow combo could hide BOTH the Neo4j-empty case AND the
+    Neo4j-driver-error case. BT232179 showed mcap pre-seed running with an
+    empty Neo4j cache; this function's silent failure modes are an upstream
+    contributor. Always log the outcome (populated count OR error) so
+    operators can correlate downstream A1 misses with the load-time state.
+    """
     global _neo4j_market_cap_cache
-    if _neo4j_market_cap_cache or driver is None:
+    if _neo4j_market_cap_cache:
+        # Already populated this session — nothing to do.
+        return
+    if driver is None:
+        _log(
+            "Neo4j market_cap cache: skipped — no Neo4j driver "
+            "(graph engine Phase 1b may not have initialized)",
+            "yellow",
+        )
         return
     try:
         with driver.session() as session:
@@ -11551,10 +11587,35 @@ def _load_neo4j_market_cap_cache(driver) -> None:
                 mc = float(rec.get("mc") or 0)
                 if t and mc > 0:
                     _neo4j_market_cap_cache[t] = mc
-        if _neo4j_market_cap_cache:
-            _log(f"Neo4j market_cap cache loaded: {len(_neo4j_market_cap_cache)} companies", "green")
-    except Exception:
-        pass  # Phase 1b may not have run yet — silent fallback
+        _n_loaded = len(_neo4j_market_cap_cache)
+        if _n_loaded > 0:
+            _log(
+                f"Neo4j market_cap cache loaded: {_n_loaded} companies",
+                "green",
+            )
+        else:
+            # Phase δ: SURFACE the empty-load case. Prior silent-fail
+            # mode left operators chasing "A1 returns LOW for everything"
+            # downstream without any audit trail of WHY the mcap cache
+            # was empty.
+            _log(
+                "Neo4j market_cap cache: 0 companies loaded — A1 mega-cap "
+                "tier resolution will fall back to raw_score for ALL "
+                "symbols (BT109429/BT232179 silent-fail mode). Verify "
+                "graph engine Phase 1b ingestion (yf_market_cap property "
+                "on Company nodes).",
+                "red",
+            )
+    except Exception as _mc_exc:
+        # Phase δ: SURFACE the exception. Prior `pass` swallowed driver
+        # connection errors, schema mismatches, etc. — leaving downstream
+        # callers to debug "A1 silently LOW" with no upstream signal.
+        _log(
+            f"Neo4j market_cap cache: load failed ({_mc_exc!r}) — A1 mcap "
+            f"path will be inert for this run. Phase 1b may not have run "
+            f"yet, or the Neo4j driver is misconfigured.",
+            "red",
+        )
 
 
 # V16: Removed duplicate _load_neo4j_market_cap_cache definition and duplicate _neo4j_market_cap_cache declaration
@@ -13480,7 +13541,14 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             _log(f"Enhanced sentiment: LLM returned {_n_raw} sentiment item(s) — all empty/invalid tickers or empty list", "yellow")
 
         # Parse future trades
+        # Phase δ observability sweep (2026-05-18, BT232179 follow-up): the
+        # prior `if future_trades: _log(...)` gate hid the empty-result case
+        # — operators couldn't distinguish "LLM returned 0 future events"
+        # from "LLM returned events but all failed validation" from "LLM
+        # crashed before reaching this path". Always log, with raw-vs-valid
+        # counts so the operator sees the filter funnel.
         future_trades = []
+        _ft_raw_count = len(raw.future) if raw.future else 0
         for ft in raw.future:
             ticker = str(ft.ticker).upper().strip()
             date = str(ft.date).strip()
@@ -13488,19 +13556,34 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             reason = str(ft.reason).strip()
             if ticker and len(date) == 10 and signal in (1, -1):
                 future_trades.append({"ticker": ticker, "date": date, "signal": signal, "reason": reason})
-        if future_trades:
-            _log(f"LLM future events: {len(future_trades)} trades scheduled", "green")
+        if future_trades or _ft_raw_count > 0:
+            _ft_color = "green" if future_trades else "yellow"
+            _log(
+                f"LLM future events: {len(future_trades)}/{_ft_raw_count} "
+                f"trades scheduled (after ticker+date+signal validation)",
+                _ft_color,
+            )
 
         # Parse cancellation recommendations
         cancel_recommendations = []
+        _ct_raw_count = len(raw.cancel) if raw.cancel else 0
         for ct in raw.cancel:
             ticker = str(ct.ticker).upper().strip()
             date = str(ct.date).strip()
             reason = str(ct.reason).strip()
             if ticker and len(date) == 10:
                 cancel_recommendations.append({"ticker": ticker, "date": date, "reason": reason})
-        if cancel_recommendations:
-            _log(f"LLM cancel recommendations: {len(cancel_recommendations)} trades to review", "yellow")
+        # Phase δ: always log, including the 0-cancel case. A burst of cancels
+        # is operationally important and the prior gate could hide quiet
+        # periods where the LLM returned `cancel:[]` (vs the schema-error
+        # case where `raw.cancel` itself was malformed).
+        if cancel_recommendations or _ct_raw_count > 0:
+            _ct_color = "yellow" if cancel_recommendations else "cyan"
+            _log(
+                f"LLM cancel recommendations: {len(cancel_recommendations)}"
+                f"/{_ct_raw_count} trades to review (after ticker+date validation)",
+                _ct_color,
+            )
 
         # Parse trend updates
         trend_updates = raw.trends.model_dump(by_alias=True)
@@ -13508,8 +13591,15 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
         n_confirm = len(trend_updates.get("confirm") or [])
         n_weaken = len(trend_updates.get("weaken") or [])
         n_end = len(trend_updates.get("end") or [])
-        if n_new or n_confirm or n_weaken or n_end:
-            _log(f"LLM trends: {n_new} new, {n_confirm} confirmed, {n_weaken} weakening, {n_end} ended", "green")
+        # Phase δ: always log so the all-zeros case is visible too. Trend
+        # tracking is a key Phase 2 signal; zero-trend bars need an audit
+        # trail to distinguish "no movement" from "LLM trend parser broke".
+        _trend_color = "green" if (n_new or n_confirm or n_weaken or n_end) else "cyan"
+        _log(
+            f"LLM trends: {n_new} new, {n_confirm} confirmed, {n_weaken} "
+            f"weakening, {n_end} ended",
+            _trend_color,
+        )
 
         return result, future_trades, cancel_recommendations, trend_updates
     except Exception as e:
@@ -18493,6 +18583,37 @@ class GraphNexusAnalysis:
         sentiment_cache_scope_doc = _enhanced_sentiment_cache_scope_doc(config, instance_id)
         active_event_history_scope_id = _active_event_history_scope_id(config)
         historical_lookback_mode = bool(config.get("historical_lookback_mode", False))
+        # Phase δ observability sweep (2026-05-18, BT232179 follow-up):
+        # surface the resolved sentiment_cache_scope_id at run_once entry
+        # so operators can verify paired re-runs of the same backtest share
+        # the same cache scope. Per the salt audit, the scope_id is derived
+        # from operator-configured static fields (history_scope_id,
+        # provider, model, prompt_version, use_toon_format,
+        # num_articles_for_llm, sentiment_cache_scope_salt). It does NOT
+        # auto-rotate per backtest run. If two paired runs of the same
+        # backtest_id log DIFFERENT scope_ids, the operator has changed
+        # one of those fields between runs (deliberately or via config
+        # drift) — α.1's cache will miss on both, neutering variance
+        # compression. Compare paired-run logs to confirm continuity.
+        # Emit ONCE per run (gated via strategy_cache flag) — the scope_id
+        # is invariant across bars by design, so per-bar emission would
+        # just inflate the log without adding info (per bug-sweep agent
+        # log-volume recommendation #2).
+        if (
+            not historical_lookback_mode
+            and isinstance(strategy_cache, dict)
+            and not strategy_cache.get("_sentiment_cache_scope_audit_emitted")
+        ):
+            _log(
+                f"sentiment cache scope: id={sentiment_cache_scope_id} "
+                f"provider={sentiment_cache_scope_doc.get('provider')} "
+                f"model={sentiment_cache_scope_doc.get('model')} "
+                f"prompt_v={sentiment_cache_scope_doc.get('prompt_version')} "
+                f"salt='{sentiment_cache_scope_doc.get('sentiment_cache_scope_salt')}' "
+                f"(stable across paired re-runs unless config changed)",
+                "cyan",
+            )
+            strategy_cache["_sentiment_cache_scope_audit_emitted"] = True
         # BT136708 calibration (2026-05-18, P1.1): pre-seed _yf_market_cap_cache
         # so the Tier-3 conviction-tier resolver can return HIGH for mega-caps
         # in backtest. Without this, the cache is empty against a static

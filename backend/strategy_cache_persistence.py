@@ -63,6 +63,10 @@ _BLACKLIST_PREFIXES = (
     "_post_sell_watch_inmem",
     "_yf_market_cap_cache_preseeded",
     "_yf_market_cap_cache_preseeded_tickers",
+    # Phase δ (2026-05-18, BT232179 follow-up): one-shot audit-log flag.
+    # Persisting would suppress the audit log on restart — operators want
+    # to re-see the resolved sentiment_cache_scope_id every fresh run.
+    "_sentiment_cache_scope_audit_emitted",
     # Phase α.2 (BT109429 follow-up, 2026-05-18): Neo4j query snapshot
     # for variance containment. Per-backtest-run; persisting would mix
     # snapshots across runs with different universes and dates. The
