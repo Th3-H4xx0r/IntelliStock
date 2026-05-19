@@ -20592,6 +20592,48 @@ class GraphNexusAnalysis:
                     sentiment_data[etf] = {"sentiment": 1, "event": "trend_momentum"}
                     mentioned.add(etf)
 
+            # η.A — Phase η (2026-05-20): bridge momentum_watchlist into
+            # sentiment_data so technical-momentum picks participate in
+            # propagation. The existing trend_buy_signals seeding above
+            # covers LLM-news-derived trends; this covers technical
+            # momentum_watchlist picks that lack news coverage (BT277953
+            # MU/LITE/PRAX case).
+            if config.get("eta_momentum_seeding_enabled", True):
+                _eta_mw_top_n = int(config.get("eta_momentum_seed_top_n", 5) or 5)
+                _eta_mw_min = float(config.get("eta_momentum_seed_min_score", 0.05) or 0.05)
+                _eta_mw = (
+                    strategy_cache.get("_momentum_watchlist", {})
+                    if isinstance(strategy_cache, dict)
+                    else {}
+                )
+                _eta_seeded = 0
+                if isinstance(_eta_mw, dict) and _eta_mw:
+                    _eta_sorted = sorted(
+                        _eta_mw.items(),
+                        key=lambda kv: -float(kv[1].get("score", 0.0) or 0.0),
+                    )[:_eta_mw_top_n]
+                    for _eta_t, _eta_d in _eta_sorted:
+                        if not isinstance(_eta_t, str) or not _eta_t:
+                            continue
+                        _eta_existing = sentiment_data.get(_eta_t)
+                        if _eta_existing and int(_eta_existing.get("sentiment", 0) or 0) != 0:
+                            continue
+                        _eta_s = float(_eta_d.get("score", 0.0) or 0.0)
+                        if _eta_s < _eta_mw_min:
+                            continue
+                        sentiment_data[_eta_t] = {
+                            "sentiment": 1,
+                            "event": "momentum_breakout",
+                        }
+                        mentioned.add(_eta_t)
+                        _eta_seeded += 1
+                if _eta_seeded:
+                    _log(
+                        f"[ETA.A] seeded {_eta_seeded} momentum_watchlist tickers "
+                        f"(top_n={_eta_mw_top_n}, min_score={_eta_mw_min})",
+                        "cyan",
+                    )
+
             # Merge trend sell signals + build sell enforcement set
             # V9: Sell enforcement tuning — min hold period, confirmed downtrend,
             # signal hysteresis, and profitable hold protection.
