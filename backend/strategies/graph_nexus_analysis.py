@@ -6453,6 +6453,21 @@ def _evaluate_trend_sell_enforcement(
 
     pos_qty = float((portfolio_emulator._positions or {}).get(ticker, 0.0) or 0.0)
     if pos_qty <= 0.0:
+        # Phase ε.A.3 (BT294837 follow-up, 2026-05-19): a stock we don't
+        # hold cannot be force-sold. Pre-ε.A.3 this branch returned with
+        # the default `allow_force_sell=True`, which caused the caller at
+        # `nexus_sell_enforcement.add(ticker)` to add non-held tickers
+        # whenever propagation's stale negative-sentiment (e.g.
+        # `SNDK=-1.000(12p)` carried from a prior sell-day) routed them
+        # to the trend-reversal sell signal. In BT901920 this flipped
+        # SNDK's $274 rebuy to a phantom SELL, consuming the buy slot
+        # and missing the +487% rally. Generalizes to any non-held
+        # ticker with stale negative propagation.
+        result["allow_force_sell"] = False
+        result["skip_reason"] = (
+            f"[sell-flip-guard] {ticker} skipped — pos=0 (no holding to sell; "
+            f"stale propagation cannot force-sell a non-held ticker)"
+        )
         return result
 
     # V31 Section 1.1: trend-reversal sell suppressed during initial grace period
@@ -17450,7 +17465,26 @@ def _apply_ml_and_overlay_to_scores(
                 _log(f"ML overlay SELL_BLOCK BYPASS: {sym} unrealized={_v11_unrealized_pct:+.1f}% <= {_sb_bypass_pct:.0f}% — sell allowed despite sell_block", "yellow")
             else:
                 final_score = 0
-                _log(f"ML overlay SELL_BLOCK: {sym} sell signal suppressed by overlay sell_block (forced_exit={base.get('_forced_exit', False)})", "yellow")
+                # Phase ε.A.2 (BT294837 follow-up, 2026-05-19): only emit the
+                # SELL_BLOCK log when there's an actual position to suppress.
+                # Pre-ε.A.2 the SELL_BLOCK fired for phantom positions (qty=0)
+                # because the ML overlay was applied to every ticker in the
+                # score dict — including ones that had been sold but were
+                # still present from prior bars. The operator's SNDK lifecycle
+                # audit found 4+ such phantom lines (lines 22804, 25653, 26268,
+                # 27558, 30795, 32129 in BT294837). final_score=0 is still
+                # set (correct behavior — phantom sells should be suppressed)
+                # but we skip the log noise that confuses post-hoc audits.
+                _sb_pos_qty = 0.0
+                if portfolio_emulator is not None:
+                    try:
+                        _sb_pos_qty = float(
+                            (portfolio_emulator._positions or {}).get(sym, 0.0) or 0.0
+                        )
+                    except Exception:
+                        _sb_pos_qty = 0.0
+                if _sb_pos_qty > 0:
+                    _log(f"ML overlay SELL_BLOCK: {sym} sell signal suppressed by overlay sell_block (forced_exit={base.get('_forced_exit', False)})", "yellow")
         # Strong graph propagation can still lift a name into the buy set as long as
         # it satisfies the current configured path-count floor.
         # V11: Do NOT override forced-exit sell signals (fast loser, trailing stop, deep-loser-protect).
