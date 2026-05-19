@@ -15693,6 +15693,18 @@ def _compute_propagated_scores(
                 f"{_size} entries cached",
                 "cyan",
             )
+    # η — Phase η (2026-05-20): per-bar telemetry summary. η.B' is the
+    # only Phase η component that fires inside _compute_propagated_scores
+    # (η.A is in run_once, η.D in the V28.9 block, η.G in the V31 cap).
+    # The per-event [ETA.X] lines remain the primary grep target; this
+    # summary collects the propagation-stage components only when at
+    # least one of them fires so logs stay quiet on bars where η is inert.
+    _eta_b_aug_summary = locals().get("_eta_b_aug", 0) or 0
+    if _eta_b_aug_summary:
+        _log(
+            f"[ETA] propagation summary: augmented={_eta_b_aug_summary}",
+            "cyan",
+        )
     return aggregated
 
 
