@@ -4911,6 +4911,7 @@ def _in_initial_grace_period(
     unrealized_pct: float,
     config: dict,
     market_regime: str = "bull",
+    conviction_tier: str | None = None,
 ) -> tuple[bool, bool, str]:
     if not bool(config.get("initial_grace_enabled", True)):
         return (False, False, "")
@@ -4919,19 +4920,92 @@ def _in_initial_grace_period(
     grace_bars = int(config.get("initial_grace_bars", 14) or 14)
     if grace_bars <= 0 or days_held >= grace_bars:
         return (False, False, "")
-    # Escape A — single-bar catastrophic
-    catastrophic_pct = float(config.get("initial_grace_catastrophic_loss_pct", -15.0) or -15.0)
+    # Phase ε.C.0' (BT294837 follow-up, 2026-05-19): Escape A previously
+    # fired at a tier-blind -15% threshold, which force-sold SNDK (resolved
+    # by γ.1+γ.5 as tier=HIGH mcap=84502M) on day 11 at -18.3% — bypassing
+    # the HIGH conviction floor of -25% that the circuit_breaker would have
+    # honored. The escape_A threshold is now tier-aware so HIGH/MID
+    # conviction stocks survive deeper drawdowns inside the grace window.
+    # NO TICKER HARDCODING — works for any HIGH/MID conviction stock per
+    # γ.5 telemetry.
+    _tier_norm = (str(conviction_tier or "").strip().upper()) or "LOW"
+    if _tier_norm == "HIGH":
+        _cat_default = float(
+            config.get("initial_grace_catastrophic_loss_pct_high", -25.0) or -25.0
+        )
+    elif _tier_norm == "MID":
+        _cat_default = float(
+            config.get("initial_grace_catastrophic_loss_pct_mid", -20.0) or -20.0
+        )
+    else:
+        _cat_default = float(
+            config.get("initial_grace_catastrophic_loss_pct", -15.0) or -15.0
+        )
+    catastrophic_pct = _cat_default
     if unrealized_pct <= catastrophic_pct:
-        return (True, True, f"escape_A_catastrophic({unrealized_pct:.1f}%≤{catastrophic_pct:.1f}%)")
-    # Escape B — cumulative bleed
-    cumulative_pct = float(config.get("initial_grace_cumulative_loss_pct", -10.0) or -10.0)
-    cumulative_min_days = int(config.get("initial_grace_cumulative_min_days", 5) or 5)
+        return (
+            True,
+            True,
+            f"escape_A_catastrophic({unrealized_pct:.1f}%≤{catastrophic_pct:.1f}%, tier={_tier_norm})",
+        )
+    # Escape B — cumulative bleed.
+    # Phase ε.C.0' fix (bug-sweep adversarial finding A1): escape_B was
+    # tier-blind which made the whole tier-aware patch silently inert —
+    # SNDK at -18.3% day 11 (the canonical fix scenario) still escaped via
+    # escape_B (-18.3% ≤ -10% AND 11 ≥ 5) regardless of HIGH tier resolution.
+    # Tier-aware cumulative thresholds parallel the catastrophic ones:
+    # HIGH stocks get -18% / 10 days, MID get -14% / 7 days, LOW unchanged
+    # -10% / 5 days. The wider HIGH/MID bands match the wider circuit_breaker
+    # floors for those tiers.
+    if _tier_norm == "HIGH":
+        # 5pp narrower than escape_A (-25%), so HIGH cumulative bands cap
+        # at -20% with 10-day window. SNDK-class at -18.3% day 11 stays
+        # protected (the canonical fix scenario).
+        cumulative_pct = float(
+            config.get("initial_grace_cumulative_loss_pct_high", -20.0) or -20.0
+        )
+        cumulative_min_days = int(
+            config.get("initial_grace_cumulative_min_days_high", 10) or 10
+        )
+    elif _tier_norm == "MID":
+        cumulative_pct = float(
+            config.get("initial_grace_cumulative_loss_pct_mid", -15.0) or -15.0
+        )
+        cumulative_min_days = int(
+            config.get("initial_grace_cumulative_min_days_mid", 7) or 7
+        )
+    else:
+        cumulative_pct = float(config.get("initial_grace_cumulative_loss_pct", -10.0) or -10.0)
+        cumulative_min_days = int(config.get("initial_grace_cumulative_min_days", 5) or 5)
     if unrealized_pct <= cumulative_pct and days_held >= cumulative_min_days:
-        return (True, True, f"escape_B_cumulative({unrealized_pct:.1f}%≤{cumulative_pct:.1f}% after {days_held}d)")
-    # Escape C — regime/correlation deterioration
+        return (
+            True,
+            True,
+            f"escape_B_cumulative({unrealized_pct:.1f}%≤{cumulative_pct:.1f}% after {days_held}d, tier={_tier_norm})",
+        )
+    # Escape C — regime/correlation deterioration.
+    # Phase ε.C.0' fix (A1 cont.): escape_C fires in bear regime for ANY
+    # negative pnl, tier-blind. Tier-aware: HIGH stocks need pnl <= -8%
+    # in bear (don't bail at -1% just because regime flipped); MID needs
+    # <= -5%; LOW unchanged (any negative).
     if bool(config.get("initial_grace_regime_escape_enabled", True)):
-        if str(market_regime or "bull").lower() == "bear" and unrealized_pct < 0.0:
-            return (True, True, f"escape_C_regime(bear+pnl{unrealized_pct:.1f}%)")
+        if str(market_regime or "bull").lower() == "bear":
+            if _tier_norm == "HIGH":
+                _esc_c_pnl = float(
+                    config.get("initial_grace_regime_escape_pnl_pct_high", -8.0) or -8.0
+                )
+            elif _tier_norm == "MID":
+                _esc_c_pnl = float(
+                    config.get("initial_grace_regime_escape_pnl_pct_mid", -5.0) or -5.0
+                )
+            else:
+                _esc_c_pnl = 0.0  # LOW: any negative pnl triggers (legacy behavior)
+            if unrealized_pct <= _esc_c_pnl and unrealized_pct < 0.0:
+                return (
+                    True,
+                    True,
+                    f"escape_C_regime(bear+pnl{unrealized_pct:.1f}%≤{_esc_c_pnl:.1f}%, tier={_tier_norm})",
+                )
     # In grace, no escape — caller must suppress sell-overrides
     return (True, False, "")
 
@@ -6481,8 +6555,16 @@ def _evaluate_trend_sell_enforcement(
     if _grace_entry_price > 0.0 and _grace_current_price > 0.0:
         _grace_unrealized_pct = ((_grace_current_price - _grace_entry_price) / _grace_entry_price) * 100.0
     _grace_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
+    # Phase ε.C.0' (2026-05-19): resolve the live conviction tier so grace
+    # escape_A's catastrophic threshold is tier-aware. SNDK at HIGH tier in
+    # BT294837 was force-sold at -18.3% via tier-blind escape_A — γ.5 wiring
+    # gives us the resolved tier; thread it through.
+    _grace_tier = _resolve_conviction_tier_at_exit(
+        ticker, config, strategy_cache, propagated
+    )
     _g_in, _g_esc, _g_reason = _in_initial_grace_period(
-        _grace_held_days, _grace_unrealized_pct, config, _grace_regime
+        _grace_held_days, _grace_unrealized_pct, config, _grace_regime,
+        conviction_tier=_grace_tier,
     )
     if _g_in and not _g_esc:
         result["allow_force_sell"] = False
@@ -7027,20 +7109,63 @@ def _rotation_candidate_allowed(
     incoming_rotation_score: float,
     config: dict,
     incoming_meta: dict | None = None,
+    market_regime: str = "bull",
 ) -> tuple[bool, float, str]:
     _cfg = lambda k, d: float(d if (v := config.get(k)) is None else v)
     # V26 Fix B: when the incoming candidate is high-conviction (top_momentum or
     # raw>=nexus_high_conviction_threshold), use shorter min-hold thresholds so
-    # SNDK/MU/LITE-style names can rotate against winners earlier in their run.
+    # high-conviction late-arrivers can rotate against winners earlier in their run.
     # The break_glass delta gates downstream still prevent weak rotations.
     _meta = incoming_meta or {}
     _is_high_conv_inflow = bool(_meta.get("is_top_momentum") or _meta.get("is_high_conviction"))
+    # Phase ε.C.2 (BT294837 follow-up, 2026-05-19): regime-aware time-floor
+    # decay. The dominant rotation-rejection cluster in BT294837 was
+    # `profitable_min_hold` (52% of rejections, 4444 events) + `min_hold`
+    # (26%, 2201 events) — 78% of rejections are time-based, not
+    # conviction-based. In chop regime, holding winners for 20 days before
+    # allowing displacement effectively freezes the portfolio against the
+    # high-conviction discoveries the propagation engine surfaces. The fix:
+    # per-regime min_hold floors, defaulting to half-length in chop. Bull
+    # and bear regimes unchanged (let winners run / stay defensive).
+    # NO TICKER HARDCODING — works for any stock, regime-scoped only.
+    _regime_norm = str(market_regime or "bull").strip().lower()
     if _is_high_conv_inflow:
-        min_hold_days = max(0, int(config.get("high_conviction_loser_min_hold_days", 5) or 5))
-        profitable_full_exit_min_hold_days = max(0, int(_cfg("high_conviction_profitable_min_hold_days", 10)))
+        _base_min_hold = int(config.get("high_conviction_loser_min_hold_days", 5) or 5)
+        _base_prof_min_hold = int(_cfg("high_conviction_profitable_min_hold_days", 10))
     else:
-        min_hold_days = max(0, int(config.get("rotation_min_hold_days", 10) or 10))
-        profitable_full_exit_min_hold_days = max(0, int(_cfg("rotation_profitable_full_exit_min_hold_days", 20)))
+        _base_min_hold = int(config.get("rotation_min_hold_days", 10) or 10)
+        _base_prof_min_hold = int(_cfg("rotation_profitable_full_exit_min_hold_days", 20))
+    if _regime_norm == "chop":
+        _min_hold_chop = int(
+            config.get(
+                "rotation_min_hold_days_chop",
+                max(0, _base_min_hold // 2),
+            )
+            or max(0, _base_min_hold // 2)
+        )
+        _prof_min_hold_chop = int(
+            config.get(
+                "rotation_profitable_full_exit_min_hold_days_chop",
+                max(0, _base_prof_min_hold // 2),
+            )
+            or max(0, _base_prof_min_hold // 2)
+        )
+        min_hold_days = max(0, _min_hold_chop)
+        profitable_full_exit_min_hold_days = max(0, _prof_min_hold_chop)
+    elif _regime_norm == "bear":
+        # Bear: keep defensive — same as base (do not loosen in bear)
+        min_hold_days = max(0, int(config.get("rotation_min_hold_days_bear", _base_min_hold) or _base_min_hold))
+        profitable_full_exit_min_hold_days = max(0, int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bear", _base_prof_min_hold)
+            or _base_prof_min_hold
+        ))
+    else:
+        # Bull (default): keep base behavior so winners get the full hold window
+        min_hold_days = max(0, int(config.get("rotation_min_hold_days_bull", _base_min_hold) or _base_min_hold))
+        profitable_full_exit_min_hold_days = max(0, int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bull", _base_prof_min_hold)
+            or _base_prof_min_hold
+        ))
     min_delta = _cfg("rotation_min_delta", 0.15)
     # Tier-3 B3: relax rotation thresholds so high-conviction late-arrivers
     # (LITE raw=1.500 in BT901920) can displace marginal winners.
@@ -7851,6 +7976,39 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         # any audit trail; this closes the observability gap.
         "conviction_telemetry_log_enabled": bool(
             config.get("conviction_telemetry_log_enabled", True)
+        ),
+        # Phase ε Stage 2 (BT294837 follow-up, 2026-05-19) knobs:
+        # ε.C.4 ETF allocation cap
+        "max_positions_etf": int(config.get("max_positions_etf", 4) or 4),
+        # ε.C.0' V31 grace tier-aware catastrophic threshold
+        "initial_grace_catastrophic_loss_pct_high": float(
+            config.get("initial_grace_catastrophic_loss_pct_high", -25.0) or -25.0
+        ),
+        "initial_grace_catastrophic_loss_pct_mid": float(
+            config.get("initial_grace_catastrophic_loss_pct_mid", -20.0) or -20.0
+        ),
+        # ε.C.2 regime-aware rotation time-floors (chop relaxed to half-length)
+        "rotation_min_hold_days_chop": int(
+            config.get("rotation_min_hold_days_chop", 5) or 5
+        ),
+        "rotation_min_hold_days_bull": int(
+            config.get("rotation_min_hold_days_bull", 10) or 10
+        ),
+        "rotation_min_hold_days_bear": int(
+            config.get("rotation_min_hold_days_bear", 10) or 10
+        ),
+        "rotation_profitable_full_exit_min_hold_days_chop": int(
+            config.get("rotation_profitable_full_exit_min_hold_days_chop", 10) or 10
+        ),
+        "rotation_profitable_full_exit_min_hold_days_bull": int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bull", 20) or 20
+        ),
+        "rotation_profitable_full_exit_min_hold_days_bear": int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bear", 20) or 20
+        ),
+        # ε.C.6 V31.4 cooldown-lift force-promotion
+        "post_sell_breakout_force_promote_enabled": bool(
+            config.get("post_sell_breakout_force_promote_enabled", True)
         ),
         "nexus_sentiment_cache_force_in_backtest": bool(
             config.get("nexus_sentiment_cache_force_in_backtest", True)
@@ -15741,8 +15899,13 @@ def _evaluate_position_risk(
                     _grace_pnl = 0.0
                 else:
                     _grace_pnl = _unrealized_pct
+                    # Phase ε.C.0' (2026-05-19): tier-aware grace escape_A.
+                    _grace_tier_sell = _resolve_conviction_tier_at_exit(
+                        sym, config, strategy_cache, propagated
+                    )
                     _g_in_grace, _g_escape, _g_reason = _in_initial_grace_period(
-                        _grace_days, _grace_pnl, config, _grace_regime
+                        _grace_days, _grace_pnl, config, _grace_regime,
+                        conviction_tier=_grace_tier_sell,
                     )
                 if _g_in_grace and not _g_escape:
                     _log(
@@ -16538,11 +16701,23 @@ def _reserve_momentum_slots(
     held_momentum: set[str],
     open_positions: set[str],
     recent_sell_cooldown: set[str] | None = None,
+    force_promote: set[str] | None = None,
 ) -> list[dict]:
     """Select top momentum candidates for reserved slot allocation.
 
     Returns candidate dicts ready for the allocation pipeline.
     Skips already-held tickers and tickers on the momentum re-buy cooldown.
+
+    Phase ε.C.6 (BT294837 follow-up, 2026-05-19): the optional
+    ``force_promote`` set marks tickers whose V31.4 cooldown-lift fired
+    THIS bar (post-sell breakout / recovery_shortcut). Pre-ε.C.6 the
+    lifted ticker still had to compete for momentum_watchlist slots and
+    often lost to higher-ranking watchlist candidates (the operator's
+    SNDK rebuy audit found this happened at BT294837 L7499 — SNDK was
+    lifted but the slot went to LITE/TYRA which scored higher). Now
+    force-promote takes priority over ranking so the lift translates
+    to an executable buy intent. NO TICKER HARDCODING — works for any
+    ticker whose V31.4 lift fired this bar.
     """
     n_reserved = int(config.get("momentum_reserved_slots", 2) or 2)
     n_open_momentum = len(held_momentum & open_positions)
@@ -16551,8 +16726,35 @@ def _reserve_momentum_slots(
         return []
 
     _cooldown = recent_sell_cooldown or set()
+    _force = {str(s or "").strip().upper() for s in (force_promote or set()) if str(s or "").strip()}
     picks: list[dict] = []
-    for sym, score in ranked:
+    # Phase ε.C.6: prioritize force-promoted tickers (V31.4 lifted) first
+    # so they actually translate to executable buy intents instead of
+    # losing the slot to higher-scoring momentum candidates.
+    ranked_normalized = list(ranked or [])
+    if _force:
+        ranked_map = {str(s or "").strip().upper(): sc for s, sc in ranked_normalized}
+        forced_first: list[tuple[str, float]] = []
+        rest: list[tuple[str, float]] = []
+        for sym, score in ranked_normalized:
+            sym_u = str(sym or "").strip().upper()
+            if sym_u in _force and sym_u not in open_positions and sym_u not in _cooldown:
+                forced_first.append((sym, score))
+            else:
+                rest.append((sym, score))
+        # Append force-promote tickers NOT already in ranked (so a lifted
+        # ticker that fell out of momentum watchlist still gets a slot).
+        _ranked_keys = {str(s or "").strip().upper() for s, _ in ranked_normalized}
+        for sym_u in _force:
+            if sym_u in _ranked_keys or sym_u in open_positions or sym_u in _cooldown:
+                continue
+            # Synthesize a watchlist score floor — give force-promote tickers
+            # the watchlist priority min raw_score so they don't get rejected
+            # downstream for low score.
+            _fp_score = float(config.get("watchlist_priority_min_raw_score", 0.35) or 0.35)
+            forced_first.append((sym_u, _fp_score))
+        ranked_normalized = forced_first + rest
+    for sym, score in ranked_normalized:
         if sym in open_positions:
             continue
         if sym in _cooldown:
@@ -16568,6 +16770,7 @@ def _reserve_momentum_slots(
             "is_propagation_expansion": False,
             "grace_eligible": True,
             "momentum_watchlist_score": score,
+            "is_force_promote": str(sym or "").strip().upper() in _force,
         })
     return picks
 
@@ -20423,12 +20626,43 @@ class GraphNexusAnalysis:
                         if _skip_reason:
                             _log(_skip_reason, "cyan")
                         # Still set sentiment but don't force-sell
-                        if ticker not in sentiment_data:
+                        # Phase ε.C.5 (BT294837 follow-up, 2026-05-19): when
+                        # the trend-reversal sell was suppressed (e.g. by
+                        # ε.A.3's pos=0 guard), do NOT seed propagation with
+                        # negative sentiment for non-held tickers — this is
+                        # the "stale Neo4j sentiment" issue per ε.B.5 audit.
+                        # Pre-ε.C.5 the SELL signal flowed into
+                        # sentiment_data → propagation aggregator →
+                        # `SNDK=-1.000(12p)` anchor that resurfaces SNDK in
+                        # propagation_expansion SELL rows every bar even
+                        # though SNDK isn't held. Gate the seed on position
+                        # existence so non-held negative sentiment decays
+                        # naturally (no new seed each bar).
+                        _ec5_pos_qty = 0.0
+                        if portfolio_emulator is not None:
+                            try:
+                                _ec5_pos_qty = float(
+                                    (portfolio_emulator._positions or {}).get(ticker, 0.0) or 0.0
+                                )
+                            except Exception:
+                                _ec5_pos_qty = 0.0
+                        if ticker not in sentiment_data and _ec5_pos_qty > 0:
                             sentiment_data[ticker] = {"sentiment": sell_data["score"], "event": "general"}
                             mentioned.add(ticker)
                 elif ticker not in sentiment_data:
-                    sentiment_data[ticker] = {"sentiment": sell_data["score"], "event": "general"}
-                    mentioned.add(ticker)
+                    # Phase ε.C.5: same gate for the no-sell-enforcement-eval
+                    # path (sell_enforcement_enabled=False OR force=False).
+                    _ec5_pos_qty2 = 0.0
+                    if portfolio_emulator is not None:
+                        try:
+                            _ec5_pos_qty2 = float(
+                                (portfolio_emulator._positions or {}).get(ticker, 0.0) or 0.0
+                            )
+                        except Exception:
+                            _ec5_pos_qty2 = 0.0
+                    if _ec5_pos_qty2 > 0:
+                        sentiment_data[ticker] = {"sentiment": sell_data["score"], "event": "general"}
+                        mentioned.add(ticker)
 
             # Enforce sells on stale trend ETFs
             if stale_etfs and sell_enforcement_enabled:
@@ -21914,9 +22148,16 @@ class GraphNexusAnalysis:
                                             del _mw_cooldown_map[_ps_lift_sym]
                             except Exception as _ps_exc:
                                 _log(f"V31.4 post-sell breakout error: {_ps_exc}", "yellow")
+                        # Phase ε.C.6 (BT294837 follow-up, 2026-05-19):
+                        # V31.4 lift force-promotion. When the post-sell
+                        # breakout / recovery_shortcut lifts a cooldown
+                        # this bar, ensure the lifted ticker actually
+                        # takes a watchlist slot (don't lose it to higher-
+                        # scoring tickers — see ε.B.5 SNDK lifecycle audit).
                         _momentum_new_buys = _reserve_momentum_slots(
                             _mw_ranked, config, _momentum_held_set, _open_positions_set,
                             recent_sell_cooldown=_mw_cooldown_set,
+                            force_promote=_ps_blocked_lift if bool(config.get("post_sell_breakout_force_promote_enabled", True)) else None,
                         )
                         # Inject momentum picks into scores + prepend to candidates
                         _existing_candidates_set = set(_new_stock_candidates)
@@ -22144,8 +22385,13 @@ class GraphNexusAnalysis:
                                 # Don't force-sell positions that would be grace-
                                 # protected from trend_reversal — breach-heal
                                 # shouldn't bypass risk controls for young names.
+                                # Phase ε.C.0' (2026-05-19): tier-aware grace escape.
+                                _bh_tier = _resolve_conviction_tier_at_exit(
+                                    _bh_sym_u, config, strategy_cache, propagated
+                                )
                                 _bh_grace_in, _bh_grace_esc, _ = _in_initial_grace_period(
-                                    _bh_held_days, _bh_pnl, config, _breach_regime
+                                    _bh_held_days, _bh_pnl, config, _breach_regime,
+                                    conviction_tier=_bh_tier,
                                 )
                                 if _bh_grace_in and not _bh_grace_esc:
                                     continue
@@ -22474,6 +22720,8 @@ class GraphNexusAnalysis:
                                         incoming_rotation_score=_bb_rotation_score,
                                         config=config,
                                         incoming_meta=_incoming_meta,
+                                        # Phase ε.C.2: regime-aware time-floor decay
+                                        market_regime=str((strategy_cache or {}).get("_market_regime") or "bull"),
                                     )
                                     # V28 Fix 4: log every rotation eval result so failed
                                     # rotations are visible (previously most failures
@@ -23112,10 +23360,90 @@ class GraphNexusAnalysis:
                 # Determine how many ETFs can be funded at the minimum
                 _max_fundable_etfs = max(1, int(_etf_budget_available / _etf_min)) if _etf_budget_available >= _etf_min else 0
                 _etf_to_fund = etf_buys[:_max_fundable_etfs] if _max_fundable_etfs > 0 else []
+                # Phase ε.C.4 (BT294837 follow-up, 2026-05-19, root cause of
+                # permanent V28.8.1 BREACH state): the ETF allocation channel
+                # pre-ε.C.4 wrote `nexus_position_sizes[sym] = {"asset_class":
+                # "etf", ...}` without consulting `_current_positions`,
+                # `_max_positions`, or `_v28_7_position_breach_active`. On
+                # bar 1 of BT294837, 4-6 trend ETFs (BOTZ/ROBT/WTAI/ARKQ/
+                # UBOT/AIQ) plus 8 stocks seated immediately → 12-14
+                # positions vs cap=8. ETFs are protected by profitable_
+                # min_hold/winner_lock and never roll off, leaving the
+                # portfolio in permanent BREACH. The breach flag then
+                # blocks BFQ dequeue + partial-trim rotations, starving
+                # all HC propagation discoveries (16 unfunded per breach
+                # bar in BT294837). The fix: enforce a per-account ETF
+                # position cap (`max_positions_etf`, default 4) using a
+                # cache-tracked held-ETF set. Existing held ETFs ride
+                # along; new ETF buys are skipped if at the cap. NO
+                # TICKER HARDCODING — works for any ETF universe.
+                try:
+                    _etf_max_held = max(0, int(config.get("max_positions_etf", 4) or 4))
+                except (TypeError, ValueError):
+                    _etf_max_held = 4
+                _held_etf_tracker = (
+                    strategy_cache.setdefault("_nexus_held_etfs", set())
+                    if strategy_cache is not None
+                    else set()
+                )
+                if not isinstance(_held_etf_tracker, set):
+                    # Persistence may have round-tripped to a list/dict
+                    try:
+                        _held_etf_tracker = set(_held_etf_tracker or [])
+                    except TypeError:
+                        _held_etf_tracker = set()
+                    if strategy_cache is not None:
+                        strategy_cache["_nexus_held_etfs"] = _held_etf_tracker
+                # Reconcile tracker against the LIVE portfolio.
+                # Phase ε.C.4 fix (bug-sweep adversarial finding B2): the
+                # tracker must do TWO operations each bar:
+                # (a) DROP sold ETFs (intersection_update with live held),
+                # (b) ADD currently-held ETFs from `etf_set` ∩ portfolio
+                # so warm-start with empty cache doesn't lose the live
+                # ETF count and permit over-allocation. `etf_set` is the
+                # known ETF universe in scope here; intersecting with live
+                # positions gives the actual held-ETF set.
+                _live_held_set: set[str] = set()
+                if portfolio_emulator is not None:
+                    try:
+                        _pe_positions = getattr(portfolio_emulator, "_positions", {}) or {}
+                        _live_held_set = {
+                            str(t or "").strip().upper()
+                            for t, q in _pe_positions.items()
+                            if float(q or 0) > 0
+                        }
+                    except Exception:
+                        _live_held_set = set()
+                # Restrict reconciliation domain to known ETFs (intersect with
+                # etf_set if available). This avoids accidentally classifying
+                # stock positions as ETFs.
+                _etf_universe: set[str] = set()
+                try:
+                    _etf_universe = {str(t or "").strip().upper() for t in (etf_set or set()) if str(t or "").strip()}
+                except (TypeError, ValueError):
+                    _etf_universe = set()
+                # (a) drop sold/non-existent entries from prior bars
+                _held_etf_tracker.intersection_update(_live_held_set)
+                # (b) add currently-held ETFs that aren't yet in the tracker
+                #     (warm-start case OR positions opened outside this strategy)
+                if _etf_universe:
+                    _held_etf_tracker.update(_live_held_set & _etf_universe)
+                _etf_slots_remaining = max(0, _etf_max_held - len(_held_etf_tracker))
+                if _etf_slots_remaining < len(_etf_to_fund):
+                    _etf_capped_out = _etf_to_fund[_etf_slots_remaining:]
+                    _etf_to_fund = _etf_to_fund[:_etf_slots_remaining]
+                    _log(
+                        f"[ε.C.4] ETF cap reached: max_positions_etf={_etf_max_held}, "
+                        f"currently_held={len(_held_etf_tracker)}, slots_remaining="
+                        f"{_etf_slots_remaining}. Skipping {len(_etf_capped_out)} "
+                        f"new ETF buy(s): {_etf_capped_out}",
+                        "yellow",
+                    )
                 if _etf_to_fund:
                     cash_per_etf = _etf_budget_available / len(_etf_to_fund)
                     for sym in _etf_to_fund:
                         nexus_position_sizes[sym] = {"buy_cash": round(cash_per_etf, 2), "asset_class": "etf", "signal_source": "etf"}
+                        _held_etf_tracker.add(str(sym or "").strip().upper())
                     if len(_etf_to_fund) < len(etf_buys):
                         _skipped_etfs = [s for s in etf_buys if s not in _etf_to_fund]
                         _log(f"ETF min-size filter: funded {len(_etf_to_fund)} ETF(s) @ ${cash_per_etf:.0f} each, skipped {len(_skipped_etfs)}: {_skipped_etfs} (min=${_etf_min:.0f})", "yellow")

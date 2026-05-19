@@ -67,6 +67,12 @@ _BLACKLIST_PREFIXES = (
     # Persisting would suppress the audit log on restart — operators want
     # to re-see the resolved sentiment_cache_scope_id every fresh run.
     "_sentiment_cache_scope_audit_emitted",
+    # Phase ε.C.4 (2026-05-19, BT294837 follow-up): per-run held-ETF tracker
+    # used by the ETF allocation cap enforcement. The set is reconciled
+    # against live portfolio_emulator._positions each bar so it stays
+    # consistent across restarts even without persistence, but adding
+    # to the blacklist is safer than relying on the reconciliation alone.
+    "_nexus_held_etfs",
     # Phase α.2 (BT109429 follow-up, 2026-05-18): Neo4j query snapshot
     # for variance containment. Per-backtest-run; persisting would mix
     # snapshots across runs with different universes and dates. The

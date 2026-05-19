@@ -849,6 +849,212 @@ def test_sentiment_cache_scope_audit_flag_in_persistence_blacklist():
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Phase ε Stage 2 — execution-throughput unlock
+# ──────────────────────────────────────────────────────────────────────────
+
+
+# ε.C.4 — ETF allocation cap enforcement
+
+
+def test_epsilon_c4_max_positions_etf_knob_surfaced_in_effective_config():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("max_positions_etf") == 4
+
+
+def test_epsilon_c4_held_etfs_blacklisted_from_persistence():
+    from backend.strategy_cache_persistence import _BLACKLIST_PREFIXES
+    assert "_nexus_held_etfs" in _BLACKLIST_PREFIXES
+
+
+# ε.C.0' — V31 grace tier-aware catastrophic threshold
+
+
+def test_epsilon_c0prime_grace_escape_uses_high_tier_threshold():
+    """HIGH conviction: -25% catastrophic threshold (vs LOW default -15%).
+    A held HIGH stock at -18.3% (SNDK exit case) should NOT escape grace."""
+    in_grace, escaped, reason = gna._in_initial_grace_period(
+        days_held=11, unrealized_pct=-18.3, config={}, market_regime="bull",
+        conviction_tier="HIGH",
+    )
+    # HIGH catastrophic threshold = -25%. -18.3% does NOT escape.
+    assert in_grace is True
+    assert escaped is False
+
+
+def test_epsilon_c0prime_grace_escape_uses_low_tier_threshold():
+    """LOW conviction: -15% catastrophic threshold (default). -18.3% should escape."""
+    in_grace, escaped, reason = gna._in_initial_grace_period(
+        days_held=11, unrealized_pct=-18.3, config={}, market_regime="bull",
+        conviction_tier="LOW",
+    )
+    assert in_grace is True
+    assert escaped is True
+    assert "escape_A_catastrophic" in reason
+    assert "tier=LOW" in reason
+
+
+def test_epsilon_c0prime_grace_escape_uses_mid_tier_threshold():
+    """MID conviction: escape_A=-20% (catastrophic), escape_B=-15%/7d (bleed)."""
+    # -13% at day 8: above escape_B threshold (-15%) → no escape
+    _, escaped, _ = gna._in_initial_grace_period(
+        days_held=8, unrealized_pct=-13.0, config={}, market_regime="bull",
+        conviction_tier="MID",
+    )
+    assert escaped is False
+    # -22% (below escape_A -20%) at day 8: catastrophic → escape
+    _, escaped, _ = gna._in_initial_grace_period(
+        days_held=8, unrealized_pct=-22.0, config={}, market_regime="bull",
+        conviction_tier="MID",
+    )
+    assert escaped is True
+    # -16% at day 8 (above escape_A -20% but below escape_B -15%, ≥7d):
+    # cumulative bleed escape fires
+    _, escaped, _ = gna._in_initial_grace_period(
+        days_held=8, unrealized_pct=-16.0, config={}, market_regime="bull",
+        conviction_tier="MID",
+    )
+    assert escaped is True
+    # -16% at day 5 (above escape_A -20%, below escape_B -15%, but <7d min):
+    # cumulative doesn't fire → no escape
+    _, escaped, _ = gna._in_initial_grace_period(
+        days_held=5, unrealized_pct=-16.0, config={}, market_regime="bull",
+        conviction_tier="MID",
+    )
+    assert escaped is False
+
+
+def test_epsilon_c0prime_grace_high_tier_deep_enough_drawdown_still_escapes():
+    """HIGH conviction at -30% (worse than -25% threshold): escapes."""
+    _, escaped, _ = gna._in_initial_grace_period(
+        days_held=8, unrealized_pct=-30.0, config={}, market_regime="bull",
+        conviction_tier="HIGH",
+    )
+    assert escaped is True
+
+
+def test_epsilon_c0prime_grace_thresholds_surfaced_in_effective_config():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("initial_grace_catastrophic_loss_pct_high") == -25.0
+    assert eff.get("initial_grace_catastrophic_loss_pct_mid") == -20.0
+
+
+def test_epsilon_c0prime_grace_unchanged_when_no_tier_passed():
+    """Back-compat: existing callers without conviction_tier kwarg get
+    LOW-default behavior (no regression)."""
+    _, escaped, _ = gna._in_initial_grace_period(
+        days_held=11, unrealized_pct=-18.3, config={}, market_regime="bull",
+    )
+    # No tier → LOW default → -15% threshold → -18.3% escapes
+    assert escaped is True
+
+
+# ε.C.2 — Regime-aware time-floor decay
+
+
+def test_epsilon_c2_rotation_uses_chop_regime_shorter_floor():
+    """In chop regime, profitable_min_hold floor is shorter — held=12
+    should not block (chop default 10d), but would block in bull (20d)."""
+    args = dict(
+        held_pnl_pct=5.0, held_rotation_score=0.5, held_days=12,
+        held_raw_score=0.5, drop_from_peak_pct=10.0, is_equity=True,
+        incoming_raw_score=0.5, incoming_rotation_score=0.7,
+        config={}, incoming_meta={"is_top_momentum": False, "is_high_conviction": False},
+    )
+    # Bull regime: held_days=12 < profitable_full_exit_min_hold_days=20 → profitable_min_hold
+    allowed_bull, _, mode_bull = gna._rotation_candidate_allowed(market_regime="bull", **args)
+    # Chop regime: held_days=12 >= 10 (chop's half-length default) → passes the time floor
+    allowed_chop, _, mode_chop = gna._rotation_candidate_allowed(market_regime="chop", **args)
+    # The chop call should have a different mode (passed the time floor)
+    assert mode_bull == "profitable_min_hold"
+    assert mode_chop != "profitable_min_hold"  # passed the chop's shorter floor
+
+
+def test_epsilon_c2_regime_knobs_surfaced_in_effective_config():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("rotation_min_hold_days_chop") == 5
+    assert eff.get("rotation_min_hold_days_bull") == 10
+    assert eff.get("rotation_min_hold_days_bear") == 10
+    assert eff.get("rotation_profitable_full_exit_min_hold_days_chop") == 10
+    assert eff.get("rotation_profitable_full_exit_min_hold_days_bull") == 20
+    assert eff.get("rotation_profitable_full_exit_min_hold_days_bear") == 20
+
+
+# ε.C.6 — V31.4 cooldown-lift force-promotion
+
+
+def test_epsilon_c6_force_promote_prioritizes_lifted_ticker():
+    """A V31.4-lifted ticker should be reserved a momentum_watchlist slot
+    even if it scores lower than other watchlist candidates."""
+    ranked = [
+        ("LITE", 0.20),  # higher rank
+        ("TYRA", 0.15),
+        ("SNDK", 0.10),  # lower rank but V31.4-lifted
+    ]
+    picks = gna._reserve_momentum_slots(
+        ranked=ranked,
+        config={"momentum_reserved_slots": 2},
+        held_momentum=set(),
+        open_positions=set(),
+        recent_sell_cooldown=set(),
+        force_promote={"SNDK"},
+    )
+    tickers_picked = [p["ticker"] for p in picks]
+    assert "SNDK" in tickers_picked, "force-promoted SNDK should take a slot"
+    # SNDK should appear FIRST (priority over higher-scoring LITE)
+    assert tickers_picked[0] == "SNDK"
+    # Verify the is_force_promote flag
+    sndk_pick = next(p for p in picks if p["ticker"] == "SNDK")
+    assert sndk_pick.get("is_force_promote") is True
+
+
+def test_epsilon_c6_force_promote_synthesizes_score_when_ticker_not_in_ranked():
+    """If V31.4 lifts a ticker that fell OUT of momentum_watchlist ranking,
+    force-promote should still admit it with a synthesized priority score."""
+    ranked = [("LITE", 0.20)]  # SNDK absent
+    picks = gna._reserve_momentum_slots(
+        ranked=ranked,
+        config={"momentum_reserved_slots": 2},
+        held_momentum=set(),
+        open_positions=set(),
+        recent_sell_cooldown=set(),
+        force_promote={"SNDK"},
+    )
+    tickers_picked = [p["ticker"] for p in picks]
+    assert "SNDK" in tickers_picked
+
+
+def test_epsilon_c6_force_promote_skips_held_positions():
+    """force-promote should NOT add a ticker that's already held."""
+    picks = gna._reserve_momentum_slots(
+        ranked=[("LITE", 0.20)],
+        config={"momentum_reserved_slots": 2},
+        held_momentum=set(),
+        open_positions={"SNDK"},  # SNDK already held
+        recent_sell_cooldown=set(),
+        force_promote={"SNDK"},
+    )
+    tickers_picked = [p["ticker"] for p in picks]
+    assert "SNDK" not in tickers_picked
+
+
+def test_epsilon_c6_force_promote_knob_surfaced_in_effective_config():
+    eff = gna._get_effective_nexus_config({})
+    assert eff.get("post_sell_breakout_force_promote_enabled") is True
+
+
+# ε.C.5 — Stale Neo4j sentiment decay (gate sentiment_data on position existence)
+
+
+# Note: ε.C.5 changes the behavior inside _evaluate_trend_sell_enforcement's
+# caller. The unit-testable surface is the existing test that ε.A.3 added
+# (`_evaluate_trend_sell_enforcement` returns allow_force_sell=False for
+# pos=0). ε.C.5 additionally gates the `sentiment_data[ticker] = ...` write
+# on the same condition — confirmed by code inspection at L20570 area.
+# Integration test would be needed to verify end-to-end behavior; relying
+# on existing γ + α suite for regression coverage.
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # α.1 — mandatory sentiment cache (now via extracted helper)
 # ──────────────────────────────────────────────────────────────────────────
 
