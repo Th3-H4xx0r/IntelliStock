@@ -87,6 +87,33 @@ _TERMINAL_LLM_FAILURES: dict[str, str] = {}
 _TERMINAL_LLM_FAILURES_LOCK = threading.Lock()
 
 
+# Models known to return empty `{}` (2-token "skeleton" response) when
+# constrained by `response_format={"type": "json_object"}`. We've seen
+# this with gpt-oss, gpt-5*, and NVIDIA NIM kimi-k2.x — all of which
+# include their own prompt-driven JSON output and reject the constraint.
+# Used by every chat-completion call path to decide whether to set the
+# response_format field. Keeping the list in one place so adding a new
+# quirky model only touches one site.
+_JSON_OBJECT_FORMAT_QUIRKY_MARKERS = (
+    "gpt-oss",
+    "gpt_oss",
+    "gpt oss",
+    "gpt-5",
+    "gpt_5",
+    "moonshotai/kimi",
+    "kimi-k2",
+    "kimi_k2",
+)
+
+
+def _model_skips_json_object_format(model_name: str) -> bool:
+    """Return True for chat-completion models that return empty `{}` when
+    constrained by response_format=json_object. Caller should omit the
+    response_format field and rely on the prompt for JSON shape."""
+    lowered = str(model_name or "").strip().lower()
+    return any(marker in lowered for marker in _JSON_OBJECT_FORMAT_QUIRKY_MARKERS)
+
+
 def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = None) -> str:
     """Resolve provider API key from explicit value first, then provider-specific env vars."""
     explicit = str(explicit_api_key or "").strip()
@@ -376,9 +403,15 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
     resolved = _resolve_provider_config(provider, provider_config)
 
     def _prefers_prompted_structured_output(provider_name: str, model_name: str) -> bool:
+        # NVIDIA NIM kimi-k2.x has the same shape-collapse pathology as
+        # Azure gpt-oss / gpt-5 — empty `{}` (2 tokens) on the first call
+        # when the structured-output schema is forced. Use prompted-JSON
+        # mode for those models so PydanticAI re-prompts on the wire
+        # without triggering the broken schema constraint.
         lowered_model = str(model_name or "").strip().lower()
-        return provider_name in {"azure", "openai"} and any(
-            marker in lowered_model for marker in ("gpt-oss", "gpt_oss", "gpt oss", "gpt-5", "gpt_5")
+        return (
+            provider_name in {"azure", "openai", "nvidia"}
+            and _model_skips_json_object_format(lowered_model)
         )
 
     def _prompted_json_profile() -> ModelProfile | None:
@@ -2503,7 +2536,13 @@ def _call_openai(
         else:
             if max_output_tokens and max_output_tokens > 0:
                 body["max_tokens"] = max_output_tokens
-        if str(response_mime_type or "").strip().lower() == "application/json":
+        # Skip response_format for quirky models that return empty `{}`
+        # when constrained by json_object mode. Same workaround as the
+        # NVIDIA + Azure paths.
+        if (
+            str(response_mime_type or "").strip().lower() == "application/json"
+            and not _model_skips_json_object_format(model)
+        ):
             body["response_format"] = {"type": "json_object"}
         timeout = _coerce_timeout_sec(timeout_sec)
         max_retries = max(0, int(retries or 0))
@@ -2645,7 +2684,14 @@ def _call_nvidia(
             body["max_tokens"] = max_output_tokens
         extra = _nvidia_reasoning_extra_body(reasoning_effort)
         body.update(extra)
-        if str(response_mime_type or "").strip().lower() == "application/json":
+        # Skip response_format for quirky NIM models that return empty
+        # `{}` when constrained by json_object mode (moonshotai/kimi-*
+        # has the same shape-collapse pathology as Azure gpt-oss).
+        # The prompt itself already asks for JSON.
+        if (
+            str(response_mime_type or "").strip().lower() == "application/json"
+            and not _model_skips_json_object_format(model)
+        ):
             body["response_format"] = {"type": "json_object"}
         timeout = _coerce_timeout_sec(timeout_sec)
         max_retries = max(0, int(retries or 0))
@@ -2748,10 +2794,14 @@ def _call_azure_openai(
             body["reasoning_effort"] = reasoning_effort
         if max_output_tokens and max_output_tokens > 0:
             body["max_completion_tokens"] = max_output_tokens
-        # Skip response_format for gpt-oss models — they return empty {} (2 tokens) when
-        # constrained by json_object mode.  The prompt already requests JSON output.
-        _is_oss = any(m in (deployment_name or "").lower() for m in ("gpt-oss", "gpt_oss", "gpt oss"))
-        if not _is_oss and str(response_mime_type or "").strip().lower() == "application/json":
+        # Skip response_format for quirky models (gpt-oss, gpt-5*,
+        # NIM-side kimi-k2 when exposed through Azure routing) — all
+        # return empty `{}` when constrained by json_object mode. The
+        # prompt already requests JSON output.
+        if (
+            str(response_mime_type or "").strip().lower() == "application/json"
+            and not _model_skips_json_object_format(deployment_name)
+        ):
             body["response_format"] = {"type": "json_object"}
         timeout = _coerce_timeout_sec(timeout_sec)
         max_retries = max(0, int(retries or 0))
