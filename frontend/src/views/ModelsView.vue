@@ -229,10 +229,17 @@ async function submitModel() {
     if (!res.ok) throw new Error(_normalizeError(body, res.status))
 
     submitOk.value = true
-    submitMsg.value = editMode.value ? 'Model updated.' : 'Model saved.'
+    submitMsg.value = editMode.value
+      ? 'LLM test passed. Model updated.'
+      : 'LLM test passed. Model saved.'
     submitting.value = false
-    closeModal(true)
+    // Refresh the list now so it's ready when the modal closes, but keep
+    // the modal open briefly so the user can read the success banner.
+    // Without the delay closeModal() fires synchronously and the green
+    // confirmation flashes for ~0 frames before the modal disappears.
     await fetchModels()
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    closeModal(true)
   } catch (e) {
     submitOk.value = false
     submitMsg.value = e.message || 'Failed to save model.'
