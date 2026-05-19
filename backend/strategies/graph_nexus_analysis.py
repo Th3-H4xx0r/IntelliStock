@@ -913,15 +913,37 @@ def _resolve_role_llm_config(config: dict, role: str) -> tuple[str, str, str, st
     # an inline `*_llm_api_key` field in the strategy config silently
     # shadows a freshly-updated Models-table model_doc and produces
     # confusing 401s after a successful UI "Test & Save".
-    _api_key_candidates: list[tuple[str, str]] = [
-        ("lookback_azure_openai_api_key", _lb_cfg("azure_openai_api_key")),
+    #
+    # Provider-aware ordering: legacy `*_azure_openai_api_key` and
+    # `GRAPH_NEXUS_*_AZURE_OPENAI_API_KEY` keys are ONLY consulted
+    # when the active provider is azure. Without this guard a stale
+    # Azure key in a strategy config that was later switched to
+    # nvidia/openai/etc. would be sent to the wrong endpoint and
+    # produce a confusing 401 (observed in production 2026-05-19).
+    _is_azure = (provider == "azure")
+    _api_key_candidates: list[tuple[str, str]] = []
+    if _is_azure:
+        _api_key_candidates += [
+            ("lookback_azure_openai_api_key", _lb_cfg("azure_openai_api_key")),
+        ]
+    _api_key_candidates += [
         ("lookback_llm_api_key", _lb_cfg("llm_api_key")),
-        (f"config.{prefix}azure_openai_api_key", (config.get(f"{prefix}azure_openai_api_key") or "").strip()),
-        (f"env.GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", os.environ.get(f"GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", "").strip()),
+    ]
+    if _is_azure:
+        _api_key_candidates += [
+            (f"config.{prefix}azure_openai_api_key", (config.get(f"{prefix}azure_openai_api_key") or "").strip()),
+            (f"env.GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", os.environ.get(f"GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", "").strip()),
+        ]
+    _api_key_candidates += [
         (f"config.{prefix}llm_api_key", (config.get(f"{prefix}llm_api_key") or "").strip()),
         (f"env.GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", os.environ.get(f"GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", "").strip()),
-        ("config.azure_openai_api_key", (config.get("azure_openai_api_key") or "").strip()),
-        ("env.GRAPH_NEXUS_AZURE_OPENAI_API_KEY", os.environ.get("GRAPH_NEXUS_AZURE_OPENAI_API_KEY", "").strip()),
+    ]
+    if _is_azure:
+        _api_key_candidates += [
+            ("config.azure_openai_api_key", (config.get("azure_openai_api_key") or "").strip()),
+            ("env.GRAPH_NEXUS_AZURE_OPENAI_API_KEY", os.environ.get("GRAPH_NEXUS_AZURE_OPENAI_API_KEY", "").strip()),
+        ]
+    _api_key_candidates += [
         ("config.llm_api_key", (config.get("llm_api_key") or "").strip()),
         ("env.GRAPH_NEXUS_LLM_API_KEY", os.environ.get("GRAPH_NEXUS_LLM_API_KEY", "").strip()),
         (f"env_default_for_{provider}", _default_api_key_for_provider(provider)),
