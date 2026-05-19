@@ -29,6 +29,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from llm_utils import (
+    call_llm_by_provider,
     call_structured_llm_by_provider,
     get_last_structured_llm_call_metadata,
     normalize_reasoning_effort,
@@ -1354,7 +1355,10 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
     provider_config = _build_llm_test_provider_config(body)
     _reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
     _test_max_tokens = {"high": 2048, "medium": 1024, "low": 256}.get(_reasoning_effort, 64)
-    _test_started = time.monotonic()
+
+    # Stage 1: structured connectivity check. Verifies auth + the
+    # structured-output path the strategy uses for sentiment/event LLMs.
+    _structured_started = time.monotonic()
     result = call_structured_llm_by_provider(
         provider,
         api_key,
@@ -1374,19 +1378,46 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         output_retries=1,
         provider_config=provider_config,
     )
-    _test_elapsed_ms = int((time.monotonic() - _test_started) * 1000)
+    _structured_elapsed_ms = int((time.monotonic() - _structured_started) * 1000)
     meta = get_last_structured_llm_call_metadata()
     if result is None:
         detail = str(meta.get("error") or "").strip() or "LLM connectivity test failed."
         raise HTTPException(status_code=400, detail=detail)
-
-    # Expose the actual parsed LLM response so operators can verify the
-    # test isn't lying (e.g. an upstream proxy returning a canned 200 OK).
-    # `result` is a Pydantic model instance from LlmConfigTestOutput.
     try:
         _result_payload = result.dict() if hasattr(result, "dict") else dict(result)
     except Exception:
         _result_payload = {"_unserializable": str(result)[:512]}
+
+    # Stage 2: real-generation smoke. The structured check above could
+    # in theory be answered by a degenerate echo path; this prompt forces
+    # the model to actually generate free-form text using the SAME
+    # call_llm_by_provider hot path that strategies use for non-structured
+    # completions. If this returns non-empty, you can be confident the
+    # provider is fully usable for the strategy's runtime calls — not
+    # just a canned 200 OK from a proxy.
+    _smoke_prompt = (
+        "In exactly one short sentence (max 20 words), name one common "
+        "macroeconomic driver of equity returns. Reply with the sentence "
+        "only — no preamble, no quotes, no markdown."
+    )
+    _smoke_started = time.monotonic()
+    _smoke_text = ""
+    _smoke_error = ""
+    try:
+        _smoke_text = call_llm_by_provider(
+            provider,
+            api_key,
+            model,
+            _smoke_prompt,
+            max_output_tokens=128,
+            timeout_sec=30,
+            retries=1,
+            provider_config=provider_config,
+        ) or ""
+    except Exception as _e:
+        _smoke_error = str(_e)[:512]
+    _smoke_elapsed_ms = int((time.monotonic() - _smoke_started) * 1000)
+    _smoke_text = (_smoke_text or "").strip()
 
     return {
         "ok": True,
@@ -1394,9 +1425,20 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         "model": model,
         "effective_model": str(meta.get("effective_model") or model),
         "provider_meta": meta.get("provider_meta") or {},
+        # Structured connectivity probe — proves auth + structured path.
         "result": _result_payload,
-        "latency_ms": _test_elapsed_ms,
-        "message": f"{provider} connectivity test succeeded.",
+        "latency_ms": _structured_elapsed_ms,
+        # Real-generation smoke — proves the model actually completes.
+        "smoke_prompt": _smoke_prompt,
+        "smoke_response": _smoke_text,
+        "smoke_latency_ms": _smoke_elapsed_ms,
+        "smoke_error": _smoke_error or None,
+        "message": (
+            f"{provider} connectivity test succeeded."
+            if _smoke_text
+            else f"{provider} structured check passed but real-generation smoke returned empty"
+            + (f": {_smoke_error}" if _smoke_error else ".")
+        ),
     }
 
 

@@ -190,6 +190,9 @@ async function submitModel() {
       // Capture the actual LLM response so the user can verify the
       // test is real (e.g. a proxy returning canned 200s would fail
       // the structured-parse step or surface a suspicious payload).
+      // Backend also runs a real free-form generation smoke (smoke_*
+      // fields) using the same call_llm_by_provider path the strategy
+      // uses, so the user can see actual generated text.
       testResult.value = {
         provider: testBody.provider,
         model: testBody.model,
@@ -197,6 +200,10 @@ async function submitModel() {
         result: testBody.result,
         latency_ms: testBody.latency_ms,
         provider_meta: testBody.provider_meta,
+        smoke_prompt: testBody.smoke_prompt,
+        smoke_response: testBody.smoke_response,
+        smoke_latency_ms: testBody.smoke_latency_ms,
+        smoke_error: testBody.smoke_error,
         message: testBody.message,
       }
     } catch (e) {
@@ -579,8 +586,31 @@ onMounted(fetchModels)
                 <span v-if="testResult.latency_ms != null">latency: <span class="font-mono text-emerald-200">{{ testResult.latency_ms }}ms</span></span>
               </div>
               <div v-if="testResult.result" class="mt-1">
-                <div class="text-emerald-300/70 mb-0.5">parsed LLM response:</div>
+                <div class="text-emerald-300/70 mb-0.5">structured connectivity probe (parsed response):</div>
                 <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.result) }}</pre>
+              </div>
+              <div v-if="testResult.smoke_prompt || testResult.smoke_response || testResult.smoke_error" class="mt-1">
+                <div class="text-emerald-300/70 mb-0.5">
+                  real-generation smoke
+                  <span v-if="testResult.smoke_latency_ms != null" class="text-emerald-300/60">({{ testResult.smoke_latency_ms }}ms)</span>
+                </div>
+                <div v-if="testResult.smoke_prompt" class="text-emerald-300/60 text-[10px] mb-0.5">
+                  prompt: <span class="text-emerald-200/90">{{ testResult.smoke_prompt }}</span>
+                </div>
+                <pre
+                  v-if="testResult.smoke_response"
+                  class="font-mono text-[11px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">{{ testResult.smoke_response }}</pre>
+                <div
+                  v-else-if="testResult.smoke_error"
+                  class="font-mono text-[10px] text-red-300 bg-red-900/20 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">
+                  smoke generation failed: {{ testResult.smoke_error }}
+                </div>
+                <div
+                  v-else
+                  class="font-mono text-[10px] text-amber-300 bg-amber-900/20 rounded px-2 py-1">
+                  smoke generation returned empty — structured check passed but the
+                  model did not produce free-form text. Strategy use may still fail.
+                </div>
               </div>
               <div v-if="testResult.provider_meta && Object.keys(testResult.provider_meta).length" class="mt-1">
                 <div class="text-emerald-300/70 mb-0.5">provider meta:</div>
