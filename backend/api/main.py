@@ -1354,6 +1354,7 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
     provider_config = _build_llm_test_provider_config(body)
     _reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
     _test_max_tokens = {"high": 2048, "medium": 1024, "low": 256}.get(_reasoning_effort, 64)
+    _test_started = time.monotonic()
     result = call_structured_llm_by_provider(
         provider,
         api_key,
@@ -1373,10 +1374,19 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         output_retries=1,
         provider_config=provider_config,
     )
+    _test_elapsed_ms = int((time.monotonic() - _test_started) * 1000)
     meta = get_last_structured_llm_call_metadata()
     if result is None:
         detail = str(meta.get("error") or "").strip() or "LLM connectivity test failed."
         raise HTTPException(status_code=400, detail=detail)
+
+    # Expose the actual parsed LLM response so operators can verify the
+    # test isn't lying (e.g. an upstream proxy returning a canned 200 OK).
+    # `result` is a Pydantic model instance from LlmConfigTestOutput.
+    try:
+        _result_payload = result.dict() if hasattr(result, "dict") else dict(result)
+    except Exception:
+        _result_payload = {"_unserializable": str(result)[:512]}
 
     return {
         "ok": True,
@@ -1384,6 +1394,8 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         "model": model,
         "effective_model": str(meta.get("effective_model") or model),
         "provider_meta": meta.get("provider_meta") or {},
+        "result": _result_payload,
+        "latency_ms": _test_elapsed_ms,
         "message": f"{provider} connectivity test succeeded.",
     }
 

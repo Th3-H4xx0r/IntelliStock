@@ -24,6 +24,19 @@ const editId     = ref(null)
 const submitting = ref(false)
 const submitMsg  = ref('')
 const submitOk   = ref(false)
+// Full LLM test response so operators can verify the test is real
+// (not a canned 200 OK from an upstream proxy). Populated by submitModel
+// after /llm/test succeeds; cleared by closeModal / openModal reset paths.
+const testResult = ref(null)
+
+function _prettyJson(value) {
+  if (value == null) return ''
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch (e) {
+    return String(value)
+  }
+}
 
 const formDraft = ref({
   name: '',
@@ -109,6 +122,7 @@ function openCreateModal() {
   submitting.value = false
   submitMsg.value = ''
   submitOk.value = false
+  testResult.value = null
   showModal.value = true
 }
 
@@ -136,6 +150,7 @@ function openEditModal(m) {
   submitting.value = false
   submitMsg.value = ''
   submitOk.value = false
+  testResult.value = null
   showModal.value = true
 }
 
@@ -145,6 +160,7 @@ function closeModal(force = false) {
   editId.value = null
   submitMsg.value = ''
   submitOk.value = false
+  testResult.value = null
 }
 
 async function submitModel() {
@@ -154,6 +170,7 @@ async function submitModel() {
 
   submitting.value = true
   submitOk.value = false
+  testResult.value = null
   const isCli = d.provider === 'claude-cli'
   submitMsg.value = isCli ? (editMode.value ? 'Updating model...' : 'Saving model...') : 'Testing LLM configuration...'
 
@@ -170,6 +187,18 @@ async function submitModel() {
       })
       const testBody = await testRes.json().catch(() => ({}))
       if (!testRes.ok) throw new Error(_normalizeError(testBody, testRes.status))
+      // Capture the actual LLM response so the user can verify the
+      // test is real (e.g. a proxy returning canned 200s would fail
+      // the structured-parse step or surface a suspicious payload).
+      testResult.value = {
+        provider: testBody.provider,
+        model: testBody.model,
+        effective_model: testBody.effective_model,
+        result: testBody.result,
+        latency_ms: testBody.latency_ms,
+        provider_meta: testBody.provider_meta,
+        message: testBody.message,
+      }
     } catch (e) {
       submitOk.value = false
       submitMsg.value = `LLM test failed: ${e.message}`
@@ -233,13 +262,11 @@ async function submitModel() {
       ? 'LLM test passed. Model updated.'
       : 'LLM test passed. Model saved.'
     submitting.value = false
-    // Refresh the list now so it's ready when the modal closes, but keep
-    // the modal open briefly so the user can read the success banner.
-    // Without the delay closeModal() fires synchronously and the green
-    // confirmation flashes for ~0 frames before the modal disappears.
+    // No auto-close — the user explicitly asked to inspect the LLM
+    // test output before dismissing the modal. They close it via the
+    // Close button (Cancel re-labels itself after success). Refresh
+    // the list in the background so it's ready when they do close.
     await fetchModels()
-    await new Promise((resolve) => setTimeout(resolve, 1500))
-    closeModal(true)
   } catch (e) {
     submitOk.value = false
     submitMsg.value = e.message || 'Failed to save model.'
@@ -533,6 +560,34 @@ onMounted(fetchModels)
               {{ submitMsg }}
             </div>
 
+            <!-- LLM test response (so operators can verify the test
+                 isn't lying — e.g. an upstream proxy returning canned
+                 200s would fail structured parse or surface odd values).
+                 Shows the parsed Pydantic payload + latency + effective
+                 model + any provider_meta the backend returned. -->
+            <div
+              v-if="testResult"
+              class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-3 text-[11px] leading-relaxed text-emerald-200/90 space-y-1.5"
+            >
+              <div class="font-semibold text-emerald-200">LLM connectivity test response</div>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-emerald-300/80">
+                <span>provider: <span class="font-mono text-emerald-200">{{ testResult.provider }}</span></span>
+                <span>model: <span class="font-mono text-emerald-200">{{ testResult.model }}</span></span>
+                <span v-if="testResult.effective_model && testResult.effective_model !== testResult.model">
+                  effective: <span class="font-mono text-emerald-200">{{ testResult.effective_model }}</span>
+                </span>
+                <span v-if="testResult.latency_ms != null">latency: <span class="font-mono text-emerald-200">{{ testResult.latency_ms }}ms</span></span>
+              </div>
+              <div v-if="testResult.result" class="mt-1">
+                <div class="text-emerald-300/70 mb-0.5">parsed LLM response:</div>
+                <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.result) }}</pre>
+              </div>
+              <div v-if="testResult.provider_meta && Object.keys(testResult.provider_meta).length" class="mt-1">
+                <div class="text-emerald-300/70 mb-0.5">provider meta:</div>
+                <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.provider_meta) }}</pre>
+              </div>
+            </div>
+
             <div
               v-if="editMode"
               class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-3 text-[11px] leading-relaxed text-amber-300/80"
@@ -544,10 +599,13 @@ onMounted(fetchModels)
           <div class="px-6 pb-6 pt-4 border-t border-border-subtle flex gap-3 shrink-0">
             <button @click="closeModal"
               :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors">
-              Cancel
+              :class="submitOk
+                ? 'flex-1 py-2.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/30 transition-colors'
+                : 'flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors'">
+              {{ submitOk ? 'Close' : 'Cancel' }}
             </button>
-            <button @click="submitModel"
+            <button v-if="!submitOk"
+              @click="submitModel"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
               <template v-if="submitting">
