@@ -250,6 +250,72 @@ def _get_model_rate_limiter(model: str) -> _TokenRateLimiter | None:
     return _MODEL_RATE_LIMITERS.get((model or "").strip().lower())
 
 
+class _RequestRateLimiter:
+    """Sliding-window REQUEST-per-minute rate limiter. Thread-safe.
+
+    Used in addition to the token-based _TokenRateLimiter for providers
+    that publish a hard RPM cap (e.g. NVIDIA NIM kimi-k2.6 at 40 RPM).
+    Proactively blocks the caller when the budget is exhausted so we
+    never burn a 429 response from the upstream.
+    """
+
+    def __init__(self, requests_per_minute: int):
+        self._limit = int(requests_per_minute)
+        self._window: deque = deque()  # monotonic timestamps
+        self._lock = threading.Lock()
+
+    def acquire(self) -> float:
+        """Block until there is request budget, then reserve one slot.
+        Returns total seconds waited."""
+        waited = 0.0
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - 60.0
+                while self._window and self._window[0] <= cutoff:
+                    self._window.popleft()
+                used = len(self._window)
+                if used < self._limit:
+                    self._window.append(now)
+                    return waited
+                sleep_sec = (
+                    max(0.5, 60.0 - (now - self._window[0]) + 0.5)
+                    if self._window else 1.0
+                )
+            import sys
+            print(
+                f"[llm_utils] RPM limiter: {used}/{self._limit} req in last 60s — "
+                f"waiting {sleep_sec:.1f}s...",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(sleep_sec)
+            waited += sleep_sec
+
+
+# Per-model REQUEST-per-minute caps. NVIDIA NIM kimi-k2.6 published
+# limit is 40 RPM; we leave a small headroom by using 38 so concurrent
+# bursts (4 parallel event_maintenance batches + 1 sentiment + 1 macro)
+# stay under the cap with their own jitter.
+_MODEL_REQUEST_RATE_LIMITERS: dict[str, _RequestRateLimiter] = {
+    "moonshotai/kimi-k2.6": _RequestRateLimiter(38),
+    "moonshotai/kimi-k2.5": _RequestRateLimiter(38),
+    "moonshotai/kimi-k2": _RequestRateLimiter(38),
+}
+
+
+def _get_model_request_rate_limiter(model: str) -> _RequestRateLimiter | None:
+    """Return the RPM limiter for a model, or None if no cap is configured."""
+    key = (model or "").strip().lower()
+    if key in _MODEL_REQUEST_RATE_LIMITERS:
+        return _MODEL_REQUEST_RATE_LIMITERS[key]
+    # Best-effort prefix match for `moonshotai/kimi-*` variants we
+    # haven't enumerated explicitly (e.g. moonshotai/kimi-k2.7).
+    if key.startswith("moonshotai/kimi"):
+        return _MODEL_REQUEST_RATE_LIMITERS.get("moonshotai/kimi-k2")
+    return None
+
+
 def _omit_temperature(model: str) -> bool:
     """Return True for models that reject custom temperature and only accept the default."""
     lowered = (model or "").strip().lower()
@@ -1741,8 +1807,8 @@ def call_structured_llm_by_provider(
                 if http_attempt == 0:
                     _LAST_STRUCTURED_LLM_CALL.data["attempted_models"].append(structured_model)
                 _model_forces_raw = (
-                    (provider or "").strip().lower() in {"azure", "openai"}
-                    and any(marker in str(structured_model or "").strip().lower() for marker in ("gpt-oss", "gpt_oss", "gpt oss", "gpt-5", "gpt_5"))
+                    (provider or "").strip().lower() in {"azure", "openai", "nvidia"}
+                    and _model_skips_json_object_format(structured_model)
                 )
                 force_raw_json = prefer_raw_json or _model_forces_raw
                 if force_raw_json:
@@ -1833,6 +1899,20 @@ def call_structured_llm_by_provider(
                         import sys
                         print(
                             f"[llm_utils] Rate limiter: waited {_rl_waited:.1f}s before structured call to {structured_model!r}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                # Proactive RPM throttle for providers with a hard
+                # requests-per-minute cap (NVIDIA NIM kimi-k2.6 = 40 RPM).
+                # Acquire BEFORE PydanticAI sends the HTTP request so
+                # we never burn 429s when parallel batches burst.
+                _rpm_limiter = _get_model_request_rate_limiter(structured_model)
+                if _rpm_limiter is not None:
+                    _rpm_waited = _rpm_limiter.acquire()
+                    if _rpm_waited > 0:
+                        import sys
+                        print(
+                            f"[llm_utils] RPM throttle: waited {_rpm_waited:.1f}s before structured call to {structured_model!r}",
                             file=sys.stderr,
                             flush=True,
                         )
@@ -2669,6 +2749,19 @@ def _call_nvidia(
     """Call NVIDIA NIM API (OpenAI-compatible with extra_body for reasoning)."""
     if not api_key:
         return ""
+    # Proactive RPM throttle for NVIDIA NIM kimi-k2.x (40 req/min cap).
+    # Without this the strategy's parallel event_maintenance batches
+    # burst past the cap and burn 429s; backoff still recovers but each
+    # 429 costs 30s+ of wall-clock time. Acquire BEFORE the request.
+    _rpm_limiter = _get_model_request_rate_limiter(model)
+    if _rpm_limiter is not None:
+        _rpm_waited = _rpm_limiter.acquire()
+        if _rpm_waited > 0:
+            import sys
+            print(
+                f"[llm_utils] NVIDIA RPM throttle: waited {_rpm_waited:.1f}s before call to {model}",
+                file=sys.stderr, flush=True,
+            )
     try:
         import requests as _requests
         url = (base_url or "https://integrate.api.nvidia.com/v1").rstrip("/") + "/chat/completions"
