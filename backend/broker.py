@@ -4772,14 +4772,18 @@ if mode == MODE_BACKTEST:
     _cached_strategies, _strategy_row_id, _backtest_strategy_schema = load_strategies_from_db()
     if _cached_strategies:
         _log(f"Loaded {len(_cached_strategies)} strategy(ies) from DB", "green")
-        # Resolve all model_id references once at startup
+        # Resolve all model_id references at startup. force_refresh drops
+        # the model_resolver's 5-min TTL cache so a freshly-edited Models
+        # row (via UI Test & Save) is picked up immediately — every
+        # backtest spawn reads the latest credentials from the Models
+        # table, no broker restart required.
         try:
             _resolve_conn = get_conn()
             for _spec in _cached_strategies:
                 cfg = _spec.get("config") or {}
-                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg)
+                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg, force_refresh=True)
             _resolve_conn.close()
-            _log("Resolved model_id references in strategy configs", "green")
+            _log("Resolved model_id references in strategy configs (force_refresh=True)", "green")
         except Exception as _e:
             _log(f"Model resolution warning: {_e}", "yellow")
         _cached_strategies = sorted(_cached_strategies, key=lambda s: int(s.get('execution_position', 0)))
@@ -5373,14 +5377,18 @@ if mode != MODE_BACKTEST:
     _cached_strategies, _strategy_row_id, _ = load_strategies_from_db()
     if _cached_strategies:
         _log(f"Loaded {len(_cached_strategies)} strategy(ies) from DB", "green")
-        # Resolve all model_id references once at startup
+        # Resolve all model_id references at startup. force_refresh drops
+        # the resolver's 5-min TTL cache so the live broker always boots
+        # with the latest credentials from the Models table — a key
+        # edit via the UI propagates on the next live-broker (re)start
+        # AND on every bar via run_run_once_strategies' per-call refresh.
         try:
             _resolve_conn = get_conn()
             for _spec in _cached_strategies:
                 cfg = _spec.get("config") or {}
-                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg)
+                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg, force_refresh=True)
             _resolve_conn.close()
-            _log("Resolved model_id references in strategy configs", "green")
+            _log("Resolved model_id references in strategy configs (force_refresh=True)", "green")
         except Exception as _e:
             _log(f"Model resolution warning: {_e}", "yellow")
         # LIVE MODE: apply in-memory overrides on top of the user's DB-tuned configs.

@@ -56,7 +56,7 @@ def invalidate_model_cache(model_id: str | None = None):
             _model_cache.clear()
 
 
-def resolve_model_refs_in_config(conn, config: dict) -> dict:
+def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = False) -> dict:
     """
     Find all ``*_llm_model_id`` keys in *config*, look up each from the
     Models table, and inject the model's credentials as inline fields.
@@ -65,6 +65,11 @@ def resolve_model_refs_in_config(conn, config: dict) -> dict:
     If a model_id cannot be resolved (deleted / missing), the key is
     silently skipped and the strategy falls through to environment
     variables / provider defaults.
+
+    When ``force_refresh`` is True, the per-module 5-minute doc cache
+    is dropped before resolution so the DB row is always re-read.
+    Use this at backtest-process spawn / live-broker startup so a key
+    edit via the Models UI propagates without waiting for the TTL.
     """
     if not config:
         return config
@@ -73,6 +78,9 @@ def resolve_model_refs_in_config(conn, config: dict) -> dict:
     model_keys = [k for k in config if k.endswith("llm_model_id")]
     if not model_keys:
         return config
+
+    if force_refresh:
+        invalidate_model_cache()
 
     resolved = dict(config)
     for key in model_keys:

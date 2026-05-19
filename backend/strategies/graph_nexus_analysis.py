@@ -620,6 +620,10 @@ _NEXUS_COMPANY_PROMPT_BUDGET_CHARS = 6000
 _NEXUS_MACRO_PROMPT_BUDGET_CHARS = 8000
 
 _NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic"}
+# Module-level dedup cache for `LLM key source for role=...` diagnostic
+# log. Each (role, source_tag, masked_key) tuple is logged at most once
+# per process lifetime so operators can spot stale inline credentials.
+_LLM_KEY_SOURCE_LOG_SEEN: set[tuple[str, str, str]] = set()
 _NEXUS_GOVERNMENT_ACTION_TYPES = {
     "monetary_policy", "fiscal_policy", "interest_rate_hike", "interest_rate_cut",
     "inflation_policy", "trade_policy", "tariffs", "sanctions", "war_declared",
@@ -904,19 +908,47 @@ def _resolve_role_llm_config(config: dict, role: str) -> tuple[str, str, str, st
         or os.environ.get(f"GRAPH_NEXUS_{role.upper()}_LLM_PROVIDER", "").strip()
         or os.environ.get("GRAPH_NEXUS_LLM_PROVIDER", "gemini").strip()
     )
-    api_key = (
-        _lb_cfg("azure_openai_api_key")
-        or _lb_cfg("llm_api_key")
-        or (config.get(f"{prefix}azure_openai_api_key") or "").strip()
-        or os.environ.get(f"GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", "").strip()
-        or (config.get(f"{prefix}llm_api_key") or "").strip()
-        or os.environ.get(f"GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", "").strip()
-        or (config.get("azure_openai_api_key") or "").strip()
-        or os.environ.get("GRAPH_NEXUS_AZURE_OPENAI_API_KEY", "").strip()
-        or (config.get("llm_api_key") or "").strip()
-        or os.environ.get("GRAPH_NEXUS_LLM_API_KEY", "").strip()
-        or _default_api_key_for_provider(provider)
+    # Resolve api_key with an explicit source tag so operators can see
+    # *which* config/env layer supplied the credential. Without this,
+    # an inline `*_llm_api_key` field in the strategy config silently
+    # shadows a freshly-updated Models-table model_doc and produces
+    # confusing 401s after a successful UI "Test & Save".
+    _api_key_candidates: list[tuple[str, str]] = [
+        ("lookback_azure_openai_api_key", _lb_cfg("azure_openai_api_key")),
+        ("lookback_llm_api_key", _lb_cfg("llm_api_key")),
+        (f"config.{prefix}azure_openai_api_key", (config.get(f"{prefix}azure_openai_api_key") or "").strip()),
+        (f"env.GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", os.environ.get(f"GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", "").strip()),
+        (f"config.{prefix}llm_api_key", (config.get(f"{prefix}llm_api_key") or "").strip()),
+        (f"env.GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", os.environ.get(f"GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", "").strip()),
+        ("config.azure_openai_api_key", (config.get("azure_openai_api_key") or "").strip()),
+        ("env.GRAPH_NEXUS_AZURE_OPENAI_API_KEY", os.environ.get("GRAPH_NEXUS_AZURE_OPENAI_API_KEY", "").strip()),
+        ("config.llm_api_key", (config.get("llm_api_key") or "").strip()),
+        ("env.GRAPH_NEXUS_LLM_API_KEY", os.environ.get("GRAPH_NEXUS_LLM_API_KEY", "").strip()),
+        (f"env_default_for_{provider}", _default_api_key_for_provider(provider)),
+    ]
+    api_key = ""
+    _api_key_source = "<none>"
+    for _src, _val in _api_key_candidates:
+        if _val:
+            api_key = _val
+            _api_key_source = _src
+            break
+    # Diagnostic: log the resolution path once per (role, source,
+    # masked-key) signature so operators can spot stale inline
+    # `*_llm_api_key` config entries shadowing freshly-updated
+    # Models-table rows. De-duplication via module-level set keeps
+    # log volume bounded across many resolution calls per bar.
+    _masked = (
+        f"len={len(api_key)} prefix={api_key[:4]} suffix={api_key[-4:]}"
+        if len(api_key) >= 8 else f"len={len(api_key)}"
     )
+    _key_sig = (role or "default", _api_key_source, _masked)
+    if _key_sig not in _LLM_KEY_SOURCE_LOG_SEEN:
+        _LLM_KEY_SOURCE_LOG_SEEN.add(_key_sig)
+        _log(
+            f"LLM key source for role={role or 'default'}: {_api_key_source} ({_masked})",
+            "cyan",
+        )
     model = (
         _lb_cfg("llm_model")
         or (config.get(f"{prefix}llm_model") or "").strip()
