@@ -5344,6 +5344,18 @@ def _enforce_sector_portfolio_cap(
     config: dict,
     prices: dict | None = None,
     price_history: dict | None = None,
+    *,
+    # η.G — Phase η (2026-05-20): optional context for conditional swap.
+    # When all of (scores, nexus_sell_enforcement, date_key) are provided
+    # and eta_v31_swap_enabled is True, the function attempts to swap a
+    # weaker held same-sector position for an eligible HIGH-conviction
+    # new buy before demoting it.
+    scores: dict | None = None,
+    strategy_cache: dict | None = None,
+    propagated: dict | None = None,
+    nexus_sell_enforcement: set | None = None,
+    sentiment_data: dict | None = None,
+    date_key: str | None = None,
 ) -> list[dict]:
     if not bool(config.get("max_sector_portfolio_enabled", True)):
         return funded_slate
@@ -5358,6 +5370,8 @@ def _enforce_sector_portfolio_cap(
         for t in tickers:
             ticker_to_sector.setdefault(str(t).strip().upper(), sector_kw)
     sector_dollars: dict[str, float] = {}
+    # η.G: also track held-by-sector with per-position dollar amounts for swap eligibility.
+    held_by_sector: dict[str, list[tuple[str, float]]] = {}
     # Existing position dollar exposure
     if portfolio_emulator is not None:
         positions = getattr(portfolio_emulator, "_positions", {}) or {}
@@ -5371,10 +5385,14 @@ def _enforce_sector_portfolio_cap(
             sym_u = str(sym).strip().upper()
             sector = ticker_to_sector.get(sym_u, "unknown")
             price = _resolve_symbol_price(sym_u, prices, price_history, portfolio_emulator=portfolio_emulator) or 0.0
-            sector_dollars[sector] = sector_dollars.get(sector, 0.0) + qty_f * float(price or 0.0)
+            held_dollars = qty_f * float(price or 0.0)
+            sector_dollars[sector] = sector_dollars.get(sector, 0.0) + held_dollars
+            held_by_sector.setdefault(sector, []).append((sym_u, held_dollars))
     # Add new buys to sector exposure
+    new_buy_tickers: set[str] = set()
     for item in funded_slate:
         sym_u = str(item.get("ticker") or "").strip().upper()
+        new_buy_tickers.add(sym_u)
         sector = ticker_to_sector.get(sym_u, "unknown")
         buy_cash = float(item.get("buy_cash", 0.0) or 0.0)
         sector_dollars[sector] = sector_dollars.get(sector, 0.0) + buy_cash
@@ -5382,6 +5400,21 @@ def _enforce_sector_portfolio_cap(
     over_cap = {s: amt for s, amt in sector_dollars.items() if amt > cap_dollars}
     if not over_cap:
         return funded_slate
+    # η.G — Phase η (2026-05-20): conditional-swap context.
+    _eta_g_enabled = bool(config.get("eta_v31_swap_enabled", True))
+    _eta_g_sources = set(config.get(
+        "eta_v31_swap_eligible_sources",
+        ["momentum_watchlist", "propagation_expansion"],
+    ))
+    _eta_g_min_hold = int(config.get("eta_v31_swap_min_hold_days", 3) or 3)
+    _eta_g_max_pnl = float(config.get("eta_v31_swap_max_pnl", 0.15) or 0.15)
+    _eta_g_can_run = (
+        _eta_g_enabled
+        and scores is not None
+        and nexus_sell_enforcement is not None
+        and date_key is not None
+    )
+    _eta_g_swaps: list[str] = []
     demoted_tickers: list[str] = []
     for sector, total_in_sector in over_cap.items():
         excess = total_in_sector - cap_dollars
@@ -5400,6 +5433,86 @@ def _enforce_sector_portfolio_cap(
             item_cash = float(item.get("buy_cash", 0.0) or 0.0)
             if item_cash <= 0:
                 continue
+            # η.G — try conditional swap BEFORE demoting eligible items.
+            if _eta_g_can_run:
+                _eta_g_item_source = str(item.get("signal_source") or "")
+                if _eta_g_item_source in _eta_g_sources:
+                    _eta_g_new_eff = float(item.get("raw_net_score", 0.0) or 0.0)
+                    _eta_g_candidates: list[tuple[float, str, float]] = []
+                    for _eta_g_held_sym, _eta_g_held_dollars in held_by_sector.get(sector, []):
+                        if _eta_g_held_sym in new_buy_tickers:
+                            continue  # defensive: don't swap something also being bought
+                        _eta_g_held_doc = scores.get(_eta_g_held_sym, {}) or {}
+                        _eta_g_held_eff = float(_eta_g_held_doc.get("raw_net_score", 0.0) or 0.0)
+                        if _eta_g_held_eff >= _eta_g_new_eff:
+                            continue
+                        _eta_g_age = _get_open_position_held_days(
+                            portfolio_emulator, _eta_g_held_sym, date_key
+                        ) or 0
+                        if int(_eta_g_age) < _eta_g_min_hold:
+                            continue
+                        _eta_g_entry = _get_open_position_entry_trade(
+                            portfolio_emulator, _eta_g_held_sym
+                        )
+                        if not _eta_g_entry:
+                            continue
+                        _eta_g_entry_price = float(_eta_g_entry.get("price", 0.0) or 0.0)
+                        _eta_g_cur_price = _resolve_symbol_price(
+                            _eta_g_held_sym, prices, price_history,
+                            portfolio_emulator=portfolio_emulator,
+                        ) or 0.0
+                        if _eta_g_entry_price <= 0 or _eta_g_cur_price <= 0:
+                            continue
+                        _eta_g_pnl_pct = (
+                            (_eta_g_cur_price - _eta_g_entry_price) / _eta_g_entry_price
+                        )
+                        if _eta_g_pnl_pct > _eta_g_max_pnl:
+                            continue
+                        _eta_g_tier = _resolve_conviction_tier_at_exit(
+                            _eta_g_held_sym, config, strategy_cache, propagated
+                        )
+                        _eta_g_regime = str(
+                            (strategy_cache or {}).get("_market_regime") or "bull"
+                        )
+                        _eta_g_in_grace, _eta_g_esc, _ = _in_initial_grace_period(
+                            int(_eta_g_age),
+                            float(_eta_g_pnl_pct * 100.0),
+                            config,
+                            _eta_g_regime,
+                            conviction_tier=_eta_g_tier,
+                        )
+                        if _eta_g_in_grace and not _eta_g_esc:
+                            continue
+                        if _eta_g_tier == "HIGH" and _eta_g_in_grace:
+                            continue
+                        _eta_g_candidates.append(
+                            (_eta_g_held_eff, _eta_g_held_sym, _eta_g_held_dollars)
+                        )
+                    if _eta_g_candidates:
+                        _eta_g_candidates.sort()  # weakest first
+                        _eta_g_target_eff, _eta_g_target, _eta_g_target_dollars = (
+                            _eta_g_candidates[0]
+                        )
+                        nexus_sell_enforcement.add(_eta_g_target)
+                        if isinstance(scores, dict):
+                            scores.setdefault(_eta_g_target, {})["raw_net_score"] = 0.0
+                        _eta_g_swaps.append(_eta_g_target)
+                        _log(
+                            f"[ETA.G] V31 conditional swap: sell existing {_eta_g_target} "
+                            f"(eff={_eta_g_target_eff:.3f}, ${_eta_g_target_dollars:.0f}) to keep "
+                            f"new buy {item.get('ticker')} (eff={_eta_g_new_eff:.3f}) "
+                            f"in sector={sector}",
+                            "magenta",
+                        )
+                        # Selling the held frees its dollars from sector accounting.
+                        excess -= _eta_g_target_dollars
+                        sector_dollars[sector] = max(0.0, sector_dollars.get(sector, 0.0) - _eta_g_target_dollars)
+                        # Remove the swap target from held_by_sector so it can't be picked twice.
+                        held_by_sector[sector] = [
+                            (t, d) for (t, d) in held_by_sector.get(sector, [])
+                            if t != _eta_g_target
+                        ]
+                        continue  # do NOT demote this item
             item["buy_cash"] = 0.0
             item["sector_cap_demoted"] = True
             excess -= item_cash
@@ -5409,6 +5522,12 @@ def _enforce_sector_portfolio_cap(
             f"V31 sector portfolio cap: demoted {len(demoted_tickers)} buy(s) "
             f"({', '.join(demoted_tickers[:6])}) — sectors over {cap_pct*100:.0f}% cap",
             "yellow",
+        )
+    if _eta_g_swaps:
+        _log(
+            f"[ETA.G] V31 swap summary: {len(_eta_g_swaps)} held position(s) "
+            f"sold to rescue eligible new buys ({', '.join(_eta_g_swaps[:6])})",
+            "magenta",
         )
     return [item for item in funded_slate if float(item.get("buy_cash", 0.0) or 0.0) > 0.0]
 
@@ -23531,6 +23650,15 @@ class GraphNexusAnalysis:
                         config,
                         prices=prices,
                         price_history=data,
+                        # η.G — Phase η (2026-05-20): supply context so the cap
+                        # enforcer can attempt a conditional swap before
+                        # demoting eligible HIGH-conviction new buys.
+                        scores=scores,
+                        strategy_cache=strategy_cache,
+                        propagated=propagated,
+                        nexus_sell_enforcement=nexus_sell_enforcement,
+                        sentiment_data=sentiment_data,
+                        date_key=date_key,
                     )
                 # HM fix: Deduct slate consumption so reserved slot doesn't double-allocate
                 _slate_spend = sum(float(f.get("buy_cash", 0.0) or 0.0) for f in _funded_stock_slate)

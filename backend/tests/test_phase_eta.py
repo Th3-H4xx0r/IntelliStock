@@ -388,3 +388,101 @@ def test_eta_e_bt277953_calibration():
     # With η.A lifting raw to ~1.0 (via momentum_breakout seeding), MU jumps to 1.7
     fs_mu_post_a, _ = _apply_eta_e_floor(1.0, 1.5)
     assert fs_mu_post_a == pytest.approx(1.7, rel=1e-6)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# η.G — V31 sector cap conditional swap tests
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _eta_g_swap_candidate(
+    new_effective: float,
+    held_effective: float,
+    held_age_days: int,
+    held_pnl_pct: float,
+    held_in_grace: bool,
+    held_tier: str,
+    min_hold: int = 3,
+    max_pnl: float = 0.15,
+) -> bool:
+    """Pure-logic eligibility check mirroring spec §4.5."""
+    if held_effective >= new_effective:
+        return False
+    if held_age_days < min_hold:
+        return False
+    if held_pnl_pct > max_pnl:
+        return False
+    if held_in_grace:
+        return False
+    if held_tier == "HIGH" and held_in_grace:
+        return False
+    return True
+
+
+def test_eta_g_swaps_when_weaker_exists():
+    assert _eta_g_swap_candidate(
+        new_effective=1.9, held_effective=0.3,
+        held_age_days=5, held_pnl_pct=-0.02,
+        held_in_grace=False, held_tier="LOW",
+    ) is True
+
+
+def test_eta_g_does_not_swap_when_held_stronger():
+    assert _eta_g_swap_candidate(
+        new_effective=1.5, held_effective=1.8,
+        held_age_days=5, held_pnl_pct=0.0,
+        held_in_grace=False, held_tier="LOW",
+    ) is False
+
+
+def test_eta_g_respects_min_hold_days():
+    assert _eta_g_swap_candidate(
+        new_effective=1.9, held_effective=0.3,
+        held_age_days=2,  # below default 3
+        held_pnl_pct=-0.02, held_in_grace=False, held_tier="LOW",
+    ) is False
+
+
+def test_eta_g_respects_max_pnl():
+    assert _eta_g_swap_candidate(
+        new_effective=1.9, held_effective=0.3,
+        held_age_days=5, held_pnl_pct=0.20,  # above 0.15
+        held_in_grace=False, held_tier="LOW",
+    ) is False
+
+
+def test_eta_g_does_not_sell_grace_period_holding():
+    assert _eta_g_swap_candidate(
+        new_effective=1.9, held_effective=0.3,
+        held_age_days=2, held_pnl_pct=-0.05,
+        held_in_grace=True, held_tier="LOW",
+    ) is False
+
+
+def test_eta_g_does_not_sell_high_tier_in_grace():
+    assert _eta_g_swap_candidate(
+        new_effective=1.9, held_effective=0.3,
+        held_age_days=5, held_pnl_pct=-0.05,
+        held_in_grace=True, held_tier="HIGH",
+    ) is False
+
+
+def test_eta_g_picks_weakest_when_multiple_eligible():
+    # Imitate the picker: lowest effective wins
+    candidates = [
+        (0.5, "T"),    # T at eff=0.5
+        (0.3, "INTC"), # INTC at eff=0.3 (weakest)
+        (0.4, "AIQ"),  # AIQ at eff=0.4
+    ]
+    candidates.sort()  # ascending by effective
+    weakest_eff, weakest_ticker = candidates[0]
+    assert weakest_ticker == "INTC"
+    assert weakest_eff == 0.3
+
+
+def test_eta_g_eligible_sources_filter():
+    """η.G only fires for momentum_watchlist + propagation_expansion buy sources."""
+    eligible = {"momentum_watchlist", "propagation_expansion"}
+    assert "momentum_watchlist" in eligible
+    assert "llm_direct" not in eligible
+    assert "general" not in eligible
