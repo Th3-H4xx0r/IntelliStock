@@ -79,6 +79,11 @@ _BLACKLIST_PREFIXES = (
     # stats counters are also per-run telemetry.
     "_neo4j_snapshot",
     "_neo4j_snapshot_stats",
+    # Phase η (2026-05-20): per-run sector map cache for η.B'/η.G.
+    # Sectors don't change mid-backtest, but a fresh run should re-fetch
+    # via Neo4j IN_SECTOR. Persisting would carry stale sector
+    # assignments across backtest restarts.
+    "_eta_sector_map",
 )
 
 _MAX_DICT_ENTRIES = 500
