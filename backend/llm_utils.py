@@ -252,18 +252,28 @@ def _get_model_rate_limiter(model: str) -> _TokenRateLimiter | None:
 
 class _RequestRateLimiter:
     """Sliding-window REQUEST-per-minute rate limiter with a minimum
-    inter-request gap. Thread-safe.
+    inter-request gap AND a circuit breaker. Thread-safe.
 
-    Two complementary guards:
+    Three complementary guards:
       * Sliding 60s window caps total RPM (`requests_per_minute`).
       * `min_interval_sec` enforces a gap between consecutive requests
         so bursts don't blow past providers' sub-minute hidden limits.
-        (NVIDIA NIM kimi-k2.6 turned out to enforce something stricter
-        than 60s RPM — bursts of 15 in 17s 429'd every request even
-        though we were under the published 40/min cap.)
+      * Circuit breaker: after N consecutive 429s (observed via the
+        external `note_rate_limited()` hook) the limiter blocks all
+        requests for `breaker_cooldown_sec`. This protects against
+        providers whose rate-limit state persists across our process
+        lifetime — once we've been put in NVIDIA's penalty box we
+        stop hammering, wait, and let the window clear.
     """
 
-    def __init__(self, requests_per_minute: int, min_interval_sec: float | None = None):
+    def __init__(
+        self,
+        requests_per_minute: int,
+        min_interval_sec: float | None = None,
+        *,
+        breaker_threshold: int = 3,
+        breaker_cooldown_sec: float = 120.0,
+    ):
         self._limit = int(requests_per_minute)
         # Default: spread requests evenly across the window.
         if min_interval_sec is None and self._limit > 0:
@@ -271,14 +281,50 @@ class _RequestRateLimiter:
         self._min_interval = float(min_interval_sec or 0.0)
         self._window: deque = deque()  # monotonic timestamps
         self._lock = threading.Lock()
+        # Circuit breaker state.
+        self._breaker_threshold = max(1, int(breaker_threshold))
+        self._breaker_cooldown = float(breaker_cooldown_sec)
+        self._consecutive_429s = 0
+        self._breaker_open_until = 0.0  # monotonic; >now means tripped
+
+    def note_success(self) -> None:
+        """Tell the limiter the most recent request succeeded. Resets
+        the consecutive-429 counter; does NOT touch the cooldown timer
+        (a tripped breaker still waits out its full cooldown)."""
+        with self._lock:
+            self._consecutive_429s = 0
+
+    def note_rate_limited(self) -> None:
+        """Tell the limiter the most recent request 429'd. After
+        breaker_threshold consecutive 429s, open the breaker for
+        breaker_cooldown_sec — subsequent acquire() calls will block
+        until the cooldown elapses."""
+        with self._lock:
+            self._consecutive_429s += 1
+            if self._consecutive_429s >= self._breaker_threshold:
+                self._breaker_open_until = time.monotonic() + self._breaker_cooldown
+                import sys
+                print(
+                    f"[llm_utils] RPM limiter: circuit breaker OPEN — "
+                    f"{self._consecutive_429s} consecutive 429s, pausing "
+                    f"requests for {self._breaker_cooldown:.0f}s",
+                    file=sys.stderr, flush=True,
+                )
 
     def acquire(self) -> float:
         """Block until there is request budget AND the min-gap has
-        elapsed, then reserve one slot. Returns total seconds waited."""
+        elapsed AND the circuit breaker (if any) is closed, then
+        reserve one slot. Returns total seconds waited."""
         waited = 0.0
         while True:
             with self._lock:
                 now = time.monotonic()
+                # Circuit-breaker check FIRST. When tripped, every
+                # acquire waits out the full cooldown before any
+                # other budget logic runs.
+                breaker_wait = 0.0
+                if self._breaker_open_until > now:
+                    breaker_wait = self._breaker_open_until - now
                 cutoff = now - 60.0
                 while self._window and self._window[0] <= cutoff:
                     self._window.popleft()
@@ -289,10 +335,12 @@ class _RequestRateLimiter:
                     elapsed = now - self._window[-1]
                     if elapsed < self._min_interval:
                         gap_wait = self._min_interval - elapsed
-                if used < self._limit and gap_wait <= 0:
+                if breaker_wait <= 0 and used < self._limit and gap_wait <= 0:
                     self._window.append(now)
                     return waited
-                if used >= self._limit:
+                if breaker_wait > 0:
+                    sleep_sec = max(0.5, breaker_wait + 0.1)
+                elif used >= self._limit:
                     sleep_sec = (
                         max(0.5, 60.0 - (now - self._window[0]) + 0.5)
                         if self._window else 1.0
@@ -2843,11 +2891,18 @@ def _call_nvidia(
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
+                # Tell the limiter about 429s so the circuit breaker
+                # can trip after sustained throttling and pause us
+                # globally instead of hammering NVIDIA's penalty box.
+                if r.status_code == 429 and _rpm_limiter is not None:
+                    _rpm_limiter.note_rate_limited()
                 wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
                 time.sleep(wait)
                 continue
 
             if r.status_code >= 400:
+                if r.status_code == 429 and _rpm_limiter is not None:
+                    _rpm_limiter.note_rate_limited()
                 try:
                     _err_body = r.json()
                 except Exception:
@@ -2864,6 +2919,8 @@ def _call_nvidia(
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                if _rpm_limiter is not None:
+                    _rpm_limiter.note_success()
                 return text
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
