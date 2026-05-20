@@ -1318,7 +1318,17 @@ _PAIRING_URL_RE = re.compile(
     r"(https?://(?:chatgpt\.com|platform\.openai\.com|auth\.openai\.com)(?=[/?#\s]|$)[^\s@]*)",
     re.IGNORECASE,
 )
-_PAIRING_CODE_RE = re.compile(r"\b([A-Z0-9]{4}-?[A-Z0-9]{4})\b")
+# Device codes are 3-6 alphanumeric chars on each side of a single
+# dash. Real-world examples from codex 0.132 include "BLM4-B2C6J" (4-5),
+# older flows used 4-4 ("A1B2-C3D4"). Require the dash so we don't pick
+# up random 8-char tokens in unrelated stderr text.
+_PAIRING_CODE_RE = re.compile(r"\b([A-Z0-9]{3,6}-[A-Z0-9]{3,6})\b")
+# ANSI / VT100 SGR escape sequences (e.g. "\x1b[94m" for blue, "\x1b[0m"
+# to reset). codex 0.132 wraps both the URL and the pairing code with
+# these when stderr is captured to a pipe, even though stdin is closed —
+# the URL regex would otherwise consume the trailing reset sequence
+# (``…/device\x1b[0m``) and surface a corrupted link to the operator.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _is_safe_pairing_url(url: str) -> bool:
@@ -1580,6 +1590,15 @@ class CodexDeviceCodeLogin:
                 if not line:
                     break
                 text = line.rstrip()
+                # Strip ANSI/VT100 SGR escapes BEFORE matching. codex
+                # 0.132 wraps the URL and pairing code in color codes
+                # (``\x1b[94m…\x1b[0m``) even when stdout/stderr are
+                # captured to a pipe. Without stripping, the URL regex
+                # would consume the trailing ``\x1b[0m`` (matches
+                # ``[^\s@]*``) and surface a corrupted link, and the
+                # pairing-code regex's word-boundary anchor would
+                # fail to find a clean match next to an ESC byte.
+                clean = _ANSI_ESCAPE_RE.sub("", text)
                 with cls._jobs_lock:
                     buf = getattr(job, buf_name)
                     buf.append(text)
@@ -1589,23 +1608,20 @@ class CodexDeviceCodeLogin:
                     # stderr. codex 0.132's ``codex login`` writes to
                     # stderr ("Starting local login server …", "If your
                     # browser did not open, navigate to …"), while
-                    # ``codex login --device-auth`` similarly emits the
-                    # chatgpt.com URL + 8-char code on stderr. The
+                    # ``codex login --device-auth`` emits the
+                    # ``https://auth.openai.com/codex/device`` URL +
+                    # ``XXXX-XXXXX`` pairing code on stdout. The
                     # _is_safe_pairing_url gate still constrains the
                     # host to the OpenAI allowlist so a future flag
                     # change can't slip a non-OpenAI URL through.
                     if not job.pairing_url:
-                        m = _PAIRING_URL_RE.search(text)
+                        m = _PAIRING_URL_RE.search(clean)
                         if m and _is_safe_pairing_url(m.group(1)):
                             job.pairing_url = m.group(1)
                     if not job.pairing_code:
-                        m = _PAIRING_CODE_RE.search(text)
+                        m = _PAIRING_CODE_RE.search(clean)
                         if m:
-                            code = m.group(1)
-                            # Allow 8-char "XXXXYYYY" too; normalize.
-                            if "-" not in code and len(code) == 8:
-                                code = f"{code[:4]}-{code[4:]}"
-                            job.pairing_code = code
+                            job.pairing_code = m.group(1)
         except Exception:
             pass
         try:

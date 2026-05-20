@@ -437,6 +437,52 @@ class TestCodexDeviceCodeLogin:
             assert snap["pairing_url"] is not None and "chatgpt.com" in snap["pairing_url"]
             assert snap["pairing_code"] == "A1B2-C3D4"
 
+    def test_parses_codex_0_132_device_auth_output_with_ansi(self):
+        # Regression: codex 0.132 ``codex login --device-auth`` wraps
+        # both the URL and the pairing code in ANSI SGR escapes
+        # (``\x1b[94m…\x1b[0m``) and uses a 4-5 char pairing code
+        # format like ``BLM4-B2C6J`` (vs the older 4-4 ``A1B2-C3D4``).
+        # Without ANSI strip the URL regex eats the trailing reset
+        # sequence and produces a corrupted link; without the wider
+        # code regex the parser misses the code entirely. This test
+        # pins both fixes so the panel never gets stuck on
+        # "Waiting for sign-in…" with no URL/code surfaced.
+        stdout_lines = iter([
+            "Welcome to Codex [v\x1b[90m0.132.0\x1b[0m]\n",
+            "Follow these steps to sign in with ChatGPT using device code authorization:\n",
+            "\n",
+            "1. Open this link in your browser and sign in to your account\n",
+            "   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n",
+            "\n",
+            "2. Enter this one-time code (expires in 15 minutes)\n",
+            "   \x1b[94mBLM4-B2C6J\x1b[0m\n",
+            "\n",
+            "",  # EOF
+        ])
+        stderr_lines = iter([""])
+        fake_proc = mock.Mock()
+        fake_proc.stdout = mock.Mock()
+        fake_proc.stdout.readline = lambda: next(stdout_lines)
+        fake_proc.stderr = mock.Mock()
+        fake_proc.stderr.readline = lambda: next(stderr_lines)
+        fake_proc.poll = mock.Mock(return_value=None)
+        fake_proc.wait = mock.Mock(return_value=0)
+
+        with mock.patch("chatbot.codex_cli_provider.shutil.which", return_value="/usr/local/bin/codex"), \
+             mock.patch("chatbot.codex_cli_provider._is_system_binary_path", return_value=True), \
+             mock.patch("chatbot.codex_cli_provider.subprocess.Popen", return_value=fake_proc):
+            job = CodexDeviceCodeLogin.start(cli_path="codex")
+            for _ in range(50):
+                snap = CodexDeviceCodeLogin.status(job.job_id)
+                if snap and snap["pairing_url"] and snap["pairing_code"]:
+                    break
+                time.sleep(0.02)
+            snap = CodexDeviceCodeLogin.status(job.job_id)
+            assert snap is not None
+            # The URL must NOT contain residual ANSI escapes.
+            assert snap["pairing_url"] == "https://auth.openai.com/codex/device"
+            assert snap["pairing_code"] == "BLM4-B2C6J"
+
     def test_rejects_non_openai_pairing_url(self):
         # An attacker-controlled codex build that prints a non-OpenAI URL
         # must NOT be surfaced to the operator (regex + urlparse gates).
