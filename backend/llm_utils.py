@@ -310,29 +310,41 @@ class _RequestRateLimiter:
             waited += sleep_sec
 
 
-# Per-model REQUEST-per-minute caps. NVIDIA NIM kimi-k2.6 PUBLISHES
-# 40 RPM but in production 429s appear at ~10 RPM, and rate-limit
-# state carries across the published 60s window (bursts hours
-# earlier still trigger 429 on the very first request of a new
-# backtest). Capping at 5 RPM with a min 12s inter-request gap
-# spreads calls evenly so we never trigger NIM's hidden sub-minute
-# burst limit.
-_MODEL_REQUEST_RATE_LIMITERS: dict[str, _RequestRateLimiter] = {
-    "moonshotai/kimi-k2.6": _RequestRateLimiter(5, min_interval_sec=12.0),
-    "moonshotai/kimi-k2.5": _RequestRateLimiter(5, min_interval_sec=12.0),
-    "moonshotai/kimi-k2": _RequestRateLimiter(5, min_interval_sec=12.0),
+# Per-(provider, model) REQUEST-per-minute caps. Keyed by provider so a
+# kimi-k2 model name through a non-NVIDIA proxy (Azure, OpenAI gateway,
+# etc.) doesn't get throttled — only NVIDIA NIM has the rate-limit
+# pathology that motivated this limiter.
+#
+# NVIDIA NIM kimi-k2.6 PUBLISHES 40 RPM but in production 429s appear
+# at ~10 RPM, and rate-limit state carries across the published 60s
+# window (bursts hours earlier still trigger 429 on the very first
+# request of a new backtest). Capping at 5 RPM with a min 12s
+# inter-request gap spreads calls evenly so we never trigger NIM's
+# hidden sub-minute burst limit.
+_PROVIDER_MODEL_REQUEST_RATE_LIMITERS: dict[tuple[str, str], _RequestRateLimiter] = {
+    ("nvidia", "moonshotai/kimi-k2.6"): _RequestRateLimiter(5, min_interval_sec=12.0),
+    ("nvidia", "moonshotai/kimi-k2.5"): _RequestRateLimiter(5, min_interval_sec=12.0),
+    ("nvidia", "moonshotai/kimi-k2"): _RequestRateLimiter(5, min_interval_sec=12.0),
 }
 
 
-def _get_model_request_rate_limiter(model: str) -> _RequestRateLimiter | None:
-    """Return the RPM limiter for a model, or None if no cap is configured."""
-    key = (model or "").strip().lower()
-    if key in _MODEL_REQUEST_RATE_LIMITERS:
-        return _MODEL_REQUEST_RATE_LIMITERS[key]
+def _get_model_request_rate_limiter(model: str, provider: str = "nvidia") -> _RequestRateLimiter | None:
+    """Return the RPM limiter for a (provider, model) pair, or None if
+    no cap is configured. Defaults to provider='nvidia' so existing
+    call sites inside _call_nvidia (which is NVIDIA-only) keep working
+    without a signature change."""
+    p = (provider or "").strip().lower()
+    if not p:
+        return None
+    key = (p, (model or "").strip().lower())
+    if key in _PROVIDER_MODEL_REQUEST_RATE_LIMITERS:
+        return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS[key]
     # Best-effort prefix match for `moonshotai/kimi-*` variants we
-    # haven't enumerated explicitly (e.g. moonshotai/kimi-k2.7).
-    if key.startswith("moonshotai/kimi"):
-        return _MODEL_REQUEST_RATE_LIMITERS.get("moonshotai/kimi-k2")
+    # haven't enumerated explicitly (e.g. moonshotai/kimi-k2.7), but
+    # only when the provider matches. Other providers exposing a
+    # kimi-shaped model name go unthrottled.
+    if p == "nvidia" and key[1].startswith("moonshotai/kimi"):
+        return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS.get(("nvidia", "moonshotai/kimi-k2"))
     return None
 
 
@@ -1926,16 +1938,17 @@ def call_structured_llm_by_provider(
                             flush=True,
                         )
                 # Proactive RPM throttle for providers with a hard
-                # requests-per-minute cap (NVIDIA NIM kimi-k2.6 = 40 RPM).
-                # Acquire BEFORE PydanticAI sends the HTTP request so
-                # we never burn 429s when parallel batches burst.
-                _rpm_limiter = _get_model_request_rate_limiter(structured_model)
+                # requests-per-minute cap (NVIDIA NIM kimi-k2.x).
+                # Pass provider so the limiter only fires for the
+                # exact (provider, model) pair — Azure/OpenAI/etc.
+                # paths bypass it even if a model name collides.
+                _rpm_limiter = _get_model_request_rate_limiter(structured_model, provider)
                 if _rpm_limiter is not None:
                     _rpm_waited = _rpm_limiter.acquire()
                     if _rpm_waited > 0:
                         import sys
                         print(
-                            f"[llm_utils] RPM throttle: waited {_rpm_waited:.1f}s before structured call to {structured_model!r}",
+                            f"[llm_utils] RPM throttle: waited {_rpm_waited:.1f}s before structured call to {provider}/{structured_model!r}",
                             file=sys.stderr,
                             flush=True,
                         )
