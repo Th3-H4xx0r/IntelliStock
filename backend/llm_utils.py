@@ -1501,6 +1501,7 @@ def _call_codex_cli_structured_from_strategy(
     try:
         from chatbot.codex_cli_provider import (
             call_codex_cli_structured as _impl,
+            _get_last_error as _impl_last_err,
             CodexCliError, CodexCliNotInstalledError, CodexCliNotAuthenticatedError,
             CodexCliValidationError,
         )
@@ -1597,14 +1598,26 @@ def _call_codex_cli_structured_from_strategy(
         return None
 
     if result is None:
+        # Pull the underlying reason from the provider's per-thread error
+        # state — without this the operator sees only the generic "no
+        # validated payload" string and has no way to diagnose whether
+        # the failure was an HTTP 4xx from the Responses API, a JSON
+        # validation miss, or an empty response.
+        try:
+            _impl_err = _impl_last_err() or ""
+        except Exception:
+            _impl_err = ""
+        _err_msg = (
+            f"codex-cli returned no validated payload ({_impl_err})"
+            if _impl_err else "codex-cli returned no validated payload"
+        )
         _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
-            model, cli_path, "codex-cli returned no validated payload",
-            terminal=False,
+            model, cli_path, _err_msg, terminal=False,
         )
         _safe_record(
             provider="codex-cli", model=model, usage={}, ok=False,
             duration_ms=int((time.monotonic() - _t0) * 1000),
-            retry_count=int(retries or 0), error="no validated payload",
+            retry_count=int(retries or 0), error=_err_msg[:200],
             model_id=cfg.get("id") if isinstance(cfg, dict) else None,
         )
         return None
