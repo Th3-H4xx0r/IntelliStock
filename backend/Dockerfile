@@ -36,17 +36,19 @@ RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
 # Operator completes the device-code OAuth from the Models UI; the auth
 # state lands in ``/root/.codex`` which compose mounts to a named volume
 # so it persists across restarts. Skip with ``--build-arg INSTALL_CODEX_CLI=0``.
+#
+# IMPORTANT: do NOT pre-populate /root/.codex in the image (no mkdir, no
+# ``codex --version`` probe). When Docker first mounts the named volume
+# ``codex_auth`` on backend/api/backtest-engine simultaneously, it tries
+# to seed the empty volume from whatever's at the image's /root/.codex.
+# Any content there (even ``codex --version``'s scratch ``tmp`` dir)
+# races across the three containers and one of them hits "mkdir … : file
+# exists" because two seeders touch the same subpath. Leaving the dir
+# absent means Docker creates an empty volume and codex creates its own
+# files at runtime — no race.
 RUN if [ "$INSTALL_CODEX_CLI" = "1" ]; then \
         npm install -g @openai/codex \
-        && codex --version || echo "codex installed (version probe non-fatal)"; \
-    fi
-
-# Pre-create the codex auth directory so the device-code login can write
-# tokens immediately (the codex CLI doesn't ``mkdir -p`` reliably on
-# first run inside a fresh container). Read-write by root; the api/
-# backend processes run as root and own writes here.
-RUN if [ "$INSTALL_CODEX_CLI" = "1" ]; then \
-        mkdir -p /root/.codex && chmod 700 /root/.codex; \
+        && rm -rf /root/.codex; \
     fi
 
 # Non-root user that ``claude`` subprocess invocations run as. The CLI
