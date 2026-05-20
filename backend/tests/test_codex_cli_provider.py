@@ -414,6 +414,11 @@ class TestResponsesRequestBuilder:
         )
         assert body["model"] == "gpt-5-codex"
         assert body["store"] is False
+        # The Codex Responses endpoint requires streaming; the builder
+        # always sets stream=True so a non-streaming call can't slip
+        # through and hit the upstream "Stream must be set to true"
+        # rejection.
+        assert body["stream"] is True
         assert isinstance(body["input"], list) and len(body["input"]) == 1
         assert body["input"][0]["role"] == "user"
         content = body["input"][0]["content"]
@@ -486,6 +491,105 @@ class TestResponsesTextExtractor:
         from chatbot.codex_cli_provider import _extract_responses_text
         assert _extract_responses_text({}) == ""
         assert _extract_responses_text({"output": []}) == ""
+
+
+# ── SSE stream parser ──────────────────────────────────────────────────────
+
+
+class _FakeStreamResponse:
+    """Minimal stand-in for httpx.Response inside _parse_sse_stream.
+
+    Only iter_lines is exercised by the parser; status checks happen
+    earlier in _call_responses_api.
+    """
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def iter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+class TestParseSseStream:
+    def _lines_from_events(self, events):
+        """Render a list of (event_type, data_obj) into SSE-formatted lines."""
+        out = []
+        for ev_type, payload in events:
+            if ev_type:
+                out.append(f"event: {ev_type}")
+            out.append(f"data: {json.dumps(payload)}")
+            out.append("")  # blank line between events
+        return out
+
+    def test_accumulates_deltas_and_returns_completed_response(self):
+        from chatbot.codex_cli_provider import _parse_sse_stream
+        events = [
+            ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "hel"}),
+            ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "lo"}),
+            ("response.completed", {
+                "type": "response.completed",
+                "response": {"output": [{"type": "message", "content": [
+                    {"type": "output_text", "text": "hello"},
+                ]}]},
+            }),
+        ]
+        resp = _FakeStreamResponse(self._lines_from_events(events))
+        out = _parse_sse_stream(resp)
+        # The parser returns the final response object; _extract_responses_text
+        # turns it into text.
+        from chatbot.codex_cli_provider import _extract_responses_text
+        assert _extract_responses_text(out) == "hello"
+
+    def test_falls_back_to_deltas_when_completed_missing_text(self):
+        # No response.completed at all → returns synthetic output_text.
+        from chatbot.codex_cli_provider import _parse_sse_stream, _extract_responses_text
+        events = [
+            ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "abc"}),
+            ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "def"}),
+        ]
+        resp = _FakeStreamResponse(self._lines_from_events(events))
+        out = _parse_sse_stream(resp)
+        assert _extract_responses_text(out) == "abcdef"
+
+    def test_response_failed_raises(self):
+        from chatbot.codex_cli_provider import _parse_sse_stream
+        events = [
+            ("response.failed", {"type": "response.failed", "error": {"message": "model overloaded"}}),
+        ]
+        resp = _FakeStreamResponse(self._lines_from_events(events))
+        with pytest.raises(CodexCliError, match="model overloaded"):
+            _parse_sse_stream(resp)
+
+    def test_handles_done_sentinel(self):
+        from chatbot.codex_cli_provider import _parse_sse_stream, _extract_responses_text
+        # Some streams emit a trailing ``data: [DONE]`` — must be ignored.
+        events = [
+            ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "x"}),
+        ]
+        lines = self._lines_from_events(events) + ["data: [DONE]"]
+        resp = _FakeStreamResponse(lines)
+        out = _parse_sse_stream(resp)
+        assert _extract_responses_text(out) == "x"
+
+    def test_empty_stream_raises(self):
+        from chatbot.codex_cli_provider import _parse_sse_stream
+        resp = _FakeStreamResponse([])
+        with pytest.raises(CodexCliError, match="without response.completed"):
+            _parse_sse_stream(resp)
+
+    def test_ignores_non_data_lines(self):
+        from chatbot.codex_cli_provider import _parse_sse_stream, _extract_responses_text
+        lines = [
+            ": comment line",
+            "event: response.created",
+            'data: {"type": "response.created", "response": {}}',
+            "",
+            "event: response.output_text.delta",
+            'data: {"type": "response.output_text.delta", "delta": "z"}',
+        ]
+        resp = _FakeStreamResponse(lines)
+        out = _parse_sse_stream(resp)
+        assert _extract_responses_text(out) == "z"
 
 
 # ── call_codex_cli_plain via Responses API ─────────────────────────────────

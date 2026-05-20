@@ -358,6 +358,11 @@ def _build_responses_request(
     body: Dict[str, Any] = {
         "model": model,
         "input": input_items,
+        # The Codex Responses endpoint at chatgpt.com/backend-api/codex
+        # is streaming-only: a non-streaming POST returns
+        # ``{"detail":"Stream must be set to true"}``. We always set
+        # ``stream: True`` and accumulate the SSE deltas server-side.
+        "stream": True,
         "store": False,
     }
     if system_prompt:
@@ -400,6 +405,94 @@ def _extract_responses_text(payload: Dict[str, Any]) -> str:
     return "".join(chunks).strip()
 
 
+def _parse_sse_stream(
+    response: "_httpx.Response",
+) -> Dict[str, Any]:
+    """Consume a Codex SSE event stream and return the final response object.
+
+    Codex emits OpenAI-style Responses API streaming events. The shapes
+    we care about:
+
+    * ``response.output_text.delta`` — incremental text chunks (we
+      accumulate so we have a fallback if ``response.completed`` is
+      missing or its ``response`` payload lacks pre-extracted text).
+    * ``response.completed`` — final event whose ``data.response``
+      payload mirrors the non-streaming response (same shape as
+      ``_extract_responses_text`` already expects).
+    * ``response.failed`` / ``error`` — server-side stream abort; we
+      surface as a CodexCliError so the retry layer can decide what
+      to do.
+
+    Returns the final ``response`` object (or a synthetic
+    ``{"output_text": ...}`` payload if no ``response.completed`` event
+    arrived but we collected deltas).
+    """
+    final_response: Optional[Dict[str, Any]] = None
+    text_chunks: List[str] = []
+    failure_message: Optional[str] = None
+    try:
+        for raw_line in response.iter_lines():
+            # httpx returns str when text was decoded; some streams
+            # yield bytes. Normalise to str.
+            if isinstance(raw_line, bytes):
+                try:
+                    line = raw_line.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+            else:
+                line = raw_line or ""
+            if not line:
+                continue
+            # SSE lines we care about are ``data: {...}``. ``event:``
+            # lines also exist but the JSON in data carries the
+            # ``type`` so we don't need to track event:.
+            if not line.startswith("data:"):
+                continue
+            data_str = line[len("data:"):].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            ev_type = event.get("type") or ""
+            if ev_type == "response.output_text.delta":
+                delta = event.get("delta")
+                if isinstance(delta, str):
+                    text_chunks.append(delta)
+            elif ev_type == "response.completed":
+                # ``response`` carries the same shape as non-streaming.
+                resp_obj = event.get("response")
+                if isinstance(resp_obj, dict):
+                    final_response = resp_obj
+            elif ev_type in ("response.failed", "error"):
+                err = event.get("error") or event.get("response", {}).get("error")
+                if isinstance(err, dict):
+                    failure_message = (
+                        err.get("message") or err.get("code") or str(err)[:200]
+                    )
+                elif isinstance(err, str):
+                    failure_message = err
+                else:
+                    failure_message = data_str[:200]
+    except Exception as e:
+        raise CodexCliError(f"codex Responses SSE read error: {e}") from e
+    if failure_message:
+        raise CodexCliError(f"codex Responses API stream failed: {failure_message}")
+    if final_response is not None:
+        # If the completed event already contains text in
+        # output[].content[], _extract_responses_text will use it.
+        # Otherwise fall back to our accumulated deltas.
+        if not _extract_responses_text(final_response) and text_chunks:
+            final_response.setdefault("output_text", "".join(text_chunks))
+        return final_response
+    if text_chunks:
+        return {"output_text": "".join(text_chunks)}
+    raise CodexCliError(
+        "codex Responses API stream ended without response.completed or any deltas"
+    )
+
+
 def _call_responses_api(
     *,
     access_token: str,
@@ -412,44 +505,67 @@ def _call_responses_api(
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
-        "Accept": "application/json",
+        # The endpoint is streaming-only — explicitly opt into SSE so a
+        # proxy doesn't try to JSON-buffer the response.
+        "Accept": "text/event-stream",
         "OpenAI-Beta": "responses=experimental",
     }
+    # Defensive: callers should already have set ``stream: True`` via
+    # _build_responses_request, but assert here so a missing flag fails
+    # loudly instead of with the upstream "Stream must be set to true"
+    # confusion.
+    body = dict(body)
+    body["stream"] = True
     try:
-        with _httpx.Client(timeout=_httpx.Timeout(timeout_sec)) as client:
-            resp = client.post(url, headers=headers, json=body)
+        client = _httpx.Client(timeout=_httpx.Timeout(timeout_sec))
     except Exception as e:
-        raise CodexCliError(f"codex Responses API network error: {e}") from e
-    if resp.status_code in (401, 403):
-        raise CodexCliNotAuthenticatedError(
-            f"codex Responses API rejected access_token ({resp.status_code}); "
-            f"refresh or re-authenticate via Models UI"
-        )
-    if resp.status_code == 404:
-        # Most common cause: unknown model name. Surface a clean error.
+        raise CodexCliError(f"codex Responses API client init error: {e}") from e
+    try:
         try:
-            err_body = resp.json()
-            err_msg = (
-                err_body.get("error", {}).get("message")
-                if isinstance(err_body, dict) else None
-            ) or resp.text[:200]
+            stream_ctx = client.stream("POST", url, headers=headers, json=body)
+        except Exception as e:
+            raise CodexCliError(f"codex Responses API network error: {e}") from e
+        with stream_ctx as resp:
+            if resp.status_code in (401, 403):
+                raise CodexCliNotAuthenticatedError(
+                    f"codex Responses API rejected access_token ({resp.status_code}); "
+                    f"refresh or re-authenticate via Models UI"
+                )
+            if resp.status_code == 404:
+                try:
+                    # ``read()`` is required because we opened the response
+                    # in streaming mode — .text would otherwise be empty.
+                    resp.read()
+                    err_body = resp.json()
+                    err_msg = (
+                        err_body.get("error", {}).get("message")
+                        if isinstance(err_body, dict) else None
+                    ) or (err_body.get("detail") if isinstance(err_body, dict) else None) \
+                        or resp.text[:200]
+                except Exception:
+                    err_msg = (resp.text or "")[:200]
+                raise CodexCliError(
+                    f"codex Responses API 404: {err_msg} "
+                    f"(check model name — codex supports gpt-5-codex, gpt-5, gpt-5-mini, "
+                    f"gpt-4.1-mini, o3, o4-mini)"
+                )
+            if resp.status_code == 429:
+                raise CodexCliError("codex Responses API rate-limited (429)")
+            if resp.status_code >= 400:
+                try:
+                    resp.read()
+                    err_text = resp.text[:400]
+                except Exception:
+                    err_text = ""
+                raise CodexCliError(
+                    f"codex Responses API HTTP {resp.status_code}: {err_text}"
+                )
+            return _parse_sse_stream(resp)
+    finally:
+        try:
+            client.close()
         except Exception:
-            err_msg = resp.text[:200]
-        raise CodexCliError(
-            f"codex Responses API 404: {err_msg} "
-            f"(check model name — codex supports gpt-5-codex, gpt-5, gpt-5-mini, "
-            f"gpt-4.1-mini, o3, o4-mini)"
-        )
-    if resp.status_code == 429:
-        raise CodexCliError("codex Responses API rate-limited (429)")
-    if resp.status_code >= 400:
-        raise CodexCliError(
-            f"codex Responses API HTTP {resp.status_code}: {resp.text[:400]}"
-        )
-    try:
-        return resp.json()
-    except Exception as e:
-        raise CodexCliError(f"codex Responses API returned non-JSON: {e}") from e
+            pass
 
 
 # ── extra_args allowlist ────────────────────────────────────────────────────
