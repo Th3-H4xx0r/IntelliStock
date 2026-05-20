@@ -235,25 +235,30 @@ def _claude_home_mount():
     return mounts
 
 
+_CODEX_AUTH_VOLUME_NAME = "codex_auth"
+
+
 def _augment_volumes_with_claude(volumes):
-    """Append the claude-auth mount to a ``volumes`` argument.
+    """Append the claude-auth + codex-auth mounts to a ``volumes`` arg.
 
     The Docker SDK accepts either a dict shape
     ``{host_path: {bind, mode}}`` or a list of ``"name:/path"`` /
     ``"host:/container"`` strings. The list-with-mode form
     (``"host:/container:rw"``) is the Docker *CLI* syntax and is
     inconsistently supported by the SDK across versions. To be safe we
-    always emit dict shape when the claude mount is added: an input
-    list-of-strings is converted to a dict in that case, dict input is
-    extended in place.
+    always emit dict shape when any auth mount is added.
 
     Returns a NEW container suitable for the SDK's ``volumes=`` arg.
-    Read-only is fine for claude's auth state (the CLI only reads
-    ``.credentials.json`` / ``settings.json``).
+    - claude is mounted **read-only** (CC only reads
+      ``.credentials.json`` / ``settings.json``).
+    - codex_auth (named volume) is mounted **read-write** so spawned
+      strategies share the same auth.json the operator established via
+      the Models UI device-code login. The volume is created by
+      docker-compose; if it doesn't exist on this host, the mount is
+      skipped silently — the codex provider's auth probe will report
+      "not authenticated" cleanly.
     """
-    mounts = _claude_home_mount()
-    if not mounts:
-        return volumes
+    claude_mounts = _claude_home_mount() or {}
     # Convert any input shape to a dict.
     out: Dict[str, Dict[str, str]] = {}
     if isinstance(volumes, dict):
@@ -270,11 +275,14 @@ def _augment_volumes_with_claude(volumes):
                 host, bind, mode = parts
                 out[host] = {"bind": bind, "mode": mode}
             else:
-                # Single-token volume name — leave it for the SDK to
-                # interpret (this branch shouldn't be hit in our code).
                 out[entry] = {"bind": "/data", "mode": "rw"}
-    for host_path, spec in mounts.items():
+    for host_path, spec in claude_mounts.items():
         out[host_path] = spec
+    # Always try to mount the codex_auth named volume. The Docker SDK
+    # auto-creates a *new* named volume if it doesn't exist, which would
+    # be empty (no auth) — that's still safe; the codex provider just
+    # reports "not authenticated" cleanly.
+    out[_CODEX_AUTH_VOLUME_NAME] = {"bind": "/root/.codex", "mode": "rw"}
     return out
 
 

@@ -3,23 +3,50 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install Python deps. ``claude`` CLI itself is installed via Node below;
-# enable/disable that with the INSTALL_CLAUDE_CLI build arg (default on).
+# ``claude`` and ``codex`` are both installed via npm. We install Node.js
+# once if either CLI is requested, then add each provider on its own
+# build arg so a deployment that uses only one doesn't pay the disk cost
+# for the other.
 ARG INSTALL_CLAUDE_CLI=1
+ARG INSTALL_CODEX_CLI=1
 
-# Install the Claude Code CLI (used by the "claude-cli" LLM provider when
-# the operator wires up their Pro/Max subscription via the locally-mounted
-# ``~/.claude/`` auth state). Skip with ``--build-arg INSTALL_CLAUDE_CLI=0``
-# if you don't plan to use this provider.
-RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
+# Install Node.js (npm) once when either CLI is requested. The
+# NodeSource setup script handles apt key + repo. Tools land in
+# /usr/bin/npm — under the system-binary allowlist the LLM providers
+# enforce, so the in-app installer endpoint can re-run ``npm install -g``
+# on a live container if the operator wants to upgrade codex.
+RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ] || [ "$INSTALL_CODEX_CLI" = "1" ]; then \
         apt-get update \
         && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
         && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
         && apt-get install -y --no-install-recommends nodejs \
-        && npm install -g @anthropic-ai/claude-code \
-        && claude --version \
         && apt-get clean \
         && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Install the Claude Code CLI (used by the "claude-cli" LLM provider when
+# the operator wires up their Pro/Max subscription via the locally-mounted
+# ``~/.claude/`` auth state). Skip with ``--build-arg INSTALL_CLAUDE_CLI=0``.
+RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
+        npm install -g @anthropic-ai/claude-code \
+        && claude --version; \
+    fi
+
+# Install the OpenAI Codex CLI (used by the "codex-cli" LLM provider).
+# Operator completes the device-code OAuth from the Models UI; the auth
+# state lands in ``/root/.codex`` which compose mounts to a named volume
+# so it persists across restarts. Skip with ``--build-arg INSTALL_CODEX_CLI=0``.
+RUN if [ "$INSTALL_CODEX_CLI" = "1" ]; then \
+        npm install -g @openai/codex \
+        && codex --version || echo "codex installed (version probe non-fatal)"; \
+    fi
+
+# Pre-create the codex auth directory so the device-code login can write
+# tokens immediately (the codex CLI doesn't ``mkdir -p`` reliably on
+# first run inside a fresh container). Read-write by root; the api/
+# backend processes run as root and own writes here.
+RUN if [ "$INSTALL_CODEX_CLI" = "1" ]; then \
+        mkdir -p /root/.codex && chmod 700 /root/.codex; \
     fi
 
 # Non-root user that ``claude`` subprocess invocations run as. The CLI

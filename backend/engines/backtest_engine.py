@@ -703,6 +703,14 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         if claude_host_config:
             container_volumes[claude_host_config] = {'bind': '/root/.claude.json', 'mode': 'ro'}
 
+    # Share the codex-cli OAuth state via the named volume that the api
+    # service writes to during device-code login. Unlike claude (which
+    # bind-mounts the host's ~/.claude RO), codex auth lives in a
+    # container-local Docker volume so the web-UI login flow can write
+    # to it without ever touching the host filesystem. RW because codex
+    # may refresh tokens during a long-running call.
+    container_volumes['codex_auth'] = {'bind': '/root/.codex', 'mode': 'rw'}
+
     try:
         client = _get_docker_client()
         if not client:

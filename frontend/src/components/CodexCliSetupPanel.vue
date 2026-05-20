@@ -329,8 +329,25 @@ onUnmounted(() => {
         <span class="font-mono">{{ status.install_method === 'brew' ? 'brew install codex' : 'npm install -g @openai/codex' }}</span>
         — requires admin role.
       </p>
-      <div v-if="status.install_method === 'unknown'" class="text-red-300">
-        Neither <span class="font-mono">npm</span> nor <span class="font-mono">brew</span> is on the server's PATH. Install one of them on the host first.
+      <div v-if="status.install_method === 'unknown'" class="space-y-1.5">
+        <p class="text-amber-300">
+          The IntelliStock backend container has neither
+          <span class="font-mono">npm</span> nor <span class="font-mono">brew</span>
+          available — it was likely built with
+          <span class="font-mono">INSTALL_CODEX_CLI=0</span>.
+        </p>
+        <p class="text-slate-400">
+          Rebuild the backend image with
+          <span class="font-mono">INSTALL_CODEX_CLI=1</span> (the default in
+          recent versions). Quick command on the host:
+        </p>
+        <pre class="font-mono text-[10px] text-slate-200 bg-black/40 rounded px-2 py-1 whitespace-pre-wrap break-all">docker compose build --build-arg INSTALL_CODEX_CLI=1 backend &amp;&amp; docker compose up -d backend api</pre>
+        <p class="text-slate-500">
+          Once codex is baked into the image, this panel will skip straight
+          to the OpenAI device-code login. Credentials are written to a
+          Docker named volume (<span class="font-mono">codex_auth</span>),
+          never the host filesystem.
+        </p>
       </div>
       <button
         v-else
