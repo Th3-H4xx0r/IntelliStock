@@ -294,13 +294,15 @@ class _RequestRateLimiter:
 
 
 # Per-model REQUEST-per-minute caps. NVIDIA NIM kimi-k2.6 published
-# limit is 40 RPM; we leave a small headroom by using 38 so concurrent
-# bursts (4 parallel event_maintenance batches + 1 sentiment + 1 macro)
-# stay under the cap with their own jitter.
+# limit is 40 RPM; we cap at 35 for safety headroom because the
+# strategy fires 4 parallel event_maintenance batches plus sentiment
+# and macro calls in quick succession, and clock skew between our
+# sliding window and NIM's window can otherwise leak a burst past
+# the published cap.
 _MODEL_REQUEST_RATE_LIMITERS: dict[str, _RequestRateLimiter] = {
-    "moonshotai/kimi-k2.6": _RequestRateLimiter(38),
-    "moonshotai/kimi-k2.5": _RequestRateLimiter(38),
-    "moonshotai/kimi-k2": _RequestRateLimiter(38),
+    "moonshotai/kimi-k2.6": _RequestRateLimiter(35),
+    "moonshotai/kimi-k2.5": _RequestRateLimiter(35),
+    "moonshotai/kimi-k2": _RequestRateLimiter(35),
 }
 
 
