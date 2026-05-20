@@ -48,6 +48,15 @@ deepseek-chat:
   input_per_1m: 0.27
   output_per_1m: 1.10
 
+# Codex CLI uses the locally installed `codex` binary authenticated against the
+# user's ChatGPT/OpenAI subscription. Token cost is billed by OpenAI directly
+# (or covered by ChatGPT Plus), so per-token cost is null and rows fall through
+# to zero cost in telemetry.
+gpt-5-codex:
+  provider: codex-cli
+  input_per_1m: 0.0
+  output_per_1m: 0.0
+
 _unknown_:
   input_per_1m: null
   output_per_1m: null

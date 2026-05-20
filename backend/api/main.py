@@ -312,7 +312,10 @@ def _startup_init_telemetry():
 @app.on_event("shutdown")
 def api_shutdown_close_claude_cli_sessions():
     """Gracefully close any persistent ``claude`` subprocesses still alive
-    in the chatbot session pool when the API shuts down."""
+    in the chatbot session pool when the API shuts down. codex-cli does
+    not use a persistent session manager (each call spawns + closes its
+    own ``codex app-server`` subprocess), so nothing to do for codex here.
+    """
     try:
         from chatbot.claude_cli_provider import shutdown_session_manager
         shutdown_session_manager()
@@ -380,7 +383,7 @@ def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]
     # its session manager folds it into the spawn argv. Drop the value
     # only for providers where the LLM dispatcher doesn't actually
     # forward it (gemini/deepseek/anthropic-direct as of today).
-    if provider in {"openai", "azure", "nvidia", "claude-cli"} and reasoning_effort:
+    if provider in {"openai", "azure", "nvidia", "claude-cli", "codex-cli"} and reasoning_effort:
         config["reasoning_effort"] = reasoning_effort
     return config
 
@@ -1873,6 +1876,220 @@ async def api_test_claude_cli(
     # it off the event loop so the FastAPI threadpool slot isn't blocked.
     from chatbot.claude_cli_provider import test_claude_cli
     return await asyncio.to_thread(test_claude_cli, cli_path=cli_path, model=model)
+
+
+# ── Codex CLI: install + auth from the web UI ─────────────────────────────
+# These endpoints power the ModelsView "Install Codex" / "Sign in with
+# OpenAI" flow. They are intentionally minimal-state: install jobs and
+# login jobs live in-process and reap themselves after 30 min. The
+# heavy-lifting is in chatbot/codex_cli_provider.py — these handlers
+# just expose it over HTTP with auth + rate limits matching test-cli.
+
+_CODEX_OP_LAST_CALL: Dict[str, float] = {}
+_CODEX_OP_LAST_CALL_LOCK = threading.Lock()
+_CODEX_OP_MIN_INTERVAL_SEC = float(os.environ.get("CODEX_CLI_OP_MIN_INTERVAL_SEC", "2"))
+
+
+def _codex_op_rate_limit(uid: str, op: str) -> None:
+    now_mono = time.monotonic()
+    key = f"{uid}:{op}"
+    with _CODEX_OP_LAST_CALL_LOCK:
+        prev = _CODEX_OP_LAST_CALL.get(key, 0.0)
+        if now_mono - prev < _CODEX_OP_MIN_INTERVAL_SEC:
+            remaining = int(_CODEX_OP_MIN_INTERVAL_SEC - (now_mono - prev)) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Codex {op} endpoint is rate-limited; retry in ~{remaining}s.",
+            )
+        _CODEX_OP_LAST_CALL[key] = now_mono
+
+
+class CodexInstallBody(BaseModel):
+    # Optional explicit method. If omitted, the server auto-detects
+    # (brew on macOS, else npm).
+    method: Optional[str] = Field(default=None, max_length=16)
+
+
+@app.get("/codex/status", response_class=JSONResponse)
+def api_codex_status(current_user: dict = Depends(get_current_user)):
+    """Report whether the codex CLI is installed, its version, whether the
+    host is authenticated against OpenAI, and which install method (npm/
+    brew) is available. Cheap probe — no subprocess unless cache is cold.
+
+    Open to any authenticated user. Non-admins get the boolean fields but
+    not the raw ``auth_message`` (which can leak path/error specifics).
+    """
+    try:
+        from chatbot.codex_cli_provider import (
+            detect_install_method,
+            get_version,
+            is_authenticated,
+            is_installed,
+        )
+    except Exception as e:
+        return {
+            "installed": False,
+            "version": None,
+            "authenticated": False,
+            "auth_message": "codex provider module not importable",
+            "install_method": "unknown",
+            "error": str(e)[:200],
+        }
+    installed = is_installed()
+    version = get_version() if installed else None
+    auth_ok, auth_msg = (False, "not installed")
+    if installed:
+        auth_ok, auth_msg = is_authenticated()
+    method, _ = detect_install_method()
+    is_admin = current_user.get("role") == "admin"
+    return {
+        "installed": bool(installed),
+        "version": version if is_admin else None,
+        "authenticated": bool(auth_ok),
+        # Mask the raw probe message for non-admins so we don't leak
+        # filesystem paths or subprocess error specifics to ordinary users.
+        "auth_message": auth_msg if is_admin else (
+            "authenticated" if auth_ok else "not authenticated"
+        ),
+        "install_method": method if is_admin else "unknown",
+    }
+
+
+@app.post("/codex/install", response_class=JSONResponse)
+def api_codex_install_start(
+    body: CodexInstallBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Kick off ``npm install -g @openai/codex`` (or brew). Returns a
+    job_id the frontend polls via ``GET /codex/install/{job_id}``.
+    Admin-only — installs system-wide packages on the host."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    uid = str(current_user.get("id") or "?")
+    _codex_op_rate_limit(uid, "install")
+    try:
+        from chatbot.codex_cli_provider import CodexInstaller, CodexCliError
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"codex provider unavailable: {e}") from e
+    try:
+        job = CodexInstaller.start(method=body.method)
+    except CodexCliError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"job_id": job.job_id, "state": job.state}
+
+
+@app.get("/codex/install/{job_id}", response_class=JSONResponse)
+def api_codex_install_status(
+    job_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Poll the install job. Returns state ∈ {running, success, failed},
+    exit_code, last 50 log lines, and a high-level error message on
+    failure. Admin-only to match the start endpoint and avoid leaking
+    install-log paths/error specifics to ordinary users."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        from chatbot.codex_cli_provider import CodexInstaller
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"codex provider unavailable: {e}") from e
+    snap = CodexInstaller.status(job_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"Install job {job_id} not found")
+    return snap
+
+
+class CodexLoginStartBody(BaseModel):
+    # Optional override for the cli_path (otherwise resolves "codex" on PATH).
+    cli_path: Optional[str] = Field(default=None, max_length=256)
+
+
+@app.post("/codex/login/start", response_class=JSONResponse)
+def api_codex_login_start(
+    body: CodexLoginStartBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Spawn ``codex login --no-browser``, capture the OpenAI pairing URL
+    + code, and return them so the frontend can display them. Returns
+    immediately once the parse completes (or the spawn fails). Admin only.
+    """
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    uid = str(current_user.get("id") or "?")
+    _codex_op_rate_limit(uid, "login")
+    try:
+        from chatbot.codex_cli_provider import (
+            CodexCliError,
+            CodexCliNotInstalledError,
+            CodexDeviceCodeLogin,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"codex provider unavailable: {e}") from e
+    cli_path = (body.cli_path or "codex").strip() or "codex"
+    try:
+        job = CodexDeviceCodeLogin.start(cli_path=cli_path)
+    except CodexCliNotInstalledError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except CodexCliError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "job_id": job.job_id,
+        "state": job.state,
+        "pairing_url": job.pairing_url,
+        "pairing_code": job.pairing_code,
+        "error": job.error,
+    }
+
+
+@app.get("/codex/login/{job_id}/status", response_class=JSONResponse)
+def api_codex_login_status(
+    job_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Poll the device-code login job. State transitions:
+    pending → parsed → success | failed | expired | cancelled.
+    """
+    try:
+        from chatbot.codex_cli_provider import CodexDeviceCodeLogin
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"codex provider unavailable: {e}") from e
+    snap = CodexDeviceCodeLogin.status(job_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"Login job {job_id} not found")
+    return snap
+
+
+@app.post("/codex/login/{job_id}/cancel", response_class=JSONResponse)
+def api_codex_login_cancel(
+    job_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Cancel an in-flight device-code login. Kills the subprocess if
+    still alive. Idempotent — returns ok even if the job already finished."""
+    try:
+        from chatbot.codex_cli_provider import CodexDeviceCodeLogin
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"codex provider unavailable: {e}") from e
+    ok = CodexDeviceCodeLogin.cancel(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Login job {job_id} not found")
+    return {"ok": True}
+
+
+@app.post("/codex/logout", response_class=JSONResponse)
+def api_codex_logout(current_user: dict = Depends(get_current_user)):
+    """Run ``codex logout`` to drop the stored OpenAI credentials. Admin
+    only — affects the entire host."""
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        from chatbot.codex_cli_provider import logout as _codex_logout
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"codex provider unavailable: {e}") from e
+    ok, msg = _codex_logout()
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "message": msg}
 
 
 @app.delete("/models/{model_id}", response_class=JSONResponse)

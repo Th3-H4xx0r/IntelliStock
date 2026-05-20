@@ -115,7 +115,13 @@ def _model_skips_json_object_format(model_name: str) -> bool:
 
 
 def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = None) -> str:
-    """Resolve provider API key from explicit value first, then provider-specific env vars."""
+    """Resolve provider API key from explicit value first, then provider-specific env vars.
+
+    For local-CLI providers (claude-cli, codex-cli) that authenticate via
+    the operator's subscription (no API key needed), return a sentinel
+    non-empty string so the ``if not api_key`` short-circuit in callers
+    doesn't skip the pipeline.
+    """
     explicit = str(explicit_api_key or "").strip()
     if explicit:
         return explicit
@@ -128,6 +134,10 @@ def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = N
         return str(os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     if p == "nvidia":
         return str(os.environ.get("NVIDIA_API_KEY") or "").strip()
+    if p == "claude-cli":
+        return "claude-cli-no-api-key"
+    if p == "codex-cli":
+        return "codex-cli-no-api-key"
     return str(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
 
 
@@ -1381,6 +1391,294 @@ def _call_claude_cli_plain(
     return ""
 
 
+def _call_codex_cli_plain(
+    *,
+    model: str,
+    prompt: str,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 0,
+) -> str:
+    """Plain-text codex-cli call. Returns the assistant's reply text or
+    empty string on failure. The heavy lifting (subprocess management,
+    allowlist validation, auth probe, retries) lives in
+    ``backend/chatbot/codex_cli_provider.py``; this is a thin shim that
+    matches the ``call_llm_by_provider`` contract and updates the
+    shared ``_LAST_PLAIN_LLM_CALL_ERROR`` thread-local on failure."""
+    if not model:
+        return ""
+    try:
+        from chatbot.codex_cli_provider import (
+            call_codex_cli_plain as _impl,
+            _get_last_error as _impl_last_err,
+        )
+    except Exception as e:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = f"codex_cli_provider import failed: {e}"
+        except Exception:
+            pass
+        return ""
+    text = _impl(
+        model=model,
+        prompt=prompt,
+        provider_config=provider_config,
+        timeout_sec=timeout_sec,
+        retries=retries,
+    )
+    if not text:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = _impl_last_err() or "codex-cli plain call failed"
+        except Exception:
+            pass
+    return text
+
+
+def _call_codex_cli_structured_from_strategy(
+    *,
+    model: str,
+    prompt: str,
+    output_type: Any,
+    system_prompt: str | Sequence[str] | None = None,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 1,
+    output_retries: int | None = None,
+    use_prompt_cache: bool = False,
+) -> Any:
+    """Codex-cli structured-output adapter. Mirrors the
+    ``_call_claude_cli_structured_from_strategy`` contract: spawns a
+    codex app-server, sends the prompt with a JSON-schema instruction,
+    parses + validates the model's text response against ``output_type``.
+    Retries on invalid JSON up to ``output_retries`` (default 2).
+    """
+    _t0 = time.monotonic()
+    if not model or output_type is None:
+        return None
+    if isinstance(system_prompt, (list, tuple)):
+        sys_str = "\n\n".join([s for s in system_prompt if s])
+    else:
+        sys_str = system_prompt or ""
+    cfg = provider_config or {}
+    cli_path = (cfg.get("cli_path") or "codex") or "codex"
+
+    # Scoped prompt cache (mirror the claude-cli adapter)
+    cache_effort = ""
+    if use_prompt_cache:
+        cache_effort = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+        try:
+            _cached_raw = _check_prompt_cache(prompt, model, cache_effort, force_cache=True)
+        except Exception:
+            _cached_raw = None
+        if _cached_raw:
+            try:
+                _cached_obj = _validate_structured_output_from_raw_text(output_type, _cached_raw)
+            except Exception:
+                _cached_obj = None
+            if _cached_obj is not None:
+                _LAST_STRUCTURED_LLM_CALL.data = {
+                    "provider": "codex-cli",
+                    "requested_model": model,
+                    "model_candidates": [model],
+                    "attempted_models": [],
+                    "provider_meta": {"cli_path": cli_path},
+                    "effective_model": model,
+                    "fallback_used": False,
+                    "raw_json_fallback_used": False,
+                    "ok": True,
+                    "error": "",
+                    "usage": {},
+                    "suppressed": False,
+                    "prompt_cache_hit": True,
+                }
+                _safe_record(
+                    provider="codex-cli", model=model, usage={}, ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=0, error=None,
+                    model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+                )
+                return _cached_obj
+
+    try:
+        from chatbot.codex_cli_provider import (
+            call_codex_cli_structured as _impl,
+            CodexCliError, CodexCliNotInstalledError, CodexCliNotAuthenticatedError,
+            CodexCliValidationError,
+        )
+    except Exception as e:
+        _LAST_STRUCTURED_LLM_CALL.data = {
+            "provider": "codex-cli",
+            "requested_model": model,
+            "model_candidates": [model],
+            "attempted_models": [],
+            "provider_meta": {"cli_path": cli_path},
+            "effective_model": "",
+            "fallback_used": False,
+            "raw_json_fallback_used": False,
+            "ok": False,
+            "error": f"codex_cli_provider import failed: {e}",
+            "usage": {},
+            "suppressed": False,
+        }
+        return None
+
+    # Without this collapse, the retry budget multiplies:
+    # ``call_codex_cli_structured``'s outer loop (output_retries+1) calls
+    # ``call_codex_cli_plain``'s inner loop (retries+1) → 6 spawns/call at
+    # the default (retries=1, output_retries=2), or ~18s of startup
+    # overhead. Mirror the claude-cli adapter's contract: use ONE budget
+    # equal to ``max(retries, output_retries)`` and pass it as
+    # output_retries, with the impl's inner retries=0.
+    _codex_budget = max(int(retries or 0), int(output_retries or 0) if output_retries is not None else 0)
+    try:
+        result = _impl(
+            model=model, prompt=prompt, output_type=output_type,
+            system_prompt=sys_str or None,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=0,
+            output_retries=_codex_budget,
+        )
+    except CodexCliNotInstalledError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"codex-cli not installed: {e}",
+            terminal=True, attempted=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliNotAuthenticatedError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"codex-cli not authenticated: {e}", terminal=True,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliValidationError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"codex-cli invalid extra_args: {e}",
+            terminal=True, attempted=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, str(e), terminal=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except Exception as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"unexpected error: {e}", terminal=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+
+    if result is None:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, "codex-cli returned no validated payload",
+            terminal=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error="no validated payload",
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+
+    _LAST_STRUCTURED_LLM_CALL.data = {
+        "provider": "codex-cli",
+        "requested_model": model,
+        "model_candidates": [model],
+        "attempted_models": [model],
+        "provider_meta": {"cli_path": cli_path},
+        "effective_model": model,
+        "fallback_used": False,
+        # Codex's app-server has no native --json-schema flag, so we
+        # always wrap the prompt with schema instructions and parse the
+        # text response. That is the normal mode, not a fallback — keep
+        # this False so dashboards joining on it don't mis-bucket every
+        # codex row as "raw_json fallback used".
+        "raw_json_fallback_used": False,
+        "ok": True,
+        "error": "",
+        "usage": {},
+        "suppressed": False,
+    }
+    if use_prompt_cache and result is not None:
+        try:
+            if hasattr(result, "model_dump_json"):
+                _raw_json = result.model_dump_json()
+            elif hasattr(result, "dict"):
+                _raw_json = json.dumps(result.dict())
+            else:
+                _raw_json = json.dumps(result)
+            _store_prompt_cache(prompt, model, cache_effort, _raw_json, force_cache=True)
+        except Exception:
+            pass
+    _safe_record(
+        provider="codex-cli", model=model, usage={}, ok=True,
+        duration_ms=int((time.monotonic() - _t0) * 1000),
+        retry_count=0, error=None,
+        model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+    )
+    return result
+
+
+def _codex_failure_meta(
+    model: str,
+    cli_path: str,
+    error: str,
+    *,
+    terminal: bool,
+    attempted: bool = True,
+) -> dict[str, Any]:
+    """Shared structured-call failure metadata for the codex-cli path.
+
+    ``attempted=False`` for pre-spawn rejections (NotInstalled, ValidationError,
+    NotAuthenticated cache lookup) so dashboards don't falsely report an
+    attempt that never reached the subprocess.
+    """
+    return {
+        "provider": "codex-cli",
+        "requested_model": model,
+        "model_candidates": [model],
+        "attempted_models": [model] if attempted else [],
+        "provider_meta": {"cli_path": cli_path},
+        "effective_model": "",
+        "fallback_used": False,
+        "raw_json_fallback_used": False,
+        "ok": False,
+        "error": error,
+        "usage": {},
+        "suppressed": bool(terminal),
+        "is_terminal": bool(terminal),
+    }
+
+
 def _call_claude_cli_structured_from_strategy(
     *,
     model: str,
@@ -1775,6 +2073,18 @@ def call_structured_llm_by_provider(
     # api_key is required for this provider.
     if (provider or "").strip().lower() == "claude-cli":
         return _call_claude_cli_structured_from_strategy(
+            model=model,
+            prompt=prompt,
+            output_type=output_type,
+            system_prompt=system_prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            output_retries=output_retries,
+            use_prompt_cache=use_prompt_cache,
+        )
+    if (provider or "").strip().lower() == "codex-cli":
+        return _call_codex_cli_structured_from_strategy(
             model=model,
             prompt=prompt,
             output_type=output_type,
@@ -3378,6 +3688,14 @@ def call_llm_by_provider(
     """
     if (provider or "").strip().lower() == "claude-cli":
         return _call_claude_cli_plain(
+            model=model,
+            prompt=prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+        )
+    if (provider or "").strip().lower() == "codex-cli":
+        return _call_codex_cli_plain(
             model=model,
             prompt=prompt,
             provider_config=provider_config,

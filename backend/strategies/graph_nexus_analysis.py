@@ -619,7 +619,7 @@ _NEXUS_OVERLAY_LLM_WORKERS = 10
 _NEXUS_COMPANY_PROMPT_BUDGET_CHARS = 6000
 _NEXUS_MACRO_PROMPT_BUDGET_CHARS = 8000
 
-_NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic"}
+_NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "codex-cli", "anthropic"}
 # Module-level dedup cache for `LLM key source for role=...` diagnostic
 # log. Each (role, source_tag, masked_key) tuple is logged at most once
 # per process lifetime so operators can spot stale inline credentials.
@@ -749,6 +749,8 @@ def _default_model_for_provider(provider: str) -> str:
         return "nvidia/nemotron-3-super-120b-a12b"
     if provider in ("claude-cli", "anthropic"):
         return "claude-sonnet-4-6"
+    if provider == "codex-cli":
+        return "gpt-5-codex"
     return "gemini-3-flash-preview"
 
 
@@ -771,6 +773,11 @@ def _default_api_key_for_provider(provider: str) -> str:
         # the entire pipeline. The downstream LLM dispatcher accepts an
         # empty api_key for this provider.
         return "claude-cli-no-api-key"
+    if provider == "codex-cli":
+        # codex-cli authenticates via the operator's ChatGPT subscription
+        # (tokens in ~/.codex/auth.json). Sentinel matches the claude-cli
+        # convention so the short-circuit doesn't skip the pipeline.
+        return "codex-cli-no-api-key"
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
@@ -841,6 +848,27 @@ def _resolve_role_llm_provider_config(config: dict, role: str) -> dict[str, Any]
             or (config.get(f"{prefix}cli_path") or "").strip()
             or (config.get("cli_path") or "").strip()
             or "claude"
+        )
+        extra_args = (
+            _lb_cfg("extra_args")
+            or (config.get(f"{prefix}extra_args") or "").strip()
+            or (config.get("extra_args") or "").strip()
+            or ""
+        )
+        out: dict[str, Any] = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        if reasoning_effort:
+            out["reasoning_effort"] = reasoning_effort
+        return out
+    if provider == "codex-cli":
+        # codex-cli uses the locally-installed `codex` binary. Same shape
+        # as claude-cli, just a different default cli_path.
+        cli_path = (
+            _lb_cfg("cli_path")
+            or (config.get(f"{prefix}cli_path") or "").strip()
+            or (config.get("cli_path") or "").strip()
+            or "codex"
         )
         extra_args = (
             _lb_cfg("extra_args")

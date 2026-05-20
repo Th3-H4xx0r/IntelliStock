@@ -171,11 +171,12 @@ async function submitModel() {
   submitting.value = true
   submitOk.value = false
   testResult.value = null
-  const isCli = d.provider === 'claude-cli'
+  const isCli = d.provider === 'claude-cli' || d.provider === 'codex-cli'
   submitMsg.value = isCli ? (editMode.value ? 'Updating model...' : 'Saving model...') : 'Testing LLM configuration...'
 
-  // Test the LLM config first. Skip for claude-cli (no key), and skip on edit when
-  // no api_key is in the draft (user didn't intend to re-test creds they didn't change).
+  // Test the LLM config first. Skip for CLI providers (claude-cli/codex-cli
+  // — no key) and skip on edit when no api_key is in the draft (user
+  // didn't intend to re-test creds they didn't change).
   const hasKey = !!d.apiKey.trim()
   if (!isCli && hasKey) {
     try {
@@ -223,10 +224,10 @@ async function submitModel() {
       model: d.model.trim(),
     }
     // Reasoning effort applies to every provider whose form exposes the
-    // dropdown (openai/azure/nvidia + claude-cli where it maps to
-    // ``--effort``). Send for both branches so saving 'High' on a
-    // claude-cli model actually persists — the previous CLI branch
-    // dropped it silently, so the row kept the prior value.
+    // dropdown (openai/azure/nvidia + claude-cli/codex-cli where it
+    // maps to a CLI flag). Send for both branches so saving 'High' on
+    // a CLI model actually persists — the previous CLI branch dropped
+    // it silently, so the row kept the prior value.
     payload.reasoning_effort = (d.reasoningEffort || '').trim() || undefined
     if (isCli) {
       payload.cli_path = d.cliPath.trim() || undefined
@@ -236,7 +237,7 @@ async function submitModel() {
       payload.nvidia_base_url = d.nvidiaBaseUrl.trim() || undefined
       payload.azure_openai_endpoint = d.azureEndpoint.trim() || undefined
       payload.azure_openai_api_version = d.azureApiVersion.trim() || undefined
-      // Clear any leftover CLI fields when switching provider away from claude-cli
+      // Clear any leftover CLI fields when switching to a non-CLI provider
       payload.cli_path = undefined
       payload.extra_args = undefined
       // Only include api_key if it was provided (don't overwrite with empty on edit)
@@ -398,9 +399,10 @@ onMounted(fetchModels)
               <td class="px-5 py-3.5 font-medium text-slate-200">{{ m.name }}</td>
               <td class="px-5 py-3.5 text-slate-400">{{ getLlmProviderLabel(m.provider) }}</td>
               <td class="px-5 py-3.5 text-slate-400 font-mono text-xs">{{ m.model }}</td>
-              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : (m.provider === 'claude-cli' ? '—' : 'Default') }}</td>
+              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : ((m.provider === 'claude-cli' || m.provider === 'codex-cli') ? '—' : 'Default') }}</td>
               <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">
                 <template v-if="m.provider === 'claude-cli'">{{ m.cli_path || 'claude' }}</template>
+                <template v-else-if="m.provider === 'codex-cli'">{{ m.cli_path || 'codex' }}</template>
                 <template v-else>{{ m.api_key || '—' }}</template>
               </td>
               <td class="px-5 py-3.5 text-slate-500 text-xs">{{ fmtDate(m.created_at) }}</td>
@@ -639,7 +641,7 @@ onMounted(fetchModels)
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
               <template v-if="submitting">
-                {{ formDraft.provider === 'claude-cli' ? (editMode ? 'Updating...' : 'Saving...') : 'Testing...' }}
+                {{ (formDraft.provider === 'claude-cli' || formDraft.provider === 'codex-cli') ? (editMode ? 'Updating...' : 'Saving...') : 'Testing...' }}
               </template>
               <template v-else>
                 {{ editMode ? 'Test & Update' : 'Test & Save' }}

@@ -128,6 +128,16 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
                 resolved[f"{prefix}extra_args"] = extra_args.strip()
             elif isinstance(extra_args, (list, tuple)):
                 resolved[f"{prefix}extra_args"] = list(extra_args)
+        # codex-cli uses the locally-installed `codex` binary; same shape
+        # as claude-cli, default cli_path is "codex".
+        if provider == "codex-cli":
+            cli_path = (model_doc.get("cli_path") or "codex").strip() or "codex"
+            resolved[f"{prefix}cli_path"] = cli_path
+            extra_args = model_doc.get("extra_args")
+            if isinstance(extra_args, str):
+                resolved[f"{prefix}extra_args"] = extra_args.strip()
+            elif isinstance(extra_args, (list, tuple)):
+                resolved[f"{prefix}extra_args"] = list(extra_args)
 
         # Also set the alternative model key for the default group
         if not prefix and model_doc.get("model"):

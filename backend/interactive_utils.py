@@ -7868,12 +7868,36 @@ def _validate_claude_cli_extra_args(extra_args):
     return s
 
 
+def _validate_codex_cli_extra_args(extra_args):
+    """Run codex-cli's extra_args string through the provider's allowlist.
+    Mirrors _validate_claude_cli_extra_args but delegates to the codex
+    provider's own (different) allowlist."""
+    if extra_args is None:
+        return ""
+    s = str(extra_args).strip()
+    if not s:
+        return ""
+    try:
+        from chatbot.codex_cli_provider import validate_extra_args
+    except Exception:
+        return s
+    # validate_extra_args raises CodexCliValidationError; let it propagate
+    # (the API layer catches generic Exception and returns 400). Normalize
+    # to ValueError so action callers can rely on a stable exception type.
+    try:
+        validate_extra_args(s)
+    except Exception as e:
+        raise ValueError(str(e)) from e
+    return s
+
+
 _PROVIDER_MODEL_INCOMPAT_PREFIXES: dict[str, tuple[str, ...]] = {
     "gemini": ("claude-", "gpt-", "o1-", "o3-", "o4-"),
     "openai": ("claude-", "gemini-"),
     "nvidia": ("claude-", "gemini-"),
     "anthropic": ("gpt-", "gemini-", "o1-", "o3-", "o4-"),
     "claude-cli": ("gpt-", "gemini-", "o1-", "o3-", "o4-"),
+    "codex-cli": ("claude-", "gemini-"),
     # Azure deliberately omitted — deployment names are operator-defined
     # and can legitimately be any string.
 }
@@ -7936,6 +7960,8 @@ def action_create_model(conn, name, provider, model, api_key=None,
     extra_args_clean = ""
     if provider_n == "claude-cli":
         extra_args_clean = _validate_claude_cli_extra_args(extra_args)
+    elif provider_n == "codex-cli":
+        extra_args_clean = _validate_codex_cli_extra_args(extra_args)
     now = datetime.datetime.utcnow().isoformat() + "Z"
     doc = {
         "name": (name or "").strip(),
@@ -7998,6 +8024,14 @@ def action_edit_model(conn, model_id, **kwargs):
             validated = _validate_claude_cli_extra_args(effective_extra)
             # Persist the canonical (validator-emitted) value so any
             # numeric/enum rewrites land in the doc.
+            kwargs["extra_args"] = validated
+    elif new_provider == "codex-cli":
+        effective_extra = (
+            kwargs["extra_args"] if ("extra_args" in kwargs and kwargs["extra_args"] is not None)
+            else doc.get("extra_args")
+        )
+        if effective_extra:
+            validated = _validate_codex_cli_extra_args(effective_extra)
             kwargs["extra_args"] = validated
     # The four cost-override fields special-case explicit None as "clear
     # the override" so a user can remove a previously-set pricing override
@@ -8097,7 +8131,7 @@ def _restore_inline_from_model(conn, model_id, model_doc):
                     cfg[f"{prefix}azure_openai_api_key"] = model_doc.get("api_key", "")
                     cfg[f"{prefix}azure_openai_endpoint"] = model_doc.get("azure_openai_endpoint", "")
                     cfg[f"{prefix}azure_openai_api_version"] = model_doc.get("azure_openai_api_version", "2024-10-21")
-                if (model_doc.get("provider") or "").lower() == "claude-cli":
+                if (model_doc.get("provider") or "").lower() in ("claude-cli", "codex-cli"):
                     if model_doc.get("cli_path"):
                         cfg[f"{prefix}cli_path"] = model_doc["cli_path"]
                     if model_doc.get("extra_args"):

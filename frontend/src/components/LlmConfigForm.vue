@@ -7,6 +7,7 @@ import {
   CLAUDE_CLI_EFFORT_OPTIONS,
   getLlmProviderLabel,
 } from '../utils/strategyConfig.js'
+import CodexCliSetupPanel from './CodexCliSetupPanel.vue'
 
 const props = defineProps({
   draft: { type: Object, required: true },
@@ -26,15 +27,22 @@ const effortOptions = computed(() => {
   return LLM_REASONING_EFFORT_OPTIONS
 })
 
+const isCliProvider = computed(() =>
+  props.draft.provider === 'claude-cli' || props.draft.provider === 'codex-cli'
+)
+
 function onProviderChange(value) {
   const next = { ...props.draft, provider: value }
-  if (value === 'claude-cli') {
+  if (value === 'claude-cli' || value === 'codex-cli') {
     next.apiKey = ''
     next.openaiBaseUrl = ''
     next.nvidiaBaseUrl = ''
     next.azureEndpoint = ''
     next.azureApiVersion = '2024-10-21'
     next.reasoningEffort = ''
+    // Leave cli_path/extra_args untouched — the input placeholder
+    // surfaces the right default ("codex" or "claude") visually, and
+    // the backend treats an empty value as that same default.
   } else {
     next.cliPath = ''
     next.extraArgs = ''
@@ -66,12 +74,12 @@ function onProviderChange(value) {
         @input="update('model', $event.target.value)"
         type="text"
         :disabled="disabled || readOnly"
-        :placeholder="draft.provider === 'azure' ? 'e.g. gpt-5.2 deployment name' : (draft.provider === 'claude-cli' ? 'claude-sonnet-4-6' : 'e.g. gemini-3-flash-preview')"
+        :placeholder="draft.provider === 'azure' ? 'e.g. gpt-5.2 deployment name' : (draft.provider === 'claude-cli' ? 'claude-sonnet-4-6' : (draft.provider === 'codex-cli' ? 'gpt-5-codex' : 'e.g. gemini-3-flash-preview'))"
         class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
       />
     </div>
 
-    <template v-if="draft.provider === 'claude-cli'">
+    <template v-if="isCliProvider">
       <div>
         <label class="block text-xs font-medium text-slate-400 mb-1.5">CLI Path</label>
         <input
@@ -79,11 +87,16 @@ function onProviderChange(value) {
           @input="update('cliPath', $event.target.value)"
           type="text"
           :disabled="disabled || readOnly"
-          placeholder="claude"
+          :placeholder="draft.provider === 'codex-cli' ? 'codex' : 'claude'"
           class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
         />
         <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
-          Path to the claude binary. Leave as 'claude' if it's on PATH.
+          <template v-if="draft.provider === 'codex-cli'">
+            Path to the <span class="font-mono">codex</span> binary. Leave as 'codex' if it's on PATH.
+          </template>
+          <template v-else>
+            Path to the claude binary. Leave as 'claude' if it's on PATH.
+          </template>
         </p>
       </div>
       <div>
@@ -93,22 +106,31 @@ function onProviderChange(value) {
           @input="update('extraArgs', $event.target.value)"
           type="text"
           :disabled="disabled || readOnly"
-          placeholder="--fallback-model claude-haiku-4-5"
+          :placeholder="draft.provider === 'codex-cli' ? '--sandbox read-only' : '--fallback-model claude-haiku-4-5'"
           class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
         />
         <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
-          Optional advanced flags. Only --fallback-model, --effort, --max-budget-usd are accepted; everything else is rejected for security.
+          <template v-if="draft.provider === 'codex-cli'">
+            Optional advanced flags. Only --sandbox, --model, --config, --no-browser, --headless, --quiet, --profile, --ask-for-approval are accepted; everything else (especially --exec/--run) is rejected for security.
+          </template>
+          <template v-else>
+            Optional advanced flags. Only --fallback-model, --effort, --max-budget-usd are accepted; everything else is rejected for security.
+          </template>
         </p>
         <p class="mt-1 text-[11px] leading-relaxed text-slate-600">
           Saving will fail with the backend's error message if a flag isn't on the allowlist.
         </p>
       </div>
-      <div class="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-3 text-[11px] leading-relaxed text-slate-400">
+      <div v-if="draft.provider === 'claude-cli'" class="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-3 text-[11px] leading-relaxed text-slate-400">
         Uses the locally-installed <span class="font-mono">claude</span> binary on the server. SSH to the server and run <span class="font-mono">claude</span> to log in before using. Tools are disabled — CC is used as a text-only LLM.
       </div>
+      <CodexCliSetupPanel
+        v-if="draft.provider === 'codex-cli'"
+        :cli-path="draft.cliPath || 'codex'"
+      />
     </template>
 
-    <div v-if="['azure', 'openai', 'nvidia', 'claude-cli'].includes(draft.provider)">
+    <div v-if="['azure', 'openai', 'nvidia', 'claude-cli', 'codex-cli'].includes(draft.provider)">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">Reasoning Effort</label>
       <select
         :value="draft.reasoningEffort"
@@ -129,6 +151,9 @@ function onProviderChange(value) {
         <template v-else-if="draft.provider === 'claude-cli'">
           Maps to <span class="font-mono">--effort</span> on the claude CLI. Higher levels let the model reason longer. Default leaves CC's behaviour unchanged.
         </template>
+        <template v-else-if="draft.provider === 'codex-cli'">
+          Reserved for Codex models that accept a reasoning_effort hint. Default leaves Codex's behaviour unchanged.
+        </template>
         <template v-else-if="draft.reasoningEffort">
           Lower is faster. Cached/history model references will be stored like
           <span class="font-mono text-slate-400">{{ (draft.model || 'model') + '-' + String(draft.reasoningEffort).toUpperCase() }}</span>.
@@ -139,7 +164,7 @@ function onProviderChange(value) {
       </p>
     </div>
 
-    <div v-if="draft.provider !== 'claude-cli'">
+    <div v-if="!isCliProvider">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">
         {{ draft.provider === 'azure' ? 'Azure API Key' : 'API Key' }}
       </label>

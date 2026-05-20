@@ -35,7 +35,7 @@ def _call_llm(
     provider_config: dict | None = None,
 ) -> str:
     """Call LLM. Returns response text or empty string."""
-    if not api_key and (provider or "").strip().lower() != "claude-cli":
+    if not api_key and (provider or "").strip().lower() not in ("claude-cli", "codex-cli"):
         return ""
     try:
         from llm_utils import call_llm_by_provider
@@ -128,7 +128,10 @@ class AiTradingDecision:
         _log(f"get_final_decision: symbol={symbol} current_decision={current_decision} ({action}) strategies={n_strategies} price_bars={n_bars}", "white")
 
         provider = ((config.get("llm_provider") or "").strip() or os.environ.get("AI_TRADING_DECISION_PROVIDER", "gemini").strip()).lower()
-        if provider not in ("gemini", "deepseek", "openai", "azure", "claude-cli"):
+        if provider not in (
+            "gemini", "deepseek", "openai", "azure",
+            "nvidia", "anthropic", "claude-cli", "codex-cli",
+        ):
             provider = "gemini"
         api_key = (
             (config.get("azure_openai_api_key") or "").strip()
@@ -144,6 +147,8 @@ class AiTradingDecision:
                 api_key = os.environ.get("AZURE_OPENAI_API_KEY", "")
             elif provider == "claude-cli":
                 api_key = ""  # claude-cli authenticates via the host's ~/.claude login
+            elif provider == "codex-cli":
+                api_key = ""  # codex-cli authenticates via OpenAI device-code login
             else:
                 api_key = os.environ.get("GEMINI_API_KEY", "")
         model = (config.get("llm_model") or "").strip() or os.environ.get("AI_TRADING_DECISION_MODEL", "")
@@ -155,10 +160,15 @@ class AiTradingDecision:
             elif provider == "azure":
                 model = (os.environ.get("AZURE_OPENAI_DEPLOYMENT") or os.environ.get("AZURE_OPENAI_MODEL") or "gpt-4.1-mini").strip()
             elif provider == "claude-cli":
-                model = (os.environ.get("AI_TRADING_DECISION_MODEL") or "claude-haiku-4-5").strip() or "claude-haiku-4-5"
+                # Use the same default as graph_nexus / earnings / ml_news
+                # so a user who promotes a model to all-strategies via the
+                # default doesn't get a quietly-different choice here.
+                model = (os.environ.get("AI_TRADING_DECISION_MODEL") or "claude-sonnet-4-6").strip() or "claude-sonnet-4-6"
+            elif provider == "codex-cli":
+                model = (os.environ.get("AI_TRADING_DECISION_MODEL") or "gpt-5-codex").strip() or "gpt-5-codex"
             else:
                 model = "gemini-2.0-flash-exp"
-        if provider != "claude-cli" and not api_key:
+        if provider not in ("claude-cli", "codex-cli") and not api_key:
             _log("No LLM API key; skipping final decision override (keeping current decision).", "yellow")
             return None
         provider_config = {}
@@ -189,6 +199,15 @@ class AiTradingDecision:
             provider_config = {"cli_path": cli_path}
             if extra_args:
                 provider_config["extra_args"] = extra_args
+        elif provider == "codex-cli":
+            cli_path = (config.get("cli_path") or "codex").strip() or "codex"
+            extra_args = config.get("extra_args") or ""
+            provider_config = {"cli_path": cli_path}
+            if extra_args:
+                provider_config["extra_args"] = extra_args
+            reasoning = (config.get("llm_reasoning_effort") or "").strip()
+            if reasoning:
+                provider_config["reasoning_effort"] = reasoning
         _log(f"LLM config: provider={provider} model={model}", "white")
         summary_lines = []
         for s in (strategy_summary or []):

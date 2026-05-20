@@ -317,7 +317,7 @@ def _to_bool(value, default: bool = False) -> bool:
 
 def _normalize_llm_provider(provider: str) -> str:
     name = (provider or "gemini").strip().lower()
-    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic") else "gemini"
+    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "codex-cli", "anthropic") else "gemini"
 
 
 def _default_model_for_provider(provider: str) -> str:
@@ -334,6 +334,8 @@ def _default_model_for_provider(provider: str) -> str:
         ).strip()
     if provider in ("claude-cli", "anthropic"):
         return "claude-sonnet-4-6"
+    if provider == "codex-cli":
+        return "gpt-5-codex"
     return "gemini-2.0-flash-exp"
 
 
@@ -352,6 +354,8 @@ def _default_api_key_for_provider(provider: str) -> str:
         # whole pipeline — claude-cli authenticates via the local binary,
         # not an API key. llm_utils' claude-cli branch ignores the value.
         return "claude-cli-no-api-key"
+    if provider == "codex-cli":
+        return "codex-cli-no-api-key"
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
@@ -387,6 +391,19 @@ def _resolve_provider_config(config: dict, provider: str) -> dict:
         out: dict = {"cli_path": cli_path}
         if extra_args:
             out["extra_args"] = extra_args
+        reasoning = (config.get("llm_reasoning_effort") or "").strip()
+        if reasoning:
+            out["reasoning_effort"] = reasoning
+        return out
+    if provider == "codex-cli":
+        cli_path = (config.get("cli_path") or "codex").strip() or "codex"
+        extra_args = config.get("extra_args") or ""
+        out = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        reasoning = (config.get("llm_reasoning_effort") or "").strip()
+        if reasoning:
+            out["reasoning_effort"] = reasoning
         return out
     return {}
 

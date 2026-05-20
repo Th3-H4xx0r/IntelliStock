@@ -307,6 +307,7 @@ export const LLM_PROVIDER_OPTIONS = [
   { value: 'azure', label: 'Azure OpenAI' },
   { value: 'nvidia', label: 'NVIDIA NIM' },
   { value: 'claude-cli', label: 'Claude Code CLI (subscription)' },
+  { value: 'codex-cli', label: 'OpenAI Codex CLI (subscription)' },
 ]
 
 export const LLM_REASONING_EFFORT_OPTIONS = [
