@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from llm_utils import (
     call_llm_by_provider,
     call_structured_llm_by_provider,
+    get_last_plain_llm_call_error,
     get_last_structured_llm_call_metadata,
     normalize_reasoning_effort,
     resolve_api_key_for_provider,
@@ -1436,6 +1437,17 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         _smoke_error = str(_e)[:512]
     _smoke_elapsed_ms = int((time.monotonic() - _smoke_started) * 1000)
     _smoke_text = (_smoke_text or "").strip()
+    # When the provider returned empty without raising, surface the
+    # per-thread error string the dispatcher recorded — without it the
+    # UI just says "smoke generation returned empty" and the operator
+    # has no way to tell whether the model rejected the prompt, the
+    # Responses API returned 200 with no output (common with bogus
+    # model names), or the smoke prompt tripped a content filter.
+    if not _smoke_text and not _smoke_error:
+        try:
+            _smoke_error = (get_last_plain_llm_call_error() or "")[:512]
+        except Exception:
+            pass
 
     return {
         "ok": True,

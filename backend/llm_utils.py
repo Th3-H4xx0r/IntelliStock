@@ -1405,7 +1405,18 @@ def _call_codex_cli_plain(
     ``backend/chatbot/codex_cli_provider.py``; this is a thin shim that
     matches the ``call_llm_by_provider`` contract and updates the
     shared ``_LAST_PLAIN_LLM_CALL_ERROR`` thread-local on failure."""
+    # Clear the per-thread error state at the start of every call so a
+    # stale message from a previous failed call doesn't leak into the
+    # caller's diagnostics on success.
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = ""
+    except Exception:
+        pass
     if not model:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = "codex-cli: model is required"
+        except Exception:
+            pass
         return ""
     try:
         from chatbot.codex_cli_provider import (
@@ -2492,6 +2503,15 @@ def get_last_structured_llm_call_metadata() -> dict[str, Any]:
     """Return metadata for the most recent structured LLM call on this thread."""
     data = getattr(_LAST_STRUCTURED_LLM_CALL, "data", None)
     return dict(data or {})
+
+
+def get_last_plain_llm_call_error() -> str:
+    """Return the per-thread error string from the most recent
+    ``call_llm_by_provider`` invocation that returned empty text. Useful
+    for surfacing the underlying provider reason ("Responses API HTTP
+    400", "rate limited", etc.) in callers that only see an empty
+    string back."""
+    return getattr(_LAST_PLAIN_LLM_CALL_ERROR, "error", "") or ""
 
 
 def _extract_chat_message_text(message: dict[str, Any]) -> str:
