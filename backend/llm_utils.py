@@ -293,16 +293,18 @@ class _RequestRateLimiter:
             waited += sleep_sec
 
 
-# Per-model REQUEST-per-minute caps. NVIDIA NIM kimi-k2.6 published
-# limit is 40 RPM; we cap at 35 for safety headroom because the
-# strategy fires 4 parallel event_maintenance batches plus sentiment
-# and macro calls in quick succession, and clock skew between our
-# sliding window and NIM's window can otherwise leak a burst past
-# the published cap.
+# Per-model REQUEST-per-minute caps. NVIDIA NIM kimi-k2.6 PUBLISHES
+# 40 RPM, but in practice 429s show up well under that — likely
+# because (a) per-API-key throttling sums across models, (b) NIM
+# enforces a sub-minute burst limit they don't document, or (c) the
+# tier ceiling is lower than the published number. Capping at 15 RPM
+# leaves >60% headroom under the published cap so the strategy's
+# 4 parallel event_maintenance + sentiment + macro burst still
+# clears even when NIM enforces a stricter window.
 _MODEL_REQUEST_RATE_LIMITERS: dict[str, _RequestRateLimiter] = {
-    "moonshotai/kimi-k2.6": _RequestRateLimiter(35),
-    "moonshotai/kimi-k2.5": _RequestRateLimiter(35),
-    "moonshotai/kimi-k2": _RequestRateLimiter(35),
+    "moonshotai/kimi-k2.6": _RequestRateLimiter(15),
+    "moonshotai/kimi-k2.5": _RequestRateLimiter(15),
+    "moonshotai/kimi-k2": _RequestRateLimiter(15),
 }
 
 
