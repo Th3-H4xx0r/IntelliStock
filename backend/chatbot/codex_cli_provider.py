@@ -1461,19 +1461,23 @@ class CodexDeviceCodeLogin:
 
     @classmethod
     def _run(cls, cli_path: str, job: _LoginJob) -> None:
-        # codex CLI v0.132+ exposes only ``codex login`` (no --no-browser,
-        # no --headless). It binds an OAuth loopback server inside the
-        # process, prints the chatgpt.com / auth.openai.com URL to stdout
-        # with the loopback redirect_uri embedded as a query param, and
-        # waits for the OAuth callback.
+        # codex CLI v0.132+ has a dedicated ``--device-auth`` flag for
+        # remote / headless machines. Without it, ``codex login`` binds
+        # an OAuth loopback server inside the container and the
+        # operator's browser can never reach it (the printed URL has
+        # ``redirect_uri=http://localhost:1455/auth/callback`` which is
+        # the *container's* localhost). With ``--device-auth``, codex
+        # uses a real device-code flow: prints a chatgpt.com pairing
+        # URL + 8-char code on stderr, polls the OpenAI device-code
+        # endpoint until the operator approves, then writes
+        # ``~/.codex/auth.json`` and exits.
         #
-        # In Docker the loopback redirect is unreachable from the
-        # operator's browser — but the printed URL still contains the
-        # full OAuth state so we can show the user something to click.
-        # We keep this attempt list extensible so future codex versions
-        # that add a real device-code flag (e.g. ``--device-code``) can
-        # be added here without touching the surrounding code.
+        # Falls back to ``codex login`` (no flag) if --device-auth is
+        # not supported by the installed version — surfaces the
+        # loopback URL anyway so the operator can at least see what
+        # codex is doing.
         attempts = [
+            (["login", "--device-auth"], {}),
             (["login"], {}),
         ]
         last_err = ""
@@ -1581,24 +1585,27 @@ class CodexDeviceCodeLogin:
                     buf.append(text)
                     if len(buf) > cls._BUF_MAX:
                         setattr(job, buf_name, buf[-cls._BUF_MAX:])
-                    # Attempt parse only on stdout.
-                    if buf_name == "stdout_buf":
-                        if not job.pairing_url:
-                            m = _PAIRING_URL_RE.search(text)
-                            if m and _is_safe_pairing_url(m.group(1)):
-                                # Second gate (urlparse-based) catches any
-                                # bypass the regex might miss after a future
-                                # tweak — defense in depth so we never
-                                # surface a non-OpenAI URL to the operator.
-                                job.pairing_url = m.group(1)
-                        if not job.pairing_code:
-                            m = _PAIRING_CODE_RE.search(text)
-                            if m:
-                                code = m.group(1)
-                                # Allow 8-char "XXXXYYYY" too; normalize.
-                                if "-" not in code and len(code) == 8:
-                                    code = f"{code[:4]}-{code[4:]}"
-                                job.pairing_code = code
+                    # Parse pairing URL + code from BOTH stdout and
+                    # stderr. codex 0.132's ``codex login`` writes to
+                    # stderr ("Starting local login server …", "If your
+                    # browser did not open, navigate to …"), while
+                    # ``codex login --device-auth`` similarly emits the
+                    # chatgpt.com URL + 8-char code on stderr. The
+                    # _is_safe_pairing_url gate still constrains the
+                    # host to the OpenAI allowlist so a future flag
+                    # change can't slip a non-OpenAI URL through.
+                    if not job.pairing_url:
+                        m = _PAIRING_URL_RE.search(text)
+                        if m and _is_safe_pairing_url(m.group(1)):
+                            job.pairing_url = m.group(1)
+                    if not job.pairing_code:
+                        m = _PAIRING_CODE_RE.search(text)
+                        if m:
+                            code = m.group(1)
+                            # Allow 8-char "XXXXYYYY" too; normalize.
+                            if "-" not in code and len(code) == 8:
+                                code = f"{code[:4]}-{code[4:]}"
+                            job.pairing_code = code
         except Exception:
             pass
         try:
