@@ -423,7 +423,10 @@ class TestResponsesRequestBuilder:
         assert body["input"][0]["role"] == "user"
         content = body["input"][0]["content"]
         assert content == [{"type": "input_text", "text": "hello"}]
-        assert "instructions" not in body
+        # Always send a non-empty instructions string — the endpoint
+        # returns 400 "Instructions are required" otherwise.
+        assert isinstance(body.get("instructions"), str)
+        assert body["instructions"].strip() != ""
         assert "reasoning" not in body
 
     def test_system_prompt_routes_to_instructions(self):
@@ -433,6 +436,19 @@ class TestResponsesRequestBuilder:
             max_output_tokens=None, reasoning_effort=None,
         )
         assert body.get("instructions") == "be terse"
+
+    def test_blank_system_prompt_falls_back_to_default_instructions(self):
+        # Whitespace-only system_prompt should be treated as missing and
+        # backfilled with the default — otherwise the API rejects with
+        # "Instructions are required".
+        from chatbot.codex_cli_provider import _build_responses_request
+        body = _build_responses_request(
+            model="gpt-5", prompt="u", system_prompt="   \n\t ",
+            max_output_tokens=None, reasoning_effort=None,
+        )
+        assert isinstance(body.get("instructions"), str)
+        assert body["instructions"].strip() != ""
+        assert body["instructions"] != "   \n\t "
 
     def test_reasoning_effort_normalised(self):
         from chatbot.codex_cli_provider import _build_responses_request

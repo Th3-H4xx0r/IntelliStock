@@ -355,9 +355,21 @@ def _build_responses_request(
         "role": "user",
         "content": [{"type": "input_text", "text": prompt}],
     })
+    # The Codex Responses endpoint at chatgpt.com/backend-api/codex
+    # requires a non-empty ``instructions`` field — omitting it returns
+    # ``HTTP 400 {"detail":"Instructions are required"}``. When the
+    # caller doesn't supply a system_prompt we send a neutral default
+    # so plain text generation works without forcing every call site
+    # to invent its own instructions string.
+    _instructions = (system_prompt or "").strip() or (
+        "You are a helpful AI assistant. Respond to the user's request directly and concisely."
+    )
     body: Dict[str, Any] = {
         "model": model,
         "input": input_items,
+        # Always send instructions — see comment above. The Codex
+        # Responses endpoint treats omitted/empty as a 400.
+        "instructions": _instructions,
         # The Codex Responses endpoint at chatgpt.com/backend-api/codex
         # is streaming-only: a non-streaming POST returns
         # ``{"detail":"Stream must be set to true"}``. We always set
@@ -365,8 +377,6 @@ def _build_responses_request(
         "stream": True,
         "store": False,
     }
-    if system_prompt:
-        body["instructions"] = system_prompt
     if max_output_tokens is not None and max_output_tokens > 0:
         body["max_output_tokens"] = int(max_output_tokens)
     effort = (reasoning_effort or "").strip().lower()
