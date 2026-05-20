@@ -614,8 +614,9 @@ def _call_responses_api(
                     err_msg = (resp.text or "")[:200]
                 raise CodexCliError(
                     f"codex Responses API 404: {err_msg} "
-                    f"(check model name — codex supports gpt-5-codex, gpt-5, gpt-5-mini, "
-                    f"gpt-4.1-mini, o3, o4-mini)"
+                    f"(check model name — current codex models include "
+                    f"gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2; "
+                    f"see `codex --model` for the full list)"
                 )
             if resp.status_code == 429:
                 # 429 spans two very different states upstream:
