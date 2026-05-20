@@ -1361,6 +1361,14 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
 
     # Stage 1: structured connectivity check. Verifies auth + the
     # structured-output path the strategy uses for sentiment/event LLMs.
+    #
+    # Single-shot, fast-fail: a UI test that takes minutes is worse
+    # than a clean fail in 30s. ``output_retries=0`` + ``retries=0``
+    # caps the wall-clock at one attempt per provider. For codex-cli
+    # this matters most — its per-call cost is ~3s app-server spawn
+    # + the model's first-turn latency, and a misconfigured model
+    # (e.g. an Azure deployment name accidentally pointed at codex)
+    # hangs each attempt for the full timeout.
     _structured_started = time.monotonic()
     result = call_structured_llm_by_provider(
         provider,
@@ -1377,8 +1385,8 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         ),
         max_output_tokens=_test_max_tokens,
         timeout_sec=30,
-        retries=1,
-        output_retries=1,
+        retries=0,
+        output_retries=0,
         provider_config=provider_config,
     )
     _structured_elapsed_ms = int((time.monotonic() - _structured_started) * 1000)
@@ -1407,6 +1415,9 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
     _smoke_text = ""
     _smoke_error = ""
     try:
+        # Same fast-fail rationale as the structured probe above: one
+        # attempt, 30s ceiling. Operators can re-click "Test" if they
+        # want a retry rather than waiting silently for the second.
         _smoke_text = call_llm_by_provider(
             provider,
             api_key,
@@ -1414,7 +1425,7 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
             _smoke_prompt,
             max_output_tokens=128,
             timeout_sec=30,
-            retries=1,
+            retries=0,
             provider_config=provider_config,
         ) or ""
     except Exception as _e:
