@@ -779,7 +779,11 @@ class _CodexAppServerClient:
             },
             "capabilities": {},
         }
-        result = self.request("initialize", params, timeout=15.0)
+        # Shorter timeout (5s) than the default 15s — initialize is a
+        # local handshake, if codex doesn't reply within a few seconds
+        # the subprocess is dead or wedged. Bailing fast keeps /llm/test
+        # under the upstream proxy's 60-100s budget.
+        result = self.request("initialize", params, timeout=5.0)
         self.notify("initialized")
         return result
 
@@ -797,7 +801,9 @@ class _CodexAppServerClient:
         params: Dict[str, Any] = {}
         if cwd:
             params["cwd"] = cwd
-        result = self.request("thread/start", params, timeout=15.0)
+        # 8s ceiling for the same reason as initialize — local
+        # handshake, no LLM call yet, must be quick.
+        result = self.request("thread/start", params, timeout=8.0)
         thread_obj = result.get("thread") or {}
         tid = (
             thread_obj.get("id")
@@ -826,13 +832,15 @@ class _CodexAppServerClient:
         doesn't exist) and tried to read text out of the response — that
         was the root cause of the multi-minute UI hang.
         """
+        # turn/start should return a turn ID promptly — it doesn't wait
+        # for the model. Streaming-response polling starts after this.
         ts_result = self.request(
             "turn/start",
             {
                 "threadId": thread_id,
                 "input": [{"type": "text", "text": user_input}],
             },
-            timeout=15.0,
+            timeout=8.0,
         )
         # Some codex versions return ``turn.id``, others omit it. Either
         # way the turn is now in flight; we collect text from the
@@ -1038,21 +1046,19 @@ def call_codex_cli_plain(
     timeout = float(timeout_sec or CODEX_CLI_TURN_TIMEOUT_SEC)
     max_retries = max(0, int(retries or 0))
     last_err = ""
-    # Model + system prompt are configured at app-server spawn time via
-    # ``-c`` TOML overrides — NOT via ``thread/start``, which only
-    # accepts ``cwd``. Earlier versions tried to pass model in
-    # thread/start, codex silently ignored it, and the subsequent
-    # turn hung. We also force approval_policy=never + sandbox=read-only
-    # so codex doesn't try to prompt for permissions on a non-tty pipe.
+    # Model is configured at app-server spawn time via ``-c model=...``
+    # — NOT via ``thread/start``, which only accepts ``cwd``. Match
+    # hermes-agent's spawn-arg shape exactly so we don't trip an
+    # unknown-config-key path in codex's TOML parser: keep ``model``
+    # (and ``sandbox_mode="read-only"`` as the safest default), drop
+    # made-up keys like ``approval_policy`` /
+    # ``experimental_instructions`` that codex 0.132 doesn't recognise.
+    # System-prompt support requires codex CLI's instruction file flow
+    # which isn't exposed for ad-hoc strategy calls — skip for now.
     spawn_extra_args: List[str] = [
         "-c", f'model="{_toml_escape(model)}"',
-        "-c", 'approval_policy="never"',
         "-c", 'sandbox_mode="read-only"',
     ]
-    if system_prompt:
-        spawn_extra_args.extend([
-            "-c", f'experimental_instructions="{_toml_escape(system_prompt)}"',
-        ])
     spawn_extra_args.extend(extra_args)
     for attempt in range(max_retries + 1):
         acquired = _GLOBAL_SPAWN_SEM.acquire(blocking=True, timeout=30)
