@@ -598,8 +598,77 @@ def _get_llm_config(stage: str) -> dict:
     }
 
 
+_QUOTA_ABORT_SIGNALLED = False  # one-shot guard so we don't Discord-spam on repeats
+
+
+def _signal_quota_exhausted_and_abort(provider: str, model: str, error: str) -> None:
+    """Discord-notify + request stop-all when an LLM provider has run
+    out of paid usage. Idempotent within a single engine process — the
+    first quota signal wins and triggers the abort; subsequent calls
+    are no-ops so a barrage of in-flight LLM calls all hitting the
+    same upstream limit don't spam the channel."""
+    global _QUOTA_ABORT_SIGNALLED
+    if _QUOTA_ABORT_SIGNALLED:
+        return
+    _QUOTA_ABORT_SIGNALLED = True
+    _log(
+        f"LLM quota exhausted (provider={provider} model={model}) — "
+        f"aborting agent and notifying Discord", "red",
+    )
+    try:
+        _send_discord(embed={
+            "title": "AI Backtest Agent: LLM Quota Exhausted",
+            "description": (
+                f"The configured LLM provider has run out of paid usage. "
+                f"Stopping all running and queued backtests so the agent "
+                f"doesn't keep burning failed calls.\n\n"
+                f"**Provider:** {provider}\n"
+                f"**Model:** {model}\n"
+                f"**Upstream error:** ```{_safe_str(error, 600)}```\n"
+                f"Top up the account (or switch the model's provider in "
+                f"the Models UI) and use `!agent resume` to continue."
+            ),
+            "color": 0xE74C3C,
+        })
+    except Exception as _e:
+        _log_error("DISCORD_QUOTA_EXHAUSTED", _e)
+    # Setting the stop event ends the engine's outer loop on the next
+    # iteration; _request_stop_all_backtests asks the API to stop any
+    # currently-running backtest jobs that this engine kicked off.
+    try:
+        _stop_event.set()
+    except Exception:
+        pass
+
+
+def _check_for_quota_exhaustion_and_abort() -> bool:
+    """Inspect the last structured-LLM-call metadata for the quota
+    exhaustion marker and, if found, trigger the abort flow. Returns
+    True if abort was triggered so the caller can short-circuit its
+    current step."""
+    try:
+        from llm_utils import get_last_structured_llm_call_metadata
+        meta = get_last_structured_llm_call_metadata() or {}
+    except Exception:
+        return False
+    if str(meta.get("error_kind") or "") != "quota_exhausted":
+        return False
+    _signal_quota_exhausted_and_abort(
+        provider=str(meta.get("provider") or "?"),
+        model=str(meta.get("requested_model") or meta.get("effective_model") or "?"),
+        error=str(meta.get("error") or "quota exhausted"),
+    )
+    return True
+
+
 def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_prompt: str, max_output_tokens: int = 8192):
-    """Call an LLM provider through the shared structured-output helper."""
+    """Call an LLM provider through the shared structured-output helper.
+
+    On a return of None, inspect the per-thread metadata for a quota
+    exhaustion marker; if found, send a Discord notification and
+    request stop-all so we don't keep hammering an upstream that's
+    out of paid usage.
+    """
     provider = _normalize_llm_provider(config.get("provider") or "gemini")
     model = (config.get("model") or "").strip()
     api_key = (config.get("api_key") or "").strip()
@@ -607,7 +676,7 @@ def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_pro
     if not api_key or not model:
         return None
     try:
-        return call_structured_llm_by_provider(
+        resp = call_structured_llm_by_provider(
             provider,
             api_key,
             model,
@@ -621,8 +690,16 @@ def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_pro
             provider_config=provider_config,
         )
     except Exception as e:
+        # Defensive: should never reach here for codex (the structured
+        # helper catches CodexCliQuotaExceededError), but if some other
+        # adapter raises a similarly-shaped error we still want to abort.
+        if "quota" in str(e).lower() or "insufficient_quota" in str(e).lower():
+            _signal_quota_exhausted_and_abort(provider, model, str(e))
         _log(f"Structured LLM call failed: {e}", "red")
         return None
+    if resp is None:
+        _check_for_quota_exhaustion_and_abort()
+    return resp
 
 
 def _parse_json_object_string(raw: Any) -> dict:

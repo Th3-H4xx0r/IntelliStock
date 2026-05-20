@@ -28,6 +28,7 @@ from chatbot.codex_cli_provider import (  # noqa: E402
     CodexCliNotAuthenticatedError,
     CodexCliNotInstalledError,
     CodexCliProtocolError,
+    CodexCliQuotaExceededError,
     CodexCliTimeoutError,
     CodexCliValidationError,
     CodexDeviceCodeLogin,
@@ -35,6 +36,7 @@ from chatbot.codex_cli_provider import (  # noqa: E402
     _classify_error_text,
     _classify_oauth_failure,
     _extract_json_from_text,
+    _looks_like_quota_exhaustion,
     detect_install_method,
     invalidate_auth_cache,
     is_authenticated,
@@ -576,6 +578,18 @@ class TestParseSseStream:
         with pytest.raises(CodexCliError, match="model overloaded"):
             _parse_sse_stream(resp)
 
+    def test_quota_exhausted_in_sse_raises_terminal(self):
+        from chatbot.codex_cli_provider import _parse_sse_stream
+        events = [
+            ("response.failed", {
+                "type": "response.failed",
+                "error": {"message": "Your account has insufficient_quota. Please add credit."},
+            }),
+        ]
+        resp = _FakeStreamResponse(self._lines_from_events(events))
+        with pytest.raises(CodexCliQuotaExceededError):
+            _parse_sse_stream(resp)
+
     def test_handles_done_sentinel(self):
         from chatbot.codex_cli_provider import _parse_sse_stream, _extract_responses_text
         # Some streams emit a trailing ``data: [DONE]`` — must be ignored.
@@ -606,6 +620,36 @@ class TestParseSseStream:
         resp = _FakeStreamResponse(lines)
         out = _parse_sse_stream(resp)
         assert _extract_responses_text(out) == "z"
+
+
+# ── Quota classifier ───────────────────────────────────────────────────────
+
+
+class TestQuotaExhaustionClassifier:
+    @pytest.mark.parametrize("text", [
+        "Error: insufficient_quota — you have exceeded your monthly limit.",
+        "billing_hard_limit",
+        '{"detail": "Usage limit reached for this account."}',
+        "Please add a payment method to continue.",
+        "Plan_limit_exceeded — upgrade your plan to continue.",
+        "You have reached your usage limit for this billing period.",
+    ])
+    def test_quota_signals_match(self, text):
+        assert _looks_like_quota_exhaustion(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "Rate limit exceeded. Please retry in 20s.",  # transient TPM cap
+        "Internal server error.",
+        "Stream must be set to true",
+        "",
+        "Instructions are required",
+    ])
+    def test_transient_or_unrelated_errors_dont_match(self, text):
+        assert _looks_like_quota_exhaustion(text) is False
+
+    def test_none_input_does_not_match(self):
+        # Don't put None in a parametrize — it confuses pytest's id generator.
+        assert _looks_like_quota_exhaustion(None) is False
 
 
 # ── call_codex_cli_plain via Responses API ─────────────────────────────────

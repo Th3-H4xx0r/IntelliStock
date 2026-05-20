@@ -1514,7 +1514,7 @@ def _call_codex_cli_structured_from_strategy(
             call_codex_cli_structured as _impl,
             _get_last_error as _impl_last_err,
             CodexCliError, CodexCliNotInstalledError, CodexCliNotAuthenticatedError,
-            CodexCliValidationError,
+            CodexCliValidationError, CodexCliQuotaExceededError,
         )
     except Exception as e:
         _LAST_STRUCTURED_LLM_CALL.data = {
@@ -1570,6 +1570,24 @@ def _call_codex_cli_structured_from_strategy(
             provider="codex-cli", model=model, usage={}, ok=False,
             duration_ms=int((time.monotonic() - _t0) * 1000),
             retry_count=0, error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliQuotaExceededError as e:
+        # Codex usage exhausted — terminal. Mark the meta with a
+        # discriminator so callers (notably the AI backtest engine) can
+        # tell quota exhaustion apart from other terminal failures and
+        # take the appropriate action (Discord notify + abort job)
+        # instead of just skipping the next strategy.
+        _meta = _codex_failure_meta(
+            model, cli_path, f"codex-cli quota exhausted: {e}", terminal=True,
+        )
+        _meta["error_kind"] = "quota_exhausted"
+        _LAST_STRUCTURED_LLM_CALL.data = _meta
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=f"quota_exhausted: {str(e)[:180]}",
             model_id=cfg.get("id") if isinstance(cfg, dict) else None,
         )
         return None

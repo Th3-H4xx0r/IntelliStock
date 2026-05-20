@@ -172,6 +172,17 @@ class CodexCliValidationError(CodexCliError):
     """An extra-args entry failed the allowlist gate."""
 
 
+class CodexCliQuotaExceededError(CodexCliError):
+    """Codex Responses API surfaced a terminal quota / billing failure.
+
+    Distinct from a transient rate-limit (HTTP 429 with ``retry-after``)
+    — this is the upstream signalling that the account is out of
+    paid usage and the operator must intervene (top up, switch
+    accounts) before any further calls will succeed. Callers should
+    treat this as terminal and abort retry loops + long-running jobs.
+    """
+
+
 # ── OAuth token management (~/.codex/auth.json) ───────────────────────────
 
 
@@ -415,6 +426,49 @@ def _extract_responses_text(payload: Dict[str, Any]) -> str:
     return "".join(chunks).strip()
 
 
+# Substrings that, when seen in a Codex error body / SSE failure message,
+# indicate the upstream account is out of paid usage — not a transient
+# per-minute rate cap. Match case-insensitively against the body text;
+# kept conservative so we don't mis-classify a transient rate-limit as
+# terminal. Sourced from observed OpenAI/Codex 429 + 402 + SSE error
+# bodies plus billing-portal language.
+_QUOTA_EXHAUSTED_HINTS = (
+    "insufficient_quota",
+    "exceeded_quota",
+    "quota exceeded",
+    "quota_exhausted",
+    "exceeded your quota",
+    "exceeded your monthly",
+    "billing_hard_limit",
+    "billing hard limit",
+    "usage_limit_reached",
+    "usage limit reached",
+    "monthly limit reached",
+    "you have reached your usage limit",
+    "no remaining credit",
+    "payment required",
+    "payment method",  # matches "add a payment method", "no payment method on file"
+    "upgrade your plan",
+    "plan_limit_exceeded",
+    "subscription_limit",
+    "account_deactivated",
+)
+
+
+def _looks_like_quota_exhaustion(text: str) -> bool:
+    """Return True if ``text`` contains a Codex quota-exhaustion marker.
+
+    Used by the 4xx / SSE error paths to split true quota exhaustion
+    (terminal — caller should stop the job) from transient rate-limits
+    (retry with backoff). Case-insensitive substring match against a
+    conservative allowlist; unknown error shapes default to transient.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    low = text.lower()
+    return any(hint in low for hint in _QUOTA_EXHAUSTED_HINTS)
+
+
 def _parse_sse_stream(
     response: "_httpx.Response",
 ) -> Dict[str, Any]:
@@ -488,6 +542,10 @@ def _parse_sse_stream(
     except Exception as e:
         raise CodexCliError(f"codex Responses SSE read error: {e}") from e
     if failure_message:
+        if _looks_like_quota_exhaustion(failure_message):
+            raise CodexCliQuotaExceededError(
+                f"codex Responses API quota exhausted: {failure_message}"
+            )
         raise CodexCliError(f"codex Responses API stream failed: {failure_message}")
     if final_response is not None:
         # If the completed event already contains text in
@@ -560,13 +618,53 @@ def _call_responses_api(
                     f"gpt-4.1-mini, o3, o4-mini)"
                 )
             if resp.status_code == 429:
-                raise CodexCliError("codex Responses API rate-limited (429)")
+                # 429 spans two very different states upstream:
+                #   1) Transient rate-limit (per-minute / TPM cap) —
+                #      retry after a backoff.
+                #   2) Quota exhausted ("insufficient_quota",
+                #      "usage_limit_reached", "billing_hard_limit") —
+                #      terminal; the operator must add credit or
+                #      switch accounts.
+                # Read the body to distinguish; classify quota signals
+                # as ``CodexCliQuotaExceededError`` so the backtest
+                # engine can abort cleanly instead of burning the
+                # retry budget.
+                try:
+                    resp.read()
+                    err_text = (resp.text or "")[:400]
+                except Exception:
+                    err_text = ""
+                if _looks_like_quota_exhaustion(err_text):
+                    raise CodexCliQuotaExceededError(
+                        f"codex Responses API quota exhausted (429): {err_text}"
+                    )
+                raise CodexCliError(
+                    f"codex Responses API rate-limited (429): {err_text}"
+                )
+            if resp.status_code == 402:
+                # 402 Payment Required is unambiguous: account is out
+                # of paid usage. Always terminal.
+                try:
+                    resp.read()
+                    err_text = (resp.text or "")[:400]
+                except Exception:
+                    err_text = ""
+                raise CodexCliQuotaExceededError(
+                    f"codex Responses API HTTP 402 (payment required): {err_text}"
+                )
             if resp.status_code >= 400:
                 try:
                     resp.read()
                     err_text = resp.text[:400]
                 except Exception:
                     err_text = ""
+                # Some 4xx responses also carry quota / billing hints in
+                # the body even when the status code itself is generic.
+                if _looks_like_quota_exhaustion(err_text):
+                    raise CodexCliQuotaExceededError(
+                        f"codex Responses API HTTP {resp.status_code} "
+                        f"(quota exhausted): {err_text}"
+                    )
                 raise CodexCliError(
                     f"codex Responses API HTTP {resp.status_code}: {err_text}"
                 )
