@@ -221,13 +221,31 @@ class TestIsAuthenticated:
         # Each test starts with a clean auth cache so previous tests don't leak.
         invalidate_auth_cache()
 
-    def test_not_installed(self):
+    def test_auth_json_fast_path_wins_over_cli(self, tmp_path, monkeypatch):
+        # Fast path: auth.json present with tokens → authenticated, no
+        # subprocess spawn at all.
+        auth_file = tmp_path / "auth.json"
+        auth_file.write_text(json.dumps({
+            "tokens": {"access_token": "abc.def.ghi", "refresh_token": "rt"},
+        }), encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        with mock.patch("chatbot.codex_cli_provider.subprocess.run") as m_run:
+            ok, msg = is_authenticated()
+            assert ok is True
+            assert "auth.json" in msg
+            assert m_run.call_count == 0
+
+    def test_not_installed(self, tmp_path, monkeypatch):
+        # Auth file absent + codex not on PATH → unauthenticated.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         with mock.patch("chatbot.codex_cli_provider.shutil.which", return_value=None):
             ok, msg = is_authenticated()
             assert ok is False
             assert "not installed" in msg
 
-    def test_logged_in_exit_zero(self):
+    def test_logged_in_exit_zero(self, tmp_path, monkeypatch):
+        # No auth.json → fall through to CLI probe → CLI says logged in.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         fake_result = mock.Mock(returncode=0, stdout="Logged in as user@example.com\n", stderr="")
         with mock.patch("chatbot.codex_cli_provider.shutil.which", return_value="/x/codex"), \
              mock.patch("chatbot.codex_cli_provider._is_system_binary_path", return_value=True), \
@@ -236,37 +254,48 @@ class TestIsAuthenticated:
             assert ok is True
             assert "authenticated" in msg.lower() or "@" in msg or msg
 
-    def test_not_logged_in(self):
+    def test_not_logged_in(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         fake_result = mock.Mock(returncode=1, stdout="", stderr="not logged in. Please run codex login.")
         with mock.patch("chatbot.codex_cli_provider.shutil.which", return_value="/x/codex"), \
              mock.patch("chatbot.codex_cli_provider._is_system_binary_path", return_value=True), \
-             mock.patch("chatbot.codex_cli_provider.subprocess.run", return_value=fake_result), \
-             mock.patch("chatbot.codex_cli_provider.os.path.isfile", return_value=False):
+             mock.patch("chatbot.codex_cli_provider.subprocess.run", return_value=fake_result):
             ok, msg = is_authenticated()
             assert ok is False
             assert "not authenticated" in msg.lower() or "codex login" in msg
 
-    def test_subcommand_not_found_falls_through_to_file_probe(self):
-        # All subcommands return "command not found"; fall through to file probe.
-        fake_result = mock.Mock(returncode=1, stdout="", stderr="unknown command 'login'")
-        with mock.patch("chatbot.codex_cli_provider.shutil.which", return_value="/x/codex"), \
-             mock.patch("chatbot.codex_cli_provider._is_system_binary_path", return_value=True), \
-             mock.patch("chatbot.codex_cli_provider.subprocess.run", return_value=fake_result), \
-             mock.patch("chatbot.codex_cli_provider.os.path.isfile", return_value=True), \
-             mock.patch("chatbot.codex_cli_provider.os.path.getsize", return_value=512):
-            ok, msg = is_authenticated()
-            assert ok is True
-
-    def test_cache_hit(self):
-        # First call caches; second should not invoke subprocess.run again.
+    def test_cache_hit(self, tmp_path, monkeypatch):
+        # No auth.json → CLI probe runs and is cached; second call hits cache.
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
         fake_result = mock.Mock(returncode=0, stdout="Logged in", stderr="")
         with mock.patch("chatbot.codex_cli_provider.shutil.which", return_value="/x/codex"), \
              mock.patch("chatbot.codex_cli_provider._is_system_binary_path", return_value=True), \
              mock.patch("chatbot.codex_cli_provider.subprocess.run", return_value=fake_result) as m_run:
             is_authenticated()
             is_authenticated()
-            # subprocess.run should be called only for the first probe
-            assert m_run.call_count <= 3  # the first probe tries up to 3 subcommands; second probe is cached
+            # First probe may try up to 3 subcommands; second is cached.
+            assert m_run.call_count <= 3
+
+    def test_auth_json_with_only_refresh_token(self, tmp_path, monkeypatch):
+        # access_token missing but refresh_token present → still treat as
+        # authenticated; the refresh will run on the first API call.
+        auth_file = tmp_path / "auth.json"
+        auth_file.write_text(json.dumps({
+            "tokens": {"refresh_token": "rt"},
+        }), encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        ok, msg = is_authenticated()
+        assert ok is True
+
+    def test_auth_json_malformed_falls_through(self, tmp_path, monkeypatch):
+        # Truncated/invalid auth.json → fast path declines, fall through
+        # to CLI probe (which then says unauthenticated because we mock no CLI).
+        auth_file = tmp_path / "auth.json"
+        auth_file.write_text("not json {{{", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        with mock.patch("chatbot.codex_cli_provider.shutil.which", return_value=None):
+            ok, _ = is_authenticated()
+            assert ok is False
 
 
 # ── _classify_oauth_failure / _classify_error_text ──────────────────────────
@@ -292,6 +321,339 @@ class TestClassifiers:
     def test_error_text_default_to_protocol(self):
         err = _classify_error_text("unparseable garbage")
         assert isinstance(err, CodexCliError)
+
+
+# ── OAuth token management ──────────────────────────────────────────────────
+
+
+def _make_jwt(exp_epoch: int) -> str:
+    """Build a fake JWT with the given exp claim (header.payload.sig)."""
+    import base64
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": exp_epoch}).encode()
+    ).rstrip(b"=").decode()
+    sig = "sig"
+    return f"{header}.{payload}.{sig}"
+
+
+class TestOAuthTokenManagement:
+    def test_access_token_exp_parses_jwt(self):
+        from chatbot.codex_cli_provider import _access_token_exp
+        tok = _make_jwt(1_700_000_000)
+        assert _access_token_exp(tok) == 1_700_000_000
+
+    def test_access_token_exp_handles_malformed(self):
+        from chatbot.codex_cli_provider import _access_token_exp
+        assert _access_token_exp("") is None
+        assert _access_token_exp("not.a.jwt.at.all") is None
+        assert _access_token_exp("only_one_part") is None
+
+    def test_is_access_token_expiring_true_when_close(self):
+        from chatbot.codex_cli_provider import _is_access_token_expiring
+        soon = int(time.time()) + 30  # 30s from now
+        assert _is_access_token_expiring(_make_jwt(soon), skew_sec=60) is True
+
+    def test_is_access_token_expiring_false_when_far(self):
+        from chatbot.codex_cli_provider import _is_access_token_expiring
+        far = int(time.time()) + 3600  # 1h from now
+        assert _is_access_token_expiring(_make_jwt(far), skew_sec=60) is False
+
+    def test_is_access_token_expiring_false_without_exp(self):
+        # No exp claim → assume valid (the API call will surface a 401 if not).
+        from chatbot.codex_cli_provider import _is_access_token_expiring
+        assert _is_access_token_expiring("a.b.c", skew_sec=60) is False
+
+    def test_get_access_token_reads_auth_file(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import _get_codex_access_token
+        far = int(time.time()) + 3600
+        tok = _make_jwt(far)
+        (tmp_path / "auth.json").write_text(json.dumps({
+            "tokens": {"access_token": tok, "refresh_token": "rt"},
+        }), encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        assert _get_codex_access_token() == tok
+
+    def test_get_access_token_refreshes_when_expiring(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import _get_codex_access_token
+        soon = int(time.time()) + 5
+        old_tok = _make_jwt(soon)
+        new_tok = _make_jwt(int(time.time()) + 3600)
+        (tmp_path / "auth.json").write_text(json.dumps({
+            "tokens": {"access_token": old_tok, "refresh_token": "rt"},
+        }), encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        with mock.patch(
+            "chatbot.codex_cli_provider._refresh_codex_tokens",
+            return_value={"access_token": new_tok, "refresh_token": "rt2", "id_token": "", "account_id": ""},
+        ) as m_refresh:
+            out = _get_codex_access_token()
+            assert out == new_tok
+            assert m_refresh.call_count == 1
+        # auth.json should have been rewritten with the new token
+        data = json.loads((tmp_path / "auth.json").read_text(encoding="utf-8"))
+        assert data["tokens"]["access_token"] == new_tok
+        assert data["tokens"]["refresh_token"] == "rt2"
+
+    def test_get_access_token_no_auth_file_raises(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import _get_codex_access_token
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        with pytest.raises(CodexCliNotAuthenticatedError):
+            _get_codex_access_token()
+
+
+# ── _build_responses_request / _extract_responses_text ─────────────────────
+
+
+class TestResponsesRequestBuilder:
+    def test_minimal_request(self):
+        from chatbot.codex_cli_provider import _build_responses_request
+        body = _build_responses_request(
+            model="gpt-5-codex", prompt="hello",
+            system_prompt=None, max_output_tokens=None, reasoning_effort=None,
+        )
+        assert body["model"] == "gpt-5-codex"
+        assert body["store"] is False
+        assert isinstance(body["input"], list) and len(body["input"]) == 1
+        assert body["input"][0]["role"] == "user"
+        content = body["input"][0]["content"]
+        assert content == [{"type": "input_text", "text": "hello"}]
+        assert "instructions" not in body
+        assert "reasoning" not in body
+
+    def test_system_prompt_routes_to_instructions(self):
+        from chatbot.codex_cli_provider import _build_responses_request
+        body = _build_responses_request(
+            model="gpt-5", prompt="u", system_prompt="be terse",
+            max_output_tokens=None, reasoning_effort=None,
+        )
+        assert body.get("instructions") == "be terse"
+
+    def test_reasoning_effort_normalised(self):
+        from chatbot.codex_cli_provider import _build_responses_request
+        for effort in ("low", "medium", "high"):
+            body = _build_responses_request(
+                model="o4-mini", prompt="x", system_prompt=None,
+                max_output_tokens=None, reasoning_effort=effort,
+            )
+            assert body["reasoning"] == {"effort": effort}
+        # garbage effort → omitted
+        body = _build_responses_request(
+            model="o4-mini", prompt="x", system_prompt=None,
+            max_output_tokens=None, reasoning_effort="bogus",
+        )
+        assert "reasoning" not in body
+
+    def test_max_output_tokens_passthrough(self):
+        from chatbot.codex_cli_provider import _build_responses_request
+        body = _build_responses_request(
+            model="gpt-5", prompt="x", system_prompt=None,
+            max_output_tokens=256, reasoning_effort=None,
+        )
+        assert body["max_output_tokens"] == 256
+
+
+class TestResponsesTextExtractor:
+    def test_direct_output_text_field(self):
+        from chatbot.codex_cli_provider import _extract_responses_text
+        assert _extract_responses_text({"output_text": "hello"}) == "hello"
+
+    def test_output_array_message_text(self):
+        from chatbot.codex_cli_provider import _extract_responses_text
+        payload = {
+            "output": [
+                {"type": "reasoning", "content": []},  # ignored
+                {"type": "message", "content": [
+                    {"type": "output_text", "text": "answer"},
+                ]},
+            ]
+        }
+        assert _extract_responses_text(payload) == "answer"
+
+    def test_handles_multiple_text_parts(self):
+        from chatbot.codex_cli_provider import _extract_responses_text
+        payload = {
+            "output": [
+                {"type": "message", "content": [
+                    {"type": "output_text", "text": "part1 "},
+                    {"type": "text", "text": "part2"},
+                ]},
+            ]
+        }
+        assert _extract_responses_text(payload) == "part1 part2"
+
+    def test_empty_payload(self):
+        from chatbot.codex_cli_provider import _extract_responses_text
+        assert _extract_responses_text({}) == ""
+        assert _extract_responses_text({"output": []}) == ""
+
+
+# ── call_codex_cli_plain via Responses API ─────────────────────────────────
+
+
+class TestCallCodexCliPlain:
+    def _setup_auth(self, tmp_path, monkeypatch):
+        far = int(time.time()) + 3600
+        tok = _make_jwt(far)
+        (tmp_path / "auth.json").write_text(json.dumps({
+            "tokens": {"access_token": tok, "refresh_token": "rt"},
+        }), encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        return tok
+
+    def test_happy_path_returns_text(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain
+        self._setup_auth(tmp_path, monkeypatch)
+        fake_payload = {"output": [
+            {"type": "message", "content": [
+                {"type": "output_text", "text": "hello world"},
+            ]},
+        ]}
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            return_value=fake_payload,
+        ) as m_call:
+            out = call_codex_cli_plain(model="gpt-5-codex", prompt="hi")
+            assert out == "hello world"
+            assert m_call.call_count == 1
+            body = m_call.call_args.kwargs["body"]
+            assert body["model"] == "gpt-5-codex"
+
+    def test_missing_model_returns_empty(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain
+        out = call_codex_cli_plain(model="", prompt="hi")
+        assert out == ""
+
+    def test_not_authenticated_raises(self, tmp_path, monkeypatch):
+        # No auth.json on disk.
+        from chatbot.codex_cli_provider import call_codex_cli_plain
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        with pytest.raises(CodexCliNotAuthenticatedError):
+            call_codex_cli_plain(model="gpt-5-codex", prompt="hi")
+
+    def test_401_triggers_refresh_and_retry(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain
+        self._setup_auth(tmp_path, monkeypatch)
+        fake_payload = {"output": [
+            {"type": "message", "content": [
+                {"type": "output_text", "text": "after refresh"},
+            ]},
+        ]}
+        # First call raises 401, second succeeds.
+        side_effects = [
+            CodexCliNotAuthenticatedError("401"),
+            fake_payload,
+        ]
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            side_effect=side_effects,
+        ) as m_call, mock.patch(
+            "chatbot.codex_cli_provider._refresh_codex_tokens",
+            return_value={"access_token": _make_jwt(int(time.time()) + 3600), "refresh_token": "rt", "id_token": "", "account_id": ""},
+        ):
+            out = call_codex_cli_plain(model="gpt-5-codex", prompt="hi")
+            assert out == "after refresh"
+            assert m_call.call_count == 2
+
+    def test_persistent_401_raises_not_authenticated(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain
+        self._setup_auth(tmp_path, monkeypatch)
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            side_effect=CodexCliNotAuthenticatedError("401"),
+        ), mock.patch(
+            "chatbot.codex_cli_provider._refresh_codex_tokens",
+            return_value={"access_token": _make_jwt(int(time.time()) + 3600), "refresh_token": "rt", "id_token": "", "account_id": ""},
+        ):
+            with pytest.raises(CodexCliNotAuthenticatedError):
+                call_codex_cli_plain(model="gpt-5-codex", prompt="hi")
+
+    def test_empty_response_returns_empty(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain
+        self._setup_auth(tmp_path, monkeypatch)
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            return_value={"output": []},
+        ):
+            out = call_codex_cli_plain(model="gpt-5-codex", prompt="hi")
+            assert out == ""
+
+    def test_reasoning_effort_forwarded(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain
+        self._setup_auth(tmp_path, monkeypatch)
+        fake_payload = {"output_text": "ok"}
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            return_value=fake_payload,
+        ) as m_call:
+            call_codex_cli_plain(
+                model="o4-mini", prompt="hi",
+                provider_config={"reasoning_effort": "high"},
+            )
+            body = m_call.call_args.kwargs["body"]
+            assert body.get("reasoning") == {"effort": "high"}
+
+
+# ── call_codex_cli_structured ───────────────────────────────────────────────
+
+
+class _StructuredOutput:
+    """Minimal pydantic-like target for structured-output tests."""
+    def __init__(self, name: str, value: int):
+        self.name = name
+        self.value = value
+
+    @classmethod
+    def model_validate(cls, data):
+        return cls(name=str(data["name"]), value=int(data["value"]))
+
+    @classmethod
+    def model_json_schema(cls):
+        return {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "value": {"type": "integer"}},
+            "required": ["name", "value"],
+        }
+
+
+class TestCallCodexCliStructured:
+    def _setup_auth(self, tmp_path, monkeypatch):
+        far = int(time.time()) + 3600
+        (tmp_path / "auth.json").write_text(json.dumps({
+            "tokens": {"access_token": _make_jwt(far), "refresh_token": "rt"},
+        }), encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
+    def test_happy_path_validates_json(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_structured
+        self._setup_auth(tmp_path, monkeypatch)
+        fake_payload = {"output_text": '{"name": "abc", "value": 42}'}
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            return_value=fake_payload,
+        ):
+            out = call_codex_cli_structured(
+                model="gpt-5-codex", prompt="x",
+                output_type=_StructuredOutput,
+            )
+            assert out is not None
+            assert out.name == "abc"
+            assert out.value == 42
+
+    def test_invalid_json_retries_then_gives_up(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_structured
+        self._setup_auth(tmp_path, monkeypatch)
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            return_value={"output_text": "not json at all"},
+        ) as m_call:
+            out = call_codex_cli_structured(
+                model="gpt-5-codex", prompt="x",
+                output_type=_StructuredOutput,
+                output_retries=1,
+            )
+            assert out is None
+            assert m_call.call_count == 2  # 1 initial + 1 retry
 
 
 # ── _extract_json_from_text ────────────────────────────────────────────────

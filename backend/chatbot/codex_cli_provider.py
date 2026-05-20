@@ -1,9 +1,18 @@
-"""Codex CLI (OpenAI ``codex``) as an IntelliStock LLM provider.
+"""Codex (OpenAI ``codex``) as an IntelliStock LLM provider.
 
-Architectural template: ``backend/chatbot/claude_cli_provider.py`` (claude-cli).
-Protocol details: cribbed from ``NousResearch/hermes-agent``
-(``agent/transports/codex_app_server.py``) — Codex CLI's ``app-server``
-subcommand speaks JSON-RPC 2.0 over newline-delimited stdin/stdout.
+Transport: direct HTTPS to the Codex Responses API at
+``chatgpt.com/backend-api/codex/responses``, authenticated with the
+OAuth ``access_token`` stored in ``~/.codex/auth.json`` (the same token
+the ``codex`` CLI uses). The CLI itself is *only* used to drive the
+device-code login flow that writes auth.json — at LLM-call time we
+bypass the CLI entirely and call the Responses API ourselves. This
+matches ``NousResearch/hermes-agent``'s ``codex_responses`` transport.
+
+Why not ``codex app-server``? It's a coding-agent runtime (file edits,
+shell exec, tool calls) — the wrong surface for pure text generation.
+The JSON-RPC framing we originally cribbed from hermes-agent's
+``codex_app_server.py`` is preserved as ``_CodexAppServerClient`` for
+future tool-call experiments but isn't on the strategy hot path.
 
 What this module exposes
 ========================
@@ -11,9 +20,9 @@ What this module exposes
 Strategy-facing (called by ``llm_utils.py``)
 --------------------------------------------
 ``call_codex_cli_plain``
-    Plain-text completion. Spawns ``codex app-server``, runs a single
-    turn, returns the assistant text. Used for non-structured strategy
-    calls and the ``/llm/test`` real-generation smoke prompt.
+    Plain-text completion via POST /responses. Refreshes the OAuth
+    access_token on expiry. Used for non-structured strategy calls and
+    the ``/llm/test`` real-generation smoke prompt.
 
 ``call_codex_cli_structured``
     Prompted-JSON structured output. Wraps the prompt with a JSON-schema
@@ -22,38 +31,39 @@ Strategy-facing (called by ``llm_utils.py``)
     ``output_retries`` times (default 2).
 
 ``call_codex_cli_chat_structured``
-    Spawn-per-call structured wrapper that reuses ``call_codex_cli_structured``
-    semantically but threads a conversation_id for telemetry parity with
-    the claude-cli chat-structured path. (Codex's app-server is itself a
-    session, so we use a fresh thread per call for determinism.)
+    Conversation-id variant — currently delegates to the structured path
+    (one-shot per call; no multi-turn history threading yet). The
+    conversation_id is threaded through telemetry only.
 
 Web-UI setup (called by ``backend/api/main.py``)
 ------------------------------------------------
 ``is_installed`` / ``get_version`` / ``is_authenticated``
     Cheap detection probes used by ``/codex/status``.
+    ``is_authenticated`` short-circuits on ``~/.codex/auth.json`` —
+    no subprocess spawn on the hot path.
 
 ``CodexInstaller``
     Wraps ``npm install -g @openai/codex`` or ``brew install codex`` as
     a streaming background job with a per-job log buffer.
 
 ``CodexDeviceCodeLogin``
-    Drives ``codex login --no-browser`` (or whichever pairing flag the
-    installed version supports), parses the pairing URL + code from
-    stdout, polls the subprocess for completion. The frontend polls
-    ``status()`` every 2s.
+    Drives ``codex login --device-auth``, parses the pairing URL + code
+    from stdout (ANSI-stripped), polls the subprocess for completion.
+    The frontend polls ``status()`` every 2s.
 
 Security stance
 ===============
 
 Pure-text, prompt-only. We do not enable Codex's tool-call APIs, file
 read/write, MCP servers, or any shell execution from the model. The
-allowlist gate on ``extra_args`` keeps an authenticated operator from
-turning the strategy config into RCE (e.g. ``--exec /usr/bin/curl ...``
-or ``-e/etc/passwd``). Codex's own tokens land in ``~/.codex/auth.json``
-on the API host — operator responsible for filesystem permissions.
+allowlist gate on ``extra_args`` is preserved for the (currently unused)
+spawn-based path. Codex's own tokens land in ``~/.codex/auth.json`` on
+the API host — operator responsible for filesystem permissions and the
+docker volume permissions on the ``codex_auth`` named volume.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -68,6 +78,11 @@ from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:
+    import httpx as _httpx  # type: ignore
+except Exception:
+    _httpx = None
+
 
 # Telemetry — defensive import so a missing module never blocks LLM calls.
 try:
@@ -75,6 +90,28 @@ try:
 except Exception:
     def _telemetry_record(**_kwargs):  # type: ignore
         return None
+
+
+# ── Codex Responses API (the actual LLM transport) ────────────────────────
+#
+# The codex CLI's ``app-server`` is a *coding agent* runtime — wrong tool
+# for plain LLM dispatch. The real text-generation surface is OpenAI's
+# Responses API at chatgpt.com/backend-api/codex, authenticated with the
+# OAuth access token that ``codex login --device-auth`` writes to
+# ``~/.codex/auth.json``. This matches NousResearch/hermes-agent's
+# ``codex_responses`` transport (the reference implementation).
+
+CODEX_RESPONSES_BASE_URL = os.environ.get(
+    "CODEX_RESPONSES_BASE_URL", "https://chatgpt.com/backend-api/codex"
+).rstrip("/")
+CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+# Same client_id codex CLI itself uses — published in the device-auth
+# flow's pairing URL output. Required for refresh_token grants.
+CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_HTTP_TIMEOUT_SEC = float(os.environ.get("CODEX_HTTP_TIMEOUT_SEC", "30"))
+# Refresh access_token when it has fewer than this many seconds left
+# before exp. 60s gives us safety margin against clock skew.
+CODEX_ACCESS_TOKEN_REFRESH_SKEW_SEC = 60
 
 
 def _safe_record(**kwargs) -> None:
@@ -133,6 +170,286 @@ class CodexCliProtocolError(CodexCliError):
 
 class CodexCliValidationError(CodexCliError):
     """An extra-args entry failed the allowlist gate."""
+
+
+# ── OAuth token management (~/.codex/auth.json) ───────────────────────────
+
+
+_AUTH_FILE_LOCK = threading.Lock()
+
+
+def _codex_auth_path() -> str:
+    home = (os.environ.get("CODEX_HOME") or "").strip()
+    if not home:
+        home = os.path.expanduser("~/.codex")
+    return os.path.join(home, "auth.json")
+
+
+def _read_codex_auth_file() -> Dict[str, Any]:
+    path = _codex_auth_path()
+    if not os.path.isfile(path):
+        raise CodexCliNotAuthenticatedError(
+            f"codex auth file not found at {path} — run `codex login --device-auth` "
+            f"(or use the Sign in flow in the Models UI)"
+        )
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise CodexCliNotAuthenticatedError(
+            f"codex auth file {path} is unreadable: {e}"
+        ) from e
+
+
+def _write_codex_auth_file(data: Dict[str, Any]) -> None:
+    path = _codex_auth_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _access_token_exp(access_token: str) -> Optional[int]:
+    """Return the JWT ``exp`` claim (epoch seconds) or None if not parsable."""
+    if not access_token or access_token.count(".") < 2:
+        return None
+    try:
+        payload_b64 = access_token.split(".")[1]
+        padding = "=" * (-len(payload_b64) % 4)
+        decoded = base64.urlsafe_b64decode(payload_b64 + padding)
+        claims = json.loads(decoded)
+        exp = claims.get("exp")
+        if isinstance(exp, (int, float)):
+            return int(exp)
+    except Exception:
+        pass
+    return None
+
+
+def _is_access_token_expiring(access_token: str, skew_sec: int) -> bool:
+    exp = _access_token_exp(access_token)
+    if exp is None:
+        # No exp claim — assume valid; the API call will surface a 401
+        # if it's actually expired and the refresh path will retry.
+        return False
+    return (exp - time.time()) < skew_sec
+
+
+def _refresh_codex_tokens(refresh_token: str) -> Dict[str, str]:
+    """POST to auth.openai.com/oauth/token with grant_type=refresh_token.
+    Returns the new ``{access_token, refresh_token, id_token}`` dict.
+    Raises ``CodexCliNotAuthenticatedError`` on terminal failures (relogin
+    required); other failures fall through as ``CodexCliError``."""
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        raise CodexCliNotAuthenticatedError(
+            "codex refresh_token missing — re-authenticate via Models UI"
+        )
+    if _httpx is None:
+        raise CodexCliError("httpx not available for codex token refresh")
+    try:
+        with _httpx.Client(timeout=_httpx.Timeout(10.0)) as client:
+            resp = client.post(
+                CODEX_OAUTH_TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": CODEX_OAUTH_CLIENT_ID,
+                },
+            )
+    except Exception as e:
+        raise CodexCliError(f"codex token refresh network error: {e}") from e
+    if resp.status_code in (400, 401, 403):
+        # Body shape: {"error": "invalid_grant", "error_description": "..."}
+        # OR {"error": {"code": "...", "message": "..."}}
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = {}
+        err = err_body.get("error") if isinstance(err_body, dict) else None
+        msg = ""
+        if isinstance(err, dict):
+            msg = err.get("message") or err.get("code") or ""
+        elif isinstance(err, str):
+            msg = err
+        raise CodexCliNotAuthenticatedError(
+            f"codex token refresh failed ({resp.status_code}): "
+            f"{msg or 'invalid_grant'} — re-authenticate via Models UI"
+        )
+    if resp.status_code != 200:
+        raise CodexCliError(
+            f"codex token refresh failed with status {resp.status_code}"
+        )
+    try:
+        payload = resp.json()
+    except Exception as e:
+        raise CodexCliError(f"codex token refresh returned non-JSON: {e}") from e
+    new_access = payload.get("access_token")
+    if not isinstance(new_access, str) or not new_access.strip():
+        raise CodexCliError("codex token refresh missing access_token in response")
+    return {
+        "access_token": new_access.strip(),
+        "refresh_token": (payload.get("refresh_token") or refresh_token).strip(),
+        "id_token": (payload.get("id_token") or "").strip(),
+        "account_id": (payload.get("account_id") or "").strip(),
+    }
+
+
+def _get_codex_access_token(force_refresh: bool = False) -> str:
+    """Return a fresh access_token, refreshing if it's close to expiry.
+    Writes refreshed tokens back to ~/.codex/auth.json under a process
+    lock so concurrent strategy calls don't race the refresh."""
+    with _AUTH_FILE_LOCK:
+        data = _read_codex_auth_file()
+        tokens = data.get("tokens") if isinstance(data, dict) else None
+        if not isinstance(tokens, dict):
+            raise CodexCliNotAuthenticatedError(
+                "codex auth.json has no `tokens` object — re-authenticate"
+            )
+        access_token = str(tokens.get("access_token") or "").strip()
+        refresh_token = str(tokens.get("refresh_token") or "").strip()
+        if not access_token:
+            raise CodexCliNotAuthenticatedError(
+                "codex auth.json has no access_token — re-authenticate"
+            )
+        needs_refresh = force_refresh or _is_access_token_expiring(
+            access_token, CODEX_ACCESS_TOKEN_REFRESH_SKEW_SEC
+        )
+        if needs_refresh and refresh_token:
+            refreshed = _refresh_codex_tokens(refresh_token)
+            tokens.update(refreshed)
+            data["tokens"] = tokens
+            try:
+                _write_codex_auth_file(data)
+            except OSError:
+                # Non-fatal: we still have a usable in-memory token. The
+                # next call will just refresh again.
+                pass
+            access_token = tokens["access_token"]
+        return access_token
+
+
+# ── Responses API call ────────────────────────────────────────────────────
+
+
+def _build_responses_request(
+    *,
+    model: str,
+    prompt: str,
+    system_prompt: Optional[str],
+    max_output_tokens: Optional[int],
+    reasoning_effort: Optional[str],
+) -> Dict[str, Any]:
+    """Build the request payload for POST /responses."""
+    input_items: List[Dict[str, Any]] = []
+    if system_prompt:
+        # The Responses API takes a top-level ``instructions`` for the
+        # system prompt — not a message role. Hermes does the same.
+        pass  # handled via the ``instructions`` field below
+    input_items.append({
+        "role": "user",
+        "content": [{"type": "input_text", "text": prompt}],
+    })
+    body: Dict[str, Any] = {
+        "model": model,
+        "input": input_items,
+        "store": False,
+    }
+    if system_prompt:
+        body["instructions"] = system_prompt
+    if max_output_tokens is not None and max_output_tokens > 0:
+        body["max_output_tokens"] = int(max_output_tokens)
+    effort = (reasoning_effort or "").strip().lower()
+    if effort in ("low", "medium", "high"):
+        body["reasoning"] = {"effort": effort}
+    return body
+
+
+def _extract_responses_text(payload: Dict[str, Any]) -> str:
+    """Pull the assistant text out of a Responses API response.
+    Tries `output_text` first (SDK helper field), then walks ``output[]``
+    looking for ``message`` items with ``output_text`` content."""
+    if not isinstance(payload, dict):
+        return ""
+    # Some servers emit a convenience ``output_text`` field directly.
+    direct = payload.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    output = payload.get("output") or []
+    if not isinstance(output, list):
+        return ""
+    chunks: List[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype in ("output_text", "text"):
+                t = part.get("text")
+                if isinstance(t, str) and t.strip():
+                    chunks.append(t)
+    return "".join(chunks).strip()
+
+
+def _call_responses_api(
+    *,
+    access_token: str,
+    body: Dict[str, Any],
+    timeout_sec: float,
+) -> Dict[str, Any]:
+    if _httpx is None:
+        raise CodexCliError("httpx not available for codex Responses API call")
+    url = f"{CODEX_RESPONSES_BASE_URL}/responses"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "OpenAI-Beta": "responses=experimental",
+    }
+    try:
+        with _httpx.Client(timeout=_httpx.Timeout(timeout_sec)) as client:
+            resp = client.post(url, headers=headers, json=body)
+    except Exception as e:
+        raise CodexCliError(f"codex Responses API network error: {e}") from e
+    if resp.status_code in (401, 403):
+        raise CodexCliNotAuthenticatedError(
+            f"codex Responses API rejected access_token ({resp.status_code}); "
+            f"refresh or re-authenticate via Models UI"
+        )
+    if resp.status_code == 404:
+        # Most common cause: unknown model name. Surface a clean error.
+        try:
+            err_body = resp.json()
+            err_msg = (
+                err_body.get("error", {}).get("message")
+                if isinstance(err_body, dict) else None
+            ) or resp.text[:200]
+        except Exception:
+            err_msg = resp.text[:200]
+        raise CodexCliError(
+            f"codex Responses API 404: {err_msg} "
+            f"(check model name — codex supports gpt-5-codex, gpt-5, gpt-5-mini, "
+            f"gpt-4.1-mini, o3, o4-mini)"
+        )
+    if resp.status_code == 429:
+        raise CodexCliError("codex Responses API rate-limited (429)")
+    if resp.status_code >= 400:
+        raise CodexCliError(
+            f"codex Responses API HTTP {resp.status_code}: {resp.text[:400]}"
+        )
+    try:
+        return resp.json()
+    except Exception as e:
+        raise CodexCliError(f"codex Responses API returned non-JSON: {e}") from e
 
 
 # ── extra_args allowlist ────────────────────────────────────────────────────
@@ -422,15 +739,32 @@ def _platform_popen_kwargs() -> Dict[str, Any]:
 
 
 def is_authenticated(cli_path: Optional[str] = None) -> Tuple[bool, str]:
-    """Probe codex CLI auth state. Returns (authenticated, message).
+    """Probe codex auth state. Returns (authenticated, message).
 
-    Strategy: try `codex login status` (preferred), then fall back to
-    `codex auth status`, then to inspecting ~/.codex/auth.json existence.
-    Cached per cli_path for CODEX_CLI_AUTH_PROBE_TTL_SEC.
+    Fast path: inspect ``~/.codex/auth.json`` directly — that's the source
+    of truth for the Responses API transport (the CLI also writes to it).
+    No subprocess spawn, no shell probe, no 3-8 second wait. The CLI's
+    own ``login status`` is only used as a fallback when auth.json is
+    missing AND the CLI is installed (i.e. legacy config).
     """
+    # Try the file probe first — it's the only thing that matters for the
+    # Responses API call path. ~/.codex/auth.json is what the CLI itself
+    # reads, so file-present means "subscription token available".
+    auth_path = _codex_auth_path()
+    if os.path.isfile(auth_path) and os.path.getsize(auth_path) > 16:
+        try:
+            with open(auth_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            tokens = data.get("tokens") if isinstance(data, dict) else None
+            if isinstance(tokens, dict) and (tokens.get("access_token") or tokens.get("refresh_token")):
+                return True, "authenticated (auth.json)"
+        except (OSError, json.JSONDecodeError):
+            pass
+    # CLI not installed AND no auth file → unauthenticated.
     path = _resolve_cli_path(cli_path)
     if not path:
-        return False, "codex CLI not installed"
+        return False, "codex CLI not installed and no auth.json present"
+    # CLI installed but no auth file: probe the CLI's own status (cached).
     key = path
     now = time.monotonic()
     with _AUTH_CACHE_LOCK:
@@ -1016,92 +1350,91 @@ def call_codex_cli_plain(
     retries: int = 0,
     system_prompt: Optional[str] = None,
 ) -> str:
-    """One-shot plain text completion via ``codex app-server``.
+    """One-shot plain text completion via the Codex Responses API.
 
-    Spawns a fresh subprocess (no session reuse for plain calls — keeps
-    the call site simple; the cost is ~3s startup, paid only for
-    non-structured strategy calls).
+    Transport: direct HTTPS POST to ``chatgpt.com/backend-api/codex/responses``
+    using the OAuth ``access_token`` stored in ``~/.codex/auth.json`` (the
+    same token the codex CLI uses internally). Refreshes the token on
+    expiry. This matches NousResearch/hermes-agent's ``codex_responses``
+    transport — the ``codex app-server`` is a coding-agent runtime and is
+    *not* the right surface for pure text generation.
     """
     _set_last_error("")
     if not model:
         _set_last_error("codex-cli: model is required")
         return ""
+    if not prompt:
+        _set_last_error("codex-cli: prompt is required")
+        return ""
     cfg = provider_config or {}
-    cli_path = (cfg.get("cli_path") or "codex") or "codex"
-    extra_args_raw = cfg.get("extra_args") or []
+    # extra_args / cli_path are accepted for backwards compatibility with
+    # the strategy's provider_config shape but unused on the Responses API
+    # path — there's no CLI subprocess to pass them to. The allowlist
+    # gate still runs so we surface misconfigured args early (and so a
+    # future spawn-based path can reuse the validated list).
     try:
-        extra_args = validate_extra_args(extra_args_raw)
+        validate_extra_args(cfg.get("extra_args") or [])
     except CodexCliValidationError as e:
         _set_last_error(str(e))
         return ""
-    path = _resolve_cli_path(cli_path)
-    if not path:
-        _set_last_error(f"codex CLI not installed (cli_path={cli_path!r})")
-        return ""
-    auth_ok, auth_msg = is_authenticated(cli_path)
-    if not auth_ok:
-        _set_last_error(auth_msg)
-        return ""
+    reasoning_effort = (cfg.get("reasoning_effort") or "").strip().lower() or None
+    max_output_tokens = cfg.get("max_output_tokens")
+    if isinstance(max_output_tokens, str):
+        try:
+            max_output_tokens = int(max_output_tokens)
+        except ValueError:
+            max_output_tokens = None
+    if not isinstance(max_output_tokens, int) or max_output_tokens <= 0:
+        max_output_tokens = None
 
-    timeout = float(timeout_sec or CODEX_CLI_TURN_TIMEOUT_SEC)
+    timeout = float(timeout_sec or CODEX_HTTP_TIMEOUT_SEC)
     max_retries = max(0, int(retries or 0))
     last_err = ""
-    # Model is configured at app-server spawn time via ``-c model=...``
-    # — NOT via ``thread/start``, which only accepts ``cwd``. Match
-    # hermes-agent's spawn-arg shape exactly so we don't trip an
-    # unknown-config-key path in codex's TOML parser: keep ``model``
-    # (and ``sandbox_mode="read-only"`` as the safest default), drop
-    # made-up keys like ``approval_policy`` /
-    # ``experimental_instructions`` that codex 0.132 doesn't recognise.
-    # System-prompt support requires codex CLI's instruction file flow
-    # which isn't exposed for ad-hoc strategy calls — skip for now.
-    spawn_extra_args: List[str] = [
-        "-c", f'model="{_toml_escape(model)}"',
-        "-c", 'sandbox_mode="read-only"',
-    ]
-    spawn_extra_args.extend(extra_args)
+    body = _build_responses_request(
+        model=model,
+        prompt=prompt,
+        system_prompt=system_prompt,
+        max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+    )
     for attempt in range(max_retries + 1):
-        acquired = _GLOBAL_SPAWN_SEM.acquire(blocking=True, timeout=30)
-        if not acquired:
-            last_err = "codex-cli: spawn semaphore timeout"
-            continue
-        client = _CodexAppServerClient(
-            codex_bin=path, codex_home=os.environ.get("CODEX_HOME"),
-            extra_args=spawn_extra_args,
-        )
         try:
-            client.spawn()
-            client.initialize()
-            tid = client.thread_start()
-            text = client.run_turn(thread_id=tid, user_input=prompt, timeout=timeout)
-            if text:
-                # Telemetry is recorded by the outer llm_utils adapter
-                # (which has model_id from the strategy's resolved Models
-                # row). Recording here too would double-count rows and
-                # break per-model attribution on the usage dashboard.
-                return text
-            last_err = "codex-cli: empty response"
+            access_token = _get_codex_access_token()
         except CodexCliNotAuthenticatedError as e:
-            invalidate_auth_cache(cli_path)
+            invalidate_auth_cache(cfg.get("cli_path") or "codex")
             _set_last_error(str(e))
-            # Re-raise so the outer adapter can mark this as terminal and
-            # short-circuit retry/split loops — swallowing the exception
-            # here used to let strategies keep retrying an unauthenticated
-            # CLI for the full output_retries budget.
             raise
+        try:
+            payload = _call_responses_api(
+                access_token=access_token, body=body, timeout_sec=timeout,
+            )
+        except CodexCliNotAuthenticatedError as e:
+            # 401/403 → try once with a forced refresh, then give up.
+            try:
+                access_token = _get_codex_access_token(force_refresh=True)
+                payload = _call_responses_api(
+                    access_token=access_token, body=body, timeout_sec=timeout,
+                )
+            except CodexCliNotAuthenticatedError as e2:
+                invalidate_auth_cache(cfg.get("cli_path") or "codex")
+                _set_last_error(str(e2))
+                raise
+            except CodexCliError as e2:
+                last_err = str(e2)
+                continue
         except CodexCliError as e:
             last_err = str(e)
+            continue
         except Exception as e:
             last_err = f"codex-cli: unexpected error: {e}"
-        finally:
-            try:
-                client.close()
-            except Exception:
-                pass
-            try:
-                _GLOBAL_SPAWN_SEM.release()
-            except Exception:
-                pass
+            continue
+        text = _extract_responses_text(payload)
+        if text:
+            # Telemetry is recorded by the outer llm_utils adapter
+            # (which has model_id from the strategy's resolved Models
+            # row). Recording here too would double-count rows.
+            return text
+        last_err = "codex-cli: Responses API returned empty text"
     _set_last_error(last_err or "codex-cli: all retries exhausted")
     return ""
 
@@ -1199,10 +1532,12 @@ def call_codex_cli_structured(
     output_retries: Optional[int] = None,
     use_prompt_cache: bool = False,
 ) -> Any:
-    """Structured-output call. Uses prompted-JSON mode because Codex's
-    app-server protocol has no native JSON-schema enforcement.
+    """Structured-output call. Uses prompted-JSON mode (the schema is
+    embedded into the prompt) because the Codex Responses API surface
+    behind chatgpt.com/backend-api/codex doesn't expose the json_schema
+    response_format gate.
 
-    ``retries`` controls HTTP-level retries (transient crashes / timeouts).
+    ``retries`` controls HTTP-level retries (transient transport errors).
     ``output_retries`` controls JSON-validation retries (model produced
     text but it failed schema validation). Default = 2.
     """
@@ -1255,14 +1590,16 @@ def call_codex_cli_chat_structured(
     retries: int = 0,
     output_retries: Optional[int] = None,
 ) -> Any:
-    """Conversation-id variant. Currently delegates to the spawn-per-call
-    structured path (Codex's app-server is itself a session, but for
-    determinism we use a fresh thread per call). The conversation_id is
-    threaded through telemetry only.
+    """Conversation-id variant. Currently delegates to the structured
+    Responses API call (we don't yet thread history through the
+    ``previous_response_id`` field — strategy chatbots use this path for
+    one-shot queries). The conversation_id is threaded through telemetry
+    only.
     """
-    # NOTE: a future enhancement could persist a real Codex thread per
-    # conversation_id and call ``thread/run_turn`` instead of restarting.
-    # For now, parity with the structured-only strategy path is enough.
+    # NOTE: a future enhancement could persist a real Codex
+    # ``previous_response_id`` per conversation_id to enable multi-turn
+    # context. For now, parity with the structured-only strategy path is
+    # enough.
     return call_codex_cli_structured(
         model=model, prompt=prompt, output_type=output_type,
         system_prompt=system_prompt, provider_config=provider_config,
