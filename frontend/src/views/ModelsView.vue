@@ -163,6 +163,40 @@ function closeModal(force = false) {
   testResult.value = null
 }
 
+// Run the /llm/test smoke against the current draft. Used by both
+// ``submitModel`` (Test & Save) and ``testOnly`` (the dry-run button).
+// Returns true on success, false on failure — caller sets submitting +
+// any follow-up state. Sets ``testResult`` directly so the response
+// panel below the form populates immediately.
+async function _runLlmTest(d) {
+  const testPayload = buildStrategyLlmTestPayload(d)
+  const testRes = await fetch(`${API_BASE}/llm/test`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(testPayload),
+  })
+  const testBody = await testRes.json().catch(() => ({}))
+  if (!testRes.ok) throw new Error(_normalizeError(testBody, testRes.status))
+  // Capture the actual LLM response so the user can verify the test
+  // is real (e.g. a proxy returning canned 200s would fail the
+  // structured-parse step or surface a suspicious payload). Backend
+  // also runs a real free-form generation smoke (smoke_* fields) using
+  // the same call_llm_by_provider path the strategy uses.
+  testResult.value = {
+    provider: testBody.provider,
+    model: testBody.model,
+    effective_model: testBody.effective_model,
+    result: testBody.result,
+    latency_ms: testBody.latency_ms,
+    provider_meta: testBody.provider_meta,
+    smoke_prompt: testBody.smoke_prompt,
+    smoke_response: testBody.smoke_response,
+    smoke_latency_ms: testBody.smoke_latency_ms,
+    smoke_error: testBody.smoke_error,
+    message: testBody.message,
+  }
+}
+
 async function submitModel() {
   const d = formDraft.value
   if (!d.name.trim()) { submitMsg.value = 'Name is required'; submitOk.value = false; return }
@@ -171,42 +205,26 @@ async function submitModel() {
   submitting.value = true
   submitOk.value = false
   testResult.value = null
-  const isCli = d.provider === 'claude-cli' || d.provider === 'codex-cli'
-  submitMsg.value = isCli ? (editMode.value ? 'Updating model...' : 'Saving model...') : 'Testing LLM configuration...'
+  // claude-cli's local-binary auth has nothing the /llm/test endpoint
+  // can probe without a separate ``codex login``-style flow, so we
+  // skip the test for that provider. codex-cli DOES go through
+  // /llm/test — the codex provider's structured + smoke calls verify
+  // both that the local binary is authenticated AND that the operator-
+  // configured model name actually resolves on OpenAI's side (catches
+  // misconfigurations like ``gpt-5.4-mini`` which is an Azure
+  // deployment name, not a codex model).
+  const skipTest = d.provider === 'claude-cli'
+  submitMsg.value = skipTest ? (editMode.value ? 'Updating model...' : 'Saving model...') : 'Testing LLM configuration...'
 
-  // Test the LLM config first. Skip for CLI providers (claude-cli/codex-cli
-  // — no key) and skip on edit when no api_key is in the draft (user
-  // didn't intend to re-test creds they didn't change).
+  // For non-CLI providers, also skip the test on edit when no api_key
+  // is in the draft (user didn't intend to re-test creds they didn't
+  // change). For codex-cli, run the test unconditionally — there is
+  // no api_key gate.
   const hasKey = !!d.apiKey.trim()
-  if (!isCli && hasKey) {
+  const shouldTest = !skipTest && (d.provider === 'codex-cli' || hasKey)
+  if (shouldTest) {
     try {
-      const testPayload = buildStrategyLlmTestPayload(d)
-      const testRes = await fetch(`${API_BASE}/llm/test`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify(testPayload),
-      })
-      const testBody = await testRes.json().catch(() => ({}))
-      if (!testRes.ok) throw new Error(_normalizeError(testBody, testRes.status))
-      // Capture the actual LLM response so the user can verify the
-      // test is real (e.g. a proxy returning canned 200s would fail
-      // the structured-parse step or surface a suspicious payload).
-      // Backend also runs a real free-form generation smoke (smoke_*
-      // fields) using the same call_llm_by_provider path the strategy
-      // uses, so the user can see actual generated text.
-      testResult.value = {
-        provider: testBody.provider,
-        model: testBody.model,
-        effective_model: testBody.effective_model,
-        result: testBody.result,
-        latency_ms: testBody.latency_ms,
-        provider_meta: testBody.provider_meta,
-        smoke_prompt: testBody.smoke_prompt,
-        smoke_response: testBody.smoke_response,
-        smoke_latency_ms: testBody.smoke_latency_ms,
-        smoke_error: testBody.smoke_error,
-        message: testBody.message,
-      }
+      await _runLlmTest(d)
     } catch (e) {
       submitOk.value = false
       submitMsg.value = `LLM test failed: ${e.message}`
@@ -214,6 +232,10 @@ async function submitModel() {
       return
     }
   }
+
+  // isCli is still used below for the save payload shape (cli_path /
+  // extra_args go in for both claude-cli and codex-cli).
+  const isCli = d.provider === 'claude-cli' || d.provider === 'codex-cli'
 
   // Create or update
   submitMsg.value = editMode.value ? 'Updating model...' : 'Saving model...'
@@ -278,6 +300,33 @@ async function submitModel() {
   } catch (e) {
     submitOk.value = false
     submitMsg.value = e.message || 'Failed to save model.'
+    submitting.value = false
+  }
+}
+
+async function testOnly() {
+  // Dry-run: hit /llm/test against the current draft WITHOUT saving.
+  // Useful for verifying a config — auth, model name resolution, smoke
+  // generation — before committing the change to the Models table.
+  const d = formDraft.value
+  if (!d.model.trim()) { submitMsg.value = 'Model is required'; submitOk.value = false; return }
+  if (d.provider === 'claude-cli') {
+    submitMsg.value = 'Use the cable icon on the saved row to test a claude-cli model.'
+    submitOk.value = false
+    return
+  }
+  submitting.value = true
+  submitOk.value = false
+  testResult.value = null
+  submitMsg.value = 'Testing LLM configuration...'
+  try {
+    await _runLlmTest(d)
+    submitMsg.value = 'LLM test passed (not saved).'
+    submitOk.value = true
+  } catch (e) {
+    submitMsg.value = `LLM test failed: ${e.message}`
+    submitOk.value = false
+  } finally {
     submitting.value = false
   }
 }
@@ -636,12 +685,25 @@ onMounted(fetchModels)
                 : 'flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors'">
               {{ submitOk ? 'Close' : 'Cancel' }}
             </button>
+            <!-- Test-only button: hits /llm/test against the current
+                 draft without touching the Models table. Useful when
+                 the operator is iterating on a config and wants to
+                 verify auth + model resolution + smoke generation
+                 before committing. Hidden for claude-cli (which has a
+                 separate per-row cable-icon test). -->
+            <button v-if="!submitOk && formDraft.provider !== 'claude-cli'"
+              @click="testOnly"
+              :disabled="submitting"
+              class="flex-1 py-2.5 rounded-lg border border-primary/40 text-sm font-semibold text-primary hover:bg-primary/10 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+              <template v-if="submitting">Testing...</template>
+              <template v-else>Test only</template>
+            </button>
             <button v-if="!submitOk"
               @click="submitModel"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
               <template v-if="submitting">
-                {{ (formDraft.provider === 'claude-cli' || formDraft.provider === 'codex-cli') ? (editMode ? 'Updating...' : 'Saving...') : 'Testing...' }}
+                {{ formDraft.provider === 'claude-cli' ? (editMode ? 'Updating...' : 'Saving...') : 'Testing...' }}
               </template>
               <template v-else>
                 {{ editMode ? 'Test & Update' : 'Test & Save' }}

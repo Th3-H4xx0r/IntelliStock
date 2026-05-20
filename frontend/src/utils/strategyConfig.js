@@ -670,7 +670,7 @@ export function buildStrategyLlmTestPayload(draft) {
   if (provider === 'nvidia') {
     payload.openai_base_url = String(draft?.nvidiaBaseUrl || 'https://integrate.api.nvidia.com/v1').trim()
   }
-  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia') {
+  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'codex-cli') {
     const reasoningEffort = String(draft?.reasoningEffort || '').trim().toLowerCase()
     if (reasoningEffort) payload.reasoning_effort = reasoningEffort
   }
