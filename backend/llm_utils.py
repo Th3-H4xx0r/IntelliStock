@@ -251,22 +251,30 @@ def _get_model_rate_limiter(model: str) -> _TokenRateLimiter | None:
 
 
 class _RequestRateLimiter:
-    """Sliding-window REQUEST-per-minute rate limiter. Thread-safe.
+    """Sliding-window REQUEST-per-minute rate limiter with a minimum
+    inter-request gap. Thread-safe.
 
-    Used in addition to the token-based _TokenRateLimiter for providers
-    that publish a hard RPM cap (e.g. NVIDIA NIM kimi-k2.6 at 40 RPM).
-    Proactively blocks the caller when the budget is exhausted so we
-    never burn a 429 response from the upstream.
+    Two complementary guards:
+      * Sliding 60s window caps total RPM (`requests_per_minute`).
+      * `min_interval_sec` enforces a gap between consecutive requests
+        so bursts don't blow past providers' sub-minute hidden limits.
+        (NVIDIA NIM kimi-k2.6 turned out to enforce something stricter
+        than 60s RPM — bursts of 15 in 17s 429'd every request even
+        though we were under the published 40/min cap.)
     """
 
-    def __init__(self, requests_per_minute: int):
+    def __init__(self, requests_per_minute: int, min_interval_sec: float | None = None):
         self._limit = int(requests_per_minute)
+        # Default: spread requests evenly across the window.
+        if min_interval_sec is None and self._limit > 0:
+            min_interval_sec = 60.0 / float(self._limit)
+        self._min_interval = float(min_interval_sec or 0.0)
         self._window: deque = deque()  # monotonic timestamps
         self._lock = threading.Lock()
 
     def acquire(self) -> float:
-        """Block until there is request budget, then reserve one slot.
-        Returns total seconds waited."""
+        """Block until there is request budget AND the min-gap has
+        elapsed, then reserve one slot. Returns total seconds waited."""
         waited = 0.0
         while True:
             with self._lock:
@@ -275,13 +283,22 @@ class _RequestRateLimiter:
                 while self._window and self._window[0] <= cutoff:
                     self._window.popleft()
                 used = len(self._window)
-                if used < self._limit:
+                # Enforce inter-request gap based on the most-recent slot.
+                gap_wait = 0.0
+                if self._window and self._min_interval > 0:
+                    elapsed = now - self._window[-1]
+                    if elapsed < self._min_interval:
+                        gap_wait = self._min_interval - elapsed
+                if used < self._limit and gap_wait <= 0:
                     self._window.append(now)
                     return waited
-                sleep_sec = (
-                    max(0.5, 60.0 - (now - self._window[0]) + 0.5)
-                    if self._window else 1.0
-                )
+                if used >= self._limit:
+                    sleep_sec = (
+                        max(0.5, 60.0 - (now - self._window[0]) + 0.5)
+                        if self._window else 1.0
+                    )
+                else:
+                    sleep_sec = max(0.5, gap_wait + 0.05)
             import sys
             print(
                 f"[llm_utils] RPM limiter: {used}/{self._limit} req in last 60s — "
@@ -294,17 +311,16 @@ class _RequestRateLimiter:
 
 
 # Per-model REQUEST-per-minute caps. NVIDIA NIM kimi-k2.6 PUBLISHES
-# 40 RPM, but in practice 429s show up well under that — likely
-# because (a) per-API-key throttling sums across models, (b) NIM
-# enforces a sub-minute burst limit they don't document, or (c) the
-# tier ceiling is lower than the published number. Capping at 15 RPM
-# leaves >60% headroom under the published cap so the strategy's
-# 4 parallel event_maintenance + sentiment + macro burst still
-# clears even when NIM enforces a stricter window.
+# 40 RPM but in production 429s appear at ~10 RPM, and rate-limit
+# state carries across the published 60s window (bursts hours
+# earlier still trigger 429 on the very first request of a new
+# backtest). Capping at 5 RPM with a min 12s inter-request gap
+# spreads calls evenly so we never trigger NIM's hidden sub-minute
+# burst limit.
 _MODEL_REQUEST_RATE_LIMITERS: dict[str, _RequestRateLimiter] = {
-    "moonshotai/kimi-k2.6": _RequestRateLimiter(15),
-    "moonshotai/kimi-k2.5": _RequestRateLimiter(15),
-    "moonshotai/kimi-k2": _RequestRateLimiter(15),
+    "moonshotai/kimi-k2.6": _RequestRateLimiter(5, min_interval_sec=12.0),
+    "moonshotai/kimi-k2.5": _RequestRateLimiter(5, min_interval_sec=12.0),
+    "moonshotai/kimi-k2": _RequestRateLimiter(5, min_interval_sec=12.0),
 }
 
 
@@ -334,7 +350,10 @@ def _omit_temperature(model: str) -> bool:
 
 
 def _http_retry_backoff_seconds(error_text: str, attempt: int) -> float:
-    """Backoff for transient HTTP retries. Uses 30s base for 429/rate-limit errors, normal otherwise."""
+    """Backoff for transient HTTP retries. Uses 60s base for 429/
+    rate-limit errors (some providers — notably NVIDIA NIM — keep
+    rate-limit state for multiple minutes, so a 30s wait is too short
+    and just earns another 429), normal exponential otherwise."""
     lowered = str(error_text or "").lower()
     is_rate_limit = (
         "status_code: 429" in lowered
@@ -343,9 +362,9 @@ def _http_retry_backoff_seconds(error_text: str, attempt: int) -> float:
         or "rate limit" in lowered
     )
     if is_rate_limit:
-        base = 30.0
-        exp = min(120.0, base * (2 ** max(0, attempt)))
-        return exp + random.uniform(0, min(5.0, exp * 0.1))
+        base = 60.0
+        exp = min(300.0, base * (2 ** max(0, attempt)))
+        return exp + random.uniform(0, min(15.0, exp * 0.1))
     return _backoff_sleep_seconds(attempt)
 
 
