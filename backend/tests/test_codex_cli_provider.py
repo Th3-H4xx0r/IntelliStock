@@ -511,6 +511,114 @@ class TestResponsesTextExtractor:
         assert _extract_responses_text({"output": []}) == ""
 
 
+# ── Usage extraction & accumulator ─────────────────────────────────────────
+
+
+class TestResponsesUsageExtractor:
+    def test_full_usage_block_extracted(self):
+        from chatbot.codex_cli_provider import _extract_responses_usage
+        payload = {
+            "usage": {
+                "input_tokens": 1200,
+                "input_tokens_details": {"cached_tokens": 400},
+                "output_tokens": 350,
+                "output_tokens_details": {"reasoning_tokens": 200},
+                "total_tokens": 1550,
+            }
+        }
+        u = _extract_responses_usage(payload)
+        assert u == {
+            "input_tokens": 1200,
+            "output_tokens": 350,
+            "reasoning_tokens": 200,
+            "cached_tokens": 400,
+            "total_tokens": 1550,
+        }
+
+    def test_missing_usage_returns_empty(self):
+        from chatbot.codex_cli_provider import _extract_responses_usage
+        assert _extract_responses_usage({}) == {}
+        assert _extract_responses_usage({"output_text": "hi"}) == {}
+
+    def test_partial_usage_normalised_to_zeros(self):
+        from chatbot.codex_cli_provider import _extract_responses_usage
+        u = _extract_responses_usage({"usage": {"input_tokens": 10}})
+        assert u["input_tokens"] == 10
+        assert u["output_tokens"] == 0
+        assert u["reasoning_tokens"] == 0
+
+
+class TestUsageAccumulator:
+    def test_reset_then_accumulate_sums(self):
+        from chatbot.codex_cli_provider import (
+            _reset_last_usage, _accumulate_usage, _get_last_usage,
+        )
+        _reset_last_usage()
+        _accumulate_usage({"input_tokens": 100, "output_tokens": 50, "total_tokens": 150})
+        _accumulate_usage({"input_tokens": 25, "output_tokens": 10, "total_tokens": 35})
+        u = _get_last_usage()
+        assert u["input_tokens"] == 125
+        assert u["output_tokens"] == 60
+        assert u["total_tokens"] == 185
+
+    def test_reset_clears(self):
+        from chatbot.codex_cli_provider import (
+            _reset_last_usage, _accumulate_usage, _get_last_usage,
+        )
+        _accumulate_usage({"input_tokens": 999})
+        _reset_last_usage()
+        u = _get_last_usage()
+        assert u.get("input_tokens", 0) == 0
+
+
+class TestPlainCallRecordsUsage:
+    def _setup_auth(self, tmp_path, monkeypatch):
+        far = int(time.time()) + 3600
+        (tmp_path / "auth.json").write_text(json.dumps({
+            "tokens": {"access_token": _make_jwt(far), "refresh_token": "rt"},
+        }), encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
+    def test_usage_accumulated_on_success(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain, _get_last_usage
+        self._setup_auth(tmp_path, monkeypatch)
+        fake_payload = {
+            "output_text": "ok",
+            "usage": {
+                "input_tokens": 200, "output_tokens": 80,
+                "output_tokens_details": {"reasoning_tokens": 50},
+                "total_tokens": 280,
+            },
+        }
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            return_value=fake_payload,
+        ):
+            out = call_codex_cli_plain(model="gpt-5.4-mini", prompt="hi")
+            assert out == "ok"
+        u = _get_last_usage()
+        assert u["input_tokens"] == 200
+        assert u["output_tokens"] == 80
+        assert u["reasoning_tokens"] == 50
+        assert u["total_tokens"] == 280
+
+    def test_usage_reset_between_calls(self, tmp_path, monkeypatch):
+        from chatbot.codex_cli_provider import call_codex_cli_plain, _get_last_usage
+        self._setup_auth(tmp_path, monkeypatch)
+        payload_a = {"output_text": "a", "usage": {"input_tokens": 5, "output_tokens": 1, "total_tokens": 6}}
+        payload_b = {"output_text": "b", "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}}
+        with mock.patch(
+            "chatbot.codex_cli_provider._call_responses_api",
+            side_effect=[payload_a, payload_b],
+        ):
+            call_codex_cli_plain(model="gpt-5.4-mini", prompt="x")
+            call_codex_cli_plain(model="gpt-5.4-mini", prompt="y")
+        # Second call's reset should have cleared the first; only b's tokens remain.
+        u = _get_last_usage()
+        assert u["input_tokens"] == 10
+        assert u["total_tokens"] == 12
+
+
 # ── SSE stream parser ──────────────────────────────────────────────────────
 
 

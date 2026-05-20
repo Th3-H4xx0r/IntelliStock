@@ -1422,6 +1422,7 @@ def _call_codex_cli_plain(
         from chatbot.codex_cli_provider import (
             call_codex_cli_plain as _impl,
             _get_last_error as _impl_last_err,
+            _get_last_usage as _impl_last_usage,
         )
     except Exception as e:
         try:
@@ -1429,6 +1430,7 @@ def _call_codex_cli_plain(
         except Exception:
             pass
         return ""
+    _t0 = time.monotonic()
     text = _impl(
         model=model,
         prompt=prompt,
@@ -1436,11 +1438,39 @@ def _call_codex_cli_plain(
         timeout_sec=timeout_sec,
         retries=retries,
     )
+    # Surface token usage in telemetry even for plain (non-structured)
+    # calls — otherwise the strategy's macro/sentiment LLM rows show
+    # 0/0/$0.00 even though the upstream did real work.
+    try:
+        _codex_usage_plain = _impl_last_usage() or {}
+    except Exception:
+        _codex_usage_plain = {}
     if not text:
         try:
             _LAST_PLAIN_LLM_CALL_ERROR.error = _impl_last_err() or "codex-cli plain call failed"
         except Exception:
             pass
+        try:
+            _safe_record(
+                provider="codex-cli", model=model, usage=_codex_usage_plain,
+                ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=int(retries or 0),
+                error=(_impl_last_err() or "codex-cli plain call failed")[:200],
+                model_id=None,
+            )
+        except Exception:
+            pass
+        return text
+    try:
+        _safe_record(
+            provider="codex-cli", model=model, usage=_codex_usage_plain, ok=True,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error=None,
+            model_id=None,
+        )
+    except Exception:
+        pass
     return text
 
 
@@ -1513,6 +1543,7 @@ def _call_codex_cli_structured_from_strategy(
         from chatbot.codex_cli_provider import (
             call_codex_cli_structured as _impl,
             _get_last_error as _impl_last_err,
+            _get_last_usage as _impl_last_usage,
             CodexCliError, CodexCliNotInstalledError, CodexCliNotAuthenticatedError,
             CodexCliValidationError, CodexCliQuotaExceededError,
         )
@@ -1636,21 +1667,38 @@ def _call_codex_cli_structured_from_strategy(
             _impl_err = _impl_last_err() or ""
         except Exception:
             _impl_err = ""
+        # Even failed validation rounds consumed tokens — include them
+        # in the telemetry so the cost dashboard shows the real spend,
+        # not a misleading $0.00 row.
+        try:
+            _codex_usage_fail = _impl_last_usage() or {}
+        except Exception:
+            _codex_usage_fail = {}
         _err_msg = (
             f"codex-cli returned no validated payload ({_impl_err})"
             if _impl_err else "codex-cli returned no validated payload"
         )
-        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+        _meta_fail = _codex_failure_meta(
             model, cli_path, _err_msg, terminal=False,
         )
+        _meta_fail["usage"] = _codex_usage_fail
+        _LAST_STRUCTURED_LLM_CALL.data = _meta_fail
         _safe_record(
-            provider="codex-cli", model=model, usage={}, ok=False,
+            provider="codex-cli", model=model, usage=_codex_usage_fail, ok=False,
             duration_ms=int((time.monotonic() - _t0) * 1000),
             retry_count=int(retries or 0), error=_err_msg[:200],
             model_id=cfg.get("id") if isinstance(cfg, dict) else None,
         )
         return None
 
+    # Pull the per-thread token usage the provider accumulated across
+    # all Responses API calls in this structured turn (incl. output
+    # retries). Empty dict if extraction failed — degrades gracefully
+    # to the old "0 tokens" behaviour rather than breaking the call.
+    try:
+        _codex_usage = _impl_last_usage() or {}
+    except Exception:
+        _codex_usage = {}
     _LAST_STRUCTURED_LLM_CALL.data = {
         "provider": "codex-cli",
         "requested_model": model,
@@ -1667,7 +1715,7 @@ def _call_codex_cli_structured_from_strategy(
         "raw_json_fallback_used": False,
         "ok": True,
         "error": "",
-        "usage": {},
+        "usage": _codex_usage,
         "suppressed": False,
     }
     if use_prompt_cache and result is not None:
@@ -1682,7 +1730,7 @@ def _call_codex_cli_structured_from_strategy(
         except Exception:
             pass
     _safe_record(
-        provider="codex-cli", model=model, usage={}, ok=True,
+        provider="codex-cli", model=model, usage=_codex_usage, ok=True,
         duration_ms=int((time.monotonic() - _t0) * 1000),
         retry_count=0, error=None,
         model_id=cfg.get("id") if isinstance(cfg, dict) else None,

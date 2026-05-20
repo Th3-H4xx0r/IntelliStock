@@ -3746,6 +3746,28 @@ def _classify_macro_article_records(
         f"Macro article LLM classification: {len(articles)} article(s) total | cache_hits={len(results)} | uncached={len(uncached_rows)}",
         "cyan",
     )
+    # Diagnostic: when we miss the cache entirely but rows exist in the
+    # table, surface the constructed key alongside one or two existing
+    # keys for the same instance so the operator can see why they don't
+    # line up (typical causes: provider switched azure↔codex-cli, model
+    # name changed including the -EFFORT suffix, prompt_version bumped).
+    if articles and not results and conn is not None:
+        try:
+            _attempted_key = cache_pairs[0][1] if cache_pairs else "?"
+            sample_cursor = (
+                _r.db(DB_NAME).table(NEXUS_NEWS_LLM_MACRO_TABLE)
+                .filter({"schema_type": "macro"}).limit(3).pluck("id").run(conn)
+            )
+            sample_ids = [str(d.get("id", ""))[:200] for d in sample_cursor if isinstance(d, dict)]
+            if sample_ids:
+                _log(
+                    f"Macro article cache miss diagnostic: attempted="
+                    f"{_attempted_key[:200]!r} | sample existing rows="
+                    f"{sample_ids}",
+                    "yellow",
+                )
+        except Exception:
+            pass
     batch_size = max(1, min(20, int(config.get("macro_article_llm_batch_size", _NEXUS_MACRO_BATCH_SIZE) or _NEXUS_MACRO_BATCH_SIZE)))
     prompt_budget_chars = max(1200, int(config.get("macro_article_llm_prompt_budget_chars", _NEXUS_MACRO_PROMPT_BUDGET_CHARS) or _NEXUS_MACRO_PROMPT_BUDGET_CHARS))
     if uncached_rows:

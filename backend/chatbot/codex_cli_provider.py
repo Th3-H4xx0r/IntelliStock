@@ -1553,6 +1553,7 @@ def _coerce_message_content_to_text(content: Any) -> str:
 
 
 _LAST_PLAIN_LLM_CALL_ERROR = threading.local()
+_LAST_USAGE = threading.local()
 
 
 def _set_last_error(msg: str) -> None:
@@ -1561,6 +1562,79 @@ def _set_last_error(msg: str) -> None:
 
 def _get_last_error() -> str:
     return getattr(_LAST_PLAIN_LLM_CALL_ERROR, "error", "") or ""
+
+
+def _reset_last_usage() -> None:
+    """Clear the per-thread usage accumulator at the start of every
+    user-facing call so token counts from prior calls don't bleed
+    forward."""
+    _LAST_USAGE.usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cached_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def _get_last_usage() -> Dict[str, int]:
+    """Return the accumulated usage from the most recent successful
+    call(s) on this thread. ``call_codex_cli_structured`` may invoke
+    ``call_codex_cli_plain`` multiple times (output retries); we sum
+    across all attempts so billing dashboards see the full cost of
+    the strategy step, not just the last fragment."""
+    return dict(getattr(_LAST_USAGE, "usage", {}) or {})
+
+
+def _extract_responses_usage(payload: Dict[str, Any]) -> Dict[str, int]:
+    """Pull the usage block out of a Responses API completed payload.
+
+    Shape per OpenAI Responses API:
+        {"usage": {
+            "input_tokens": ...,
+            "input_tokens_details": {"cached_tokens": ...},
+            "output_tokens": ...,
+            "output_tokens_details": {"reasoning_tokens": ...},
+            "total_tokens": ...,
+        }}
+    """
+    if not isinstance(payload, dict):
+        return {}
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    input_details = usage.get("input_tokens_details") or {}
+    output_details = usage.get("output_tokens_details") or {}
+    if not isinstance(input_details, dict):
+        input_details = {}
+    if not isinstance(output_details, dict):
+        output_details = {}
+    def _to_int(v: Any) -> int:
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+    return {
+        "input_tokens": _to_int(usage.get("input_tokens")),
+        "output_tokens": _to_int(usage.get("output_tokens")),
+        "reasoning_tokens": _to_int(output_details.get("reasoning_tokens")),
+        "cached_tokens": _to_int(input_details.get("cached_tokens")),
+        "total_tokens": _to_int(usage.get("total_tokens")),
+    }
+
+
+def _accumulate_usage(new_usage: Dict[str, int]) -> None:
+    """Sum ``new_usage`` into the per-thread accumulator. Called once
+    per successful Responses API call."""
+    current = getattr(_LAST_USAGE, "usage", None)
+    if not isinstance(current, dict):
+        _reset_last_usage()
+        current = _LAST_USAGE.usage
+    for key, value in new_usage.items():
+        try:
+            current[key] = int(current.get(key, 0) or 0) + int(value or 0)
+        except (TypeError, ValueError):
+            pass
 
 
 # ── Public API: plain ──────────────────────────────────────────────────────
@@ -1585,6 +1659,7 @@ def call_codex_cli_plain(
     *not* the right surface for pure text generation.
     """
     _set_last_error("")
+    _reset_last_usage()
     if not model:
         _set_last_error("codex-cli: model is required")
         return ""
@@ -1653,11 +1728,22 @@ def call_codex_cli_plain(
         except Exception as e:
             last_err = f"codex-cli: unexpected error: {e}"
             continue
+        # Record usage from this successful HTTP call into the
+        # per-thread accumulator regardless of whether we extracted
+        # text — empty-text responses still consumed tokens (often
+        # all on reasoning) and the operator should see that cost
+        # in telemetry.
+        try:
+            _accumulate_usage(_extract_responses_usage(payload))
+        except Exception:
+            pass
         text = _extract_responses_text(payload)
         if text:
             # Telemetry is recorded by the outer llm_utils adapter
             # (which has model_id from the strategy's resolved Models
-            # row). Recording here too would double-count rows.
+            # row). Recording here too would double-count rows; the
+            # usage we just accumulated is read back via
+            # ``_get_last_usage`` and forwarded into ``_safe_record``.
             return text
         last_err = "codex-cli: Responses API returned empty text"
     _set_last_error(last_err or "codex-cli: all retries exhausted")
