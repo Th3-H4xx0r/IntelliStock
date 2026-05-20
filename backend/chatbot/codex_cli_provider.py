@@ -733,35 +733,141 @@ class _CodexAppServerClient:
         except Empty:
             return None
 
+    def notify(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
+        """Send a JSON-RPC notification (no id, no response expected).
+
+        Used for the LSP-style ``initialized`` post-handshake notification
+        that codex requires before accepting any other requests."""
+        if self._proc is None or self._proc.stdin is None:
+            raise CodexCliProtocolError("codex app-server: process not started")
+        if not self.is_alive():
+            raise CodexCliCrashError("codex app-server: process exited", self.stderr_tail())
+        payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = params
+        line = json.dumps(payload).encode("utf-8") + b"\n"
+        try:
+            with self._send_lock:
+                self._proc.stdin.write(line)
+                self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            raise CodexCliCrashError(
+                f"codex app-server notify write failed: {e}", self.stderr_tail()
+            ) from e
+
     def initialize(self) -> Dict[str, Any]:
+        """LSP-style two-step handshake: ``initialize`` request, then
+        ``initialized`` notification. Without the trailing notification
+        codex 0.132 silently never transitions to "ready" and any
+        subsequent ``thread/start`` hangs.
+
+        Param shape matches what hermes-agent uses against codex 0.125+:
+        nested ``clientInfo`` object + ``capabilities`` (currently empty).
+        Older flat ``client_name``/``client_title``/``client_version``
+        keys are quietly ignored by codex and were responsible for
+        ``/llm/test`` hanging the whole UI.
+        """
         try:
             from version import __version__ as _intelli_version  # type: ignore
         except Exception:
             _intelli_version = "0.0.0"
         params = {
-            "client_name": "intellistock",
-            "client_title": "IntelliStock Agent",
-            "client_version": _intelli_version,
+            "clientInfo": {
+                "name": "intellistock",
+                "title": "IntelliStock Agent",
+                "version": _intelli_version,
+            },
+            "capabilities": {},
         }
-        return self.request("initialize", params, timeout=15.0)
+        result = self.request("initialize", params, timeout=15.0)
+        self.notify("initialized")
+        return result
 
-    def thread_start(self, *, model: Optional[str] = None, system: Optional[str] = None) -> str:
+    def thread_start(self, *, cwd: Optional[str] = None) -> str:
+        """``thread/start`` only accepts ``cwd`` — the model is configured
+        at app-server spawn time via ``-c model="..."``. Earlier versions
+        of this client tried to pass ``model``/``system`` here, which
+        codex silently ignored and we then hung on ``thread/run_turn``
+        (a method codex never had — should have been ``turn/start``).
+
+        Returns the thread ID. Codex versions differ on the result
+        envelope shape: some emit ``result.thread.id``, others
+        ``result.sessionId`` or ``result.threadId``. Accept any of them.
+        """
         params: Dict[str, Any] = {}
-        if model:
-            params["model"] = model
-        if system:
-            params["system"] = system
+        if cwd:
+            params["cwd"] = cwd
         result = self.request("thread/start", params, timeout=15.0)
-        tid = result.get("thread_id") or result.get("id")
+        thread_obj = result.get("thread") or {}
+        tid = (
+            thread_obj.get("id")
+            or thread_obj.get("sessionId")
+            or result.get("sessionId")
+            or result.get("threadId")
+            or result.get("thread_id")
+            or result.get("id")
+        )
         if not isinstance(tid, str) or not tid:
             raise CodexCliProtocolError(
-                f"codex app-server: thread/start returned no thread_id, got {result!r}"
+                f"codex app-server: thread/start returned no thread id, got {result!r}"
             )
         return tid
 
-    def run_turn(self, *, thread_id: str, user_input: str, timeout: float = CODEX_CLI_TURN_TIMEOUT_SEC) -> Dict[str, Any]:
-        params = {"thread_id": thread_id, "user_input": user_input}
-        return self.request("thread/run_turn", params, timeout=timeout)
+    def run_turn(self, *, thread_id: str, user_input: str, timeout: float = CODEX_CLI_TURN_TIMEOUT_SEC) -> str:
+        """Drive one full assistant turn and return the final text.
+
+        Codex 0.132's protocol: ``turn/start`` returns a turn ID
+        immediately, then the server streams ``item/completed``
+        notifications (one per assistant message, tool call, etc.)
+        until ``turn/completed`` arrives. The assistant's final text
+        lives in ``item.text`` for the last ``item.type == "agentMessage"``.
+
+        Our previous implementation called ``thread/run_turn`` (which
+        doesn't exist) and tried to read text out of the response — that
+        was the root cause of the multi-minute UI hang.
+        """
+        ts_result = self.request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": user_input}],
+            },
+            timeout=15.0,
+        )
+        # Some codex versions return ``turn.id``, others omit it. Either
+        # way the turn is now in flight; we collect text from the
+        # streaming notifications until turn/completed.
+        deadline = time.monotonic() + timeout
+        final_text = ""
+        while time.monotonic() < deadline:
+            note = self.take_notification(timeout=1.0)
+            if note is None:
+                if not self.is_alive():
+                    raise CodexCliCrashError(
+                        "codex app-server: process exited mid-turn",
+                        self.stderr_tail(),
+                    )
+                continue
+            method = note.get("method") or ""
+            params = note.get("params") or {}
+            item = params.get("item") or {}
+            if method == "item/completed":
+                if item.get("type") == "agentMessage":
+                    text = item.get("text") or ""
+                    if isinstance(text, str) and text.strip():
+                        final_text = text  # last agentMessage wins
+            if method == "turn/completed":
+                return final_text
+            if method == "turn/failed":
+                err = params.get("error") or {}
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                raise CodexCliProtocolError(
+                    f"codex turn/failed: {msg or 'no detail'} (stderr: {self.stderr_tail(20)})"
+                )
+        raise CodexCliTimeoutError(
+            f"codex turn did not complete within {timeout}s "
+            f"(last stderr: {self.stderr_tail(10)})"
+        )
 
     def close(self) -> None:
         if self._closed:
@@ -932,6 +1038,22 @@ def call_codex_cli_plain(
     timeout = float(timeout_sec or CODEX_CLI_TURN_TIMEOUT_SEC)
     max_retries = max(0, int(retries or 0))
     last_err = ""
+    # Model + system prompt are configured at app-server spawn time via
+    # ``-c`` TOML overrides — NOT via ``thread/start``, which only
+    # accepts ``cwd``. Earlier versions tried to pass model in
+    # thread/start, codex silently ignored it, and the subsequent
+    # turn hung. We also force approval_policy=never + sandbox=read-only
+    # so codex doesn't try to prompt for permissions on a non-tty pipe.
+    spawn_extra_args: List[str] = [
+        "-c", f'model="{_toml_escape(model)}"',
+        "-c", 'approval_policy="never"',
+        "-c", 'sandbox_mode="read-only"',
+    ]
+    if system_prompt:
+        spawn_extra_args.extend([
+            "-c", f'experimental_instructions="{_toml_escape(system_prompt)}"',
+        ])
+    spawn_extra_args.extend(extra_args)
     for attempt in range(max_retries + 1):
         acquired = _GLOBAL_SPAWN_SEM.acquire(blocking=True, timeout=30)
         if not acquired:
@@ -939,14 +1061,13 @@ def call_codex_cli_plain(
             continue
         client = _CodexAppServerClient(
             codex_bin=path, codex_home=os.environ.get("CODEX_HOME"),
-            extra_args=extra_args,
+            extra_args=spawn_extra_args,
         )
         try:
             client.spawn()
             client.initialize()
-            tid = client.thread_start(model=model, system=system_prompt)
-            result = client.run_turn(thread_id=tid, user_input=prompt, timeout=timeout)
-            text = _extract_text_from_run_turn_result(result)
+            tid = client.thread_start()
+            text = client.run_turn(thread_id=tid, user_input=prompt, timeout=timeout)
             if text:
                 # Telemetry is recorded by the outer llm_utils adapter
                 # (which has model_id from the strategy's resolved Models
@@ -977,6 +1098,14 @@ def call_codex_cli_plain(
                 pass
     _set_last_error(last_err or "codex-cli: all retries exhausted")
     return ""
+
+
+def _toml_escape(s: str) -> str:
+    """Minimal escape for codex's ``-c key="<value>"`` TOML override.
+    Escapes backslash and double-quote so a model name or system prompt
+    that contains either character doesn't break out of the TOML string.
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
 # ── Public API: structured (prompted JSON) ─────────────────────────────────
