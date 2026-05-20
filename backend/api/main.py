@@ -1916,8 +1916,10 @@ def api_codex_status(current_user: dict = Depends(get_current_user)):
     host is authenticated against OpenAI, and which install method (npm/
     brew) is available. Cheap probe — no subprocess unless cache is cold.
 
-    Open to any authenticated user. Non-admins get the boolean fields but
-    not the raw ``auth_message`` (which can leak path/error specifics).
+    Open to any authenticated user. The codex CLI auth state is shared
+    across the deployment (a named Docker volume holds the OAuth tokens),
+    so any user picking codex-cli in /models needs full visibility into
+    install + auth state to drive the setup flow.
     """
     try:
         from chatbot.codex_cli_provider import (
@@ -1941,17 +1943,12 @@ def api_codex_status(current_user: dict = Depends(get_current_user)):
     if installed:
         auth_ok, auth_msg = is_authenticated()
     method, _ = detect_install_method()
-    is_admin = current_user.get("role") == "admin"
     return {
         "installed": bool(installed),
-        "version": version if is_admin else None,
+        "version": version,
         "authenticated": bool(auth_ok),
-        # Mask the raw probe message for non-admins so we don't leak
-        # filesystem paths or subprocess error specifics to ordinary users.
-        "auth_message": auth_msg if is_admin else (
-            "authenticated" if auth_ok else "not authenticated"
-        ),
-        "install_method": method if is_admin else "unknown",
+        "auth_message": auth_msg,
+        "install_method": method,
     }
 
 
@@ -1962,9 +1959,12 @@ def api_codex_install_start(
 ):
     """Kick off ``npm install -g @openai/codex`` (or brew). Returns a
     job_id the frontend polls via ``GET /codex/install/{job_id}``.
-    Admin-only — installs system-wide packages on the host."""
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+
+    Open to any authenticated user — the codex CLI is intentionally a
+    shared deployment-level dependency. A class-level install semaphore
+    + per-user rate limit prevents this from being a DoS vector even
+    without an admin gate.
+    """
     uid = str(current_user.get("id") or "?")
     _codex_op_rate_limit(uid, "install")
     try:
@@ -1985,10 +1985,8 @@ def api_codex_install_status(
 ):
     """Poll the install job. Returns state ∈ {running, success, failed},
     exit_code, last 50 log lines, and a high-level error message on
-    failure. Admin-only to match the start endpoint and avoid leaking
-    install-log paths/error specifics to ordinary users."""
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    failure. Open to any authenticated user — they need to see the
+    install progress they kicked off."""
     try:
         from chatbot.codex_cli_provider import CodexInstaller
     except Exception as e:
@@ -2011,10 +2009,14 @@ def api_codex_login_start(
 ):
     """Spawn ``codex login --no-browser``, capture the OpenAI pairing URL
     + code, and return them so the frontend can display them. Returns
-    immediately once the parse completes (or the spawn fails). Admin only.
+    immediately once the parse completes (or the spawn fails).
+
+    Open to any authenticated user — the codex auth lives in a shared
+    Docker volume and any user picking codex-cli in /models needs to
+    drive this flow when the deployment isn't already authenticated.
+    A hard cap on concurrent live login jobs + per-user rate limit
+    keeps this from being a DoS vector.
     """
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
     uid = str(current_user.get("id") or "?")
     _codex_op_rate_limit(uid, "login")
     try:
@@ -2078,10 +2080,9 @@ def api_codex_login_cancel(
 
 @app.post("/codex/logout", response_class=JSONResponse)
 def api_codex_logout(current_user: dict = Depends(get_current_user)):
-    """Run ``codex logout`` to drop the stored OpenAI credentials. Admin
-    only — affects the entire host."""
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    """Run ``codex logout`` to drop the stored OpenAI credentials.
+    Open to any authenticated user — affects the shared deployment-wide
+    auth, so any user who signed in should be able to sign out."""
     try:
         from chatbot.codex_cli_provider import logout as _codex_logout
     except Exception as e:
