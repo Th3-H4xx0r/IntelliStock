@@ -1414,32 +1414,26 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
     _smoke_started = time.monotonic()
     _smoke_text = ""
     _smoke_error = ""
-    # Skip the second smoke probe for codex-cli — the structured probe
-    # already spawned ``codex app-server``, ran a full turn, and got
-    # back a parsed response, so generation is already proven. Running
-    # a second turn here just doubles the wall-clock and risks tripping
-    # the upstream proxy's 60-100s timeout (Cloudflare default), which
-    # surfaces as "Failed to fetch" in the browser. For cloud-API
-    # providers the smoke call is cheap (~1s) so we keep it there.
-    if provider == "codex-cli":
-        _smoke_text = "(skipped for codex-cli — structured probe above already exercised the live turn)"
-    else:
-        try:
-            # Same fast-fail rationale as the structured probe above: one
-            # attempt, 30s ceiling. Operators can re-click "Test" if they
-            # want a retry rather than waiting silently for the second.
-            _smoke_text = call_llm_by_provider(
-                provider,
-                api_key,
-                model,
-                _smoke_prompt,
-                max_output_tokens=128,
-                timeout_sec=30,
-                retries=0,
-                provider_config=provider_config,
-            ) or ""
-        except Exception as _e:
-            _smoke_error = str(_e)[:512]
+    try:
+        # Same fast-fail rationale as the structured probe above: one
+        # attempt, 30s ceiling. Operators can re-click "Test" if they
+        # want a retry rather than waiting silently for the second.
+        # codex-cli used to skip this because the legacy app-server
+        # spawn was ~3s and risked the proxy timeout; on the Responses
+        # API path each call is ~1.5s so the smoke probe is cheap and
+        # operators want to see real generated text.
+        _smoke_text = call_llm_by_provider(
+            provider,
+            api_key,
+            model,
+            _smoke_prompt,
+            max_output_tokens=128,
+            timeout_sec=30,
+            retries=0,
+            provider_config=provider_config,
+        ) or ""
+    except Exception as _e:
+        _smoke_error = str(_e)[:512]
     _smoke_elapsed_ms = int((time.monotonic() - _smoke_started) * 1000)
     _smoke_text = (_smoke_text or "").strip()
 
