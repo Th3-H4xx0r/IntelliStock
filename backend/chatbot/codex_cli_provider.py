@@ -1461,15 +1461,37 @@ class CodexDeviceCodeLogin:
 
     @classmethod
     def _run(cls, cli_path: str, job: _LoginJob) -> None:
-        # Try a sequence of non-interactive flags. Stop at the first that
-        # spawns and produces a pairing URL within the parse window.
+        # codex CLI v0.132+ exposes only ``codex login`` (no --no-browser,
+        # no --headless). It binds an OAuth loopback server inside the
+        # process, prints the chatgpt.com / auth.openai.com URL to stdout
+        # with the loopback redirect_uri embedded as a query param, and
+        # waits for the OAuth callback.
+        #
+        # In Docker the loopback redirect is unreachable from the
+        # operator's browser — but the printed URL still contains the
+        # full OAuth state so we can show the user something to click.
+        # We keep this attempt list extensible so future codex versions
+        # that add a real device-code flag (e.g. ``--device-code``) can
+        # be added here without touching the surrounding code.
         attempts = [
-            (["login", "--no-browser"], {}),
-            (["login", "--headless"], {}),
-            (["login"], {"CODEX_NO_BROWSER": "1"}),
+            (["login"], {}),
         ]
         last_err = ""
         for args, env_overrides in attempts:
+            # Reset state at the top of each iteration. Without this,
+            # the second attempt's state-update block (guarded by
+            # ``if job.state in ("pending", "parsed")``) would skip
+            # because the first attempt had already flipped state to
+            # "failed", and the loop would return the first attempt's
+            # stale error even if a later attempt succeeded.
+            with cls._jobs_lock:
+                job.state = "pending"
+                job.error = None
+                job.stdout_buf = []
+                job.stderr_buf = []
+                job.pairing_url = None
+                job.pairing_code = None
+
             env = os.environ.copy()
             env.update(env_overrides)
             env["TERM"] = env.get("TERM", "dumb")
@@ -1519,9 +1541,18 @@ class CodexDeviceCodeLogin:
                     if exit_code == 0:
                         job.state = "success"
                     else:
-                        # Look at stderr for an OAuth hint.
-                        stderr_blob = "\n".join(job.stderr_buf)
-                        hint = _classify_oauth_failure(stderr_blob) or stderr_blob[-200:]
+                        # Pull stderr first, then stdout — older codex
+                        # versions printed the clap parse error on
+                        # stderr; newer versions print runtime errors
+                        # interleaved in stdout. Surface both so the
+                        # operator can see what's wrong.
+                        stderr_blob = "\n".join(job.stderr_buf).strip()
+                        stdout_tail = "\n".join(job.stdout_buf[-10:]).strip()
+                        hint = (
+                            _classify_oauth_failure(stderr_blob, stdout_tail)
+                            or stderr_blob[-300:]
+                            or stdout_tail[-300:]
+                        )
                         job.error = hint or f"codex login exited {exit_code}"
                         job.state = "failed"
             if job.state in ("success", "parsed", "pending"):
@@ -1532,8 +1563,9 @@ class CodexDeviceCodeLogin:
             # Otherwise loop and try the next flag form.
         # All attempts failed.
         with cls._jobs_lock:
-            job.state = "failed"
-            job.error = last_err or "codex login: no supported flag worked"
+            if job.state != "expired":
+                job.state = "failed"
+                job.error = last_err or "codex login: no supported flag worked"
 
     @classmethod
     def _reader(cls, stream, job: _LoginJob, buf_name: str, stop: threading.Event) -> None:
