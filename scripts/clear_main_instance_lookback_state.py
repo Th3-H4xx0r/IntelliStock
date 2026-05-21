@@ -47,11 +47,17 @@ DB_NAME = "IntelliStock"
 
 
 def _build_targets(instance_id: str):
-    """Return the list of (table_name, criteria) tuples for the given instance.
+    """Return the list of (table_name, criteria) or (table_name, criteria, combine)
+    tuples for the given instance.
 
     criteria entries are (field_name, value, match_mode) where match_mode is
-    one of "exact", "prefix", "contains". Multiple criteria within a table are
-    OR-combined (any match -> delete).
+    one of "exact", "prefix", "contains", "special". Special pseudo-fields:
+      - "origin_not_backtest": row must not have origin == "backtest"
+        (used to keep ``backtest`` snapshots while clearing ``live`` and
+        legacy rows that pre-date the origin field).
+
+    The optional 3rd element is ``"or"`` (default, back-compat) or ``"and"``.
+    Multiple criteria within a table combine per that mode.
     """
     return [
         # ----- Original 4 -----
@@ -70,10 +76,17 @@ def _build_targets(instance_id: str):
             ("id", instance_id, "exact"),
         ]),
         # ----- Phase 1 additions (10 more tables) -----
-        # NexusStrategyCache: live-origin rows only (preserve backtest snapshots).
+        # NexusStrategyCache: per-instance live-origin (and legacy-origin) rows
+        # only. MUST AND-combine the instance filter with the origin filter so
+        # we never touch another instance's rows AND never delete backtest
+        # snapshots. The previous OR-only filter on origin=live would delete
+        # every live-origin row across ALL instances (production safety bug
+        # from the 2026-05-21 bug-sweep). ``origin_not_backtest`` covers both
+        # origin="live" and legacy rows that pre-date the origin field.
         ("NexusStrategyCache", [
-            ("origin", "live", "exact"),
-        ]),
+            ("instance_id", instance_id, "exact"),
+            ("origin_not_backtest", None, "special"),
+        ], "and"),
         ("LiveOrderWAL", [
             ("instance_id", instance_id, "exact"),
         ]),
@@ -104,20 +117,37 @@ def _build_targets(instance_id: str):
     ]
 
 
-def _build_filter(r, criteria):
-    """Build a rethinkdb `filter(...)` expression that matches ANY criterion."""
+def _build_filter(r, criteria, combine: str = "or"):
+    """Build a rethinkdb `filter(...)` expression combining the criteria.
+
+    combine="or" (default, back-compat) -> any match
+    combine="and"                       -> all match
+    """
     expr = None
     for field, val, mode in criteria:
-        row_field = r.row[field]
-        if mode == "exact":
-            this = row_field.eq(val)
-        elif mode == "prefix":
-            this = row_field.default("").match(f"^{val.replace('|', '[|]')}")
-        elif mode == "contains":
-            this = row_field.default("").match(val)
+        if mode == "special":
+            if field == "origin_not_backtest":
+                # Row must NOT have origin == "backtest". Treats missing
+                # origin as "not backtest" (legacy rows pre-date the field).
+                this = r.row["origin"].default("") != "backtest"
+            else:
+                continue
         else:
-            continue
-        expr = this if expr is None else expr | this
+            row_field = r.row[field]
+            if mode == "exact":
+                this = row_field.eq(val)
+            elif mode == "prefix":
+                this = row_field.default("").match(f"^{val.replace('|', '[|]')}")
+            elif mode == "contains":
+                this = row_field.default("").match(val)
+            else:
+                continue
+        if expr is None:
+            expr = this
+        elif combine == "and":
+            expr = expr & this
+        else:
+            expr = expr | this
     return expr
 
 
@@ -141,12 +171,18 @@ def main(apply: bool, instance_id: str) -> int:
     summary: list = []
     try:
         existing_tables = set(r.db(DB_NAME).table_list().run(conn))
-        for table, criteria in targets:
+        for entry in targets:
+            # Entries are (table, criteria) or (table, criteria, combine_mode).
+            if len(entry) == 3:
+                table, criteria, combine_mode = entry
+            else:
+                table, criteria = entry
+                combine_mode = "or"
             if table not in existing_tables:
                 print(f"SKIP  {table}: table does not exist.")
                 summary.append((table, 0, "skipped"))
                 continue
-            expr = _build_filter(r, criteria)
+            expr = _build_filter(r, criteria, combine=combine_mode)
             if expr is None:
                 print(f"SKIP  {table}: no criteria resolved.")
                 summary.append((table, 0, "skipped"))

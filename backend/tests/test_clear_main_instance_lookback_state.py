@@ -33,19 +33,128 @@ def test_build_targets_covers_all_14_phase1_tables():
     assert not missing, f"missing tables in TARGETS: {missing}"
 
 
-def test_nexus_strategy_cache_target_filters_origin_live_only():
-    """The cleanup must NOT delete backtest-origin snapshots."""
+def _criteria_of(entry):
+    """Helper: return the criteria list from a (table, criteria) or
+    (table, criteria, combine) entry."""
+    return entry[1]
+
+
+def _combine_of(entry):
+    """Helper: return the combine mode ('or' default) from an entry."""
+    return entry[2] if len(entry) == 3 else "or"
+
+
+def test_nexus_strategy_cache_target_uses_and_mode_with_instance_filter():
+    """Bug-sweep 2026-05-21: must AND-combine instance_id and origin filters.
+
+    The previous OR-only filter on origin=live would delete every live-origin
+    row across ALL instances. The new contract: delete only rows that match
+    BOTH (instance_id == X) AND (origin != backtest).
+    """
     targets = cleaner._build_targets("main")
     nsc = [t for t in targets if t[0] == "NexusStrategyCache"]
     assert len(nsc) == 1, "NexusStrategyCache should appear exactly once"
-    criteria = nsc[0][1]
-    # Expect at least one filter referencing "origin"="live"
-    has_origin_filter = False
-    for field, value, mode in criteria:
-        if field == "origin" and value == "live":
-            has_origin_filter = True
-            break
-    assert has_origin_filter, f"NexusStrategyCache must filter on origin=live; got {criteria}"
+    criteria = _criteria_of(nsc[0])
+    combine = _combine_of(nsc[0])
+    assert combine == "and", (
+        f"NexusStrategyCache must AND-combine criteria; got combine={combine!r}"
+    )
+    fields = [(c[0], c[1], c[2]) for c in criteria]
+    assert ("instance_id", "main", "exact") in fields, (
+        f"NexusStrategyCache must filter on instance_id; got {fields}"
+    )
+    has_special_origin = any(
+        f == "origin_not_backtest" and mode == "special"
+        for f, _v, mode in fields
+    )
+    assert has_special_origin, (
+        f"NexusStrategyCache must include origin_not_backtest special; got {fields}"
+    )
+
+
+# Reusable ReQL-row-expression evaluator stub: every r.row[<field>] returns a
+# comparator that captures field+op+value. The composed expression supports
+# & / | which we mimic with a tree we can evaluate against a candidate row.
+class _Pred:
+    def __init__(self, fn):
+        self.fn = fn
+    def __and__(self, other):
+        return _Pred(lambda row: bool(self.fn(row)) and bool(other.fn(row)))
+    def __or__(self, other):
+        return _Pred(lambda row: bool(self.fn(row)) or bool(other.fn(row)))
+
+
+class _Field:
+    def __init__(self, name):
+        self.name = name
+        self._default = None
+    def default(self, v):
+        f = _Field(self.name); f._default = v; return f
+    def eq(self, val):
+        name = self.name
+        return _Pred(lambda row: row.get(name) == val)
+    def __ne__(self, val):  # type: ignore[override]
+        name = self.name; d = self._default
+        return _Pred(lambda row: (row.get(name, d) if d is not None else row.get(name)) != val)
+    def match(self, pat):
+        import re as _re; name = self.name; d = self._default
+        return _Pred(lambda row: bool(_re.search(pat, str(row.get(name, d) or ""))))
+
+
+class _Row:
+    def __getitem__(self, k): return _Field(k)
+
+
+class _FakeR:
+    row = _Row()
+
+
+def test_nexus_strategy_cache_does_not_delete_other_instance_rows():
+    """Bug-sweep 2026-05-21 regression: filter built for instance='foo' must
+    NOT match a row that belongs to instance_id='main'."""
+    targets = cleaner._build_targets("foo")
+    nsc_entry = next(t for t in targets if t[0] == "NexusStrategyCache")
+    criteria = _criteria_of(nsc_entry)
+    combine = _combine_of(nsc_entry)
+    pred = cleaner._build_filter(_FakeR(), criteria, combine=combine)
+    assert pred is not None
+    # Row from a different instance with live origin must NOT match.
+    assert pred.fn({"instance_id": "main", "origin": "live"}) is False, (
+        "filter for instance='foo' must not match a row with instance_id='main'"
+    )
+    # Row from the targeted instance with live origin SHOULD match.
+    assert pred.fn({"instance_id": "foo", "origin": "live"}) is True
+    # Backtest row in the targeted instance must NOT match (snapshots preserved).
+    assert pred.fn({"instance_id": "foo", "origin": "backtest"}) is False
+    # Legacy row (no origin field) in the targeted instance SHOULD match
+    # (origin_not_backtest treats missing origin as "not backtest").
+    assert pred.fn({"instance_id": "foo"}) is True
+
+
+def test_build_filter_and_mode_combines_with_and():
+    """Sanity-check _build_filter AND-mode against a synthetic row."""
+    pred_and = cleaner._build_filter(
+        _FakeR(),
+        [("instance_id", "main", "exact"), ("origin_not_backtest", None, "special")],
+        combine="and",
+    )
+    assert pred_and is not None
+    assert pred_and.fn({"instance_id": "main", "origin": "live"}) is True
+    assert pred_and.fn({"instance_id": "main", "origin": "backtest"}) is False
+    assert pred_and.fn({"instance_id": "other", "origin": "live"}) is False
+
+
+def test_build_filter_default_or_mode_unchanged():
+    """Back-compat: criteria without an explicit combine mode still OR."""
+    pred_or = cleaner._build_filter(
+        _FakeR(),
+        [("instance_id", "main", "exact"), ("base_instance_id", "main", "exact")],
+        # default combine="or"
+    )
+    assert pred_or is not None
+    assert pred_or.fn({"instance_id": "main"}) is True
+    assert pred_or.fn({"base_instance_id": "main"}) is True
+    assert pred_or.fn({"instance_id": "other"}) is False
 
 
 def test_build_targets_substitutes_instance_id():
@@ -53,7 +162,8 @@ def test_build_targets_substitutes_instance_id():
     targets = cleaner._build_targets("my-test-instance")
     # Look at any criterion that references INSTANCE_ID, confirm it picked up the param
     found_instance_ref = False
-    for table_name, criteria in targets:
+    for entry in targets:
+        criteria = _criteria_of(entry)
         for field, value, mode in criteria:
             if "my-test-instance" in str(value):
                 found_instance_ref = True
