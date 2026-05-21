@@ -161,6 +161,11 @@ class _FakeR:
     def now(self):
         import datetime
         return datetime.datetime.utcnow()
+    def desc(self, field):
+        # Mirror rethinkdb's r.desc(): a sentinel passed into order_by().
+        # Tests only need this to be a no-op callable that the chain stub
+        # can ignore.
+        return ("desc", field)
 
 
 class _FakeDB:
@@ -263,3 +268,193 @@ def test_persist_backtest_snapshot_rejects_blank_args():
         cache={}, config_hash="a", module_hash="b",
         start_date="d", end_date="d",
     ) is False
+
+
+import datetime as _dt
+
+
+class _FakeRWithSnapshot(_FakeR):
+    """_FakeR variant that returns a specific snapshot row on query."""
+    def __init__(self, snapshot_row=None, table_list=None):
+        super().__init__(table_list=table_list)
+        self._snapshot_row = snapshot_row
+    def db(self, name):
+        return _FakeDBWithSnapshot(self, name, self._snapshot_row)
+
+
+class _FakeDBWithSnapshot(_FakeDB):
+    def __init__(self, parent, name, snapshot_row):
+        super().__init__(parent, name)
+        self._snapshot_row = snapshot_row
+    def table(self, name):
+        return _FakeTableWithSnapshot(self.parent, self.name, name, self._snapshot_row)
+
+
+class _FakeTableWithSnapshot(_FakeTable):
+    def __init__(self, parent, db_name, name, snapshot_row):
+        super().__init__(parent, db_name, name)
+        self._snapshot_row = snapshot_row
+    def get_all(self, key, index=None):
+        return _ChainStub(self._snapshot_row)
+    def index_list(self):
+        # Pretend the compound index already exists so _ensure_table is happy.
+        class _W:
+            def run(self, conn): return ["instance_id_config_hash"]
+        return _W()
+
+
+class _ChainStub:
+    """Chainable stub that returns the seeded row from any terminal `.run(conn)` call."""
+    def __init__(self, row):
+        self._row = row
+    def filter(self, *a, **kw): return self
+    def order_by(self, *a, **kw): return self
+    def limit(self, *a, **kw): return self
+    def nth(self, *a, **kw): return self
+    def default(self, *a, **kw): return self
+    def run(self, conn): return self._row
+
+
+def _today_iso():
+    return _dt.date.today().isoformat()
+
+
+def _days_ago_iso(n):
+    return (_dt.date.today() - _dt.timedelta(days=n)).isoformat()
+
+
+def test_load_with_fallback_returns_match():
+    row = {
+        "id": "main|graph_nexus_analysis|abc|backtest|" + _today_iso(),
+        "instance_id": "main",
+        "strategy_name": "graph_nexus_analysis",
+        "origin": "backtest",
+        "config_hash": "abc",
+        "nexus_module_hash": "mod1",
+        "end_date": _today_iso(),
+        "cache_json": '{"_momentum_watchlist": ["AAPL"]}',
+        "size_bytes": 42,
+    }
+    fake_r = _FakeRWithSnapshot(snapshot_row=row)
+    cache, reason, meta = scp.load_with_fallback(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        current_config_hash="abc", current_module_hash="mod1",
+        staleness_days=7,
+    )
+    assert reason == "ok"
+    assert cache == {"_momentum_watchlist": ["AAPL"]}
+    assert meta is not None
+    assert meta["end_date"] == _today_iso()
+    assert meta["origin"] == "backtest"
+    assert meta["config_hash"] == "abc"
+
+
+def test_load_with_fallback_returns_no_match_on_empty():
+    fake_r = _FakeRWithSnapshot(snapshot_row=None)
+    cache, reason, meta = scp.load_with_fallback(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod",
+        staleness_days=7,
+    )
+    assert cache is None
+    assert reason == "no_match"
+    assert meta is None
+
+
+def test_load_with_fallback_rejects_stale():
+    row = {
+        "id": "main|x|abc|backtest|" + _days_ago_iso(30),
+        "cache_json": '{"k": 1}',
+        "end_date": _days_ago_iso(30),
+        "nexus_module_hash": "mod",
+        "origin": "backtest",
+        "config_hash": "abc",
+    }
+    fake_r = _FakeRWithSnapshot(snapshot_row=row)
+    cache, reason, meta = scp.load_with_fallback(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod",
+        staleness_days=7,
+    )
+    assert cache is None
+    assert reason == "stale"
+    assert meta is None
+
+
+def test_load_with_fallback_rejects_module_drift():
+    row = {
+        "id": "main|x|abc|backtest|" + _today_iso(),
+        "cache_json": '{"k": 1}',
+        "end_date": _today_iso(),
+        "nexus_module_hash": "mod_OLD",
+        "origin": "backtest",
+        "config_hash": "abc",
+    }
+    fake_r = _FakeRWithSnapshot(snapshot_row=row)
+    cache, reason, meta = scp.load_with_fallback(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod_NEW",
+        staleness_days=7,
+    )
+    assert cache is None
+    assert reason == "module_drift"
+    assert meta is None
+
+
+def test_load_with_fallback_rejects_deserialize_error():
+    row = {
+        "id": "main|x|abc|backtest|" + _today_iso(),
+        "cache_json": "}{not valid json{{",
+        "end_date": _today_iso(),
+        "nexus_module_hash": "mod",
+        "origin": "backtest",
+        "config_hash": "abc",
+    }
+    fake_r = _FakeRWithSnapshot(snapshot_row=row)
+    cache, reason, meta = scp.load_with_fallback(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod",
+        staleness_days=7,
+    )
+    assert cache is None
+    assert reason == "deserialize_error"
+    assert meta is None
+
+
+def test_load_with_fallback_db_error_returns_none():
+    class _RaisingR(_FakeR):
+        def db(self, name):
+            class _D:
+                def table_list(self):
+                    class _W:
+                        def run(self, conn): raise RuntimeError("rethink down")
+                    return _W()
+            return _D()
+    cache, reason, meta = scp.load_with_fallback(
+        conn=object(), r=_RaisingR(),
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod",
+        staleness_days=7,
+    )
+    assert cache is None
+    assert reason == "db_error"
+    assert meta is None
+
+
+def test_load_with_fallback_env_flag_off(monkeypatch):
+    monkeypatch.setenv("NEXUS_LIVE_SNAPSHOT_LOAD", "off")
+    fake_r = _FakeRWithSnapshot(snapshot_row={"cache_json": "{}", "end_date": _today_iso(), "nexus_module_hash": "mod", "origin": "backtest", "config_hash": "abc"})
+    cache, reason, meta = scp.load_with_fallback(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod",
+        staleness_days=7,
+    )
+    assert cache is None
+    assert reason == "disabled"
+    assert meta is None

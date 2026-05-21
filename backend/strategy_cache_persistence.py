@@ -422,6 +422,71 @@ def persist_backtest_snapshot(
         return False
 
 
+def load_with_fallback(
+    conn,
+    r,
+    *,
+    instance_id: str,
+    strategy_name: str,
+    current_config_hash: str,
+    current_module_hash: str,
+    staleness_days: int = 7,
+) -> tuple:
+    """Try to hydrate `_strategy_cache` from a recent NexusStrategyCache row.
+
+    Returns (cache_dict_or_None, reason, meta_or_None) where:
+      reason in {"ok", "disabled", "no_match", "stale", "module_drift",
+                "deserialize_error", "db_error"}
+      meta is a dict {"id", "origin", "end_date", "config_hash", "size_bytes"}
+        on the "ok" path, None otherwise.
+    """
+    import os as _os
+    if (_os.environ.get("NEXUS_LIVE_SNAPSHOT_LOAD", "on") or "on").lower() == "off":
+        return None, "disabled", None
+    if conn is None or r is None or not instance_id or not strategy_name:
+        return None, "no_match", None
+    try:
+        if not _ensure_table(conn, r):
+            return None, "db_error", None
+        row = (
+            r.db(DB_NAME).table(TABLE_NAME)
+             .get_all([instance_id, current_config_hash], index="instance_id_config_hash")
+             .filter(r.row["strategy_name"].eq(strategy_name))
+             .order_by(r.desc("end_date"), r.desc("created_at"))
+             .limit(1)
+             .nth(0)
+             .default(None)
+             .run(conn)
+        )
+    except Exception:
+        return None, "db_error", None
+    if not row:
+        return None, "no_match", None
+    module_hash = row.get("nexus_module_hash", "")
+    if module_hash != current_module_hash:
+        return None, "module_drift", None
+    end_date_str = row.get("end_date") or ""
+    try:
+        import datetime as _dt
+        end_dt = _dt.date.fromisoformat(end_date_str)
+        if (_dt.date.today() - end_dt).days > staleness_days:
+            return None, "stale", None
+    except Exception:
+        return None, "stale", None
+    try:
+        cache = _deserialize_cache_from_blob(row.get("cache_json", "") or "")
+    except ValueError:
+        return None, "deserialize_error", None
+    meta = {
+        "id": row.get("id", ""),
+        "origin": row.get("origin", ""),
+        "end_date": end_date_str,
+        "config_hash": row.get("config_hash", ""),
+        "size_bytes": int(row.get("size_bytes", 0) or 0),
+    }
+    return cache, "ok", meta
+
+
 def merge_loaded_cache_into(target: dict, loaded: Optional[dict]) -> None:
     """Merge loaded dict into ``target`` in-place without blowing away
     existing entries. Used to restore persisted keys into a freshly-created
