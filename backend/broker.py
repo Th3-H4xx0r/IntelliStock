@@ -3144,7 +3144,14 @@ def _fetch_daily_close_prices(symbols, start_date, end_date, alpaca_key, alpaca_
     return prices_by_date
 
 
-def _run_live_historic_lookback(run_once_specs, symbols, alpaca_key, alpaca_secret):
+def _run_live_historic_lookback(
+    run_once_specs,
+    symbols,
+    alpaca_key,
+    alpaca_secret,
+    *,
+    restrict_to_dates=None,
+):
     """Run Nexus historic lookback on live startup.
 
     Contract (Phase B-full, 2026-04-21 revamp):
@@ -3259,6 +3266,28 @@ def _run_live_historic_lookback(run_once_specs, symbols, alpaca_key, alpaca_secr
                 "cyan",
             )
             continue
+
+        # Phase 1 (2026-05-20): if the caller passed a snapshot gap-day list,
+        # AFTER the resume-marker skip applies, FURTHER restrict to just those
+        # explicit dates. The snapshot already covers everything up through
+        # its end_date; we only need to fill in the gap from snapshot+1 to
+        # today. The resume-marker filter above guards against re-running any
+        # gap day that nexus_processed_trade_contexts already recorded.
+        if restrict_to_dates is not None:
+            _restrict_set = set(restrict_to_dates)
+            _before = len(resume_opens)
+            resume_opens = [d for d in resume_opens if d.strftime("%Y-%m-%d") in _restrict_set]
+            _log(
+                f"[lookback] restricted to {len(resume_opens)} gap day(s) (from {_before}): "
+                f"{[d.strftime('%Y-%m-%d') for d in resume_opens]}",
+                "cyan",
+            )
+            if not resume_opens:
+                _log(
+                    f"Live lookback: snapshot gap empty for {spec_name}; skipping prepass.",
+                    "cyan",
+                )
+                continue
 
         # Only pre-fetch Alpaca daily closes when the caller provided seed
         # symbols. For discovery instances (base_symbols=[]) Nexus will
@@ -5055,9 +5084,23 @@ elif mode == MODE_LIVE:
         #       portfolio MTM grows past 50% → `buys=0` pathology.
         # Both run ONCE at boot; the tick-loop's load-gate prevents re-run.
         try:
+            # Phase 1 (2026-05-20): snapshot-aware boot load. Try the new
+            # 5-segment (config_hash|origin|end_date) snapshot row first
+            # via load_with_fallback. If that returns no row, fall back to
+            # the legacy 2-segment per-instance row so existing live
+            # deployments keep working.
+            from broker_snapshot_helpers import (
+                _invoke_load_snapshot_with_gap,
+                _collect_prompt_versions,
+                _collect_llm_stages,
+                _collect_history_scope_inputs,
+                _resolve_nexus_module_path,
+            )
             from strategy_cache_persistence import (
                 load_strategy_cache_from_db as _scp_load_boot,
                 merge_loaded_cache_into as _scp_merge_boot,
+                _compute_config_hash,
+                _compute_module_hash,
             )
             _boot_conn = get_conn_retry(max_attempts=3, delay=2)
             # Seed F1 for the known live strategy name `graph_nexus_analysis`.
@@ -5067,28 +5110,82 @@ elif mode == MODE_LIVE:
             _nexus_cache = _strategy_cache.setdefault(_nexus_name, {})
             if _boot_conn is not None:
                 try:
-                    _loaded_boot = _scp_load_boot(
-                        _boot_conn, r, str(instance_id), _nexus_name,
+                    # Build config_hash + module_hash for the snapshot lookup
+                    # (must match what backtest writes in
+                    # _invoke_persist_backtest_snapshot — same canonical fields).
+                    _nexus_spec_for_load = next(
+                        (s for s in (_run_once_specs or [])
+                         if str((s or {}).get("strategy") or "").strip() == _nexus_name),
+                        None,
                     )
-                    if _loaded_boot:
-                        _scp_merge_boot(_nexus_cache, _loaded_boot)
+                    _bt_cfg_load = (_nexus_spec_for_load or {}).get("config") or {}
+                    _current_config_hash = _compute_config_hash({
+                        "strategy_name": _nexus_name,
+                        "prompt_versions": _collect_prompt_versions(_bt_cfg_load),
+                        "llm_stages": _collect_llm_stages(_bt_cfg_load),
+                        "history_scope_id_inputs": _collect_history_scope_inputs(_bt_cfg_load),
+                        "lookback_learning_days": int(_bt_cfg_load.get("lookback_learning_days", 120) or 120),
+                    })
+                    _nexus_module_path = _resolve_nexus_module_path() or ""
+                    _current_module_hash = _compute_module_hash(_nexus_module_path) if _nexus_module_path else "missing"
+                    _snap_cache, _snap_reason, _gap_dates = _invoke_load_snapshot_with_gap(
+                        conn=_boot_conn,
+                        r=r,
+                        instance_id=str(instance_id),
+                        strategy_name=_nexus_name,
+                        current_config_hash=_current_config_hash,
+                        current_module_hash=_current_module_hash,
+                    )
+                    _log(
+                        f"[snapshot] decision: reason={_snap_reason} "
+                        f"gap_days={None if _gap_dates is None else len(_gap_dates)}",
+                        "cyan",
+                    )
+                    if _snap_cache is not None:
+                        _scp_merge_boot(_nexus_cache, _snap_cache)
                         _log(
-                            f"strategy_cache restored at boot for {_nexus_name}: {len(_loaded_boot)} key(s) "
+                            f"[snapshot] hydrated {len(_snap_cache)} keys into _strategy_cache[{_nexus_name!r}] "
                             f"(bar_index={_nexus_cache.get('_deployment_bar_index')}, "
                             f"halt_active={(_nexus_cache.get('_portfolio_drawdown_state') or {}).get('halt_active')})",
-                            "cyan",
+                            "green",
                         )
+                        # Store gap_dates so the lookback caller (line ~6019) can
+                        # narrow the prepass to only the missing days.
+                        globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = _gap_dates
+                        # Mark legacy F1 load as already-satisfied so the
+                        # tick-loop fallback at ~6815 doesn't re-run the load.
+                        globals()["_strategy_cache_loaded_from_db"] = True
                     else:
-                        _log(
-                            f"strategy_cache: no persisted row for {instance_id}|{_nexus_name} "
-                            "(first deploy or cleared); starting fresh",
-                            "cyan",
+                        # Snapshot not usable -> fall back to legacy per-instance
+                        # row load (preserves current behavior for ongoing
+                        # deployments that haven't yet produced a 5-segment row).
+                        _loaded_boot = _scp_load_boot(
+                            _boot_conn, r, str(instance_id), _nexus_name,
                         )
+                        if _loaded_boot:
+                            _scp_merge_boot(_nexus_cache, _loaded_boot)
+                            _log(
+                                f"[snapshot] legacy row loaded: {len(_loaded_boot)} key(s) "
+                                f"(bar_index={_nexus_cache.get('_deployment_bar_index')}, "
+                                f"halt_active={(_nexus_cache.get('_portfolio_drawdown_state') or {}).get('halt_active')})",
+                                "cyan",
+                            )
+                        else:
+                            _log(
+                                f"strategy_cache: no persisted row for {instance_id}|{_nexus_name} "
+                                "(first deploy or cleared); starting fresh",
+                                "cyan",
+                            )
+                        # None signals "run full lookback" to the caller below.
+                        globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = None
                 finally:
                     try:
                         _boot_conn.close()
                     except Exception:
                         pass
+            else:
+                # No DB connection at all -> conservative: run full lookback.
+                globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = None
             # F1b: ramp bypass on warm cold boot.
             try:
                 _bar_now = int(_nexus_cache.get("_deployment_bar_index", 0) or 0)
@@ -5307,6 +5404,8 @@ elif mode == MODE_LIVE:
             except Exception:
                 pass
             globals()["_strategy_cache_loaded_from_db"] = True
+            # Boot exception path -> conservative: run full lookback.
+            globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = None
 
         # portfolio_emulator points at the adapter so strategies read through transparently.
         portfolio_emulator = live_adapter
@@ -6016,12 +6115,24 @@ if mode == MODE_BACKTEST:
 
 if mode == MODE_LIVE:
     try:
-        _lb_caches = _run_live_historic_lookback(
-            _run_once_specs,
-            symbols,
-            key or os.environ.get("KEY", ""),
-            secret or os.environ.get("SECRET", ""),
-        ) or {}
+        # Phase 1 (2026-05-20): snapshot-aware lookback narrowing.
+        # The F1 boot block above set _NEXUS_SNAPSHOT_GAP_DATES based on
+        # whether a usable backtest snapshot was found:
+        #   None  -> no snapshot or boot failed; run the FULL 120-day lookback.
+        #   []    -> snapshot end_date covers today; SKIP lookback entirely.
+        #   [...] -> snapshot is partial; restrict to the missing trading days.
+        _gap_for_lookback = globals().get("_NEXUS_SNAPSHOT_GAP_DATES")
+        if _gap_for_lookback == []:
+            _log("[snapshot] gap_dates empty; skipping lookback", "green")
+            _lb_caches = {}
+        else:
+            _lb_caches = _run_live_historic_lookback(
+                _run_once_specs,
+                symbols,
+                key or os.environ.get("KEY", ""),
+                secret or os.environ.get("SECRET", ""),
+                restrict_to_dates=_gap_for_lookback if _gap_for_lookback is not None else None,
+            ) or {}
         # Seed the module-level _strategy_cache with whatever the prepass
         # accumulated (peak watermarks, fast-loser blacklist, V32 convert
         # cooldowns, momentum watchlist). Without this merge the state
@@ -6040,6 +6151,69 @@ if mode == MODE_LIVE:
             )
     except Exception as e:
         _log(f"Live historic lookback failed (non-fatal): {e}", "yellow")
+
+    # Phase 1 BLOCKER boot-time log lines (2026-05-20).
+    # Emit AFTER the lookback completes and AFTER the cache merge, so the
+    # warm-position count + bar_index + drawdown halt state reflect both
+    # the snapshot hydrate and any lookback fills. Each block is wrapped
+    # so an attribute miss in one doesn't suppress the others.
+    _nexus_name_for_blocker_logs = "graph_nexus_analysis"
+    # BLOCKER #2 — F1b ramp bypass with 0 warm positions
+    try:
+        _warm_pos_count = 0
+        try:
+            for _p in (getattr(live_adapter, "_positions", {}) or {}).values():
+                try:
+                    if float(getattr(_p, "qty", 0.0) or 0.0) > 0:
+                        _warm_pos_count += 1
+                except Exception:
+                    continue
+        except Exception:
+            _warm_pos_count = len(getattr(live_adapter, "_positions", {}) or {})
+        _bar_idx = _strategy_cache.get(_nexus_name_for_blocker_logs, {}).get("_deployment_bar_index", 0)
+        _log(
+            f"[live_boot] warm_positions={_warm_pos_count}, "
+            f"F1b_bypass={'enabled' if _warm_pos_count > 0 else 'disabled'}, "
+            f"ramp_starting_bar_index={_bar_idx}",
+            "cyan",
+        )
+    except Exception:
+        pass
+
+    # BLOCKER #3 — _nexus_full_cycle_completed_date communication
+    try:
+        _fcd = _strategy_cache.get(_nexus_name_for_blocker_logs, {}).get(
+            "_nexus_full_cycle_completed_date", ""
+        )
+        _log(
+            f"[live_boot] _nexus_full_cycle_completed_date={_fcd or '<unset>'}; "
+            f"next FULL cycle expected ~06:30 AM PT",
+            "cyan",
+        )
+    except Exception:
+        pass
+
+    # BLOCKER #1 — settlement soft check.
+    # Adapters expose _cash (available/buying-power) and _settled_cash
+    # (settled). Compare; if settled significantly under cash, warn —
+    # T+1/T+2 unsettled funds can block early buys.
+    try:
+        _cash_avail = float(getattr(live_adapter, "_cash", 0.0) or 0.0)
+        _cash_total = float(
+            getattr(live_adapter, "_settled_cash", _cash_avail) or _cash_avail
+        )
+        # If we couldn't read settled separately, fall back to equity.
+        if _cash_total <= 0:
+            _cash_total = float(getattr(live_adapter, "_initial_value", _cash_avail) or _cash_avail)
+        if _cash_total > 0 and _cash_avail < _cash_total * 0.95:
+            _log(
+                f"[live_boot] WARNING: unsettled funds detected "
+                f"(available={_cash_avail:.2f}, total={_cash_total:.2f}); "
+                f"T+1/T+2 may block early buys",
+                "yellow",
+            )
+    except Exception:
+        pass
 
 
 while not shutdown_requested:

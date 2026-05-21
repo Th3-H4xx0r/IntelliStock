@@ -95,3 +95,55 @@ def test_invoke_persist_returns_false_when_disabled(monkeypatch):
     )
     assert ok is False
     assert called["count"] == 0
+
+
+def test_live_boot_loads_snapshot_when_present(monkeypatch):
+    """Snapshot returned by load_with_fallback -> cache hydrated, gap=[]."""
+    monkeypatch.setattr(scp, "load_with_fallback", lambda *a, **kw: (
+        {"_momentum_watchlist": ["AAPL"]}, "ok", {"end_date": _today_iso()}
+    ))
+    from backend import broker_snapshot_helpers as bsh
+    cache, reason, gap_dates = bsh._invoke_load_snapshot_with_gap(
+        conn=object(), r=object(),
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        current_config_hash="abc", current_module_hash="mod",
+    )
+    assert reason == "ok"
+    assert cache == {"_momentum_watchlist": ["AAPL"]}
+    assert gap_dates == []
+
+
+def test_live_boot_returns_gap_dates_when_snapshot_partial(monkeypatch):
+    """Snapshot ends 3 days ago -> gap_dates is the trading days between."""
+    three_days_ago = (dt.date.today() - dt.timedelta(days=3)).isoformat()
+    monkeypatch.setattr(scp, "load_with_fallback", lambda *a, **kw: (
+        {"k": 1}, "ok", {"end_date": three_days_ago}
+    ))
+    from backend import broker_snapshot_helpers as bsh
+    cache, reason, gap_dates = bsh._invoke_load_snapshot_with_gap(
+        conn=object(), r=object(),
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        current_config_hash="abc", current_module_hash="mod",
+    )
+    assert reason == "ok"
+    assert isinstance(gap_dates, list)
+    # all returned dates are weekdays between snapshot end (exclusive) and today (inclusive)
+    assert all(d > three_days_ago for d in gap_dates)
+    assert all(d <= _today_iso() for d in gap_dates)
+    for d in gap_dates:
+        dd = dt.date.fromisoformat(d)
+        assert dd.weekday() < 5, f"{d} is not a weekday"
+
+
+def test_live_boot_falls_back_when_snapshot_missing(monkeypatch):
+    """Snapshot not found -> cache=None, gap=None (signal full lookback)."""
+    monkeypatch.setattr(scp, "load_with_fallback", lambda *a, **kw: (None, "no_match", None))
+    from backend import broker_snapshot_helpers as bsh
+    cache, reason, gap_dates = bsh._invoke_load_snapshot_with_gap(
+        conn=object(), r=object(),
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        current_config_hash="abc", current_module_hash="mod",
+    )
+    assert cache is None
+    assert reason == "no_match"
+    assert gap_dates is None

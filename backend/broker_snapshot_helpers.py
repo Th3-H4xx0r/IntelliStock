@@ -137,3 +137,64 @@ def _invoke_persist_backtest_snapshot(
     except Exception as e:
         print(f"[snapshot] persist raised (suppressed): {e}")
         return False
+
+
+def _invoke_load_snapshot_with_gap(
+    conn,
+    r,
+    *,
+    instance_id: str,
+    strategy_name: str,
+    current_config_hash: str,
+    current_module_hash: str,
+    staleness_days: int = 7,
+) -> tuple:
+    """Call ``load_with_fallback`` and compute a gap-day list for shortened lookback.
+
+    Returns ``(cache_dict_or_None, reason, gap_dates_list_or_None)``:
+      - cache=None, gap_dates=None  -> snapshot not usable; caller runs FULL lookback.
+      - cache=dict, gap_dates=[]    -> snapshot covers today; caller skips lookback.
+      - cache=dict, gap_dates=[...] -> snapshot partial; caller runs lookback for those days.
+
+    Looks up ``load_with_fallback`` on the live module object (not as a
+    re-imported local symbol) so the standard test pattern of
+    ``monkeypatch.setattr(strategy_cache_persistence, "load_with_fallback", ...)``
+    is honored.
+    """
+    try:
+        try:
+            from backend import strategy_cache_persistence as _scp
+        except ImportError:
+            import strategy_cache_persistence as _scp  # type: ignore[no-redef]
+    except Exception:
+        # If the helper module isn't importable, treat as no match — caller falls back.
+        return None, "no_match", None
+    try:
+        cache, reason, meta = _scp.load_with_fallback(
+            conn=conn,
+            r=r,
+            instance_id=instance_id,
+            strategy_name=strategy_name,
+            current_config_hash=current_config_hash,
+            current_module_hash=current_module_hash,
+            staleness_days=staleness_days,
+        )
+    except Exception:
+        return None, "no_match", None
+    if cache is None:
+        return None, reason, None
+    try:
+        import datetime as _dt
+        end_date_str = (meta or {}).get("end_date", "") if meta else ""
+        end_dt = _dt.date.fromisoformat(end_date_str) if end_date_str else _dt.date.today()
+        today_dt = _dt.date.today()
+        gap_dates = []
+        cursor = end_dt + _dt.timedelta(days=1)
+        while cursor <= today_dt:
+            if cursor.weekday() < 5:  # weekdays only; lookback skips holidays via data availability
+                gap_dates.append(cursor.isoformat())
+            cursor += _dt.timedelta(days=1)
+        return cache, reason, gap_dates
+    except Exception:
+        # Bad date parse -> conservative: return cache but no gap (caller will skip lookback).
+        return cache, reason, []
