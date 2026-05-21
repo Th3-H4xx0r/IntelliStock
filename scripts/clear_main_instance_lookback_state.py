@@ -1,6 +1,6 @@
 """One-shot: clear per-instance lookback + decision + cache state so the next
-broker boot starts cleanly. Phase 1 extension covers all 14 per-instance
-tables that could leak old-strategy state into a new strategy on the same
+broker boot starts cleanly. Phase 1 extension covers the per-instance tables
+that could leak old-strategy state into a new strategy on the same
 instance_id.
 
 What this SCRIPT CLEARS (only for the chosen --instance, default 'main'):
@@ -9,7 +9,6 @@ What this SCRIPT CLEARS (only for the chosen --instance, default 'main'):
 - NexusRuntimeState: cached V32 peak / blacklist / momentum watchlist
 - LiveState: live snapshot for the instance
 - NexusStrategyCache: LIVE-origin rows only (backtest-origin SNAPSHOTS preserved)
-- LiveOrderWAL: write-ahead log entries
 - GraphNexusDiscoveredStocks: discovered-stock state (active/sold flags)
 - GraphNexusMarketTrends: market trend state machine
 - GraphNexusRotationCooldown: rotation cooldown timer
@@ -18,6 +17,10 @@ What this SCRIPT CLEARS (only for the chosen --instance, default 'main'):
 - GraphNexusDiscoverySnapshots: discovery snapshots
 - GraphNexusOutcomeSeries: outcome time-series
 - GraphNexusAnalystPanel: panel decisions
+
+What this SCRIPT does NOT touch:
+- LiveOrderWAL: globally-scoped (no instance_id field); operator clears
+  manually if needed. See docs/runbooks/live-launch-checklist.md.
 
 What this SCRIPT PRESERVES (shared caches + backtest snapshots):
 - All shared news/sentiment/article caches (article-hash + provider + model keyed)
@@ -87,9 +90,11 @@ def _build_targets(instance_id: str):
             ("instance_id", instance_id, "exact"),
             ("origin_not_backtest", None, "special"),
         ], "and"),
-        ("LiveOrderWAL", [
-            ("instance_id", instance_id, "exact"),
-        ]),
+        # LiveOrderWAL is intentionally globally-scoped: one broker process
+        # per host -> one WAL. WALStore.insert does NOT stamp ``instance_id``,
+        # so a per-instance filter would match 0 rows. WAL cleanup is the
+        # operator's manual responsibility (see live-launch-checklist.md).
+        # Removed from per-instance cleanup in the 2026-05-21 bug-sweep.
         ("GraphNexusDiscoveredStocks", [
             ("instance_id", instance_id, "exact"),
         ]),

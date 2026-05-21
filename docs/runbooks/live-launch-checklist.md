@@ -24,7 +24,8 @@
   ```bash
   python scripts/clear_main_instance_lookback_state.py --instance main --apply
   ```
-  Expected: summary listing cleared row counts across all 14 per-instance tables. Backtest-origin `NexusStrategyCache` rows should be PRESERVED.
+  Expected: summary listing cleared row counts across the per-instance tables. Backtest-origin `NexusStrategyCache` rows should be PRESERVED.
+- [ ] **(Optional) Check LiveOrderWAL state manually.** The WAL is globally-scoped (one broker per host -> one WAL) and is NOT cleared by the per-instance cleanup script. Open `r.db("IntelliStock").table("LiveOrderWAL").filter(lambda d: r.expr(["intent", "open", "pending", "partial"]).contains(d["state"].default(""))).count()` in RethinkDB and confirm 0 non-terminal entries before launch (or accept that the broker's WAL reconciliation runs on boot).
 - [ ] **Run validation:**
   ```bash
   python scripts/validate_live_launch_readiness.py --instance main
@@ -60,7 +61,8 @@
 
 - Old (deprecated) nexus version's persisted state (cooldowns, blacklists, peak HWM, discovered-stock "sold" flags) leaking into the new strategy's decision-making.
 - Stale Robinhood positions distorting the new strategy's deployment ramp.
-- Stale `LiveOrderWAL` entries causing spurious order replays on boot.
+
+> Note: `LiveOrderWAL` is globally-scoped (one broker process per host -> one WAL). It is NOT touched by the per-instance cleanup script; the broker's startup reconciliation handles non-terminal WAL entries on boot. See the optional "Check LiveOrderWAL state manually" step above.
 
 ## What this checklist does NOT protect against
 

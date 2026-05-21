@@ -74,25 +74,6 @@ def _check_no_legacy_live_strategy_cache(r, conn, instance_id: str):
     return "green", "no leftover live-origin NexusStrategyCache rows"
 
 
-def _check_wal_open_count(r, conn, instance_id: str):
-    try:
-        existing = list(r.db(DB_NAME).table_list().run(conn))
-        if "LiveOrderWAL" not in existing:
-            return "green", "LiveOrderWAL table does not exist; nothing to check"
-        non_terminal = ["intent", "open", "pending", "partial"]
-        count = int(
-            r.db(DB_NAME).table("LiveOrderWAL")
-             .filter(r.row["instance_id"] == instance_id)
-             .filter(lambda doc: r.expr(non_terminal).contains(doc["state"].default("")))
-             .count().run(conn) or 0
-        )
-    except Exception as e:
-        return "yellow", f"WAL check raised: {e}"
-    if count > 0:
-        return "yellow", f"{count} non-terminal WAL entries for instance={instance_id}; reconciliation will run on boot"
-    return "green", "WAL has no non-terminal entries"
-
-
 def _check_per_instance_residue(r, conn, instance_id: str):
     """Sum row counts across per-instance tables that should be empty after cleanup."""
     leftover_tables = (
@@ -140,12 +121,19 @@ def main(instance_id: str) -> int:
         print("RED: cannot connect to RethinkDB.")
         return 2
 
+    # 2026-05-21 bug-sweep: LiveOrderWAL is globally-scoped (one broker per
+    # host -> one WAL). WALStore.insert does NOT stamp instance_id, so a
+    # per-instance WAL check was always 0 (false GREEN). Removed; operator
+    # is responsible for manually verifying WAL state if needed.
     checks = [
         ("snapshot present", _check_snapshot_present),
         ("no legacy live cache", _check_no_legacy_live_strategy_cache),
-        ("WAL open count", _check_wal_open_count),
         ("per-instance residue", _check_per_instance_residue),
     ]
+    print(
+        "[note] LiveOrderWAL is global-scope; not checked here. Operator "
+        "verifies WAL state manually if needed."
+    )
     results = []
     try:
         for name, fn in checks:

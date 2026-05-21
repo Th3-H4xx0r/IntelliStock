@@ -13,16 +13,21 @@ if _SCRIPTS_DIR not in sys.path:
 import clear_main_instance_lookback_state as cleaner  # noqa: E402
 
 
-def test_build_targets_covers_all_14_phase1_tables():
-    """Phase 1 design requires all 14 per-instance tables be cleared."""
+def test_build_targets_covers_all_phase1_tables():
+    """Phase 1 design covers the per-instance tables.
+
+    2026-05-21 bug-sweep: WAL is intentionally globally-scoped (one broker
+    per host -> one WAL); its cleanup is operator-manual not per-instance,
+    so it was removed from _build_targets.
+    """
     targets = cleaner._build_targets("main")
     table_names = {t[0] for t in targets}
     expected = {
         # Original 4 (already cleared by this script before Phase 1)
         "GraphNexusTradeContexts", "GraphNexusOutcomes",
         "NexusRuntimeState", "LiveState",
-        # Phase 1 additions
-        "NexusStrategyCache", "LiveOrderWAL",
+        # Phase 1 additions (WAL deliberately excluded -- global scope)
+        "NexusStrategyCache",
         "GraphNexusDiscoveredStocks", "GraphNexusMarketTrends",
         "GraphNexusRotationCooldown", "GraphNexusTradeOutcomes",
         "GraphNexusLearningCache",
@@ -31,6 +36,11 @@ def test_build_targets_covers_all_14_phase1_tables():
     }
     missing = expected - table_names
     assert not missing, f"missing tables in TARGETS: {missing}"
+    assert "LiveOrderWAL" not in table_names, (
+        "LiveOrderWAL is global-scope; it was removed from per-instance "
+        "cleanup in the 2026-05-21 bug-sweep -- do not re-add without "
+        "first wiring instance_id into WALStore.insert"
+    )
 
 
 def _criteria_of(entry):
