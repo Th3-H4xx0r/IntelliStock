@@ -324,18 +324,28 @@ def save_strategy_cache_to_db(
     cache: dict,
     *,
     max_blob_bytes: int = 1_000_000,
+    config_hash: Optional[str] = None,
+    module_hash: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> bool:
-    """Upsert `cache` dict keyed by `(instance_id, strategy_name)`.
+    """Upsert `cache` dict for `(instance_id, strategy_name)`.
 
-    Returns True on success, False otherwise. Never raises.
-    Skips any key matching blacklist prefixes. Caps nested dicts at
-    ``_MAX_DICT_ENTRIES``.
+    Phase 1: if config_hash + module_hash + end_date are all provided, writes
+    with the new 5-segment PK and origin="live" so the snapshot loader can
+    pick it up on next boot. Otherwise writes with the legacy 2-segment PK
+    (back-compat for callers that haven't been updated yet).
     """
     if conn is None or r is None or not instance_id or not strategy_name:
         return False
     if not isinstance(cache, dict):
         return False
-    row_id = f"{instance_id}|{strategy_name}"
+
+    use_new_schema = bool(config_hash and module_hash and end_date)
+    if use_new_schema:
+        row_id = f"{instance_id}|{strategy_name}|{config_hash}|live|{end_date}"
+    else:
+        row_id = f"{instance_id}|{strategy_name}"
+
     try:
         filtered = {
             k: _coerce_for_json(v)
@@ -345,7 +355,6 @@ def save_strategy_cache_to_db(
         filtered = {k: v for k, v in filtered.items() if v is not None}
         blob = json.dumps(filtered, default=str)
         if len(blob) > max_blob_bytes:
-            # Over-cap: drop the largest top-level entries until we fit.
             sized = sorted(
                 filtered.items(),
                 key=lambda kv: len(json.dumps(kv[1], default=str)),
@@ -358,18 +367,26 @@ def save_strategy_cache_to_db(
                     break
         if not _ensure_table(conn, r):
             return False
-        r.db(DB_NAME).table(TABLE_NAME).insert(
-            {
-                "id": row_id,
-                "instance_id": instance_id,
-                "strategy_name": strategy_name,
-                "cache_json": blob,
-                "size_bytes": len(blob),
-                "updated_at": r.now(),
-                "updated_at_epoch": time.time(),
-            },
-            conflict="replace",
-        ).run(conn)
+        row = {
+            "id": row_id,
+            "instance_id": instance_id,
+            "strategy_name": strategy_name,
+            "cache_json": blob,
+            "size_bytes": len(blob),
+            "updated_at": r.now(),
+            "updated_at_epoch": time.time(),
+        }
+        if use_new_schema:
+            row.update(
+                {
+                    "origin": "live",
+                    "config_hash": config_hash,
+                    "nexus_module_hash": module_hash,
+                    "end_date": end_date,
+                    "record_version": 1,
+                }
+            )
+        r.db(DB_NAME).table(TABLE_NAME).insert(row, conflict="replace").run(conn)
         return True
     except Exception:
         return False

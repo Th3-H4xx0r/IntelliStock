@@ -540,3 +540,46 @@ def test_ensure_table_skips_index_create_when_present():
     ok = scp._ensure_table(object(), _R())
     assert ok is True
     assert create_calls == []
+
+
+def test_save_strategy_cache_writes_origin_live_when_hash_provided():
+    fake_r = _FakeR()
+    ok = scp.save_strategy_cache_to_db(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        cache={"_momentum_watchlist": ["AAPL"]},
+        config_hash="abc",
+        module_hash="mod",
+        end_date=_today_iso(),
+    )
+    assert ok is True
+    inserts = [c for c in fake_r.recorder if c[0] == "insert"]
+    assert len(inserts) == 1
+    row = inserts[0][1]
+    assert row["origin"] == "live"
+    assert row["config_hash"] == "abc"
+    assert row["nexus_module_hash"] == "mod"
+    assert row["end_date"] == _today_iso()
+    assert row["id"] == f"main|graph_nexus_analysis|abc|live|{_today_iso()}"
+    assert row["record_version"] == 1
+
+
+def test_save_strategy_cache_back_compat_legacy_id_when_no_hash():
+    """Old callers that don't pass config_hash keep the original PK form."""
+    fake_r = _FakeR()
+    ok = scp.save_strategy_cache_to_db(
+        conn=object(), r=fake_r,
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        cache={"_momentum_watchlist": ["AAPL"]},
+    )
+    assert ok is True
+    inserts = [c for c in fake_r.recorder if c[0] == "insert"]
+    assert len(inserts) == 1
+    row = inserts[0][1]
+    assert row["id"] == "main|graph_nexus_analysis"
+    # Legacy row MUST NOT have these new fields:
+    assert "origin" not in row
+    assert "config_hash" not in row
+    assert "nexus_module_hash" not in row
+    assert "end_date" not in row
+    assert "record_version" not in row
