@@ -90,6 +90,24 @@ def test_module_hash_missing_file_returns_marker():
     assert scp._compute_module_hash("/nonexistent/path.py") == "missing"
 
 
+def test_module_hash_normalizes_line_endings(tmp_path):
+    """Bug-sweep 2026-05-21: same logical file with CRLF vs LF must hash
+    identically, so a Windows-checkout backtest and a Linux-deploy live
+    host agree on the module hash."""
+    lf_file = tmp_path / "lf_strategy.py"
+    crlf_file = tmp_path / "crlf_strategy.py"
+    content_lf = b"def run_once():\n    return 1\n# end\n"
+    content_crlf = b"def run_once():\r\n    return 1\r\n# end\r\n"
+    lf_file.write_bytes(content_lf)
+    crlf_file.write_bytes(content_crlf)
+    h_lf = scp._compute_module_hash(str(lf_file))
+    h_crlf = scp._compute_module_hash(str(crlf_file))
+    assert h_lf == h_crlf, (
+        f"line-ending normalization broken: LF hash {h_lf} != CRLF hash {h_crlf}"
+    )
+    assert len(h_lf) == 16
+
+
 def test_serialize_cache_roundtrip_preserves_basic_types():
     cache = {
         "_momentum_watchlist": ["AAPL", "MSFT"],

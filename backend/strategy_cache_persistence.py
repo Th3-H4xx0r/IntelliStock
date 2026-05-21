@@ -207,12 +207,20 @@ def _compute_module_hash(file_path: str) -> str:
 
     Used to detect strategy code changes between the time a snapshot was
     written and the time it's being loaded.
+
+    Phase 1 bug-sweep (2026-05-21): normalize CRLF -> LF so the hash is
+    OS-agnostic. A Windows-checkout backtest and a Linux-deploy live host
+    must agree on the hash of the same logical file. Without this, the
+    live boot's load_with_fallback returns ``module_drift`` and falls back
+    to the full lookback even when the strategy code is byte-identical
+    apart from line endings.
     """
     try:
         with open(file_path, "rb") as fh:
             data = fh.read()
     except Exception:
         return "missing"
+    data = data.replace(b"\r\n", b"\n")
     return hashlib.sha256(data).hexdigest()[:16]
 
 
