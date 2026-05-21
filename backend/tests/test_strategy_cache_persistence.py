@@ -64,3 +64,27 @@ def test_config_hash_invalid_input_returns_marker():
     assert scp._compute_config_hash(None) == "invalid"
     assert scp._compute_config_hash("not a dict") == "invalid"
     assert scp._compute_config_hash(42) == "invalid"
+
+
+def test_module_hash_stable_for_same_file(tmp_path):
+    """Same file contents must produce same hash across calls."""
+    f = tmp_path / "fake_strategy.py"
+    f.write_text("def run_once():\n    pass\n", encoding="utf-8")
+    h1 = scp._compute_module_hash(str(f))
+    h2 = scp._compute_module_hash(str(f))
+    assert h1 == h2
+    assert len(h1) == 16
+
+
+def test_module_hash_changes_on_file_edit(tmp_path):
+    """Edited file must produce different hash."""
+    f = tmp_path / "fake_strategy.py"
+    f.write_text("def run_once():\n    pass\n", encoding="utf-8")
+    h1 = scp._compute_module_hash(str(f))
+    f.write_text("def run_once():\n    return 1\n", encoding="utf-8")
+    h2 = scp._compute_module_hash(str(f))
+    assert h1 != h2
+
+
+def test_module_hash_missing_file_returns_marker():
+    assert scp._compute_module_hash("/nonexistent/path.py") == "missing"

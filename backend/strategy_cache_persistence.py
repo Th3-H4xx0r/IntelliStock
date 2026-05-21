@@ -190,6 +190,20 @@ def _compute_config_hash(config: dict) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+def _compute_module_hash(file_path: str) -> str:
+    """16-char SHA256 hex of file bytes. Returns 'missing' if file not readable.
+
+    Used to detect strategy code changes between the time a snapshot was
+    written and the time it's being loaded.
+    """
+    try:
+        with open(file_path, "rb") as fh:
+            data = fh.read()
+    except Exception:
+        return "missing"
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
 def _ensure_table(conn, r) -> bool:
     try:
         tables = list(r.db(DB_NAME).table_list().run(conn))
