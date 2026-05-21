@@ -6552,10 +6552,32 @@ while not shutdown_requested:
                                 )
                                 if _nexus_spec_for_snapshot is not None:
                                     _bt_cfg = _nexus_spec_for_snapshot.get("config") or {}
+                                    # Phase 1 bug-sweep (2026-05-21): the snapshot row's instance_id field
+                                    # is the LIVE-mode namespace key — live boot reads
+                                    # `r.row["instance_id"] == "main"`. Backtests use a numeric
+                                    # `instance_id_for_db` distinct from that namespace, so writing the
+                                    # snapshot with the backtest id meant live boot never found it.
+                                    # Prefer the explicit `base_instance_id` from the spec config
+                                    # (populated by run_run_once_strategies for graph_nexus_analysis).
+                                    _bt_base_id = str(
+                                        _bt_cfg.get("base_instance_id")
+                                        or instance_id_for_db
+                                        or instance_id
+                                        or ""
+                                    )
+                                    if not _bt_cfg.get("base_instance_id"):
+                                        try:
+                                            _log(
+                                                f"[snapshot] WARN: base_instance_id missing from spec config; "
+                                                f"falling back to instance_id_for_db={instance_id_for_db!r}",
+                                                "yellow",
+                                            )
+                                        except NameError:
+                                            pass
                                     _scp_invoke(
                                         conn=conn,
                                         r=r,
-                                        base_instance_id=str(instance_id_for_db or instance_id or ""),
+                                        base_instance_id=_bt_base_id,
                                         strategy_name="graph_nexus_analysis",
                                         strategy_cache=_strategy_cache.get("graph_nexus_analysis", {}) or {},
                                         config_dict={

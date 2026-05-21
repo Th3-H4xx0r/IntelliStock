@@ -76,6 +76,44 @@ def test_backtest_persist_snapshot_called_with_expected_fields(monkeypatch):
     assert len(captured["module_hash"]) in (7, 16)
 
 
+def test_backtest_persist_uses_base_instance_id_namespace(monkeypatch):
+    """Phase 1 bug-sweep regression: snapshot row instance_id must be the
+    LIVE-mode namespace (e.g. ``"main"``), not the numeric backtest id.
+
+    Without this, the live boot lookup (which filters
+    ``r.row["instance_id"] == "main"``) never matches the backtest row that
+    was written with ``instance_id_for_db`` (a numeric backtest id).
+    """
+    captured = {}
+
+    def _fake_persist(conn, r, *, instance_id, strategy_name, cache,
+                      config_hash, module_hash, start_date, end_date,
+                      max_blob_bytes=5_000_000):
+        captured["instance_id"] = instance_id
+        return True
+
+    monkeypatch.setattr(scp, "persist_backtest_snapshot", _fake_persist)
+    monkeypatch.delenv("NEXUS_BACKTEST_SNAPSHOT_WRITE", raising=False)
+
+    # base_instance_id explicitly provided ("main") -- it should win over the
+    # numeric backtest id that lives in instance_id_for_db.
+    ok = bsh._invoke_persist_backtest_snapshot(
+        conn=object(),
+        r=object(),
+        base_instance_id="main",
+        strategy_name="graph_nexus_analysis",
+        strategy_cache={},
+        config_dict={"strategy_name": "graph_nexus_analysis"},
+        start_date="2025-11-10",
+        end_date=_today_iso(),
+    )
+    assert ok is True
+    assert captured["instance_id"] == "main", (
+        f"snapshot row must be written under the live-namespace 'main', not "
+        f"a numeric backtest id; got {captured['instance_id']!r}"
+    )
+
+
 def test_invoke_persist_returns_false_when_disabled(monkeypatch):
     """When NEXUS_BACKTEST_SNAPSHOT_WRITE=off, the helper short-circuits
     without calling persist."""
