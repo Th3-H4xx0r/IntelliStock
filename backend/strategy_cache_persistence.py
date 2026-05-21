@@ -25,6 +25,7 @@ Design:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any, Optional
@@ -157,6 +158,36 @@ def _decode_json(value: Any) -> Any:
     if isinstance(value, list):
         return [_decode_json(v) for v in value]
     return value
+
+
+def _canonical_json(value: Any) -> str:
+    """Deterministic JSON encoding: sorted keys, no whitespace."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _compute_config_hash(config: dict) -> str:
+    """Compute a stable 16-char SHA256 hex of the behaviorally-significant
+    portion of the strategy config.
+
+    Fields included (all others are considered behaviorally neutral):
+    - strategy_name
+    - prompt_versions (all roles)
+    - llm_stages (provider/model/effort per stage)
+    - history_scope_id_inputs (neo4j_uri, neo4j_user, sentiment_cache_scope_salt,
+      use_toon_format, num_articles_for_llm)
+    - lookback_learning_days
+    """
+    if not isinstance(config, dict):
+        return "invalid"
+    canonical = {
+        "strategy_name": config.get("strategy_name", ""),
+        "prompt_versions": config.get("prompt_versions", {}),
+        "llm_stages": config.get("llm_stages", {}),
+        "history_scope_id_inputs": config.get("history_scope_id_inputs", {}),
+        "lookback_learning_days": config.get("lookback_learning_days", 0),
+    }
+    blob = _canonical_json(canonical).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def _ensure_table(conn, r) -> bool:
