@@ -198,3 +198,38 @@ def _invoke_load_snapshot_with_gap(
     except Exception:
         # Bad date parse -> conservative: return cache but no gap (caller will skip lookback).
         return cache, reason, []
+
+
+def _invoke_save_strategy_cache(
+    conn,
+    r,
+    *,
+    instance_id: str,
+    strategy_name: str,
+    cache: dict,
+    config_dict: dict,
+) -> bool:
+    """Wrapper around save_strategy_cache_to_db that computes config_hash and
+    module_hash from the current strategy state and passes end_date=today.
+
+    Used by the live runtime periodic save path. Errors are swallowed.
+    Returns True on success, False otherwise.
+    """
+    try:
+        from backend import strategy_cache_persistence as _scp
+        config_hash = _scp._compute_config_hash(config_dict)
+        module_path = _resolve_nexus_module_path()
+        module_hash = _scp._compute_module_hash(module_path) if module_path else "missing"
+        import datetime as _dt
+        return bool(_scp.save_strategy_cache_to_db(
+            conn, r, instance_id, strategy_name, cache,
+            config_hash=config_hash,
+            module_hash=module_hash,
+            end_date=_dt.date.today().isoformat(),
+        ))
+    except Exception as e:
+        try:
+            print(f"[snapshot] live save raised (suppressed): {e}")
+        except Exception:
+            pass
+        return False

@@ -7424,8 +7424,11 @@ while not shutdown_requested:
                     def _scp_persist_blocking():
                         _conn = None
                         try:
-                            from strategy_cache_persistence import (
-                                save_strategy_cache_to_db as _scp_save,
+                            from broker_snapshot_helpers import (
+                                _invoke_save_strategy_cache,
+                                _collect_prompt_versions,
+                                _collect_llm_stages,
+                                _collect_history_scope_inputs,
                             )
                             _conn = get_conn_retry(max_attempts=3, delay=2)
                             if _conn is None:
@@ -7436,7 +7439,29 @@ while not shutdown_requested:
                                     continue
                                 _payload = _strategy_cache.get(_nm)
                                 if isinstance(_payload, dict) and _payload:
-                                    _ok = bool(_scp_save(_conn, r, str(instance_id), _nm, _payload))
+                                    # Only wrap with new-schema kwargs for graph_nexus_analysis (the only
+                                    # strategy that produces snapshots). Other strategies continue with
+                                    # legacy 2-segment PK via save_strategy_cache_to_db's back-compat.
+                                    if _nm == "graph_nexus_analysis":
+                                        _bt_cfg_save = (_spec_sc or {}).get("config") or {}
+                                        _ok = _invoke_save_strategy_cache(
+                                            conn=_conn,
+                                            r=r,
+                                            instance_id=str(instance_id),
+                                            strategy_name=_nm,
+                                            cache=_payload,
+                                            config_dict={
+                                                "strategy_name": _nm,
+                                                "prompt_versions": _collect_prompt_versions(_bt_cfg_save),
+                                                "llm_stages": _collect_llm_stages(_bt_cfg_save),
+                                                "history_scope_id_inputs": _collect_history_scope_inputs(_bt_cfg_save),
+                                                "lookback_learning_days": int(_bt_cfg_save.get("lookback_learning_days", 120) or 120),
+                                            },
+                                        )
+                                    else:
+                                        # Legacy path for non-nexus strategies — preserves prior behavior.
+                                        from strategy_cache_persistence import save_strategy_cache_to_db as _scp_save_legacy
+                                        _ok = bool(_scp_save_legacy(_conn, r, str(instance_id), _nm, _payload))
                                     if not _ok:
                                         return (True, f"save_strategy_cache_to_db returned False for {_nm}")
                             return (False, None)

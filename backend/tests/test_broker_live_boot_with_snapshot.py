@@ -147,3 +147,39 @@ def test_live_boot_falls_back_when_snapshot_missing(monkeypatch):
     assert cache is None
     assert reason == "no_match"
     assert gap_dates is None
+
+
+def test_live_runtime_save_passes_new_kwargs(monkeypatch):
+    """The broker's live runtime save wrapper passes config_hash, module_hash,
+    end_date so the saved row uses the new PK form."""
+    captured = {}
+
+    def _fake_save(conn, r, instance_id, strategy_name, cache, **kwargs):
+        captured.update(kwargs)
+        captured["positional"] = (instance_id, strategy_name)
+        return True
+
+    monkeypatch.setattr(scp, "save_strategy_cache_to_db", _fake_save)
+
+    from backend import broker_snapshot_helpers as bsh
+    ok = bsh._invoke_save_strategy_cache(
+        conn=object(),
+        r=object(),
+        instance_id="main",
+        strategy_name="graph_nexus_analysis",
+        cache={"_momentum_watchlist": ["AAPL"]},
+        config_dict={
+            "strategy_name": "graph_nexus_analysis",
+            "prompt_versions": {"sentiment": "v1"},
+            "llm_stages": {},
+            "history_scope_id_inputs": {},
+            "lookback_learning_days": 120,
+        },
+    )
+    assert ok is True
+    assert captured["positional"] == ("main", "graph_nexus_analysis")
+    assert "config_hash" in captured
+    assert "module_hash" in captured
+    assert "end_date" in captured
+    assert len(captured["config_hash"]) == 16
+    assert captured["end_date"] == _today_iso()
