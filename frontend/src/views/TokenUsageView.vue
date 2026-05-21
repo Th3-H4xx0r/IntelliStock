@@ -535,16 +535,17 @@ onUnmounted(() => {
       <section class="glass-card rounded-2xl overflow-hidden border border-border-subtle">
         <div class="flex items-center justify-between gap-4 border-b border-border-subtle px-5 py-4 flex-wrap">
           <div>
-            <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Per-backtest spend</p>
-            <h2 class="mt-1 text-lg font-semibold text-slate-100">LLM cost by backtest</h2>
+            <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Per-run spend</p>
+            <h2 class="mt-1 text-lg font-semibold text-slate-100">LLM cost by run</h2>
           </div>
-          <span class="text-xs text-slate-500">Sorted by cost · click a row to open the backtest</span>
+          <span class="text-xs text-slate-500">Sorted by cost · click a Backtest row to open it; Live rows are summary-only</span>
         </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
               <tr class="border-b border-border-subtle/70 text-left">
-                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Backtest</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Run</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Kind</th>
                 <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Instance</th>
                 <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Started</th>
                 <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500 text-right">Calls</th>
@@ -556,11 +557,18 @@ onUnmounted(() => {
             <tbody>
               <tr
                 v-for="row in byBacktest"
-                :key="row.backtest_id"
-                class="border-b border-border-subtle/40 text-slate-200 transition-colors hover:bg-surface/30 cursor-pointer"
-                @click="$router.push({ name: 'backtest-detail', params: { id: row.backtest_id } })"
+                :key="`${row.kind || 'backtest'}|${row.key || row.backtest_id}`"
+                class="border-b border-border-subtle/40 text-slate-200 transition-colors hover:bg-surface/30"
+                :class="row.kind === 'backtest' ? 'cursor-pointer' : 'cursor-default'"
+                @click="row.kind === 'backtest' && row.backtest_id ? $router.push({ name: 'backtest-detail', params: { id: row.backtest_id } }) : null"
               >
-                <td class="px-5 py-3 font-mono text-xs text-slate-300">#{{ row.backtest_id }}</td>
+                <td class="px-5 py-3 font-mono text-xs text-slate-300">{{ row.display_label || ('#' + (row.backtest_id || '?')) }}</td>
+                <td class="px-5 py-3">
+                  <span
+                    class="inline-flex rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                    :class="row.kind === 'live' ? 'bg-emerald-900/40 text-emerald-200' : 'bg-indigo-900/40 text-indigo-200'"
+                  >{{ row.kind || 'backtest' }}</span>
+                </td>
                 <td class="px-5 py-3 text-xs text-slate-400">{{ row.instance_id || '—' }}</td>
                 <td class="px-5 py-3 whitespace-nowrap text-slate-400">{{ fmtTime(row.first_ts) }}</td>
                 <td class="px-5 py-3 text-right">{{ row.calls }}</td>
@@ -573,9 +581,8 @@ onUnmounted(() => {
                 </td>
               </tr>
               <tr v-if="!byBacktest.length">
-                <td colspan="7" class="px-5 py-10 text-center text-sm text-slate-500">
-                  No backtest LLM spend in this window. Cost rows only appear for backtests that
-                  ran while the engine tagged calls — re-run a backtest to populate this table.
+                <td colspan="8" class="px-5 py-10 text-center text-sm text-slate-500">
+                  No LLM cost data in this range. Backtest or live runs that made LLM calls will appear here.
                 </td>
               </tr>
             </tbody>
