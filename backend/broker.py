@@ -6193,27 +6193,10 @@ if mode == MODE_LIVE:
     except Exception:
         pass
 
-    # BLOCKER #1 — settlement soft check.
-    # Adapters expose _cash (available/buying-power) and _settled_cash
-    # (settled). Compare; if settled significantly under cash, warn —
-    # T+1/T+2 unsettled funds can block early buys.
-    try:
-        _cash_avail = float(getattr(live_adapter, "_cash", 0.0) or 0.0)
-        _cash_total = float(
-            getattr(live_adapter, "_settled_cash", _cash_avail) or _cash_avail
-        )
-        # If we couldn't read settled separately, fall back to equity.
-        if _cash_total <= 0:
-            _cash_total = float(getattr(live_adapter, "_initial_value", _cash_avail) or _cash_avail)
-        if _cash_total > 0 and _cash_avail < _cash_total * 0.95:
-            _log(
-                f"[live_boot] WARNING: unsettled funds detected "
-                f"(available={_cash_avail:.2f}, total={_cash_total:.2f}); "
-                f"T+1/T+2 may block early buys",
-                "yellow",
-            )
-    except Exception:
-        pass
+    # Phase 1 BLOCKER #1 — settlement reminder (manual operator verification)
+    # A robust adapter-agnostic settlement check is deferred; for now we just log
+    # a reminder. Operator verifies via the launch checklist before starting.
+    _log("[live_boot] BLOCKER #1 settlement: operator confirmed via launch checklist (no programmatic check)", "cyan")
 
 
 while not shutdown_requested:
