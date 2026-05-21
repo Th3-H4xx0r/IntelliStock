@@ -6377,6 +6377,45 @@ while not shutdown_requested:
                             else:
                                 r.db(DB_NAME).table('BacktestResults').insert(backtest_result).run(conn)
                                 _log(f"Saved backtest results to database (instance_id={instance_id_for_db}, strategy_id={strategy_row_id})", "green")
+                            # Phase 1 snapshot: persist final _strategy_cache for live-boot reuse.
+                            # Helpers live in broker_snapshot_helpers.py so they're testable without
+                            # broker.py's module-level argparse + DB bootstrap (extraction pattern
+                            # mirrors broker_session.py / strategy_tick_state.py).
+                            try:
+                                from broker_snapshot_helpers import (
+                                    _invoke_persist_backtest_snapshot as _scp_invoke,
+                                    _collect_prompt_versions as _scp_collect_prompts,
+                                    _collect_llm_stages as _scp_collect_stages,
+                                    _collect_history_scope_inputs as _scp_collect_history,
+                                )
+                                _nexus_spec_for_snapshot = next(
+                                    (s for s in (_run_once_specs or [])
+                                     if str((s or {}).get("strategy") or "").strip() == "graph_nexus_analysis"),
+                                    None,
+                                )
+                                if _nexus_spec_for_snapshot is not None:
+                                    _bt_cfg = _nexus_spec_for_snapshot.get("config") or {}
+                                    _scp_invoke(
+                                        conn=conn,
+                                        r=r,
+                                        base_instance_id=str(instance_id_for_db or instance_id or ""),
+                                        strategy_name="graph_nexus_analysis",
+                                        strategy_cache=_strategy_cache.get("graph_nexus_analysis", {}) or {},
+                                        config_dict={
+                                            "strategy_name": "graph_nexus_analysis",
+                                            "prompt_versions": _scp_collect_prompts(_bt_cfg),
+                                            "llm_stages": _scp_collect_stages(_bt_cfg),
+                                            "history_scope_id_inputs": _scp_collect_history(_bt_cfg),
+                                            "lookback_learning_days": int(_bt_cfg.get("lookback_learning_days", 120) or 120),
+                                        },
+                                        start_date=str(backtest_start_date) if backtest_start_date else "",
+                                        end_date=str(backtest_end_date) if backtest_end_date else "",
+                                    )
+                            except Exception as _snap_e:
+                                try:
+                                    _log(f"[snapshot] wrap-up failed (suppressed): {_snap_e}", "yellow")
+                                except NameError:
+                                    pass
                             # Edit #backtests Discord message to Finished (same message that was Queued/Running)
                             try:
                                 from interactive_utils import action_enqueue_discord_edit
