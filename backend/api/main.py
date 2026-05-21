@@ -3281,13 +3281,17 @@ def _llm_usage_top_spenders(*, range_str, group_by, limit, conn) -> list:
 
 
 def _llm_usage_by_backtest(*, range_str: str, limit: int, conn) -> list:
-    """Aggregate LLMUsage rows by ``backtest_id`` within ``range_str``.
+    """Aggregate LLMUsage rows within ``range_str`` into per-run buckets.
+
+    Rows with a non-empty ``backtest_id`` group by ``backtest_id`` and emit
+    ``kind="backtest"`` (``display_label="Backtest #<id>"``). Rows with a null
+    or empty ``backtest_id`` group by ``instance_id`` and emit ``kind="live"``
+    (``display_label="Live: <instance_id>"``). Truly-untagged rows (no
+    backtest AND no instance) are dropped so the table doesn't sprout
+    an "(unset)" pseudo-row.
 
     Implementation: scan the time-bounded window via the ``ts`` index,
-    group in-memory, sort by cost desc, cap at ``limit``. This is the
-    same scan-and-fold pattern as ``_llm_usage_top_spenders`` — at the
-    volumes we see (a few thousand rows / day) the fold is faster than
-    a server-side groupBy roundtrip would be in RethinkDB.
+    group in-memory, sort by cost desc, cap at ``limit``.
     """
     start, end = _range_to_ms_window(range_str)
     try:
@@ -3298,44 +3302,61 @@ def _llm_usage_by_backtest(*, range_str: str, limit: int, conn) -> list:
         )
     except Exception:
         rows = []
-    by_bt: dict = {}
+
+    buckets: dict = {}
+
+    def _get_bucket(kind: str, key: str, instance_id):
+        bk = (kind, key)
+        if bk not in buckets:
+            label = f"Backtest #{key}" if kind == "backtest" else f"Live: {key}"
+            buckets[bk] = {
+                "kind": kind,
+                "key": key,
+                # back-compat with prior shape: backtest rows still have
+                # `backtest_id`; live rows have it as None.
+                "backtest_id": key if kind == "backtest" else None,
+                "instance_id": instance_id,
+                "display_label": label,
+                "calls": 0,
+                "tokens": 0,
+                "cost_usd": 0.0,
+                "first_ts": None,
+                "last_ts": None,
+                "ok_calls": 0,
+                "failed_calls": 0,
+            }
+        return buckets[bk]
+
     for row in rows:
         bt_id = row.get("backtest_id")
+        inst_id = row.get("instance_id")
         if bt_id is None or bt_id == "":
-            # Untagged calls (live mode, /llm/test smoke probes, agent
-            # strategy-generation cycles) are skipped — they have no
-            # backtest to bill against and would otherwise pollute the
-            # table with an "(unset)" row. Compare against None / ""
-            # explicitly so a theoretical backtest_id=0 (numeric zero)
-            # isn't dropped by a falsy truth-test.
-            continue
-        b = by_bt.setdefault(str(bt_id), {
-            "backtest_id": str(bt_id),
-            "instance_id": row.get("instance_id"),
-            "calls": 0,
-            "tokens": 0,
-            "cost_usd": 0.0,
-            "first_ts": int(row.get("ts", 0) or 0),
-            "last_ts": int(row.get("ts", 0) or 0),
-            "ok_calls": 0,
-            "failed_calls": 0,
-        })
+            # Live mode — bucket by instance_id. Rows with no instance
+            # either (e.g. /llm/test smoke probes outside any run) are
+            # dropped to avoid an "(unset)" pseudo-row.
+            if inst_id is None or inst_id == "":
+                continue
+            b = _get_bucket("live", str(inst_id), str(inst_id))
+        else:
+            b = _get_bucket("backtest", str(bt_id), str(inst_id) if inst_id else None)
+
         b["calls"] += 1
         b["tokens"] += int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
         b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
         ts = int(row.get("ts", 0) or 0)
-        if ts < b["first_ts"]:
+        if b["first_ts"] is None or ts < b["first_ts"]:
             b["first_ts"] = ts
-        if ts > b["last_ts"]:
+        if b["last_ts"] is None or ts > b["last_ts"]:
             b["last_ts"] = ts
         if row.get("ok"):
             b["ok_calls"] += 1
         else:
             b["failed_calls"] += 1
         # Prefer non-empty instance_id from any row in the group.
-        if not b.get("instance_id") and row.get("instance_id"):
-            b["instance_id"] = row.get("instance_id")
-    out = sorted(by_bt.values(), key=lambda x: x["cost_usd"], reverse=True)
+        if not b.get("instance_id") and inst_id:
+            b["instance_id"] = str(inst_id)
+
+    out = sorted(buckets.values(), key=lambda x: x["cost_usd"], reverse=True)
     return out[: max(1, int(limit or 100))]
 
 

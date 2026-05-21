@@ -372,3 +372,105 @@ def test_for_backtest_returns_zeroed_doc_on_db_error(monkeypatch):
     assert out["by_model"] == []
     assert out["first_ts"] is None
     assert out["last_ts"] is None
+
+
+# ── Phase 1.1 cost-attribution fix — live vs backtest partition ───────────
+
+
+def _stub_r_for_rows(rows):
+    """Return a _FakeR that yields the given rows from any LLMUsage.between()."""
+    class _FakeQuery:
+        def between(self, *_a, **_k): return self
+        def run(self, _conn): return iter(rows)
+
+    class _FakeDb:
+        def table(self, _name): return _FakeQuery()
+
+    class _FakeR:
+        def db(self, _name): return _FakeDb()
+
+    return _FakeR()
+
+
+def test_by_backtest_groups_backtest_rows_with_kind_and_display_label(monkeypatch):
+    """Rows with non-null backtest_id group by backtest_id; emit kind='backtest'
+    and display_label='Backtest #<id>'."""
+    import api.main as main_mod
+    rows = [
+        {"backtest_id": "100", "instance_id": "main", "ts": 1_000,
+         "input_tokens": 50, "output_tokens": 30, "total_cost_usd": 0.05, "ok": True},
+        {"backtest_id": "100", "instance_id": "main", "ts": 1_100,
+         "input_tokens": 60, "output_tokens": 40, "total_cost_usd": 0.07, "ok": True},
+        {"backtest_id": "200", "instance_id": "main", "ts": 1_200,
+         "input_tokens": 10, "output_tokens": 10, "total_cost_usd": 0.01, "ok": False},
+    ]
+    monkeypatch.setattr(main_mod, "_r_auth", _stub_r_for_rows(rows))
+    out = main_mod._llm_usage_by_backtest(range_str="24h", limit=100, conn=object())
+
+    rows_by_key = {(r.get("kind"), r.get("key")): r for r in out}
+    assert ("backtest", "100") in rows_by_key
+    assert ("backtest", "200") in rows_by_key
+    r100 = rows_by_key[("backtest", "100")]
+    assert r100["calls"] == 2
+    assert r100["cost_usd"] == pytest.approx(0.12)
+    assert r100["display_label"] == "Backtest #100"
+    # Backward-compat: backtest rows still expose `backtest_id`.
+    assert r100["backtest_id"] == "100"
+
+
+def test_by_backtest_includes_live_rows_with_null_backtest_id(monkeypatch):
+    """Rows with null/empty backtest_id group by instance_id; emit
+    kind='live' and display_label='Live: <instance_id>'."""
+    import api.main as main_mod
+    rows = [
+        {"backtest_id": None, "instance_id": "main", "ts": 1_000,
+         "input_tokens": 100, "output_tokens": 50, "total_cost_usd": 0.20, "ok": True},
+        {"backtest_id": None, "instance_id": "main", "ts": 1_100,
+         "input_tokens": 200, "output_tokens": 100, "total_cost_usd": 0.40, "ok": True},
+        {"backtest_id": "", "instance_id": "paper", "ts": 1_200,
+         "input_tokens": 30, "output_tokens": 20, "total_cost_usd": 0.06, "ok": True},
+        # Untagged AND no instance — should be dropped.
+        {"backtest_id": None, "instance_id": None, "ts": 1_300,
+         "input_tokens": 10, "output_tokens": 5, "total_cost_usd": 0.001, "ok": True},
+    ]
+    monkeypatch.setattr(main_mod, "_r_auth", _stub_r_for_rows(rows))
+    out = main_mod._llm_usage_by_backtest(range_str="24h", limit=100, conn=object())
+
+    rows_by_key = {(r.get("kind"), r.get("key")): r for r in out}
+    assert ("live", "main") in rows_by_key
+    assert ("live", "paper") in rows_by_key
+    # The untagged-no-instance row must have been dropped.
+    assert ("live", "") not in rows_by_key
+    assert (None, None) not in rows_by_key
+
+    rmain = rows_by_key[("live", "main")]
+    assert rmain["calls"] == 2
+    assert rmain["cost_usd"] == pytest.approx(0.60)
+    assert rmain["display_label"] == "Live: main"
+    # Live rows have backtest_id explicitly None for clarity.
+    assert rmain["backtest_id"] is None
+
+
+def test_by_backtest_emits_kind_and_display_label_on_every_row(monkeypatch):
+    """Both kinds in one response — confirm every row carries kind +
+    display_label and the sort still puts the higher-cost bucket first."""
+    import api.main as main_mod
+    rows = [
+        {"backtest_id": "777", "instance_id": "main", "ts": 1_000,
+         "input_tokens": 10, "output_tokens": 5, "total_cost_usd": 0.01, "ok": True},
+        {"backtest_id": None, "instance_id": "main", "ts": 1_100,
+         "input_tokens": 20, "output_tokens": 10, "total_cost_usd": 0.50, "ok": True},
+    ]
+    monkeypatch.setattr(main_mod, "_r_auth", _stub_r_for_rows(rows))
+    out = main_mod._llm_usage_by_backtest(range_str="24h", limit=100, conn=object())
+
+    for row in out:
+        assert "kind" in row, f"row missing kind: {row}"
+        assert "display_label" in row, f"row missing display_label: {row}"
+        assert row["kind"] in ("backtest", "live")
+        assert isinstance(row["display_label"], str) and row["display_label"]
+    # The $0.50 live row should outrank the $0.01 backtest row.
+    assert out[0]["kind"] == "live"
+    assert out[0]["display_label"] == "Live: main"
+    assert out[1]["kind"] == "backtest"
+    assert out[1]["display_label"] == "Backtest #777"
