@@ -202,6 +202,22 @@ class _FakeTable:
             def run(self, conn): return None
         return _RunWrap()
 
+    def index_list(self):
+        # Pretend the compound index already exists so _ensure_table is happy.
+        class _W:
+            def run(self, conn): return ["instance_id_config_hash"]
+        return _W()
+
+    def index_create(self, name, *args, **kwargs):
+        class _W:
+            def run(self, conn): return {"created": 1}
+        return _W()
+
+    def index_wait(self, name):
+        class _W:
+            def run(self, conn): return [{"ready": True}]
+        return _W()
+
 
 def test_persist_backtest_snapshot_writes_row():
     fake_r = _FakeR()
@@ -458,3 +474,69 @@ def test_load_with_fallback_env_flag_off(monkeypatch):
     assert cache is None
     assert reason == "disabled"
     assert meta is None
+
+
+def test_ensure_table_creates_compound_index_when_missing():
+    """When the table exists but the compound index doesn't, create it."""
+    index_create_calls = []
+    index_wait_calls = []
+
+    class _R:
+        row = _FakeQuery([], "row")
+        def db(self, name): return _D(name)
+        def now(self): import datetime; return datetime.datetime.utcnow()
+        def desc(self, *a, **kw): return None
+    class _D:
+        def __init__(self, name): self.name = name
+        def table_list(self):
+            class _W:
+                def run(self, conn): return [scp.TABLE_NAME]
+            return _W()
+        def table(self, name): return _T()
+    class _T:
+        def index_list(self):
+            class _W:
+                def run(self, conn): return []
+            return _W()
+        def index_create(self, name, *args, **kwargs):
+            index_create_calls.append((name, args, kwargs))
+            class _W:
+                def run(self, conn): return {"created": 1}
+            return _W()
+        def index_wait(self, name):
+            index_wait_calls.append(name)
+            class _W:
+                def run(self, conn): return [{"ready": True}]
+            return _W()
+
+    ok = scp._ensure_table(object(), _R())
+    assert ok is True
+    assert len(index_create_calls) == 1
+    assert index_create_calls[0][0] == "instance_id_config_hash"
+    assert index_wait_calls == ["instance_id_config_hash"]
+
+
+def test_ensure_table_skips_index_create_when_present():
+    create_calls = []
+    class _R:
+        row = _FakeQuery([], "row")
+        def db(self, name): return _D()
+        def now(self): import datetime; return datetime.datetime.utcnow()
+    class _D:
+        def table_list(self):
+            class _W:
+                def run(self, conn): return [scp.TABLE_NAME]
+            return _W()
+        def table(self, name): return _T()
+    class _T:
+        def index_list(self):
+            class _W:
+                def run(self, conn): return ["instance_id_config_hash"]
+            return _W()
+        def index_create(self, *a, **kw):
+            create_calls.append(a)
+            raise AssertionError("index_create should not be called")
+
+    ok = scp._ensure_table(object(), _R())
+    assert ok is True
+    assert create_calls == []

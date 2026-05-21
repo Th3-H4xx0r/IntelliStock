@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 TABLE_NAME = "NexusStrategyCache"
 DB_NAME = "IntelliStock"
+_COMPOUND_INDEX_NAME = "instance_id_config_hash"
 
 _BLACKLIST_PREFIXES = (
     "_llm_",
@@ -248,17 +249,37 @@ def _deserialize_cache_from_blob(blob: str) -> dict:
 
 
 def _ensure_table(conn, r) -> bool:
+    """Ensure NexusStrategyCache exists with the compound secondary index
+    required for load_with_fallback's get_all query.
+
+    Returns True if the table+index are usable, False on any error.
+    """
     try:
         tables = list(r.db(DB_NAME).table_list().run(conn))
     except Exception:
         return False
-    if TABLE_NAME in tables:
-        return True
+    if TABLE_NAME not in tables:
+        try:
+            r.db(DB_NAME).table_create(TABLE_NAME).run(conn)
+        except Exception:
+            return False
     try:
-        r.db(DB_NAME).table_create(TABLE_NAME).run(conn)
-        return True
+        existing_indexes = list(r.db(DB_NAME).table(TABLE_NAME).index_list().run(conn))
     except Exception:
         return False
+    if _COMPOUND_INDEX_NAME not in existing_indexes:
+        try:
+            r.db(DB_NAME).table(TABLE_NAME).index_create(
+                _COMPOUND_INDEX_NAME,
+                lambda doc: [doc["instance_id"], doc["config_hash"]],
+            ).run(conn)
+            r.db(DB_NAME).table(TABLE_NAME).index_wait(_COMPOUND_INDEX_NAME).run(conn)
+        except Exception:
+            # If create fails (e.g., existing rows lack the fields), the load
+            # query will fall back to None; persistent failures will be
+            # visible via the load_with_fallback "db_error" path.
+            return False
+    return True
 
 
 def load_strategy_cache_from_db(
