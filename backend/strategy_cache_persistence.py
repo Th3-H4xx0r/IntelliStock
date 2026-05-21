@@ -505,11 +505,15 @@ def load_with_fallback(
     try:
         if not _ensure_table(conn, r):
             return None, "db_error", None
+        # Phase 1 bug-sweep (2026-05-21): tiebreaker was ``created_at``, which
+        # neither writer (persist_backtest_snapshot, save_strategy_cache_to_db)
+        # sets -- so the secondary sort was undefined. Use ``updated_at_epoch``,
+        # which both writers DO set on every upsert.
         row = (
             r.db(DB_NAME).table(TABLE_NAME)
              .get_all([instance_id, current_config_hash], index="instance_id_config_hash")
              .filter(r.row["strategy_name"].eq(strategy_name))
-             .order_by(r.desc("end_date"), r.desc("created_at"))
+             .order_by(r.desc("end_date"), r.desc("updated_at_epoch"))
              .limit(1)
              .nth(0)
              .default(None)

@@ -480,6 +480,64 @@ def test_load_with_fallback_db_error_returns_none():
     assert meta is None
 
 
+def test_load_with_fallback_prefers_newer_updated_at_when_end_date_ties():
+    """Phase 1 bug-sweep regression: when two snapshots share the same
+    ``end_date``, the secondary order must be ``updated_at_epoch`` (a real
+    field set by both writers), not ``created_at`` (never written, so the
+    tiebreaker was undefined before this fix).
+    """
+    captured_order_by = {"args": None}
+
+    class _R:
+        row = _FakeQuery([], "row")
+        def __init__(self):
+            pass
+        def db(self, name): return _D()
+        def now(self): import datetime; return datetime.datetime.utcnow()
+        def desc(self, field):
+            # Return a tagged tuple we can inspect.
+            return ("desc", field)
+    class _D:
+        def table_list(self):
+            class _W:
+                def run(self, conn): return [scp.TABLE_NAME]
+            return _W()
+        def table(self, name): return _T()
+    class _T:
+        def index_list(self):
+            class _W:
+                def run(self, conn): return ["instance_id_config_hash"]
+            return _W()
+        def get_all(self, *a, **kw): return _Chain()
+    class _Chain:
+        def filter(self, *a, **kw): return self
+        def order_by(self, *args, **kwargs):
+            captured_order_by["args"] = args
+            return self
+        def limit(self, *a, **kw): return self
+        def nth(self, *a, **kw): return self
+        def default(self, *a, **kw): return self
+        def run(self, conn): return None
+
+    # Don't care about the return value; only the captured order_by args.
+    scp.load_with_fallback(
+        conn=object(), r=_R(),
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod",
+        staleness_days=7,
+    )
+    args = captured_order_by["args"]
+    assert args is not None, "order_by was not invoked"
+    fields = [a[1] for a in args if isinstance(a, tuple) and a and a[0] == "desc"]
+    assert "end_date" in fields, f"primary sort must be end_date; got {fields}"
+    assert "updated_at_epoch" in fields, (
+        f"tiebreaker must be updated_at_epoch (a real field), not created_at; got {fields}"
+    )
+    assert "created_at" not in fields, (
+        f"created_at is never written by either writer; remove it as tiebreaker; got {fields}"
+    )
+
+
 def test_load_with_fallback_env_flag_off(monkeypatch):
     monkeypatch.setenv("NEXUS_LIVE_SNAPSHOT_LOAD", "off")
     fake_r = _FakeRWithSnapshot(snapshot_row={"cache_json": "{}", "end_date": _today_iso(), "nexus_module_hash": "mod", "origin": "backtest", "config_hash": "abc"})
