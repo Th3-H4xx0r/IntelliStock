@@ -216,7 +216,15 @@ def _invoke_save_strategy_cache(
     Returns True on success, False otherwise.
     """
     try:
-        from backend import strategy_cache_persistence as _scp
+        # Phase 1 bug-sweep (2026-05-21): in Docker, ``backend/`` is on
+        # PYTHONPATH directly (not as a package), so ``from backend import ...``
+        # raises ModuleNotFoundError. Without this fallback, every live save
+        # silently no-ops. Mirror the two-step pattern already used by
+        # _invoke_persist_backtest_snapshot / _invoke_load_snapshot_with_gap.
+        try:
+            from backend import strategy_cache_persistence as _scp
+        except ImportError:
+            import strategy_cache_persistence as _scp  # type: ignore[no-redef]
         config_hash = _scp._compute_config_hash(config_dict)
         module_path = _resolve_nexus_module_path()
         module_hash = _scp._compute_module_hash(module_path) if module_path else "missing"
