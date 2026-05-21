@@ -204,6 +204,49 @@ def _compute_module_hash(file_path: str) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
+def _serialize_cache_for_blob(cache: dict) -> str:
+    """JSON-encode `cache` for storage in NexusStrategyCache.cache_json.
+
+    Drops blacklisted keys (see _BLACKLIST_PREFIXES) and records dropped
+    key names under `__skipped_fields__` so future readers can tell what
+    was intentionally omitted.
+    """
+    if not isinstance(cache, dict):
+        return "{}"
+    filtered: dict = {}
+    skipped: list = []
+    for k, v in cache.items():
+        if not isinstance(k, str):
+            continue
+        if _is_blacklisted(k):
+            skipped.append(k)
+            continue
+        coerced = _coerce_for_json(v)
+        if coerced is None and v is not None:
+            skipped.append(k)
+            continue
+        filtered[k] = coerced
+    if skipped:
+        filtered["__skipped_fields__"] = sorted(set(skipped))
+    return json.dumps(filtered, default=str)
+
+
+def _deserialize_cache_from_blob(blob: str) -> dict:
+    """Decode a cache_json blob written by _serialize_cache_for_blob.
+
+    Raises ValueError on malformed JSON. Returns {} for empty input.
+    """
+    if not blob:
+        return {}
+    try:
+        raw = json.loads(blob)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"corrupt cache blob: {e}") from e
+    if not isinstance(raw, dict):
+        return {}
+    return _decode_json(raw)
+
+
 def _ensure_table(conn, r) -> bool:
     try:
         tables = list(r.db(DB_NAME).table_list().run(conn))

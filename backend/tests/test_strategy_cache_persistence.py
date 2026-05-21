@@ -88,3 +88,49 @@ def test_module_hash_changes_on_file_edit(tmp_path):
 
 def test_module_hash_missing_file_returns_marker():
     assert scp._compute_module_hash("/nonexistent/path.py") == "missing"
+
+
+def test_serialize_cache_roundtrip_preserves_basic_types():
+    cache = {
+        "_momentum_watchlist": ["AAPL", "MSFT"],
+        "_deployment_bar_index": 3,
+        "_peak_hwm": {"AAPL": 195.5, "MSFT": 410.2},
+        "_some_set": {"a", "b", "c"},
+    }
+    blob = scp._serialize_cache_for_blob(cache)
+    restored = scp._deserialize_cache_from_blob(blob)
+    assert restored["_momentum_watchlist"] == ["AAPL", "MSFT"]
+    assert restored["_deployment_bar_index"] == 3
+    assert restored["_peak_hwm"] == {"AAPL": 195.5, "MSFT": 410.2}
+    assert restored["_some_set"] == {"a", "b", "c"}
+
+
+def test_serialize_cache_records_skipped_fields():
+    """Blacklisted keys must NOT appear in the blob, and the blob must
+    record which keys were dropped via __skipped_fields__."""
+    cache = {
+        "_momentum_watchlist": ["AAPL"],
+        "_neo4j_snapshot": {"big": "lru cache"},
+        "_llm_trace_buffer": ["..."],
+        "_eta_sector_map": {"AAPL": "XLK"},
+    }
+    blob = scp._serialize_cache_for_blob(cache)
+    restored = scp._deserialize_cache_from_blob(blob)
+    assert "_neo4j_snapshot" not in restored
+    assert "_llm_trace_buffer" not in restored
+    assert "_eta_sector_map" not in restored
+    assert "_momentum_watchlist" in restored
+    skipped = restored.get("__skipped_fields__", [])
+    assert "_neo4j_snapshot" in skipped
+    assert "_llm_trace_buffer" in skipped
+    assert "_eta_sector_map" in skipped
+
+
+def test_deserialize_corrupt_blob_raises_value_error():
+    with pytest.raises(ValueError):
+        scp._deserialize_cache_from_blob("not valid json{{{")
+
+
+def test_deserialize_empty_blob_returns_empty_dict():
+    assert scp._deserialize_cache_from_blob("") == {}
+    assert scp._deserialize_cache_from_blob("{}") == {}
