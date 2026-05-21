@@ -3225,7 +3225,6 @@ def _classify_company_article_chunk(
         f"Articles: {prompt_payload_text}"
     )
     with llm_call_context(
-        backtest_id=instance_id,
         strategy="GraphNexusAnalysis",
         call_site="company_classification",
     ):
@@ -3276,7 +3275,6 @@ def _classify_company_article_chunk(
             f"Article: {_to_prompt_payload(_article_prompt_entry(single_row, include_symbols=True, prompt_role='company'), use_toon=use_toon)}"
         )
         with llm_call_context(
-            backtest_id=instance_id,
             strategy="GraphNexusAnalysis",
             call_site="company_classification",
         ):
@@ -3431,7 +3429,6 @@ def _classify_macro_article_chunk(
         f"Articles: {_to_prompt_payload(prompt_payload, use_toon=use_toon)}"
     )
     with llm_call_context(
-        backtest_id=instance_id,
         strategy="GraphNexusAnalysis",
         call_site="macro_classification",
     ):
@@ -3491,7 +3488,6 @@ def _classify_macro_article_chunk(
             f"Article: {_to_prompt_payload(_article_prompt_entry(single_row, include_symbols=False, prompt_role='macro'), use_toon=use_toon)}"
         )
         with llm_call_context(
-            backtest_id=instance_id,
             strategy="GraphNexusAnalysis",
             call_site="macro_classification",
         ):
@@ -4321,7 +4317,6 @@ def _maintain_active_events(
                     "Return updates that create, confirm, narrow, broaden, end, or invalidate events."
                 )
                 with llm_call_context(
-                    backtest_id=instance_id,
                     strategy="GraphNexusAnalysis",
                     call_site="active_event_maintenance",
                 ):
@@ -13899,7 +13894,6 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             or str((config or {}).get("instance_id") or "").strip()
         )
         with llm_call_context(
-            backtest_id=_sent_instance_id,
             strategy="GraphNexusAnalysis",
             call_site="sentiment",
         ):
