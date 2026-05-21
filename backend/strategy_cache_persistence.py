@@ -354,6 +354,74 @@ def save_strategy_cache_to_db(
         return False
 
 
+def persist_backtest_snapshot(
+    conn,
+    r,
+    *,
+    instance_id: str,
+    strategy_name: str,
+    cache: dict,
+    config_hash: str,
+    module_hash: str,
+    start_date: str,
+    end_date: str,
+    max_blob_bytes: int = 5_000_000,
+) -> bool:
+    """Write a backtest end-of-run snapshot of `_strategy_cache` to NexusStrategyCache.
+
+    Row PK = "{instance_id}|{strategy_name}|{config_hash}|backtest|{end_date}"
+    so backtest snapshots coexist with live runtime rows. Returns True on
+    success, False otherwise. Never raises.
+    """
+    if conn is None or r is None or not instance_id or not strategy_name:
+        return False
+    if not config_hash or not module_hash:
+        return False
+    if not end_date:
+        return False
+    row_id = f"{instance_id}|{strategy_name}|{config_hash}|backtest|{end_date}"
+    try:
+        if not _ensure_table(conn, r):
+            return False
+        blob = _serialize_cache_for_blob(cache or {})
+        if len(blob) > max_blob_bytes:
+            payload = json.loads(blob)
+            sized = sorted(
+                payload.items(),
+                key=lambda kv: len(json.dumps(kv[1], default=str)),
+                reverse=True,
+            )
+            for k, _ in sized:
+                if k == "__skipped_fields__":
+                    continue
+                payload.pop(k, None)
+                payload.setdefault("__skipped_fields__", []).append(k)
+                blob = json.dumps(payload, default=str)
+                if len(blob) <= max_blob_bytes:
+                    break
+        r.db(DB_NAME).table(TABLE_NAME).insert(
+            {
+                "id": row_id,
+                "instance_id": instance_id,
+                "strategy_name": strategy_name,
+                "origin": "backtest",
+                "config_hash": config_hash,
+                "nexus_module_hash": module_hash,
+                "start_date": start_date,
+                "end_date": end_date,
+                "cache_json": blob,
+                "size_bytes": len(blob),
+                "updated_at": r.now(),
+                "updated_at_epoch": time.time(),
+                "record_version": 1,
+            },
+            conflict="replace",
+        ).run(conn)
+        return True
+    except Exception:
+        return False
+
+
 def merge_loaded_cache_into(target: dict, loaded: Optional[dict]) -> None:
     """Merge loaded dict into ``target`` in-place without blowing away
     existing entries. Used to restore persisted keys into a freshly-created

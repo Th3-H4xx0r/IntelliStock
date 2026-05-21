@@ -134,3 +134,132 @@ def test_deserialize_corrupt_blob_raises_value_error():
 def test_deserialize_empty_blob_returns_empty_dict():
     assert scp._deserialize_cache_from_blob("") == {}
     assert scp._deserialize_cache_from_blob("{}") == {}
+
+
+class _FakeQuery:
+    """Chainable mock that records calls and returns itself."""
+    def __init__(self, recorder, name="root"):
+        self.recorder = recorder
+        self.name = name
+    def __getattr__(self, attr):
+        return _FakeQuery(self.recorder, f"{self.name}.{attr}")
+    def __call__(self, *args, **kwargs):
+        self.recorder.append((self.name, args, kwargs))
+        return _FakeQuery(self.recorder, f"{self.name}()")
+    def __getitem__(self, key):
+        return _FakeQuery(self.recorder, f"{self.name}[{key!r}]")
+
+
+class _FakeR:
+    def __init__(self, table_list=None, insert_result=None):
+        self.recorder: list = []
+        self._table_list = table_list or [scp.TABLE_NAME]
+        self._insert_result = insert_result or {"inserted": 1, "errors": 0}
+        self.row = _FakeQuery(self.recorder, "row")
+    def db(self, name):
+        return _FakeDB(self, name)
+    def now(self):
+        import datetime
+        return datetime.datetime.utcnow()
+
+
+class _FakeDB:
+    def __init__(self, parent, name):
+        self.parent = parent
+        self.name = name
+    def table(self, name):
+        return _FakeTable(self.parent, self.name, name)
+    def table_list(self):
+        items = self.parent._table_list
+        class _RunWrap:
+            def run(self, conn): return list(items)
+        return _RunWrap()
+    def table_create(self, name):
+        class _RunWrap:
+            def run(self, conn): return {"created": 1}
+        return _RunWrap()
+
+
+class _FakeTable:
+    def __init__(self, parent, db_name, name):
+        self.parent = parent
+        self.db_name = db_name
+        self.name = name
+    def insert(self, row, conflict=None):
+        result = self.parent._insert_result
+        recorder = self.parent.recorder
+        recorder.append(("insert", row, conflict))
+        class _RunWrap:
+            def run(self, conn): return result
+        return _RunWrap()
+    def get(self, row_id):
+        class _RunWrap:
+            def run(self, conn): return None
+        return _RunWrap()
+
+
+def test_persist_backtest_snapshot_writes_row():
+    fake_r = _FakeR()
+    cache = {"_momentum_watchlist": ["AAPL"], "_deployment_bar_index": 5}
+    ok = scp.persist_backtest_snapshot(
+        conn=object(),
+        r=fake_r,
+        instance_id="main",
+        strategy_name="graph_nexus_analysis",
+        cache=cache,
+        config_hash="abc123def456",
+        module_hash="0011223344556677",
+        start_date="2025-11-10",
+        end_date="2026-05-20",
+    )
+    assert ok is True
+    inserts = [call for call in fake_r.recorder if call[0] == "insert"]
+    assert len(inserts) == 1
+    row = inserts[0][1]
+    assert row["instance_id"] == "main"
+    assert row["strategy_name"] == "graph_nexus_analysis"
+    assert row["origin"] == "backtest"
+    assert row["config_hash"] == "abc123def456"
+    assert row["nexus_module_hash"] == "0011223344556677"
+    assert row["start_date"] == "2025-11-10"
+    assert row["end_date"] == "2026-05-20"
+    assert row["record_version"] == 1
+    assert row["id"] == "main|graph_nexus_analysis|abc123def456|backtest|2026-05-20"
+
+
+def test_persist_backtest_snapshot_handles_db_error():
+    """If insert raises, the function logs but does not propagate."""
+    class _RaisingR(_FakeR):
+        def db(self, name):
+            class _D:
+                def table_list(self):
+                    class _W:
+                        def run(self, conn): raise RuntimeError("rethink down")
+                    return _W()
+            return _D()
+    ok = scp.persist_backtest_snapshot(
+        conn=object(),
+        r=_RaisingR(),
+        instance_id="main",
+        strategy_name="graph_nexus_analysis",
+        cache={},
+        config_hash="abc",
+        module_hash="def",
+        start_date="2025-11-10",
+        end_date="2026-05-20",
+    )
+    assert ok is False
+
+
+def test_persist_backtest_snapshot_rejects_blank_args():
+    fake_r = _FakeR()
+    assert scp.persist_backtest_snapshot(
+        conn=None, r=fake_r, instance_id="main", strategy_name="x",
+        cache={}, config_hash="a", module_hash="b",
+        start_date="d", end_date="d",
+    ) is False
+    assert scp.persist_backtest_snapshot(
+        conn=object(), r=fake_r, instance_id="", strategy_name="x",
+        cache={}, config_hash="a", module_hash="b",
+        start_date="d", end_date="d",
+    ) is False
