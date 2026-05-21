@@ -1,66 +1,107 @@
-"""One-shot: clear the 'main' instance's lookback-resume + outcome state
-so the next broker boot re-runs the full 120-day historic lookback cleanly.
+"""One-shot: clear per-instance lookback + decision + cache state so the next
+broker boot starts cleanly. Phase 1 extension covers all 14 per-instance
+tables that could leak old-strategy state into a new strategy on the same
+instance_id.
 
-What this SCRIPT CLEARS (only for base_instance_id='main'):
-- GraphNexusTradeContexts rows: the "processed-date" markers consulted by
-  `_historic_lookback_resume_dates`. Deleting these forces the next
-  `_run_live_historic_lookback` to process every day in the 120-day window.
-- GraphNexusOutcomes rows: the per-day outcome snapshots. Junk outcomes
-  from the earlier failed lookback (time_increment="1d" TypeError,
-  _unrealized_pct UnboundLocalError) are removed so the new run writes
-  clean ones.
-- NexusRuntimeState rows: any cached V32 peak / blacklist / momentum
-  watchlist state scoped to main — so the main-loop starts from zero.
-- LiveState row: the live snapshot for main (will be re-upserted).
+What this SCRIPT CLEARS (only for the chosen --instance, default 'main'):
+- GraphNexusTradeContexts: lookback resume-date markers
+- GraphNexusOutcomes: per-day outcome snapshots
+- NexusRuntimeState: cached V32 peak / blacklist / momentum watchlist
+- LiveState: live snapshot for the instance
+- NexusStrategyCache: LIVE-origin rows only (backtest-origin SNAPSHOTS preserved)
+- LiveOrderWAL: write-ahead log entries
+- GraphNexusDiscoveredStocks: discovered-stock state (active/sold flags)
+- GraphNexusMarketTrends: market trend state machine
+- GraphNexusRotationCooldown: rotation cooldown timer
+- GraphNexusTradeOutcomes: per-instance trade outcomes (SONA learning input)
+- GraphNexusLearningCache: cached learning summaries
+- GraphNexusDiscoverySnapshots: discovery snapshots
+- GraphNexusOutcomeSeries: outcome time-series
+- GraphNexusAnalystPanel: panel decisions
 
-What this SCRIPT PRESERVES (shared caches):
-- Alpaca article cache (date-keyed, shared across instances)
-- Benzinga bulk cache (date-range-keyed, shared)
-- FinBERT scoring cache (hash-keyed, content-addressed)
+What this SCRIPT PRESERVES (shared caches + backtest snapshots):
+- All shared news/sentiment/article caches (article-hash + provider + model keyed)
+- Alpaca article cache, Benzinga bulk cache, FinBERT scoring cache
 - Company/Macro article LLM classification caches
 - Sentiment fingerprint cache
 - Overlay bars cache
 - Neo4j graph data
+- NexusStrategyCache rows with origin="backtest" (the snapshots used at live boot)
 
 Dry run by default. Pass --apply to actually delete.
 
 Usage:
-  python scripts/clear_main_instance_lookback_state.py           # dry-run
-  python scripts/clear_main_instance_lookback_state.py --apply   # delete
+  python scripts/clear_main_instance_lookback_state.py                # dry-run for instance 'main'
+  python scripts/clear_main_instance_lookback_state.py --apply        # apply to 'main'
+  python scripts/clear_main_instance_lookback_state.py --instance foo --apply  # apply to 'foo'
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
-INSTANCE_ID = "main"
+INSTANCE_ID = "main"  # default; CLI --instance overrides at runtime
 DB_NAME = "IntelliStock"
 
-# Tables to target with a scope-or-instance filter. Each entry is:
-#   (table_name, list_of_filter_criteria_tuples)
-# Filter tuple = (field_name, value_prefix_or_exact, match_mode)
-# match_mode ∈ {"exact", "prefix", "contains"}
-TARGETS = [
-    # Resume-date markers — clearing forces 120-day lookback to re-run
-    ("GraphNexusTradeContexts", [
-        ("instance_id", f"{INSTANCE_ID}|", "prefix"),
-        ("base_instance_id", INSTANCE_ID, "exact"),
-    ]),
-    # Outcome snapshots — clean slate for the rebuilt lookback
-    ("GraphNexusOutcomes", [
-        ("instance_id", f"{INSTANCE_ID}|", "prefix"),
-        ("base_instance_id", INSTANCE_ID, "exact"),
-    ]),
-    # Runtime state (peak watermarks, blacklists, cooldowns)
-    ("NexusRuntimeState", [
-        ("id", f"{INSTANCE_ID}:", "prefix"),
-    ]),
-    # Live snapshot — will be recreated on next broker tick
-    ("LiveState", [
-        ("id", INSTANCE_ID, "exact"),
-    ]),
-]
+
+def _build_targets(instance_id: str):
+    """Return the list of (table_name, criteria) tuples for the given instance.
+
+    criteria entries are (field_name, value, match_mode) where match_mode is
+    one of "exact", "prefix", "contains". Multiple criteria within a table are
+    OR-combined (any match -> delete).
+    """
+    return [
+        # ----- Original 4 -----
+        ("GraphNexusTradeContexts", [
+            ("instance_id", f"{instance_id}|", "prefix"),
+            ("base_instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusOutcomes", [
+            ("instance_id", f"{instance_id}|", "prefix"),
+            ("base_instance_id", instance_id, "exact"),
+        ]),
+        ("NexusRuntimeState", [
+            ("id", f"{instance_id}:", "prefix"),
+        ]),
+        ("LiveState", [
+            ("id", instance_id, "exact"),
+        ]),
+        # ----- Phase 1 additions (10 more tables) -----
+        # NexusStrategyCache: live-origin rows only (preserve backtest snapshots).
+        ("NexusStrategyCache", [
+            ("origin", "live", "exact"),
+        ]),
+        ("LiveOrderWAL", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusDiscoveredStocks", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusMarketTrends", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusRotationCooldown", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusTradeOutcomes", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusLearningCache", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusDiscoverySnapshots", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusOutcomeSeries", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+        ("GraphNexusAnalystPanel", [
+            ("instance_id", instance_id, "exact"),
+        ]),
+    ]
 
 
 def _build_filter(r, criteria):
@@ -80,7 +121,7 @@ def _build_filter(r, criteria):
     return expr
 
 
-def main(apply: bool) -> int:
+def main(apply: bool, instance_id: str) -> int:
     try:
         from rethinkdb import RethinkDB  # type: ignore
     except ImportError:
@@ -95,44 +136,64 @@ def main(apply: bool) -> int:
         print(f"ERROR: connect({host}:{port}): {e}", file=sys.stderr)
         return 3
 
+    targets = _build_targets(instance_id)
     total_to_delete = 0
+    summary: list = []
     try:
         existing_tables = set(r.db(DB_NAME).table_list().run(conn))
-        for table, criteria in TARGETS:
+        for table, criteria in targets:
             if table not in existing_tables:
                 print(f"SKIP  {table}: table does not exist.")
+                summary.append((table, 0, "skipped"))
                 continue
             expr = _build_filter(r, criteria)
             if expr is None:
                 print(f"SKIP  {table}: no criteria resolved.")
+                summary.append((table, 0, "skipped"))
                 continue
             count = int(r.db(DB_NAME).table(table).filter(expr).count().run(conn) or 0)
             total_to_delete += count
             verb = "WILL DELETE" if not apply else "DELETING   "
             print(f"{verb} {count:>5} rows from {table}")
+            deleted = 0
             if apply and count > 0:
                 res = r.db(DB_NAME).table(table).filter(expr).delete().run(conn)
                 deleted = int((res or {}).get("deleted", 0) or 0)
                 print(f"           -> deleted={deleted}")
+            summary.append((table, count, "deleted" if apply else "would_delete"))
     finally:
         try:
             conn.close()
         except Exception:
             pass
 
+    print(f"\n--- Summary (instance='{instance_id}') ---")
+    for table, count, status in summary:
+        print(f"  {table:40s} {count:>6} ({status})")
+    print(f"  {'TOTAL':40s} {total_to_delete:>6}")
+
     if not apply:
         print(
-            f"\nDRY RUN. {total_to_delete} row(s) would be deleted for instance '{INSTANCE_ID}'. "
+            f"\nDRY RUN. {total_to_delete} row(s) would be deleted across {len(targets)} tables. "
             "Re-run with --apply to execute."
         )
     else:
         print(
-            f"\nDone. Cleared lookback + outcome + runtime state for '{INSTANCE_ID}'. "
-            "Restart the main live broker — the next boot will re-run the 120-day lookback."
+            f"\nDone. Cleared per-instance lookback + decision + cache state for '{instance_id}' "
+            f"across {len(targets)} tables. Backtest-origin NexusStrategyCache snapshots PRESERVED. "
+            "Restart the live broker - the next boot will use the snapshot (if available) or run "
+            "a full lookback."
         )
     return 0
 
 
+def _parse_args():
+    p = argparse.ArgumentParser(description="Clear per-instance lookback + decision + cache state.")
+    p.add_argument("--apply", action="store_true", help="actually delete (default: dry-run)")
+    p.add_argument("--instance", default=INSTANCE_ID, help=f"instance_id to clear (default: {INSTANCE_ID})")
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    apply = "--apply" in sys.argv[1:]
-    raise SystemExit(main(apply))
+    args = _parse_args()
+    raise SystemExit(main(args.apply, args.instance))
