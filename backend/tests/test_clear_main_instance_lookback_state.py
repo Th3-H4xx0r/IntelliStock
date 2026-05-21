@@ -157,6 +157,53 @@ def test_build_filter_default_or_mode_unchanged():
     assert pred_or.fn({"instance_id": "other"}) is False
 
 
+def test_id_keyed_tables_filter_by_id_not_instance_id():
+    """Bug-sweep 2026-05-21: 3 tables use id=instance_id as PK with no
+    separate instance_id field. Filtering on instance_id matched 0 rows
+    (silently no-op in production)."""
+    targets = cleaner._build_targets("main")
+    by_table = {t[0]: t for t in targets}
+    for tbl in ("GraphNexusRotationCooldown",
+                "GraphNexusLearningCache",
+                "GraphNexusDiscoverySnapshots"):
+        criteria = _criteria_of(by_table[tbl])
+        fields = {c[0] for c in criteria}
+        assert "id" in fields, (
+            f"{tbl} must filter on 'id' (the table's per-instance PK); got fields={fields}"
+        )
+        assert "instance_id" not in fields, (
+            f"{tbl} must NOT filter on 'instance_id' (no such field on this table); "
+            f"got fields={fields}"
+        )
+
+
+def test_learning_cache_filter_covers_prefix_variant():
+    """GraphNexusLearningCache also writes keys shaped like
+    '{instance_id}|...' (e.g. 'cleanup_done|main'); cleanup must match
+    those too."""
+    targets = cleaner._build_targets("main")
+    lc = next(t for t in targets if t[0] == "GraphNexusLearningCache")
+    criteria = _criteria_of(lc)
+    modes = {(c[0], c[2]) for c in criteria}
+    assert ("id", "exact") in modes, criteria
+    assert ("id", "prefix") in modes, (
+        f"GraphNexusLearningCache must include a prefix match for 'main|...' keys; got {criteria}"
+    )
+
+
+def test_id_keyed_filter_matches_rows_with_id_only():
+    """End-to-end: a row whose only identifier is ``id == 'main'`` must be
+    matched by the cleanup filter for instance='main'."""
+    targets = cleaner._build_targets("main")
+    rc = next(t for t in targets if t[0] == "GraphNexusRotationCooldown")
+    criteria = _criteria_of(rc)
+    combine = _combine_of(rc)
+    pred = cleaner._build_filter(_FakeR(), criteria, combine=combine)
+    assert pred is not None
+    assert pred.fn({"id": "main"}) is True
+    assert pred.fn({"id": "other"}) is False
+
+
 def test_build_targets_substitutes_instance_id():
     """_build_targets must use the passed instance_id, not hardcode 'main'."""
     targets = cleaner._build_targets("my-test-instance")

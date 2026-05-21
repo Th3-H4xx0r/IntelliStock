@@ -96,17 +96,25 @@ def _build_targets(instance_id: str):
         ("GraphNexusMarketTrends", [
             ("instance_id", instance_id, "exact"),
         ]),
+        # GraphNexusRotationCooldown / GraphNexusLearningCache /
+        # GraphNexusDiscoverySnapshots: ``id`` is the per-instance PK; there
+        # is no separate ``instance_id`` field. Filtering on ``instance_id``
+        # matches 0 rows (silently no-ops in production -- bug-sweep
+        # 2026-05-21 CRITICAL). GraphNexusLearningCache additionally writes
+        # keys shaped like ``{instance_id}|...`` (e.g. ``cleanup_done|main``),
+        # so match both via OR-mode.
         ("GraphNexusRotationCooldown", [
-            ("instance_id", instance_id, "exact"),
+            ("id", instance_id, "exact"),
         ]),
         ("GraphNexusTradeOutcomes", [
             ("instance_id", instance_id, "exact"),
         ]),
         ("GraphNexusLearningCache", [
-            ("instance_id", instance_id, "exact"),
+            ("id", instance_id, "exact"),
+            ("id", f"{instance_id}|", "prefix"),
         ]),
         ("GraphNexusDiscoverySnapshots", [
-            ("instance_id", instance_id, "exact"),
+            ("id", instance_id, "exact"),
         ]),
         ("GraphNexusOutcomeSeries", [
             ("instance_id", instance_id, "exact"),
