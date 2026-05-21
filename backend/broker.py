@@ -2684,6 +2684,15 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
             instance = cls()
             broker_backtest_id = str(backtest_row_id).strip() if backtest_row_id is not None else None
             broker_instance_id = str(instance_id).strip() if instance_id is not None else None
+            # 2026-05-21: telemetry context uses threading.local(), so the broker's
+            # outer llm_call_context frame does NOT reach worker threads spawned by
+            # strategies (e.g., active_event_maintenance's ThreadPoolExecutor).
+            # Propagate the IDs via the config dict — strategies push them into
+            # their per-call inner llm_call_context, which works on any thread.
+            config["_telemetry_backtest_id"] = broker_backtest_id or None
+            config["_telemetry_instance_id"] = broker_instance_id or None
+            conditions["_telemetry_backtest_id"] = broker_backtest_id or None
+            conditions["_telemetry_instance_id"] = broker_instance_id or None
             with telemetry_llm_call_context(
                 backtest_id=broker_backtest_id or None,
                 instance_id=broker_instance_id or None,
