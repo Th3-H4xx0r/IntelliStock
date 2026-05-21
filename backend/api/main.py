@@ -3069,6 +3069,37 @@ def api_llm_usage_top_spenders(
     )
 
 
+@app.get("/llm-usage/by-backtest", response_class=JSONResponse)
+def api_llm_usage_by_backtest(
+    range: str = "30d",
+    limit: int = 100,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Per-backtest aggregated LLM usage rows for the cost-screen table.
+
+    Returns one row per ``backtest_id`` (untagged calls are excluded —
+    they have no backtest to attribute cost to). Sorted by descending
+    total cost so the most expensive runs surface first.
+    """
+    return _llm_usage_by_backtest(range_str=range, limit=limit, conn=conn)
+
+
+@app.get("/backtests/{backtest_id}/llm-cost", response_class=JSONResponse)
+def api_backtest_llm_cost(
+    backtest_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Full LLM cost / token breakdown for one backtest.
+
+    Drives the AI-credits card on the backtest detail view. Returns
+    totals + per-model + per-call_site (strategy stage) + per-strategy
+    sub-aggregates so the operator can see where the cost came from.
+    """
+    return _llm_usage_for_backtest(backtest_id=str(backtest_id), conn=conn)
+
+
 @app.get("/llm-usage/calls", response_class=JSONResponse)
 def api_llm_usage_calls(
     limit: int = 50,
@@ -3247,6 +3278,149 @@ def _llm_usage_top_spenders(*, range_str, group_by, limit, conn) -> list:
         b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
     out = sorted(by_key.values(), key=lambda x: x["cost_usd"], reverse=True)
     return out[: max(1, int(limit))]
+
+
+def _llm_usage_by_backtest(*, range_str: str, limit: int, conn) -> list:
+    """Aggregate LLMUsage rows by ``backtest_id`` within ``range_str``.
+
+    Implementation: scan the time-bounded window via the ``ts`` index,
+    group in-memory, sort by cost desc, cap at ``limit``. This is the
+    same scan-and-fold pattern as ``_llm_usage_top_spenders`` — at the
+    volumes we see (a few thousand rows / day) the fold is faster than
+    a server-side groupBy roundtrip would be in RethinkDB.
+    """
+    start, end = _range_to_ms_window(range_str)
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("LLMUsage")
+            .between(start, end, index="ts")
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+    by_bt: dict = {}
+    for row in rows:
+        bt_id = row.get("backtest_id")
+        if bt_id is None or bt_id == "":
+            # Untagged calls (live mode, /llm/test smoke probes, agent
+            # strategy-generation cycles) are skipped — they have no
+            # backtest to bill against and would otherwise pollute the
+            # table with an "(unset)" row. Compare against None / ""
+            # explicitly so a theoretical backtest_id=0 (numeric zero)
+            # isn't dropped by a falsy truth-test.
+            continue
+        b = by_bt.setdefault(str(bt_id), {
+            "backtest_id": str(bt_id),
+            "instance_id": row.get("instance_id"),
+            "calls": 0,
+            "tokens": 0,
+            "cost_usd": 0.0,
+            "first_ts": int(row.get("ts", 0) or 0),
+            "last_ts": int(row.get("ts", 0) or 0),
+            "ok_calls": 0,
+            "failed_calls": 0,
+        })
+        b["calls"] += 1
+        b["tokens"] += int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
+        b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
+        ts = int(row.get("ts", 0) or 0)
+        if ts < b["first_ts"]:
+            b["first_ts"] = ts
+        if ts > b["last_ts"]:
+            b["last_ts"] = ts
+        if row.get("ok"):
+            b["ok_calls"] += 1
+        else:
+            b["failed_calls"] += 1
+        # Prefer non-empty instance_id from any row in the group.
+        if not b.get("instance_id") and row.get("instance_id"):
+            b["instance_id"] = row.get("instance_id")
+    out = sorted(by_bt.values(), key=lambda x: x["cost_usd"], reverse=True)
+    return out[: max(1, int(limit or 100))]
+
+
+def _llm_usage_for_backtest(*, backtest_id: str, conn) -> dict:
+    """Per-backtest cost detail. Uses the ``backtest_id`` secondary index
+    so this stays O(rows-for-this-backtest), not full table scan."""
+    rows: list = []
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("LLMUsage")
+            .get_all(backtest_id, index="backtest_id")
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+    total_calls = len(rows)
+    total_tokens = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_reasoning_tokens = 0
+    total_cache_read_tokens = 0
+    total_cost = 0.0
+    first_ts: Optional[int] = None
+    last_ts: Optional[int] = None
+    ok_calls = 0
+    failed_calls = 0
+    by_model: dict = {}
+    by_call_site: dict = {}
+    by_strategy: dict = {}
+    by_provider: dict = {}
+    for row in rows:
+        in_t = int(row.get("input_tokens", 0) or 0)
+        out_t = int(row.get("output_tokens", 0) or 0)
+        reason_t = int(row.get("reasoning_tokens", 0) or 0)
+        cache_t = int(row.get("cache_read_input_tokens", 0) or 0)
+        cost = float(row.get("total_cost_usd", 0.0) or 0.0)
+        total_input_tokens += in_t
+        total_output_tokens += out_t
+        total_reasoning_tokens += reason_t
+        total_cache_read_tokens += cache_t
+        total_tokens += in_t + out_t
+        total_cost += cost
+        ts = int(row.get("ts", 0) or 0)
+        if first_ts is None or ts < first_ts:
+            first_ts = ts
+        if last_ts is None or ts > last_ts:
+            last_ts = ts
+        if row.get("ok"):
+            ok_calls += 1
+        else:
+            failed_calls += 1
+
+        def _bump(bucket: dict, key: Any) -> None:
+            k = str(key or "(unset)")
+            b = bucket.setdefault(k, {"key": k, "calls": 0, "tokens": 0, "cost_usd": 0.0})
+            b["calls"] += 1
+            b["tokens"] += in_t + out_t
+            b["cost_usd"] += cost
+
+        _bump(by_model, row.get("model"))
+        _bump(by_call_site, row.get("call_site"))
+        _bump(by_strategy, row.get("strategy"))
+        _bump(by_provider, row.get("provider"))
+
+    def _sort(bucket: dict) -> list:
+        return sorted(bucket.values(), key=lambda x: x["cost_usd"], reverse=True)
+
+    return {
+        "backtest_id": str(backtest_id),
+        "total_calls": total_calls,
+        "ok_calls": ok_calls,
+        "failed_calls": failed_calls,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_reasoning_tokens": total_reasoning_tokens,
+        "total_cache_read_tokens": total_cache_read_tokens,
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_cost, 6),
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "by_provider": _sort(by_provider),
+        "by_model": _sort(by_model),
+        "by_call_site": _sort(by_call_site),
+        "by_strategy": _sort(by_strategy),
+    }
 
 
 def _merge_recent_usage_rows(*, limit, in_memory_rows, db_rows) -> list:

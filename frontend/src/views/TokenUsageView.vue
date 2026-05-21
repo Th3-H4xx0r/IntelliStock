@@ -15,6 +15,7 @@ const summary = ref(null)
 const timeseries = ref([])
 const topByModel = ref([])
 const topByCallSite = ref([])
+const byBacktest = ref([])
 const recentCalls = ref([])
 const selectedCall = ref(null)
 const lastLoadedAt = ref(0)
@@ -102,21 +103,23 @@ async function fetchAll(silent = false) {
       fetchJson(`${API_BASE}/llm-usage/timeseries?range=${range.value}&bucket=${bucket}`, headers),
       fetchJson(`${API_BASE}/llm-usage/top-spenders?range=${range.value}&group_by=model&limit=10`, headers),
       fetchJson(`${API_BASE}/llm-usage/top-spenders?range=${range.value}&group_by=call_site&limit=10`, headers),
+      fetchJson(`${API_BASE}/llm-usage/by-backtest?range=${range.value}&limit=50`, headers),
       fetchJson(`${API_BASE}/llm-usage/calls?limit=50&range=now`, headers),
     ]
     const results = await Promise.allSettled(requests)
     if (generation !== fetchGeneration) return
 
-    const [summaryResult, timeseriesResult, modelResult, callSiteResult, callsResult] = results
+    const [summaryResult, timeseriesResult, modelResult, callSiteResult, byBacktestResult, callsResult] = results
     if (summaryResult.status === 'fulfilled') summary.value = summaryResult.value
     if (timeseriesResult.status === 'fulfilled') timeseries.value = Array.isArray(timeseriesResult.value) ? timeseriesResult.value : []
     if (modelResult.status === 'fulfilled') topByModel.value = Array.isArray(modelResult.value) ? modelResult.value : []
     if (callSiteResult.status === 'fulfilled') topByCallSite.value = Array.isArray(callSiteResult.value) ? callSiteResult.value : []
+    if (byBacktestResult.status === 'fulfilled') byBacktest.value = Array.isArray(byBacktestResult.value) ? byBacktestResult.value : []
     if (callsResult.status === 'fulfilled') recentCalls.value = Array.isArray(callsResult.value) ? callsResult.value : []
 
     const failures = results.filter((result) => result.status === 'rejected')
     loadError.value = failures.length
-      ? `${failures.length} of 5 telemetry requests failed: ${failures[0].reason?.message || 'unknown'}`
+      ? `${failures.length} of 6 telemetry requests failed: ${failures[0].reason?.message || 'unknown'}`
       : ''
     lastLoadedAt.value = Date.now()
   } finally {
@@ -527,6 +530,57 @@ onUnmounted(() => {
             </table>
           </div>
         </article>
+      </section>
+
+      <section class="glass-card rounded-2xl overflow-hidden border border-border-subtle">
+        <div class="flex items-center justify-between gap-4 border-b border-border-subtle px-5 py-4 flex-wrap">
+          <div>
+            <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Per-backtest spend</p>
+            <h2 class="mt-1 text-lg font-semibold text-slate-100">LLM cost by backtest</h2>
+          </div>
+          <span class="text-xs text-slate-500">Sorted by cost · click a row to open the backtest</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border-subtle/70 text-left">
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Backtest</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Instance</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">Started</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500 text-right">Calls</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500 text-right">Tokens</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500 text-right">Cost</th>
+                <th class="px-5 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500 text-right">Success</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in byBacktest"
+                :key="row.backtest_id"
+                class="border-b border-border-subtle/40 text-slate-200 transition-colors hover:bg-surface/30 cursor-pointer"
+                @click="$router.push({ name: 'backtest-detail', params: { id: row.backtest_id } })"
+              >
+                <td class="px-5 py-3 font-mono text-xs text-slate-300">#{{ row.backtest_id }}</td>
+                <td class="px-5 py-3 text-xs text-slate-400">{{ row.instance_id || '—' }}</td>
+                <td class="px-5 py-3 whitespace-nowrap text-slate-400">{{ fmtTime(row.first_ts) }}</td>
+                <td class="px-5 py-3 text-right">{{ row.calls }}</td>
+                <td class="px-5 py-3 text-right">{{ fmtTokens(row.tokens) }}</td>
+                <td class="px-5 py-3 text-right text-slate-100 font-medium">{{ fmtUSD(row.cost_usd) }}</td>
+                <td class="px-5 py-3 text-right text-xs">
+                  <span :class="row.failed_calls > 0 ? 'text-amber-300' : 'text-emerald-300'">
+                    {{ row.ok_calls }}/{{ row.calls }}
+                  </span>
+                </td>
+              </tr>
+              <tr v-if="!byBacktest.length">
+                <td colspan="7" class="px-5 py-10 text-center text-sm text-slate-500">
+                  No backtest LLM spend in this window. Cost rows only appear for backtests that
+                  ran while the engine tagged calls — re-run a backtest to populate this table.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section class="glass-card rounded-2xl overflow-hidden border border-border-subtle">

@@ -33,6 +33,25 @@ let pollTimer = null
 const strategyData = ref(null)
 const strategyOpen = ref(false)
 
+// AI credits / LLM cost card
+const llmCost = ref(null)
+const llmCostLoading = ref(false)
+const llmCostError = ref('')
+
+async function fetchLlmCost() {
+  llmCostLoading.value = true
+  llmCostError.value = ''
+  try {
+    const res = await fetch(`${API_BASE}/backtests/${btId.value}/llm-cost`, { headers: authHeaders() })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    llmCost.value = await res.json()
+  } catch (e) {
+    llmCostError.value = e?.message || 'failed to load LLM cost'
+  } finally {
+    llmCostLoading.value = false
+  }
+}
+
 // ── Data fetching ─────────────────────────────────────────────────────────────
 async function fetchSummary() {
   try {
@@ -52,7 +71,17 @@ async function fetchGraphData() {
   } catch { /* non-critical — not available for pending/failed */ }
 }
 
+let _llmCostPollTick = 0
 async function fetchStatus() {
+  // Refresh the LLM cost card on every ~30s tick regardless of whether
+  // /status succeeded. If the API is briefly flaky, we still want the
+  // cost card to keep ticking — and we still want the terminal-state
+  // check below to run against the last-known status so a transient
+  // failure doesn't leave the polling loop spinning forever.
+  _llmCostPollTick = (_llmCostPollTick + 1) % 10
+  if (_llmCostPollTick === 0) {
+    void fetchLlmCost()
+  }
   try {
     const res = await fetch(`${API_BASE}/backtests/${btId.value}/status`, { headers: authHeaders() })
     if (!res.ok) return
@@ -60,7 +89,7 @@ async function fetchStatus() {
     const st = (statusData.value.status || '').toLowerCase()
     if (['completed', 'finished', 'failed', 'stopped', 'error', 'cancelled'].includes(st)) {
       stopPolling()
-      await Promise.all([fetchSummary(), fetchGraphData()])
+      await Promise.all([fetchSummary(), fetchGraphData(), fetchLlmCost()])
     } else if (st === 'paused') {
       stopPolling()
     }
@@ -88,9 +117,14 @@ async function initPage() {
   graphData.value    = null
   statusData.value   = null
   strategyData.value = null
+  llmCost.value      = null
+  llmCostError.value = ''
   loading.value = true
   error.value   = ''
-  await Promise.all([fetchSummary(), fetchGraphData()])
+  // LLM cost is independent of the summary / graph fetches — fire it in
+  // parallel so the AI-credits card paints as soon as the backtest_id
+  // becomes known, without waiting on the heavier summary payload.
+  await Promise.all([fetchSummary(), fetchGraphData(), fetchLlmCost()])
   loading.value = false
   loadStrategyFromSummary()
   const s = (summary.value?.status || '').toLowerCase()
@@ -108,6 +142,22 @@ watch(() => route.params.id, (newId, oldId) => {
 })
 
 // ── Formatting ────────────────────────────────────────────────────────────────
+function fmtTokens(value) {
+  if (value == null) return '—'
+  const count = Number(value)
+  if (Number.isNaN(count)) return '—'
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`
+  if (count >= 1000) return `${(count / 1000).toFixed(1)}k`
+  return String(count)
+}
+function fmtUsdCost(value) {
+  if (value == null) return '—'
+  const amount = Number(value)
+  if (Number.isNaN(amount)) return '—'
+  if (amount === 0) return '$0.00'
+  if (Math.abs(amount) < 1) return `$${amount.toFixed(4)}`
+  return `$${amount.toFixed(2)}`
+}
 function fmtMoney(v) {
   if (v == null) return '—'
   return '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -847,6 +897,113 @@ function onLogScroll(e) {
             <p class="text-[10px] text-slate-500">Low: <span class="font-mono text-red-400">{{ fmtMoney(summary.portfolio_value_low) }}</span></p>
           </div>
         </div>
+
+        <!-- ── AI credits / LLM cost card ────────────────────────────────────── -->
+        <section class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
+          <div class="flex items-center justify-between gap-3 px-5 py-4 border-b border-border-subtle">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="size-8 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-primary text-base">payments</span>
+              </div>
+              <div class="text-left min-w-0">
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-0.5">AI Credits</p>
+                <p class="text-sm font-semibold text-slate-200 truncate">LLM cost for this backtest</p>
+              </div>
+            </div>
+            <button
+              v-if="!llmCostLoading"
+              @click="fetchLlmCost"
+              class="inline-flex items-center justify-center rounded-lg border border-border-subtle bg-surface/60 px-2 py-1 text-slate-400 transition-colors hover:bg-surface hover:text-slate-100"
+              title="Refresh"
+            >
+              <span class="material-symbols-outlined text-[16px]">refresh</span>
+            </button>
+            <span v-else class="material-symbols-outlined text-[18px] text-slate-400 animate-spin">refresh</span>
+          </div>
+          <div v-if="llmCostError" class="px-5 py-4 text-sm text-rose-300">
+            {{ llmCostError }}
+          </div>
+          <div v-else-if="!llmCost && llmCostLoading" class="px-5 py-6 text-sm text-slate-500">
+            Loading…
+          </div>
+          <div v-else-if="!llmCost || !llmCost.total_calls" class="px-5 py-6 text-sm text-slate-500">
+            No LLM calls were attributed to this backtest. (Either the strategy ran with no LLM stages
+            enabled, or the backtest finished before the telemetry sink flushed.)
+          </div>
+          <div v-else>
+            <!-- Headline totals row -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 px-5 py-4 border-b border-border-subtle">
+              <div>
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Total cost</p>
+                <p class="text-2xl font-bold text-slate-100 font-mono">{{ fmtUsdCost(llmCost.total_cost_usd) }}</p>
+              </div>
+              <div>
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Calls</p>
+                <p class="text-2xl font-bold text-slate-200 font-mono">{{ llmCost.total_calls }}</p>
+                <p class="text-[10px] text-slate-500">
+                  <span class="text-emerald-400">{{ llmCost.ok_calls }} ok</span>
+                  <span v-if="llmCost.failed_calls > 0"> · <span class="text-amber-300">{{ llmCost.failed_calls }} failed</span></span>
+                </p>
+              </div>
+              <div>
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Input tokens</p>
+                <p class="text-2xl font-bold text-slate-200 font-mono">{{ fmtTokens(llmCost.total_input_tokens) }}</p>
+              </div>
+              <div>
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Output tokens</p>
+                <p class="text-2xl font-bold text-slate-200 font-mono">{{ fmtTokens(llmCost.total_output_tokens) }}</p>
+                <p v-if="llmCost.total_reasoning_tokens > 0" class="text-[10px] text-slate-500">
+                  incl. {{ fmtTokens(llmCost.total_reasoning_tokens) }} reasoning
+                </p>
+              </div>
+            </div>
+            <!-- Breakdown tables: model, stage, strategy -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-0 divide-x divide-border-subtle">
+              <div class="px-5 py-4">
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-3">By model</p>
+                <div class="space-y-2">
+                  <div
+                    v-for="row in llmCost.by_model.slice(0, 6)"
+                    :key="`m-${row.key}`"
+                    class="flex items-center justify-between gap-2 text-sm"
+                  >
+                    <span class="font-mono text-xs text-slate-300 truncate min-w-0">{{ row.key }}</span>
+                    <span class="text-slate-100 font-mono shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
+                  </div>
+                  <p v-if="!llmCost.by_model.length" class="text-xs text-slate-500">No models recorded.</p>
+                </div>
+              </div>
+              <div class="px-5 py-4">
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-3">By call site</p>
+                <div class="space-y-2">
+                  <div
+                    v-for="row in llmCost.by_call_site.slice(0, 6)"
+                    :key="`c-${row.key}`"
+                    class="flex items-center justify-between gap-2 text-sm"
+                  >
+                    <span class="font-mono text-xs text-slate-300 truncate min-w-0">{{ row.key }}</span>
+                    <span class="text-slate-100 font-mono shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
+                  </div>
+                  <p v-if="!llmCost.by_call_site.length" class="text-xs text-slate-500">No call sites recorded.</p>
+                </div>
+              </div>
+              <div class="px-5 py-4">
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-3">By provider</p>
+                <div class="space-y-2">
+                  <div
+                    v-for="row in llmCost.by_provider.slice(0, 6)"
+                    :key="`p-${row.key}`"
+                    class="flex items-center justify-between gap-2 text-sm"
+                  >
+                    <span class="font-mono text-xs text-slate-300 truncate min-w-0">{{ row.key }}</span>
+                    <span class="text-slate-100 font-mono shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
+                  </div>
+                  <p v-if="!llmCost.by_provider.length" class="text-xs text-slate-500">No providers recorded.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
 
         <!-- ── Strategy info ─────────────────────────────────────────────────── -->
         <section v-if="strategyData" class="glass-card rounded-2xl overflow-hidden mb-6">

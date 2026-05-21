@@ -76,6 +76,17 @@ def ensure_llm_usage_tables(*, conn, r, db_name: str) -> None:
                         f"[llm_telemetry] index_create {table}.{idx} failed: {e}",
                         flush=True,
                     )
+        # RethinkDB builds secondary indexes asynchronously — queries against
+        # an in-progress index error out. Wait so the per-backtest cost
+        # endpoints don't silently return empty rows immediately after a
+        # fresh deploy adds a new index.
+        try:
+            r.db(db_name).table(table).index_wait(*indexes).run(conn)
+        except Exception as e:
+            print(
+                f"[llm_telemetry] index_wait {table} failed (will retry on use): {e}",
+                flush=True,
+            )
 
     _ensure_indexes(_LLM_USAGE_TABLE, _LLM_USAGE_INDEXES)
     _ensure_indexes(_LLM_USAGE_DAILY_TABLE, _LLM_USAGE_DAILY_INDEXES)
@@ -349,6 +360,16 @@ def record_llm_call(
         )
 
         ctx = _merge_active_ctx()
+        # Normalize backtest_id / instance_id on the write side so an int
+        # write doesn't drift from a string read on the by-id index. The
+        # CLI plumbing passes argparse strings already, but defending here
+        # means future callers can't accidentally break the index lookup.
+        _norm_bt = ctx.get("backtest_id")
+        if _norm_bt is not None:
+            _norm_bt = str(_norm_bt).strip() or None
+        _norm_inst = ctx.get("instance_id")
+        if _norm_inst is not None:
+            _norm_inst = str(_norm_inst).strip() or None
         row: Dict[str, Any] = {
             "id": uuid.uuid4().hex,
             "ts": int(time.time() * 1000),
@@ -368,8 +389,8 @@ def record_llm_call(
             "duration_ms": int(duration_ms or 0),
             "retry_count": int(retry_count or 0),
             "error": (str(error)[:200] if error else None),
-            "backtest_id": ctx.get("backtest_id"),
-            "instance_id": ctx.get("instance_id"),
+            "backtest_id": _norm_bt,
+            "instance_id": _norm_inst,
             "strategy": ctx.get("strategy"),
             "call_site": ctx.get("call_site"),
             "conversation_id": ctx.get("conversation_id"),
