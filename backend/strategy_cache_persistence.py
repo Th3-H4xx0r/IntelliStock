@@ -86,6 +86,17 @@ _BLACKLIST_PREFIXES = (
     # via Neo4j IN_SECTOR. Persisting would carry stale sector
     # assignments across backtest restarts.
     "_eta_sector_map",
+    # Phase 1 bug-sweep (2026-05-21): per-run cache keys discovered by the
+    # blacklist audit. Each is regenerated every tick / bar / decision cycle
+    # from current portfolio state, so persisting stale copies across a
+    # restart would feed the new run incorrect universe / sizing data.
+    "_inst_co_holdings_",       # per-instrument company-holdings cache, derived from current positions
+    "_active_watchlist_",       # filtered active watchlist; should reflect this run's universe
+    "_mw_rotation_sells_",      # rotation-sell candidates computed this cycle
+    "_mw_sized_",               # sized order book this cycle (depends on current cash)
+    "_mw_free_cash_",           # free-cash snapshot used by this cycle's sizing
+    "_overlay_no_data_",        # negative-result cache for overlay lookups, per-symbol per-run
+    "_momentum_ranked_cache",   # ranked-momentum table, recomputed each run from fresh data
 )
 
 _MAX_DICT_ENTRIES = 500
