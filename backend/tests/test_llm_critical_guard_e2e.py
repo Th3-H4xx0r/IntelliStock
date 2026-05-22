@@ -35,8 +35,8 @@ def _reset_modules():
     yield
 
 
-def test_e2e_backtest_abort_flow(monkeypatch):
-    """Simulate the bt357345 scenario end-to-end."""
+def test_e2e_backtest_pause_flow(monkeypatch):
+    """Simulate the bt357345 scenario end-to-end, now ending in PAUSE (not abort)."""
     monkeypatch.setattr(time, "sleep", lambda s: None)  # skip backoff waits
 
     # Patch _call_with_capture to return Azure 403 blocked, 4 times
@@ -59,7 +59,7 @@ def test_e2e_backtest_abort_flow(monkeypatch):
     assert failure.attribution["backtest_id"] == "357345"
     assert len(failure.attempts) == 4
 
-    # 2. broker.py-style routing: backtest mode → backtest_critical_abort
+    # 2. broker.py-style routing: backtest mode → backtest_critical_abort (now PAUSE)
     from backend import backtest_critical_abort
 
     discord_captured = {}
@@ -71,27 +71,52 @@ def test_e2e_backtest_abort_flow(monkeypatch):
     fake_conn = MagicMock()
     fake_r = MagicMock()
 
+    # Capture the BacktestResults update payload to verify the new pause status fields
+    captured_results_update = {}
+
+    def _record_update(payload):
+        if isinstance(payload, dict) and payload.get("status") == "paused_llm_critical":
+            captured_results_update.update(payload)
+        return fake_r  # chainable
+
+    fake_r.db.return_value.table.return_value.get.return_value.update.side_effect = _record_update
+
     with patch.object(backtest_critical_abort, "_get_conn_and_r",
                       return_value=(fake_conn, fake_r)), \
          patch.object(backtest_critical_abort, "_enqueue_discord",
-                      side_effect=fake_enqueue):
+                      side_effect=fake_enqueue), \
+         patch.object(backtest_critical_abort, "_bs_restore",
+                      return_value=({}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore",
+                      return_value=None):
+        # handle() must return normally — NO sys.exit call. If it did exit, the
+        # test process would die before reaching the assertions below.
         backtest_critical_abort.handle(
             backtest_id="357345",
             instance_id="main",
             failure=failure,
         )
 
-    # 3. Verify Discord payload
+    # 3. Verify Discord payload — yellow pause styling, "paused" verbiage
     assert discord_captured["channel"] == "backtests"
-    assert "BACKTEST ABORT" in discord_captured["content"]
+    assert "PAUSED" in discord_captured["content"].upper() or "paused" in discord_captured["content"]
+    assert "ABORT" not in discord_captured["content"].upper()
     assert "357345" in discord_captured["content"]
     assert "azure_403_blocked" in discord_captured["content"]
+    assert discord_captured["embed"]["color"] == 0xF1C40F  # yellow (was 0xE74C3C red)
+    assert "paused" in discord_captured["embed"]["title"].lower()
     embed_field_names = {f["name"] for f in discord_captured["embed"]["fields"]}
     assert "backtest_id" in embed_field_names
     assert "sample" in embed_field_names
 
-    # 4. Skip-snapshot flag is now set
-    assert backtest_critical_abort._skip_snapshot_persist is True
+    # 4. BacktestResults was updated with status='paused_llm_critical' + diagnostic fields
+    assert captured_results_update.get("status") == "paused_llm_critical"
+    assert captured_results_update.get("pause_reason_tag") == "azure_403_blocked"
+    assert captured_results_update.get("pause_provider") == "azure"
+
+    # 5. Skip-snapshot flag stays False — the pause flow does NOT corrupt the
+    #    eventual end-of-run snapshot; the bar will re-execute cleanly on resume.
+    assert backtest_critical_abort._skip_snapshot_persist is False
 
 
 def test_e2e_live_abort_flow(monkeypatch):
