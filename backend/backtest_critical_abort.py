@@ -163,7 +163,11 @@ def handle(*, backtest_id: str, instance_id: str, failure) -> None:
                     "paused_at": r.now(),
                     "pause_sample": (failure.attempts[-1].get("body_sample") or "")[:500] if failure.attempts else "",
                 }
-                r.db("IntelliStock").table("BacktestResults").get(str(backtest_id)).update(payload).run(conn)
+                # RethinkDB primary keys are type-strict; BacktestResults.id
+                # is written as int by the engine (broker.py:5842 and every
+                # other writer), so a get("357345") string silently misses
+                # (returns {skipped: 1} instead of raising). Coerce to int.
+                r.db("IntelliStock").table("BacktestResults").get(int(backtest_id)).update(payload).run(conn)
             except Exception as e:
                 _log_red(f"BacktestResults pause status update failed: {e}")
         finally:

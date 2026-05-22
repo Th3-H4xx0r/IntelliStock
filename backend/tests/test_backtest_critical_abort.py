@@ -160,6 +160,40 @@ def test_handle_discord_yellow_pause_styling():
     assert "paused" in captured["embed"]["title"].lower()
 
 
+def test_handle_uses_int_backtest_id_for_db_lookup():
+    """BacktestResults PK is int; RethinkDB get('str') silently misses
+    (returns {skipped: 1} not an exception). Every .get() call in the DB
+    chain — both BacktestInstances and BacktestResults — must receive int."""
+    from backend import backtest_critical_abort
+    fake_conn = MagicMock()
+    fake_r = MagicMock()
+    captured_get_args = []
+
+    # Capture every .get(...) arg in the table chain (covers both
+    # BacktestInstances and BacktestResults — they share the same mock chain
+    # because fake_r.db.return_value.table.return_value resolves identically
+    # regardless of the table-name argument passed by the handler).
+    def _record_get(arg):
+        captured_get_args.append(arg)
+        return fake_r.db.return_value.table.return_value.get.return_value
+    fake_r.db.return_value.table.return_value.get.side_effect = _record_get
+
+    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
+        backtest_critical_abort.handle(
+            backtest_id="357345", instance_id="main", failure=_make_failure(),
+        )
+    # Both BacktestInstances and BacktestResults .get() must use int (not str)
+    assert 357345 in captured_get_args, \
+        f"int 357345 not in get() args: {captured_get_args}"
+    # Belt-and-suspenders: NO string '357345' should appear — that would mean
+    # one of the two .get() calls is still using the str path.
+    assert "357345" not in captured_get_args, \
+        f"str '357345' leaked into get() args: {captured_get_args}"
+
+
 def test_handle_idempotent():
     from backend import backtest_critical_abort
     mock_apply = MagicMock()

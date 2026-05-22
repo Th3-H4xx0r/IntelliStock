@@ -9290,6 +9290,31 @@ while not shutdown_requested:
                             instance_id=str(instance_id),
                             failure=_outer_err,
                         )
+                    # CRITICAL (bug fix 2026-05-22): synchronously flip the
+                    # LOCAL pause flag. _backtest_paused is normally driven by
+                    # the watch_backtest_run_command changefeed thread (see
+                    # ~line 2510), which observes the DB write made above by
+                    # handle() and propagates it into this module global. But
+                    # that's a cross-thread DB roundtrip — the local `continue`
+                    # below is much faster and would otherwise run an ENTIRE
+                    # next bar iteration before the wait block at ~line 9177
+                    # ever sees paused=True. During that wasted iteration:
+                    #   - llm_critical_guard._already_raised is still True,
+                    #     so every LLM call short-circuits to empty text
+                    #   - strategies run with garbage LLM responses against
+                    #     the freshly-restored portfolio, possibly producing
+                    #     bogus trades
+                    # Flipping the local global here closes that race.
+                    #
+                    # Note: no `global _backtest_paused` declaration here.
+                    # This entire outer-except is at MODULE scope (the main
+                    # backtest/live loop at line 6263 is a top-level `while`,
+                    # NOT inside a def), so a bare assignment already binds
+                    # the module attribute. Adding `global` at module top-
+                    # level is a SyntaxError when the name has already been
+                    # read earlier (e.g. the wait block at line 9177 reads
+                    # _backtest_paused before this point).
+                    _backtest_paused = True
                     # DO NOT sys.exit — handle() restored snapshot and set paused=True;
                     # the main loop will hit the existing wait block and idle until resume.
                     continue  # re-enter the while loop; the wait block holds the worker
