@@ -12292,7 +12292,8 @@ def _llm_validate_usaspending_edges(
     """
     import json
     import re as _re
-    from llm_utils import call_llm_by_provider, call_gemini_with_grounding
+    from llm_utils import call_llm_by_provider, call_gemini_with_grounding  # noqa: F401
+    from llm_utils import _call_llm_with_critical_guard as _call_llm_guarded
 
     uncertain = [(i, e) for i, e in enumerate(edges) if e.get("confidence", 1.0) < 0.90]
     if not uncertain:
@@ -12343,8 +12344,13 @@ def _llm_validate_usaspending_edges(
                 "Return strict JSON only — an array of booleans in the same order as the input.\n\n"
                 f"INPUT:\n{pairs_json}\n"
             )
-            raw = call_llm_by_provider(provider, api_key, model, prompt, max_output_tokens=0, retries=1,
-                                       response_mime_type="application/json")
+            # Route through critical-guard so persistent Azure/OpenAI auth or
+            # 5xx failures auto-abort the backtest. TODO: thread engine config
+            # into this helper to populate backtest_id/instance_id.
+            raw = _call_llm_guarded(provider, api_key, model, prompt,
+                                    attribution_keys={"call_site": "nexus_graph_engine.usaspending_validation"},
+                                    max_output_tokens=0, retries=1,
+                                    response_mime_type="application/json")
             if not raw:
                 for x in batch:
                     confirmed_indices.add(x["idx"])
@@ -13121,7 +13127,8 @@ def _llm_validate_controls_edges(
     Returns the filtered edge list.
     """
     from pydantic import BaseModel, Field
-    from llm_utils import call_gemini_with_grounding, call_llm_by_provider, call_structured_llm_by_provider
+    from llm_utils import call_gemini_with_grounding, call_llm_by_provider, call_structured_llm_by_provider  # noqa: F401
+    from llm_utils import _call_llm_with_critical_guard as _call_llm_guarded
 
     class _ControlsValidationDecision(BaseModel):
         keep: bool
@@ -13235,11 +13242,15 @@ def _llm_validate_controls_edges(
             )
             results_list = _structured_validate(prompt, len(batch_edges))
             if results_list is None:
-                raw = call_llm_by_provider(
+                # Route through critical-guard so persistent Azure/OpenAI auth or
+                # 5xx failures auto-abort the backtest. TODO: thread engine config
+                # into this helper to populate backtest_id/instance_id.
+                raw = _call_llm_guarded(
                     provider,
                     api_key,
                     model,
                     prompt,
+                    attribution_keys={"call_site": "nexus_graph_engine.controls_validation"},
                     max_output_tokens=0,
                     retries=1,
                     response_mime_type="application/json",

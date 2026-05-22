@@ -38,7 +38,8 @@ def _call_llm(
     if not api_key and (provider or "").strip().lower() not in ("claude-cli", "codex-cli"):
         return ""
     try:
-        from llm_utils import call_llm_by_provider
+        from llm_utils import call_llm_by_provider  # noqa: F401  (kept for back-compat references)
+        from llm_utils import _call_llm_with_critical_guard as _call_llm_guarded
         provider = (provider or "gemini").strip().lower()
         resolved_provider_config = dict(provider_config or {})
         if provider == "azure":
@@ -62,11 +63,18 @@ def _call_llm(
             )
             if base_url:
                 resolved_provider_config = {"base_url": base_url}
-        out = call_llm_by_provider(
+        # Route through critical-guard wrapper so persistent auth/5xx failures
+        # auto-abort the backtest (or halt live trading) after 3 retries.
+        # TODO: thread `config` into _call_llm() so we can populate
+        # backtest_id/instance_id in attribution_keys for telemetry.
+        out = _call_llm_guarded(
             provider,
             api_key,
             model,
             prompt,
+            attribution_keys={
+                "call_site": "ai_trading_decision.get_final_decision",
+            },
             max_output_tokens=max_tokens,
             provider_config=resolved_provider_config,
         )
