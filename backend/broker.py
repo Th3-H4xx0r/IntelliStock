@@ -2424,8 +2424,14 @@ def watch_backtest_run_command():
     """Separate thread: watch this backtest's row in BacktestInstances.
     When run=false (stop requested): set BacktestResults status to stopped, remove row from
     BacktestInstances, and exit immediately via os._exit(0) so the process does not wait for
-    the main loop. When paused=true/false only update _backtest_paused."""
+    the main loop. When paused=true/false only update _backtest_paused.
+
+    2026-05-22: On `paused: True -> False` transition (operator resumed), reset
+    llm_critical_guard + backtest_critical_abort module state and flip
+    BacktestResults.status back to 'running' if it was 'paused_llm_critical'.
+    This complements the broker outer-except pause flow."""
     global _backtest_result_id, _backtest_paused
+    _prev_paused = False
     if not backtest_row_id or r is None:
         return
     try:
@@ -2466,7 +2472,42 @@ def watch_backtest_run_command():
                 except Exception as e:
                     _log(f"Error updating DB on row delete: {e}", "red")
                 os._exit(0)
-            _backtest_paused = bool(new_val.get('paused', False))
+            new_paused = bool(new_val.get('paused', False))
+            # 2026-05-22 — Resume transition (paused: True -> False).
+            # Operator clicked Resume after an LLM-critical pause: reset the
+            # critical-guard module state on both modules so the next failure
+            # can re-fire cleanly, and flip BacktestResults.status back to
+            # 'running' (gated on it being 'paused_llm_critical' so manual
+            # operator pauses don't get stomped). Defensive try/except on every
+            # step — the changefeed thread must never die.
+            if _prev_paused and not new_paused:
+                try:
+                    from llm_critical_guard import reset_state as _cg_reset
+                    _cg_reset()
+                except Exception:
+                    pass
+                try:
+                    from backtest_critical_abort import reset_state as _bca_reset
+                    _bca_reset()
+                except Exception:
+                    pass
+                try:
+                    if _backtest_result_id is not None:
+                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
+                            lambda row: r.branch(
+                                row["status"].default("").eq("paused_llm_critical"),
+                                {"status": "running", "resumed_at": r.now()},
+                                {}
+                            )
+                        ).run(conn)
+                except Exception:
+                    pass
+                try:
+                    _log("Resume detected; critical-guard state reset", "cyan")
+                except Exception:
+                    pass
+            _prev_paused = new_paused
+            _backtest_paused = new_paused
             if new_val.get('run') is False:
                 _log("Backtest stop requested (run=false); setting status, removing from queue, exiting.", "yellow")
                 try:
@@ -7347,6 +7388,24 @@ while not shutdown_requested:
                                         pass
                         else:
                             # BACKTEST: synchronous, no watchdog.
+                            # Per-bar snapshot capture for LLM-critical rewind support.
+                            # Captures the last-good-bar state immediately BEFORE the
+                            # strategy fires; if LLMCriticalFailure raises mid-bar the
+                            # outer-except handler restores from this snapshot and the
+                            # bar replays on resume. See backtest_bar_snapshot.py.
+                            if mode == MODE_BACKTEST:
+                                try:
+                                    from backtest_bar_snapshot import capture as _bs_capture
+                                    _bs_capture(
+                                        strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
+                                        portfolio_emulator=portfolio_emulator if 'portfolio_emulator' in dir() else None,
+                                        current_time=current_time,
+                                    )
+                                except Exception as _capture_err:
+                                    try:
+                                        _log(f"bar snapshot capture failed (non-fatal): {_capture_err}", "yellow")
+                                    except Exception:
+                                        pass
                             run_once_results = run_run_once_strategies(
                                 _run_once_specs, list(symbols or []), prices, current_time,
                                 price_history if mode == MODE_BACKTEST else None,
@@ -9211,15 +9270,47 @@ while not shutdown_requested:
         if _is_llm_critical:
             try:
                 if mode == MODE_BACKTEST and _backtest_result_id is not None:
-                    from backtest_critical_abort import handle as _bt_handle
-                    _bt_handle(
-                        backtest_id=str(_backtest_result_id),
-                        instance_id=str(instance_id),
-                        failure=_outer_err,
-                    )
+                    # PAUSE flow (2026-05-22): backtest no longer exits on
+                    # LLM-critical. backtest_critical_abort.handle() restores
+                    # the last-good-bar snapshot, sets BacktestInstances.paused=True
+                    # and writes BacktestResults.status='paused_llm_critical'.
+                    # The main loop's wait block (~line 9118) then idles the
+                    # worker until the operator resumes via the UI.
+                    try:
+                        from backtest_critical_abort import handle as _bt_handle
+                    except Exception as _imp_err:
+                        try:
+                            _log(f"backtest_critical_abort import failed: {_imp_err}", "red")
+                        except Exception:
+                            pass
+                        _bt_handle = None
+                    if _bt_handle is not None:
+                        _bt_handle(
+                            backtest_id=str(_backtest_result_id),
+                            instance_id=str(instance_id),
+                            failure=_outer_err,
+                        )
+                    # DO NOT sys.exit — handle() restored snapshot and set paused=True;
+                    # the main loop will hit the existing wait block and idle until resume.
+                    continue  # re-enter the while loop; the wait block holds the worker
                 elif mode == MODE_LIVE:
-                    from live_critical_abort import handle as _lv_handle
-                    _lv_handle(instance_id=str(instance_id), failure=_outer_err)
+                    try:
+                        from live_critical_abort import handle as _lv_handle
+                    except Exception as _imp_err:
+                        try:
+                            _log(f"live_critical_abort import failed: {_imp_err}", "red")
+                        except Exception:
+                            pass
+                        _lv_handle = None
+                    if _lv_handle is not None:
+                        _lv_handle(instance_id=str(instance_id), failure=_outer_err)
+                    # Live still exits — live mode can't pause (no snapshot model).
+                    # Distinct exit code so engine knows this was an operator-actionable
+                    # LLM failure, not a generic crash. Exit code 7 chosen to avoid
+                    # collision with argparse pre-check failure (exit 2) and existing
+                    # exit codes 0,1,2,3,4,5,6 used elsewhere in broker.py.
+                    import sys as _sys
+                    _sys.exit(7)
                 else:
                     # Defensive: backtest mode but no result_id — log loudly so operator notices.
                     try:
@@ -9235,12 +9326,6 @@ while not shutdown_requested:
                     _log(f"critical-guard handler crashed: {_abort_err}", "red")
                 except Exception:
                     pass
-            # Distinct exit code so engine knows this was an operator-actionable
-            # LLM failure, not a generic crash. Exit code 7 chosen to avoid
-            # collision with argparse pre-check failure (exit 2) and existing
-            # exit codes 0,1,2,3,4,5,6 used elsewhere in broker.py.
-            import sys as _sys
-            _sys.exit(7)
 
         # Not LLM critical — we caught BaseException, so KeyboardInterrupt/
         # SystemExit also land here. Re-raise non-Exception cases so they
