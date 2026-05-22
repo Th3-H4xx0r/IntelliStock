@@ -25,6 +25,7 @@ Honors ``NEXUS_BACKTEST_SNAPSHOT_WRITE=off`` to short-circuit writes.
 from __future__ import annotations
 
 import os as _os
+from typing import Any
 
 
 def _collect_prompt_versions(cfg: dict) -> dict:
@@ -241,3 +242,64 @@ def _invoke_save_strategy_cache(
         except Exception:
             pass
         return False
+
+
+def _apply_in_process_snapshot_restore(
+    *,
+    strategy_caches: dict,
+    portfolio_emulator: Any,
+    current_time,
+) -> None:
+    """Apply a restored bar snapshot to broker's in-process state.
+
+    Called by backtest_critical_abort.handle() after bar_snapshot.restore() returns
+    the snapshotted values. Mutates broker module-level state so the next loop
+    iteration sees the restored values.
+
+    Implementation: looks up the broker module via sys.modules and rebinds
+    the relevant globals. This avoids a circular import (broker imports
+    broker_snapshot_helpers, not the other way around).
+    """
+    import sys as _sys
+    broker = _sys.modules.get("broker") or _sys.modules.get("backend.broker")
+    if broker is None:
+        try:
+            from intellistock_logger import intellistock_logger
+            intellistock_logger.log(
+                "snapshot_restore: broker module not in sys.modules — restore skipped",
+                "red", service="BROKER_SNAPSHOT_HELPERS",
+            )
+        except Exception:
+            pass
+        return
+
+    # Mutate broker globals. Strategy caches: replace the named entries
+    # (strategy_caches is a {strategy_name: cache_dict} mapping).
+    try:
+        broker_strategy_caches = getattr(broker, "strategy_caches", None)
+        if isinstance(broker_strategy_caches, dict) and isinstance(strategy_caches, dict):
+            broker_strategy_caches.clear()
+            broker_strategy_caches.update(strategy_caches)
+    except Exception as e:
+        try:
+            from intellistock_logger import intellistock_logger
+            intellistock_logger.log(f"snapshot_restore: strategy_caches restore failed: {e}", "red", service="BROKER_SNAPSHOT_HELPERS")
+        except Exception:
+            pass
+
+    # Portfolio emulator: deep-replace the broker's reference if possible.
+    # Broker may also keep portfolio refs in sub-objects; this is the
+    # operator-blessed shape — see design Section 5.
+    try:
+        if portfolio_emulator is not None and hasattr(broker, "portfolio_emulator"):
+            broker.portfolio_emulator = portfolio_emulator
+    except Exception:
+        pass
+
+    # current_time: the LOOP variable. Broker has `current_time` as a module
+    # global that the main loop reads at each iteration. Rebind it.
+    try:
+        if current_time is not None:
+            broker.current_time = current_time
+    except Exception:
+        pass
