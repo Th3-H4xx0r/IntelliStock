@@ -430,6 +430,24 @@ def persist_backtest_snapshot(
     so backtest snapshots coexist with live runtime rows. Returns True on
     success, False otherwise. Never raises.
     """
+    # CRITICAL-GUARD: skip snapshot persist when a backtest aborted due to
+    # LLM critical failure. Otherwise we'd seed live-mode warm-start with a
+    # corrupted cache (ruined LLM classifications cached as misses).
+    try:
+        from backtest_critical_abort import _skip_snapshot_persist
+        if _skip_snapshot_persist:
+            try:
+                from intellistock_logger import intellistock_logger
+                intellistock_logger.log(
+                    "persist_backtest_snapshot: SKIPPED — critical LLM abort flagged this run as corrupt.",
+                    "yellow", service="STRATEGY_CACHE_PERSISTENCE",
+                )
+            except Exception:
+                pass
+            return None
+    except Exception:
+        pass
+
     if conn is None or r is None or not instance_id or not strategy_name:
         return False
     if not config_hash or not module_hash:

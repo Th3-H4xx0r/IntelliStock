@@ -118,3 +118,76 @@ def test_handle_handles_missing_attribution_keys():
         backtest_critical_abort.handle(
             backtest_id="357345", instance_id="main", failure=failure,
         )
+
+
+def test_persist_backtest_snapshot_honors_skip_flag(monkeypatch):
+    """When _skip_snapshot_persist is True, persist_backtest_snapshot is a no-op.
+
+    Test kwargs match the actual signature of
+    ``strategy_cache_persistence.persist_backtest_snapshot`` (instance_id,
+    strategy_name, cache, config_hash, module_hash, start_date, end_date);
+    the substantive assertion is that no DB calls happen when the flag is set.
+
+    The guard inside ``persist_backtest_snapshot`` uses a bare import
+    (``from backtest_critical_abort import _skip_snapshot_persist``) because
+    production runs with ``backend/`` on ``sys.path``. Tests run from repo
+    root, so we mirror that here by inserting backend/ on sys.path before
+    flipping the flag.
+    """
+    import os
+    import sys
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    backend_path = os.path.join(repo_root, "backend")
+    sys_path_added = False
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+        sys_path_added = True
+    try:
+        # Import the production-import-path module reference (the one the
+        # guard inside persist_backtest_snapshot will resolve to).
+        import backtest_critical_abort as _bca_bare  # noqa: WPS433
+        from backend import strategy_cache_persistence
+        # Also alias via the `backend.` package path so tests that touch the
+        # same module reference stay coherent.
+        from backend import backtest_critical_abort as _bca_pkg
+
+        _bca_bare._skip_snapshot_persist = True
+        _bca_pkg._skip_snapshot_persist = True
+        try:
+            # If guard works, no DB calls happen. Pass stubs that would raise
+            # if they were used.
+            class _ExplodingConn:
+                def __getattr__(self, name):
+                    raise RuntimeError("guard didn't fire — conn was contacted")
+
+            class _ExplodingR:
+                def __getattr__(self, name):
+                    raise RuntimeError("guard didn't fire — r-module was contacted")
+
+            result = strategy_cache_persistence.persist_backtest_snapshot(
+                _ExplodingConn(),
+                _ExplodingR(),
+                instance_id="main",
+                strategy_name="graph_nexus_analysis",
+                cache={"some_key": "some_value"},
+                config_hash="x" * 16,
+                module_hash="y" * 16,
+                start_date="2026-05-01",
+                end_date="2026-05-22",
+            )
+            # Guard returns None; normal early-out returns False; success
+            # returns True. Only the guard short-circuits with None.
+            assert result is None, (
+                "Guard didn't fire — persist_backtest_snapshot returned "
+                f"{result!r} (expected None). DB stubs would have raised if "
+                "the function had progressed past the guard."
+            )
+        finally:
+            _bca_bare._skip_snapshot_persist = False
+            _bca_pkg._skip_snapshot_persist = False
+    finally:
+        if sys_path_added:
+            try:
+                sys.path.remove(backend_path)
+            except ValueError:
+                pass
