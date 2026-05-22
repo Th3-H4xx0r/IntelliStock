@@ -1383,9 +1383,23 @@ def _call_claude_cli_plain(
             _store_prompt_cache(prompt, model, _effort_key, str(result_text))
         except Exception:
             pass
+        # T10 critical-guard capture — CLI providers map signals to synthetic status
+        try:
+            _stash_last_http(status=200, body=None, exc=None)
+        except Exception:
+            pass
         return str(result_text)
     try:
         _LAST_PLAIN_LLM_CALL_ERROR.error = last_err or "claude-cli plain call failed"
+    except Exception:
+        pass
+    # T10 critical-guard capture — synthesize status from last_err for CLI providers
+    try:
+        _body_l = (last_err or "").lower()
+        if "usage_limit_reached" in _body_l or "quota" in _body_l:
+            _stash_last_http(status=429, body=(last_err or "")[:1000], exc=None)
+        else:
+            _stash_last_http(status=500, body=(last_err or "claude-cli plain call failed")[:1000], exc=None)
     except Exception:
         pass
     return ""
@@ -1450,6 +1464,17 @@ def _call_codex_cli_plain(
             _LAST_PLAIN_LLM_CALL_ERROR.error = _impl_last_err() or "codex-cli plain call failed"
         except Exception:
             pass
+        # T10 critical-guard capture — CLI providers map stderr signals to
+        # synthetic status: usage_limit_reached / quota → 429, else 500.
+        try:
+            _err_body = _impl_last_err() or "codex-cli plain call failed"
+            _body_l = (_err_body or "").lower()
+            if "usage_limit_reached" in _body_l or "quota" in _body_l:
+                _stash_last_http(status=429, body=(_err_body or "")[:1000], exc=None)
+            else:
+                _stash_last_http(status=500, body=(_err_body or "")[:1000], exc=None)
+        except Exception:
+            pass
         try:
             _safe_record(
                 provider="codex-cli", model=model, usage=_codex_usage_plain,
@@ -1462,6 +1487,11 @@ def _call_codex_cli_plain(
         except Exception:
             pass
         return text
+    # T10 critical-guard capture — success
+    try:
+        _stash_last_http(status=200, body=None, exc=None)
+    except Exception:
+        pass
     try:
         _safe_record(
             provider="codex-cli", model=model, usage=_codex_usage_plain, ok=True,
@@ -2743,7 +2773,7 @@ def _call_gemini(
                     json=body,
                     timeout=(connect_timeout, attempt_timeout),
                 )
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
@@ -2753,6 +2783,11 @@ def _call_gemini(
                     f"Set LLM_REQUEST_TIMEOUT to increase.",
                     file=sys.stderr, flush=True,
                 )
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="gemini", model=model, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -2764,6 +2799,16 @@ def _call_gemini(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
                 _safe_record(
                     provider="gemini", model=model, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -2799,6 +2844,15 @@ def _call_gemini(
                         f"[llm_utils] Gemini HTTP {status} (model={model!r}): {err_msg}",
                         file=sys.stderr, flush=True,
                     )
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(
+                        status=status,
+                        body=(getattr(r, "text", "") or err_msg or "")[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
                 _safe_record(
                     provider="gemini", model=model, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -2850,6 +2904,11 @@ def _call_gemini(
             text_parts = [(p.get("text") or "") for p in parts if isinstance(p, dict)]
             out = (" ".join(t for t in text_parts if t)).strip()
             if out:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
                 _gem_usage = data.get("usageMetadata") if isinstance(data, dict) else None
                 _u = {}
                 if isinstance(_gem_usage, dict):
@@ -2888,6 +2947,20 @@ def _call_gemini(
         return ""
     except Exception as _e:
         import sys
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_e, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_e))[:1000],
+                    exc=_e,
+                )
+        except Exception:
+            pass
         # Timeouts are common for long prompts; make them visible for easier debugging.
         try:
             import requests  # type: ignore
@@ -2969,10 +3042,15 @@ def _call_deepseek(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="deepseek", model=model, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -2983,6 +3061,16 @@ def _call_deepseek(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
                 _safe_record(
                     provider="deepseek", model=model, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3000,6 +3088,15 @@ def _call_deepseek(
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
                 # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
@@ -3019,6 +3116,11 @@ def _call_deepseek(
             message = choices[0].get("message") or {}
             content = (message.get("content") or "").strip()
             if content:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="deepseek", model=model,
                     usage=_ds_usage_from_data(data), ok=True,
@@ -3028,6 +3130,11 @@ def _call_deepseek(
                 return content
             reasoning = (message.get("reasoning_content") or "").strip()
             if reasoning:
+                # T10 critical-guard capture (success — reasoning fallback)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="deepseek", model=model,
                     usage=_ds_usage_from_data(data), ok=True,
@@ -3053,6 +3160,20 @@ def _call_deepseek(
         )
         return ""
     except Exception as _e:
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_e, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_e))[:1000],
+                    exc=_e,
+                )
+        except Exception:
+            pass
         _safe_record(
             provider="deepseek", model=model, usage={}, ok=False,
             duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3126,10 +3247,15 @@ def _call_openai(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="openai", model=model, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3140,6 +3266,16 @@ def _call_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
                 _safe_record(
                     provider="openai", model=model, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3157,6 +3293,15 @@ def _call_openai(
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
                 # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
@@ -3176,6 +3321,11 @@ def _call_openai(
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="openai", model=model,
                     usage=_oa_usage_from_data(data), ok=True,
@@ -3201,6 +3351,20 @@ def _call_openai(
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_exc, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_exc))[:1000],
+                    exc=_exc,
+                )
+        except Exception:
+            pass
         _safe_record(
             provider="openai", model=model, usage={}, ok=False,
             duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3288,15 +3452,30 @@ def _call_nvidia(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = _requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except _requests.exceptions.Timeout:
+            except _requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
                 return ""
-            except _requests.exceptions.RequestException:
+            except _requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
@@ -3316,6 +3495,15 @@ def _call_nvidia(
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("nvidia", model, data)
@@ -3328,6 +3516,11 @@ def _call_nvidia(
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
                 if _rpm_limiter is not None:
                     _rpm_limiter.note_success()
                 return text
@@ -3338,6 +3531,20 @@ def _call_nvidia(
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_exc, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_exc))[:1000],
+                    exc=_exc,
+                )
+        except Exception:
+            pass
         return ""
 
 
@@ -3410,12 +3617,17 @@ def _call_azure_openai(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 import sys
                 print(f"[llm_utils] Azure {deployment_name!r} timed out after {attempt_timeout:.0f}s (attempt {attempt+1})", file=sys.stderr, flush=True)
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="azure", model=deployment_name, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3426,6 +3638,16 @@ def _call_azure_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
                 _safe_record(
                     provider="azure", model=deployment_name, usage={}, ok=False,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3443,6 +3665,16 @@ def _call_azure_openai(
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising so the
+                # outer except can rely on it without re-parsing the message)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
                 # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
@@ -3493,6 +3725,11 @@ def _call_azure_openai(
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
                 _safe_record(
                     provider="azure", model=deployment_name,
                     usage=_az_usage_from_data(data), ok=True,
@@ -3518,6 +3755,21 @@ def _call_azure_openai(
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        # T10 critical-guard capture — only stash if an inner handler hasn't
+        # already done so (the >=400 branch above stashes the raw response).
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_exc, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_exc))[:1000],
+                    exc=_exc,
+                )
+        except Exception:
+            pass
         _safe_record(
             provider="azure", model=deployment_name, usage={}, ok=False,
             duration_ms=int((time.monotonic() - _t0) * 1000),
@@ -3763,6 +4015,58 @@ def _fire_llm_output_log(provider: str, model: str, prompt: str, raw_output: str
             pass  # best-effort, never crash the strategy
 
     threading.Thread(target=_post, daemon=True).start()
+
+
+# ── Critical-guard HTTP capture (Wave 1, T10) ─────────────────────────────
+#
+# Each provider stashes the last (status, body, exc) it observed before
+# returning to the caller. The retry wrapper (_call_llm_with_critical_guard)
+# pops this value and feeds it to llm_critical_guard.classify(). Keyed by
+# thread-ident so concurrent workers don't collide.
+
+_LAST_HTTP_PER_THREAD: dict[int, dict[str, Any]] = {}
+_LAST_HTTP_LOCK = threading.Lock()
+
+
+def _stash_last_http(*, status: int | None, body: str | None, exc: BaseException | None) -> None:
+    """Provider call sites invoke this just before returning so the retry
+    wrapper can classify the response. Overwrites any prior stash for the
+    current thread."""
+    tid = threading.get_ident()
+    with _LAST_HTTP_LOCK:
+        _LAST_HTTP_PER_THREAD[tid] = {"status": status, "body": body, "exc": exc}
+
+
+def _pop_last_http() -> dict[str, Any] | None:
+    """Retry wrapper invokes this after each call_llm_by_provider() return.
+    Returns None if the provider didn't stash anything (counts as 'no info' —
+    classifier returns 'none')."""
+    tid = threading.get_ident()
+    with _LAST_HTTP_LOCK:
+        return _LAST_HTTP_PER_THREAD.pop(tid, None)
+
+
+def _call_with_capture(provider, api_key, model, prompt, **kw):
+    """Wrap call_llm_by_provider so the caller gets (text, status, body, exc)
+    instead of just text. status/body/exc come from _pop_last_http(); if the
+    provider didn't stash, status=200/body=None/exc=None (treat as success
+    when text was returned, or generic error when text is empty)."""
+    # Clear any stale stash from a previous call on this thread.
+    _pop_last_http()
+    text = ""
+    captured_exc = None
+    try:
+        text = call_llm_by_provider(provider, api_key, model, prompt, **kw)
+    except Exception as e:
+        captured_exc = e
+    captured = _pop_last_http() or {}
+    status = captured.get("status")
+    body = captured.get("body")
+    exc = captured.get("exc") or captured_exc
+    # Heuristic: if no stash AND no exception AND non-empty text, treat as 200.
+    if status is None and exc is None and text:
+        status = 200
+    return text, status, body, exc
 
 
 def call_llm_by_provider(

@@ -81,3 +81,43 @@ def test_openai_path_records_one_row(telemetry_clean):
     # Even on parse failure we should have recorded the attempt OR none — accept
     # either; the strong test is that NOTHING crashes the sink.
     assert isinstance(rows, list)
+
+
+def test_last_http_capture_module_state():
+    """Each provider stashes (status, body, exc) to a module-level dict
+    keyed by thread-ident before returning. _call_with_capture reads it."""
+    from backend import llm_utils
+    assert hasattr(llm_utils, "_LAST_HTTP_PER_THREAD")
+    assert hasattr(llm_utils, "_stash_last_http")
+    assert hasattr(llm_utils, "_pop_last_http")
+
+    # _stash then _pop returns the value
+    llm_utils._stash_last_http(status=403, body="x", exc=None)
+    captured = llm_utils._pop_last_http()
+    assert captured["status"] == 403
+    assert captured["body"] == "x"
+    assert captured["exc"] is None
+
+    # Second pop returns None (consumed)
+    assert llm_utils._pop_last_http() is None
+
+
+def test_call_with_capture_signature():
+    """_call_with_capture returns (result_text, status, body, exc)."""
+    from backend import llm_utils
+    # Stub call_llm_by_provider to set known state via _stash_last_http
+    original = llm_utils.call_llm_by_provider
+
+    def fake(provider, api_key, model, prompt, **kw):
+        llm_utils._stash_last_http(status=200, body=None, exc=None)
+        return "OK"
+
+    llm_utils.call_llm_by_provider = fake
+    try:
+        result_text, status, body, exc = llm_utils._call_with_capture(
+            "azure", "k", "m", "p"
+        )
+        assert result_text == "OK"
+        assert status == 200
+    finally:
+        llm_utils.call_llm_by_provider = original
