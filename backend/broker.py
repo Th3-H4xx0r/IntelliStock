@@ -4768,6 +4768,17 @@ WARMUP_CYCLES = 700
 
 if mode == MODE_BACKTEST:
     _log("Running in backtest mode", "green")
+    # CRITICAL-GUARD: reset per-process module state at the top of every backtest
+    # entry so a fresh run isn't contaminated by leftover state from a prior run
+    # inside the same Python process (defense-in-depth — backtests usually run as
+    # separate docker containers, but tests and dev runs may reuse the process).
+    try:
+        from llm_critical_guard import reset_state as _cg_reset
+        from backtest_critical_abort import reset_state as _bca_reset
+        _cg_reset()
+        _bca_reset()
+    except Exception:
+        pass
     _log("Start date: " + str(start_date), "green")
     _log("End date: " + str(end_date), "green")
     _log("Time increment: " + str(time_increment), "green")
@@ -9181,6 +9192,38 @@ while not shutdown_requested:
 
         #time.sleep(0.1)
     except Exception as loop_err:
+        # CRITICAL-GUARD route: route LLMCriticalFailure to the dedicated abort handler
+        # BEFORE the generic crash path. The dedicated handler updates BacktestResults
+        # with status='aborted_llm_failure' (not the generic crash status), sets
+        # _skip_snapshot_persist, and pages Discord with full diagnostics.
+        try:
+            from llm_critical_guard import LLMCriticalFailure
+            _is_llm_critical = isinstance(loop_err, LLMCriticalFailure)
+        except Exception:
+            _is_llm_critical = False
+
+        if _is_llm_critical:
+            try:
+                if mode == MODE_BACKTEST and _backtest_result_id is not None:
+                    from backtest_critical_abort import handle as _bt_handle
+                    _bt_handle(
+                        backtest_id=str(_backtest_result_id),
+                        instance_id=str(instance_id),
+                        failure=loop_err,
+                    )
+                elif mode == MODE_LIVE:
+                    from live_critical_abort import handle as _lv_handle
+                    _lv_handle(instance_id=str(instance_id), failure=loop_err)
+            except Exception as _abort_err:
+                try:
+                    _log(f"critical-guard handler crashed: {_abort_err}", "red")
+                except Exception:
+                    pass
+            # Distinct exit code so engine knows this was an operator-actionable
+            # LLM failure, not a generic crash.
+            import sys as _sys
+            _sys.exit(2)
+
         if mode == MODE_BACKTEST and _backtest_result_id is not None:
             progress_pct_crash = None
             try:
