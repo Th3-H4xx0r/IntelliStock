@@ -2972,6 +2972,14 @@ def _historic_lookback_resume_dates(instance_id_value, lookback_opens):
 
 
 def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, portfolio_emulator, time_increment, alpaca_key, alpaca_secret):
+    # 2026-05-22 — extend critical-guard pause/retry coverage to the lookback
+    # prepass. The main while-loop's outer except catches LLMCriticalFailure
+    # and pauses (commit d92c435), but the lookback runs BEFORE that loop and
+    # was OUTSIDE the catch — an Azure 403 storm on lookback day 1 (bt437583)
+    # caused container exit 1 instead of pause. The per-iteration wrap below
+    # routes lookback critical failures through backtest_critical_abort.handle
+    # and idles on _backtest_paused until the operator resumes via the UI.
+    global _backtest_paused
     if mode != MODE_BACKTEST or not run_once_specs or start_dt is None:
         return
     # Diagnostic: this prep block was running silently for 60-90s
@@ -3096,18 +3104,106 @@ def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, por
                 )
             lookback_prices = _get_prices_at_time(data, base_symbols, lookback_time) if isinstance(data, dict) else {}
             lookback_history = get_price_history_up_to_current(data, base_symbols, lookback_time) if isinstance(data, dict) else {}
-            run_run_once_strategies(
-                [prepass_spec],
-                base_symbols,
-                lookback_prices,
-                lookback_time,
-                data=lookback_history,
-                portfolio_emulator=portfolio_emulator,
-                time_increment=time_increment,
-                alpaca_key=alpaca_key,
-                alpaca_secret=alpaca_secret,
-                strategy_caches=temp_strategy_caches,
-            )
+
+            # 2026-05-22 — per-iteration snapshot capture so an LLMCriticalFailure
+            # during lookback can restore the last-good-bar state before retry.
+            # Mirrors the main-loop snapshot capture at ~line 7397.
+            try:
+                from backtest_bar_snapshot import capture as _bs_capture
+                _bs_capture(
+                    strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
+                    portfolio_emulator=portfolio_emulator,
+                    current_time=lookback_time,
+                )
+            except Exception as _capture_err:
+                try:
+                    _log(f"lookback bar snapshot capture failed (non-fatal): {_capture_err}", "yellow")
+                except Exception:
+                    pass
+
+            # Retry-on-critical loop wrapping the strategy invocation. Same pattern
+            # as the main loop's outer-except at ~line 9253: route LLMCriticalFailure
+            # through backtest_critical_abort.handle (which restores snapshot, marks
+            # paused in the DB, pages Discord), then idle until the operator resumes
+            # via the UI. On resume, reset the guards and retry the SAME idx.
+            while not shutdown_requested:
+                try:
+                    run_run_once_strategies(
+                        [prepass_spec],
+                        base_symbols,
+                        lookback_prices,
+                        lookback_time,
+                        data=lookback_history,
+                        portfolio_emulator=portfolio_emulator,
+                        time_increment=time_increment,
+                        alpaca_key=alpaca_key,
+                        alpaca_secret=alpaca_secret,
+                        strategy_caches=temp_strategy_caches,
+                    )
+                    break  # success → advance to next idx
+                except BaseException as _lb_err:
+                    # except BaseException because LLMCriticalFailure inherits
+                    # BaseException (see llm_critical_guard.py:146, commit 468d4ca)
+                    # and would otherwise escape any plain `except Exception`.
+                    try:
+                        from llm_critical_guard import LLMCriticalFailure
+                        _is_llm_critical = isinstance(_lb_err, LLMCriticalFailure)
+                    except Exception:
+                        _is_llm_critical = False
+
+                    if not _is_llm_critical:
+                        raise  # not our concern — let the top-level error path take over
+
+                    # Critical LLM failure during lookback. Route through the same
+                    # pause flow as the main loop.
+                    try:
+                        if _backtest_result_id is not None:
+                            from backtest_critical_abort import handle as _bt_handle
+                            _bt_handle(
+                                backtest_id=str(_backtest_result_id),
+                                instance_id=str(instance_id),
+                                failure=_lb_err,
+                            )
+                    except Exception as _bt_handle_err:
+                        try:
+                            _log(f"backtest_critical_abort handler raised during lookback: {_bt_handle_err}", "red")
+                        except Exception:
+                            pass
+
+                    # Synchronously set local pause flag — same fix as commit d92c435
+                    # for the main loop. `global _backtest_paused` is declared at the
+                    # top of this function so this assignment hits the module global.
+                    _backtest_paused = True
+
+                    # Wait for operator to resume via UI.
+                    try:
+                        _log(f"Lookback paused at idx={idx}/{_lb_total} (LLM critical); awaiting resume...", "yellow")
+                    except Exception:
+                        pass
+                    while _backtest_paused and not shutdown_requested:
+                        time.sleep(1)
+
+                    if shutdown_requested:
+                        import sys as _sys
+                        _sys.exit(0)
+
+                    # Resume: reset critical-guard state and retry the same idx.
+                    try:
+                        from llm_critical_guard import reset_state as _cg_reset
+                        _cg_reset()
+                    except Exception:
+                        pass
+                    try:
+                        from backtest_critical_abort import reset_state as _bca_reset
+                        _bca_reset()
+                    except Exception:
+                        pass
+                    try:
+                        _log(f"Resumed lookback at idx={idx}/{_lb_total}; retrying...", "cyan")
+                    except Exception:
+                        pass
+                    # Loop back to retry this same idx (while not shutdown_requested).
+
             _nexus_lookback_update_db(idx, _lb_total, lookback_time.strftime('%Y-%m-%d'), _lb_start_str, _lb_end_str)
         _nexus_lookback_clear_db()
         _log_historic_lookback_banner(
@@ -3463,7 +3559,55 @@ def _run_live_historic_lookback(
                         alpaca_secret=alpaca_secret,
                         strategy_caches=temp_strategy_caches,
                     )
-                except Exception as _e:
+                except BaseException as _e:
+                    # 2026-05-22 — was `except Exception`, but LLMCriticalFailure
+                    # inherits BaseException (see llm_critical_guard.py:146,
+                    # commit 468d4ca) so an Azure-403/5xx storm during live
+                    # lookback was escaping uncaught → container exit 1, no
+                    # operator alert. Route critical failures through the
+                    # dedicated live abort handler (mirrors main-loop live
+                    # path at ~line 9321); preserve previous log-and-continue
+                    # behaviour for everything else.
+                    try:
+                        from llm_critical_guard import LLMCriticalFailure
+                        _is_llm_critical = isinstance(_e, LLMCriticalFailure)
+                    except Exception:
+                        _is_llm_critical = False
+
+                    if _is_llm_critical:
+                        try:
+                            _log(
+                                f"  Live lookback {date_str} LLM-CRITICAL: {type(_e).__name__}: {_e}",
+                                "red",
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            from live_critical_abort import handle as _lv_handle
+                            _lv_handle(instance_id=str(instance_id), failure=_e)
+                        except Exception as _lv_handle_err:
+                            try:
+                                _log(
+                                    f"live_critical_abort handler raised during lookback: {_lv_handle_err}",
+                                    "red",
+                                )
+                            except Exception:
+                                pass
+                        # Live can't pause (no snapshot model). Exit code 7
+                        # matches main-loop live path so the supervisor knows
+                        # this was an operator-actionable LLM failure, not a
+                        # generic crash. The outer try/finally still runs and
+                        # clears the UI lookback banner.
+                        import sys as _sys
+                        _sys.exit(7)
+
+                    # Not LLM-critical. Re-raise non-Exception BaseException
+                    # cases (KeyboardInterrupt, SystemExit) so they propagate
+                    # to Python's default handler / outer try/finally; log
+                    # and continue for ordinary Exceptions (preserves prior
+                    # log-and-skip-day behaviour).
+                    if not isinstance(_e, Exception):
+                        raise
                     _log(f"  Live lookback {date_str} FAILED: {_e}", "yellow")
                 # Mirror the backtest path by writing per-day progress to the DB
                 # so the UI progress strip populates during a 120-day warmup.
