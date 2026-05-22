@@ -4069,6 +4069,76 @@ def _call_with_capture(provider, api_key, model, prompt, **kw):
     return text, status, body, exc
 
 
+def _call_llm_with_critical_guard(
+    provider: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    *,
+    attribution_keys: dict[str, Any] | None = None,
+    **kw,
+) -> str:
+    """Wraps _call_with_capture with critical-class detection + retry escalation.
+
+    Behavior:
+      - Calls _call_with_capture, classifies the response.
+      - If class is critical AND we've already raised once in this process,
+        return the empty text from the underlying call (don't re-raise; live
+        traffic shouldn't be blocked after abort triggers).
+      - If class is critical and we haven't raised, retry up to 3x with
+        exponential backoff (1s, 2s, 4s). If the 4th attempt is still
+        critical, mark_raised() and raise LLMCriticalFailure.
+      - If class is 'none' (normal), return text immediately.
+    """
+    import time as _time
+    from backend import llm_critical_guard
+
+    if llm_critical_guard.was_already_raised():
+        # A different worker already triggered abort. Pass through one call
+        # so the caller's normal error path runs; do not retry, do not raise.
+        text, status, body, exc = _call_with_capture(provider, api_key, model, prompt, **kw)
+        return text
+
+    attempts: list[dict[str, Any]] = []
+    for attempt_idx in range(4):  # 1 original + 3 retries
+        text, status, body, exc = _call_with_capture(provider, api_key, model, prompt, **kw)
+
+        # Update 5xx-consecutive counter before classifying (counter feeds classify).
+        llm_critical_guard.update_consecutive_state(
+            tag="pending", status=status, provider=provider, model=model,
+        )
+        class_tag, is_critical = llm_critical_guard.classify(
+            status=status, body=body, exc=exc, provider=provider,
+        )
+
+        if not is_critical:
+            return text
+
+        attempts.append({
+            "attempt": attempt_idx + 1,
+            "class_tag": class_tag,
+            "http_status": status,
+            "body_sample": (body or "")[:300],
+            "ts": _time.time(),
+        })
+
+        if attempt_idx < 3:
+            _time.sleep(2 ** attempt_idx)  # 1, 2, 4
+            continue
+
+        # 4th attempt also critical → escalate
+        llm_critical_guard.mark_raised()
+        raise llm_critical_guard.LLMCriticalFailure(
+            class_tag=class_tag,
+            provider=provider,
+            model=model,
+            attribution=dict(attribution_keys or {}),
+            attempts=attempts,
+        )
+
+    return text  # unreachable, but mypy-friendly
+
+
 def call_llm_by_provider(
     provider: str,
     api_key: str,
