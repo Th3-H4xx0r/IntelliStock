@@ -76,6 +76,85 @@ def _safe_record(**kwargs) -> None:
         pass
 
 
+# Patterns for responses that MUST NOT be retried.
+#
+# Retrying these patterns triggers Azure's abuse monitor (interprets a repeat
+# of a blocked prompt as a deliberate bypass attempt) and gets the entire
+# resource temp-blocked for 24-48h. Two real backtests have already died
+# this way (bt357345 with 1008 of these errors, bt437583 exited mid-lookback).
+#
+# These are matched against the response body / exception text in the
+# inner HTTP retry loops AND in the outer raw-JSON retry loop so the
+# abuse monitor sees ONE attempt per blocked prompt and moves on.
+_RX_CONTENT_FILTER = re.compile(r"content_filter|content filter", re.I)
+_RX_AZURE_TEMP_BLOCK = re.compile(r"temporarily blocked|unusual behavior", re.I)
+
+
+def _is_non_retryable_filter_response(
+    *,
+    status: int | None = None,
+    body: str | None = None,
+    exc: BaseException | None = None,
+) -> tuple[bool, str]:
+    """Return ``(is_non_retryable, reason_tag)`` for responses that MUST NOT
+    be retried at the inner HTTP / raw-JSON layer.
+
+    Retrying these patterns is exactly what triggers Azure's abuse-monitor
+    temp-block. The outer ``_call_structured_llm_with_critical_guard``
+    wrapper still classifies the response (``azure_403_blocked`` /
+    ``content_filter``) and handles pause/abort — this guard is only
+    here to make sure inner loops don't re-fire the same blocked prompt.
+
+    Args:
+        status: HTTP status code (if known). Pass ``None`` if only an
+            exception is available.
+        body: Response body text / error message (if available).
+        exc: Exception to inspect when ``status`` / ``body`` are missing
+            (e.g. ``requests.HTTPError`` carrying a ``response`` attr).
+
+    Returns:
+        ``(True, tag)`` if the caller MUST stop retrying.
+        ``(False, "")`` otherwise (safe to retry under normal backoff rules).
+    """
+    if status is None and exc is not None:
+        # Try to pull status + body off the exception (requests pattern).
+        _resp = getattr(exc, "response", None)
+        if _resp is not None:
+            try:
+                status = getattr(_resp, "status_code", None)
+            except Exception:
+                status = None
+            if body is None:
+                try:
+                    body = getattr(_resp, "text", "") or ""
+                except Exception:
+                    body = ""
+        if body is None:
+            body = str(exc)
+
+    body_l = (body or "").lower() if body else ""
+
+    # 1. Content filter — HTTP 400 with "content_filter" in body. Azure's
+    #    content filter and OpenAI's both surface this signature. Even if
+    #    the status is missing or wrong (sometimes wrapped inside a
+    #    RuntimeError(f"HTTP 400: ...") string), match on body alone.
+    if status == 400 and _RX_CONTENT_FILTER.search(body_l):
+        return True, "content_filter"
+    if _RX_CONTENT_FILTER.search(body_l):
+        return True, "content_filter"
+
+    # 2. Azure abuse-monitor temp-block — HTTP 403 with "temporarily blocked"
+    #    or "unusual behavior" in body. The resource is already temp-blocked;
+    #    retrying just extends the block window. Same fall-through logic for
+    #    status: prefer status+body, fall back to body-only.
+    if status == 403 and _RX_AZURE_TEMP_BLOCK.search(body_l):
+        return True, "azure_temp_blocked"
+    if _RX_AZURE_TEMP_BLOCK.search(body_l):
+        return True, "azure_temp_blocked"
+
+    return False, ""
+
+
 # Gemini REST
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _STRUCTURED_LLM_PROVIDER_LOCKS: dict[str, threading.Lock] = {
@@ -2362,6 +2441,17 @@ def call_structured_llm_by_provider(
                                 return repaired
                         except Exception as raw_pref_exc:
                             _raw_last_exc = raw_pref_exc
+                            # Non-retryable filter / temp-block check FIRST — retrying
+                            # these patterns is exactly what triggers Azure's
+                            # abuse-monitor temp-block (see _is_non_retryable_filter_response).
+                            _nr_filter, _nr_tag = _is_non_retryable_filter_response(exc=raw_pref_exc)
+                            if _nr_filter:
+                                import sys
+                                print(
+                                    f"[llm_utils] Raw JSON: non-retryable response ({_nr_tag}) for provider={provider!r}, model={structured_model!r}; skipping further retries to avoid Azure abuse-monitor cascade.",
+                                    file=sys.stderr, flush=True,
+                                )
+                                break
                             # Terminal errors that won't resolve with retries — stop immediately
                             _exc_str = str(raw_pref_exc)
                             _is_terminal = any(kw in _exc_str for kw in [
@@ -2826,7 +2916,20 @@ def _call_gemini(
                     err_msg = getattr(r, "text", "") or ""
                 err_msg = _truncate(err_msg.strip(), 300)
 
-                if status in retriable_status and attempt < max_retries:
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                # Gemini's safety filter shape is different (no "content_filter"
+                # string; uses "BLOCKED_REASON_SAFETY"), so this primarily defends
+                # against pathological wrapped errors. Cheap to leave in place.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=status, body=(getattr(r, "text", "") or err_msg or ""),
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] Gemini {model!r}: non-retryable response ({_nr_tag}) at status {status}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                elif status in retriable_status and attempt < max_retries:
                     wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {status}", attempt)
                     import sys
                     print(
@@ -3079,9 +3182,20 @@ def _call_deepseek(
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] DeepSeek {model!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
                 try:
@@ -3284,9 +3398,20 @@ def _call_openai(
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] OpenAI {model!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
                 try:
@@ -3479,14 +3604,27 @@ def _call_nvidia(
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                # Tell the limiter about 429s so the circuit breaker
-                # can trip after sustained throttling and pause us
-                # globally instead of hammering NVIDIA's penalty box.
-                if r.status_code == 429 and _rpm_limiter is not None:
-                    _rpm_limiter.note_rate_limited()
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                # NVIDIA NIM is unlikely to surface Azure-style temp-blocks, but
+                # content_filter responses can appear; same retry-cascade hazard.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] NVIDIA {model!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    # Tell the limiter about 429s so the circuit breaker
+                    # can trip after sustained throttling and pause us
+                    # globally instead of hammering NVIDIA's penalty box.
+                    if r.status_code == 429 and _rpm_limiter is not None:
+                        _rpm_limiter.note_rate_limited()
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
                 if r.status_code == 429 and _rpm_limiter is not None:
@@ -3656,9 +3794,25 @@ def _call_azure_openai(
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Defensive: even though 400/403 aren't in retriable_status,
+                # if Azure ever wraps a content_filter / temp-block under a
+                # 5xx (or our retriable set grows later), don't retry these.
+                # See _is_non_retryable_filter_response for the why.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] Azure {deployment_name!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                    # Fall through to the >=400 branch so we stash + raise
+                    # exactly once with the original error body.
+                else:
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
                 try:
