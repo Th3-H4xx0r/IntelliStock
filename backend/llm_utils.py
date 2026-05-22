@@ -4091,7 +4091,18 @@ def _call_llm_with_critical_guard(
       - If class is 'none' (normal), return text immediately.
     """
     import time as _time
-    from backend import llm_critical_guard
+    # Use the bare module name so that this resolves to the SAME module object
+    # that broker.py imports via `from llm_critical_guard import ...`. If we
+    # use `from backend import llm_critical_guard`, Python will instantiate
+    # two distinct module objects (one under each path) with separate
+    # _already_raised flags / counters / LLMCriticalFailure class identity —
+    # breaking isinstance() in the broker outer-loop catch.
+    try:
+        import llm_critical_guard
+    except ImportError:
+        # Fallback for environments where `backend/` isn't on sys.path
+        # (e.g. some test invocations from repo root).
+        from backend import llm_critical_guard
 
     if llm_critical_guard.was_already_raised():
         # A different worker already triggered abort. Pass through one call
@@ -4108,7 +4119,7 @@ def _call_llm_with_critical_guard(
             tag="pending", status=status, provider=provider, model=model,
         )
         class_tag, is_critical = llm_critical_guard.classify(
-            status=status, body=body, exc=exc, provider=provider,
+            status=status, body=body, exc=exc, provider=provider, model=model,
         )
 
         if not is_critical:

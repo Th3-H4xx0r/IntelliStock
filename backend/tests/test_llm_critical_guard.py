@@ -18,6 +18,7 @@ def _classify(**kw):
         body=kw.get("body"),
         exc=kw.get("exc"),
         provider=kw.get("provider", "azure"),
+        model=kw.get("model", ""),
     )
 
 
@@ -103,8 +104,9 @@ def test_5xx_three_consecutive_critical():
     from backend.llm_critical_guard import update_consecutive_state, classify
     for _ in range(3):
         update_consecutive_state(tag="none", status=503, provider="azure", model="m")
-    # 3rd consecutive 5xx now classifies as critical
-    tag, crit = classify(status=503, body="server error", provider="azure")
+    # 3rd consecutive 5xx now classifies as critical — must pass the same
+    # (provider, model) to classify() since the counter is per-key now.
+    tag, crit = classify(status=503, body="server error", provider="azure", model="m")
     assert tag == "provider_5xx_persistent"
     assert crit is True
 
@@ -113,10 +115,10 @@ def test_5xx_reset_on_success():
     from backend.llm_critical_guard import update_consecutive_state, classify
     for _ in range(2):
         update_consecutive_state(tag="none", status=503, provider="azure", model="m")
-    update_consecutive_state(tag="none", status=200, provider="azure", model="m")  # success resets
+    update_consecutive_state(tag="none", status=200, provider="azure", model="m")  # success resets this key
     for _ in range(2):
         update_consecutive_state(tag="none", status=503, provider="azure", model="m")
-    tag, crit = classify(status=503, body="x", provider="azure")
+    tag, crit = classify(status=503, body="x", provider="azure", model="m")
     # Only 2 consecutive after reset — not critical yet
     assert crit is False
 
@@ -125,21 +127,67 @@ def test_5xx_reset_on_non_5xx_error():
     from backend.llm_critical_guard import update_consecutive_state, classify
     for _ in range(2):
         update_consecutive_state(tag="none", status=503, provider="azure", model="m")
-    update_consecutive_state(tag="none", status=429, provider="azure", model="m")  # non-5xx resets
+    update_consecutive_state(tag="none", status=429, provider="azure", model="m")  # non-5xx resets this key
     for _ in range(2):
         update_consecutive_state(tag="none", status=503, provider="azure", model="m")
-    tag, crit = classify(status=503, body="x", provider="azure")
+    tag, crit = classify(status=503, body="x", provider="azure", model="m")
     assert crit is False
 
 
 def test_5xx_separate_counter_per_provider_model():
+    """Hitting 3× 5xx on azure-m1 must NOT make a single openai-m2 5xx critical.
+
+    Previously (buggy) the classifier used `any(v >= 3 for v in values())`
+    so m1's history would trip m2. Now classify() looks up the exact
+    (provider, model) tuple.
+    """
+    from backend.llm_critical_guard import update_consecutive_state, classify
+    # m1 trips at 3
+    for _ in range(3):
+        update_consecutive_state(tag="none", status=503, provider="azure", model="m1")
+    # m2 hits its first 5xx
+    update_consecutive_state(tag="none", status=503, provider="azure", model="m2")
+    tag, crit = classify(status=503, body="x", provider="azure", model="m2")
+    # m2 has 1 consecutive; m1 has 3. Lookup is per-key now → m2 is NOT critical.
+    assert tag == "none"
+    assert crit is False
+    # Sanity: m1 IS still critical when queried with its own key.
+    tag1, crit1 = classify(status=503, body="x", provider="azure", model="m1")
+    assert tag1 == "provider_5xx_persistent"
+    assert crit1 is True
+
+
+def test_5xx_one_provider_does_not_trip_another():
+    """Azure 2× 5xx history, then OpenAI hits its first 5xx — OpenAI must NOT
+    be classified critical. Regression test for Bug 2 (per-(provider, model)
+    scoping of the 5xx counter check in classify())."""
     from backend.llm_critical_guard import update_consecutive_state, classify
     for _ in range(2):
-        update_consecutive_state(tag="none", status=503, provider="azure", model="m1")
-    update_consecutive_state(tag="none", status=503, provider="azure", model="m2")
-    # m2 has 1 consecutive; m1 has 2; neither is 3
-    tag, crit = classify(status=503, body="x", provider="azure")
+        update_consecutive_state(tag="none", status=503, provider="azure", model="gpt-5.4-mini")
+    update_consecutive_state(tag="none", status=503, provider="openai", model="gpt-4")
+    tag, crit = classify(status=503, body="server error", provider="openai", model="gpt-4")
+    assert tag == "none"
     assert crit is False
+
+
+def test_5xx_one_provider_success_does_not_reset_another():
+    """A successful Gemini call must NOT zero Azure's near-trip 5xx history.
+
+    Regression test for Bug 3 (per-(provider, model) reset semantics in
+    update_consecutive_state). Previously a single non-5xx response would
+    `_consecutive_5xx.clear()` and forgive every provider's history.
+    """
+    from backend.llm_critical_guard import update_consecutive_state, classify
+    # Azure builds up 2× 5xx history
+    for _ in range(2):
+        update_consecutive_state(tag="none", status=503, provider="azure", model="gpt-5.4-mini")
+    # Gemini has a successful response — must NOT touch the azure counter
+    update_consecutive_state(tag="none", status=200, provider="gemini", model="gemini-1.5-pro")
+    # Azure's 3rd 5xx should still trip critical
+    update_consecutive_state(tag="none", status=503, provider="azure", model="gpt-5.4-mini")
+    tag, crit = classify(status=503, body="x", provider="azure", model="gpt-5.4-mini")
+    assert tag == "provider_5xx_persistent"
+    assert crit is True
 
 
 def test_guard_disabled_env(monkeypatch):

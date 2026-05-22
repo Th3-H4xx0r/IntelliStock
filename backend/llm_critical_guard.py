@@ -38,6 +38,7 @@ def classify(
     body: str | None,
     exc: BaseException | None = None,
     provider: str,
+    model: str = "",
 ) -> tuple[str, bool]:
     """Return (class_tag, is_critical).
 
@@ -71,12 +72,11 @@ def classify(
 
     # 4. Provider 5xx persistent — counter must already be ≥3 (caller increments
     # via update_consecutive_state BEFORE calling classify on the same response).
+    # Strictly per-(provider, model): an Azure outage must not make a Gemini
+    # first-5xx critical (Bug 2 fix — was: any(v >= 3 for v in values())).
     if status is not None and 500 <= int(status) < 600:
         with _state_lock:
-            # Check counter for any (provider, model) — counter is keyed by
-            # (provider, model); the caller's update_consecutive_state set it.
-            # If ANY entry hit 3+, this 5xx is critical.
-            if any(v >= 3 for v in _consecutive_5xx.values()):
+            if _consecutive_5xx.get((provider, model), 0) >= 3:
                 return "provider_5xx_persistent", True
 
     return "none", False
@@ -93,9 +93,10 @@ def update_consecutive_state(
 
     Rules:
       - 5xx → counter += 1 for (provider, model)
-      - Any non-5xx (including 200) → counter reset to 0 for ALL (provider, model)
-        because a single recovery proves the network/auth is fine and we should
-        forgive prior 5xx history project-wide.
+      - Any non-5xx (including 200) → counter reset to 0 ONLY for this
+        (provider, model). A successful Gemini call says nothing about
+        Azure's outage history; cross-provider reset (Bug 3) would zero out
+        an Azure near-trip just because Gemini is healthy.
     """
     if _GUARD_DISABLED:
         return
@@ -106,7 +107,9 @@ def update_consecutive_state(
             key = (provider, model)
             _consecutive_5xx[key] = _consecutive_5xx.get(key, 0) + 1
         else:
-            _consecutive_5xx.clear()
+            key = (provider, model)
+            if key in _consecutive_5xx:
+                del _consecutive_5xx[key]
 
 
 def is_immediately_fatal(class_tag: str) -> bool:
@@ -140,10 +143,15 @@ def reset_state() -> None:
         _already_raised = False
 
 
-class LLMCriticalFailure(Exception):
+class LLMCriticalFailure(BaseException):
     """Raised by the retry wrapper when 4 consecutive attempts on the same
     LLM call all classify as critical. Caught at broker.py's outer loop;
     triggers backtest_critical_abort or live_critical_abort.
+
+    Inherits from BaseException (not Exception) so that bare ``except Exception:``
+    blocks scattered throughout strategy code (e.g. graph_nexus_analysis.py)
+    cannot silently swallow it before broker.py's outer-loop catch can route
+    it to backtest_critical_abort / live_critical_abort.
     """
 
     _already_raised = False  # class-level mirror of module flag (test contract)
