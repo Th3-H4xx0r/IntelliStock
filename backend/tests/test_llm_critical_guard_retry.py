@@ -205,3 +205,76 @@ def test_structured_non_critical_no_retry(monkeypatch):
     )
     assert result is None
     assert calls["n"] == 1  # no retries
+
+
+# ----------------------------------------------------------------------------
+# Mid-retry short-circuit: if a SIBLING worker raises LLMCriticalFailure while
+# THIS worker is sleeping between attempts, this worker should bail out
+# instead of running its full 4-attempt loop and raising a second time. The
+# second raise would otherwise be silently swallowed by ThreadPoolExecutor
+# (stored on a Future that nobody awaits), masking the failure.
+# ----------------------------------------------------------------------------
+
+
+def test_second_worker_short_circuits_mid_retry(monkeypatch):
+    """If another worker raises mid-retry, this worker should short-circuit
+    instead of completing its own 4-retry loop and raising again."""
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    from backend import llm_utils
+    from backend.llm_critical_guard import mark_raised
+
+    seq = iter([
+        ("", 403, "temporarily blocked", None),  # attempt 1: critical
+        ("", 403, "temporarily blocked", None),  # attempt 2: critical (then we externally trip the flag)
+    ])
+    call_count = {"n": 0}
+
+    def fake_call(*a, **kw):
+        call_count["n"] += 1
+        # After the second call, simulate another worker tripping the flag
+        if call_count["n"] == 2:
+            mark_raised()
+        return next(seq)
+
+    monkeypatch.setattr(llm_utils, "_call_with_capture", fake_call)
+
+    # Wrapper should NOT raise (the short-circuit kicks in before attempt 3)
+    result = llm_utils._call_llm_with_critical_guard(
+        "azure", "k", "m", "p", attribution_keys={},
+    )
+    # No exception; result is empty string passthrough
+    assert result == ""
+    assert call_count["n"] == 2  # only 2 calls, not 4
+
+
+def test_structured_second_worker_short_circuits_mid_retry(monkeypatch):
+    """Structured-path analog: sibling worker tripping the guard mid-retry
+    must cause this worker to bail with the last (non-ok) result instead of
+    completing 4 attempts and re-raising."""
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    from backend import llm_utils
+    from backend.llm_critical_guard import mark_raised
+
+    call_count = {"n": 0}
+
+    def fake_call(provider, api_key, model, prompt, output_type, **kw):
+        call_count["n"] += 1
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {
+            "ok": False,
+            "error": "raw_json_preferred=HTTP 403: temporarily blocked",
+            "provider": provider,
+        }
+        # After the second call, simulate another worker tripping the flag
+        if call_count["n"] == 2:
+            mark_raised()
+        return None
+
+    monkeypatch.setattr(llm_utils, "call_structured_llm_by_provider", fake_call)
+
+    # Wrapper should NOT raise (the short-circuit kicks in before attempt 3)
+    result = llm_utils._call_structured_llm_with_critical_guard(
+        "azure", "k", "m", "p", dict, attribution_keys={},
+    )
+    # No exception; result is None passthrough (last non-ok structured return)
+    assert result is None
+    assert call_count["n"] == 2  # only 2 calls, not 4

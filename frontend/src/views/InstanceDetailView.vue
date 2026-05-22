@@ -1503,13 +1503,13 @@ async function submitCreateBacktest() {
                           <span class="material-symbols-outlined text-[16px]">pause_circle</span>
                         </button>
                       </template>
-                      <template v-if="(btProgress[bt.id]?.status || bt.status || '').toLowerCase() === 'paused'">
+                      <template v-if="['paused','paused_llm_critical'].includes((btProgress[bt.id]?.status || bt.status || '').toLowerCase())">
                         <button @click="openBtConfirm(bt, 'resume')" title="Resume"
                           class="p-1 rounded-md text-sky-400 hover:bg-sky-500/10 transition-colors">
                           <span class="material-symbols-outlined text-[16px]">play_circle</span>
                         </button>
                       </template>
-                      <template v-if="['running','queued','pending','paused'].includes((btProgress[bt.id]?.status || bt.status || '').toLowerCase())">
+                      <template v-if="['running','queued','pending','paused','paused_llm_critical'].includes((btProgress[bt.id]?.status || bt.status || '').toLowerCase())">
                         <button @click="openBtConfirm(bt, 'stop')" title="Stop"
                           class="p-1 rounded-md text-red-400 hover:bg-red-500/10 transition-colors">
                           <span class="material-symbols-outlined text-[16px]">stop_circle</span>

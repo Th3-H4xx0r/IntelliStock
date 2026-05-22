@@ -198,6 +198,7 @@ const statusColors = {
   queued:               'text-amber-400 bg-amber-500/10 border-amber-500/20',
   paused:               'text-violet-400 bg-violet-500/10 border-violet-500/20',
   paused_llm_critical:  'text-amber-400 bg-amber-500/10 border-amber-500/20',
+  aborted_llm_failure:  'text-red-400 bg-red-500/10 border-red-500/20',
   stopped:              'text-red-400 bg-red-500/10 border-red-500/20',
   cancelled:            'text-red-400 bg-red-500/10 border-red-500/20',
   error:                'text-red-400 bg-red-500/10 border-red-500/20',

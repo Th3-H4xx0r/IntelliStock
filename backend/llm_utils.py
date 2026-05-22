@@ -4111,7 +4111,18 @@ def _call_llm_with_critical_guard(
         return text
 
     attempts: list[dict[str, Any]] = []
+    text = ""  # ensure defined for the mid-retry short-circuit return below
     for attempt_idx in range(4):  # 1 original + 3 retries
+        # Mid-retry short-circuit: if a sibling worker tripped the guard while
+        # we were sleeping between attempts, don't compound the raise. Return
+        # the last empty/error text from the previous attempt and let the
+        # caller's normal None/empty handling fire. Only the FIRST worker's
+        # LLMCriticalFailure propagates to broker.py — losing workers would
+        # otherwise raise into a ThreadPoolExecutor Future that nobody awaits,
+        # silently swallowing the failure.
+        if attempt_idx > 0 and llm_critical_guard.was_already_raised():
+            return text
+
         text, status, body, exc = _call_with_capture(provider, api_key, model, prompt, **kw)
 
         # Update 5xx-consecutive counter before classifying (counter feeds classify).
@@ -4207,6 +4218,13 @@ def _call_structured_llm_with_critical_guard(
     attempts: list[dict[str, Any]] = []
     result = None
     for attempt_idx in range(4):  # 1 original + 3 retries
+        # Mid-retry short-circuit: see _call_llm_with_critical_guard for the
+        # full rationale. If a sibling worker tripped the guard while we slept
+        # between attempts, return the last result (None / non-ok) instead of
+        # compounding the raise into a stranded ThreadPoolExecutor Future.
+        if attempt_idx > 0 and llm_critical_guard.was_already_raised():
+            return result
+
         result = call_structured_llm_by_provider(provider, api_key, model, prompt, output_type, **kw)
         # Inspect _LAST_STRUCTURED_LLM_CALL to classify the response. The
         # structured helper always stashes (provider, error, ok, ...) just
