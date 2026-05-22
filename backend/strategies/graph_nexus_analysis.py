@@ -3180,6 +3180,7 @@ def _classify_company_article_chunk(
     use_toon: bool,
     instance_id: str,
     system_prompt: str,
+    config: dict | None = None,
     _split_depth: int = 0,
 ) -> tuple[list[dict], list[dict]]:
     # 2026-05-15: azure used to special-case to 0 retries but that meant
@@ -3304,7 +3305,7 @@ def _classify_company_article_chunk(
             provider=provider, api_key=api_key, model=model,
             prompt_version=prompt_version, provider_config=provider_config,
             date_key=date_key, use_toon=use_toon, instance_id=instance_id,
-            system_prompt=system_prompt, _split_depth=_split_depth + 1,
+            system_prompt=system_prompt, config=config, _split_depth=_split_depth + 1,
         )
         with ThreadPoolExecutor(max_workers=2) as split_ex:
             left_fut = split_ex.submit(_classify_company_article_chunk, chunk[:mid], **split_kwargs)
@@ -3404,6 +3405,7 @@ def _classify_macro_article_chunk(
     use_toon: bool,
     instance_id: str,
     system_prompt: str,
+    config: dict | None = None,
     _split_depth: int = 0,
 ) -> tuple[list[dict], list[dict]]:
     # 2026-05-15: azure used to special-case to 0 retries but that meant
@@ -3521,7 +3523,7 @@ def _classify_macro_article_chunk(
             provider=provider, api_key=api_key, model=model,
             prompt_version=prompt_version, provider_config=provider_config,
             date_key=date_key, use_toon=use_toon, instance_id=instance_id,
-            system_prompt=system_prompt, _split_depth=_split_depth + 1,
+            system_prompt=system_prompt, config=config, _split_depth=_split_depth + 1,
         )
         with ThreadPoolExecutor(max_workers=2) as split_ex:
             left_fut = split_ex.submit(_classify_macro_article_chunk, chunk[:mid], **split_kwargs)
@@ -3665,6 +3667,7 @@ def _classify_company_article_records(
                     use_toon=use_toon,
                     instance_id=instance_id,
                     system_prompt=system_prompt,
+                    config=config,
                 ): chunk
                 for chunk in chunks
             }
@@ -3808,6 +3811,7 @@ def _classify_macro_article_records(
                     use_toon=use_toon,
                     instance_id=instance_id,
                     system_prompt=system_prompt,
+                    config=config,
                 ): chunk
                 for chunk in chunks
             }
@@ -15228,6 +15232,7 @@ def _build_sector_map_for_aug(driver, tickers: set, strategy_cache) -> dict[str,
                 return {t: _cached[t] for t in tickers if t in _cached}
         else:
             strategy_cache["_eta_sector_map"] = {}
+            _need = list(tickers)
         _cache_dict = strategy_cache["_eta_sector_map"]
     else:
         _cache_dict = {}
