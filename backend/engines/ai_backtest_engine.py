@@ -31,6 +31,7 @@ load_dotenv(os.path.join(BACKEND_DIR, ".env"))
 load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), ".env"))
 
 from llm_utils import call_structured_llm_by_provider
+from llm_utils import _call_structured_llm_with_critical_guard as _scl_guarded
 
 # Discord status channel (ai-backtest-agent); messages go via RethinkDB outbox, bot posts to Discord
 DISCORD_AGENT_CHANNEL = "ai-backtest-agent"
@@ -676,12 +677,17 @@ def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_pro
     if not api_key or not model:
         return None
     try:
-        resp = call_structured_llm_by_provider(
+        resp = _scl_guarded(
             provider,
             api_key,
             model,
             prompt,
             output_type,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "ai_backtest_engine.call_structured_llm",
+            },
             system_prompt=system_prompt,
             max_output_tokens=max_output_tokens,
             retries=2,

@@ -14,10 +14,24 @@ from unittest.mock import MagicMock, patch
 
 @pytest.fixture(autouse=True)
 def _reset_modules():
+    import sys
     from backend import llm_critical_guard, backtest_critical_abort, live_critical_abort
     importlib.reload(llm_critical_guard)
     importlib.reload(backtest_critical_abort)
     importlib.reload(live_critical_abort)
+    # llm_utils imports llm_critical_guard via the bare name. If an earlier
+    # test file loaded the module under the bare alias as well, the two
+    # aliases are DISTINCT module objects with their own LLMCriticalFailure
+    # class identity — pytest.raises won't match. Force the bare alias to
+    # share the reloaded backend module so both resolve to the same class.
+    sys.modules["llm_critical_guard"] = llm_critical_guard
+    for _alias in ("llm_critical_guard", "backend.llm_critical_guard"):
+        _mod = sys.modules.get(_alias)
+        if _mod is not None and hasattr(_mod, "reset_state"):
+            try:
+                _mod.reset_state()
+            except Exception:
+                pass
     yield
 
 

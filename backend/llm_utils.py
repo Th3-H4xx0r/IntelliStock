@@ -4150,6 +4150,115 @@ def _call_llm_with_critical_guard(
     return text  # unreachable, but mypy-friendly
 
 
+def _parse_structured_error(error_str: str) -> tuple[int | None, str]:
+    """Parse the _LAST_STRUCTURED_LLM_CALL error string into (status, body).
+
+    Sample formats:
+      'raw_json_preferred=HTTP 403: {...body...}'
+      'raw_json_preferred=HTTP 401: {...}'
+      'raw_json_preferred=Skeleton output: model=...'   (no status)
+      'some other error string'  (no status)
+
+    Returns (status_or_None, body_string).
+    """
+    import re as _re
+    if not error_str:
+        return None, ""
+    m = _re.search(r"HTTP\s+(\d{3})", error_str)
+    status = int(m.group(1)) if m else None
+    return status, error_str
+
+
+def _call_structured_llm_with_critical_guard(
+    provider: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    output_type: Any,
+    *,
+    attribution_keys: dict[str, Any] | None = None,
+    **kw,
+):
+    """Mirror of _call_llm_with_critical_guard for the structured-JSON path.
+
+    After each call_structured_llm_by_provider invocation, reads
+    _LAST_STRUCTURED_LLM_CALL.data to classify the response. If the response
+    is critical (Azure 403 blocked / auth fail / codex quota / persistent 5xx),
+    retries up to 3 times with exponential backoff. On the 4th critical
+    attempt, raises LLMCriticalFailure so backtests can abort cleanly.
+
+    Non-critical failures (None return with no recognised critical signal)
+    pass straight through — the caller's existing None-handling fires.
+    """
+    import time as _time
+    # Use the bare module name so this resolves to the SAME llm_critical_guard
+    # module object that broker.py imports — see _call_llm_with_critical_guard
+    # above for the full rationale.
+    try:
+        import llm_critical_guard
+    except ImportError:
+        from backend import llm_critical_guard
+
+    if llm_critical_guard.was_already_raised():
+        # Another worker already triggered abort. Pass the call through once so
+        # the caller's normal error path runs; do not retry, do not re-raise.
+        return call_structured_llm_by_provider(provider, api_key, model, prompt, output_type, **kw)
+
+    attempts: list[dict[str, Any]] = []
+    result = None
+    for attempt_idx in range(4):  # 1 original + 3 retries
+        result = call_structured_llm_by_provider(provider, api_key, model, prompt, output_type, **kw)
+        # Inspect _LAST_STRUCTURED_LLM_CALL to classify the response. The
+        # structured helper always stashes (provider, error, ok, ...) just
+        # before returning, but tolerate missing thread-local data defensively.
+        try:
+            data = _LAST_STRUCTURED_LLM_CALL.data or {}
+        except Exception:
+            data = {}
+        ok = bool(data.get("ok"))
+        if ok:
+            return result
+        error_str = str(data.get("error") or "")
+        status, body = _parse_structured_error(error_str)
+
+        # Update 5xx-consecutive counter before classifying (counter feeds classify).
+        llm_critical_guard.update_consecutive_state(
+            tag="pending", status=status, provider=provider, model=model,
+        )
+        class_tag, is_critical = llm_critical_guard.classify(
+            status=status, body=body, exc=None, provider=provider, model=model,
+        )
+
+        if not is_critical:
+            # Non-critical failure (skeleton output, transient parse error, etc.) —
+            # let the caller's existing None-handling fire. Don't retry here.
+            return result
+
+        attempts.append({
+            "attempt": attempt_idx + 1,
+            "class_tag": class_tag,
+            "http_status": status,
+            "body_sample": body[:300],
+            "ts": _time.time(),
+        })
+
+        if attempt_idx < 3:
+            _time.sleep(2 ** attempt_idx)  # 1, 2, 4
+            continue
+
+        # 4th attempt also critical → escalate
+        llm_critical_guard.mark_raised()
+        raise llm_critical_guard.LLMCriticalFailure(
+            class_tag=class_tag,
+            provider=provider,
+            model=model,
+            attribution=dict(attribution_keys or {}),
+            attempts=attempts,
+        )
+
+    return result  # unreachable, but mypy-friendly
+
+
 def call_llm_by_provider(
     provider: str,
     api_key: str,

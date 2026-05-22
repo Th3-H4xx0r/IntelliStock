@@ -284,7 +284,8 @@ def test_enhanced_sentiment_retry_shrinks_prompt_for_gpt_oss():
 
     with patch.object(gna, "_log", side_effect=lambda msg, *_args, **_kwargs: logs.append(str(msg))), \
          patch.object(gna, "_build_trends_context", return_value="\nACTIVE TRENDS:\n- Example trend"), \
-         patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call):
+         patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call), \
+         patch.object(gna, "_scl_guarded", side_effect=_fake_call):
         result, future, cancellations, trend_updates = gna._enhanced_sentiment_from_llm(
             articles,
             "azure",
@@ -363,6 +364,7 @@ def test_active_event_maintenance_retry_shrinks_prompt_context_for_gpt_oss():
          patch.object(gna, "_ensure_nexus_history_table"), \
          patch.object(gna, "_r", None), \
          patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call), \
+         patch.object(gna, "_scl_guarded", side_effect=_fake_call), \
          patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "azure", "effective_model": "gpt-oss-120b", "ok": False, "usage": {}}):
         gna._maintain_active_events(
             object(),

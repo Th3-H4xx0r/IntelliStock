@@ -43,12 +43,14 @@ if _backend_dir not in sys.path:
 try:
     from llm_utils import (
         call_structured_llm_by_provider,
+        _call_structured_llm_with_critical_guard as _scl_guarded,
         normalize_reasoning_effort,
         get_last_structured_llm_call_metadata,
     )
 except ImportError:
     from strategies.llm_utils import (  # type: ignore[no-redef]
         call_structured_llm_by_provider,
+        _call_structured_llm_with_critical_guard as _scl_guarded,
         normalize_reasoning_effort,
         get_last_structured_llm_call_metadata,
     )
@@ -357,8 +359,13 @@ def _run_single_agent(sys_prompt: str, user_prompt: str, out_type: type, config:
     # deadline of timeout+15s (75s) ensures the round never exceeds ~75s wall clock.
     try:
         with llm_call_context(strategy="NexusAnalystPanel", call_site="main"):
-            resp = call_structured_llm_by_provider(
+            resp = _scl_guarded(
                 provider, api_key, model, user_prompt, output_type=out_type,
+                attribution_keys={
+                    "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                    "instance_id": (config or {}).get("_telemetry_instance_id"),
+                    "call_site": f"nexus_analyst_panel.round{round_num}",
+                },
                 system_prompt=sys_prompt, max_output_tokens=0,
                 timeout_sec=timeout, temperature=0.4, provider_config=prov_cfg,
                 retries=1, output_retries=1, http_retries=1,
@@ -381,8 +388,13 @@ def _run_single_agent(sys_prompt: str, user_prompt: str, out_type: type, config:
             _log(f"PANEL agent '{role_label}' R{round_num}: skeleton response, retrying with shorter prompt", "yellow")
             short_prompt = user_prompt[:len(user_prompt) * 2 // 3] + "\n\nProvide concrete stock ratings and directional outlook. Do NOT return neutral/empty."
             with llm_call_context(strategy="NexusAnalystPanel", call_site="main"):
-                resp = call_structured_llm_by_provider(
+                resp = _scl_guarded(
                     provider, api_key, model, short_prompt, output_type=out_type,
+                    attribution_keys={
+                        "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                        "instance_id": (config or {}).get("_telemetry_instance_id"),
+                        "call_site": f"nexus_analyst_panel.round{round_num}.skeleton_retry",
+                    },
                     system_prompt=sys_prompt, max_output_tokens=0,
                     timeout_sec=timeout, temperature=0.5, provider_config=prov_cfg,
                     retries=0, output_retries=0, http_retries=0, prefer_raw_json=is_azure,

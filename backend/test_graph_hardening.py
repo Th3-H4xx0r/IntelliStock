@@ -767,7 +767,8 @@ class GraphHardeningTests(unittest.TestCase):
             ({"article_hash": "a1", "source": "alpaca", "published_at": "2025-12-19T12:00:00Z", "date_key": "2025-12-19", "headline": "A", "summary": "", "content_excerpt": "", "symbols": ["NVDA"]}, "cid-1"),
             ({"article_hash": "a2", "source": "alpaca", "published_at": "2025-12-19T12:05:00Z", "date_key": "2025-12-19", "headline": "B", "summary": "", "content_excerpt": "", "symbols": ["AMD"]}, "cid-2"),
         ]
-        with patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call):
+        with patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call), \
+             patch.object(gna, "_scl_guarded", side_effect=_fake_call):
             docs, traces = gna._classify_company_article_chunk(
                 chunk,
                 provider="azure",
@@ -2018,7 +2019,8 @@ class GraphHardeningTests(unittest.TestCase):
                 new=[gna._TrendNewRecord(id="ai_spend", name="AI Spend", desc="AI capex rising", dir="bullish", str=0.8)]
             ),
         )
-        with patch.object(gna, "call_structured_llm_by_provider", return_value=payload):
+        with patch.object(gna, "call_structured_llm_by_provider", return_value=payload), \
+             patch.object(gna, "_scl_guarded", return_value=payload):
             sentiment, future, cancel, trends = gna._enhanced_sentiment_from_llm(
                 [{"headline": "Apple launches a new flagship device"}],
                 "gemini",
@@ -2047,7 +2049,8 @@ class GraphHardeningTests(unittest.TestCase):
                 )
             ]
         )
-        with patch.object(gna, "call_structured_llm_by_provider", return_value=payload):
+        with patch.object(gna, "call_structured_llm_by_provider", return_value=payload), \
+             patch.object(gna, "_scl_guarded", return_value=payload):
             signals = gna._classify_macro_news_via_llm(
                 [{"headline": "Oil prices surge after supply shock"}],
                 "deepseek",
@@ -2169,6 +2172,7 @@ class GraphHardeningTests(unittest.TestCase):
             "symbols": ["AAPL"],
         }
         with patch.object(gna, "call_structured_llm_by_provider", return_value=payload), \
+             patch.object(gna, "_scl_guarded", return_value=payload), \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "openai", "effective_model": "gpt-4.1-mini", "ok": True, "usage": {"total_tokens": 111}}):
             rows, traces = gna._classify_company_article_records(
                 [article],
@@ -2215,6 +2219,7 @@ class GraphHardeningTests(unittest.TestCase):
 
         with patch.object(gna, "_to_prompt_payload", return_value="TOON_PAYLOAD") as payload_mock, \
              patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_structured), \
+             patch.object(gna, "_scl_guarded", side_effect=_fake_structured), \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "openai", "effective_model": "gpt-4.1-mini", "ok": True, "usage": {}}):
             gna._classify_company_article_records(
                 [article],
@@ -2565,6 +2570,7 @@ class GraphHardeningTests(unittest.TestCase):
             },
         ]
         with patch.object(gna, "call_structured_llm_by_provider", return_value=payload) as llm_mock, \
+             patch.object(gna, "_scl_guarded", return_value=payload) as llm_mock, \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "openai", "effective_model": "gpt-4.1-mini", "ok": True, "usage": {"total_tokens": 222}}):
             rows, traces = gna._classify_company_article_records(
                 articles,
@@ -2618,6 +2624,7 @@ class GraphHardeningTests(unittest.TestCase):
             return payload
 
         with patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_structured), \
+             patch.object(gna, "_scl_guarded", side_effect=_fake_structured), \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "azure", "effective_model": "Kimi-K2.5", "ok": True, "usage": {"total_tokens": 123}, "raw_json_fallback_used": False}):
             rows, _ = gna._classify_company_article_records(
                 articles,
@@ -2672,6 +2679,7 @@ class GraphHardeningTests(unittest.TestCase):
             return payload
 
         with patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_structured), \
+             patch.object(gna, "_scl_guarded", side_effect=_fake_structured), \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "azure", "effective_model": "Kimi-K2.5", "ok": True, "usage": {"total_tokens": 123}, "raw_json_fallback_used": False}):
             rows, _ = gna._classify_company_article_records(
                 articles,
@@ -2743,6 +2751,7 @@ class GraphHardeningTests(unittest.TestCase):
             },
         ]
         with patch.object(gna, "call_structured_llm_by_provider", return_value=payload) as llm_mock, \
+             patch.object(gna, "_scl_guarded", return_value=payload) as llm_mock, \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "openai", "effective_model": "gpt-4.1-mini", "ok": True, "usage": {"total_tokens": 333}}):
             rows, traces = gna._classify_macro_article_records(
                 articles,
@@ -2797,6 +2806,7 @@ class GraphHardeningTests(unittest.TestCase):
             },
         ]
         with patch.object(gna, "call_structured_llm_by_provider", return_value=payload), \
+             patch.object(gna, "_scl_guarded", return_value=payload), \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "azure", "effective_model": "Kimi-K2.5", "ok": True, "usage": {"total_tokens": 333}}):
             rows, _traces = gna._classify_macro_article_records(
                 articles,
@@ -2931,7 +2941,8 @@ class GraphHardeningTests(unittest.TestCase):
         with patch.object(gna, "_load_active_events_as_of", side_effect=[current_events, current_events]) as load_mock, \
              patch.object(gna, "_derive_event_candidates_from_macro_rows", return_value=candidates), \
              patch.object(gna, "_load_active_event_maintenance_cache_doc", return_value=cache_doc), \
-             patch.object(gna, "call_structured_llm_by_provider") as llm_mock:
+             patch.object(gna, "call_structured_llm_by_provider") as llm_mock, \
+                  patch.object(gna, "_scl_guarded") as llm_mock:
             events, traces = gna._maintain_active_events(
                 object(),
                 config,
@@ -3107,6 +3118,7 @@ class GraphHardeningTests(unittest.TestCase):
              patch.object(gna, "_derive_event_candidates_from_macro_rows", return_value=candidates), \
              patch.object(gna, "_load_active_events_as_of", side_effect=[current_events, reloaded]), \
              patch.object(gna, "call_structured_llm_by_provider", return_value=llm_updates), \
+             patch.object(gna, "_scl_guarded", return_value=llm_updates), \
              patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "openai", "effective_model": "gpt-4.1-mini", "ok": True, "usage": {}}), \
              patch.object(gna, "_r", _FakeR()):
             gna._maintain_active_events(
@@ -4328,7 +4340,8 @@ class GraphHardeningTests(unittest.TestCase):
             ]
         )
         with patch.dict(os.environ, {"GEMINI_API_KEY": "g-key", "KEY": "alpaca-key", "SECRET": "alpaca-secret"}, clear=False), \
-             patch.object(abe, "call_structured_llm_by_provider", return_value=payload):
+             patch.object(abe, "call_structured_llm_by_provider", return_value=payload), \
+             patch.object(abe, "_scl_guarded", return_value=payload):
             strategies = abe._generate_strategies(
                 _FakeClient(),
                 {"provider": "gemini", "model": "gemini-3-flash-preview", "api_key": "g-key"},
@@ -4345,11 +4358,9 @@ class GraphHardeningTests(unittest.TestCase):
         self.assertEqual(14, earnings_sub["config"]["lookahead_days"])
 
     def test_ai_backtest_validate_result_uses_structured_output(self):
-        with patch.object(
-            abe,
-            "call_structured_llm_by_provider",
-            return_value=abe._ValidationDecisionResponse(decision="KEEP", reason="Strong profit with acceptable concentration."),
-        ):
+        _resp = abe._ValidationDecisionResponse(decision="KEEP", reason="Strong profit with acceptable concentration.")
+        with patch.object(abe, "call_structured_llm_by_provider", return_value=_resp), \
+             patch.object(abe, "_scl_guarded", return_value=_resp):
             keep, reason = abe._validate_result_llm(
                 {"pnl": 250.0, "pnl_percent": 12.5, "win_rate_percent": 60.0, "total_trades": 8},
                 {"name": "Test", "strategies": []},
@@ -4359,14 +4370,12 @@ class GraphHardeningTests(unittest.TestCase):
         self.assertIn("Strong profit", reason)
 
     def test_ai_backtest_best_selection_uses_structured_output(self):
-        with patch.object(
-            abe,
-            "call_structured_llm_by_provider",
-            return_value=abe._BestSelectionDecisionResponse(
-                decision="SET_AS_NEW_BEST",
-                reason="Candidate is stronger across the validation stages.",
-            ),
-        ):
+        _resp = abe._BestSelectionDecisionResponse(
+            decision="SET_AS_NEW_BEST",
+            reason="Candidate is stronger across the validation stages.",
+        )
+        with patch.object(abe, "call_structured_llm_by_provider", return_value=_resp), \
+             patch.object(abe, "_scl_guarded", return_value=_resp):
             set_best, reason = abe._decide_new_best_llm(
                 {"name": "Candidate", "strategies": []},
                 400.0,

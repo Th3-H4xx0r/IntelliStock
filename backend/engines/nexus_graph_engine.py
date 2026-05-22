@@ -6965,6 +6965,7 @@ def _phase6_call_hierarchy_validator(
 ):
     from llm_utils import (
         call_structured_llm_by_provider,
+        _call_structured_llm_with_critical_guard as _scl_guarded,
         get_last_structured_llm_call_metadata,
         google_cse_search,
     )
@@ -6986,12 +6987,15 @@ def _phase6_call_hierarchy_validator(
         )
 
     tools = [google_search_tool] if allow_search and GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_ENGINE_ID else None
-    result = call_structured_llm_by_provider(
+    # TODO: thread `config` into _phase6_call_hierarchy_validator to attribute
+    # critical-guard failures back to the originating backtest/instance.
+    result = _scl_guarded(
         provider,
         api_key,
         model,
         prompt,
         output_type,
+        attribution_keys={"call_site": "nexus_graph.phase6_hierarchy_validator"},
         system_prompt=system_prompt,
         tools=tools,
         max_output_tokens=0,
@@ -13129,6 +13133,7 @@ def _llm_validate_controls_edges(
     from pydantic import BaseModel, Field
     from llm_utils import call_gemini_with_grounding, call_llm_by_provider, call_structured_llm_by_provider  # noqa: F401
     from llm_utils import _call_llm_with_critical_guard as _call_llm_guarded
+    from llm_utils import _call_structured_llm_with_critical_guard as _scl_guarded
 
     class _ControlsValidationDecision(BaseModel):
         keep: bool
@@ -13177,12 +13182,15 @@ def _llm_validate_controls_edges(
         return results
 
     def _structured_validate(prompt_text: str, expected_len: int) -> list[bool] | None:
-        structured = call_structured_llm_by_provider(
+        # TODO: thread `config` into _llm_validate_controls_edges to attribute
+        # critical-guard failures back to the originating backtest/instance.
+        structured = _scl_guarded(
             provider,
             api_key,
             model,
             prompt_text,
             _ControlsValidationBatch,
+            attribution_keys={"call_site": "nexus_graph.controls_edges_validation"},
             system_prompt=(
                 "Validate current corporate control relationships. "
                 "Return a structured object with a single `results` list containing keep=true/false items in input order."
@@ -13901,6 +13909,7 @@ def _llm_resolve_patent_assignees(
     import threading
     from pydantic import BaseModel, Field
     from llm_utils import call_structured_llm_by_provider
+    from llm_utils import _call_structured_llm_with_critical_guard as _scl_guarded
 
     class _PatentAssigneeResolutionItem(BaseModel):
         assignee_name: str
@@ -14048,12 +14057,15 @@ def _llm_resolve_patent_assignees(
         )
         prompt_chars = len(prompt)
         call_start = time.monotonic()
-        structured = call_structured_llm_by_provider(
+        # TODO: thread `config` into _llm_resolve_patent_assignees to attribute
+        # critical-guard failures back to the originating backtest/instance.
+        structured = _scl_guarded(
             provider,
             api_key,
             model,
             prompt,
             _PatentAssigneeBatchResolution,
+            attribution_keys={"call_site": "nexus_graph.patent_assignee_resolution"},
             system_prompt=(
                 "You map patent assignee organizations to public-company stock tickers. "
                 "Return a structured object with a single `results` list. "

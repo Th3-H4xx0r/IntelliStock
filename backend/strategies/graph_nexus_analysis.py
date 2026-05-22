@@ -80,6 +80,7 @@ try:
     from llm_utils import (
         call_llm_by_provider,
         call_structured_llm_by_provider,
+        _call_structured_llm_with_critical_guard as _scl_guarded,
         configure_llm_prompt_cache,
         get_last_structured_llm_call_metadata,
         get_prompt_cache_stats,
@@ -95,6 +96,7 @@ except ImportError:
     from llm_utils import (
         call_llm_by_provider,
         call_structured_llm_by_provider,
+        _call_structured_llm_with_critical_guard as _scl_guarded,
         configure_llm_prompt_cache,
         get_last_structured_llm_call_metadata,
         get_prompt_cache_stats,
@@ -2824,12 +2826,17 @@ def _build_learning_context(
         "Return a numbered list of patterns (plain text, no JSON needed)."
     )
     try:
-        summary_resp = call_structured_llm_by_provider(
+        summary_resp = _scl_guarded(
             llm_provider,
             llm_key,
             llm_model,
             prompt,
             _LearningSummaryResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "learning_summary",
+            },
             system_prompt=(
                 "Return a concise structured summary of learned market outcome patterns. "
                 "Do not include markdown or commentary outside the summary field."
@@ -2853,9 +2860,14 @@ def _build_learning_context(
                     "2. Defense stocks rise +1.5% on government contract news\n\n"
                     "Return ONLY the numbered list, no other text."
                 )
-                _retry_resp = call_structured_llm_by_provider(
+                _retry_resp = _scl_guarded(
                     llm_provider, llm_key, llm_model, _retry_prompt,
                     _LearningSummaryResponse,
+                    attribution_keys={
+                        "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                        "instance_id": (config or {}).get("_telemetry_instance_id"),
+                        "call_site": "learning_summary_retry",
+                    },
                     system_prompt="Return a numbered list of market patterns in the summary field.",
                     max_output_tokens=0, retries=1, output_retries=1,
                     provider_config=provider_config,
@@ -3231,12 +3243,17 @@ def _classify_company_article_chunk(
         strategy="GraphNexusAnalysis",
         call_site="company_classification",
     ):
-        raw = call_structured_llm_by_provider(
+        raw = _scl_guarded(
             provider,
             api_key,
             model,
             prompt,
             _CompanyArticleBatchResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "company_article",
+            },
             system_prompt=system_prompt,
             retries=2,
             output_retries=output_retries,
@@ -3283,12 +3300,17 @@ def _classify_company_article_chunk(
             strategy="GraphNexusAnalysis",
             call_site="company_classification",
         ):
-            raw = call_structured_llm_by_provider(
+            raw = _scl_guarded(
                 provider,
                 api_key,
                 model,
                 single_prompt,
                 _CompanyArticleClassificationResponse,
+                attribution_keys={
+                    "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                    "instance_id": (config or {}).get("_telemetry_instance_id"),
+                    "call_site": "company_article_single",
+                },
                 system_prompt=system_prompt,
                 retries=2,
                 output_retries=output_retries,
@@ -3440,12 +3462,17 @@ def _classify_macro_article_chunk(
         strategy="GraphNexusAnalysis",
         call_site="macro_classification",
     ):
-        raw = call_structured_llm_by_provider(
+        raw = _scl_guarded(
             provider,
             api_key,
             model,
             prompt,
             _MacroArticleBatchResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "macro_article",
+            },
             system_prompt=system_prompt,
             retries=2,
             output_retries=output_retries,
@@ -3501,12 +3528,17 @@ def _classify_macro_article_chunk(
             strategy="GraphNexusAnalysis",
             call_site="macro_classification",
         ):
-            raw = call_structured_llm_by_provider(
+            raw = _scl_guarded(
                 provider,
                 api_key,
                 model,
                 single_prompt,
                 _MacroArticleClassificationResponse,
+                attribution_keys={
+                    "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                    "instance_id": (config or {}).get("_telemetry_instance_id"),
+                    "call_site": "macro_article_single",
+                },
                 system_prompt=system_prompt,
                 retries=2,
                 output_retries=output_retries,
@@ -4334,9 +4366,14 @@ def _maintain_active_events(
                     strategy="GraphNexusAnalysis",
                     call_site="active_event_maintenance",
                 ):
-                    r = call_structured_llm_by_provider(
+                    r = _scl_guarded(
                         provider, api_key, model, batch_prompt,
                         _ActiveEventMaintenanceResponse,
+                        attribution_keys={
+                            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                            "instance_id": (config or {}).get("_telemetry_instance_id"),
+                            "call_site": "event_maintenance",
+                        },
                         system_prompt=system_prompt,
                         # 2026-05-15: 1024 -> 4096 -> 8192 -> 0 (uncapped).
                         # Each ceiling was insufficient because reasoning
@@ -13090,12 +13127,15 @@ def _structured_hierarchy_validation(prompt: str, output_type: Any, *, system_pr
         )
 
     tools = [google_search_tool] if allow_search else None
-    raw = call_structured_llm_by_provider(
+    # TODO: thread `config` into this helper to attribute critical-guard
+    # failures back to the originating backtest/instance.
+    raw = _scl_guarded(
         provider,
         api_key,
         model,
         prompt,
         output_type,
+        attribution_keys={"call_site": "structured_hierarchy_validation"},
         system_prompt=system_prompt,
         tools=tools,
         max_output_tokens=0,
@@ -13913,12 +13953,17 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             strategy="GraphNexusAnalysis",
             call_site="sentiment",
         ):
-            raw = call_structured_llm_by_provider(
+            raw = _scl_guarded(
                 provider,
                 api_key,
                 model,
                 prompt,
                 _EnhancedSentimentResponse,
+                attribution_keys={
+                    "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                    "instance_id": (config or {}).get("_telemetry_instance_id"),
+                    "call_site": "sentiment",
+                },
                 system_prompt=(
                     "Return only structured financial headline classifications as minimal JSON. "
                     "Use the short alias keys (t, s, e, sp, d, r). "
@@ -14161,12 +14206,15 @@ def _classify_macro_news_via_llm(
             "Keep reason under 8 words. Max 3 sectors per signal. "
             "Minimize total output tokens. No markdown or prose."
         )
-        raw = call_structured_llm_by_provider(
+        # TODO: thread `config` into _classify_macro_news_via_llm to attribute
+        # critical-guard failures back to the originating backtest/instance.
+        raw = _scl_guarded(
             provider,
             api_key,
             model,
             prompt,
             _MacroSignalsResponse,
+            attribution_keys={"call_site": "macro_news_classification"},
             system_prompt=macro_batch_sys,
             max_output_tokens=0,
             retries=2,
@@ -14415,12 +14463,15 @@ def _classify_macro_with_tools(
     )
 
     try:
-        raw = call_structured_llm_by_provider(
+        # TODO: thread `config` into _classify_macro_with_tools to attribute
+        # critical-guard failures back to the originating backtest/instance.
+        raw = _scl_guarded(
             "gemini",
             api_key,
             model,
             tool_prompt,
             _MacroSignalsResponse,
+            attribution_keys={"call_site": "macro_news_tools_fallback"},
             system_prompt=(
                 "Use the available Neo4j tools when needed, then return only structured macro signals. "
                 "Do not include markdown or explanatory prose outside the schema."
@@ -17600,12 +17651,17 @@ def _apply_trade_overlay(
         "Return only the bounded overlay decision."
     )
     _overlay_timeout = int(config.get("overlay_llm_timeout_sec", 60) or 60)
-    raw = call_structured_llm_by_provider(
+    raw = _scl_guarded(
         provider,
         api_key,
         model,
         prompt,
         _TradeOverlayResponse,
+        attribution_keys={
+            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+            "instance_id": (config or {}).get("_telemetry_instance_id"),
+            "call_site": "overlay",
+        },
         system_prompt=system_prompt,
         max_output_tokens=0,
         timeout_sec=_overlay_timeout,
@@ -17723,12 +17779,17 @@ def _apply_etf_trade_overlay(
         'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"],"ra":"Gold trend accelerating on Fed pivot"}\n'
         "Return only the bounded overlay decision."
     )
-    raw = call_structured_llm_by_provider(
+    raw = _scl_guarded(
         provider,
         api_key,
         model,
         prompt,
         _TradeOverlayResponse,
+        attribution_keys={
+            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+            "instance_id": (config or {}).get("_telemetry_instance_id"),
+            "call_site": "overlay_etf",
+        },
         system_prompt=system_prompt,
         max_output_tokens=0,
         retries=2,

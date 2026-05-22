@@ -6,12 +6,29 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_state():
+    import sys
     from backend import llm_critical_guard, llm_utils
     importlib.reload(llm_critical_guard)
     # Don't reload llm_utils (it's huge & has heavy import side effects);
     # just clear the per-thread stash.
     if hasattr(llm_utils, "_LAST_HTTP_PER_THREAD"):
         llm_utils._LAST_HTTP_PER_THREAD.clear()
+    # _call_llm_with_critical_guard imports llm_critical_guard via the bare
+    # module name. If an earlier test file (test_nexus_fixes.py etc.) caused
+    # the module to be loaded under the bare alias, it's a DISTINCT module
+    # object with its own LLMCriticalFailure class identity — pytest.raises
+    # on backend.llm_critical_guard.LLMCriticalFailure won't match the
+    # exception the wrapper raises. Force the bare alias to point at the
+    # just-reloaded backend module so both aliases share the same class.
+    sys.modules["llm_critical_guard"] = llm_critical_guard
+    # Defensive reset in case any other reference is still live.
+    for _alias in ("llm_critical_guard", "backend.llm_critical_guard"):
+        _mod = sys.modules.get(_alias)
+        if _mod is not None and hasattr(_mod, "reset_state"):
+            try:
+                _mod.reset_state()
+            except Exception:
+                pass
     yield
 
 
@@ -112,3 +129,79 @@ def test_idempotent_after_first_raise(monkeypatch):
     result = _call_llm_with_critical_guard("azure", "k", "m", "p", attribution_keys={})
     # Result is whatever the underlying provider returned (empty here)
     assert result == ""
+
+
+# ----------------------------------------------------------------------------
+# Structured-JSON path (_call_structured_llm_with_critical_guard) tests.
+# Mirrors the plain-text path above but drives the wrapper that
+# graph_nexus_analysis.py / nexus_analyst_panel.py actually use.
+# ----------------------------------------------------------------------------
+
+
+def test_structured_critical_then_success_no_raise(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    from backend import llm_utils
+
+    seq = iter([
+        ("raw_json_preferred=HTTP 403: temporarily blocked", False),
+        ("raw_json_preferred=HTTP 403: temporarily blocked", False),
+        ("", True),  # ok=True
+    ])
+
+    def fake_call(provider, api_key, model, prompt, output_type, **kw):
+        err, ok = next(seq)
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {"ok": ok, "error": err, "provider": provider}
+        return {"result": "OK"} if ok else None
+
+    monkeypatch.setattr(llm_utils, "call_structured_llm_by_provider", fake_call)
+    result = llm_utils._call_structured_llm_with_critical_guard(
+        "azure", "k", "gpt-5.4-mini", "p", dict,
+        attribution_keys={"backtest_id": "bt9"},
+    )
+    assert result == {"result": "OK"}
+
+
+def test_structured_critical_four_attempts_raises(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    from backend import llm_utils
+    from backend.llm_critical_guard import LLMCriticalFailure
+
+    def fake_call(*a, **kw):
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {
+            "ok": False,
+            "error": "raw_json_preferred=HTTP 403: Your resource has been temporarily blocked",
+            "provider": "azure",
+        }
+        return None
+
+    monkeypatch.setattr(llm_utils, "call_structured_llm_by_provider", fake_call)
+    with pytest.raises(LLMCriticalFailure) as excinfo:
+        llm_utils._call_structured_llm_with_critical_guard(
+            "azure", "k", "gpt-5.4-mini", "p", dict,
+            attribution_keys={"backtest_id": "357345"},
+        )
+    assert excinfo.value.class_tag == "azure_403_blocked"
+    assert len(excinfo.value.attempts) == 4
+
+
+def test_structured_non_critical_no_retry(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    from backend import llm_utils
+
+    calls = {"n": 0}
+
+    def fake_call(*a, **kw):
+        calls["n"] += 1
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {
+            "ok": False,
+            "error": "raw_json_preferred=Skeleton output: model=foo",  # no HTTP status, non-critical
+            "provider": "azure",
+        }
+        return None
+
+    monkeypatch.setattr(llm_utils, "call_structured_llm_by_provider", fake_call)
+    result = llm_utils._call_structured_llm_with_critical_guard(
+        "azure", "k", "m", "p", dict, attribution_keys={},
+    )
+    assert result is None
+    assert calls["n"] == 1  # no retries
