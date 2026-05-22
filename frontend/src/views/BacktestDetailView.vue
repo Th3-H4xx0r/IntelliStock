@@ -3,6 +3,7 @@ import { ref, shallowRef, computed, watch, onMounted, onUnmounted, nextTick } fr
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
 import VueApexCharts from 'vue3-apexcharts'
+import BacktestLLMPauseBanner from '../components/BacktestLLMPauseBanner.vue'
 import { getToken } from '../utils/auth.js'
 
 const route   = useRoute()
@@ -128,7 +129,7 @@ async function initPage() {
   loading.value = false
   loadStrategyFromSummary()
   const s = (summary.value?.status || '').toLowerCase()
-  if (['running', 'queued', 'pending', 'paused'].includes(s)) {
+  if (['running', 'queued', 'pending', 'paused', 'paused_llm_critical'].includes(s)) {
     await fetchStatus()
     startPolling()
   }
@@ -191,15 +192,16 @@ function pnlClass(v) {
 }
 
 const statusColors = {
-  completed: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-  finished:  'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-  running:   'text-sky-400 bg-sky-500/10 border-sky-500/20',
-  queued:    'text-amber-400 bg-amber-500/10 border-amber-500/20',
-  paused:    'text-violet-400 bg-violet-500/10 border-violet-500/20',
-  stopped:   'text-red-400 bg-red-500/10 border-red-500/20',
-  cancelled: 'text-red-400 bg-red-500/10 border-red-500/20',
-  error:     'text-red-400 bg-red-500/10 border-red-500/20',
-  failed:    'text-red-400 bg-red-500/10 border-red-500/20',
+  completed:            'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+  finished:             'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+  running:              'text-sky-400 bg-sky-500/10 border-sky-500/20',
+  queued:               'text-amber-400 bg-amber-500/10 border-amber-500/20',
+  paused:               'text-violet-400 bg-violet-500/10 border-violet-500/20',
+  paused_llm_critical:  'text-amber-400 bg-amber-500/10 border-amber-500/20',
+  stopped:              'text-red-400 bg-red-500/10 border-red-500/20',
+  cancelled:            'text-red-400 bg-red-500/10 border-red-500/20',
+  error:                'text-red-400 bg-red-500/10 border-red-500/20',
+  failed:               'text-red-400 bg-red-500/10 border-red-500/20',
 }
 
 // ── Backtest controls (stop / pause / resume / rerun) ─────────────────────────
@@ -833,6 +835,9 @@ function onLogScroll(e) {
             </div>
           </div>
         </div>
+
+        <!-- ── LLM-critical pause banner ────────────────────────────────────── -->
+        <BacktestLLMPauseBanner :summary="summary" />
 
         <!-- ── Nexus Lookback Training Banner ───────────────────────────────── -->
         <div
