@@ -175,11 +175,13 @@ def test_persist_backtest_snapshot_honors_skip_flag(monkeypatch):
                 start_date="2026-05-01",
                 end_date="2026-05-22",
             )
-            # Guard returns None; normal early-out returns False; success
-            # returns True. Only the guard short-circuits with None.
-            assert result is None, (
+            # Guard returns False (matches the function's declared bool
+            # return type); success returns True. The guard short-circuits
+            # with False so callers doing `if ok is False:` correctly see
+            # a non-success outcome.
+            assert result is False, (
                 "Guard didn't fire — persist_backtest_snapshot returned "
-                f"{result!r} (expected None). DB stubs would have raised if "
+                f"{result!r} (expected False). DB stubs would have raised if "
                 "the function had progressed past the guard."
             )
         finally:

@@ -444,7 +444,20 @@ def persist_backtest_snapshot(
                 )
             except Exception:
                 pass
-            return None
+            return False
+    except ImportError as _scg_import_err:
+        # Log loudly when the critical-abort guard is missing — mid-deploy
+        # state where backtest_critical_abort.py hasn't landed yet would
+        # otherwise silently disable the guard exactly when we need it.
+        try:
+            from intellistock_logger import intellistock_logger
+            intellistock_logger.log(
+                f"persist_backtest_snapshot: critical-abort guard DISARMED "
+                f"(import failed: {_scg_import_err}). Persist will proceed.",
+                "yellow", service="STRATEGY_CACHE_PERSISTENCE",
+            )
+        except Exception:
+            pass
     except Exception:
         pass
 

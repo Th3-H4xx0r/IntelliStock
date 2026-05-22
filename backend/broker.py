@@ -9191,14 +9191,20 @@ while not shutdown_requested:
             current_time = datetime.datetime.now(datetime.timezone.utc)
 
         #time.sleep(0.1)
-    except Exception as loop_err:
+    except BaseException as _outer_err:
         # CRITICAL-GUARD route: route LLMCriticalFailure to the dedicated abort handler
         # BEFORE the generic crash path. The dedicated handler updates BacktestResults
         # with status='aborted_llm_failure' (not the generic crash status), sets
         # _skip_snapshot_persist, and pages Discord with full diagnostics.
+        #
+        # NOTE: outer except is `BaseException` (not `Exception`) because
+        # LLMCriticalFailure inherits from BaseException — this guarantees it
+        # is never accidentally swallowed by an intermediate `except Exception`.
+        # The trade-off is we also catch KeyboardInterrupt/SystemExit here, so
+        # we explicitly re-raise non-Exception cases below.
         try:
             from llm_critical_guard import LLMCriticalFailure
-            _is_llm_critical = isinstance(loop_err, LLMCriticalFailure)
+            _is_llm_critical = isinstance(_outer_err, LLMCriticalFailure)
         except Exception:
             _is_llm_critical = False
 
@@ -9209,21 +9215,42 @@ while not shutdown_requested:
                     _bt_handle(
                         backtest_id=str(_backtest_result_id),
                         instance_id=str(instance_id),
-                        failure=loop_err,
+                        failure=_outer_err,
                     )
                 elif mode == MODE_LIVE:
                     from live_critical_abort import handle as _lv_handle
-                    _lv_handle(instance_id=str(instance_id), failure=loop_err)
+                    _lv_handle(instance_id=str(instance_id), failure=_outer_err)
+                else:
+                    # Defensive: backtest mode but no result_id — log loudly so operator notices.
+                    try:
+                        _log(
+                            "LLM critical fired but _backtest_result_id is None; "
+                            "no BacktestResults update possible",
+                            "red",
+                        )
+                    except Exception:
+                        pass
             except Exception as _abort_err:
                 try:
                     _log(f"critical-guard handler crashed: {_abort_err}", "red")
                 except Exception:
                     pass
             # Distinct exit code so engine knows this was an operator-actionable
-            # LLM failure, not a generic crash.
+            # LLM failure, not a generic crash. Exit code 7 chosen to avoid
+            # collision with argparse pre-check failure (exit 2) and existing
+            # exit codes 0,1,2,3,4,5,6 used elsewhere in broker.py.
             import sys as _sys
-            _sys.exit(2)
+            _sys.exit(7)
 
+        # Not LLM critical — we caught BaseException, so KeyboardInterrupt/
+        # SystemExit also land here. Re-raise non-Exception cases so they
+        # propagate to Python's default handler (preserves Ctrl-C semantics
+        # and explicit sys.exit() codes from downstream code).
+        if not isinstance(_outer_err, Exception):
+            raise
+
+        # Existing generic crash path for normal Exceptions.
+        loop_err = _outer_err
         if mode == MODE_BACKTEST and _backtest_result_id is not None:
             progress_pct_crash = None
             try:
