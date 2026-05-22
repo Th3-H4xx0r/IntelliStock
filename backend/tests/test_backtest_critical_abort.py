@@ -1,4 +1,3 @@
-# backend/tests/test_backtest_critical_abort.py
 import importlib
 import pytest
 from unittest.mock import MagicMock, patch
@@ -6,8 +5,9 @@ from unittest.mock import MagicMock, patch
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    from backend import backtest_critical_abort, llm_critical_guard
+    from backend import backtest_critical_abort, llm_critical_guard, backtest_bar_snapshot
     importlib.reload(llm_critical_guard)
+    importlib.reload(backtest_bar_snapshot)
     importlib.reload(backtest_critical_abort)
     yield
 
@@ -28,168 +28,145 @@ def _make_failure():
     )
 
 
-def test_handle_updates_backtestresults_idempotent():
-    from backend import backtest_critical_abort
-    fake_conn = MagicMock()
-    fake_r = MagicMock()
-
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
-         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None):
-        backtest_critical_abort.handle(
-            backtest_id="357345",
-            instance_id="main",
-            failure=_make_failure(),
-        )
-        # First call -> r.db().table().get().update() should be invoked once
-        assert fake_r.db.called
-        # Second call -> flagged as already-alerted, no second update
-        backtest_critical_abort.handle(
-            backtest_id="357345",
-            instance_id="main",
-            failure=_make_failure(),
-        )
-        assert backtest_critical_abort._already_alerted is True
-
-
-def test_handle_sets_skip_snapshot_persist():
+def test_handle_does_not_exit():
+    """handle() must NOT call sys.exit (the whole point of the redesign)."""
     from backend import backtest_critical_abort
     fake_conn = MagicMock()
     fake_r = MagicMock()
     with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
-         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None):
-        assert backtest_critical_abort._skip_snapshot_persist is False
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=({"x": 1}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore", return_value=None), \
+         patch("sys.exit", side_effect=AssertionError("sys.exit must NOT be called")):
+        # Should complete without raising AssertionError
         backtest_critical_abort.handle(
             backtest_id="357345", instance_id="main", failure=_make_failure(),
         )
-        assert backtest_critical_abort._skip_snapshot_persist is True
 
 
-def test_handle_enqueues_discord():
+def test_handle_calls_snapshot_restore():
+    from backend import backtest_critical_abort
+    mock_restore = MagicMock(return_value=({"strategy_state": "good"}, {"cash": 100}, None))
+    mock_apply = MagicMock()
+    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", mock_restore), \
+         patch.object(backtest_critical_abort, "_apply_restore", mock_apply):
+        backtest_critical_abort.handle(
+            backtest_id="357345", instance_id="main", failure=_make_failure(),
+        )
+    mock_restore.assert_called_once()
+    mock_apply.assert_called_once()
+    # apply must receive the restored values
+    apply_kwargs = mock_apply.call_args.kwargs
+    assert apply_kwargs.get("strategy_caches") == {"strategy_state": "good"}
+    assert apply_kwargs.get("portfolio_emulator") == {"cash": 100}
+
+
+def test_handle_survives_no_snapshot():
+    """If no snapshot was ever captured (critical fires before first bar), pause still works."""
+    from backend import backtest_critical_abort
+    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=None):
+        # Should NOT raise even though restore returned None
+        backtest_critical_abort.handle(
+            backtest_id="357345", instance_id="main", failure=_make_failure(),
+        )
+
+
+def test_handle_writes_paused_true_to_backtestinstances():
+    from backend import backtest_critical_abort
+    fake_conn = MagicMock()
+    fake_r = MagicMock()
+    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
+        backtest_critical_abort.handle(
+            backtest_id="357345", instance_id="main", failure=_make_failure(),
+        )
+    # Verify .table("BacktestInstances").get(357345).update({"paused": True})
+    # was called somewhere in the call chain — inspect mock call args
+    found = False
+    for call in fake_r.db.return_value.table.call_args_list:
+        if call.args and call.args[0] == "BacktestInstances":
+            found = True
+    assert found, "BacktestInstances was never written to"
+
+
+def test_handle_writes_paused_llm_critical_status_with_diagnostic_fields():
+    from backend import backtest_critical_abort
+    fake_conn = MagicMock()
+    fake_r = MagicMock()
+    captured_update = {}
+
+    def _record_update(payload):
+        # Each .update() call in the BacktestResults chain — capture the payload
+        if isinstance(payload, dict) and payload.get("status") == "paused_llm_critical":
+            captured_update.update(payload)
+        return fake_r  # chainable
+
+    fake_r.db.return_value.table.return_value.get.return_value.update.side_effect = _record_update
+
+    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
+        backtest_critical_abort.handle(
+            backtest_id="357345", instance_id="main", failure=_make_failure(),
+        )
+    assert captured_update.get("status") == "paused_llm_critical"
+    assert captured_update.get("pause_reason_tag") == "azure_403_blocked"
+    assert captured_update.get("pause_provider") == "azure"
+    assert captured_update.get("pause_model") == "gpt-5.4-mini-MEDIUM"
+    assert captured_update.get("pause_attempts") == 2
+    assert "pause_sample" in captured_update
+
+
+def test_handle_does_not_set_skip_snapshot_persist():
+    """The old auto-abort behavior set _skip_snapshot_persist=True to prevent
+    Phase 1's end-of-run snapshot from seeding live mode with corrupt state.
+    The new pause behavior does NOT set this flag — the bar will rerun on
+    resume; eventual completion is fine to snapshot."""
+    from backend import backtest_critical_abort
+    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
+        backtest_critical_abort.handle(
+            backtest_id="357345", instance_id="main", failure=_make_failure(),
+        )
+    assert backtest_critical_abort._skip_snapshot_persist is False
+
+
+def test_handle_discord_yellow_pause_styling():
     from backend import backtest_critical_abort
     captured = {}
     def fake_enqueue(channel, content, embed):
         captured["channel"] = channel
         captured["content"] = content
         captured["embed"] = embed
-
     with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
-         patch.object(backtest_critical_abort, "_enqueue_discord", side_effect=fake_enqueue):
+         patch.object(backtest_critical_abort, "_enqueue_discord", side_effect=fake_enqueue), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
         backtest_critical_abort.handle(
             backtest_id="357345", instance_id="main", failure=_make_failure(),
         )
     assert captured["channel"] == "backtests"
-    assert "BACKTEST ABORT" in captured["content"]
-    assert "azure_403_blocked" in captured["content"]
-    embed = captured["embed"]
-    # Required fields
-    field_names = {f["name"] for f in embed["fields"]}
-    assert {"backtest_id", "instance_id", "class", "provider", "model",
-            "attempts", "sample", "next steps"}.issubset(field_names)
+    assert "PAUSED" in captured["content"].upper() or "paused" in captured["content"]
+    assert captured["embed"]["color"] == 0xF1C40F  # yellow
+    assert "paused" in captured["embed"]["title"].lower()
 
 
-def test_handle_truncates_sample_text():
+def test_handle_idempotent():
     from backend import backtest_critical_abort
-    failure = _make_failure()
-    failure.attempts[-1]["body_sample"] = "x" * 2000
-
-    captured = {}
-    def fake_enqueue(channel, content, embed):
-        captured["embed"] = embed
-
+    mock_apply = MagicMock()
     with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
-         patch.object(backtest_critical_abort, "_enqueue_discord", side_effect=fake_enqueue):
-        backtest_critical_abort.handle(
-            backtest_id="357345", instance_id="main", failure=failure,
-        )
-
-    sample_field = next(f for f in captured["embed"]["fields"] if f["name"] == "sample")
-    assert len(sample_field["value"]) <= 600  # 500 + formatting overhead
-
-
-def test_handle_handles_missing_attribution_keys():
-    """If attribution dict is empty, handle still works (uses provided args)."""
-    from backend import backtest_critical_abort
-    failure = _make_failure()
-    failure.attribution = {}
-
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
-         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None):
-        # Should not raise
-        backtest_critical_abort.handle(
-            backtest_id="357345", instance_id="main", failure=failure,
-        )
-
-
-def test_persist_backtest_snapshot_honors_skip_flag(monkeypatch):
-    """When _skip_snapshot_persist is True, persist_backtest_snapshot is a no-op.
-
-    Test kwargs match the actual signature of
-    ``strategy_cache_persistence.persist_backtest_snapshot`` (instance_id,
-    strategy_name, cache, config_hash, module_hash, start_date, end_date);
-    the substantive assertion is that no DB calls happen when the flag is set.
-
-    The guard inside ``persist_backtest_snapshot`` uses a bare import
-    (``from backtest_critical_abort import _skip_snapshot_persist``) because
-    production runs with ``backend/`` on ``sys.path``. Tests run from repo
-    root, so we mirror that here by inserting backend/ on sys.path before
-    flipping the flag.
-    """
-    import os
-    import sys
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    backend_path = os.path.join(repo_root, "backend")
-    sys_path_added = False
-    if backend_path not in sys.path:
-        sys.path.insert(0, backend_path)
-        sys_path_added = True
-    try:
-        # Import the production-import-path module reference (the one the
-        # guard inside persist_backtest_snapshot will resolve to).
-        import backtest_critical_abort as _bca_bare  # noqa: WPS433
-        from backend import strategy_cache_persistence
-        # Also alias via the `backend.` package path so tests that touch the
-        # same module reference stay coherent.
-        from backend import backtest_critical_abort as _bca_pkg
-
-        _bca_bare._skip_snapshot_persist = True
-        _bca_pkg._skip_snapshot_persist = True
-        try:
-            # If guard works, no DB calls happen. Pass stubs that would raise
-            # if they were used.
-            class _ExplodingConn:
-                def __getattr__(self, name):
-                    raise RuntimeError("guard didn't fire — conn was contacted")
-
-            class _ExplodingR:
-                def __getattr__(self, name):
-                    raise RuntimeError("guard didn't fire — r-module was contacted")
-
-            result = strategy_cache_persistence.persist_backtest_snapshot(
-                _ExplodingConn(),
-                _ExplodingR(),
-                instance_id="main",
-                strategy_name="graph_nexus_analysis",
-                cache={"some_key": "some_value"},
-                config_hash="x" * 16,
-                module_hash="y" * 16,
-                start_date="2026-05-01",
-                end_date="2026-05-22",
-            )
-            # Guard returns False (matches the function's declared bool
-            # return type); success returns True. The guard short-circuits
-            # with False so callers doing `if ok is False:` correctly see
-            # a non-success outcome.
-            assert result is False, (
-                "Guard didn't fire — persist_backtest_snapshot returned "
-                f"{result!r} (expected False). DB stubs would have raised if "
-                "the function had progressed past the guard."
-            )
-        finally:
-            _bca_bare._skip_snapshot_persist = False
-            _bca_pkg._skip_snapshot_persist = False
-    finally:
-        if sys_path_added:
-            try:
-                sys.path.remove(backend_path)
-            except ValueError:
-                pass
+         patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
+         patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
+         patch.object(backtest_critical_abort, "_apply_restore", mock_apply):
+        backtest_critical_abort.handle(backtest_id="357345", instance_id="main", failure=_make_failure())
+        backtest_critical_abort.handle(backtest_id="357345", instance_id="main", failure=_make_failure())
+    assert mock_apply.call_count == 1
