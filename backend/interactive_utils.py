@@ -5555,6 +5555,16 @@ def action_summarize_backtest(conn, backtest_id):
         "portfolio_value_low": min(float(h.get("value") or 0) for h in portfolio_value_history) if portfolio_value_history else None,
         "strategy_schema": doc.get("strategy_schema"),
         "strategy_id": doc.get("strategy_id"),
+        "pause_reason_tag":   doc.get("pause_reason_tag"),
+        "pause_reason_text":  doc.get("pause_reason_text"),
+        "pause_provider":     doc.get("pause_provider"),
+        "pause_model":        doc.get("pause_model"),
+        "pause_call_site":    doc.get("pause_call_site"),
+        "pause_attempts":     doc.get("pause_attempts"),
+        "pause_bar_time":     doc.get("pause_bar_time"),
+        "pause_sample":       doc.get("pause_sample"),
+        "paused_at":          doc.get("paused_at"),
+        "resumed_at":         doc.get("resumed_at"),
     }
 
 
