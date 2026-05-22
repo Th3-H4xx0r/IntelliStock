@@ -222,7 +222,27 @@ def main(apply: bool, bid: int, skip_llm_usage: bool, skip_results: bool) -> int
             summary.append(("LLMUsage", matched, deleted, "deleted" if apply else "would_delete"))
 
         # 3. Per-instance state for each resolved instance.
+        # SAFETY: per-instance filters (e.g. instance_id="main", or prefix
+        # "main|") would match LIVE data and other backtests if the resolved
+        # ID is the BARE base ("main") rather than the scoped form
+        # ("main|<scope_id>"). This guards against catastrophic cross-run
+        # deletion when an older backtest pre-dates the scoping feature
+        # (CRITICAL safety bug from the 2026-05-22 bt531126 wipe attempt
+        # which would have deleted 15164 GraphNexusTradeContexts rows
+        # belonging to live + other backtests).
         for iid in instance_ids:
+            if "|" not in iid:
+                print(
+                    f"\n--- SKIPPING per-instance wipes for {iid!r} ---\n"
+                    f"  Reason: bare base instance_id (no '|<scope_id>' suffix).\n"
+                    f"  Wiping per-instance tables by '{iid}' would also delete\n"
+                    f"  LIVE state and other backtests' state. This backtest's\n"
+                    f"  per-instance writes (if any) are commingled with that\n"
+                    f"  shared bucket and must be left in place. Wipe LLMUsage\n"
+                    f"  + BacktestResults only."
+                )
+                summary.append((f"per_instance[{iid}]", 0, 0, "skipped_unscoped"))
+                continue
             print(f"\n--- Per-instance state for {iid} ---")
             for table, criteria in _build_per_instance_targets(iid):
                 if table not in existing:
