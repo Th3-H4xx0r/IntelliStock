@@ -50,6 +50,9 @@ const formDraft = ref({
   reasoningEffort: '',
   cliPath: '',
   extraArgs: '',
+  // Ollama provider config — only used when provider === 'ollama'.
+  ollamaBaseUrl: 'http://localhost:11434',
+  ollamaKeepAlive: '',
   // Optional per-model pricing override ($/1M tokens). null = use
   // backend llm_pricing.yaml defaults.
   inputCostPer1m: null,
@@ -141,6 +144,10 @@ function openEditModal(m) {
     reasoningEffort: m.reasoning_effort || '',
     cliPath: m.cli_path || '',
     extraArgs: m.extra_args || '',
+    // Ollama: hydrate base_url + keep_alive; default base_url when blank
+    // so editing a stored ollama row never lands on an empty picker.
+    ollamaBaseUrl: m.ollama_base_url || 'http://localhost:11434',
+    ollamaKeepAlive: m.ollama_keep_alive || '',
     // Pricing override: row stores snake_case; null/undefined → blank input.
     inputCostPer1m: (m.input_cost_per_1m ?? null),
     outputCostPer1m: (m.output_cost_per_1m ?? null),
@@ -219,9 +226,13 @@ async function submitModel() {
   // For non-CLI providers, also skip the test on edit when no api_key
   // is in the draft (user didn't intend to re-test creds they didn't
   // change). For codex-cli, run the test unconditionally — there is
-  // no api_key gate.
+  // no api_key gate. For ollama, run the test unconditionally too
+  // (local Ollama legitimately has no api_key and we still want
+  // "Test & Save" to actually probe the host).
   const hasKey = !!d.apiKey.trim()
-  const shouldTest = !skipTest && (d.provider === 'codex-cli' || hasKey)
+  const shouldTest = !skipTest && (
+    d.provider === 'codex-cli' || d.provider === 'ollama' || hasKey
+  )
   if (shouldTest) {
     try {
       await _runLlmTest(d)
@@ -266,6 +277,12 @@ async function submitModel() {
       if (d.apiKey.trim()) {
         payload.api_key = d.apiKey.trim()
       }
+    }
+    // Ollama fields — always sent when ollama provider is selected so a
+    // fresh row gets the base_url stored even if it equals the default.
+    if (d.provider === 'ollama') {
+      payload.ollama_base_url = (d.ollamaBaseUrl || '').trim() || 'http://localhost:11434'
+      payload.ollama_keep_alive = (d.ollamaKeepAlive || '').trim() || undefined
     }
 
     // Pricing override ($/1M tokens). Convert camelCase → snake_case and

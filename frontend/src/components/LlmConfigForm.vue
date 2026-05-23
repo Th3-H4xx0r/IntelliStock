@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   LLM_PROVIDER_OPTIONS,
   LLM_REASONING_EFFORT_OPTIONS,
@@ -7,6 +7,7 @@ import {
   CLAUDE_CLI_EFFORT_OPTIONS,
   getLlmProviderLabel,
 } from '../utils/strategyConfig.js'
+import { loadOllamaModels } from '../composables/useOllamaModels.js'
 import CodexCliSetupPanel from './CodexCliSetupPanel.vue'
 
 const props = defineProps({
@@ -31,6 +32,54 @@ const isCliProvider = computed(() =>
   props.draft.provider === 'claude-cli' || props.draft.provider === 'codex-cli'
 )
 
+// ── Ollama-specific state ────────────────────────────────────────────────────
+const ollamaModels = ref([])
+const ollamaListLoading = ref(false)
+const ollamaListError = ref('')
+
+const ollamaCloudHost = computed(() => {
+  const url = String(props.draft?.ollamaBaseUrl || '').trim()
+  if (!url) return false
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host === 'ollama.com' || host.endsWith('.ollama.com')
+  } catch (_) {
+    return false
+  }
+})
+
+async function fetchOllamaModels({ force = false } = {}) {
+  const baseUrl = String(props.draft?.ollamaBaseUrl || '').trim()
+  if (!baseUrl) {
+    ollamaModels.value = []
+    ollamaListError.value = ''
+    return
+  }
+  ollamaListLoading.value = true
+  ollamaListError.value = ''
+  const { models, error } = await loadOllamaModels({
+    baseUrl,
+    apiKey: props.draft?.apiKey || '',
+    force,
+  })
+  ollamaModels.value = models || []
+  ollamaListError.value = error || ''
+  ollamaListLoading.value = false
+}
+
+function refreshOllamaModels() { fetchOllamaModels({ force: true }) }
+
+// Re-fetch the model list when the user changes provider, base_url, or key.
+// Skipping when not on ollama keeps the network footprint scoped.
+watch(
+  () => [props.draft?.provider, props.draft?.ollamaBaseUrl, props.draft?.apiKey],
+  ([provider]) => {
+    if (provider === 'ollama') fetchOllamaModels()
+    else { ollamaModels.value = []; ollamaListError.value = '' }
+  },
+  { immediate: true },
+)
+
 function onProviderChange(value) {
   const next = { ...props.draft, provider: value }
   if (value === 'claude-cli' || value === 'codex-cli') {
@@ -46,6 +95,12 @@ function onProviderChange(value) {
   } else {
     next.cliPath = ''
     next.extraArgs = ''
+  }
+  if (value === 'ollama') {
+    // Default a base URL so the picker can fire immediately. Operators
+    // editing an existing row keep their stored value.
+    if (!next.ollamaBaseUrl) next.ollamaBaseUrl = 'http://localhost:11434'
+    next.reasoningEffort = ''  // model-specific for Ollama, not standard
   }
   emit('update:draft', next)
 }
@@ -130,6 +185,88 @@ function onProviderChange(value) {
       />
     </template>
 
+    <!-- Ollama-specific configuration -->
+    <template v-if="draft.provider === 'ollama'">
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">Ollama Base URL</label>
+        <input
+          :value="draft.ollamaBaseUrl"
+          @input="update('ollamaBaseUrl', $event.target.value)"
+          type="text"
+          :disabled="disabled || readOnly"
+          placeholder="http://localhost:11434 or https://ollama.com/v1"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Local default <span class="font-mono">http://localhost:11434</span> · Ollama Cloud <span class="font-mono">https://ollama.com/v1</span> · or a remote self-hosted host.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">
+          API Key
+          <span v-if="ollamaCloudHost" class="text-amber-400">(required for ollama.com)</span>
+          <span v-else class="text-slate-600">(optional — local Ollama has no auth)</span>
+        </label>
+        <input
+          :value="draft.apiKey"
+          @input="update('apiKey', $event.target.value)"
+          type="password"
+          :disabled="disabled || readOnly"
+          placeholder="Ollama Cloud Bearer token, or leave blank for local"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5 flex items-center justify-between">
+          <span>Pick from installed models</span>
+          <button
+            type="button"
+            @click="refreshOllamaModels"
+            :disabled="disabled || readOnly || ollamaListLoading"
+            class="text-[11px] text-primary hover:underline disabled:opacity-50"
+          >{{ ollamaListLoading ? 'Loading…' : 'Refresh' }}</button>
+        </label>
+        <div v-if="ollamaListError" class="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-300 mb-2">
+          Couldn't reach Ollama at this base URL: {{ ollamaListError }}. Enter the model name manually in the field above.
+        </div>
+        <select
+          v-else
+          :value="draft.model"
+          @change="update('model', $event.target.value)"
+          :disabled="disabled || readOnly || !ollamaModels.length"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+        >
+          <option value="" disabled>{{ ollamaModels.length ? 'Select a model' : 'No models found — install one with `ollama pull <name>`' }}</option>
+          <option v-for="m in ollamaModels" :key="m.name" :value="m.name">
+            {{ m.name }}<template v-if="m.parameter_size"> — {{ m.parameter_size }}</template><template v-if="m.quantization_level"> / {{ m.quantization_level }}</template><template v-if="m.context_length"> · ctx {{ m.context_length }}</template>
+          </option>
+        </select>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          The Model field above is the source of truth — picking from the list just fills it in. Free-text entry works too (useful for cloud-only or just-pulled models).
+        </p>
+      </div>
+
+      <details class="rounded-lg border border-border-subtle bg-[#0f1318] px-3 py-2">
+        <summary class="cursor-pointer text-[11px] text-slate-400">Advanced</summary>
+        <div class="mt-2">
+          <label class="block text-xs font-medium text-slate-400 mb-1.5">Keep Alive</label>
+          <input
+            :value="draft.ollamaKeepAlive"
+            @input="update('ollamaKeepAlive', $event.target.value)"
+            type="text"
+            :disabled="disabled || readOnly"
+            placeholder="5m"
+            class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+          />
+          <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+            How long Ollama keeps the model resident between calls. <span class="font-mono">5m</span> default, <span class="font-mono">60m</span> for hot-paths, <span class="font-mono">-1</span> for never-unload.
+          </p>
+        </div>
+      </details>
+    </template>
+
     <div v-if="['azure', 'openai', 'nvidia', 'claude-cli', 'codex-cli'].includes(draft.provider)">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">Reasoning Effort</label>
       <select
@@ -164,7 +301,9 @@ function onProviderChange(value) {
       </p>
     </div>
 
-    <div v-if="!isCliProvider">
+    <!-- Standard API-key field for non-CLI, non-Ollama providers. -->
+    <!-- Ollama has its own API-key field above (with cloud-required hint). -->
+    <div v-if="!isCliProvider && draft.provider !== 'ollama'">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">
         {{ draft.provider === 'azure' ? 'Azure API Key' : 'API Key' }}
       </label>
