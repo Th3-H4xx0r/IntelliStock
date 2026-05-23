@@ -196,3 +196,28 @@ def test_dispatch_routes_bedrock_to_call_bedrock(monkeypatch):
     assert out == "routed"
     assert called["args"][3]["region"] == "us-east-1"
     assert called["args"][3]["reasoning"] == "low"
+
+
+# ────────────────────────── reasoning maxTokens reconciliation ──────────────
+
+
+def test_call_bedrock_reasoning_bumps_max_tokens(monkeypatch):
+    # Converse requires maxTokens > reasoning budget_tokens; the default 256
+    # would 400 without reconciliation.
+    fake = _FakeConverseClient(response=_ok_converse())
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    llm_utils._call_bedrock("key", "us.anthropic.claude-3-7-sonnet-20250219-v1:0", "ping",
+                            max_output_tokens=256, region="us-east-1", reasoning="high")
+    ic = fake.calls[0]["inferenceConfig"]
+    budget = fake.calls[0]["additionalModelRequestFields"]["reasoning_config"]["budget_tokens"]
+    assert ic["maxTokens"] > budget
+    assert ic["maxTokens"] == budget + 1024
+
+
+def test_call_bedrock_with_tools_reasoning_bumps_max_tokens(monkeypatch):
+    fake = _FakeConverseClient(response=_ok_converse())
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    llm_utils.call_bedrock_with_tools("key", "anthropic.claude-3-7-sonnet-20250219-v1:0", "p", [],
+                                      region="us-east-1", max_output_tokens=1024, reasoning="low")
+    ic = fake.calls[0]["inferenceConfig"]
+    assert ic["maxTokens"] == 1024 + 1024  # budget 1024 + margin

@@ -8,8 +8,10 @@ path in ``_build_pydantic_ai_model``; this module owns
 exception classes and the per-client bearer-token injection.
 
 Auth: Bedrock API key (bearer token), injected per boto3 client via a
-``before-send`` event handler with an UNSIGNED signer — so concurrent clients
+``before-sign`` event handler with an UNSIGNED signer — so concurrent clients
 built with different keys never collide and no AWS credentials are required.
+(``before-sign`` is the idiomatic header-injection hook; with UNSIGNED there is
+no SigV4 step to overwrite the header. Verified at the wire in tests.)
 
 Used by:
   * backend/api/main.py — the ``POST /bedrock/list-models`` endpoint
@@ -60,7 +62,13 @@ _CONNECTION_EXCS = (EndpointConnectionError, BotoConnError, ConnectionError, Tim
 
 
 def _make_bearer_injector(api_key: str):
-    """Return a before-send handler that sets the bearer Authorization header."""
+    """Return a before-sign handler that sets the bearer Authorization header.
+
+    Works for the ``before-sign.<service>`` event (mutable ``AWSRequest``,
+    fires before transmission); with an UNSIGNED signer there is no SigV4 step
+    to clobber the header. The handler tolerates the extra kwargs before-sign
+    passes (signing_name, region_name, request_signer, …) via ``**_kwargs``.
+    """
     token = str(api_key or "").strip()
 
     def _inject(request=None, **_kwargs):
@@ -85,7 +93,7 @@ def _build_client(service: str, api_key: str, region: str, *, timeout_sec: float
     if not region:
         raise BedrockProviderError("Bedrock requires a region (e.g. us-east-1)")
     client = boto3.client(service, region_name=region, config=_client_config(timeout_sec))
-    client.meta.events.register(f"before-send.{service}", _make_bearer_injector(api_key))
+    client.meta.events.register(f"before-sign.{service}", _make_bearer_injector(api_key))
     return client
 
 

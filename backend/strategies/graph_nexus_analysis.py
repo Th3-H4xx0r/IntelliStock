@@ -13162,6 +13162,23 @@ def _hierarchy_llm_config() -> tuple[str, str, str]:
 
 def _hierarchy_llm_provider_config() -> dict[str, Any]:
     provider = (os.environ.get("GRAPH_NEXUS_HIERARCHY_LLM_PROVIDER", "deepseek") or "deepseek").strip().lower()
+    if provider == "bedrock":
+        # Bedrock requires a region — unlike ollama (which defaults to
+        # localhost), _call_bedrock returns "" with no region, so the
+        # env-driven hierarchy provider must supply one.
+        region = (
+            os.environ.get("GRAPH_NEXUS_HIERARCHY_BEDROCK_REGION")
+            or os.environ.get("BEDROCK_REGION")
+            or os.environ.get("AWS_REGION")
+            or ""
+        ).strip()
+        reasoning = (os.environ.get("GRAPH_NEXUS_HIERARCHY_BEDROCK_REASONING") or "").strip().lower()
+        out: dict[str, Any] = {}
+        if region:
+            out["bedrock_region"] = region
+        if reasoning and reasoning != "off":
+            out["bedrock_reasoning"] = reasoning
+        return out
     if provider != "azure":
         return {}
     return {

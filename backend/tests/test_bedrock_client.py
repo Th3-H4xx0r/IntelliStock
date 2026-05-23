@@ -54,7 +54,40 @@ def test_build_runtime_client_is_unsigned_with_region(monkeypatch):
     assert captured["region"] == "us-east-1"
     # UNSIGNED so no AWS creds are needed; bearer header injected via event.
     assert captured["config"].signature_version == bc.botocore.UNSIGNED
-    assert captured["registered"][0].startswith("before-send.bedrock-runtime")
+    assert captured["registered"][0].startswith("before-sign.bedrock-runtime")
+
+
+def test_bearer_header_reaches_the_wire(monkeypatch):
+    """End-to-end mechanism check: patch the real HTTP send and confirm the
+    bearer Authorization header is present on the outgoing request. This
+    validates the event NAME is correct (a wrong event would drop the header)
+    without needing AWS credentials or a network call."""
+    from unittest.mock import patch
+
+    captured = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_send(self, request):
+        captured["headers"] = {k.lower(): v for k, v in dict(request.headers).items()}
+        raise _Stop()
+
+    client = bc.build_runtime_client("KEY-XYZ", "us-east-1")
+    with patch("botocore.httpsession.URLLib3Session.send", fake_send):
+        try:
+            client.converse(
+                modelId="anthropic.claude-3-5-sonnet-20241022-v2:0",
+                messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            )
+        except _Stop:
+            pass
+        except Exception:
+            pass
+    auth = captured.get("headers", {}).get("authorization")
+    if isinstance(auth, bytes):
+        auth = auth.decode()
+    assert auth == "Bearer KEY-XYZ"
 
 
 def test_build_client_requires_region(monkeypatch):

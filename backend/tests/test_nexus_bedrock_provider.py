@@ -49,3 +49,12 @@ def test_role_provider_config_bedrock():
     out = gna._resolve_role_llm_provider_config(cfg, "sentiment")
     assert out["bedrock_region"] == "us-west-2"
     assert out["bedrock_reasoning"] == "high"
+
+
+def test_hierarchy_provider_config_bedrock(monkeypatch):
+    # The env-driven hierarchy fallback must supply a region for bedrock,
+    # otherwise _call_bedrock returns "" (region is required).
+    monkeypatch.setenv("GRAPH_NEXUS_HIERARCHY_LLM_PROVIDER", "bedrock")
+    monkeypatch.setenv("GRAPH_NEXUS_HIERARCHY_BEDROCK_REGION", "us-west-2")
+    cfg = gna._hierarchy_llm_provider_config()
+    assert cfg.get("bedrock_region") == "us-west-2"

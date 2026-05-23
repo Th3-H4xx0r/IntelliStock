@@ -866,14 +866,15 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
         if not region:
             return None
         client = bedrock_client.build_runtime_client(api_key, region)
-        settings = None
-        amrf = _normalize_bedrock_reasoning(resolved.get("bedrock_reasoning"), model)
-        if amrf and BedrockModelSettings is not None:
-            settings = BedrockModelSettings(bedrock_additional_model_requests_fields=amrf)
+        # Extended-thinking (bedrock_reasoning) is intentionally NOT applied on
+        # the structured path: Converse requires budget_tokens < maxTokens, but
+        # structured calls use small max_output_tokens (often 256) where a
+        # >=1024 thinking budget would be invalid and fail the request.
+        # Reasoning applies to the plain + tool-calling paths (which reconcile
+        # maxTokens); structured output runs without an explicit thinking budget.
         return BedrockConverseModel(
             model,
             provider=BedrockProvider(bedrock_client=client),
-            settings=settings,
         )
     if p == "ollama":
         base = str(resolved.get("ollama_base_url")
@@ -5149,10 +5150,17 @@ def _call_bedrock(
     inference_config: dict[str, object] = {}
     if max_output_tokens and int(max_output_tokens) > 0:
         inference_config["maxTokens"] = int(max_output_tokens)
+    amrf = _normalize_bedrock_reasoning(reasoning, model)
+    if amrf:
+        # Converse requires maxTokens > reasoning budget_tokens (maxTokens is
+        # the hard cap covering thinking + the visible answer). Bump it so a
+        # small default max can't invalidate a reasoning request.
+        _budget = int((amrf.get("reasoning_config") or {}).get("budget_tokens") or 0)
+        if _budget:
+            inference_config["maxTokens"] = max(int(inference_config.get("maxTokens") or 0), _budget + 1024)
     converse_kwargs: dict[str, object] = {"modelId": model, "messages": messages}
     if inference_config:
         converse_kwargs["inferenceConfig"] = inference_config
-    amrf = _normalize_bedrock_reasoning(reasoning, model)
     if amrf:
         converse_kwargs["additionalModelRequestFields"] = amrf
     if response_mime_type and "json" in str(response_mime_type).lower():
@@ -5281,16 +5289,24 @@ def call_bedrock_with_tools(
         return {"text": "", "tool_calls": []}
     from botocore.exceptions import ClientError
 
+    inference_config: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        inference_config["maxTokens"] = int(max_output_tokens)
+    amrf = _normalize_bedrock_reasoning(reasoning, model)
+    if amrf:
+        # maxTokens must exceed the reasoning budget (see _call_bedrock).
+        _budget = int((amrf.get("reasoning_config") or {}).get("budget_tokens") or 0)
+        if _budget:
+            inference_config["maxTokens"] = max(int(inference_config.get("maxTokens") or 0), _budget + 1024)
     converse_kwargs: dict[str, object] = {
         "modelId": model,
         "messages": [{"role": "user", "content": [{"text": prompt}]}],
     }
-    if max_output_tokens and int(max_output_tokens) > 0:
-        converse_kwargs["inferenceConfig"] = {"maxTokens": int(max_output_tokens)}
+    if inference_config:
+        converse_kwargs["inferenceConfig"] = inference_config
     specs = _tools_to_bedrock_toolspec(tools or [])
     if specs:
         converse_kwargs["toolConfig"] = {"tools": specs}
-    amrf = _normalize_bedrock_reasoning(reasoning, model)
     if amrf:
         converse_kwargs["additionalModelRequestFields"] = amrf
 
