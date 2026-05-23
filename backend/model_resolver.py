@@ -94,7 +94,16 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
 
         provider = (model_doc.get("provider") or "").strip().lower()
 
-        # Build field mapping: model_doc field → strategy config key
+        # Build field mapping: model_doc field → strategy config key.
+        # ``provider`` and ``api_key`` are ALWAYS overwritten (even with
+        # empty) so a previously-saved stale role entry can't linger.
+        # Without that, switching from Azure → Ollama at this role left
+        # the old Azure api_key in place and the call routed through
+        # the wrong provider via fallback. Other fields preserve the
+        # "only-set-if-non-empty" semantics so non-applicable provider
+        # fields (e.g. azure_endpoint on an Ollama row) don't clobber
+        # legitimate inline values elsewhere.
+        always_overwrite = {"provider", "api_key"}
         field_map = {
             "provider": f"{prefix}llm_provider",
             "model": f"{prefix}llm_model" if prefix else "model_name",
@@ -104,12 +113,25 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
             "azure_openai_endpoint": f"{prefix}azure_openai_endpoint",
             "azure_openai_api_version": f"{prefix}azure_openai_api_version",
             "reasoning_effort": f"{prefix}llm_reasoning_effort",
+            # Ollama-specific propagation. Without these the dispatcher
+            # didn't see the operator's ollama_base_url / keep_alive /
+            # think settings even when the Models row had them — the
+            # strategy fell back to OLLAMA_BASE_URL env (= localhost)
+            # which is wrong for any remote Ollama host.
+            "ollama_base_url": f"{prefix}ollama_base_url",
+            "ollama_keep_alive": f"{prefix}ollama_keep_alive",
+            "ollama_think": f"{prefix}ollama_think",
         }
 
         for doc_field, config_key in field_map.items():
             val = (model_doc.get(doc_field) or "").strip()
             if val:
                 resolved[config_key] = val
+            elif doc_field in always_overwrite:
+                # Empty value from the Models row is meaningful for
+                # provider/api_key — set it explicitly to "" so the
+                # strategy doesn't keep using a stale value.
+                resolved[config_key] = ""
 
         # Azure uses a separate api key field too
         if provider == "azure":

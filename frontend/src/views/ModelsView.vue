@@ -43,6 +43,24 @@ function _prettyJson(value) {
   }
 }
 
+// Render the "Reasoning" cell in the Models table. For Ollama rows we
+// show the ollama_think value (Off/On/Low/Medium/High) because that's
+// what controls reasoning on Ollama models — reasoning_effort is the
+// Azure/OpenAI/NVIDIA field and is not used for Ollama.
+function _reasoningCell(m) {
+  if (m.provider === 'claude-cli' || m.provider === 'codex-cli') return '—'
+  if (m.provider === 'ollama') {
+    const think = String(m.ollama_think || '').trim().toLowerCase()
+    if (!think) return 'Default'
+    if (think === 'true' || think === 'on') return 'On'
+    if (think === 'false' || think === 'off') return 'Off'
+    return think.charAt(0).toUpperCase() + think.slice(1)
+  }
+  const eff = String(m.reasoning_effort || '').trim()
+  if (!eff) return 'Default'
+  return eff.charAt(0).toUpperCase() + eff.slice(1)
+}
+
 const formDraft = ref({
   name: '',
   provider: 'gemini',
@@ -480,7 +498,7 @@ onMounted(fetchModels)
               <td class="px-5 py-3.5 font-medium text-slate-200">{{ m.name }}</td>
               <td class="px-5 py-3.5 text-slate-400">{{ getLlmProviderLabel(m.provider) }}</td>
               <td class="px-5 py-3.5 text-slate-400 font-mono text-xs">{{ m.model }}</td>
-              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : ((m.provider === 'claude-cli' || m.provider === 'codex-cli') ? '—' : 'Default') }}</td>
+              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ _reasoningCell(m) }}</td>
               <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">
                 <template v-if="m.provider === 'claude-cli'">{{ m.cli_path || 'claude' }}</template>
                 <template v-else-if="m.provider === 'codex-cli'">{{ m.cli_path || 'codex' }}</template>

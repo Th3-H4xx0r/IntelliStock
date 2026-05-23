@@ -867,7 +867,29 @@ const llmConfigDraft = ref({
   azureEndpoint: '',
   azureApiVersion: '2024-10-21',
   reasoningEffort: '',
+  // Ollama-specific — used by the Effort cell (Ollama uses ``think``,
+  // not ``reasoning_effort``) and by the runtime resolver to know the
+  // Ollama host the operator picked.
+  ollamaBaseUrl: '',
+  ollamaKeepAlive: '',
+  ollamaThink: '',
 })
+
+// Friendly label for the "Effort" line in the picker — works across
+// reasoning_effort (Azure/OpenAI/NVIDIA) and ollama_think (Ollama).
+function effortLabel(draft) {
+  if (!draft) return 'Default'
+  if (draft.provider === 'ollama') {
+    const v = String(draft.ollamaThink || '').trim().toLowerCase()
+    if (!v) return 'Default'
+    if (v === 'true' || v === 'on') return 'On'
+    if (v === 'false' || v === 'off') return 'Off'
+    return v.charAt(0).toUpperCase() + v.slice(1)
+  }
+  const eff = String(draft.reasoningEffort || '').trim()
+  if (!eff) return 'Default'
+  return eff.charAt(0).toUpperCase() + eff.slice(1)
+}
 const llmConfigTesting = ref(false)
 const llmConfigMsg = ref('')
 const llmConfigOk = ref(false)
@@ -897,6 +919,9 @@ async function openLlmConfigModal(sub, group) {
       llmConfigDraft.value.provider = m.provider || 'gemini'
       llmConfigDraft.value.model = m.model || ''
       llmConfigDraft.value.reasoningEffort = m.reasoning_effort || ''
+      llmConfigDraft.value.ollamaBaseUrl = m.ollama_base_url || ''
+      llmConfigDraft.value.ollamaKeepAlive = m.ollama_keep_alive || ''
+      llmConfigDraft.value.ollamaThink = m.ollama_think || ''
     }
   }
   showLlmConfigModal.value = true
@@ -921,6 +946,9 @@ function onModelSelect() {
     provider: m.provider || 'gemini',
     model: m.model || '',
     reasoningEffort: m.reasoning_effort || '',
+    ollamaBaseUrl: m.ollama_base_url || '',
+    ollamaKeepAlive: m.ollama_keep_alive || '',
+    ollamaThink: m.ollama_think || '',
   }
 }
 
@@ -2150,7 +2178,7 @@ async function submitCreateBacktest() {
               </div>
               <div class="flex items-center gap-2 text-xs">
                 <span class="text-slate-500 w-20 shrink-0">Effort</span>
-                <span class="text-slate-200">{{ llmConfigDraft.reasoningEffort ? llmConfigDraft.reasoningEffort.charAt(0).toUpperCase() + llmConfigDraft.reasoningEffort.slice(1) : 'Default' }}</span>
+                <span class="text-slate-200">{{ effortLabel(llmConfigDraft) }}</span>
               </div>
             </div>
 
