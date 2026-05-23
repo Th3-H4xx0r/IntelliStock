@@ -124,6 +124,55 @@ def test_compute_cost_from_yaml():
     assert cost["cost_source"] == "yaml"
 
 
+def test_record_applies_override_by_provider_model_without_model_id():
+    """The per-model pricing override must apply even when the call site did
+    not thread the Models-row id (the common plain/raw-json path, where
+    model_id is None). The override lookup is passed provider+model so it can
+    fall back to a (provider, model) match."""
+    import llm_telemetry as t
+
+    seen = {}
+
+    def fake_lookup(model_id, provider=None, model=None):
+        seen["args"] = (model_id, provider, model)
+        if provider == "bedrock" and model == "moonshotai.kimi-k2.5":
+            return {"input_cost_per_1m": 0.6, "output_cost_per_1m": 3.0}
+        return None
+
+    t.configure(db_conn_factory=lambda: None, enabled=True, models_override_lookup=fake_lookup)
+    try:
+        t.record_llm_call(
+            provider="bedrock", model="moonshotai.kimi-k2.5",
+            usage={"input_tokens": 1_000_000, "output_tokens": 1_000_000},
+            model_id=None,
+        )
+        # Lookup received provider+model despite model_id being None.
+        assert seen.get("args") == (None, "bedrock", "moonshotai.kimi-k2.5")
+        row = t.get_recent_calls(1)[0]
+        assert row["cost_source"] == "models_override"
+        assert row["total_cost_usd"] == pytest.approx(3.6)  # 1M*0.6/1M + 1M*3.0/1M
+    finally:
+        t.configure(enabled=False)
+
+
+def test_record_back_compat_single_arg_override_lookup():
+    """A legacy single-arg (model_id only) lookup must not raise."""
+    import llm_telemetry as t
+
+    def legacy_lookup(model_id):
+        return {"input_cost_per_1m": 1.0} if model_id == "row-1" else None
+
+    t.configure(db_conn_factory=lambda: None, enabled=True, models_override_lookup=legacy_lookup)
+    try:
+        t.record_llm_call(provider="openai", model="gpt-x",
+                          usage={"input_tokens": 1_000_000}, model_id="row-1")
+        row = t.get_recent_calls(1)[0]
+        assert row["cost_source"] == "models_override"
+        assert row["total_cost_usd"] == pytest.approx(1.0)
+    finally:
+        t.configure(enabled=False)
+
+
 def test_compute_cost_models_table_override():
     from llm_telemetry import compute_cost
     pricing = {"foo-model": {"input_per_1m": 5.0, "output_per_1m": 10.0}}

@@ -255,26 +255,47 @@ def _startup_init_telemetry():
             # timeout to avoid half-open hangs.
             return _r_iu.connect(host=_RDB_HOST, port=_RDB_PORT, timeout=10)
 
-        def _models_override_lookup(model_id):
-            """Return any cost-override fields set on the Models row for
-            ``model_id``, else None. Used by the cost computer to prefer
-            user-set per-model pricing over the YAML defaults."""
-            if not model_id:
-                return None
+        _override_pm_cache = {}  # (provider, model) -> (ts, override|None)
+
+        def _models_override_lookup(model_id, provider=None, model=None):
+            """Return any cost-override fields set on a Models row, else None.
+            Prefers an exact ``model_id`` match; falls back to a
+            (provider, model) match so per-model pricing applies even when the
+            call site didn't thread the Models-row id (model_id is None on the
+            plain / raw-json structured paths). Used by the cost computer to
+            prefer user-set per-model pricing over the YAML defaults."""
+            keys = (
+                "input_cost_per_1m",
+                "output_cost_per_1m",
+                "cache_creation_cost_per_1m",
+                "cache_read_cost_per_1m",
+            )
+
+            def _extract(row):
+                if not row:
+                    return None
+                out = {k: row.get(k) for k in keys if row.get(k) is not None}
+                return out or None
+
             conn = None
             try:
                 conn = _conn_factory()
-                row = _r_iu.db("IntelliStock").table("Models").get(model_id).run(conn)
-                if not row:
-                    return None
-                keys = (
-                    "input_cost_per_1m",
-                    "output_cost_per_1m",
-                    "cache_creation_cost_per_1m",
-                    "cache_read_cost_per_1m",
-                )
-                out = {k: row.get(k) for k in keys if row.get(k) is not None}
-                return out or None
+                models = _r_iu.db("IntelliStock").table("Models")
+                if model_id:
+                    res = _extract(models.get(model_id).run(conn))
+                    if res is not None:
+                        return res
+                if provider and model:
+                    ck = (str(provider), str(model))
+                    hit = _override_pm_cache.get(ck)
+                    if hit and (time.time() - hit[0]) < 60.0:
+                        return hit[1]
+                    matches = list(models.filter({"provider": provider, "model": model}).run(conn))
+                    chosen = next((m for m in matches if _extract(m) is not None), None)
+                    res = _extract(chosen)
+                    _override_pm_cache[ck] = (time.time(), res)
+                    return res
+                return None
             except Exception:
                 return None
             finally:

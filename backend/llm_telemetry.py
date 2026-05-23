@@ -206,7 +206,7 @@ _state = {
     "max_buffer_hard_cap": 5000,
     "pricing_yaml": {},
     "pricing_yaml_path": "backend/llm_pricing.yaml",
-    "models_override_lookup": None,  # Optional[Callable[[str], Optional[dict]]]
+    "models_override_lookup": None,  # Optional[Callable[(model_id, provider, model) -> Optional[dict]]] (legacy single-arg still supported)
     "write_errors_24h": 0,
     "last_flush_ts": 0,
     "flusher_thread": None,
@@ -346,9 +346,21 @@ def record_llm_call(
         # Cost computation
         override_lookup = _state.get("models_override_lookup")
         models_override = None
-        if override_lookup is not None and model_id:
+        if override_lookup is not None:
             try:
-                models_override = override_lookup(model_id)
+                # Pass provider+model so the lookup can fall back to a
+                # (provider, model) match when the call site didn't thread the
+                # Models-row id (model_id is None on the plain / raw-json
+                # structured paths — the common case). Without this, per-model
+                # price overrides never apply and cost falls back to the YAML
+                # or "unknown".
+                models_override = override_lookup(model_id, provider=provider, model=model)
+            except TypeError:
+                # Back-compat: a legacy single-arg (model_id only) lookup.
+                try:
+                    models_override = override_lookup(model_id) if model_id else None
+                except Exception:
+                    models_override = None
             except Exception:
                 models_override = None
         cost = compute_cost(

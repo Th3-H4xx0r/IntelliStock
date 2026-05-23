@@ -1727,23 +1727,48 @@ def _init_llm_telemetry() -> None:
     try:
         import llm_telemetry
 
-        def _models_override_lookup(model_id):
-            if not model_id:
-                return None
+        _override_pm_cache: dict = {}  # (provider, model) -> (ts, override|None)
+
+        def _models_override_lookup(model_id, provider=None, model=None):
+            keys = (
+                "input_cost_per_1m",
+                "output_cost_per_1m",
+                "cache_creation_cost_per_1m",
+                "cache_read_cost_per_1m",
+            )
+
+            def _extract(row):
+                if not row:
+                    return None
+                out = {key: row.get(key) for key in keys if row.get(key) is not None}
+                return out or None
+
             conn = None
             try:
                 conn = get_conn()
-                row = r.db(DB_NAME).table("Models").get(model_id).run(conn)
-                if not row:
-                    return None
-                keys = (
-                    "input_cost_per_1m",
-                    "output_cost_per_1m",
-                    "cache_creation_cost_per_1m",
-                    "cache_read_cost_per_1m",
-                )
-                out = {key: row.get(key) for key in keys if row.get(key) is not None}
-                return out or None
+                if model_id:
+                    res = _extract(r.db(DB_NAME).table("Models").get(model_id).run(conn))
+                    if res is not None:
+                        return res
+                # Fall back to a (provider, model) match so per-model price
+                # overrides apply even when the call site didn't thread the
+                # Models-row id (model_id is None on the plain / raw-json
+                # structured paths). Cached briefly — Models is tiny but this
+                # runs per recorded call.
+                if provider and model:
+                    ck = (str(provider), str(model))
+                    hit = _override_pm_cache.get(ck)
+                    if hit and (time.time() - hit[0]) < 60.0:
+                        return hit[1]
+                    matches = list(
+                        r.db(DB_NAME).table("Models")
+                        .filter({"provider": provider, "model": model}).run(conn)
+                    )
+                    chosen = next((m for m in matches if _extract(m) is not None), None)
+                    res = _extract(chosen)
+                    _override_pm_cache[ck] = (time.time(), res)
+                    return res
+                return None
             except Exception:
                 return None
             finally:
