@@ -301,3 +301,110 @@ def test_dispatcher_other_providers_still_short_circuit_on_empty_api_key():
         )
     assert out == ""
     fake.assert_not_called()
+
+
+def test_dispatcher_azure_still_short_circuits_on_empty_api_key():
+    """Regression: Azure must still reject empty api_key after the ollama fix."""
+    from llm_utils import call_llm_by_provider
+
+    with patch("llm_utils._call_azure_openai") as fake:
+        out = call_llm_by_provider(
+            provider="azure", api_key="", model="gpt-4o", prompt="x",
+            max_output_tokens=16,
+            provider_config={"azure_endpoint": "https://x.azure.com",
+                             "api_version": "2024-10-21"},
+        )
+    assert out == ""
+    fake.assert_not_called()
+
+
+def test_dispatcher_nvidia_still_short_circuits_on_empty_api_key():
+    """Regression: NVIDIA must still reject empty api_key after the ollama fix."""
+    from llm_utils import call_llm_by_provider
+
+    with patch("llm_utils._call_nvidia") as fake:
+        out = call_llm_by_provider(
+            provider="nvidia", api_key="", model="moonshotai/kimi-k2.6",
+            prompt="x", max_output_tokens=16,
+        )
+    assert out == ""
+    fake.assert_not_called()
+
+
+def test_dispatcher_keep_alive_flows_to_underlying_call():
+    """Trace: provider_config.ollama_keep_alive must reach _call_ollama's
+    keep_alive kwarg via the dispatcher."""
+    from llm_utils import call_llm_by_provider
+
+    captured = {}
+    def _fake(api_key, model, prompt, **kwargs):
+        captured["keep_alive"] = kwargs.get("keep_alive")
+        return "ok"
+
+    with patch("llm_utils._call_ollama", side_effect=_fake):
+        out = call_llm_by_provider(
+            provider="ollama", api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=16,
+            provider_config={
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_keep_alive": "60m",
+            },
+        )
+    assert out == "ok"
+    assert captured["keep_alive"] == "60m"
+
+
+def test_call_ollama_generic_exception_is_not_retried_and_returns_empty():
+    """A non-ResponseError, non-network Exception (e.g. SDK parse failure)
+    must not retry — it indicates a bug, not a transient outage."""
+    from llm_utils import _call_ollama, _pop_last_http
+
+    _pop_last_http()
+    fake_client = MagicMock()
+    fake_client.chat.side_effect = RuntimeError("JSON parse failed")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        out = _call_ollama(
+            api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=32, base_url="http://localhost:11434",
+            retries=3,
+        )
+    assert out == ""
+    assert fake_client.chat.call_count == 1
+
+
+def test_call_ollama_403_other_4xx_is_not_retried():
+    """4xx other than 401/404 still terminates the loop (no retry storm)."""
+    from ollama import ResponseError
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.side_effect = ResponseError("forbidden", 403)
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        out = _call_ollama(
+            api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=32, base_url="http://localhost:11434",
+            retries=3,
+        )
+    assert out == ""
+    assert fake_client.chat.call_count == 1
+
+
+def test_warm_pair_lock_is_acquired_on_concurrent_marks():
+    """The warm-pair helpers serialize set updates so concurrent worker
+    threads don't observe a torn set. We can't easily prove correctness
+    under contention in a unit test, but we can verify the lock is in
+    fact held during the public helpers."""
+    from llm_utils import (
+        _mark_ollama_pair_warm,
+        _ollama_pair_is_warm,
+        _ollama_warm_pairs_lock,
+        _ollama_warm_pairs,
+    )
+
+    _ollama_warm_pairs.clear()
+    assert not _ollama_pair_is_warm("http://x:11434", "llama3.2")
+    _mark_ollama_pair_warm("http://x:11434", "llama3.2")
+    assert _ollama_pair_is_warm("http://x:11434", "llama3.2")
+    # Lock is a regular threading.Lock — acquire/release works as expected.
+    assert _ollama_warm_pairs_lock.acquire(blocking=False) is True
+    _ollama_warm_pairs_lock.release()

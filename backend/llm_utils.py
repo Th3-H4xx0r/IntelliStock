@@ -3592,8 +3592,20 @@ def _call_openai(
 # we can use a shorter read timeout; a cold pair may sit in a load step
 # for tens of seconds. Module-level so ThreadPoolExecutor workers share
 # state (consistent with how ``_consecutive_5xx`` is scoped in
-# llm_critical_guard.py).
+# llm_critical_guard.py). Guarded by an explicit lock so concurrent
+# .add()/.in checks from worker threads can't observe a torn set.
 _ollama_warm_pairs: set[tuple[str, str]] = set()
+_ollama_warm_pairs_lock = threading.Lock()
+
+
+def _ollama_pair_is_warm(base_url: str, model: str) -> bool:
+    with _ollama_warm_pairs_lock:
+        return (base_url, model) in _ollama_warm_pairs
+
+
+def _mark_ollama_pair_warm(base_url: str, model: str) -> None:
+    with _ollama_warm_pairs_lock:
+        _ollama_warm_pairs.add((base_url, model))
 
 
 def _make_ollama_sync_client(base_url: str, api_key: str | None, timeout: float):
@@ -3620,7 +3632,7 @@ def _resolve_ollama_timeout(base_url: str, model: str, explicit_timeout) -> floa
             return float(explicit_timeout)
         except (TypeError, ValueError):
             pass
-    if (base_url, model) in _ollama_warm_pairs:
+    if _ollama_pair_is_warm(base_url, model):
         return 30.0
     return 120.0
 
@@ -3753,7 +3765,7 @@ def _call_ollama(
             )
         except Exception:
             pass
-        _ollama_warm_pairs.add((base_url, model))
+        _mark_ollama_pair_warm(base_url, model)
         return text
 
     # Failure exit — stash last-seen HTTP shape + record telemetry.
@@ -3917,7 +3929,7 @@ def call_ollama_with_tools(
         )
     except Exception:
         pass
-    _ollama_warm_pairs.add((base_url, model))
+    _mark_ollama_pair_warm(base_url, model)
 
     return {"text": text, "tool_calls": tool_calls}
 
