@@ -120,3 +120,33 @@ def test_call_bedrock_returns_empty_on_client_error(monkeypatch):
 def test_call_bedrock_empty_without_region_or_key():
     assert llm_utils._call_bedrock("", "model", "p", region="us-east-1") == ""
     assert llm_utils._call_bedrock("key", "model", "p", region="") == ""
+
+
+# ────────────────────────── call_bedrock_with_tools ─────────────────────────
+
+
+def test_call_bedrock_with_tools_parses_tooluse(monkeypatch):
+    resp = {"output": {"message": {"role": "assistant", "content": [
+                {"text": "calling"},
+                {"toolUse": {"toolUseId": "t1", "name": "lookup", "input": {"q": "AAPL"}}}]}},
+            "usage": {"inputTokens": 3, "outputTokens": 4}, "stopReason": "tool_use"}
+    fake = _FakeConverseClient(response=resp)
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    tools = [{"type": "function", "function": {"name": "lookup", "description": "d",
+              "parameters": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}}}]
+    out = llm_utils.call_bedrock_with_tools("key", "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                                            "find AAPL", tools, region="us-east-1")
+    assert out["tool_calls"] == [{"name": "lookup", "arguments": {"q": "AAPL"}}]
+    assert "calling" in out["text"]
+    assert "toolConfig" in fake.calls[0]
+    assert fake.calls[0]["toolConfig"]["tools"][0]["toolSpec"]["name"] == "lookup"
+
+
+def test_call_bedrock_with_tools_empty_on_error(monkeypatch):
+    from botocore.exceptions import ClientError
+    err = ClientError({"Error": {"Code": "ValidationException", "Message": "bad"},
+                       "ResponseMetadata": {"HTTPStatusCode": 400}}, "Converse")
+    fake = _FakeConverseClient(error=err)
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    out = llm_utils.call_bedrock_with_tools("key", "m", "p", [], region="us-east-1")
+    assert out == {"text": "", "tool_calls": []}

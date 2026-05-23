@@ -5223,6 +5223,102 @@ def _call_bedrock(
     return ""
 
 
+def _tools_to_bedrock_toolspec(tools: list[dict]) -> list[dict]:
+    """Convert OpenAI/Gemini-shape tool dicts to Converse toolSpec entries."""
+    normalised = _normalize_tools_to_openai_shape(tools or [])
+    specs = []
+    for t in normalised:
+        fn = (t or {}).get("function") or {}
+        name = fn.get("name")
+        if not name:
+            continue
+        specs.append({"toolSpec": {
+            "name": name,
+            "description": fn.get("description", "") or name,
+            "inputSchema": {"json": fn.get("parameters") or {"type": "object", "properties": {}}},
+        }})
+    return specs
+
+
+def call_bedrock_with_tools(
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    tools: list[dict],
+    *,
+    region: str = "",
+    timeout_sec=None,
+    max_output_tokens: int = 1024,
+    reasoning: str = "",
+) -> dict:
+    """Single-shot tool-using Converse call. Returns
+    ``{"text": str, "tool_calls": [{"name", "arguments"}, ...]}``; does NOT
+    execute tools or loop (mirrors ``call_ollama_with_tools``). Returns
+    ``{"text": "", "tool_calls": []}`` on any failure."""
+    _t0 = time.monotonic()
+    if bedrock_client is None or not model or not api_key or not str(region or "").strip():
+        return {"text": "", "tool_calls": []}
+    from botocore.exceptions import ClientError
+
+    converse_kwargs: dict[str, object] = {
+        "modelId": model,
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+    }
+    if max_output_tokens and int(max_output_tokens) > 0:
+        converse_kwargs["inferenceConfig"] = {"maxTokens": int(max_output_tokens)}
+    specs = _tools_to_bedrock_toolspec(tools or [])
+    if specs:
+        converse_kwargs["toolConfig"] = {"tools": specs}
+    amrf = _normalize_bedrock_reasoning(reasoning, model)
+    if amrf:
+        converse_kwargs["additionalModelRequestFields"] = amrf
+
+    timeout = float(_coerce_timeout_sec(timeout_sec))
+    try:
+        client = bedrock_client.build_runtime_client(api_key, region, timeout_sec=timeout)
+        resp = client.converse(**converse_kwargs)
+    except ClientError as e:
+        try:
+            _stash_last_http(
+                status=(e.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode"),
+                body=str(e)[:1000], exc=e,
+            )
+            _safe_record(
+                provider="bedrock", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000), retry_count=0,
+                error=str(e)[:200], model_id=None,
+            )
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+    except Exception as e:
+        try:
+            _stash_last_http(status=None, body=str(e)[:1000], exc=e)
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+
+    content = (((resp or {}).get("output") or {}).get("message") or {}).get("content") or []
+    text = "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
+    tool_calls = [
+        {"name": b["toolUse"].get("name", ""), "arguments": b["toolUse"].get("input") or {}}
+        for b in content if isinstance(b, dict) and "toolUse" in b
+    ]
+    usage = (resp or {}).get("usage") or {}
+    try:
+        _stash_last_http(status=200, body=None, exc=None)
+        _safe_record(
+            provider="bedrock", model=model,
+            usage={"input_tokens": int(usage.get("inputTokens") or 0),
+                   "output_tokens": int(usage.get("outputTokens") or 0)},
+            ok=True, duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=None, model_id=None,
+        )
+    except Exception:
+        pass
+    return {"text": text, "tool_calls": tool_calls}
+
+
 def call_llm_by_provider(
     provider: str,
     api_key: str,
