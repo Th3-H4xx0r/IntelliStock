@@ -125,3 +125,38 @@ def test_bedrock_list_models_passes_args(app_client):
         resp = app_client.post("/bedrock/list-models", json={"api_key": "secret", "region": "eu-west-1"})
     assert resp.status_code == 200
     assert captured == {"api_key": "secret", "region": "eu-west-1"}
+
+
+# ─────────────── interactive_utils action round-trips ──────────────────────
+
+
+def test_action_create_model_persists_bedrock_fields(monkeypatch):
+    import interactive_utils as iu
+    from unittest.mock import MagicMock
+    fake_r = MagicMock()
+    fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
+    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
+    iu.action_create_model(
+        None, "bk", "bedrock", "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        api_key="key", bedrock_region="us-east-1", bedrock_reasoning="Medium")
+    doc = fake_r.db.return_value.table.return_value.insert.call_args.args[0]
+    assert doc["provider"] == "bedrock"
+    assert doc["bedrock_region"] == "us-east-1"
+    assert doc["bedrock_reasoning"] == "medium"  # normalized to lowercase
+
+
+def test_action_edit_model_updates_bedrock_fields(monkeypatch):
+    import interactive_utils as iu
+    from unittest.mock import MagicMock
+    existing = {"id": "m1", "provider": "bedrock",
+                "model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+                "bedrock_region": "us-east-1", "bedrock_reasoning": "off"}
+    fake_r = MagicMock()
+    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = existing
+    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
+    iu.action_edit_model(None, "m1", bedrock_region="eu-west-1", bedrock_reasoning="high")
+    update = fake_r.db.return_value.table.return_value.get.return_value.update.call_args.args[0]
+    assert update["bedrock_region"] == "eu-west-1"
+    assert update["bedrock_reasoning"] == "high"

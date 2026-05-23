@@ -8029,6 +8029,7 @@ def action_create_model(conn, name, provider, model, api_key=None,
                         cli_path=None, extra_args=None,
                         ollama_base_url=None, ollama_keep_alive=None,
                         ollama_think=None,
+                        bedrock_region=None, bedrock_reasoning=None,
                         input_cost_per_1m=None, output_cost_per_1m=None,
                         cache_creation_cost_per_1m=None,
                         cache_read_cost_per_1m=None):
@@ -8058,6 +8059,11 @@ def action_create_model(conn, name, provider, model, api_key=None,
         "ollama_base_url": (ollama_base_url or "").strip(),
         "ollama_keep_alive": (ollama_keep_alive or "").strip(),
         "ollama_think": (ollama_think or "").strip().lower(),
+        # Bedrock-specific (empty for non-bedrock rows; the dispatcher only
+        # reads them when provider == "bedrock"). region is required at call
+        # time; reasoning is "off"/"low"/"medium"/"high".
+        "bedrock_region": (bedrock_region or "").strip(),
+        "bedrock_reasoning": (bedrock_reasoning or "").strip().lower(),
         # Optional per-model pricing override ($/1M tokens). None means
         # "use llm_pricing.yaml defaults" at cost-computation time.
         "input_cost_per_1m": input_cost_per_1m,
@@ -8130,6 +8136,7 @@ def action_edit_model(conn, model_id, **kwargs):
                   "azure_openai_api_version", "reasoning_effort",
                   "cli_path", "extra_args",
                   "ollama_base_url", "ollama_keep_alive", "ollama_think",
+                  "bedrock_region", "bedrock_reasoning",
                   "input_cost_per_1m", "output_cost_per_1m",
                   "cache_creation_cost_per_1m", "cache_read_cost_per_1m"):
         if field not in kwargs:
