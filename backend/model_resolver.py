@@ -56,6 +56,20 @@ def invalidate_model_cache(model_id: str | None = None):
             _model_cache.clear()
 
 
+def _emit_log(msg: str) -> None:
+    """Best-effort log line for resolver activity. Routed through the
+    broker's logger when available so the message shows up alongside
+    "[BROKER] Resolved model_id references…"; otherwise dropped silently
+    (e.g. during unit tests where no broker is wired up)."""
+    try:
+        import sys
+        # Print to stderr so the broker's tail picks it up. The broker
+        # itself uses a similar emit style for its "[BROKER]" lines.
+        print(f"[ModelResolver] {msg}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = False) -> dict:
     """
     Find all ``*_llm_model_id`` keys in *config*, look up each from the
@@ -77,20 +91,42 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
     # Fast path: skip if no model_id keys exist
     model_keys = [k for k in config if k.endswith("llm_model_id")]
     if not model_keys:
+        _emit_log(
+            "No *_llm_model_id keys found in this strategy config — "
+            "nothing to resolve. If you set a model via the LLM picker "
+            "but the strategy is still using the old provider, the "
+            "picker change was not saved (use the top-level Save button "
+            "on the strategy/instance after picking)."
+        )
         return config
 
     if force_refresh:
         invalidate_model_cache()
+    _emit_log(
+        f"Resolving {len(model_keys)} *_llm_model_id key(s): "
+        f"{', '.join(sorted(model_keys))}"
+    )
 
     resolved = dict(config)
     for key in model_keys:
         model_id = (resolved[key] or "").strip()
         if not model_id:
+            _emit_log(f"  {key}: empty value — skipped")
             continue
         prefix = key[: -len("llm_model_id")]  # e.g. "sentiment_" or ""
         model_doc = _get_model_from_cache_or_db(conn, model_id)
         if model_doc is None:
+            _emit_log(
+                f"  {key}={model_id}: NOT FOUND in Models table — "
+                f"strategy will fall through to env / inline values "
+                f"(was the Models row deleted?)"
+            )
             continue
+        _emit_log(
+            f"  {key}={model_id}: resolved → provider="
+            f"{(model_doc.get('provider') or '').strip().lower()!r} "
+            f"model={(model_doc.get('model') or '').strip()!r}"
+        )
 
         provider = (model_doc.get("provider") or "").strip().lower()
 

@@ -4913,6 +4913,22 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
     def _is_terminal_status(status):
         return str(status or "").strip().lower() in ("finished", "completed", "stopped", "failed", "error", "cancelled")
 
+    def _normalize_status_for_display(status):
+        """Collapse paused_llm_critical / paused_<anything> down to "paused"
+        for UI consumption. Without this the listing keeps the raw DB
+        status and the sort + filter logic in this function (and in the
+        frontend) doesn't recognise the row as a paused backtest — so it
+        sorts to the bottom of the page and falls off page-1 entirely
+        when there are 100+ rows."""
+        s = str(status or "").strip().lower()
+        if s.startswith("paused"):
+            return "paused"
+        return s
+
+    def _is_active_status(status):
+        s = str(status or "").strip().lower()
+        return s in ("running", "queued", "pending", "paused") or s.startswith("paused")
+
     def _to_seconds(value):
         try:
             if value is None:
@@ -5016,6 +5032,10 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
             status = str(row.get("status") or "").strip() or ""
             if queue_row is not None and bool(queue_row.get("paused")) and status.lower() in ("running", "queued", "pending"):
                 status = "paused"
+            # Collapse paused_llm_critical / paused_<anything> → paused so
+            # the listing's sort + the frontend's status switch both see
+            # the row as a paused backtest (active rank, top of list).
+            status = _normalize_status_for_display(status) if str(status).lower().startswith("paused") else status
             completed_at_raw = row.get("completed_at")
             if completed_at_raw is None and _is_terminal_status(status):
                 completed_at_raw = row.get("timestamp")
@@ -5042,6 +5062,7 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
         status = str(row.get("status") or current.get("status") or "").strip() or ""
         if queue_row is not None and bool(queue_row.get("paused")) and status.lower() in ("running", "queued", "pending"):
             status = "paused"
+        status = _normalize_status_for_display(status) if str(status).lower().startswith("paused") else status
         completed_at_raw = row.get("completed_at")
         if completed_at_raw is None and _is_terminal_status(status):
             completed_at_raw = row.get("timestamp")
@@ -5066,7 +5087,10 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
                 return None
 
         status = str(item.get("status") or "").strip().lower()
-        is_active = status in ("running", "queued", "pending", "paused")
+        # Active includes paused_llm_critical and any "paused_<tag>" variant
+        # — without this an LLM-critical pause lands as active_rank=1 and
+        # gets sorted to the bottom of the list, off page-1 entirely.
+        is_active = _is_active_status(status)
         active_rank = 0 if is_active else 1
 
         if sort_by == "pnl":
