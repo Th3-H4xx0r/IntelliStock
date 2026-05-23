@@ -1098,11 +1098,31 @@ def action_get_instance(conn, instance_id):
     try:
         ensure_backtest_instances_table(conn)
         tables = list(r.db(DB_NAME).table_list().run(conn))
-        bt_rows = list(
-            r.db(DB_NAME).table("BacktestInstances")
-            .filter(r.row["instance"] == str(doc.get("id", instance_id)))
-            .run(conn)
-        )
+        # Use the "instance" secondary index when present — same
+        # optimisation as action_list_backtests. Falls back to filter()
+        # when the index isn't ready (e.g. first deploy of that index).
+        # Without this, the instance detail page scanned the entire
+        # BacktestInstances table on every load, which gets slow once
+        # an instance has dozens of historical backtests.
+        _bt_instance_filter = str(doc.get("id", instance_id))
+        try:
+            _bt_idx = set(
+                r.db(DB_NAME).table("BacktestInstances").index_list().run(conn)
+            )
+        except Exception:
+            _bt_idx = set()
+        if "instance" in _bt_idx:
+            bt_rows = list(
+                r.db(DB_NAME).table("BacktestInstances")
+                .get_all(_bt_instance_filter, index="instance")
+                .run(conn)
+            )
+        else:
+            bt_rows = list(
+                r.db(DB_NAME).table("BacktestInstances")
+                .filter(r.row["instance"] == _bt_instance_filter)
+                .run(conn)
+            )
         has_results = "BacktestResults" in tables
         for row in bt_rows:
             rid = row.get("id")

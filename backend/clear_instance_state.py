@@ -240,10 +240,45 @@ def _indexed_selection(conn, r, table: str, criteria, combine: str):
             continue
         _ensure_index(conn, r, table, field)
 
-    # Multi-criterion OR with no special field: fall back to filter.
-    # (The single-pass OR scan is still hundreds of times faster than
-    # the same-shape pre-index code.)
+    # Multi-criterion OR. We want to avoid the table scan that the
+    # plain ``.filter()`` does, but RethinkDB's .union() doesn't
+    # deduplicate, so a row that matches both criteria is counted twice.
+    # Strategy: if EVERY criterion is indexable (exact / prefix on a
+    # field where _single_criterion_selection succeeds), materialise
+    # the matching primary keys from each branch into a Python set,
+    # then expose the de-duped set via .get_all(*ids). This streams
+    # through O(matching_rows) instead of O(table_rows), and the
+    # count + delete operate on the same de-duped set.
     if combine == "or" and len(criteria) > 1:
+        sub_selections = []
+        all_indexable = True
+        for c in criteria:
+            sel = _single_criterion_selection(conn, r, table, c)
+            if sel is None or c[2] == "special":
+                all_indexable = False
+                break
+            sub_selections.append(sel)
+        if all_indexable:
+            try:
+                ids: set = set()
+                for sel in sub_selections:
+                    for doc in sel.pluck("id").run(conn):
+                        rid = doc.get("id") if isinstance(doc, dict) else None
+                        if rid is not None:
+                            ids.add(rid)
+                if not ids:
+                    # Return an empty selection that still answers
+                    # .count() (== 0) and .delete() (no-op) cleanly.
+                    return r.db(DB_NAME).table(table).get_all(
+                        "__no_match_sentinel__"
+                    )
+                # ``get_all`` accepts variadic args; the spread keeps
+                # the PK-set lookup as a single index traversal.
+                return r.db(DB_NAME).table(table).get_all(*ids)
+            except Exception:
+                # Any failure (e.g. cursor drained twice, network) falls
+                # back to the table scan — correctness wins over speed.
+                pass
         expr = _build_filter(r, criteria, combine="or")
         if expr is None:
             return None
