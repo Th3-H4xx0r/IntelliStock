@@ -59,3 +59,7 @@ pydantic-ai-slim[google,openai]==1.0.18
 alpaca-py>=0.43.0
 cryptography>=41.0.0
 exchange_calendars>=4.13.2
+# Ollama provider — official Python SDK for local + remote + cloud Ollama
+# hosts. We use Client/AsyncClient + ResponseError; httpx is a transitive
+# dep and we catch its network exceptions directly in ollama_client.py.
+ollama>=0.4,<1
