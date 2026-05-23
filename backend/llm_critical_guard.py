@@ -45,6 +45,15 @@ _RX_AUTH = re.compile(
     r"|incorrect API key"
     r"|authentication.{0,20}failed"
     r"|unauthorized"
+    # Bedrock auth/authorization error codes (data-plane Converse + control
+    # plane). Bedrock returns these as the Error.Code; a bad/expired API key
+    # surfaces as AccessDenied / UnrecognizedClient / ExpiredToken — without
+    # these, backtests retry every call instead of pausing.
+    r"|AccessDeniedException"
+    r"|UnrecognizedClientException"
+    r"|InvalidSignatureException"
+    r"|ExpiredTokenException"
+    r"|ForbiddenException"
     r")",
     re.I,
 )
