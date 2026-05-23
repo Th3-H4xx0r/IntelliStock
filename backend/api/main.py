@@ -391,6 +391,13 @@ def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]
         think = str(body.ollama_think or "").strip()
         if think:
             config["ollama_think"] = think
+    if provider == "bedrock":
+        region = str(body.bedrock_region or "").strip()
+        if region:
+            config["bedrock_region"] = region
+        reasoning = str(body.bedrock_reasoning or "").strip().lower()
+        if reasoning:
+            config["bedrock_reasoning"] = reasoning
     reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
     # claude-cli accepts ``--effort`` (low/medium/high/xhigh/max) too —
     # its session manager folds it into the spawn argv. Drop the value
@@ -476,6 +483,10 @@ class LlmConfigTestBody(BaseModel):
     # "low"/"medium"/"high" for gpt-oss-style effort. Normalised in
     # llm_utils._normalize_ollama_think before reaching Ollama.
     ollama_think: Optional[str] = Field(default=None, max_length=16)
+    # Bedrock provider config — region is required (AWS is regional);
+    # bedrock_reasoning is "off"/"low"/"medium"/"high" (Claude 3.7+ only).
+    bedrock_region: Optional[str] = Field(default=None, max_length=32)
+    bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
 
 
 class LlmConfigTestOutput(BaseModel):
@@ -507,6 +518,10 @@ class CreateModelBody(BaseModel):
     ollama_base_url: Optional[str] = Field(default=None, max_length=512)
     ollama_keep_alive: Optional[str] = Field(default=None, max_length=16)
     ollama_think: Optional[str] = Field(default=None, max_length=16)
+    # Bedrock provider config — region required; reasoning is the bedrock
+    # equivalent of ollama_think ("off"/"low"/"medium"/"high", Claude 3.7+).
+    bedrock_region: Optional[str] = Field(default=None, max_length=32)
+    bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
     # Optional per-model pricing override ($/1M tokens). When set, these
     # win over backend/llm_pricing.yaml at telemetry-cost time. Leave
     # None to fall back to the YAML defaults.
@@ -531,6 +546,8 @@ class EditModelBody(BaseModel):
     ollama_base_url: Optional[str] = Field(default=None, max_length=512)
     ollama_keep_alive: Optional[str] = Field(default=None, max_length=16)
     ollama_think: Optional[str] = Field(default=None, max_length=16)
+    bedrock_region: Optional[str] = Field(default=None, max_length=32)
+    bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
     input_cost_per_1m: Optional[float] = Field(default=None, ge=0)
     output_cost_per_1m: Optional[float] = Field(default=None, ge=0)
     cache_creation_cost_per_1m: Optional[float] = Field(default=None, ge=0)
