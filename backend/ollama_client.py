@@ -147,3 +147,61 @@ async def list_models(
         await asyncio.gather(*(_enrich(t) for t in tags))
 
     return tags
+
+
+# ────────────────────────────── show_model ─────────────────────────────────
+
+
+async def show_model(
+    base_url: str,
+    api_key: Optional[str],
+    model: str,
+    *,
+    timeout_sec: float = 8.0,
+) -> dict[str, Any]:
+    """Return /api/show for a specific model (raw response, no projection)."""
+    client = AsyncClient(
+        host=base_url,
+        headers=_auth_headers(api_key),
+        timeout=timeout_sec,
+    )
+    try:
+        resp = await client.show(model)
+    except ResponseError as e:
+        if (e.status_code or 0) == 401:
+            raise OllamaAuthError(f"Unauthorized at {base_url}") from e
+        raise OllamaProviderError(
+            f"Ollama returned {e.status_code} for show({model}): {e}"
+        ) from e
+    except _CONNECTION_EXCS as e:
+        raise OllamaConnectionError(
+            f"Could not reach Ollama at {base_url}"
+        ) from e
+    if hasattr(resp, "model_dump"):
+        return resp.model_dump()
+    return resp if isinstance(resp, dict) else dict(resp)
+
+
+# ────────────────────────────── health_check ───────────────────────────────
+
+
+async def health_check(
+    base_url: str,
+    api_key: Optional[str] = None,
+    *,
+    timeout_sec: float = 4.0,
+) -> tuple[bool, str]:
+    """Cheap probe: hit /api/tags. Returns ``(ok, error_message)``.
+
+    Never raises — wraps the typed exceptions list_models can raise into
+    a flat status/string pair for UI consumption.
+    """
+    try:
+        await list_models(base_url, api_key, timeout_sec=timeout_sec)
+        return True, ""
+    except OllamaAuthError as e:
+        return False, f"Unauthorized ({e})"
+    except OllamaConnectionError as e:
+        return False, str(e)
+    except OllamaProviderError as e:
+        return False, str(e)

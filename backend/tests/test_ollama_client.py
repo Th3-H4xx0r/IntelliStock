@@ -117,3 +117,81 @@ def test_list_models_sends_bearer_when_api_key_provided():
 
     headers = captured.get("headers", {}) or {}
     assert headers.get("Authorization") == "Bearer secret"
+
+
+# ─────────────────────────────────── show_model ─────────────────────────────
+
+
+def test_show_model_returns_raw_response():
+    from ollama_client import show_model
+
+    expected = {
+        "model_info": {"llama.context_length": 131072},
+        "capabilities": ["completion", "tools"],
+    }
+    fake_client = AsyncMock()
+    fake_client.show = AsyncMock(return_value=expected)
+    with patch("ollama_client.AsyncClient", return_value=fake_client):
+        result = asyncio.run(show_model("http://localhost:11434", None, "llama3.2"))
+    assert result == expected
+    fake_client.show.assert_awaited_once_with("llama3.2")
+
+
+def test_show_model_auth_error_on_401():
+    from ollama import ResponseError
+    from ollama_client import show_model, OllamaAuthError
+
+    fake_client = AsyncMock()
+    fake_client.show = AsyncMock(side_effect=ResponseError("unauthorized", 401))
+    with patch("ollama_client.AsyncClient", return_value=fake_client):
+        with pytest.raises(OllamaAuthError):
+            asyncio.run(show_model("https://ollama.com/v1", "bad", "any"))
+
+
+def test_show_model_connection_error_on_network_failure():
+    import httpx
+    from ollama_client import show_model, OllamaConnectionError
+
+    fake_client = AsyncMock()
+    fake_client.show = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    with patch("ollama_client.AsyncClient", return_value=fake_client):
+        with pytest.raises(OllamaConnectionError):
+            asyncio.run(show_model("http://localhost:11434", None, "llama3.2"))
+
+
+# ─────────────────────────────────── health_check ───────────────────────────
+
+
+def test_health_check_ok_when_list_succeeds():
+    from ollama_client import health_check
+
+    fake_client = AsyncMock()
+    fake_client.list = AsyncMock(return_value={"models": []})
+    with patch("ollama_client.AsyncClient", return_value=fake_client):
+        ok, msg = asyncio.run(health_check("http://localhost:11434"))
+    assert ok is True
+    assert msg == ""
+
+
+def test_health_check_false_on_connection_error_with_message():
+    import httpx
+    from ollama_client import health_check
+
+    fake_client = AsyncMock()
+    fake_client.list = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    with patch("ollama_client.AsyncClient", return_value=fake_client):
+        ok, msg = asyncio.run(health_check("http://localhost:11434"))
+    assert ok is False
+    assert "localhost:11434" in msg
+
+
+def test_health_check_false_on_auth_failure():
+    from ollama import ResponseError
+    from ollama_client import health_check
+
+    fake_client = AsyncMock()
+    fake_client.list = AsyncMock(side_effect=ResponseError("unauthorized", 401))
+    with patch("ollama_client.AsyncClient", return_value=fake_client):
+        ok, msg = asyncio.run(health_check("https://ollama.com/v1", "bad"))
+    assert ok is False
+    assert "auth" in msg.lower() or "unauthorized" in msg.lower()
