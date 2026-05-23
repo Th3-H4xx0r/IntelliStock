@@ -284,7 +284,7 @@ function onProviderChange(value) {
             class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
           />
           <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
-            How long Ollama keeps the model resident between calls. <span class="font-mono">5m</span> default, <span class="font-mono">60m</span> for hot-paths, <span class="font-mono">-1</span> for never-unload.
+            How long Ollama keeps the model resident between calls. Use a Go duration like <span class="font-mono">5m</span> (default), <span class="font-mono">60m</span>, or <span class="font-mono">1h</span>. Plain integers are seconds — <span class="font-mono">-1</span> means never-unload, <span class="font-mono">0</span> means unload immediately.
           </p>
         </div>
       </details>

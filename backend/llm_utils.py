@@ -3619,6 +3619,32 @@ def _make_ollama_sync_client(base_url: str, api_key: str | None, timeout: float)
     return Client(host=base_url, headers=headers, timeout=timeout)
 
 
+def _normalize_ollama_keep_alive(value):
+    """Coerce a ``keep_alive`` value to the shape Ollama actually accepts.
+
+    Ollama's HTTP API documents two valid shapes:
+      * Go duration string with a unit: ``5m``, ``1h``, ``300s``
+      * JSON number (seconds): ``0`` (unload immediately), ``-1`` (forever)
+
+    Their Go-side parser uses ``time.ParseDuration`` for strings, which
+    rejects bare integer strings like ``"-1"`` with
+    ``time: missing unit in duration``. So when an operator types ``-1``
+    or ``300`` in the form, we must send an int, not a string.
+
+    Returns ``None`` to mean "omit the field" (let Ollama use its default).
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        pass
+    return s  # duration string with unit — pass through verbatim
+
+
 def _resolve_ollama_timeout(base_url: str, model: str, explicit_timeout) -> float:
     """120s on cold pair (first call since boot), 30s once warm.
 
@@ -3680,8 +3706,9 @@ def _call_ollama(
     }
     if response_mime_type and "json" in str(response_mime_type).lower():
         chat_kwargs["format"] = "json"
-    if keep_alive:
-        chat_kwargs["keep_alive"] = keep_alive
+    normalised_keep_alive = _normalize_ollama_keep_alive(keep_alive)
+    if normalised_keep_alive is not None:
+        chat_kwargs["keep_alive"] = normalised_keep_alive
 
     max_retries = max(0, int(retries or 0))
     # Reuse the same network-error tuple as ollama_client.py so we
@@ -3836,8 +3863,9 @@ def call_ollama_with_tools(
         "tools": normalised,
         "options": options,
     }
-    if keep_alive:
-        chat_kwargs["keep_alive"] = keep_alive
+    normalised_keep_alive = _normalize_ollama_keep_alive(keep_alive)
+    if normalised_keep_alive is not None:
+        chat_kwargs["keep_alive"] = normalised_keep_alive
 
     _net_excs = (
         httpx.ConnectError,

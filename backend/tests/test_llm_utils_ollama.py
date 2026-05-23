@@ -70,6 +70,71 @@ def test_call_ollama_keep_alive_propagated():
     assert call_kwargs.get("keep_alive") == "60m"
 
 
+def test_call_ollama_keep_alive_minus_one_sent_as_int_not_string():
+    """Ollama's Go parser rejects '-1' as a string ('time: missing unit in
+    duration') but accepts -1 as an integer (special-cased to 'never
+    unload'). _normalize_ollama_keep_alive must coerce."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = _fake_response("ok")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=8, base_url="http://localhost:11434",
+            keep_alive="-1",
+        )
+    sent = fake_client.chat.call_args.kwargs.get("keep_alive")
+    assert sent == -1 and isinstance(sent, int)
+
+
+def test_call_ollama_keep_alive_zero_sent_as_int():
+    """0 must reach Ollama as an int (unload immediately)."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = _fake_response("ok")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=8, base_url="http://localhost:11434",
+            keep_alive="0",
+        )
+    sent = fake_client.chat.call_args.kwargs.get("keep_alive")
+    assert sent == 0 and isinstance(sent, int)
+
+
+def test_call_ollama_keep_alive_empty_string_omits_field():
+    """Empty string keep_alive must NOT be sent — Ollama would 400."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = _fake_response("ok")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=8, base_url="http://localhost:11434",
+            keep_alive="",
+        )
+    assert "keep_alive" not in fake_client.chat.call_args.kwargs
+
+
+def test_normalize_keep_alive_passes_through_duration_strings():
+    """5m, 60m, 1h etc. must pass through unchanged."""
+    from llm_utils import _normalize_ollama_keep_alive
+    assert _normalize_ollama_keep_alive("5m") == "5m"
+    assert _normalize_ollama_keep_alive("60m") == "60m"
+    assert _normalize_ollama_keep_alive("1h") == "1h"
+    assert _normalize_ollama_keep_alive("  5m  ") == "5m"
+    # Integer-shaped strings get coerced to int (Ollama needs that for -1/0).
+    assert _normalize_ollama_keep_alive("-1") == -1
+    assert _normalize_ollama_keep_alive("300") == 300
+    # Empty / None → None (omit the field).
+    assert _normalize_ollama_keep_alive("") is None
+    assert _normalize_ollama_keep_alive("   ") is None
+    assert _normalize_ollama_keep_alive(None) is None
+
+
 def test_call_ollama_warms_pair_after_first_success():
     from llm_utils import _call_ollama, _ollama_warm_pairs
 
