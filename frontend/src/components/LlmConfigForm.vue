@@ -67,15 +67,31 @@ async function fetchOllamaModels({ force = false } = {}) {
   ollamaListLoading.value = false
 }
 
-function refreshOllamaModels() { fetchOllamaModels({ force: true }) }
+function refreshOllamaModels() {
+  // Cancel any pending debounced auto-fetch so the explicit refresh wins.
+  if (_debounceHandle) { clearTimeout(_debounceHandle); _debounceHandle = null }
+  fetchOllamaModels({ force: true })
+}
 
-// Re-fetch the model list when the user changes provider, base_url, or key.
-// Skipping when not on ollama keeps the network footprint scoped.
+// 500ms debounce on the watcher so a user typing "http://localhost:11434"
+// triggers ONE fetch when they pause, not one per character. The Refresh
+// button still fires immediately via refreshOllamaModels().
+let _debounceHandle = null
+const FETCH_DEBOUNCE_MS = 500
+
 watch(
   () => [props.draft?.provider, props.draft?.ollamaBaseUrl, props.draft?.apiKey],
   ([provider]) => {
-    if (provider === 'ollama') fetchOllamaModels()
-    else { ollamaModels.value = []; ollamaListError.value = '' }
+    if (_debounceHandle) clearTimeout(_debounceHandle)
+    if (provider !== 'ollama') {
+      ollamaModels.value = []
+      ollamaListError.value = ''
+      return
+    }
+    _debounceHandle = setTimeout(() => {
+      _debounceHandle = null
+      fetchOllamaModels()
+    }, FETCH_DEBOUNCE_MS)
   },
   { immediate: true },
 )
@@ -101,6 +117,13 @@ function onProviderChange(value) {
     // editing an existing row keep their stored value.
     if (!next.ollamaBaseUrl) next.ollamaBaseUrl = 'http://localhost:11434'
     next.reasoningEffort = ''  // model-specific for Ollama, not standard
+  } else {
+    // Clear Ollama-only fields when switching away so they don't leak
+    // into a save payload meant for another provider. submitModel
+    // already gates this on provider === 'ollama', but keeping the
+    // draft clean is the same defensive pattern used above for CLI.
+    next.ollamaBaseUrl = ''
+    next.ollamaKeepAlive = ''
   }
   emit('update:draft', next)
 }
