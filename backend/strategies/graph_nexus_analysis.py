@@ -621,7 +621,10 @@ _NEXUS_OVERLAY_LLM_WORKERS = 10
 _NEXUS_COMPANY_PROMPT_BUDGET_CHARS = 6000
 _NEXUS_MACRO_PROMPT_BUDGET_CHARS = 8000
 
-_NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "codex-cli", "anthropic"}
+_NEXUS_VALID_PROVIDERS = {
+    "gemini", "deepseek", "openai", "azure", "nvidia",
+    "claude-cli", "codex-cli", "anthropic", "ollama",
+}
 # Module-level dedup cache for `LLM key source for role=...` diagnostic
 # log. Each (role, source_tag, masked_key) tuple is logged at most once
 # per process lifetime so operators can spot stale inline credentials.
@@ -753,6 +756,10 @@ def _default_model_for_provider(provider: str) -> str:
         return "claude-sonnet-4-6"
     if provider == "codex-cli":
         return "gpt-5-codex"
+    if provider == "ollama":
+        # No universal Ollama default — the operator's installed models
+        # vary widely. Pick a small, broadly-available reasoning model.
+        return os.environ.get("GRAPH_NEXUS_OLLAMA_MODEL", "llama3.2").strip() or "llama3.2"
     return "gemini-3-flash-preview"
 
 
@@ -883,6 +890,35 @@ def _resolve_role_llm_provider_config(config: dict, role: str) -> dict[str, Any]
             out["extra_args"] = extra_args
         if reasoning_effort:
             out["reasoning_effort"] = reasoning_effort
+        return out
+    if provider == "ollama":
+        # Pull the Ollama-specific config the model_resolver injects
+        # (ollama_base_url / ollama_keep_alive / ollama_think) so the
+        # dispatcher receives them. Without this branch the dispatcher
+        # silently falls back to OLLAMA_BASE_URL=http://localhost:11434,
+        # which is the wrong host for any non-local Ollama row.
+        base_url = (
+            _lb_cfg("ollama_base_url")
+            or (config.get(f"{prefix}ollama_base_url") or "").strip()
+            or (config.get("ollama_base_url") or "").strip()
+            or os.environ.get("OLLAMA_BASE_URL", "").strip()
+            or "http://localhost:11434"
+        )
+        keep_alive = (
+            _lb_cfg("ollama_keep_alive")
+            or (config.get(f"{prefix}ollama_keep_alive") or "").strip()
+            or (config.get("ollama_keep_alive") or "").strip()
+        )
+        think = (
+            _lb_cfg("ollama_think")
+            or (config.get(f"{prefix}ollama_think") or "").strip()
+            or (config.get("ollama_think") or "").strip()
+        )
+        out: dict[str, Any] = {"ollama_base_url": base_url}
+        if keep_alive:
+            out["ollama_keep_alive"] = keep_alive
+        if think:
+            out["ollama_think"] = think
         return out
     if provider != "azure":
         return {}
@@ -1048,6 +1084,11 @@ def _resolve_role_llm_config(config: dict, role: str) -> tuple[str, str, str, st
         elif provider == "gemini":
             if not _model_lc.startswith(("gemini-", "models/gemini")):
                 _hint = "Gemini ids start with 'gemini-'"
+        elif provider == "ollama":
+            # Ollama model names are arbitrary Modelfile tags (llama3.2,
+            # qwen3.6:35b, gpt-oss:20b, my-custom-modelfile, …) — no
+            # canonical pattern to validate against. Skip the hint.
+            pass
         if _hint:
             _log(
                 f"LLM provider/model mismatch hint for role={role or 'default'}: "
