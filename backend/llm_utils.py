@@ -232,6 +232,8 @@ def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = N
         # Cloud requires a Bearer token. Caller decides whether to enforce
         # non-empty (e.g., when the host suffix is ``ollama.com``).
         return str(os.environ.get("OLLAMA_API_KEY") or "").strip()
+    if p == "bedrock":
+        return str(os.environ.get("BEDROCK_API_KEY") or "").strip()
     return str(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
 
 
@@ -599,6 +601,11 @@ def _cache_effort_key(provider: str, provider_config: dict[str, Any] | None) -> 
         # accidentally collides with a future provider's effort=high.
         v = str(pc.get("ollama_think", "") or "").strip().lower()
         return f"think:{v}" if v else ""
+    if (provider or "").strip().lower() == "bedrock":
+        # Prefix with "reason:" so bedrock reasoning=high never collides with
+        # another provider's effort=high in the prompt-cache key.
+        v = str(pc.get("bedrock_reasoning", "") or "").strip().lower()
+        return f"reason:{v}" if v and v != "off" else ""
     return str(pc.get("reasoning_effort", "") or "").strip().lower()
 
 
@@ -688,6 +695,23 @@ def _resolve_provider_config(provider: str, provider_config: dict[str, Any] | No
         # propagate the standard field — strip it if a strategy left it
         # on. ``ollama_think`` is the Ollama-specific equivalent above.
         resolved.pop("reasoning_effort", None)
+    elif p == "bedrock":
+        region = str(
+            resolved.get("bedrock_region")
+            or os.environ.get("BEDROCK_REGION")
+            or os.environ.get("AWS_REGION")
+            or ""
+        ).strip()
+        if region:
+            resolved["bedrock_region"] = region
+        reasoning = str(resolved.get("bedrock_reasoning") or "").strip().lower()
+        if reasoning and reasoning != "off":
+            resolved["bedrock_reasoning"] = reasoning
+        else:
+            resolved.pop("bedrock_reasoning", None)
+        # Reasoning is bedrock-specific (Converse additionalModelRequestFields),
+        # not the standard reasoning_effort knob — strip the latter if present.
+        resolved.pop("reasoning_effort", None)
     return resolved
 
 
@@ -718,6 +742,12 @@ def _safe_provider_meta(provider: str, provider_config: dict[str, Any] | None = 
         reasoning_effort = normalize_reasoning_effort(config.get("reasoning_effort"))
         if reasoning_effort:
             meta["reasoning_effort"] = reasoning_effort
+        return meta
+    if p == "bedrock":
+        meta = {"bedrock_region": str(config.get("bedrock_region") or "")}
+        reasoning = str(config.get("bedrock_reasoning") or "").strip().lower()
+        if reasoning and reasoning != "off":
+            meta["bedrock_reasoning"] = reasoning
         return meta
     return {}
 
