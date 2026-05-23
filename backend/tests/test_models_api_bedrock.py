@@ -65,3 +65,63 @@ def test_build_llm_test_provider_config_bedrock_omits_empty():
     cfg = _build_llm_test_provider_config(body)
     assert cfg["bedrock_region"] == "us-east-1"
     assert "bedrock_reasoning" not in cfg
+
+
+# ─────────────── POST /bedrock/list-models endpoint ────────────────────────
+
+
+@pytest.fixture
+def app_client():
+    from fastapi.testclient import TestClient
+    from api import main as api_main
+    app = api_main.app
+    app.dependency_overrides[api_main.get_current_user] = lambda: {
+        "id": "test-user", "username": "test", "role": "user"}
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+
+
+def test_bedrock_list_models_happy_path(app_client):
+    from unittest.mock import patch, Mock
+    fake = [{"id": "anthropic.claude-3-5-sonnet-20241022-v2:0", "name": "Claude 3.5 Sonnet v2",
+             "provider_name": "Anthropic", "kind": "foundation", "supports_tools": True, "modalities": ["TEXT"]}]
+    with patch("api.main.bedrock_client.list_models", new=Mock(return_value=fake)):
+        resp = app_client.post("/bedrock/list-models", json={"api_key": "k", "region": "us-east-1"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"models": fake}
+
+
+def test_bedrock_list_models_auth_error_401(app_client):
+    from unittest.mock import patch, Mock
+    from bedrock_client import BedrockAuthError
+    with patch("api.main.bedrock_client.list_models", new=Mock(side_effect=BedrockAuthError("denied"))):
+        resp = app_client.post("/bedrock/list-models", json={"api_key": "k", "region": "us-east-1"})
+    assert resp.status_code == 401
+
+
+def test_bedrock_list_models_connection_error_502(app_client):
+    from unittest.mock import patch, Mock
+    from bedrock_client import BedrockConnectionError
+    with patch("api.main.bedrock_client.list_models", new=Mock(side_effect=BedrockConnectionError("no net"))):
+        resp = app_client.post("/bedrock/list-models", json={"api_key": "k", "region": "us-east-1"})
+    assert resp.status_code == 502
+
+
+def test_bedrock_list_models_requires_region(app_client):
+    resp = app_client.post("/bedrock/list-models", json={"api_key": "k"})
+    assert resp.status_code in (400, 422)
+
+
+def test_bedrock_list_models_passes_args(app_client):
+    from unittest.mock import patch
+    captured = {}
+
+    def _fake(api_key, region, **kw):
+        captured["api_key"] = api_key
+        captured["region"] = region
+        return []
+
+    with patch("api.main.bedrock_client.list_models", new=_fake):
+        resp = app_client.post("/bedrock/list-models", json={"api_key": "secret", "region": "eu-west-1"})
+    assert resp.status_code == 200
+    assert captured == {"api_key": "secret", "region": "eu-west-1"}

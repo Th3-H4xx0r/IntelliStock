@@ -2042,6 +2042,57 @@ async def api_ollama_list_models(
         )
 
 
+class BedrockListModelsBody(BaseModel):
+    api_key: str = Field(..., min_length=1, max_length=4096)
+    region: str = Field(..., min_length=1, max_length=32)
+
+
+# Imported lazily (like ollama_client) so a missing boto3 at boot doesn't take
+# down the whole API; the endpoint surfaces the error instead.
+import bedrock_client  # noqa: E402
+
+
+@app.post("/bedrock/list-models", response_class=JSONResponse)
+def api_bedrock_list_models(
+    body: BedrockListModelsBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Discovery endpoint: list Bedrock foundation models + cross-region
+    inference profiles available to the API key in a region.
+
+    Sync handler (boto3 is synchronous) — FastAPI runs it in a threadpool, so
+    the blocking control-plane call doesn't stall the event loop.
+
+    Body: ``{"api_key": str, "region": str}``.
+    Returns: ``{"models": [{"id", "name", "provider_name", "kind",
+    "supports_tools", "modalities"}, …]}``.
+
+    Errors:
+      * 401 if the key is rejected OR lacks ``bedrock:ListFoundationModels``
+        (Bedrock API keys can be narrowly scoped). The UI treats this as
+        "discovery unavailable" and falls back to manual model-id entry.
+      * 502 if the region endpoint is unreachable or returns an upstream error.
+    """
+    try:
+        models = bedrock_client.list_models(body.api_key, body.region)
+        return {"models": models}
+    except bedrock_client.BedrockAuthError as e:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Authentication failed", "detail": str(e)},
+        )
+    except bedrock_client.BedrockConnectionError as e:
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"Could not reach Bedrock in {body.region}", "detail": str(e)},
+        )
+    except bedrock_client.BedrockProviderError as e:
+        return JSONResponse(
+            status_code=502,
+            content={"error": str(e)},
+        )
+
+
 @app.post("/models/{model_id}/test-cli", response_class=JSONResponse)
 async def api_test_claude_cli(
     model_id: str,
