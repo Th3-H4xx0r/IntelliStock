@@ -3551,6 +3551,207 @@ def _call_openai(
         return ""
 
 
+# ────────────────────────────── Ollama provider ────────────────────────────
+#
+# Inline branch sibling of ``_call_openai`` / ``_call_nvidia``. Matches the
+# existing return-empty-on-failure convention: never raises out, always
+# stashes for the critical-guard via ``_stash_last_http`` and records
+# telemetry via ``_safe_record``. The discovery surface (list_models,
+# show_model, health_check) lives in ``backend/ollama_client.py``.
+
+# Tracks ``(base_url, model)`` pairs that have responded at least once
+# since process boot. A "warm" pair has the model loaded in memory, so
+# we can use a shorter read timeout; a cold pair may sit in a load step
+# for tens of seconds. Module-level so ThreadPoolExecutor workers share
+# state (consistent with how ``_consecutive_5xx`` is scoped in
+# llm_critical_guard.py).
+_ollama_warm_pairs: set[tuple[str, str]] = set()
+
+
+def _make_ollama_sync_client(base_url: str, api_key: str | None, timeout: float):
+    """Thin wrapper around ``ollama.Client`` so tests can patch construction.
+
+    Always returns a synchronous client — the dispatcher path is sync.
+    The async client lives in ``ollama_client.py`` for discovery calls.
+    """
+    from ollama import Client
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    return Client(host=base_url, headers=headers, timeout=timeout)
+
+
+def _resolve_ollama_timeout(base_url: str, model: str, explicit_timeout) -> float:
+    """120s on cold pair (first call since boot), 30s once warm.
+
+    Cold-load can legitimately take 10-60s on CPU as Ollama maps the
+    model into memory; using the standard 30s timeout there would
+    misclassify routine cold starts as outages and trip the
+    persistent-5xx counter.
+    """
+    if explicit_timeout is not None:
+        try:
+            return float(explicit_timeout)
+        except (TypeError, ValueError):
+            pass
+    if (base_url, model) in _ollama_warm_pairs:
+        return 30.0
+    return 120.0
+
+
+def _call_ollama(
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    max_output_tokens: int = 256,
+    timeout_sec=None,
+    retries: int = 0,
+    base_url: str = "http://localhost:11434",
+    response_mime_type=None,
+    reasoning_effort: str = "",   # accepted, ignored (model-specific)
+    keep_alive: str | None = None,
+) -> str:
+    """Plain-text chat against an Ollama host.
+
+    Mirrors ``_call_openai`` semantics:
+      * Returns ``""`` on every failure (no raise).
+      * Stashes the response HTTP shape via ``_stash_last_http`` so the
+        critical-guard can classify auth_failure / persistent_5xx.
+      * Records telemetry via ``_safe_record(provider="ollama", ...)``.
+
+    Differences from OpenAI:
+      * 404 = model-not-installed → user-config problem, never retried.
+      * 401 = Ollama Cloud auth failure → never retried (critical-guard fires).
+      * ``reasoning_effort`` accepted but ignored (Ollama uses Modelfile-side
+        settings; there's no standard generation knob).
+      * First call to a ``(base_url, model)`` pair gets a 120s timeout
+        for cold loads; subsequent calls get 30s.
+    """
+    _t0 = time.monotonic()
+    from ollama import ResponseError
+    import httpx
+
+    options: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        options["num_predict"] = int(max_output_tokens)
+
+    chat_kwargs: dict[str, object] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "options": options,
+    }
+    if response_mime_type and "json" in str(response_mime_type).lower():
+        chat_kwargs["format"] = "json"
+    if keep_alive:
+        chat_kwargs["keep_alive"] = keep_alive
+
+    max_retries = max(0, int(retries or 0))
+    # Reuse the same network-error tuple as ollama_client.py so we
+    # classify identically.
+    _net_excs = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+        httpx.NetworkError,
+        ConnectionError,
+        TimeoutError,
+    )
+
+    last_status: int | None = None
+    last_body: str | None = None
+    last_exc: BaseException | None = None
+
+    for attempt in range(max_retries + 1):
+        timeout = _resolve_ollama_timeout(base_url, model, timeout_sec)
+        try:
+            client = _make_ollama_sync_client(base_url, api_key, timeout)
+            resp = client.chat(**chat_kwargs)
+        except ResponseError as e:
+            status = e.status_code or 0
+            last_status = status
+            last_body = str(e)[:1000]
+            last_exc = e
+            # 401 and 404 are NOT retried — both are configuration-class
+            # failures where retrying just wastes time (and for 401 against
+            # Ollama Cloud, may rate-limit the operator).
+            if status == 401 or status == 404:
+                break
+            if status == 429 or (500 <= status < 600):
+                if attempt < max_retries:
+                    time.sleep(_backoff_sleep_seconds(attempt))
+                    continue
+                break
+            # Any other 4xx — surface and stop.
+            break
+        except _net_excs as e:
+            last_status = None
+            last_body = str(e)[:1000]
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        except Exception as e:
+            # Defensive: SDK can raise un-typed errors (e.g. dict-parse
+            # issues). Treat as non-retryable to avoid retry storms.
+            last_status = None
+            last_body = str(e)[:1000]
+            last_exc = e
+            break
+
+        # Success branch — pull text and return.
+        msg = ((resp or {}).get("message") if isinstance(resp, dict)
+               else getattr(resp, "message", {}) or {})
+        if not isinstance(msg, dict):
+            msg = dict(msg) if msg is not None else {}
+        text = msg.get("content") or ""
+        elapsed_ms = int((time.monotonic() - _t0) * 1000)
+        try:
+            _stash_last_http(status=200, body=None, exc=None)
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="ollama", model=model,
+                usage={
+                    "input_tokens": int(
+                        (resp or {}).get("prompt_eval_count", 0) or 0
+                    ) if isinstance(resp, dict) else 0,
+                    "output_tokens": int(
+                        (resp or {}).get("eval_count", 0) or 0
+                    ) if isinstance(resp, dict) else 0,
+                },
+                ok=True, duration_ms=elapsed_ms, retry_count=attempt,
+                error=None, model_id=None,
+            )
+        except Exception:
+            pass
+        _ollama_warm_pairs.add((base_url, model))
+        return text
+
+    # Failure exit — stash last-seen HTTP shape + record telemetry.
+    try:
+        _stash_last_http(status=last_status, body=last_body, exc=last_exc)
+    except Exception:
+        pass
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = str(last_exc) if last_exc else (
+            last_body or "")
+    except Exception:
+        pass
+    try:
+        _safe_record(
+            provider="ollama", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries,
+            error=(str(last_exc)[:200] if last_exc else
+                   (last_body[:200] if last_body else "unknown")),
+            model_id=None,
+        )
+    except Exception:
+        pass
+    return ""
+
+
 def _nvidia_reasoning_extra_body(reasoning_effort: str) -> dict[str, Any]:
     """Build NVIDIA-specific extra_body for reasoning control.
 
