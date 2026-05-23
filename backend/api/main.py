@@ -33,6 +33,7 @@ from llm_utils import (
     call_structured_llm_by_provider,
     get_last_plain_llm_call_error,
     get_last_structured_llm_call_metadata,
+    get_last_ollama_reasoning,
     normalize_reasoning_effort,
     resolve_api_key_for_provider,
 )
@@ -1480,6 +1481,21 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         except Exception:
             pass
 
+    # For Ollama, surface the content/thinking split from the smoke call
+    # so reasoning text doesn't get mixed into the visible response. Other
+    # providers leave this empty; the field is provider-agnostic on the wire.
+    _smoke_thinking = ""
+    _smoke_content_chars = None
+    _smoke_thinking_chars = None
+    if provider == "ollama":
+        try:
+            reasoning = get_last_ollama_reasoning() or {}
+            _smoke_thinking = str(reasoning.get("thinking") or "")[:4096]
+            _smoke_content_chars = reasoning.get("content_chars")
+            _smoke_thinking_chars = reasoning.get("thinking_chars")
+        except Exception:
+            pass
+
     return {
         "ok": True,
         "provider": provider,
@@ -1492,6 +1508,9 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         # Real-generation smoke — proves the model actually completes.
         "smoke_prompt": _smoke_prompt,
         "smoke_response": _smoke_text,
+        "smoke_thinking": _smoke_thinking or None,
+        "smoke_content_chars": _smoke_content_chars,
+        "smoke_thinking_chars": _smoke_thinking_chars,
         "smoke_latency_ms": _smoke_elapsed_ms,
         "smoke_error": _smoke_error or None,
         "message": (

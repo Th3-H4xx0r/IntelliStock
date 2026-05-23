@@ -3604,6 +3604,35 @@ def _call_openai(
 _ollama_warm_pairs: set[tuple[str, str]] = set()
 _ollama_warm_pairs_lock = threading.Lock()
 
+# Thread-local stash for the most recent Ollama call's thinking/reasoning
+# segment. Reasoning models (qwen3, deepseek-r1, gpt-oss) split their
+# output into ``message.content`` (visible answer) and ``message.thinking``
+# (internal reasoning). _call_ollama returns ``content`` and stashes the
+# raw thinking + a character-count split here so the smoke endpoint and
+# any other caller can render them separately without changing the
+# str-returning API of _call_ollama.
+_LAST_OLLAMA_REASONING = threading.local()
+
+
+def _stash_ollama_reasoning(*, content: str, thinking: str) -> None:
+    """Record the per-thread content/thinking split for the most recent
+    Ollama call. Always overwrites — there's only one "most recent" per
+    thread. Callers use ``get_last_ollama_reasoning()`` to read."""
+    _LAST_OLLAMA_REASONING.data = {
+        "content_chars": len(content or ""),
+        "thinking_chars": len(thinking or ""),
+        "thinking": str(thinking or ""),
+    }
+
+
+def get_last_ollama_reasoning() -> dict:
+    """Return the most-recent thread-local content/thinking split, or
+    ``{}`` if no Ollama call has stashed on this thread yet. Does NOT
+    clear; callers can read more than once. The data is overwritten by
+    the next Ollama call on the same thread, so read it before any other
+    LLM call fires."""
+    return dict(getattr(_LAST_OLLAMA_REASONING, "data", None) or {})
+
 
 def _ollama_pair_is_warm(base_url: str, model: str) -> bool:
     with _ollama_warm_pairs_lock:
@@ -3816,17 +3845,20 @@ def _call_ollama(
                     msg = msg.model_dump()
                 else:
                     msg = {}
-        text = msg.get("content") or ""
+        content = msg.get("content") or ""
+        thinking = msg.get("thinking") or ""
+        # Always stash both so the smoke endpoint can render them
+        # separately, regardless of which one ends up populated.
+        _stash_ollama_reasoning(content=content, thinking=thinking)
+        text = content
         # Reasoning models (qwen3, deepseek-r1, gpt-oss, etc.) split their
         # output into ``thinking`` and ``content`` fields. If num_predict
         # gets consumed by reasoning tokens before the visible answer is
         # produced, ``content`` is empty while ``thinking`` has the model's
         # actual response. Surfacing thinking is strictly better than
         # returning empty — the operator sees the model did respond.
-        if not text:
-            thinking = msg.get("thinking") or ""
-            if thinking:
-                text = thinking
+        if not text and thinking:
+            text = thinking
         elapsed_ms = int((time.monotonic() - _t0) * 1000)
         try:
             _stash_last_http(status=200, body=None, exc=None)
@@ -3985,11 +4017,10 @@ def call_ollama_with_tools(
             else:
                 msg = {}
 
-    text = msg.get("content") or ""
-    if not text:
-        thinking = msg.get("thinking") or ""
-        if thinking:
-            text = thinking
+    content = msg.get("content") or ""
+    thinking = msg.get("thinking") or ""
+    _stash_ollama_reasoning(content=content, thinking=thinking)
+    text = content if content else thinking
     raw_calls = msg.get("tool_calls") or []
     tool_calls: list[dict] = []
     for tc in raw_calls:

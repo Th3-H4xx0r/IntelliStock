@@ -208,6 +208,9 @@ async function _runLlmTest(d) {
     provider_meta: testBody.provider_meta,
     smoke_prompt: testBody.smoke_prompt,
     smoke_response: testBody.smoke_response,
+    smoke_thinking: testBody.smoke_thinking,
+    smoke_content_chars: testBody.smoke_content_chars,
+    smoke_thinking_chars: testBody.smoke_thinking_chars,
     smoke_latency_ms: testBody.smoke_latency_ms,
     smoke_error: testBody.smoke_error,
     message: testBody.message,
@@ -669,27 +672,47 @@ onMounted(fetchModels)
                 <div class="text-emerald-300/70 mb-0.5">structured connectivity probe (parsed response):</div>
                 <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.result) }}</pre>
               </div>
-              <div v-if="testResult.smoke_prompt || testResult.smoke_response || testResult.smoke_error" class="mt-1">
+              <div v-if="testResult.smoke_prompt || testResult.smoke_response || testResult.smoke_thinking || testResult.smoke_error" class="mt-1">
                 <div class="text-emerald-300/70 mb-0.5">
                   real-generation smoke
                   <span v-if="testResult.smoke_latency_ms != null" class="text-emerald-300/60">({{ testResult.smoke_latency_ms }}ms)</span>
+                  <span v-if="testResult.smoke_content_chars != null || testResult.smoke_thinking_chars != null" class="text-emerald-300/60">
+                    · content {{ testResult.smoke_content_chars ?? 0 }} chars
+                    · reasoning {{ testResult.smoke_thinking_chars ?? 0 }} chars
+                  </span>
                 </div>
                 <div v-if="testResult.smoke_prompt" class="text-emerald-300/60 text-[10px] mb-0.5">
                   prompt: <span class="text-emerald-200/90">{{ testResult.smoke_prompt }}</span>
                 </div>
-                <pre
-                  v-if="testResult.smoke_response"
-                  class="font-mono text-[11px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">{{ testResult.smoke_response }}</pre>
+
+                <!-- Visible answer (content) — prefer this when populated. -->
+                <template v-if="testResult.smoke_response && (testResult.smoke_content_chars == null || testResult.smoke_content_chars > 0)">
+                  <div class="text-emerald-300/60 text-[10px] mb-0.5">content (visible answer):</div>
+                  <pre class="font-mono text-[11px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">{{ testResult.smoke_response }}</pre>
+                </template>
+
+                <!-- Reasoning / thinking — for Ollama reasoning models. -->
+                <details v-if="testResult.smoke_thinking" class="mt-1">
+                  <summary class="cursor-pointer text-emerald-300/60 text-[10px]">reasoning ({{ testResult.smoke_thinking_chars ?? testResult.smoke_thinking.length }} chars) — click to expand</summary>
+                  <pre class="font-mono text-[11px] text-emerald-200/70 bg-black/40 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words mt-1">{{ testResult.smoke_thinking }}</pre>
+                </details>
+
+                <!-- Empty-content fallback: only thinking was returned. -->
                 <div
-                  v-else-if="testResult.smoke_error"
+                  v-if="!testResult.smoke_response && !testResult.smoke_thinking && testResult.smoke_error"
                   class="font-mono text-[10px] text-red-300 bg-red-900/20 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">
                   smoke generation failed: {{ testResult.smoke_error }}
                 </div>
                 <div
-                  v-else
+                  v-else-if="!testResult.smoke_response && !testResult.smoke_thinking"
                   class="font-mono text-[10px] text-amber-300 bg-amber-900/20 rounded px-2 py-1">
                   smoke generation returned empty — structured check passed but the
                   model did not produce free-form text. Strategy use may still fail.
+                </div>
+                <div
+                  v-else-if="testResult.smoke_content_chars === 0 && testResult.smoke_thinking_chars > 0"
+                  class="font-mono text-[10px] text-amber-300 bg-amber-900/20 rounded px-2 py-1 mt-1">
+                  Model produced only reasoning tokens — no visible answer. Try the Thinking/Effort dropdown to set "Off" or "Low", or raise the smoke max_output_tokens budget.
                 </div>
               </div>
               <div v-if="testResult.provider_meta && Object.keys(testResult.provider_meta).length" class="mt-1">

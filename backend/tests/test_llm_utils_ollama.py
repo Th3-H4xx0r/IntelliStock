@@ -157,6 +157,57 @@ def test_call_ollama_falls_back_to_thinking_when_content_empty():
     assert "interest-rate expectations" in out
 
 
+def test_call_ollama_stashes_reasoning_split_when_both_present():
+    """The thread-local reasoning stash captures content + thinking so the
+    smoke endpoint can render them separately even though _call_ollama
+    returns just the visible content string."""
+    from llm_utils import _call_ollama, get_last_ollama_reasoning
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = {
+        "message": {
+            "content": "Interest rate changes.",
+            "thinking": "Let me reason about macro drivers...",
+        },
+        "done": True,
+    }
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        out = _call_ollama(
+            api_key="", model="gpt-oss:20b", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+        )
+    # Return value is just content — NOT a mixed/concatenated blob.
+    assert out == "Interest rate changes."
+    stash = get_last_ollama_reasoning()
+    assert stash["content_chars"] == len("Interest rate changes.")
+    assert stash["thinking_chars"] == len("Let me reason about macro drivers...")
+    assert "macro drivers" in stash["thinking"]
+
+
+def test_call_ollama_stashes_reasoning_split_when_content_empty():
+    """Even when content is empty and we fall back to thinking, the stash
+    still records the split — the endpoint sees content_chars=0."""
+    from llm_utils import _call_ollama, get_last_ollama_reasoning
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = {
+        "message": {
+            "content": "",
+            "thinking": "All reasoning, no answer.",
+        },
+        "done": True,
+    }
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="qwen3.6:35b", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+        )
+    stash = get_last_ollama_reasoning()
+    assert stash["content_chars"] == 0
+    assert stash["thinking_chars"] > 0
+    assert stash["thinking"] == "All reasoning, no answer."
+
+
 def test_call_ollama_prefers_content_over_thinking_when_both_present():
     """When both fields are populated, content (the visible answer) wins."""
     from llm_utils import _call_ollama
