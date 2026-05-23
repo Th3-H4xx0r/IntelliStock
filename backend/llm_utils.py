@@ -687,10 +687,14 @@ def _safe_provider_meta(provider: str, provider_config: dict[str, Any] | None = 
 
 
 def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_config: dict[str, Any] | None = None):
-    """Build a PydanticAI model instance for Gemini, DeepSeek, OpenAI, or Azure OpenAI."""
-    if not _PYDANTIC_AI_AVAILABLE or not api_key or not model:
+    """Build a PydanticAI model instance for Gemini, DeepSeek, OpenAI, Azure OpenAI, or Ollama."""
+    if not _PYDANTIC_AI_AVAILABLE or not model:
         return None
     p = (provider or "gemini").strip().lower()
+    # Local Ollama legitimately has no API key (only Ollama Cloud needs one).
+    # Every other provider still requires a key here.
+    if not api_key and p != "ollama":
+        return None
     resolved = _resolve_provider_config(provider, provider_config)
 
     def _prefers_prompted_structured_output(provider_name: str, model_name: str) -> bool:
@@ -783,6 +787,26 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
                 api_key=api_key,
             ),
             profile=profile,
+        )
+    if p == "ollama":
+        base = str(resolved.get("ollama_base_url")
+                   or "http://localhost:11434").rstrip("/")
+        # Ollama exposes JSON-schema structured output through its
+        # OpenAI-compatible /v1 endpoint — the most reliable path for
+        # PydanticAI as of Ollama v0.5+. Append /v1 if the operator
+        # didn't already include it.
+        if not base.endswith("/v1"):
+            base = base + "/v1"
+        # The OpenAI SDK requires a non-empty api_key string even when
+        # the upstream endpoint ignores it. ``"ollama"`` is the
+        # well-known sentinel for the OpenAI-compatible path.
+        effective_key = api_key or "ollama"
+        return OpenAIChatModel(
+            model,
+            provider=OpenAIProvider(
+                base_url=base,
+                api_key=effective_key,
+            ),
         )
     return GoogleModel(
         model,
@@ -2347,7 +2371,11 @@ def call_structured_llm_by_provider(
             output_retries=output_retries,
             use_prompt_cache=use_prompt_cache,
         )
-    if not _PYDANTIC_AI_AVAILABLE or not api_key or not model or output_type is None:
+    if not _PYDANTIC_AI_AVAILABLE or not model or output_type is None:
+        return None
+    # Local Ollama legitimately has no api_key (only Ollama Cloud needs one);
+    # every other provider still requires a key.
+    if not api_key and (provider or "").strip().lower() != "ollama":
         return None
     # ── Scoped prompt-cache lookup ──
     _structured_cache_effort = ""
