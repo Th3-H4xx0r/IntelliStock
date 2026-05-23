@@ -6,9 +6,11 @@ import {
   NVIDIA_REASONING_EFFORT_OPTIONS,
   CLAUDE_CLI_EFFORT_OPTIONS,
   OLLAMA_THINK_OPTIONS,
+  BEDROCK_REASONING_OPTIONS,
   getLlmProviderLabel,
 } from '../utils/strategyConfig.js'
 import { loadOllamaModels } from '../composables/useOllamaModels.js'
+import { loadBedrockModels } from '../composables/useBedrockModels.js'
 import CodexCliSetupPanel from './CodexCliSetupPanel.vue'
 
 const props = defineProps({
@@ -101,6 +103,56 @@ watch(
   { immediate: true },
 )
 
+// ── Bedrock-specific state ───────────────────────────────────────────────────
+const bedrockModels = ref([])
+const bedrockListLoading = ref(false)
+const bedrockListError = ref('')
+const BEDROCK_COMMON_REGIONS = [
+  'us-east-1', 'us-west-2', 'us-east-2',
+  'eu-central-1', 'eu-west-1', 'eu-west-3',
+  'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1',
+]
+
+async function fetchBedrockModels({ force = false } = {}) {
+  const region = String(props.draft?.bedrockRegion || '').trim()
+  const apiKey = String(props.draft?.apiKey || '').trim()
+  if (!region || !apiKey) {
+    bedrockModels.value = []
+    bedrockListError.value = ''
+    return
+  }
+  bedrockListLoading.value = true
+  bedrockListError.value = ''
+  const { models, error } = await loadBedrockModels({ apiKey, region, force })
+  bedrockModels.value = models || []
+  bedrockListError.value = error || ''
+  bedrockListLoading.value = false
+}
+
+function refreshBedrockModels() {
+  if (_bedrockDebounceHandle) { clearTimeout(_bedrockDebounceHandle); _bedrockDebounceHandle = null }
+  fetchBedrockModels({ force: true })
+}
+
+let _bedrockDebounceHandle = null
+
+watch(
+  () => [props.draft?.provider, props.draft?.bedrockRegion, props.draft?.apiKey],
+  ([provider]) => {
+    if (_bedrockDebounceHandle) clearTimeout(_bedrockDebounceHandle)
+    if (provider !== 'bedrock') {
+      bedrockModels.value = []
+      bedrockListError.value = ''
+      return
+    }
+    _bedrockDebounceHandle = setTimeout(() => {
+      _bedrockDebounceHandle = null
+      fetchBedrockModels()
+    }, FETCH_DEBOUNCE_MS)
+  },
+  { immediate: true },
+)
+
 function onProviderChange(value) {
   const next = { ...props.draft, provider: value }
   if (value === 'claude-cli' || value === 'codex-cli') {
@@ -130,6 +182,15 @@ function onProviderChange(value) {
     next.ollamaBaseUrl = ''
     next.ollamaKeepAlive = ''
     next.ollamaThink = ''
+  }
+  if (value === 'bedrock') {
+    // Seed sensible defaults so the picker can fire once a key is entered.
+    if (!next.bedrockRegion) next.bedrockRegion = 'us-east-1'
+    if (!next.bedrockReasoning) next.bedrockReasoning = 'off'
+    next.reasoningEffort = ''  // bedrock reasoning is its own field
+  } else {
+    next.bedrockRegion = ''
+    next.bedrockReasoning = ''
   }
   emit('update:draft', next)
 }
@@ -322,6 +383,91 @@ function onProviderChange(value) {
       </details>
     </template>
 
+    <!-- AWS Bedrock-specific configuration -->
+    <template v-if="draft.provider === 'bedrock'">
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">AWS Region</label>
+        <input
+          :value="draft.bedrockRegion"
+          @input="update('bedrockRegion', $event.target.value)"
+          type="text"
+          list="bedrock-region-list"
+          :disabled="disabled || readOnly"
+          placeholder="us-east-1"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+        <datalist id="bedrock-region-list">
+          <option v-for="r in BEDROCK_COMMON_REGIONS" :key="r" :value="r" />
+        </datalist>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Bedrock is regional — model availability varies by region. Required.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">
+          API Key <span class="text-amber-400">(required — Bedrock API key / bearer token)</span>
+        </label>
+        <input
+          :value="draft.apiKey"
+          @input="update('apiKey', $event.target.value)"
+          type="password"
+          :disabled="disabled || readOnly"
+          placeholder="Bedrock API key (bearer token)"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5 flex items-center justify-between">
+          <span>Pick from available models</span>
+          <button
+            type="button"
+            @click="refreshBedrockModels"
+            :disabled="disabled || readOnly || bedrockListLoading"
+            class="text-[11px] text-primary hover:underline disabled:opacity-50"
+          >{{ bedrockListLoading ? 'Loading…' : 'Refresh' }}</button>
+        </label>
+        <div v-if="bedrockListError" class="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-300 mb-2 space-y-1">
+          <div>Couldn't list Bedrock models for this region / key.</div>
+          <div class="text-amber-200/70 font-mono whitespace-pre-wrap break-words">{{ bedrockListError }}</div>
+          <div class="text-amber-200/70">
+            Bedrock API keys can be scoped without <span class="font-mono">bedrock:ListFoundationModels</span> — discovery may be unavailable even when the key can run Converse. Enter the model or inference-profile id manually in the Model field above (e.g. <span class="font-mono">us.anthropic.claude-3-5-sonnet-20241022-v2:0</span>).
+          </div>
+        </div>
+        <select
+          v-else
+          :value="draft.model"
+          @change="update('model', $event.target.value)"
+          :disabled="disabled || readOnly || !bedrockModels.length"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+        >
+          <option value="" disabled>{{ bedrockModels.length ? 'Select a model' : 'No models — enter the model id manually above' }}</option>
+          <option v-for="m in bedrockModels" :key="m.id" :value="m.id">
+            {{ m.id }}<template v-if="m.kind === 'inference_profile'"> · profile</template><template v-if="m.provider_name"> — {{ m.provider_name }}</template>
+          </option>
+        </select>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          The Model field above is the source of truth — picking just fills it in. Newer models often need a cross-region inference-profile id (the <span class="font-mono">us.</span>/<span class="font-mono">eu.</span> prefixed entries).
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">Reasoning</label>
+        <select
+          :value="draft.bedrockReasoning"
+          @change="update('bedrockReasoning', $event.target.value)"
+          :disabled="disabled || readOnly"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+        >
+          <option v-for="o in BEDROCK_REASONING_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Extended thinking budget, sent via Converse. Only Anthropic Claude 3.7+ models honour it; other families ignore it — leave <span class="font-mono">Off</span> for them.
+        </p>
+      </div>
+    </template>
+
     <div v-if="['azure', 'openai', 'nvidia', 'claude-cli', 'codex-cli'].includes(draft.provider)">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">Reasoning Effort</label>
       <select
@@ -356,9 +502,9 @@ function onProviderChange(value) {
       </p>
     </div>
 
-    <!-- Standard API-key field for non-CLI, non-Ollama providers. -->
-    <!-- Ollama has its own API-key field above (with cloud-required hint). -->
-    <div v-if="!isCliProvider && draft.provider !== 'ollama'">
+    <!-- Standard API-key field for non-CLI, non-Ollama, non-Bedrock providers. -->
+    <!-- Ollama and Bedrock have their own API-key fields above. -->
+    <div v-if="!isCliProvider && draft.provider !== 'ollama' && draft.provider !== 'bedrock'">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">
         {{ draft.provider === 'azure' ? 'Azure API Key' : 'API Key' }}
       </label>

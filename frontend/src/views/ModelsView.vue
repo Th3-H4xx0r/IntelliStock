@@ -56,6 +56,11 @@ function _reasoningCell(m) {
     if (think === 'false' || think === 'off') return 'Off'
     return think.charAt(0).toUpperCase() + think.slice(1)
   }
+  if (m.provider === 'bedrock') {
+    const r = String(m.bedrock_reasoning || '').trim().toLowerCase()
+    if (!r || r === 'off') return 'Off'
+    return r.charAt(0).toUpperCase() + r.slice(1)
+  }
   const eff = String(m.reasoning_effort || '').trim()
   if (!eff) return 'Default'
   return eff.charAt(0).toUpperCase() + eff.slice(1)
@@ -77,6 +82,9 @@ const formDraft = ref({
   ollamaBaseUrl: 'http://localhost:11434',
   ollamaKeepAlive: '',
   ollamaThink: '',
+  // Bedrock provider config — only used when provider === 'bedrock'.
+  bedrockRegion: 'us-east-1',
+  bedrockReasoning: 'off',
   // Optional per-model pricing override ($/1M tokens). null = use
   // backend llm_pricing.yaml defaults.
   inputCostPer1m: null,
@@ -174,6 +182,9 @@ function openEditModal(m) {
     ollamaBaseUrl: m.ollama_base_url || 'http://localhost:11434',
     ollamaKeepAlive: m.ollama_keep_alive || '',
     ollamaThink: m.ollama_think || '',
+    // Bedrock: hydrate region + reasoning; default region when blank.
+    bedrockRegion: m.bedrock_region || 'us-east-1',
+    bedrockReasoning: m.bedrock_reasoning || 'off',
     // Pricing override: row stores snake_case; null/undefined → blank input.
     inputCostPer1m: (m.input_cost_per_1m ?? null),
     outputCostPer1m: (m.output_cost_per_1m ?? null),
@@ -315,6 +326,11 @@ async function submitModel() {
       payload.ollama_base_url = (d.ollamaBaseUrl || '').trim() || 'http://localhost:11434'
       payload.ollama_keep_alive = (d.ollamaKeepAlive || '').trim() || undefined
       payload.ollama_think = (d.ollamaThink || '').trim() || undefined
+    }
+    // Bedrock fields — region is required; reasoning defaults to off.
+    if (d.provider === 'bedrock') {
+      payload.bedrock_region = (d.bedrockRegion || '').trim() || undefined
+      payload.bedrock_reasoning = (d.bedrockReasoning || '').trim().toLowerCase() || undefined
     }
 
     // Pricing override ($/1M tokens). Convert camelCase → snake_case and

@@ -984,6 +984,9 @@ const llmConfigDraft = ref({
   ollamaBaseUrl: '',
   ollamaKeepAlive: '',
   ollamaThink: '',
+  // Bedrock-specific — region + reasoning, surfaced in the Effort cell.
+  bedrockRegion: '',
+  bedrockReasoning: '',
 })
 
 // Friendly label for the "Effort" line in the picker — works across
@@ -996,6 +999,11 @@ function effortLabel(draft) {
     if (v === 'true' || v === 'on') return 'On'
     if (v === 'false' || v === 'off') return 'Off'
     return v.charAt(0).toUpperCase() + v.slice(1)
+  }
+  if (draft.provider === 'bedrock') {
+    const r = String(draft.bedrockReasoning || '').trim().toLowerCase()
+    if (!r || r === 'off') return 'Off'
+    return r.charAt(0).toUpperCase() + r.slice(1)
   }
   const eff = String(draft.reasoningEffort || '').trim()
   if (!eff) return 'Default'
@@ -1033,6 +1041,8 @@ async function openLlmConfigModal(sub, group) {
       llmConfigDraft.value.ollamaBaseUrl = m.ollama_base_url || ''
       llmConfigDraft.value.ollamaKeepAlive = m.ollama_keep_alive || ''
       llmConfigDraft.value.ollamaThink = m.ollama_think || ''
+      llmConfigDraft.value.bedrockRegion = m.bedrock_region || ''
+      llmConfigDraft.value.bedrockReasoning = m.bedrock_reasoning || ''
     }
   }
   showLlmConfigModal.value = true
@@ -1060,6 +1070,8 @@ function onModelSelect() {
     ollamaBaseUrl: m.ollama_base_url || '',
     ollamaKeepAlive: m.ollama_keep_alive || '',
     ollamaThink: m.ollama_think || '',
+    bedrockRegion: m.bedrock_region || '',
+    bedrockReasoning: m.bedrock_reasoning || '',
   }
 }
 

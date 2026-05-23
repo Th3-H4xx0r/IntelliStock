@@ -307,6 +307,7 @@ export const LLM_PROVIDER_OPTIONS = [
   { value: 'azure', label: 'Azure OpenAI' },
   { value: 'nvidia', label: 'NVIDIA NIM' },
   { value: 'ollama', label: 'Ollama (local / cloud)' },
+  { value: 'bedrock', label: 'AWS Bedrock' },
   { value: 'claude-cli', label: 'Claude Code CLI (subscription)' },
   { value: 'codex-cli', label: 'OpenAI Codex CLI (subscription)' },
 ]
@@ -336,6 +337,16 @@ export const OLLAMA_THINK_OPTIONS = [
   { value: 'low', label: 'Low effort' },
   { value: 'medium', label: 'Medium effort' },
   { value: 'high', label: 'High effort' },
+]
+
+// AWS Bedrock reasoning (extended thinking). Maps to Converse
+// additionalModelRequestFields on the backend; only Anthropic Claude 3.7+
+// models honour it (others ignore / are omitted). "off" = no reasoning budget.
+export const BEDROCK_REASONING_OPTIONS = [
+  { value: 'off', label: 'Off' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
 ]
 
 // Maps to the claude CLI's `--effort` flag. CC supports five levels;
@@ -691,6 +702,12 @@ export function buildStrategyLlmTestPayload(draft) {
     const think = String(draft?.ollamaThink || '').trim()
     if (think) payload.ollama_think = think
     // api_key is already populated above for cloud Ollama; leave empty for local.
+  }
+  if (provider === 'bedrock') {
+    payload.bedrock_region = String(draft?.bedrockRegion || '').trim()
+    const reasoning = String(draft?.bedrockReasoning || '').trim().toLowerCase()
+    if (reasoning) payload.bedrock_reasoning = reasoning
+    // api_key is the Bedrock bearer token, populated above.
   }
   if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'codex-cli') {
     const reasoningEffort = String(draft?.reasoningEffort || '').trim().toLowerCase()
