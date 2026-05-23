@@ -5,6 +5,7 @@ import {
   LLM_REASONING_EFFORT_OPTIONS,
   NVIDIA_REASONING_EFFORT_OPTIONS,
   CLAUDE_CLI_EFFORT_OPTIONS,
+  OLLAMA_THINK_OPTIONS,
   getLlmProviderLabel,
 } from '../utils/strategyConfig.js'
 import { loadOllamaModels } from '../composables/useOllamaModels.js'
@@ -124,6 +125,7 @@ function onProviderChange(value) {
     // draft clean is the same defensive pattern used above for CLI.
     next.ollamaBaseUrl = ''
     next.ollamaKeepAlive = ''
+    next.ollamaThink = ''
   }
   emit('update:draft', next)
 }
@@ -251,8 +253,14 @@ function onProviderChange(value) {
             class="text-[11px] text-primary hover:underline disabled:opacity-50"
           >{{ ollamaListLoading ? 'Loading…' : 'Refresh' }}</button>
         </label>
-        <div v-if="ollamaListError" class="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-300 mb-2">
-          Couldn't reach Ollama at this base URL: {{ ollamaListError }}. Enter the model name manually in the field above.
+        <div v-if="ollamaListError" class="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-300 mb-2 space-y-1">
+          <div>Couldn't reach Ollama at this base URL: {{ ollamaListError }}.</div>
+          <div v-if="ollamaListError === 'Failed to fetch' || ollamaListError.toLowerCase().includes('network')" class="text-amber-200/70">
+            "Failed to fetch" usually means the IntelliStock <em>backend</em> can't reach the Ollama host (e.g. you pointed at a Tailscale/LAN IP that's only reachable from your laptop, not from the backend container). Try a host the backend can reach, or just enter the model name manually below.
+          </div>
+          <div v-else class="text-amber-200/70">
+            Enter the model name manually in the field above.
+          </div>
         </div>
         <select
           v-else
@@ -268,6 +276,21 @@ function onProviderChange(value) {
         </select>
         <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
           The Model field above is the source of truth — picking from the list just fills it in. Free-text entry works too (useful for cloud-only or just-pulled models).
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">Thinking / Effort</label>
+        <select
+          :value="draft.ollamaThink"
+          @change="update('ollamaThink', $event.target.value)"
+          :disabled="disabled || readOnly"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+        >
+          <option v-for="o in OLLAMA_THINK_OPTIONS" :key="o.value || 'default'" :value="o.value">{{ o.label }}</option>
+        </select>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Maps to Ollama's <span class="font-mono">think</span> parameter. <span class="font-mono">On</span>/<span class="font-mono">Off</span> works on reasoning models like qwen3 or deepseek-r1. <span class="font-mono">Low</span>/<span class="font-mono">Medium</span>/<span class="font-mono">High</span> is for gpt-oss-style effort. Most non-reasoning models ignore this field.
         </p>
       </div>
 

@@ -58,6 +58,7 @@ const formDraft = ref({
   // Ollama provider config — only used when provider === 'ollama'.
   ollamaBaseUrl: 'http://localhost:11434',
   ollamaKeepAlive: '',
+  ollamaThink: '',
   // Optional per-model pricing override ($/1M tokens). null = use
   // backend llm_pricing.yaml defaults.
   inputCostPer1m: null,
@@ -150,10 +151,11 @@ function openEditModal(m) {
     reasoningEffort: m.reasoning_effort || '',
     cliPath: m.cli_path || '',
     extraArgs: m.extra_args || '',
-    // Ollama: hydrate base_url + keep_alive; default base_url when blank
-    // so editing a stored ollama row never lands on an empty picker.
+    // Ollama: hydrate base_url + keep_alive + think; default base_url when
+    // blank so editing a stored ollama row never lands on an empty picker.
     ollamaBaseUrl: m.ollama_base_url || 'http://localhost:11434',
     ollamaKeepAlive: m.ollama_keep_alive || '',
+    ollamaThink: m.ollama_think || '',
     // Pricing override: row stores snake_case; null/undefined → blank input.
     inputCostPer1m: (m.input_cost_per_1m ?? null),
     outputCostPer1m: (m.output_cost_per_1m ?? null),
@@ -291,6 +293,7 @@ async function submitModel() {
     if (d.provider === 'ollama') {
       payload.ollama_base_url = (d.ollamaBaseUrl || '').trim() || 'http://localhost:11434'
       payload.ollama_keep_alive = (d.ollamaKeepAlive || '').trim() || undefined
+      payload.ollama_think = (d.ollamaThink || '').trim() || undefined
     }
 
     // Pricing override ($/1M tokens). Convert camelCase → snake_case and

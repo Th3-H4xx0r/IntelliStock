@@ -325,6 +325,17 @@ export const NVIDIA_REASONING_EFFORT_OPTIONS = [
   { value: 'high', label: 'High (full reasoning)' },
 ]
 
+// Ollama's `think` parameter accepts either a bool (qwen3, deepseek-r1)
+// or an effort string (gpt-oss). One dropdown covers both.
+export const OLLAMA_THINK_OPTIONS = [
+  { value: '', label: 'Default (model decides)' },
+  { value: 'false', label: 'Off (disable thinking)' },
+  { value: 'true', label: 'On (enable thinking)' },
+  { value: 'low', label: 'Low effort (gpt-oss)' },
+  { value: 'medium', label: 'Medium effort (gpt-oss)' },
+  { value: 'high', label: 'High effort (gpt-oss)' },
+]
+
 // Maps to the claude CLI's `--effort` flag. CC supports five levels;
 // the default ("") lets CC decide.
 export const CLAUDE_CLI_EFFORT_OPTIONS = [
@@ -675,6 +686,8 @@ export function buildStrategyLlmTestPayload(draft) {
     payload.ollama_base_url = String(draft?.ollamaBaseUrl || 'http://localhost:11434').trim()
     const keepAlive = String(draft?.ollamaKeepAlive || '').trim()
     if (keepAlive) payload.ollama_keep_alive = keepAlive
+    const think = String(draft?.ollamaThink || '').trim()
+    if (think) payload.ollama_think = think
     // api_key is already populated above for cloud Ollama; leave empty for local.
   }
   if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'codex-cli') {

@@ -177,6 +177,111 @@ def test_call_ollama_prefers_content_over_thinking_when_both_present():
     assert out == "Rates."
 
 
+def test_normalize_think_accepts_bool_and_effort_strings():
+    from llm_utils import _normalize_ollama_think
+    # Bool-shaped strings → actual bool
+    assert _normalize_ollama_think("true") is True
+    assert _normalize_ollama_think("True") is True
+    assert _normalize_ollama_think("ON") is True
+    assert _normalize_ollama_think("yes") is True
+    assert _normalize_ollama_think("1") is True
+    assert _normalize_ollama_think("false") is False
+    assert _normalize_ollama_think("FALSE") is False
+    assert _normalize_ollama_think("off") is False
+    assert _normalize_ollama_think("no") is False
+    assert _normalize_ollama_think("0") is False
+    # Effort levels → pass-through lowercase strings
+    assert _normalize_ollama_think("low") == "low"
+    assert _normalize_ollama_think("Medium") == "medium"
+    assert _normalize_ollama_think("HIGH") == "high"
+    # Empty / unknown → None (omit field)
+    assert _normalize_ollama_think("") is None
+    assert _normalize_ollama_think(None) is None
+    assert _normalize_ollama_think("   ") is None
+    assert _normalize_ollama_think("ultra") is None  # unknown — better silent omit than 400
+
+
+def test_call_ollama_sends_think_bool_true():
+    """think='true' must reach Ollama as JSON bool True (not the string)."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = _fake_response("hi")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="qwen3.6:35b", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+            think="true",
+        )
+    sent = fake_client.chat.call_args.kwargs.get("think")
+    assert sent is True
+
+
+def test_call_ollama_sends_think_bool_false():
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = _fake_response("hi")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="qwen3.6:35b", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+            think="false",
+        )
+    sent = fake_client.chat.call_args.kwargs.get("think")
+    assert sent is False
+
+
+def test_call_ollama_sends_think_effort_string():
+    """gpt-oss accepts think='low'/'medium'/'high' as a string."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = _fake_response("hi")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="gpt-oss:20b", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+            think="high",
+        )
+    sent = fake_client.chat.call_args.kwargs.get("think")
+    assert sent == "high"
+
+
+def test_call_ollama_omits_think_when_unset():
+    """No think arg → the field is not sent (Ollama uses model default)."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = _fake_response("hi")
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        _call_ollama(
+            api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+        )
+    assert "think" not in fake_client.chat.call_args.kwargs
+
+
+def test_dispatcher_routes_think_from_provider_config():
+    """Trace: provider_config.ollama_think → resolved → _call_ollama think kw."""
+    from llm_utils import call_llm_by_provider
+
+    captured = {}
+    def _fake(api_key, model, prompt, **kwargs):
+        captured["think"] = kwargs.get("think")
+        return "ok"
+    with patch("llm_utils._call_ollama", side_effect=_fake):
+        call_llm_by_provider(
+            provider="ollama", api_key="", model="qwen3.6:35b", prompt="x",
+            max_output_tokens=16,
+            provider_config={
+                "ollama_base_url": "http://localhost:11434",
+                "ollama_think": "high",
+            },
+        )
+    assert captured["think"] == "high"
+
+
 def test_call_ollama_with_tools_thinking_fallback():
     """Tool-calling path also surfaces thinking when content is empty."""
     from llm_utils import call_ollama_with_tools

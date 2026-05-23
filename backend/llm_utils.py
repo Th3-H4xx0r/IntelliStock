@@ -648,9 +648,16 @@ def _resolve_provider_config(provider: str, provider_config: dict[str, Any] | No
             resolved["ollama_keep_alive"] = keep_alive
         else:
             resolved.pop("ollama_keep_alive", None)
+        think_raw = resolved.get("ollama_think")
+        think_norm = str(think_raw or "").strip().lower()
+        if think_norm:
+            resolved["ollama_think"] = think_norm
+        else:
+            resolved.pop("ollama_think", None)
         # Reasoning-effort is model-specific for Ollama (set via the
         # Modelfile, not a standard generation option), so we never
-        # propagate the field — strip it if a strategy left it on.
+        # propagate the standard field — strip it if a strategy left it
+        # on. ``ollama_think`` is the Ollama-specific equivalent above.
         resolved.pop("reasoning_effort", None)
     return resolved
 
@@ -3619,6 +3626,34 @@ def _make_ollama_sync_client(base_url: str, api_key: str | None, timeout: float)
     return Client(host=base_url, headers=headers, timeout=timeout)
 
 
+def _normalize_ollama_think(value):
+    """Coerce an ``ollama_think`` field value to what Ollama actually accepts.
+
+    Ollama's ``think`` parameter on /api/chat accepts either:
+      * bool ``true``/``false`` — binary thinking on/off (qwen3, deepseek-r1)
+      * string ``"low"``/``"medium"``/``"high"`` — effort levels (gpt-oss)
+
+    The Models table stores a single string so the operator can configure
+    either flavour from one dropdown. Normalisation:
+      * ``"true"``  / ``"on"``  / ``"yes"`` (any case) → ``True``
+      * ``"false"`` / ``"off"`` / ``"no"``             → ``False``
+      * ``"low"``   / ``"medium"`` / ``"high"``        → pass through
+      * empty / unknown                                → ``None`` (omit field)
+    """
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in ("true", "on", "yes", "1"):
+        return True
+    if s in ("false", "off", "no", "0"):
+        return False
+    if s in ("low", "medium", "high"):
+        return s
+    return None  # silently ignore unknown — better than 400 from Ollama
+
+
 def _normalize_ollama_keep_alive(value):
     """Coerce a ``keep_alive`` value to the shape Ollama actually accepts.
 
@@ -3674,6 +3709,7 @@ def _call_ollama(
     response_mime_type=None,
     reasoning_effort: str = "",   # accepted, ignored (model-specific)
     keep_alive: str | None = None,
+    think: str | None = None,
 ) -> str:
     """Plain-text chat against an Ollama host.
 
@@ -3709,6 +3745,9 @@ def _call_ollama(
     normalised_keep_alive = _normalize_ollama_keep_alive(keep_alive)
     if normalised_keep_alive is not None:
         chat_kwargs["keep_alive"] = normalised_keep_alive
+    normalised_think = _normalize_ollama_think(think)
+    if normalised_think is not None:
+        chat_kwargs["think"] = normalised_think
 
     max_retries = max(0, int(retries or 0))
     # Reuse the same network-error tuple as ollama_client.py so we
@@ -3846,6 +3885,7 @@ def call_ollama_with_tools(
     timeout_sec=None,
     max_output_tokens: int = 1024,
     keep_alive: str | None = None,
+    think: str | None = None,
 ) -> dict:
     """Single-shot tool-using chat against an Ollama host.
 
@@ -3883,6 +3923,9 @@ def call_ollama_with_tools(
     normalised_keep_alive = _normalize_ollama_keep_alive(keep_alive)
     if normalised_keep_alive is not None:
         chat_kwargs["keep_alive"] = normalised_keep_alive
+    normalised_think = _normalize_ollama_think(think)
+    if normalised_think is not None:
+        chat_kwargs["think"] = normalised_think
 
     _net_excs = (
         httpx.ConnectError,
@@ -5031,6 +5074,7 @@ def call_llm_by_provider(
             base_url=str(resolved.get("ollama_base_url") or "http://localhost:11434"),
             response_mime_type=response_mime_type,
             keep_alive=resolved.get("ollama_keep_alive"),
+            think=resolved.get("ollama_think"),
         )
     else:
         _result = _call_gemini(
