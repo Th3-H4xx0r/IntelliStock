@@ -53,3 +53,70 @@ def test_safe_provider_meta_bedrock():
     meta = llm_utils._safe_provider_meta("bedrock", {"bedrock_region": "eu-central-1", "bedrock_reasoning": "high"})
     assert meta["bedrock_region"] == "eu-central-1"
     assert meta["bedrock_reasoning"] == "high"
+
+
+# ────────────────────────── Converse fakes ──────────────────────────────────
+
+
+class _FakeConverseClient:
+    def __init__(self, response=None, error=None):
+        self._response = response
+        self._error = error
+        self.calls = []
+
+    def converse(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        return self._response
+
+
+def _ok_converse(text="hello", in_tok=10, out_tok=5):
+    return {"output": {"message": {"role": "assistant", "content": [{"text": text}]}},
+            "usage": {"inputTokens": in_tok, "outputTokens": out_tok},
+            "stopReason": "end_turn"}
+
+
+# ────────────────────────── _call_bedrock (plain) ───────────────────────────
+
+
+def test_call_bedrock_happy_path(monkeypatch):
+    fake = _FakeConverseClient(response=_ok_converse("hi there"))
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    out = llm_utils._call_bedrock("key", "anthropic.claude-3-5-sonnet-20241022-v2:0", "ping", region="us-east-1")
+    assert out == "hi there"
+    assert fake.calls[0]["modelId"] == "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    assert fake.calls[0]["messages"][0]["content"][0]["text"] == "ping"
+
+
+def test_call_bedrock_includes_reasoning_for_claude(monkeypatch):
+    fake = _FakeConverseClient(response=_ok_converse())
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    llm_utils._call_bedrock("key", "us.anthropic.claude-3-7-sonnet-20250219-v1:0", "ping",
+                            region="us-east-1", reasoning="high")
+    assert fake.calls[0]["additionalModelRequestFields"]["reasoning_config"]["budget_tokens"] == 16384
+
+
+def test_call_bedrock_no_reasoning_field_for_llama(monkeypatch):
+    fake = _FakeConverseClient(response=_ok_converse())
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    llm_utils._call_bedrock("key", "meta.llama3-1-70b-instruct-v1:0", "ping", region="us-east-1", reasoning="high")
+    assert "additionalModelRequestFields" not in fake.calls[0]
+
+
+def test_call_bedrock_returns_empty_on_client_error(monkeypatch):
+    from botocore.exceptions import ClientError
+    err = ClientError({"Error": {"Code": "AccessDeniedException", "Message": "no"},
+                       "ResponseMetadata": {"HTTPStatusCode": 403}}, "Converse")
+    fake = _FakeConverseClient(error=err)
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    llm_utils._pop_last_http()  # clear any stale stash
+    out = llm_utils._call_bedrock("key", "anthropic.claude-3-5-sonnet-20241022-v2:0", "ping", region="us-east-1")
+    assert out == ""
+    captured = llm_utils._pop_last_http() or {}
+    assert captured.get("status") == 403
+
+
+def test_call_bedrock_empty_without_region_or_key():
+    assert llm_utils._call_bedrock("", "model", "p", region="us-east-1") == ""
+    assert llm_utils._call_bedrock("key", "model", "p", region="") == ""

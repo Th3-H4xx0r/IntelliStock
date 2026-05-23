@@ -5097,6 +5097,132 @@ def _call_structured_llm_with_critical_guard(
     return result  # unreachable, but mypy-friendly
 
 
+def _call_bedrock(
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_output_tokens: int = 256,
+    timeout_sec: int | None = None,
+    retries: int = 0,
+    region: str = "",
+    response_mime_type: str | None = None,
+    reasoning: str = "",
+) -> str:
+    """Plain-text chat against Amazon Bedrock via the Converse API.
+
+    Mirrors ``_call_ollama`` semantics: returns ``""`` on every failure (no
+    raise), stashes the HTTP shape via ``_stash_last_http`` so the
+    critical-guard can classify, and records telemetry. boto3 is synchronous;
+    the per-call client carries the bearer token + region.
+    """
+    _t0 = time.monotonic()
+    if bedrock_client is None or not model or not api_key or not str(region or "").strip():
+        try:
+            _stash_last_http(status=None, body="bedrock not configured (region/key/model)", exc=None)
+        except Exception:
+            pass
+        return ""
+    from botocore.exceptions import ClientError
+
+    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    inference_config: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        inference_config["maxTokens"] = int(max_output_tokens)
+    converse_kwargs: dict[str, object] = {"modelId": model, "messages": messages}
+    if inference_config:
+        converse_kwargs["inferenceConfig"] = inference_config
+    amrf = _normalize_bedrock_reasoning(reasoning, model)
+    if amrf:
+        converse_kwargs["additionalModelRequestFields"] = amrf
+    if response_mime_type and "json" in str(response_mime_type).lower():
+        converse_kwargs["system"] = [
+            {"text": "Respond with ONLY a single valid JSON value. No prose, no markdown fences."}
+        ]
+
+    timeout = float(_coerce_timeout_sec(timeout_sec))
+    max_retries = max(0, int(retries or 0))
+    last_status: int | None = None
+    last_body: str | None = None
+    last_exc: BaseException | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            client = bedrock_client.build_runtime_client(api_key, region, timeout_sec=timeout)
+            resp = client.converse(**converse_kwargs)
+        except ClientError as e:
+            code = (e.response or {}).get("Error", {}).get("Code", "")
+            last_status = (e.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
+            last_body = f"{code}: {(e.response or {}).get('Error', {}).get('Message', str(e))}"[:1000]
+            last_exc = e
+            transient = code in (
+                "ThrottlingException", "TooManyRequestsException",
+                "ServiceUnavailableException", "InternalServerException",
+                "ModelNotReadyException",
+            ) or (isinstance(last_status, int) and 500 <= last_status < 600)
+            if transient and attempt < max_retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        except Exception as e:
+            last_status = None
+            last_body = str(e)[:1000]
+            last_exc = e
+            break
+
+        content = (((resp or {}).get("output") or {}).get("message") or {}).get("content") or []
+        text = "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
+        if not text:  # reasoning-only output → fall back to reasoning text blocks
+            text = "".join(
+                ((b.get("reasoningContent", {}) or {}).get("reasoningText", {}) or {}).get("text", "")
+                for b in content if isinstance(b, dict) and "reasoningContent" in b
+            )
+        usage = (resp or {}).get("usage") or {}
+        _in_tok = int(usage.get("inputTokens") or 0)
+        _out_tok = int(usage.get("outputTokens") or 0)
+        try:
+            import sys as _sys
+            print(
+                f"[llm_utils] BEDROCK TOKENS: model={model!r} in_tokens={_in_tok} "
+                f"out_tokens={_out_tok} content_chars={len(text)}",
+                file=_sys.stderr, flush=True,
+            )
+        except Exception:
+            pass
+        try:
+            _stash_last_http(status=200, body=None, exc=None)
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="bedrock", model=model,
+                usage={"input_tokens": _in_tok, "output_tokens": _out_tok},
+                ok=True, duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error=None, model_id=None,
+            )
+        except Exception:
+            pass
+        return text
+
+    try:
+        _stash_last_http(status=last_status, body=last_body, exc=last_exc)
+    except Exception:
+        pass
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = str(last_exc) if last_exc else (last_body or "")
+    except Exception:
+        pass
+    try:
+        _safe_record(
+            provider="bedrock", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000), retry_count=max_retries,
+            error=(str(last_exc)[:200] if last_exc else (last_body[:200] if last_body else "unknown")),
+            model_id=None,
+        )
+    except Exception:
+        pass
+    return ""
+
+
 def call_llm_by_provider(
     provider: str,
     api_key: str,
