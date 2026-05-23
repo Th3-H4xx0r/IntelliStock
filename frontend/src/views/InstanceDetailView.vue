@@ -157,6 +157,117 @@ function closeEditInfo() {
   showEditInfo.value = false
 }
 
+// ── Clear instance state (destructive — modal-gated) ────────────────────────
+// One modal handles three scopes (lookback_only / strategy_cache_only /
+// full_instance). Workflow: pick scope → click Preview → review per-table
+// counts from the dry-run endpoint → type the instance id to unlock
+// "Confirm and clear" → second POST with apply=true.
+const showClearState = ref(false)
+const clearScope     = ref('lookback_only')
+const clearPreview   = ref(null)       // dry-run response from the API
+const clearPreviewLoading = ref(false)
+const clearApplying  = ref(false)
+const clearConfirm   = ref('')         // operator types instance_id here
+const clearMsg       = ref('')
+const clearOk        = ref(false)
+const clearResult    = ref(null)       // apply response
+
+function openClearState() {
+  clearScope.value = 'lookback_only'
+  clearPreview.value = null
+  clearConfirm.value = ''
+  clearMsg.value = ''
+  clearOk.value = false
+  clearResult.value = null
+  clearPreviewLoading.value = false
+  clearApplying.value = false
+  showClearState.value = true
+}
+
+function closeClearState() {
+  if (clearApplying.value || clearPreviewLoading.value) return
+  showClearState.value = false
+}
+
+const clearScopeOptions = [
+  {
+    value: 'lookback_only',
+    label: 'Lookback only',
+    blurb: 'GraphNexusTradeContexts + GraphNexusOutcomes. Forces lookback re-build on next run; other instance state untouched.',
+  },
+  {
+    value: 'strategy_cache_only',
+    label: 'DB strategy cache only',
+    blurb: 'NexusStrategyCache rows for this instance (non-backtest origin). Backtest snapshots preserved.',
+  },
+  {
+    value: 'full_instance',
+    label: 'Full instance reset',
+    blurb: 'Every per-instance table — lookback, runtime state, discovery, market trends, rotation cooldown, learning cache, trade outcomes, analyst panel, strategy cache (non-backtest). Shared caches (article/sentiment/finbert/Benzinga/Neo4j) and backtest snapshots preserved.',
+  },
+]
+
+const clearConfirmOk = computed(() => {
+  return (clearConfirm.value || '').trim() === String(route?.params?.id || '').trim()
+})
+
+async function previewClearState() {
+  if (!route?.params?.id) return
+  clearPreviewLoading.value = true
+  clearMsg.value = ''
+  clearOk.value = false
+  clearPreview.value = null
+  clearResult.value = null
+  try {
+    const res = await fetch(`${API_BASE}/instances/${route.params.id}/clear-state`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ scope: clearScope.value, apply: false }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`)
+    clearPreview.value = data
+  } catch (e) {
+    clearMsg.value = `Preview failed: ${e.message}`
+    clearOk.value = false
+  } finally {
+    clearPreviewLoading.value = false
+  }
+}
+
+async function applyClearState() {
+  if (!route?.params?.id) return
+  if (!clearConfirmOk.value) {
+    clearMsg.value = `Type "${route.params.id}" to confirm.`
+    clearOk.value = false
+    return
+  }
+  clearApplying.value = true
+  clearMsg.value = ''
+  clearOk.value = false
+  try {
+    const res = await fetch(`${API_BASE}/instances/${route.params.id}/clear-state`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        scope: clearScope.value,
+        apply: true,
+        confirm: String(route.params.id),
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`)
+    clearResult.value = data
+    clearOk.value = true
+    clearMsg.value = `Deleted ${data.total_deleted} row(s) across ${data.tables.length} table(s).`
+  } catch (e) {
+    clearMsg.value = `Clear failed: ${e.message}`
+    clearOk.value = false
+  } finally {
+    clearApplying.value = false
+  }
+}
+
 async function submitEditInfo() {
   if (!inst.value) return
   editInfoSaving.value = true
@@ -1211,13 +1322,23 @@ async function submitCreateBacktest() {
           <div class="glass-card rounded-2xl p-5">
             <div class="flex items-center justify-between mb-4">
               <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Instance Info</p>
-              <button
-                @click="openEditInfo"
-                class="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400 hover:bg-amber-500/10 px-2 py-1 rounded-lg border border-amber-500/20 transition-colors"
-              >
-                <span class="material-symbols-outlined text-[13px]">edit</span>
-                Edit
-              </button>
+              <div class="flex items-center gap-2">
+                <button
+                  @click="openClearState"
+                  class="inline-flex items-center gap-1 text-[11px] font-semibold text-red-300 hover:bg-red-500/10 px-2 py-1 rounded-lg border border-red-500/20 transition-colors"
+                  title="Clear lookback / strategy cache / full instance state"
+                >
+                  <span class="material-symbols-outlined text-[13px]">delete_sweep</span>
+                  Clear data
+                </button>
+                <button
+                  @click="openEditInfo"
+                  class="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400 hover:bg-amber-500/10 px-2 py-1 rounded-lg border border-amber-500/20 transition-colors"
+                >
+                  <span class="material-symbols-outlined text-[13px]">edit</span>
+                  Edit
+                </button>
+              </div>
             </div>
             <div class="space-y-3 text-sm">
               <div class="flex justify-between gap-2">
@@ -2129,6 +2250,151 @@ async function submitCreateBacktest() {
               class="flex-1 py-2.5 rounded-lg bg-amber-500 text-black text-sm font-bold hover:bg-amber-400 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
               <span v-if="editStrategySaving" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
               {{ editStrategySaving ? 'Saving...' : 'Save Changes' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+
+  <!-- ── Clear Instance State Modal (destructive) ─────────────────────────── -->
+  <Teleport to="body">
+    <Transition name="modal">
+      <div v-if="showClearState"
+           class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+           @click.self="closeClearState">
+        <div class="relative w-full max-w-2xl bg-[#0f1318] border border-red-500/30 rounded-2xl shadow-2xl overflow-hidden">
+          <div class="flex items-center justify-between px-6 py-5 border-b border-red-500/20">
+            <div class="flex items-center gap-3">
+              <div class="size-9 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-red-300 text-lg">warning</span>
+              </div>
+              <div>
+                <h2 class="text-base font-bold">Clear instance data</h2>
+                <p class="text-[11px] text-slate-500">Destructive · scoped to instance <span class="font-mono text-slate-300">{{ route.params.id }}</span></p>
+              </div>
+            </div>
+            <button @click="closeClearState"
+                    :disabled="clearApplying || clearPreviewLoading"
+                    class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+
+          <div class="px-6 py-5 space-y-5 max-h-[70vh] overflow-y-auto">
+            <!-- Scope picker -->
+            <div class="space-y-2">
+              <p class="text-xs font-semibold uppercase tracking-widest text-slate-500">Scope</p>
+              <div
+                v-for="opt in clearScopeOptions"
+                :key="opt.value"
+                @click="!clearOk && (clearScope = opt.value)"
+                :class="[
+                  'rounded-xl border px-4 py-3 cursor-pointer transition-colors',
+                  clearScope === opt.value
+                    ? 'border-red-500/40 bg-red-500/5'
+                    : 'border-border-subtle hover:border-slate-600',
+                  clearOk ? 'opacity-50 cursor-not-allowed' : '',
+                ]"
+              >
+                <div class="flex items-start gap-3">
+                  <input type="radio"
+                         :checked="clearScope === opt.value"
+                         :value="opt.value"
+                         :disabled="clearOk"
+                         @change="clearScope = opt.value"
+                         class="mt-1 accent-red-400 shrink-0"
+                  />
+                  <div>
+                    <div class="text-sm font-semibold text-slate-200">{{ opt.label }}</div>
+                    <p class="text-[11px] text-slate-500 leading-relaxed mt-0.5">{{ opt.blurb }}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Preview button + counts -->
+            <div class="flex items-center gap-3">
+              <button
+                @click="previewClearState"
+                :disabled="clearPreviewLoading || clearApplying || clearOk"
+                class="inline-flex items-center gap-2 text-xs font-semibold px-3 py-2 rounded-lg border border-amber-500/30 text-amber-200 hover:bg-amber-500/10 transition-colors disabled:opacity-50"
+              >
+                <span class="material-symbols-outlined text-[14px]">visibility</span>
+                {{ clearPreviewLoading ? 'Counting…' : (clearPreview ? 'Refresh preview' : 'Preview (dry run)') }}
+              </button>
+              <span v-if="clearPreview" class="text-[11px] text-slate-500">
+                Would delete <span class="text-red-300 font-bold">{{ clearPreview.total_would_delete }}</span> row(s) across {{ clearPreview.tables.length }} table(s).
+              </span>
+            </div>
+
+            <!-- Per-table preview -->
+            <div v-if="clearPreview" class="rounded-xl border border-border-subtle overflow-hidden">
+              <table class="w-full text-xs">
+                <thead class="bg-white/[0.02] text-slate-500">
+                  <tr>
+                    <th class="text-left px-4 py-2 font-semibold">Table</th>
+                    <th class="text-right px-4 py-2 font-semibold">{{ clearOk ? 'Deleted' : 'Would delete' }}</th>
+                    <th class="text-left px-4 py-2 font-semibold">Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in (clearResult || clearPreview).tables" :key="row.table"
+                      class="border-t border-border-subtle/60">
+                    <td class="px-4 py-2 font-mono text-slate-300">{{ row.table }}</td>
+                    <td class="px-4 py-2 text-right font-mono"
+                        :class="(clearOk ? row.deleted : row.would_delete) > 0 ? 'text-red-300' : 'text-slate-600'">
+                      {{ clearOk ? row.deleted : row.would_delete }}
+                    </td>
+                    <td class="px-4 py-2 text-slate-500">
+                      <span v-if="row.skipped">{{ row.reason || 'skipped' }}</span>
+                      <span v-else-if="row.would_delete === 0 && !clearOk">no matching rows</span>
+                      <span v-else-if="clearOk" class="text-emerald-400">deleted</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Confirm typed-instance-id gate -->
+            <div v-if="clearPreview && !clearOk" class="space-y-2">
+              <p class="text-xs text-slate-400">
+                To confirm, type the instance id
+                <span class="font-mono text-slate-200">{{ route.params.id }}</span>
+                below.
+              </p>
+              <input
+                :value="clearConfirm"
+                @input="clearConfirm = $event.target.value"
+                :disabled="clearApplying"
+                :placeholder="String(route.params.id)"
+                class="w-full bg-surface border border-red-500/30 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-red-400 font-mono"
+              />
+            </div>
+
+            <!-- Status / result -->
+            <div v-if="clearMsg" :class="[
+                   'rounded-xl px-3 py-2 text-xs leading-relaxed',
+                   clearOk
+                     ? 'border border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
+                     : 'border border-red-500/30 bg-red-500/5 text-red-300',
+                 ]">
+              {{ clearMsg }}
+            </div>
+          </div>
+
+          <div class="px-6 py-4 border-t border-border-subtle flex gap-3 shrink-0">
+            <button @click="closeClearState"
+                    :disabled="clearApplying"
+                    class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50">
+              {{ clearOk ? 'Close' : 'Cancel' }}
+            </button>
+            <button v-if="!clearOk"
+                    @click="applyClearState"
+                    :disabled="!clearPreview || !clearConfirmOk || clearApplying || clearPreviewLoading"
+                    class="flex-1 py-2.5 rounded-lg bg-red-500 text-white text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+              <template v-if="clearApplying">Clearing…</template>
+              <template v-else>Confirm and clear</template>
             </button>
           </div>
         </div>

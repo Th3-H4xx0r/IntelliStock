@@ -58,6 +58,7 @@ from strategies_meta import get_available_strategies
 from interactive_utils import (
     get_conn,
     parse_granularity_to_seconds,
+    action_clear_instance_state,
     action_status,
     action_tickers,
     action_add_ticker,
@@ -1734,6 +1735,67 @@ def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_
 @app.post("/instances/{instance_id}/stop", response_class=JSONResponse)
 def api_stop_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(action_stop_instance, conn, instance_id)
+
+
+class ClearInstanceStateBody(BaseModel):
+    # ``lookback_only``: just GraphNexusTradeContexts + GraphNexusOutcomes.
+    # ``full_instance``: all per-instance tables (shared caches preserved).
+    scope: str = Field(default="lookback_only", max_length=32)
+    # ``apply=False`` is a dry-run (counts only). The UI calls with
+    # apply=false first to render a preview, then again with apply=true
+    # after the operator confirms a typed phrase.
+    apply: bool = Field(default=False)
+    # Typed confirmation required for apply=true. Must equal the
+    # instance_id from the URL. Stops curl-fired accidental wipes.
+    confirm: Optional[str] = Field(default=None, max_length=256)
+
+
+@app.post("/instances/{instance_id}/clear-state", response_class=JSONResponse)
+def api_clear_instance_state(
+    instance_id: str,
+    body: ClearInstanceStateBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Wipe per-instance lookback / decision / cache state.
+
+    Always scoped to a single instance — never touches another
+    instance's rows or shared caches (article cache, sentiment cache,
+    FinBERT, etc.). See backend/clear_instance_state.py docstring for
+    the full preserved/cleared list.
+
+    Operator workflow (mirrored by the InstanceDetailView modal):
+      1. POST with ``apply=false`` to get per-table counts.
+      2. Review the preview.
+      3. POST with ``apply=true`` and ``confirm=<instance_id>`` to
+         actually delete. The confirm field stops bare curl-fired wipes.
+    """
+    scope = (body.scope or "lookback_only").strip()
+    if scope not in ("lookback_only", "strategy_cache_only", "full_instance"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown scope {scope!r}; use one of "
+                f"'lookback_only', 'strategy_cache_only', 'full_instance'"
+            ),
+        )
+    if body.apply:
+        confirm = (body.confirm or "").strip()
+        if confirm != str(instance_id).strip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "destructive apply requires confirm == instance_id "
+                    "(received empty or mismatched confirm)"
+                ),
+            )
+    try:
+        return _run(
+            action_clear_instance_state, conn,
+            str(instance_id), scope, bool(body.apply),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Config flags ---

@@ -5133,6 +5133,28 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
     }
 
 
+def action_clear_instance_state(conn, instance_id: str, scope: str = "lookback_only",
+                                 apply: bool = False) -> dict:
+    """Dry-run / apply per-instance state wipe.
+
+    Thin wrapper around ``clear_instance_state.execute``. ``apply=False``
+    just counts what would be deleted; ``apply=True`` performs the
+    deletes. Returns the same shape either way so the UI can render a
+    "before" preview and an "after" confirmation with one code path.
+
+    Raises ``ValueError`` on unknown scope (the API maps that to 400).
+    """
+    from clear_instance_state import execute as _execute
+    if not (instance_id and str(instance_id).strip()):
+        raise ValueError("instance_id is required")
+    return _execute(
+        conn,
+        instance_id=str(instance_id).strip(),
+        scope=str(scope or "lookback_only").strip(),
+        apply=bool(apply),
+    )
+
+
 def action_create_backtest(
     conn,
     instance_id,
