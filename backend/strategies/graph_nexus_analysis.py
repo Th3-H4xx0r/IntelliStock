@@ -623,7 +623,7 @@ _NEXUS_MACRO_PROMPT_BUDGET_CHARS = 8000
 
 _NEXUS_VALID_PROVIDERS = {
     "gemini", "deepseek", "openai", "azure", "nvidia",
-    "claude-cli", "codex-cli", "anthropic", "ollama",
+    "claude-cli", "codex-cli", "anthropic", "ollama", "bedrock",
 }
 # Module-level dedup cache for `LLM key source for role=...` diagnostic
 # log. Each (role, source_tag, masked_key) tuple is logged at most once
@@ -760,6 +760,13 @@ def _default_model_for_provider(provider: str) -> str:
         # No universal Ollama default — the operator's installed models
         # vary widely. Pick a small, broadly-available reasoning model.
         return os.environ.get("GRAPH_NEXUS_OLLAMA_MODEL", "llama3.2").strip() or "llama3.2"
+    if provider == "bedrock":
+        # Default to a broadly-available cross-region Claude inference profile
+        # (us-* regions). Overridable per-model and via env.
+        return (
+            os.environ.get("GRAPH_NEXUS_BEDROCK_MODEL")
+            or "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+        ).strip() or "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
     return "gemini-3-flash-preview"
 
 
@@ -787,6 +794,8 @@ def _default_api_key_for_provider(provider: str) -> str:
         # (tokens in ~/.codex/auth.json). Sentinel matches the claude-cli
         # convention so the short-circuit doesn't skip the pipeline.
         return "codex-cli-no-api-key"
+    if provider == "bedrock":
+        return os.environ.get("BEDROCK_API_KEY", "").strip()
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
@@ -919,6 +928,28 @@ def _resolve_role_llm_provider_config(config: dict, role: str) -> dict[str, Any]
             out["ollama_keep_alive"] = keep_alive
         if think:
             out["ollama_think"] = think
+        return out
+    if provider == "bedrock":
+        # Pull bedrock_region (required) + bedrock_reasoning that the
+        # model_resolver injects, so the dispatcher's _resolve_provider_config
+        # receives them. Mirrors the ollama branch above.
+        region = (
+            _lb_cfg("bedrock_region")
+            or (config.get(f"{prefix}bedrock_region") or "").strip()
+            or (config.get("bedrock_region") or "").strip()
+            or os.environ.get("BEDROCK_REGION", "").strip()
+            or os.environ.get("AWS_REGION", "").strip()
+        )
+        reasoning = (
+            _lb_cfg("bedrock_reasoning")
+            or (config.get(f"{prefix}bedrock_reasoning") or "").strip()
+            or (config.get("bedrock_reasoning") or "").strip()
+        )
+        out: dict[str, Any] = {}
+        if region:
+            out["bedrock_region"] = region
+        if reasoning:
+            out["bedrock_reasoning"] = reasoning
         return out
     if provider != "azure":
         return {}
