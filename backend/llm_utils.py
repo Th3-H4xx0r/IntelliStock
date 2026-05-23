@@ -3780,6 +3780,148 @@ def _call_ollama(
     return ""
 
 
+def call_ollama_with_tools(
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    tools: list[dict],
+    *,
+    base_url: str = "http://localhost:11434",
+    timeout_sec=None,
+    max_output_tokens: int = 1024,
+    keep_alive: str | None = None,
+) -> dict:
+    """Single-shot tool-using chat against an Ollama host.
+
+    Accepts OpenAI-shape OR Gemini-shape tool dicts; the input is
+    normalised via ``_normalize_tools_to_openai_shape`` before dispatch.
+
+    Returns ``{"text": str, "tool_calls": [{"name": str, "arguments": dict}, ...]}``.
+
+    Important: this is single-shot — it does NOT execute tool calls or
+    loop. Callers that need a multi-turn tool loop (like
+    ``call_gemini_with_tools``) should wrap this themselves. The choice
+    keeps the API simple; the multi-turn behaviour wasn't actually
+    needed by the existing strategy roles that wired up tools.
+
+    On any provider failure (404 model-not-found, 401, 5xx, connection
+    error) returns ``{"text": "", "tool_calls": []}`` — mirrors the
+    return-empty convention of ``_call_ollama``.
+    """
+    _t0 = time.monotonic()
+    from ollama import ResponseError
+    import httpx
+    import json as _json
+
+    normalised = _normalize_tools_to_openai_shape(tools or [])
+    options: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        options["num_predict"] = int(max_output_tokens)
+
+    chat_kwargs: dict[str, object] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": normalised,
+        "options": options,
+    }
+    if keep_alive:
+        chat_kwargs["keep_alive"] = keep_alive
+
+    _net_excs = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+        httpx.NetworkError,
+        ConnectionError,
+        TimeoutError,
+    )
+
+    timeout = _resolve_ollama_timeout(base_url, model, timeout_sec)
+    try:
+        client = _make_ollama_sync_client(base_url, api_key, timeout)
+        resp = client.chat(**chat_kwargs)
+    except ResponseError as e:
+        try:
+            _stash_last_http(
+                status=e.status_code or 0,
+                body=str(e)[:1000],
+                exc=e,
+            )
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="ollama", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=0, error=str(e)[:200], model_id=None,
+            )
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+    except _net_excs as e:
+        try:
+            _stash_last_http(status=None, body=str(e)[:1000], exc=e)
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="ollama", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=0, error=str(e)[:200], model_id=None,
+            )
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+
+    msg = ((resp or {}).get("message") if isinstance(resp, dict)
+           else getattr(resp, "message", {}) or {})
+    if not isinstance(msg, dict):
+        try:
+            msg = dict(msg)
+        except Exception:
+            msg = {}
+
+    text = msg.get("content") or ""
+    raw_calls = msg.get("tool_calls") or []
+    tool_calls: list[dict] = []
+    for tc in raw_calls:
+        fn = (tc or {}).get("function") or {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            # Ollama may stringify args depending on the model — normalise.
+            try:
+                args = _json.loads(args)
+            except Exception:
+                args = {"_raw": args}
+        tool_calls.append({"name": fn.get("name", ""), "arguments": args or {}})
+
+    try:
+        _stash_last_http(status=200, body=None, exc=None)
+    except Exception:
+        pass
+    try:
+        _safe_record(
+            provider="ollama", model=model,
+            usage={
+                "input_tokens": int(
+                    (resp or {}).get("prompt_eval_count", 0) or 0
+                ) if isinstance(resp, dict) else 0,
+                "output_tokens": int(
+                    (resp or {}).get("eval_count", 0) or 0
+                ) if isinstance(resp, dict) else 0,
+            },
+            ok=True,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=None, model_id=None,
+        )
+    except Exception:
+        pass
+    _ollama_warm_pairs.add((base_url, model))
+
+    return {"text": text, "tool_calls": tool_calls}
+
+
 def _nvidia_reasoning_extra_body(reasoning_effort: str) -> dict[str, Any]:
     """Build NVIDIA-specific extra_body for reasoning control.
 
