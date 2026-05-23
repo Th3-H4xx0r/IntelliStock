@@ -164,6 +164,148 @@ def build_targets(instance_id: str, scope: str = "lookback_only"):
     raise ValueError(f"unknown scope: {scope!r}")
 
 
+def _ensure_index(conn, r, table: str, field: str) -> bool:
+    """Create a secondary index on ``table.field`` if missing.
+
+    Returns True when the index exists (created or already there),
+    False when creation failed. Idempotent across processes — the
+    create call will race-fail safely.
+
+    PK fields ("id") are always indexed by RethinkDB itself; we
+    short-circuit those.
+    """
+    if field == "id":
+        return True
+    try:
+        existing = set(
+            r.db(DB_NAME).table(table).index_list().run(conn)
+        )
+    except Exception:
+        return False
+    if field in existing:
+        return True
+    try:
+        r.db(DB_NAME).table(table).index_create(field).run(conn)
+        r.db(DB_NAME).table(table).index_wait(field).run(conn)
+        return True
+    except Exception:
+        # Race with another process creating the same index is fine —
+        # if the second create raises, the first either already
+        # finished or is still pending. The index_wait above would have
+        # waited; if not, the subsequent count() may briefly fall back
+        # to scan, which is correct, just slower.
+        try:
+            existing_after = set(
+                r.db(DB_NAME).table(table).index_list().run(conn)
+            )
+            return field in existing_after
+        except Exception:
+            return False
+
+
+def _indexed_selection(conn, r, table: str, criteria, combine: str):
+    """Build the cheapest correct selection for the given criteria.
+
+    Strategy:
+      * Single criterion, exact match on a field → ``get_all`` with an
+        index (auto-created if missing). PK ``id`` uses the primary
+        index for free.
+      * Single criterion, prefix match → ``between(prefix, prefix+max)``
+        with an index. PK ``id`` uses the primary index for free.
+      * combine="and" with N criteria → use the first criterion as the
+        indexed base (per the rules above), then chain ``.filter()``
+        with the remaining criteria. Index narrows the scan to the
+        instance's rows first; the chained filter then prunes the
+        origin field (or whatever else).
+      * combine="or" with N criteria → fall back to ``.filter()`` with
+        an OR expression. RethinkDB has no clean indexed-union path
+        without materialising IDs in Python; the OR cases in our
+        targets (instance_id-prefix OR base_instance_id-exact) span
+        two fields and ``.filter()`` is still markedly faster than the
+        ID-materialisation alternative for the row counts we see in
+        production. We do still ``_ensure_index`` on each field so the
+        next single-criterion query benefits.
+
+    Returns the selection (anything you can call ``.count()`` /
+    ``.delete()`` on), or ``None`` if no criteria resolved.
+    """
+    if not criteria:
+        return None
+
+    # Pre-create indices for every field referenced — costs nothing
+    # when they already exist, and the OR-fallback path leaves indices
+    # ready for future single-criterion queries.
+    for field, _val, mode in criteria:
+        if mode == "special":
+            continue
+        _ensure_index(conn, r, table, field)
+
+    # Multi-criterion OR with no special field: fall back to filter.
+    # (The single-pass OR scan is still hundreds of times faster than
+    # the same-shape pre-index code.)
+    if combine == "or" and len(criteria) > 1:
+        expr = _build_filter(r, criteria, combine="or")
+        if expr is None:
+            return None
+        return r.db(DB_NAME).table(table).filter(expr)
+
+    # Single criterion — use the indexed primitive directly.
+    if len(criteria) == 1:
+        return _single_criterion_selection(
+            conn, r, table, criteria[0]
+        )
+
+    # combine == "and" with multiple criteria: pick the first
+    # non-special criterion as the indexed base, then filter the rest.
+    base_idx = next(
+        (i for i, c in enumerate(criteria) if c[2] != "special"),
+        None,
+    )
+    if base_idx is None:
+        # All criteria are "special" (only origin_not_backtest today).
+        # Filter the whole table.
+        expr = _build_filter(r, criteria, combine=combine)
+        if expr is None:
+            return None
+        return r.db(DB_NAME).table(table).filter(expr)
+
+    base_selection = _single_criterion_selection(
+        conn, r, table, criteria[base_idx]
+    )
+    remaining = [c for i, c in enumerate(criteria) if i != base_idx]
+    if not remaining:
+        return base_selection
+    expr = _build_filter(r, remaining, combine="and")
+    if expr is None:
+        return base_selection
+    return base_selection.filter(expr)
+
+
+def _single_criterion_selection(conn, r, table: str, criterion):
+    """Build the cheapest selection for a single criterion."""
+    field, val, mode = criterion
+    tbl = r.db(DB_NAME).table(table)
+    if mode == "special":
+        # No "get_all"-style indexed primitive for special predicates;
+        # filter against the whole table.
+        if field == "origin_not_backtest":
+            return tbl.filter(lambda row: row["origin"].default("") != "backtest")
+        return None
+    if mode == "exact":
+        if field == "id":
+            return tbl.get_all(val)
+        return tbl.get_all(val, index=field)
+    if mode == "prefix":
+        # between() with a high sentinel above any printable codepoint —
+        # ￿ sorts after every UTF-8 character RethinkDB will see
+        # in our instance_id strings.
+        high = str(val) + "￿"
+        if field == "id":
+            return tbl.between(val, high, right_bound="closed")
+        return tbl.between(val, high, index=field, right_bound="closed")
+    return None
+
+
 def _build_filter(r, criteria, combine: str = "or"):
     """Build a RethinkDB filter expression combining the criteria."""
     expr = None
@@ -242,8 +384,12 @@ def execute(conn, *, instance_id: str, scope: str, apply: bool) -> dict[str, Any
             })
             continue
 
-        expr = _build_filter(r, criteria, combine=combine_mode)
-        if expr is None:
+        # Build the cheapest correct selection (indexed where possible,
+        # filter() fallback for multi-criterion OR). _indexed_selection
+        # also auto-creates secondary indices on the referenced fields
+        # so subsequent runs (and the rest of the codebase) benefit.
+        selection = _indexed_selection(conn, r, table, criteria, combine_mode)
+        if selection is None:
             rows.append({
                 "table": table, "would_delete": 0, "deleted": 0,
                 "skipped": True, "reason": "no criteria",
@@ -251,9 +397,7 @@ def execute(conn, *, instance_id: str, scope: str, apply: bool) -> dict[str, Any
             continue
 
         try:
-            count = int(
-                r.db(DB_NAME).table(table).filter(expr).count().run(conn) or 0
-            )
+            count = int(selection.count().run(conn) or 0)
         except Exception as e:
             rows.append({
                 "table": table, "would_delete": 0, "deleted": 0,
@@ -265,7 +409,13 @@ def execute(conn, *, instance_id: str, scope: str, apply: bool) -> dict[str, Any
         deleted = 0
         if apply and count > 0:
             try:
-                res = r.db(DB_NAME).table(table).filter(expr).delete().run(conn)
+                # Rebuild the selection — RethinkDB's count() consumed
+                # the cursor on the original. Cheap: indices already
+                # primed, no second index_create round-trip.
+                delete_selection = _indexed_selection(
+                    conn, r, table, criteria, combine_mode,
+                )
+                res = delete_selection.delete().run(conn)
                 deleted = int((res or {}).get("deleted", 0) or 0)
                 total_deleted += deleted
             except Exception as e:
