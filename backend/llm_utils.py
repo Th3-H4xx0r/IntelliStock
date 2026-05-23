@@ -485,6 +485,37 @@ def _get_model_request_rate_limiter(model: str, provider: str = "nvidia") -> _Re
     return None
 
 
+def _normalize_tools_to_openai_shape(tools) -> list[dict]:
+    """Convert either Gemini- or OpenAI-shaped tool dicts into OpenAI shape.
+
+    Gemini shape (used by ``call_gemini_with_tools``):
+        ``[{"function_declarations": [{"name": ..., "parameters": ...}, ...]}]``
+    OpenAI shape (used by Ollama, OpenAI, NVIDIA):
+        ``[{"type": "function", "function": {"name": ..., "parameters": ...}}]``
+
+    Returns a list copy in OpenAI shape. Empty/None input → ``[]``.
+    Raises ``ValueError`` for any shape we don't recognise so we surface
+    the mismatch loudly instead of silently sending an empty tool list.
+    """
+    if not tools:
+        return []
+    first = tools[0]
+    if isinstance(first, dict) and first.get("type") == "function":
+        # Already OpenAI shape — shallow-copy so callers can't mutate ours.
+        return [dict(t) for t in tools]
+    if isinstance(first, dict) and "function_declarations" in first:
+        flattened: list[dict] = []
+        for entry in tools:
+            for fn in entry.get("function_declarations", []) or []:
+                flattened.append({"type": "function", "function": dict(fn)})
+        return flattened
+    raise ValueError(
+        "Unsupported tools shape: expected OpenAI-style "
+        "[{type:function,...}] or Gemini-style "
+        "[{function_declarations:[...]}]"
+    )
+
+
 def _omit_temperature(model: str) -> bool:
     """Return True for models that reject custom temperature and only accept the default."""
     lowered = (model or "").strip().lower()
