@@ -379,6 +379,13 @@ def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]
             config["api_version"] = api_version
     if provider == "nvidia":
         config["base_url"] = "https://integrate.api.nvidia.com/v1"
+    if provider == "ollama":
+        base = str(body.ollama_base_url or "").strip()
+        if base:
+            config["ollama_base_url"] = base
+        keep_alive = str(body.ollama_keep_alive or "").strip()
+        if keep_alive:
+            config["ollama_keep_alive"] = keep_alive
     reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
     # claude-cli accepts ``--effort`` (low/medium/high/xhigh/max) too —
     # its session manager folds it into the spawn argv. Drop the value
@@ -455,6 +462,11 @@ class LlmConfigTestBody(BaseModel):
     azure_openai_endpoint: Optional[str] = None
     azure_openai_api_version: Optional[str] = None
     reasoning_effort: Optional[str] = None
+    # Ollama provider config — base_url defaults to http://localhost:11434
+    # when omitted; keep_alive controls how long Ollama keeps the model
+    # loaded between calls (e.g. "5m", "60m", "-1" for forever).
+    ollama_base_url: Optional[str] = Field(default=None, max_length=512)
+    ollama_keep_alive: Optional[str] = Field(default=None, max_length=16)
 
 
 class LlmConfigTestOutput(BaseModel):
@@ -479,6 +491,12 @@ class CreateModelBody(BaseModel):
     # repetition; the allowlist itself caps token count too.
     cli_path: Optional[str] = Field(default=None, max_length=256)
     extra_args: Optional[str] = Field(default=None, max_length=1024)
+    # Ollama provider config — base_url defaults to http://localhost:11434
+    # when omitted (also accepts https://ollama.com/v1 for cloud).
+    # keep_alive: how long Ollama keeps the model resident between calls
+    # (e.g. "5m", "60m", "-1" for forever).
+    ollama_base_url: Optional[str] = Field(default=None, max_length=512)
+    ollama_keep_alive: Optional[str] = Field(default=None, max_length=16)
     # Optional per-model pricing override ($/1M tokens). When set, these
     # win over backend/llm_pricing.yaml at telemetry-cost time. Leave
     # None to fall back to the YAML defaults.
@@ -500,6 +518,8 @@ class EditModelBody(BaseModel):
     reasoning_effort: Optional[str] = Field(default=None, max_length=16)
     cli_path: Optional[str] = Field(default=None, max_length=256)
     extra_args: Optional[str] = Field(default=None, max_length=1024)
+    ollama_base_url: Optional[str] = Field(default=None, max_length=512)
+    ollama_keep_alive: Optional[str] = Field(default=None, max_length=16)
     input_cost_per_1m: Optional[float] = Field(default=None, ge=0)
     output_cost_per_1m: Optional[float] = Field(default=None, ge=0)
     cache_creation_cost_per_1m: Optional[float] = Field(default=None, ge=0)
@@ -1807,6 +1827,8 @@ def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), curre
             reasoning_effort=body.reasoning_effort,
             cli_path=body.cli_path,
             extra_args=body.extra_args,
+            ollama_base_url=body.ollama_base_url,
+            ollama_keep_alive=body.ollama_keep_alive,
             input_cost_per_1m=body.input_cost_per_1m,
             output_cost_per_1m=body.output_cost_per_1m,
             cache_creation_cost_per_1m=body.cache_creation_cost_per_1m,
