@@ -157,6 +157,12 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
             "ollama_base_url": f"{prefix}ollama_base_url",
             "ollama_keep_alive": f"{prefix}ollama_keep_alive",
             "ollama_think": f"{prefix}ollama_think",
+            # Bedrock-specific propagation: region is required and reasoning
+            # is the bedrock equivalent of ollama_think. Not in
+            # always_overwrite — only set when the row has them, so a
+            # non-bedrock row never injects empty bedrock keys.
+            "bedrock_region": f"{prefix}bedrock_region",
+            "bedrock_reasoning": f"{prefix}bedrock_reasoning",
         }
 
         for doc_field, config_key in field_map.items():
