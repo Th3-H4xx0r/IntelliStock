@@ -24,6 +24,11 @@ const editId     = ref(null)
 const submitting = ref(false)
 const submitMsg  = ref('')
 const submitOk   = ref(false)
+// True only after submitModel actually saves a row. Test only success
+// flips submitOk but NOT saved — so the Test only / Test & Save buttons
+// stay visible and the operator can re-test or save without reopening
+// the modal.
+const saved      = ref(false)
 // Full LLM test response so operators can verify the test is real
 // (not a canned 200 OK from an upstream proxy). Populated by submitModel
 // after /llm/test succeeds; cleared by closeModal / openModal reset paths.
@@ -125,6 +130,7 @@ function openCreateModal() {
   submitting.value = false
   submitMsg.value = ''
   submitOk.value = false
+  saved.value = false
   testResult.value = null
   showModal.value = true
 }
@@ -157,6 +163,7 @@ function openEditModal(m) {
   submitting.value = false
   submitMsg.value = ''
   submitOk.value = false
+  saved.value = false
   testResult.value = null
   showModal.value = true
 }
@@ -167,6 +174,7 @@ function closeModal(force = false) {
   editId.value = null
   submitMsg.value = ''
   submitOk.value = false
+  saved.value = false
   testResult.value = null
 }
 
@@ -305,6 +313,7 @@ async function submitModel() {
     if (!res.ok) throw new Error(_normalizeError(body, res.status))
 
     submitOk.value = true
+    saved.value = true
     submitMsg.value = editMode.value
       ? 'LLM test passed. Model updated.'
       : 'LLM test passed. Model saved.'
@@ -697,25 +706,27 @@ onMounted(fetchModels)
           <div class="px-6 pb-6 pt-4 border-t border-border-subtle flex gap-3 shrink-0">
             <button @click="closeModal"
               :disabled="submitting"
-              :class="submitOk
+              :class="saved
                 ? 'flex-1 py-2.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/30 transition-colors'
                 : 'flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors'">
-              {{ submitOk ? 'Close' : 'Cancel' }}
+              {{ saved ? 'Close' : 'Cancel' }}
             </button>
             <!-- Test-only button: hits /llm/test against the current
                  draft without touching the Models table. Useful when
                  the operator is iterating on a config and wants to
                  verify auth + model resolution + smoke generation
                  before committing. Hidden for claude-cli (which has a
-                 separate per-row cable-icon test). -->
-            <button v-if="!submitOk && formDraft.provider !== 'claude-cli'"
+                 separate per-row cable-icon test). Stays visible after
+                 a successful Test only run so the operator can re-test
+                 or jump straight to Save without reopening the modal. -->
+            <button v-if="!saved && formDraft.provider !== 'claude-cli'"
               @click="testOnly"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg border border-primary/40 text-sm font-semibold text-primary hover:bg-primary/10 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
               <template v-if="submitting">Testing...</template>
               <template v-else>Test only</template>
             </button>
-            <button v-if="!submitOk"
+            <button v-if="!saved"
               @click="submitModel"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
