@@ -37,6 +37,11 @@ except Exception:
     _rethink = None
 
 try:
+    import bedrock_client
+except Exception:
+    bedrock_client = None
+
+try:
     from pydantic_ai import Agent
     from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -46,6 +51,8 @@ try:
     from pydantic_ai.providers.google import GoogleProvider
     from pydantic_ai.providers.openai import OpenAIProvider
     from pydantic_ai.settings import ModelSettings
+    from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
+    from pydantic_ai.providers.bedrock import BedrockProvider
     _PYDANTIC_AI_AVAILABLE = True
 except Exception:
     Agent = None
@@ -58,6 +65,9 @@ except Exception:
     GoogleProvider = None
     OpenAIProvider = None
     ModelSettings = None
+    BedrockConverseModel = None
+    BedrockModelSettings = None
+    BedrockProvider = None
     _PYDANTIC_AI_AVAILABLE = False
 
 # Telemetry — defensive import so a missing/broken module never blocks LLM calls.
@@ -3726,6 +3736,28 @@ def _normalize_ollama_keep_alive(value):
     except (TypeError, ValueError):
         pass
     return s  # duration string with unit — pass through verbatim
+
+
+_BEDROCK_REASONING_BUDGETS = {"low": 1024, "medium": 4096, "high": 16384}
+
+
+def _normalize_bedrock_reasoning(value, model) -> dict | None:
+    """Map a bedrock_reasoning effort to Converse additionalModelRequestFields.
+
+    Only Anthropic Claude reasoning-capable models (3.7+, Sonnet/Opus 4) accept
+    the reasoning_config block; sending it to other families (Llama, Nova,
+    Mistral) — or to older Claude — yields a ValidationException. So we emit the
+    field only for anthropic/claude model ids and omit (return None) otherwise.
+    Older Claude models that reject reasoning surface a classified config error;
+    the operator sets reasoning=off. (Requires Claude 3.7+.)
+    """
+    effort = str(value or "").strip().lower()
+    if effort not in _BEDROCK_REASONING_BUDGETS:
+        return None
+    m = str(model or "").strip().lower()
+    if "anthropic" in m or "claude" in m:
+        return {"reasoning_config": {"type": "enabled", "budget_tokens": _BEDROCK_REASONING_BUDGETS[effort]}}
+    return None
 
 
 def _resolve_ollama_timeout(base_url: str, model: str, explicit_timeout) -> float:
