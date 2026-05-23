@@ -677,6 +677,38 @@ def test_call_ollama_403_other_4xx_is_not_retried():
     assert fake_client.chat.call_count == 1
 
 
+def test_cache_effort_key_ollama_uses_think_with_prefix():
+    """Ollama cache key uses ``ollama_think`` so think=medium and
+    think=off don't collide on the same cache slot."""
+    from llm_utils import _cache_effort_key
+    assert _cache_effort_key("ollama", {"ollama_think": "medium"}) == "think:medium"
+    assert _cache_effort_key("ollama", {"ollama_think": "off"}) == "think:off"
+    assert _cache_effort_key("ollama", {"ollama_think": ""}) == ""
+    assert _cache_effort_key("ollama", {}) == ""
+    # Differentiated keys → cache hits never bleed across think levels.
+    a = _cache_effort_key("ollama", {"ollama_think": "high"})
+    b = _cache_effort_key("ollama", {"ollama_think": "low"})
+    assert a != b
+
+
+def test_cache_effort_key_non_ollama_uses_reasoning_effort():
+    """Other providers keep using reasoning_effort — no regression."""
+    from llm_utils import _cache_effort_key
+    assert _cache_effort_key("openai", {"reasoning_effort": "high"}) == "high"
+    assert _cache_effort_key("azure", {"reasoning_effort": "low"}) == "low"
+    assert _cache_effort_key("claude-cli", {"reasoning_effort": "medium"}) == "medium"
+    assert _cache_effort_key("nvidia", {}) == ""
+
+
+def test_cache_effort_key_ollama_does_not_pick_up_reasoning_effort():
+    """For Ollama, a stray reasoning_effort in provider_config (left
+    behind from a prior provider) must NOT leak into the cache key —
+    ollama_think is the only knob that should affect Ollama's key."""
+    from llm_utils import _cache_effort_key
+    out = _cache_effort_key("ollama", {"reasoning_effort": "high"})
+    assert out == ""  # ollama_think is empty → no effort suffix
+
+
 def test_warm_pair_lock_is_acquired_on_concurrent_marks():
     """The warm-pair helpers serialize set updates so concurrent worker
     threads don't observe a torn set. We can't easily prove correctness

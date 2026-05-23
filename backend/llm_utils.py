@@ -573,6 +573,25 @@ def _normalize_azure_endpoint(endpoint: str) -> str:
     return raw.rstrip("/")
 
 
+def _cache_effort_key(provider: str, provider_config: dict[str, Any] | None) -> str:
+    """Build the per-provider 'effort' fragment of the prompt-cache key.
+
+    For most providers the key is ``reasoning_effort`` (low/medium/high).
+    For Ollama the equivalent knob is ``ollama_think`` (true/false/low/
+    medium/high), so we use that instead. Without this, two Ollama
+    calls with think=medium vs think=off would hash to the SAME cache
+    key and could return each other's responses on a hit. Returns a
+    lowercased string; empty string means "no effort set".
+    """
+    pc = provider_config or {}
+    if (provider or "").strip().lower() == "ollama":
+        # Prefix with "think:" so an Ollama row with think=high never
+        # accidentally collides with a future provider's effort=high.
+        v = str(pc.get("ollama_think", "") or "").strip().lower()
+        return f"think:{v}" if v else ""
+    return str(pc.get("reasoning_effort", "") or "").strip().lower()
+
+
 def normalize_reasoning_effort(value: Any) -> str:
     effort = str(value or "").strip().lower()
     return effort if effort in {"low", "medium", "high"} else ""
@@ -1542,7 +1561,7 @@ def _call_claude_cli_plain(
         result_text = envelope.get("result") or ""
         # Persist to prompt cache if enabled.
         try:
-            _effort_key = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+            _effort_key = _cache_effort_key("claude-cli", provider_config)
             _store_prompt_cache(prompt, model, _effort_key, str(result_text))
         except Exception:
             pass
@@ -1698,7 +1717,7 @@ def _call_codex_cli_structured_from_strategy(
     # Scoped prompt cache (mirror the claude-cli adapter)
     cache_effort = ""
     if use_prompt_cache:
-        cache_effort = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+        cache_effort = _cache_effort_key("codex-cli", provider_config)
         try:
             _cached_raw = _check_prompt_cache(prompt, model, cache_effort, force_cache=True)
         except Exception:
@@ -2031,7 +2050,7 @@ def _call_claude_cli_structured_from_strategy(
     # ── Scoped prompt-cache lookup (mirror the main function's logic) ──
     cache_effort = ""
     if use_prompt_cache:
-        cache_effort = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+        cache_effort = _cache_effort_key("claude-cli", provider_config)
         try:
             _cached_raw = _check_prompt_cache(prompt, model, cache_effort, force_cache=True)
         except Exception:
@@ -2387,7 +2406,7 @@ def call_structured_llm_by_provider(
     # ── Scoped prompt-cache lookup ──
     _structured_cache_effort = ""
     if use_prompt_cache:
-        _structured_cache_effort = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+        _structured_cache_effort = _cache_effort_key(provider, provider_config)
         try:
             _cached_raw = _check_prompt_cache(prompt, model, _structured_cache_effort, force_cache=True)
         except Exception:
@@ -5038,7 +5057,7 @@ def call_llm_by_provider(
     if not api_key and _provider_lower != "ollama":
         return ""
     # ── Prompt cache check ──
-    _effort_key = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+    _effort_key = _cache_effort_key(provider, provider_config)
     _cached = _check_prompt_cache(prompt, model, _effort_key)
     if _cached is not None:
         return _cached
