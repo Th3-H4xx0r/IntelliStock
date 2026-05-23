@@ -3869,6 +3869,29 @@ def _call_ollama(
         # Always stash both so the smoke endpoint can render them
         # separately, regardless of which one ends up populated.
         _stash_ollama_reasoning(content=content, thinking=thinking)
+
+        # Per-call diagnostic: input vs output tokens AND content vs
+        # thinking chars. Without this the broker log only shows
+        # ``CACHE STORE: prompt_len=X resp_len=Y`` (char counts of the
+        # cached payload), which hides Ollama's actual eval_count —
+        # the bulk of which is reasoning tokens on gpt-oss / qwen3 /
+        # deepseek-r1. Operators were misreading the cache log as
+        # "tiny output" when the model had in fact burned thousands
+        # of reasoning tokens to produce a small visible answer.
+        if isinstance(resp, dict):
+            _in_tok = int(resp.get("prompt_eval_count") or 0)
+            _out_tok = int(resp.get("eval_count") or 0)
+            try:
+                import sys as _sys
+                print(
+                    f"[llm_utils] OLLAMA TOKENS: model={model!r} "
+                    f"in_tokens={_in_tok} out_tokens={_out_tok} "
+                    f"content_chars={len(content)} thinking_chars={len(thinking)}",
+                    file=_sys.stderr, flush=True,
+                )
+            except Exception:
+                pass
+
         text = content
         # Reasoning models (qwen3, deepseek-r1, gpt-oss, etc.) split their
         # output into ``thinking`` and ``content`` fields. If num_predict
