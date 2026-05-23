@@ -28,7 +28,26 @@ _already_raised = False
 # --- Classifier patterns ---
 
 _RX_AZURE_BLOCKED = re.compile(r"(temporarily blocked|unusual behavior|abuse)", re.I)
-_RX_AUTH = re.compile(r"(invalid_api_key|incorrect API key|authentication.{0,20}failed)", re.I)
+# Match auth failures across providers. Each branch is a real on-wire shape:
+#   * invalid_api_key            — OpenAI / Azure
+#   * API_KEY_INVALID            — Gemini ErrorInfo.reason
+#   * api[ _]key[ _]not[ _]valid — Gemini human-readable + variants
+#   * incorrect API key          — OpenAI 401 body
+#   * authentication failed      — generic
+# Gemini returns 400 (not 401) with this body when the key is wrong, so the
+# body-pattern path is the only way the critical-guard catches it. Without
+# this, backtests retry 6× per call and never pause.
+_RX_AUTH = re.compile(
+    r"("
+    r"invalid_api_key"
+    r"|API_KEY_INVALID"
+    r"|api[ _]key[ _]not[ _]valid"
+    r"|incorrect API key"
+    r"|authentication.{0,20}failed"
+    r"|unauthorized"
+    r")",
+    re.I,
+)
 _RX_CODEX_QUOTA = re.compile(r"(usage_limit_reached|quota.{0,30}exhausted|weekly quota)", re.I)
 
 

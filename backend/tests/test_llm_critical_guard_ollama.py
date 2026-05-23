@@ -98,6 +98,53 @@ def test_classify_ollama_200_resets_5xx_counter():
     assert is_critical is False
 
 
+def test_classify_gemini_400_api_key_invalid_is_auth_failure_critical():
+    """Gemini returns 400 (not 401) with 'API_KEY_INVALID' / 'API key not
+    valid' when the key is wrong. The critical-guard must catch this via
+    body match so backtests pause cleanly instead of retrying 6× per
+    call. Regression: this is the exact shape from the operator's
+    Ollama-misconfig backtest log."""
+    from llm_critical_guard import classify
+    body = (
+        "400 INVALID_ARGUMENT. {'error': {'code': 400, "
+        "'message': 'API key not valid. Please pass a valid API key.', "
+        "'status': 'INVALID_ARGUMENT', 'details': [{'@type': "
+        "'type.googleapis.com/google.rpc.ErrorInfo', "
+        "'reason': 'API_KEY_INVALID', ...}]}}"
+    )
+    tag, is_critical = classify(
+        status=400, body=body, exc=None,
+        provider="gemini", model="gpt-oss:20b",
+    )
+    assert tag == "auth_failure"
+    assert is_critical is True
+
+
+def test_classify_openai_invalid_api_key_body_matches_existing_pattern():
+    """Regression: the existing invalid_api_key match for OpenAI/Azure
+    still fires after the regex expansion."""
+    from llm_critical_guard import classify
+    body = '{"error": {"type": "invalid_request_error", "code": "invalid_api_key"}}'
+    tag, is_critical = classify(
+        status=401, body=body, exc=None, provider="openai", model="gpt-4o",
+    )
+    assert tag == "auth_failure"
+    assert is_critical is True
+
+
+def test_classify_5xx_body_with_apikey_phrase_still_auth_failure():
+    """A 500 from a provider where the body says 'API key not valid'
+    should be classified as auth_failure (don't retry, surface clearly).
+    Unlikely shape but defensible — the regex doesn't filter on status."""
+    from llm_critical_guard import classify
+    tag, is_critical = classify(
+        status=500, body="downstream said API key not valid",
+        exc=None, provider="openai", model="gpt-4o",
+    )
+    assert tag == "auth_failure"
+    assert is_critical is True
+
+
 def test_classify_ollama_5xx_outage_does_not_bleed_into_other_provider():
     """Per-(provider, model) scoping: an Ollama outage must not make
     Gemini's first 5xx classify as critical."""
