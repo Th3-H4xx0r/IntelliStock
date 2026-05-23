@@ -1370,7 +1370,9 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
         raise HTTPException(status_code=400, detail="LLM model or deployment name is required")
 
     api_key = resolve_api_key_for_provider(provider, body.api_key)
-    if not api_key:
+    # Local Ollama legitimately has no api_key — only Ollama Cloud needs
+    # a Bearer token. Every other provider still requires a key here.
+    if not api_key and provider != "ollama":
         raise HTTPException(
             status_code=400,
             detail="No API key provided for the selected LLM provider, and no matching environment fallback was found.",

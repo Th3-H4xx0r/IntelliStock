@@ -107,3 +107,77 @@ def test_llm_config_test_body_accepts_ollama_fields():
     )
     assert body.ollama_base_url == "http://localhost:11434"
     assert body.ollama_keep_alive == "5m"
+
+
+# ─────────────── _build_llm_test_provider_config branch ──────────────────
+
+
+def test_build_llm_test_provider_config_ollama_propagates_fields():
+    from api.main import _build_llm_test_provider_config
+    LlmConfigTestBody = _import_body("LlmConfigTestBody")
+    body = LlmConfigTestBody(
+        provider="ollama",
+        model="llama3.2",
+        ollama_base_url="http://REDACTED-IP:11434",
+        ollama_keep_alive="60m",
+    )
+    config = _build_llm_test_provider_config(body)
+    assert config["ollama_base_url"] == "http://REDACTED-IP:11434"
+    assert config["ollama_keep_alive"] == "60m"
+
+
+def test_build_llm_test_provider_config_ollama_omits_empty_keep_alive():
+    from api.main import _build_llm_test_provider_config
+    LlmConfigTestBody = _import_body("LlmConfigTestBody")
+    body = LlmConfigTestBody(
+        provider="ollama",
+        model="llama3.2",
+        ollama_base_url="http://localhost:11434",
+    )
+    config = _build_llm_test_provider_config(body)
+    assert config["ollama_base_url"] == "http://localhost:11434"
+    assert "ollama_keep_alive" not in config
+
+
+# ─────────────── /llm/test path — local Ollama (no api_key) ────────────────
+
+
+def test_llm_test_endpoint_accepts_local_ollama_without_api_key(monkeypatch):
+    """Critical UX path: clicking "Test & Save" on a local Ollama row
+    must NOT fail with "No API key provided" — local Ollama has no key."""
+    from fastapi.testclient import TestClient
+    from unittest.mock import patch
+    from api import main as api_main
+
+    # Clear env so the test isolates the explicit api_key=None case.
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+    app = api_main.app
+    app.dependency_overrides[api_main.get_current_user] = lambda: {
+        "id": "test-user", "username": "test", "role": "user"
+    }
+    client = TestClient(app)
+
+    # Mock the two LLM call sites the test endpoint uses.
+    class _Stub:
+        ok = True
+    with patch("api.main.call_structured_llm_by_provider",
+               return_value=_Stub()), \
+         patch("api.main.call_llm_by_provider",
+               return_value="PONG"), \
+         patch("api.main.get_last_structured_llm_call_metadata",
+               return_value={"effective_model": "llama3.2", "provider_meta": {}}):
+        resp = client.post(
+            "/llm/test",
+            json={
+                "provider": "ollama",
+                "model": "llama3.2",
+                "api_key": None,
+                "ollama_base_url": "http://localhost:11434",
+            },
+        )
+    app.dependency_overrides.clear()
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["provider"] == "ollama"
+    assert payload["model"] == "llama3.2"
