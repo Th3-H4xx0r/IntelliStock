@@ -1881,6 +1881,57 @@ _TEST_CLI_LAST_CALL_LOCK = threading.Lock()
 _TEST_CLI_MIN_INTERVAL_SEC = float(os.environ.get("CLAUDE_CLI_TEST_MIN_INTERVAL_SEC", "5"))
 
 
+class OllamaListModelsBody(BaseModel):
+    base_url: str = Field(..., min_length=1, max_length=512)
+    api_key: Optional[str] = Field(default=None, max_length=512)
+
+
+# Imported lazily so missing-module errors at boot time don't take down the
+# whole API; instead the endpoint returns a 502 when the SDK isn't present.
+import ollama_client  # noqa: E402
+
+
+@app.post("/ollama/list-models", response_class=JSONResponse)
+async def api_ollama_list_models(
+    body: OllamaListModelsBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Discovery endpoint: list models installed on an Ollama host.
+
+    Body: ``{"base_url": str, "api_key": str | null}``. The api_key is
+    only consulted when the host is Ollama Cloud (``ollama.com``); local
+    hosts ignore it.
+
+    Returns: ``{"models": [{"name", "model", "size_bytes",
+    "parameter_size", "quantization_level", "context_length"}, …]}``.
+
+    Errors:
+      * 401 if Ollama Cloud rejects the key.
+      * 502 if the host is unreachable or returns an upstream error.
+    """
+    try:
+        models = await ollama_client.list_models(body.base_url, body.api_key)
+        return {"models": models}
+    except ollama_client.OllamaAuthError:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Authentication failed"},
+        )
+    except ollama_client.OllamaConnectionError as e:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": f"Could not reach Ollama at {body.base_url}",
+                "detail": str(e),
+            },
+        )
+    except ollama_client.OllamaProviderError as e:
+        return JSONResponse(
+            status_code=502,
+            content={"error": str(e)},
+        )
+
+
 @app.post("/models/{model_id}/test-cli", response_class=JSONResponse)
 async def api_test_claude_cli(
     model_id: str,
