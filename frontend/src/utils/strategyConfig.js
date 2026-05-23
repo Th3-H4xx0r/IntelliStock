@@ -306,6 +306,7 @@ export const LLM_PROVIDER_OPTIONS = [
   { value: 'openai', label: 'OpenAI Compatible' },
   { value: 'azure', label: 'Azure OpenAI' },
   { value: 'nvidia', label: 'NVIDIA NIM' },
+  { value: 'ollama', label: 'Ollama (local / cloud)' },
   { value: 'claude-cli', label: 'Claude Code CLI (subscription)' },
   { value: 'codex-cli', label: 'OpenAI Codex CLI (subscription)' },
 ]
@@ -669,6 +670,12 @@ export function buildStrategyLlmTestPayload(draft) {
   }
   if (provider === 'nvidia') {
     payload.openai_base_url = String(draft?.nvidiaBaseUrl || 'https://integrate.api.nvidia.com/v1').trim()
+  }
+  if (provider === 'ollama') {
+    payload.ollama_base_url = String(draft?.ollamaBaseUrl || 'http://localhost:11434').trim()
+    const keepAlive = String(draft?.ollamaKeepAlive || '').trim()
+    if (keepAlive) payload.ollama_keep_alive = keepAlive
+    // api_key is already populated above for cloud Ollama; leave empty for local.
   }
   if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'codex-cli') {
     const reasoningEffort = String(draft?.reasoningEffort || '').trim().toLowerCase()
