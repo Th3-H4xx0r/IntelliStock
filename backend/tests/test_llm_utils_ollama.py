@@ -135,6 +135,73 @@ def test_normalize_keep_alive_passes_through_duration_strings():
     assert _normalize_ollama_keep_alive(None) is None
 
 
+def test_call_ollama_falls_back_to_thinking_when_content_empty():
+    """Reasoning models (qwen3, deepseek-r1, gpt-oss) emit content in the
+    thinking field when num_predict is consumed by reasoning tokens.
+    _call_ollama must surface that text rather than returning empty."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = {
+        "message": {
+            "content": "",
+            "thinking": "Equities respond to interest-rate expectations.",
+        },
+        "done": True,
+    }
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        out = _call_ollama(
+            api_key="", model="qwen3.6:35b", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+        )
+    assert "interest-rate expectations" in out
+
+
+def test_call_ollama_prefers_content_over_thinking_when_both_present():
+    """When both fields are populated, content (the visible answer) wins."""
+    from llm_utils import _call_ollama
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = {
+        "message": {
+            "content": "Rates.",
+            "thinking": "Let me reason about this in detail...",
+        },
+        "done": True,
+    }
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        out = _call_ollama(
+            api_key="", model="qwen3.6:35b", prompt="x",
+            max_output_tokens=128, base_url="http://localhost:11434",
+        )
+    assert out == "Rates."
+
+
+def test_call_ollama_with_tools_thinking_fallback():
+    """Tool-calling path also surfaces thinking when content is empty."""
+    from llm_utils import call_ollama_with_tools
+
+    fake_client = MagicMock()
+    fake_client.chat.return_value = {
+        "message": {
+            "content": "",
+            "thinking": "I should call get_weather.",
+            "tool_calls": [{"function": {"name": "get_weather",
+                                         "arguments": {"city": "SF"}}}],
+        }
+    }
+    with patch("llm_utils._make_ollama_sync_client", return_value=fake_client):
+        out = call_ollama_with_tools(
+            api_key="", model="qwen3.6:35b", prompt="weather?",
+            tools=[{"type": "function",
+                    "function": {"name": "get_weather",
+                                 "parameters": {"type": "object"}}}],
+            base_url="http://localhost:11434",
+        )
+    assert "get_weather" in out["text"] or "call" in out["text"].lower()
+    assert out["tool_calls"][0]["name"] == "get_weather"
+
+
 def test_call_ollama_warms_pair_after_first_success():
     from llm_utils import _call_ollama, _ollama_warm_pairs
 

@@ -3769,8 +3769,25 @@ def _call_ollama(
         msg = ((resp or {}).get("message") if isinstance(resp, dict)
                else getattr(resp, "message", {}) or {})
         if not isinstance(msg, dict):
-            msg = dict(msg) if msg is not None else {}
+            try:
+                msg = dict(msg) if msg is not None else {}
+            except Exception:
+                # Pydantic message object from the SDK — flatten via model_dump.
+                if hasattr(msg, "model_dump"):
+                    msg = msg.model_dump()
+                else:
+                    msg = {}
         text = msg.get("content") or ""
+        # Reasoning models (qwen3, deepseek-r1, gpt-oss, etc.) split their
+        # output into ``thinking`` and ``content`` fields. If num_predict
+        # gets consumed by reasoning tokens before the visible answer is
+        # produced, ``content`` is empty while ``thinking`` has the model's
+        # actual response. Surfacing thinking is strictly better than
+        # returning empty — the operator sees the model did respond.
+        if not text:
+            thinking = msg.get("thinking") or ""
+            if thinking:
+                text = thinking
         elapsed_ms = int((time.monotonic() - _t0) * 1000)
         try:
             _stash_last_http(status=200, body=None, exc=None)
@@ -3920,9 +3937,16 @@ def call_ollama_with_tools(
         try:
             msg = dict(msg)
         except Exception:
-            msg = {}
+            if hasattr(msg, "model_dump"):
+                msg = msg.model_dump()
+            else:
+                msg = {}
 
     text = msg.get("content") or ""
+    if not text:
+        thinking = msg.get("thinking") or ""
+        if thinking:
+            text = thinking
     raw_calls = msg.get("tool_calls") or []
     tool_calls: list[dict] = []
     for tc in raw_calls:
