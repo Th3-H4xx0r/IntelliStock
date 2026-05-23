@@ -49,22 +49,26 @@ const ollamaCloudHost = computed(() => {
   }
 })
 
+const ollamaListSource = ref('')  // 'backend' | 'browser' | ''
+
 async function fetchOllamaModels({ force = false } = {}) {
   const baseUrl = String(props.draft?.ollamaBaseUrl || '').trim()
   if (!baseUrl) {
     ollamaModels.value = []
     ollamaListError.value = ''
+    ollamaListSource.value = ''
     return
   }
   ollamaListLoading.value = true
   ollamaListError.value = ''
-  const { models, error } = await loadOllamaModels({
+  const { models, error, source } = await loadOllamaModels({
     baseUrl,
     apiKey: props.draft?.apiKey || '',
     force,
   })
   ollamaModels.value = models || []
   ollamaListError.value = error || ''
+  ollamaListSource.value = source || ''
   ollamaListLoading.value = false
 }
 
@@ -254,13 +258,18 @@ function onProviderChange(value) {
           >{{ ollamaListLoading ? 'Loading…' : 'Refresh' }}</button>
         </label>
         <div v-if="ollamaListError" class="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-300 mb-2 space-y-1">
-          <div>Couldn't reach Ollama at this base URL: {{ ollamaListError }}.</div>
-          <div v-if="ollamaListError === 'Failed to fetch' || ollamaListError.toLowerCase().includes('network')" class="text-amber-200/70">
-            "Failed to fetch" usually means the IntelliStock <em>backend</em> can't reach the Ollama host (e.g. you pointed at a Tailscale/LAN IP that's only reachable from your laptop, not from the backend container). Try a host the backend can reach, or just enter the model name manually below.
+          <div>Couldn't reach Ollama at this base URL.</div>
+          <div class="text-amber-200/70 font-mono whitespace-pre-wrap break-words">{{ ollamaListError }}</div>
+          <div class="text-amber-200/70">
+            We try the IntelliStock backend first, then fall back to a direct browser fetch. Both failed.
+            For Tailscale / LAN / mDNS hosts that only your laptop can resolve, set
+            <span class="font-mono">OLLAMA_ORIGINS=&quot;*&quot;</span>
+            on the Ollama server (or pin to this app's origin) so the browser-direct
+            fallback works. Otherwise enter the model name manually in the Model field above.
           </div>
-          <div v-else class="text-amber-200/70">
-            Enter the model name manually in the field above.
-          </div>
+        </div>
+        <div v-if="!ollamaListError && ollamaListSource === 'browser'" class="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-[11px] leading-relaxed text-sky-300/80 mb-2">
+          Model list loaded directly from your browser — the backend couldn't reach this host. Strategy calls run through the backend, so the model needs to be reachable from there too at runtime.
         </div>
         <select
           v-else
@@ -290,7 +299,7 @@ function onProviderChange(value) {
           <option v-for="o in OLLAMA_THINK_OPTIONS" :key="o.value || 'default'" :value="o.value">{{ o.label }}</option>
         </select>
         <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
-          Maps to Ollama's <span class="font-mono">think</span> parameter. <span class="font-mono">On</span>/<span class="font-mono">Off</span> works on reasoning models like qwen3 or deepseek-r1. <span class="font-mono">Low</span>/<span class="font-mono">Medium</span>/<span class="font-mono">High</span> is for gpt-oss-style effort. Most non-reasoning models ignore this field.
+          Maps to Ollama's <span class="font-mono">think</span> parameter and is sent to every model. <span class="font-mono">On</span>/<span class="font-mono">Off</span> toggles internal reasoning on models that support it (qwen3, deepseek-r1, etc.). <span class="font-mono">Low</span>/<span class="font-mono">Medium</span>/<span class="font-mono">High</span> sets the reasoning effort on models that accept tiered effort. Models that don't honour the parameter silently ignore it.
         </p>
       </div>
 

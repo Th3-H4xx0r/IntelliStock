@@ -325,15 +325,17 @@ export const NVIDIA_REASONING_EFFORT_OPTIONS = [
   { value: 'high', label: 'High (full reasoning)' },
 ]
 
-// Ollama's `think` parameter accepts either a bool (qwen3, deepseek-r1)
-// or an effort string (gpt-oss). One dropdown covers both.
+// Ollama's ``think`` parameter accepts a bool (true / false) or an
+// effort string (low / medium / high). The same value is sent to every
+// model; whether a given model honours it depends on the model itself.
+// Most non-reasoning models silently ignore the field.
 export const OLLAMA_THINK_OPTIONS = [
   { value: '', label: 'Default (model decides)' },
   { value: 'false', label: 'Off (disable thinking)' },
   { value: 'true', label: 'On (enable thinking)' },
-  { value: 'low', label: 'Low effort (gpt-oss)' },
-  { value: 'medium', label: 'Medium effort (gpt-oss)' },
-  { value: 'high', label: 'High effort (gpt-oss)' },
+  { value: 'low', label: 'Low effort' },
+  { value: 'medium', label: 'Medium effort' },
+  { value: 'high', label: 'High effort' },
 ]
 
 // Maps to the claude CLI's `--effort` flag. CC supports five levels;
