@@ -174,3 +174,25 @@ def test_build_pydantic_ai_model_bedrock_requires_region(monkeypatch):
     monkeypatch.delenv("BEDROCK_REGION", raising=False)
     monkeypatch.delenv("AWS_REGION", raising=False)
     assert llm_utils._build_pydantic_ai_model("bedrock", "key", "m", {}) is None
+
+
+# ────────────────────────── dispatch wiring ─────────────────────────────────
+
+
+def test_dispatch_routes_bedrock_to_call_bedrock(monkeypatch):
+    called = {}
+
+    def _fake(api_key, model, prompt, **kw):
+        called["args"] = (api_key, model, prompt, kw)
+        return "routed"
+
+    monkeypatch.setattr(llm_utils, "_call_bedrock", _fake)
+    monkeypatch.setattr(llm_utils, "_check_prompt_cache", lambda *a, **k: None)
+    monkeypatch.setattr(llm_utils, "_store_prompt_cache", lambda *a, **k: None)
+    monkeypatch.setattr(llm_utils, "_get_model_rate_limiter", lambda *a, **k: None)
+    out = llm_utils.call_llm_by_provider(
+        "bedrock", "key", "anthropic.claude-x", "hi",
+        provider_config={"bedrock_region": "us-east-1", "bedrock_reasoning": "low"})
+    assert out == "routed"
+    assert called["args"][3]["region"] == "us-east-1"
+    assert called["args"][3]["reasoning"] == "low"

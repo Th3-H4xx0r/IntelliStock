@@ -5454,6 +5454,18 @@ def call_llm_by_provider(
             keep_alive=resolved.get("ollama_keep_alive"),
             think=resolved.get("ollama_think"),
         )
+    elif p == "bedrock":
+        _result = _call_bedrock(
+            api_key,
+            model,
+            prompt,
+            max_output_tokens=max_output_tokens,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            region=str(resolved.get("bedrock_region") or ""),
+            response_mime_type=response_mime_type,
+            reasoning=str(resolved.get("bedrock_reasoning") or ""),
+        )
     else:
         _result = _call_gemini(
             api_key,
