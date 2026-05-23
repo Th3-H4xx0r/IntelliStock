@@ -4721,7 +4721,13 @@ def call_llm_by_provider(
             timeout_sec=timeout_sec,
             retries=retries,
         )
-    if not api_key or not model:
+    # Local Ollama legitimately has no API key, so the api_key short-circuit
+    # must not block it. Cloud Ollama (api_key provided) still flows through
+    # the standard machinery.
+    if not model:
+        return ""
+    _provider_lower = (provider or "").strip().lower()
+    if not api_key and _provider_lower != "ollama":
         return ""
     # ── Prompt cache check ──
     _effort_key = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
@@ -4780,6 +4786,18 @@ def call_llm_by_provider(
         )
     elif p == "deepseek":
         _result = _call_deepseek(api_key, model, prompt, max_output_tokens, timeout_sec=timeout_sec, retries=retries)
+    elif p == "ollama":
+        _result = _call_ollama(
+            api_key,
+            model,
+            prompt,
+            max_output_tokens=max_output_tokens,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            base_url=str(resolved.get("ollama_base_url") or "http://localhost:11434"),
+            response_mime_type=response_mime_type,
+            keep_alive=resolved.get("ollama_keep_alive"),
+        )
     else:
         _result = _call_gemini(
             api_key,

@@ -240,3 +240,64 @@ def test_resolve_ollama_timeout_explicit_override_wins():
     from llm_utils import _resolve_ollama_timeout, _ollama_warm_pairs
     _ollama_warm_pairs.clear()
     assert _resolve_ollama_timeout("http://localhost:11434", "x", 10) == 10.0
+
+
+# ────────────────────────── dispatcher wiring ───────────────────────────────
+
+
+def test_dispatcher_routes_provider_ollama():
+    """call_llm_by_provider should dispatch provider=ollama to _call_ollama
+    with the resolved ollama_base_url + keep_alive."""
+    from llm_utils import call_llm_by_provider
+
+    captured = {}
+    def _fake(api_key, model, prompt, **kwargs):
+        captured["model"] = model
+        captured["prompt"] = prompt
+        captured["base_url"] = kwargs.get("base_url")
+        captured["keep_alive"] = kwargs.get("keep_alive")
+        return "dispatcher-ok"
+
+    with patch("llm_utils._call_ollama", side_effect=_fake):
+        out = call_llm_by_provider(
+            provider="ollama",
+            api_key="",
+            model="llama3.2",
+            prompt="ping",
+            max_output_tokens=16,
+            provider_config={"ollama_base_url": "http://localhost:11434",
+                             "ollama_keep_alive": "5m"},
+        )
+    assert out == "dispatcher-ok"
+    assert captured["model"] == "llama3.2"
+    assert captured["base_url"] == "http://localhost:11434"
+    assert captured["keep_alive"] == "5m"
+
+
+def test_dispatcher_empty_api_key_local_ollama_does_not_short_circuit():
+    """A local Ollama row legitimately has empty api_key; the dispatcher
+    must NOT short-circuit it like it does for the cloud providers."""
+    from llm_utils import call_llm_by_provider
+
+    with patch("llm_utils._call_ollama", return_value="local") as fake:
+        out = call_llm_by_provider(
+            provider="ollama", api_key="", model="llama3.2", prompt="x",
+            max_output_tokens=16,
+            provider_config={"ollama_base_url": "http://localhost:11434"},
+        )
+    assert out == "local"
+    fake.assert_called_once()
+
+
+def test_dispatcher_other_providers_still_short_circuit_on_empty_api_key():
+    """Regression: the short-circuit fix for ollama must NOT bleed into other
+    providers — openai etc. with empty api_key must still return ''."""
+    from llm_utils import call_llm_by_provider
+
+    with patch("llm_utils._call_openai") as fake:
+        out = call_llm_by_provider(
+            provider="openai", api_key="", model="gpt-4o", prompt="x",
+            max_output_tokens=16,
+        )
+    assert out == ""
+    fake.assert_not_called()
