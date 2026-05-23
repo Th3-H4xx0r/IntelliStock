@@ -217,6 +217,11 @@ def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = N
         return "claude-cli-no-api-key"
     if p == "codex-cli":
         return "codex-cli-no-api-key"
+    if p == "ollama":
+        # Empty string is valid for local Ollama (no auth) — only Ollama
+        # Cloud requires a Bearer token. Caller decides whether to enforce
+        # non-empty (e.g., when the host suffix is ``ollama.com``).
+        return str(os.environ.get("OLLAMA_API_KEY") or "").strip()
     return str(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
 
 
@@ -630,6 +635,23 @@ def _resolve_provider_config(provider: str, provider_config: dict[str, Any] | No
             resolved["reasoning_effort"] = reasoning_effort
         else:
             resolved.pop("reasoning_effort", None)
+    elif p == "ollama":
+        base = str(
+            resolved.get("ollama_base_url")
+            or os.environ.get("OLLAMA_BASE_URL")
+            or "http://localhost:11434"
+        ).strip().rstrip("/")
+        resolved["ollama_base_url"] = base
+        keep_alive_raw = resolved.get("ollama_keep_alive")
+        keep_alive = str(keep_alive_raw or "").strip()
+        if keep_alive:
+            resolved["ollama_keep_alive"] = keep_alive
+        else:
+            resolved.pop("ollama_keep_alive", None)
+        # Reasoning-effort is model-specific for Ollama (set via the
+        # Modelfile, not a standard generation option), so we never
+        # propagate the field — strip it if a strategy left it on.
+        resolved.pop("reasoning_effort", None)
     return resolved
 
 
