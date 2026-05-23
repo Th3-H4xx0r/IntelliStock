@@ -854,6 +854,27 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
             ),
             profile=profile,
         )
+    if p == "bedrock":
+        if BedrockConverseModel is None or BedrockProvider is None or bedrock_client is None:
+            return None
+        region = str(
+            resolved.get("bedrock_region")
+            or os.environ.get("BEDROCK_REGION")
+            or os.environ.get("AWS_REGION")
+            or ""
+        ).strip()
+        if not region:
+            return None
+        client = bedrock_client.build_runtime_client(api_key, region)
+        settings = None
+        amrf = _normalize_bedrock_reasoning(resolved.get("bedrock_reasoning"), model)
+        if amrf and BedrockModelSettings is not None:
+            settings = BedrockModelSettings(bedrock_additional_model_requests_fields=amrf)
+        return BedrockConverseModel(
+            model,
+            provider=BedrockProvider(bedrock_client=client),
+            settings=settings,
+        )
     if p == "ollama":
         base = str(resolved.get("ollama_base_url")
                    or "http://localhost:11434").rstrip("/")

@@ -1,4 +1,6 @@
 """Tests for the Bedrock call paths + config helpers in backend/llm_utils.py."""
+from unittest.mock import MagicMock
+
 import llm_utils
 
 
@@ -150,3 +152,25 @@ def test_call_bedrock_with_tools_empty_on_error(monkeypatch):
     monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
     out = llm_utils.call_bedrock_with_tools("key", "m", "p", [], region="us-east-1")
     assert out == {"text": "", "tool_calls": []}
+
+
+# ────────────────────────── _build_pydantic_ai_model (structured) ───────────
+
+
+def test_build_pydantic_ai_model_bedrock(monkeypatch):
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: MagicMock())
+    m = llm_utils._build_pydantic_ai_model(
+        "bedrock", "key", "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        {"bedrock_region": "us-east-1", "bedrock_reasoning": "medium"})
+    assert m is not None
+    assert m.__class__.__name__ == "BedrockConverseModel"
+
+
+def test_build_pydantic_ai_model_bedrock_requires_key():
+    assert llm_utils._build_pydantic_ai_model("bedrock", "", "m", {"bedrock_region": "us-east-1"}) is None
+
+
+def test_build_pydantic_ai_model_bedrock_requires_region(monkeypatch):
+    monkeypatch.delenv("BEDROCK_REGION", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    assert llm_utils._build_pydantic_ai_model("bedrock", "key", "m", {}) is None
