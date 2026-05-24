@@ -163,6 +163,8 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
             # non-bedrock row never injects empty bedrock keys.
             "bedrock_region": f"{prefix}bedrock_region",
             "bedrock_reasoning": f"{prefix}bedrock_reasoning",
+            # Cache-grouping override (canonical_model_cache_key).
+            "model_cache_family": f"{prefix}model_cache_family",
         }
 
         for doc_field, config_key in field_map.items():

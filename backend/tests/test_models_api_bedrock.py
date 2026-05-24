@@ -38,6 +38,29 @@ def test_llm_config_test_body_accepts_bedrock_fields():
     assert b.bedrock_region == "us-east-1"
 
 
+def test_create_edit_model_body_accept_cache_family():
+    CreateModelBody = _import_body("CreateModelBody")
+    EditModelBody = _import_body("EditModelBody")
+    c = CreateModelBody(name="x", provider="bedrock", model="openai.gpt-oss-120b-1:0",
+                        api_key="k", model_cache_family="gpt-oss-120b")
+    assert c.model_cache_family == "gpt-oss-120b"
+    e = EditModelBody(model_cache_family="gpt-oss-120b")
+    assert e.model_cache_family == "gpt-oss-120b"
+
+
+def test_action_create_model_persists_cache_family(monkeypatch):
+    import interactive_utils as iu
+    from unittest.mock import MagicMock
+    fake_r = MagicMock()
+    fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
+    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
+    iu.action_create_model(None, "x", "bedrock", "openai.gpt-oss-120b-1:0",
+                           api_key="k", model_cache_family="GPT-OSS-120b")
+    doc = fake_r.db.return_value.table.return_value.insert.call_args.args[0]
+    assert doc["model_cache_family"] == "gpt-oss-120b"  # normalized lowercase
+
+
 def test_llm_config_test_output_tolerates_terse_models():
     """Terse models (e.g. Bedrock GPT-OSS) return only {"ok": true}; the probe
     must not require provider/model to be echoed back."""

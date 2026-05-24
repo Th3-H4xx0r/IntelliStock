@@ -43,6 +43,16 @@ def test_resolver_propagates_bedrock_fields():
     assert out["lookback_sentiment_bedrock_reasoning"] == "medium"
 
 
+def test_resolver_propagates_model_cache_family():
+    from model_resolver import resolve_model_refs_in_config
+    row = dict(_BEDROCK_ROW)
+    row["model_cache_family"] = "gpt-oss-120b"
+    cfg = {"lookback_sentiment_llm_model_id": "row-bedrock-1"}
+    with _patch_model_lookup(row):
+        out = resolve_model_refs_in_config(conn=None, config=cfg)
+    assert out["lookback_sentiment_model_cache_family"] == "gpt-oss-120b"
+
+
 def test_resolver_overwrites_stale_provider_when_switching_to_bedrock():
     from model_resolver import resolve_model_refs_in_config
     cfg = {

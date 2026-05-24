@@ -548,6 +548,9 @@ class CreateModelBody(BaseModel):
     # equivalent of ollama_think ("off"/"low"/"medium"/"high", Claude 3.7+).
     bedrock_region: Optional[str] = Field(default=None, max_length=32)
     bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
+    # Optional cache-grouping tag: rows sharing this value share LLM cache (same
+    # underlying model across providers/names). See canonical_model_cache_key.
+    model_cache_family: Optional[str] = Field(default=None, max_length=64)
     # Optional per-model pricing override ($/1M tokens). When set, these
     # win over backend/llm_pricing.yaml at telemetry-cost time. Leave
     # None to fall back to the YAML defaults.
@@ -574,6 +577,7 @@ class EditModelBody(BaseModel):
     ollama_think: Optional[str] = Field(default=None, max_length=16)
     bedrock_region: Optional[str] = Field(default=None, max_length=32)
     bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
+    model_cache_family: Optional[str] = Field(default=None, max_length=64)
     input_cost_per_1m: Optional[float] = Field(default=None, ge=0)
     output_cost_per_1m: Optional[float] = Field(default=None, ge=0)
     cache_creation_cost_per_1m: Optional[float] = Field(default=None, ge=0)
@@ -1967,6 +1971,7 @@ def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), curre
             ollama_think=body.ollama_think,
             bedrock_region=body.bedrock_region,
             bedrock_reasoning=body.bedrock_reasoning,
+            model_cache_family=body.model_cache_family,
             input_cost_per_1m=body.input_cost_per_1m,
             output_cost_per_1m=body.output_cost_per_1m,
             cache_creation_cost_per_1m=body.cache_creation_cost_per_1m,
