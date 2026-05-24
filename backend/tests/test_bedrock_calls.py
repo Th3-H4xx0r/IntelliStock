@@ -21,10 +21,19 @@ def test_reasoning_claude_maps_to_budget():
     assert lo["reasoning_config"]["budget_tokens"] == 1024
 
 
-def test_reasoning_omitted_for_non_claude():
-    # Llama / Nova / Mistral don't take Claude's reasoning_config — omit to avoid 400.
+def test_reasoning_omitted_for_unsupported_families():
+    # Llama / Nova / Mistral take neither reasoning_config nor reasoning_effort — omit.
     assert llm_utils._normalize_bedrock_reasoning("high", "meta.llama3-1-70b-instruct-v1:0") is None
     assert llm_utils._normalize_bedrock_reasoning("high", "amazon.nova-pro-v1:0") is None
+
+
+def test_reasoning_gpt_oss_uses_reasoning_effort():
+    # OpenAI gpt-oss on Bedrock takes the OpenAI Chat-Completion `reasoning_effort`
+    # field (verified honored live: high produces ~7x the reasoning of low).
+    assert llm_utils._normalize_bedrock_reasoning("medium", "openai.gpt-oss-120b-1:0") == {"reasoning_effort": "medium"}
+    assert llm_utils._normalize_bedrock_reasoning("high", "openai.gpt-oss-20b-1:0") == {"reasoning_effort": "high"}
+    assert llm_utils._normalize_bedrock_reasoning("low", "openai.gpt-oss-120b-1:0") == {"reasoning_effort": "low"}
+    assert llm_utils._normalize_bedrock_reasoning("off", "openai.gpt-oss-120b-1:0") is None
 
 
 # ────────────────────────── config helpers ──────────────────────────────────
@@ -221,3 +230,24 @@ def test_call_bedrock_with_tools_reasoning_bumps_max_tokens(monkeypatch):
                                       region="us-east-1", max_output_tokens=1024, reasoning="low")
     ic = fake.calls[0]["inferenceConfig"]
     assert ic["maxTokens"] == 1024 + 1024  # budget 1024 + margin
+
+
+def test_call_bedrock_gpt_oss_reasoning_effort_floor_and_uncapped(monkeypatch):
+    # gpt-oss reasoning_effort is sent verbatim; a small maxTokens cap is raised
+    # to a floor so reasoning doesn't starve the answer.
+    fake = _FakeConverseClient(response=_ok_converse())
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake)
+    llm_utils._call_bedrock("k", "openai.gpt-oss-120b-1:0", "p",
+                            max_output_tokens=128, region="us-east-1", reasoning="medium")
+    c0 = fake.calls[0]
+    assert c0["additionalModelRequestFields"] == {"reasoning_effort": "medium"}
+    assert c0["inferenceConfig"]["maxTokens"] == 4096
+
+    # Uncapped (max_output_tokens=0) stays uncapped — the caller intends no limit.
+    fake2 = _FakeConverseClient(response=_ok_converse())
+    monkeypatch.setattr(llm_utils.bedrock_client, "build_runtime_client", lambda api_key, region, **kw: fake2)
+    llm_utils._call_bedrock("k", "openai.gpt-oss-120b-1:0", "p",
+                            max_output_tokens=0, region="us-east-1", reasoning="high")
+    c1 = fake2.calls[0]
+    assert c1["additionalModelRequestFields"] == {"reasoning_effort": "high"}
+    assert "maxTokens" not in c1.get("inferenceConfig", {})

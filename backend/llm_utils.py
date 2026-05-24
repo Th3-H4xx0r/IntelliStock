@@ -3796,19 +3796,24 @@ _BEDROCK_REASONING_BUDGETS = {"low": 1024, "medium": 4096, "high": 16384}
 def _normalize_bedrock_reasoning(value, model) -> dict | None:
     """Map a bedrock_reasoning effort to Converse additionalModelRequestFields.
 
-    Only Anthropic Claude reasoning-capable models (3.7+, Sonnet/Opus 4) accept
-    the reasoning_config block; sending it to other families (Llama, Nova,
-    Mistral) — or to older Claude — yields a ValidationException. So we emit the
-    field only for anthropic/claude model ids and omit (return None) otherwise.
-    Older Claude models that reject reasoning surface a classified config error;
-    the operator sets reasoning=off. (Requires Claude 3.7+.)
+    Reasoning shape is model-family-specific:
+      * Anthropic Claude (3.7+, Sonnet/Opus 4): ``reasoning_config`` with a
+        ``budget_tokens`` thinking budget. Sending it to non-supporting models
+        (or older Claude) yields a ValidationException, so we gate on the id.
+      * OpenAI gpt-oss (gpt-oss-20b / gpt-oss-120b): the OpenAI Chat-Completion
+        field ``reasoning_effort`` (low/medium/high). Verified honored on
+        Bedrock Converse (high produces ~7x the reasoning of low).
+    Everything else (Llama, Nova, Mistral, …) — and ``off``/empty — returns
+    None so we don't send an unsupported field.
     """
     effort = str(value or "").strip().lower()
-    if effort not in _BEDROCK_REASONING_BUDGETS:
+    if effort not in _BEDROCK_REASONING_BUDGETS:  # low / medium / high
         return None
     m = str(model or "").strip().lower()
     if "anthropic" in m or "claude" in m:
         return {"reasoning_config": {"type": "enabled", "budget_tokens": _BEDROCK_REASONING_BUDGETS[effort]}}
+    if "gpt-oss" in m or "gpt_oss" in m:
+        return {"reasoning_effort": effort}
     return None
 
 
@@ -5152,12 +5157,18 @@ def _call_bedrock(
         inference_config["maxTokens"] = int(max_output_tokens)
     amrf = _normalize_bedrock_reasoning(reasoning, model)
     if amrf:
-        # Converse requires maxTokens > reasoning budget_tokens (maxTokens is
-        # the hard cap covering thinking + the visible answer). Bump it so a
-        # small default max can't invalidate a reasoning request.
         _budget = int((amrf.get("reasoning_config") or {}).get("budget_tokens") or 0)
+        _cur = int(inference_config.get("maxTokens") or 0)
         if _budget:
-            inference_config["maxTokens"] = max(int(inference_config.get("maxTokens") or 0), _budget + 1024)
+            # Claude extended thinking: Converse requires maxTokens > budget_tokens
+            # (maxTokens caps thinking + the visible answer). Bump so a small
+            # default max can't invalidate a reasoning request.
+            inference_config["maxTokens"] = max(_cur, _budget + 1024)
+        elif amrf.get("reasoning_effort") and _cur:
+            # gpt-oss reasoning consumes output tokens; if a small cap is set,
+            # raise it to a floor so reasoning doesn't starve the answer.
+            # Uncapped calls (no maxTokens) are left uncapped on purpose.
+            inference_config["maxTokens"] = max(_cur, 4096)
     converse_kwargs: dict[str, object] = {"modelId": model, "messages": messages}
     if inference_config:
         converse_kwargs["inferenceConfig"] = inference_config
@@ -5294,10 +5305,13 @@ def call_bedrock_with_tools(
         inference_config["maxTokens"] = int(max_output_tokens)
     amrf = _normalize_bedrock_reasoning(reasoning, model)
     if amrf:
-        # maxTokens must exceed the reasoning budget (see _call_bedrock).
+        # See _call_bedrock for the maxTokens reconciliation rationale.
         _budget = int((amrf.get("reasoning_config") or {}).get("budget_tokens") or 0)
+        _cur = int(inference_config.get("maxTokens") or 0)
         if _budget:
-            inference_config["maxTokens"] = max(int(inference_config.get("maxTokens") or 0), _budget + 1024)
+            inference_config["maxTokens"] = max(_cur, _budget + 1024)
+        elif amrf.get("reasoning_effort") and _cur:
+            inference_config["maxTokens"] = max(_cur, 4096)
     converse_kwargs: dict[str, object] = {
         "modelId": model,
         "messages": [{"role": "user", "content": [{"text": prompt}]}],

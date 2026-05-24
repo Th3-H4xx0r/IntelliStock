@@ -339,9 +339,10 @@ export const OLLAMA_THINK_OPTIONS = [
   { value: 'high', label: 'High effort' },
 ]
 
-// AWS Bedrock reasoning (extended thinking). Maps to Converse
-// additionalModelRequestFields on the backend; only Anthropic Claude 3.7+
-// models honour it (others ignore / are omitted). "off" = no reasoning budget.
+// AWS Bedrock reasoning. Maps to Converse additionalModelRequestFields on the
+// backend, model-family-specific: Claude 3.7+ gets a thinking-token budget,
+// OpenAI gpt-oss gets reasoning_effort (low/medium/high). Other families are
+// omitted. "off" = no reasoning.
 export const BEDROCK_REASONING_OPTIONS = [
   { value: 'off', label: 'Off' },
   { value: 'low', label: 'Low' },

@@ -116,10 +116,13 @@ retry_count=..., error=..., model_id=...)` for telemetry, and emit a
 - Anthropic Claude (3.7+ / models advertising reasoning): `off` → omit; `low/medium/high`
   → `{"reasoning_config": {"type": "enabled", "budget_tokens": N}}` with
   N ≈ 1024 / 4096 / 16384.
-- Amazon Nova: equivalent reasoning field when applicable.
-- Any model that does not support reasoning, or `off`: **omit the field entirely** (sending
-  it raises `ValidationException`). Model-family detection is by `model` ID prefix /
-  discovery metadata.
+- OpenAI gpt-oss (gpt-oss-20b / gpt-oss-120b): `low/medium/high` → `{"reasoning_effort": <effort>}`
+  (the OpenAI Chat-Completion field; verified honored on Converse — high produces ~7x the
+  reasoning of low). When a small `maxTokens` cap is set it's raised to a ≥4096 floor so
+  reasoning doesn't starve the answer; uncapped calls stay uncapped.
+- Any other family (Llama, Nova, Mistral, …), or `off`: **omit the field entirely** (sending
+  an unsupported field raises `ValidationException` or is ignored). Model-family detection is
+  by `model` ID substring.
 
 ### 4.3 `backend/strategies/graph_nexus_analysis.py`
 

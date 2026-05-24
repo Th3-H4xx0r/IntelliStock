@@ -463,7 +463,7 @@ function onProviderChange(value) {
           <option v-for="o in BEDROCK_REASONING_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
         </select>
         <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
-          Extended thinking budget, sent via Converse. Only Anthropic Claude 3.7+ models honour it; other families ignore it — leave <span class="font-mono">Off</span> for them.
+          Sent via Converse. Anthropic Claude 3.7+ uses it as a thinking-token budget; OpenAI <span class="font-mono">gpt-oss</span> uses it as reasoning effort. Other families (Llama, Nova, Mistral) ignore it — leave <span class="font-mono">Off</span>.
         </p>
       </div>
     </template>
