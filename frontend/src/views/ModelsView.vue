@@ -85,6 +85,8 @@ const formDraft = ref({
   // Bedrock provider config — only used when provider === 'bedrock'.
   bedrockRegion: 'us-east-1',
   bedrockReasoning: 'off',
+  // Cache-grouping tag — share LLM cache across same-model-different-name rows.
+  modelCacheFamily: '',
   // Optional per-model pricing override ($/1M tokens). null = use
   // backend llm_pricing.yaml defaults.
   inputCostPer1m: null,
@@ -149,6 +151,7 @@ function openCreateModal() {
     reasoningEffort: '',
     cliPath: '',
     extraArgs: '',
+    modelCacheFamily: '',
     inputCostPer1m: null,
     outputCostPer1m: null,
     cacheCreationCostPer1m: null,
@@ -185,6 +188,7 @@ function openEditModal(m) {
     // Bedrock: hydrate region + reasoning; default region when blank.
     bedrockRegion: m.bedrock_region || 'us-east-1',
     bedrockReasoning: m.bedrock_reasoning || 'off',
+    modelCacheFamily: m.model_cache_family || '',
     // Pricing override: row stores snake_case; null/undefined → blank input.
     inputCostPer1m: (m.input_cost_per_1m ?? null),
     outputCostPer1m: (m.output_cost_per_1m ?? null),
@@ -332,6 +336,8 @@ async function submitModel() {
       payload.bedrock_region = (d.bedrockRegion || '').trim() || undefined
       payload.bedrock_reasoning = (d.bedrockReasoning || '').trim().toLowerCase() || undefined
     }
+    // Cache-grouping tag applies to every provider.
+    payload.model_cache_family = (d.modelCacheFamily || '').trim().toLowerCase() || undefined
 
     // Pricing override ($/1M tokens). Convert camelCase → snake_case and
     // send only when a finite number was entered (empty/null = "no

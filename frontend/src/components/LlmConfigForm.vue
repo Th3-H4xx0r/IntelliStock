@@ -224,6 +224,23 @@ function onProviderChange(value) {
       />
     </div>
 
+    <div>
+      <label class="block text-xs font-medium text-slate-400 mb-1.5">
+        Cache Family <span class="text-slate-600">(optional)</span>
+      </label>
+      <input
+        :value="draft.modelCacheFamily"
+        @input="update('modelCacheFamily', $event.target.value)"
+        type="text"
+        :disabled="disabled || readOnly"
+        placeholder="auto (e.g. gpt-oss-120b)"
+        class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+      />
+      <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+        Optional. Rows sharing this tag share LLM cache — set the same value on models that are the same underlying model across providers (e.g. an Azure and a Bedrock <span class="font-mono">gpt-oss-120b</span>). Leave blank to auto-detect from the model name.
+      </p>
+    </div>
+
     <template v-if="isCliProvider">
       <div>
         <label class="block text-xs font-medium text-slate-400 mb-1.5">CLI Path</label>
