@@ -622,6 +622,70 @@ def llm_model_reference(model: str, reasoning_effort: Any = None) -> str:
     return f"{model_name}-{effort.upper()}"
 
 
+_CANON_VENDOR_PREFIXES = (
+    "openai.", "anthropic.", "meta.", "amazon.", "mistral.", "cohere.", "ai21.", "deepseek.", "qwen.",
+)
+_CANON_REGION_PREFIXES = ("us.", "eu.", "apac.")
+_CANON_VERSION_SUFFIX_RE = re.compile(r"(?:-v?\d+)?:\d+$")
+
+
+def _auto_normalize_model(model: str) -> str:
+    """Normalize a provider/model string to a provider-agnostic token.
+
+    Strips a leading cross-region inference-profile prefix (us./eu./apac.), a
+    vendor prefix (openai./anthropic./…), and a trailing version/profile suffix
+    (:0, -1:0, -v2:0); lowercases. So ``openai.gpt-oss-120b-1:0`` and a bare
+    azure deployment named ``gpt-oss-120b`` both become ``gpt-oss-120b``.
+    """
+    s = str(model or "").strip().lower()
+    for p in _CANON_REGION_PREFIXES:
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    for p in _CANON_VENDOR_PREFIXES:
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    s = _CANON_VERSION_SUFFIX_RE.sub("", s)
+    return s.strip()
+
+
+def _unified_reasoning_effort(provider_config: dict[str, Any] | None) -> str:
+    """Collapse the per-provider effort field to a common token.
+
+    Reads ``reasoning_effort`` (azure/openai/nvidia/cli) OR ``bedrock_reasoning``
+    (bedrock) OR ``ollama_think`` (ollama). low/medium/high pass through;
+    true/on → 'on'; off/false/empty/unknown → ''.
+    """
+    pc = provider_config or {}
+    raw = (
+        str(pc.get("reasoning_effort") or "").strip().lower()
+        or str(pc.get("bedrock_reasoning") or "").strip().lower()
+        or str(pc.get("ollama_think") or "").strip().lower()
+    )
+    if raw in ("low", "medium", "high"):
+        return raw
+    if raw in ("true", "on", "yes", "1"):
+        return "on"
+    return ""
+
+
+def canonical_model_cache_key(model: str, provider_config: dict[str, Any] | None = None) -> str:
+    """Provider-agnostic cache identity ``<base>@<effort>`` (or ``<base>``).
+
+    base = ``provider_config['model_cache_family']`` (operator override) if set,
+    else the auto-normalized model. effort = the unified reasoning effort. Two
+    configs that mean the same model + effort produce the same key regardless of
+    provider or naming convention (azure ``gpt-oss-120b`` ≡ bedrock
+    ``openai.gpt-oss-120b-1:0``), so they share cache instead of invalidating.
+    """
+    pc = provider_config or {}
+    family = str(pc.get("model_cache_family") or "").strip().lower()
+    base = family or _auto_normalize_model(model)
+    effort = _unified_reasoning_effort(pc)
+    return f"{base}@{effort}" if effort else base
+
+
 def _resolve_provider_config(provider: str, provider_config: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved = dict(provider_config or {})
     p = (provider or "gemini").strip().lower()
