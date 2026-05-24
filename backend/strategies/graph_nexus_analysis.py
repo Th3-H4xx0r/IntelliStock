@@ -85,6 +85,7 @@ try:
         get_last_structured_llm_call_metadata,
         get_prompt_cache_stats,
         google_cse_search,
+        canonical_model_cache_key,
         llm_model_reference,
         normalize_reasoning_effort,
     )
@@ -101,6 +102,7 @@ except ImportError:
         get_last_structured_llm_call_metadata,
         get_prompt_cache_stats,
         google_cse_search,
+        canonical_model_cache_key,
         llm_model_reference,
         normalize_reasoning_effort,
     )
@@ -800,6 +802,26 @@ def _default_api_key_for_provider(provider: str) -> str:
 
 
 def _resolve_role_llm_provider_config(config: dict, role: str) -> dict[str, Any]:
+    """Provider config for a role, plus the operator's model_cache_family override
+    (so canonical_model_cache_key can force-group same-model-different-name rows).
+    Thin wrapper over the per-provider field resolver to add the field once."""
+    out = dict(_resolve_role_llm_provider_config_fields(config, role))
+    role_l = str(role or "").strip().lower()
+    prefix = f"{role_l}_" if role_l else ""
+    lookback = bool(config.get("historical_lookback_mode", False))
+    fam = ""
+    if lookback:
+        fam = (config.get(f"lookback_{prefix}model_cache_family") or "").strip()
+        if not fam and prefix:
+            fam = (config.get("lookback_model_cache_family") or "").strip()
+    if not fam:
+        fam = (config.get(f"{prefix}model_cache_family") or config.get("model_cache_family") or "").strip()
+    if fam:
+        out["model_cache_family"] = fam.lower()
+    return out
+
+
+def _resolve_role_llm_provider_config_fields(config: dict, role: str) -> dict[str, Any]:
     role = str(role or "").strip().lower()
     prefix = f"{role}_" if role else ""
     lookback = bool(config.get("historical_lookback_mode", False))
@@ -3187,12 +3209,13 @@ def _score_finbert_for_articles(conn, normalized_articles: list[dict], strategy_
 def _llm_cached_doc_id(
     schema_type: str,
     article_hash: str,
-    provider: str,
     model: str,
     prompt_version: str,
     provider_config: dict[str, Any] | None = None,
 ) -> str:
-    return f"{schema_type}|{article_hash}|{provider}|{_llm_model_ref(model, provider_config)}|{prompt_version}"
+    # Provider-agnostic + effort-aware: same underlying model under different
+    # provider/name strings shares cache; changing reasoning level invalidates.
+    return f"{schema_type}|{article_hash}|{canonical_model_cache_key(model, provider_config)}|{prompt_version}"
 
 
 def _load_llm_cache_rows(conn, table_name: str, cache_ids: list[str]) -> dict[str, dict]:
@@ -3716,7 +3739,7 @@ def _classify_company_article_records(
     results: list[dict] = []
     traces: list[dict] = []
     cache_pairs = [
-        (row, _llm_cached_doc_id("company", row["article_hash"], provider, model, prompt_version, provider_config))
+        (row, _llm_cached_doc_id("company", row["article_hash"], model, prompt_version, provider_config))
         for row in articles
     ]
     cached = _load_llm_cache_rows(conn, NEXUS_NEWS_LLM_COMPANY_TABLE, [cache_id for _, cache_id in cache_pairs])
@@ -3841,7 +3864,7 @@ def _classify_macro_article_records(
     results: list[dict] = []
     traces: list[dict] = []
     cache_pairs = [
-        (row, _llm_cached_doc_id("macro", row["article_hash"], provider, model, prompt_version, provider_config))
+        (row, _llm_cached_doc_id("macro", row["article_hash"], model, prompt_version, provider_config))
         for row in articles
     ]
     cached = _load_llm_cache_rows(conn, NEXUS_NEWS_LLM_MACRO_TABLE, [cache_id for _, cache_id in cache_pairs])
