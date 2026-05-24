@@ -1688,7 +1688,7 @@ def _call_claude_cli_plain(
         # Persist to prompt cache if enabled.
         try:
             _effort_key = _cache_effort_key("claude-cli", provider_config)
-            _store_prompt_cache(prompt, model, _effort_key, str(result_text))
+            _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", str(result_text))
         except Exception:
             pass
         # T10 critical-guard capture — CLI providers map signals to synthetic status
@@ -1845,7 +1845,7 @@ def _call_codex_cli_structured_from_strategy(
     if use_prompt_cache:
         cache_effort = _cache_effort_key("codex-cli", provider_config)
         try:
-            _cached_raw = _check_prompt_cache(prompt, model, cache_effort, force_cache=True)
+            _cached_raw = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", force_cache=True)
         except Exception:
             _cached_raw = None
         if _cached_raw:
@@ -2064,7 +2064,7 @@ def _call_codex_cli_structured_from_strategy(
                 _raw_json = json.dumps(result.dict())
             else:
                 _raw_json = json.dumps(result)
-            _store_prompt_cache(prompt, model, cache_effort, _raw_json, force_cache=True)
+            _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", _raw_json, force_cache=True)
         except Exception:
             pass
     _safe_record(
@@ -2178,7 +2178,7 @@ def _call_claude_cli_structured_from_strategy(
     if use_prompt_cache:
         cache_effort = _cache_effort_key("claude-cli", provider_config)
         try:
-            _cached_raw = _check_prompt_cache(prompt, model, cache_effort, force_cache=True)
+            _cached_raw = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", force_cache=True)
         except Exception:
             _cached_raw = None
         if _cached_raw:
@@ -2327,7 +2327,7 @@ def _call_claude_cli_structured_from_strategy(
                         raw_json = json.dumps(result.dict())
                     else:
                         raw_json = json.dumps(result)
-                    _store_prompt_cache(prompt, model, cache_effort, raw_json, force_cache=True)
+                    _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", raw_json, force_cache=True)
                 except Exception:
                     pass
             try:
@@ -2534,7 +2534,7 @@ def call_structured_llm_by_provider(
     if use_prompt_cache:
         _structured_cache_effort = _cache_effort_key(provider, provider_config)
         try:
-            _cached_raw = _check_prompt_cache(prompt, model, _structured_cache_effort, force_cache=True)
+            _cached_raw = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", force_cache=True)
         except Exception:
             _cached_raw = None
         if _cached_raw:
@@ -2571,7 +2571,7 @@ def call_structured_llm_by_provider(
             else:
                 _raw_json = json.dumps(structured_obj)
             _stores_before = int(_prompt_cache_stats.get("stores", 0) or 0)
-            _store_prompt_cache(prompt, model, _structured_cache_effort, _raw_json, force_cache=True)
+            _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", _raw_json, force_cache=True)
             _stores_after = int(_prompt_cache_stats.get("stores", 0) or 0)
             if _stores_after > _stores_before:
                 _LAST_STRUCTURED_LLM_CALL.data["prompt_cache_stored"] = True
@@ -5480,7 +5480,7 @@ def call_llm_by_provider(
         return ""
     # ── Prompt cache check ──
     _effort_key = _cache_effort_key(provider, provider_config)
-    _cached = _check_prompt_cache(prompt, model, _effort_key)
+    _cached = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "")
     if _cached is not None:
         return _cached
     _rl = _get_model_rate_limiter(model)
@@ -5572,7 +5572,7 @@ def call_llm_by_provider(
         )
     if _result:
         _fire_llm_output_log(provider, model, prompt, _result)
-        _store_prompt_cache(prompt, model, _effort_key, _result)
+        _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", _result)
     return _result
 
 
