@@ -511,9 +511,14 @@ class LlmConfigTestBody(BaseModel):
 
 
 class LlmConfigTestOutput(BaseModel):
+    # ``ok`` is the real connectivity signal. provider/model are optional: the
+    # test prompt asks the model to echo them, but terser models (e.g. Bedrock
+    # GPT-OSS) return only {"ok": true}. Requiring the echo made the probe fail
+    # for working models, so we don't — Stage 2's smoke generation still
+    # exercises the real call path.
     ok: bool
-    provider: str
-    model: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
 
 
 class CreateModelBody(BaseModel):

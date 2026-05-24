@@ -38,6 +38,17 @@ def test_llm_config_test_body_accepts_bedrock_fields():
     assert b.bedrock_region == "us-east-1"
 
 
+def test_llm_config_test_output_tolerates_terse_models():
+    """Terse models (e.g. Bedrock GPT-OSS) return only {"ok": true}; the probe
+    must not require provider/model to be echoed back."""
+    LlmConfigTestOutput = _import_body("LlmConfigTestOutput")
+    out = LlmConfigTestOutput(ok=True)
+    assert out.ok is True and out.provider is None and out.model is None
+    # Extra fields a model might add are ignored (Pydantic default).
+    out2 = LlmConfigTestOutput(**{"ok": True, "reason": "valid"})
+    assert out2.ok is True
+
+
 def test_bedrock_region_length_capped():
     CreateModelBody = _import_body("CreateModelBody")
     from pydantic import ValidationError
