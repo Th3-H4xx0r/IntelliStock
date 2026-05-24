@@ -27,3 +27,9 @@ def test_already_canonical_skipped():
 
 def test_non_string_skipped():
     assert mig._canonical_from_old_id(None) is None
+
+
+def test_does_not_split_on_suffix():
+    # '-on' was never an old effort suffix; a model name ending in -on must NOT
+    # be mis-split (else the migrated id wouldn't match the runtime key).
+    assert mig._canonical_from_old_id("company|H|azure|qwen3-thinking-on|v3") == "company|H|qwen3-thinking-on|v3"

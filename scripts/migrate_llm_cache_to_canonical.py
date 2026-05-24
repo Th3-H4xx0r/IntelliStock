@@ -19,6 +19,13 @@ lookup uses, so migrated ids match runtime keys exactly.
 Run dry first:   python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST
 Then apply:      python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST --apply
 Cleanup orphans: python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST --apply --cleanup
+
+Limitation: this re-keys using the auto-normalized model only. It cannot apply a
+``model_cache_family`` override (that lives on the Models row, not the cache row,
+and the field is new — no existing cache row was built with one). If you later
+set a family that differs from the auto-normalized name, rows migrated here keep
+the auto-normalized key and won't match the family-based runtime key (they'll
+re-classify once). For the common no-override case, migrated ids match runtime exactly.
 """
 from __future__ import annotations
 
@@ -31,9 +38,13 @@ from llm_utils import _auto_normalize_model  # noqa: E402
 
 TABLES = ("GraphNexusNewsLLMCompany", "GraphNexusNewsLLMMacro")
 _BATCH = 500  # rows per insert/delete round-trip (tables can hold tens of thousands)
-# Effort suffixes the old model_ref could carry (llm_model_reference upper-cased
-# the effort, e.g. 'gpt-oss-120b-MEDIUM'). Matched case-insensitively.
-_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-on")
+# Effort suffixes the old model_ref could carry. The old key built model_ref via
+# llm_model_reference, which only ever appended -LOW/-MEDIUM/-HIGH
+# (normalize_reasoning_effort returns only those; on/true/off → empty → no
+# suffix). We deliberately do NOT include '-on': it was never produced, and
+# matching it would wrongly split a model whose NAME ends in '-on'. Matched
+# case-insensitively.
+_EFFORT_SUFFIXES = ("-low", "-medium", "-high")
 
 
 def _canonical_from_old_id(old_id):
