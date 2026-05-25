@@ -1482,3 +1482,24 @@ def test_ordered_discovery_candidates_by_ticker_when_no_strength_getter():
     items = {"ZZZ": {}, "AAA": {}, "MMM": {}}
     ordered = gna._ordered_discovery_candidates(items.items())
     assert [t for t, _ in ordered] == ["AAA", "MMM", "ZZZ"]
+
+
+def test_ordered_discovery_candidates_tolerates_non_numeric_strength():
+    # The helper is generic — a getter that yields a non-numeric value must not
+    # raise; treat it as 0 (sorts last among ties).
+    items = {"BAD": {"score": "oops"}, "GOOD": {"score": 2}, "ZERO": {"score": 0}}
+    ordered = gna._ordered_discovery_candidates(
+        items.items(), strength_getter=lambda d: d.get("score")
+    )
+    # GOOD(2) first; BAD("oops"->0) and ZERO(0) tie -> ticker asc (BAD < ZERO).
+    assert [t for t, _ in ordered] == ["GOOD", "BAD", "ZERO"]
+
+
+def test_ordered_discovery_candidates_score_prefers_bullish_over_bearish():
+    # Trend buy-signal dicts use score=+1 (bullish) / -1 (bearish); at the
+    # max_discovered cap bullish names must win deterministically over bearish.
+    items = {"BEAR": {"score": -1}, "BULL2": {"score": 1}, "BULL1": {"score": 1}}
+    ordered = gna._ordered_discovery_candidates(
+        items.items(), strength_getter=lambda d: d.get("score", 0)
+    )
+    assert [t for t, _ in ordered] == ["BULL1", "BULL2", "BEAR"]

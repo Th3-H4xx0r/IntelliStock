@@ -10288,10 +10288,12 @@ def _ordered_discovery_candidates(items, strength_getter=None):
     """
     pairs = list(items)
     if strength_getter is not None:
-        return sorted(
-            pairs,
-            key=lambda kv: (-float(strength_getter(kv[1]) or 0.0), str(kv[0])),
-        )
+        def _strength(value):
+            try:
+                return float(strength_getter(value) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        return sorted(pairs, key=lambda kv: (-_strength(kv[1]), str(kv[0])))
     return sorted(pairs, key=lambda kv: str(kv[0]))
 
 
@@ -10315,9 +10317,11 @@ def _discover_stocks(
 
     hard_limit = max_discovered
     newly_discovered = []
+    # Order by trend score (bullish +1 wins the cap over bearish -1), ticker
+    # tiebreak. trend_buy_signals values carry "score" (not "strength").
     for ticker, data in _ordered_discovery_candidates(
         trend_buy_signals.items(),
-        strength_getter=lambda d: (d or {}).get("strength", 0),
+        strength_getter=lambda d: (d or {}).get("score", 0),
     ):
         if current_count >= hard_limit:
             break
@@ -21039,6 +21043,8 @@ class GraphNexusAnalysis:
                 _bz_no_data = strategy_cache.get("_overlay_no_data_tickers", set()) if strategy_cache else set()
                 _bz_excl = set(symbols_list) | _sold_cooldown | set(_existing_active_disc) | _bz_no_data
                 _bz_newly_discovered = []
+                # Benzinga candidates carry no per-ticker magnitude (sentiment is
+                # a constant flag), so order deterministically by ticker.
                 for ticker, sig in _ordered_discovery_candidates(bz_discovery.items()):
                     if current_discovered_count >= hard_limit:
                         break
