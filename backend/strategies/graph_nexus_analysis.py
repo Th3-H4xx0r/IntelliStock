@@ -10277,6 +10277,24 @@ def _build_nexus_candidate_meta(
     }
 
 
+def _ordered_discovery_candidates(items, strength_getter=None):
+    """Deterministically order discovery ``(ticker, data)`` candidates so the
+    ``max_discovered_stocks`` cap boundary does not depend on dict/set
+    iteration order (which varies run-to-run unless PYTHONHASHSEED is pinned).
+
+    With ``strength_getter`` (called on each value), order is strongest-first
+    then ticker ascending; otherwise ticker ascending. Belt-and-suspenders
+    behind PYTHONHASHSEED=0 so determinism does not rely on env alone.
+    """
+    pairs = list(items)
+    if strength_getter is not None:
+        return sorted(
+            pairs,
+            key=lambda kv: (-float(strength_getter(kv[1]) or 0.0), str(kv[0])),
+        )
+    return sorted(pairs, key=lambda kv: str(kv[0]))
+
+
 def _discover_stocks(
     conn, trend_buy_signals: dict[str, dict], instance_id: str,
     current_symbols: set[str], config: dict, date_key: str,
@@ -10297,7 +10315,10 @@ def _discover_stocks(
 
     hard_limit = max_discovered
     newly_discovered = []
-    for ticker, data in trend_buy_signals.items():
+    for ticker, data in _ordered_discovery_candidates(
+        trend_buy_signals.items(),
+        strength_getter=lambda d: (d or {}).get("strength", 0),
+    ):
         if current_count >= hard_limit:
             break
         if ticker in current_symbols or ticker in existing_set:
@@ -21018,7 +21039,7 @@ class GraphNexusAnalysis:
                 _bz_no_data = strategy_cache.get("_overlay_no_data_tickers", set()) if strategy_cache else set()
                 _bz_excl = set(symbols_list) | _sold_cooldown | set(_existing_active_disc) | _bz_no_data
                 _bz_newly_discovered = []
-                for ticker, sig in bz_discovery.items():
+                for ticker, sig in _ordered_discovery_candidates(bz_discovery.items()):
                     if current_discovered_count >= hard_limit:
                         break
                     if ticker in _bz_excl:

@@ -213,3 +213,25 @@ def reset_state() -> None:
     with _state_lock:
         _already_alerted = False
         _skip_snapshot_persist = False
+
+
+# Pause-metadata fields handle() writes to BacktestResults (the keys in its
+# `payload` minus `status`). Cleared on resume so a run that finishes after
+# resuming doesn't carry stale pause_* metadata. Keep in sync with handle().
+_PAUSE_RESULT_FIELDS = (
+    "pause_reason_tag",
+    "pause_reason_text",
+    "pause_provider",
+    "pause_model",
+    "pause_call_site",
+    "pause_attempts",
+    "pause_bar_time",
+    "pause_sample",
+    "paused_at",
+)
+
+
+def cleared_pause_fields() -> dict:
+    """Return ``{field: None}`` for every pause_* field, for the broker's
+    resume update so finished-after-resume runs don't carry stale pause data."""
+    return {k: None for k in _PAUSE_RESULT_FIELDS}

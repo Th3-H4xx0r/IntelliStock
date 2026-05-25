@@ -204,3 +204,19 @@ def test_handle_idempotent():
         backtest_critical_abort.handle(backtest_id="357345", instance_id="main", failure=_make_failure())
         backtest_critical_abort.handle(backtest_id="357345", instance_id="main", failure=_make_failure())
     assert mock_apply.call_count == 1
+
+
+def test_cleared_pause_fields_nulls_all_pause_metadata():
+    """On resume the broker must clear every pause_* field handle() wrote, so a
+    finished run doesn't carry misleading pause metadata. The set must mirror
+    handle()'s payload (minus status, which resume sets separately)."""
+    from backend.backtest_critical_abort import cleared_pause_fields
+    cleared = cleared_pause_fields()
+    expected = {
+        "pause_reason_tag", "pause_reason_text", "pause_provider", "pause_model",
+        "pause_call_site", "pause_attempts", "pause_bar_time", "pause_sample",
+        "paused_at",
+    }
+    assert set(cleared) == expected
+    assert all(v is None for v in cleared.values())
+    assert "status" not in cleared

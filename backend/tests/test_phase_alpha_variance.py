@@ -31,6 +31,7 @@ for _p in (_BACKEND, _ROOT):
 
 import backend.strategies.graph_nexus_analysis as gna
 from backend._phase_alpha_helpers import (
+    backtest_determinism_env_vars,
     derive_backtest_seed,
     neo4j_snapshot_key,
     resolve_use_sentiment_cache,
@@ -1430,3 +1431,54 @@ def test_alpha2_cross_bar_same_week_hits_cache():
     # Day 3 of same ISO week (Thu).
     gna._neo4j_cached_query(cache, {}, "1hop_out", {"SNDK"}, "2026-05-14", fn)
     assert fn.calls == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# α.3 (cont.) — PYTHONHASHSEED forwarding default for spawned backtest brokers.
+# The broker relies on PYTHONHASHSEED=0 for deterministic set iteration
+# (broker.py warns when unset). The backtest engine must forward a value into
+# the spawned broker container; default to "0" so determinism is on even when
+# the deployment env omits it.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_alpha3_determinism_env_defaults_pythonhashseed_zero():
+    out = backtest_determinism_env_vars({})
+    assert out["PYTHONHASHSEED"] == "0"
+
+
+def test_alpha3_determinism_env_respects_operator_pythonhashseed():
+    out = backtest_determinism_env_vars({"PYTHONHASHSEED": "7"})
+    assert out["PYTHONHASHSEED"] == "7"
+
+
+def test_alpha3_determinism_env_blank_pythonhashseed_falls_back_to_zero():
+    out = backtest_determinism_env_vars({"PYTHONHASHSEED": "   "})
+    assert out["PYTHONHASHSEED"] == "0"
+
+
+def test_alpha3_determinism_env_forwards_backtest_seed_only_when_set():
+    assert "BACKTEST_SEED" not in backtest_determinism_env_vars({})
+    assert backtest_determinism_env_vars({"BACKTEST_SEED": "42"})["BACKTEST_SEED"] == "42"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Discovery selection determinism — order candidates explicitly so the
+# max_discovered_stocks cap boundary doesn't depend on dict/set iteration
+# order (belt-and-suspenders behind PYTHONHASHSEED).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_ordered_discovery_candidates_by_strength_then_ticker():
+    items = {"ZZZ": {"strength": 0.9}, "AAA": {"strength": 0.5}, "MMM": {"strength": 0.9}}
+    ordered = gna._ordered_discovery_candidates(
+        items.items(), strength_getter=lambda d: d.get("strength", 0)
+    )
+    # Strongest first; ticker breaks the 0.9 tie deterministically (MMM < ZZZ).
+    assert [t for t, _ in ordered] == ["MMM", "ZZZ", "AAA"]
+
+
+def test_ordered_discovery_candidates_by_ticker_when_no_strength_getter():
+    items = {"ZZZ": {}, "AAA": {}, "MMM": {}}
+    ordered = gna._ordered_discovery_candidates(items.items())
+    assert [t for t, _ in ordered] == ["AAA", "MMM", "ZZZ"]

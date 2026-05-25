@@ -2518,10 +2518,15 @@ def watch_backtest_run_command():
                     pass
                 try:
                     if _backtest_result_id is not None:
+                        # Clear the stale pause_* metadata handle() wrote, so a run
+                        # that finishes after resuming doesn't carry misleading
+                        # pause fields. Only when transitioning out of the critical
+                        # pause (gated on status), so manual pauses aren't stomped.
+                        from backtest_critical_abort import cleared_pause_fields as _bca_cleared_pause
                         r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
                             lambda row: r.branch(
                                 row["status"].default("").eq("paused_llm_critical"),
-                                {"status": "running", "resumed_at": r.now()},
+                                {"status": "running", "resumed_at": r.now(), **_bca_cleared_pause()},
                                 {}
                             )
                         ).run(conn)

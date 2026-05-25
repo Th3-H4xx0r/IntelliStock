@@ -214,6 +214,10 @@ services:
       - INSTANCE_DOCKER_NETWORK=intellistockv4_default
       - BACKTEST_LOG_VOLUME=backtest_logs
       - BACKTEST_LOG_DIR=/app/backtest_logs
+      # Determinism: the spawned broker relies on PYTHONHASHSEED for stable set
+      # iteration during stock discovery (the engine forwards it; it must be set
+      # before the interpreter starts). Default 0 for reproducible backtests.
+      - PYTHONHASHSEED=${PYTHONHASHSEED:-0}
       # R19: explicit passthrough as belt-and-suspenders against env_file
       # not being populated by the orchestrator (e.g. Dockploy may render
       # service env separately from the project .env file).

@@ -91,6 +91,26 @@ def derive_backtest_seed(
         return 12345, f"hard fallback (derive failed: {exc!r})"
 
 
+def backtest_determinism_env_vars(environ: dict) -> dict:
+    """Phase α.3: env vars to forward into a spawned backtest broker container
+    for run-to-run determinism.
+
+    ``PYTHONHASHSEED`` must be set before the interpreter starts — the broker
+    relies on it for deterministic ``set`` iteration during stock discovery
+    (broker.py warns when it is unset). Default it to ``"0"`` so determinism is
+    on even when the deployment env omits it; an explicit operator value wins.
+    ``BACKTEST_SEED`` is forwarded only when explicitly set (otherwise the
+    broker derives one from the backtest id + universe — see derive_backtest_seed).
+    """
+    out: dict = {}
+    ph = (environ.get("PYTHONHASHSEED") or "").strip() or "0"
+    out["PYTHONHASHSEED"] = ph
+    bt = (environ.get("BACKTEST_SEED") or "").strip()
+    if bt:
+        out["BACKTEST_SEED"] = bt
+    return out
+
+
 def neo4j_snapshot_key(
     query_name: str,
     seeds,
