@@ -110,6 +110,21 @@ def _full_instance_targets(instance_id: str):
             ("instance_id", instance_id, "exact"),
             ("instance_id", f"{instance_id}|", "prefix"),
         ]),
+        # Active-event state (scoped instance_id "main|<hash>"). 2026-05-25
+        # bug-sweep: these were missing, so a full clear left stale active
+        # events that the strategy reloads on the next backtest restart.
+        ("GraphNexusActiveEvents", [
+            ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
+        ]),
+        ("GraphNexusActiveEventHistory", [
+            ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
+        ]),
+        ("GraphNexusActiveEventMaintenance", [
+            ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
+        ]),
         # Per-instance PK tables (id == instance_id or "<id>|<scope>"):
         ("GraphNexusRotationCooldown", [
             ("id", instance_id, "exact"),

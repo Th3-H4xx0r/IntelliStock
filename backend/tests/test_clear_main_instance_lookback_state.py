@@ -33,6 +33,9 @@ def test_build_targets_covers_all_phase1_tables():
         "GraphNexusLearningCache",
         "GraphNexusDiscoverySnapshots", "GraphNexusOutcomeSeries",
         "GraphNexusAnalystPanel",
+        # 2026-05-25 bug-sweep: per-instance active-event tables
+        "GraphNexusActiveEvents", "GraphNexusActiveEventHistory",
+        "GraphNexusActiveEventMaintenance",
     }
     missing = expected - table_names
     assert not missing, f"missing tables in TARGETS: {missing}"
@@ -288,6 +291,22 @@ def test_scoped_clear_does_not_leak_across_instances():
     pred_main = _full_filter_for("GraphNexusDiscoveredStocks", instance_id="main")
     assert pred_main.fn({"instance_id": "maine|abc"}) is False
     assert pred_main.fn({"instance_id": "maincorp"}) is False
+
+
+def test_active_event_tables_are_cleared_and_scoped():
+    """2026-05-25 bug-sweep: the 3 per-instance active-event tables carry the
+    scoped instance_id 'main|<hash>' and the strategy reloads them on restart,
+    but they were missing from the full clear — so stale events survived."""
+    by_table = {t[0]: t for t in cleaner._build_targets("main")}
+    for tbl in ("GraphNexusActiveEvents", "GraphNexusActiveEventHistory",
+                "GraphNexusActiveEventMaintenance"):
+        assert tbl in by_table, f"{tbl} must be a full-instance clear target"
+        pred = _full_filter_for(tbl)
+        assert pred.fn({"instance_id": "main|734add9fabe9356b7ccfa181"}) is True, (
+            f"{tbl} must match the scoped instance_id 'main|<hash>'"
+        )
+        assert pred.fn({"instance_id": "main"}) is True
+        assert pred.fn({"instance_id": "maine|x"}) is False  # no cross-instance leak
 
 
 def test_backend_clear_instance_state_targets_match_script():
