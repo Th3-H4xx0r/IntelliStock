@@ -233,3 +233,80 @@ def test_build_targets_substitutes_instance_id():
 def test_instance_id_module_constant_is_main():
     """Default INSTANCE_ID constant should still be 'main' for back-compat."""
     assert cleaner.INSTANCE_ID == "main"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 2026-05-25: scope-mismatch fix. GraphNexus namespaces per-instance discovery
+# /trend/outcome data under the SCOPED id "main|<config-hash>", but the full
+# clear matched bare "main" (exact) on those tables and never matched the
+# "cleanup_done|main|<hash>" gate marker. Net: a "full clear" deleted almost
+# nothing and the strategy kept logging "already cleaned, config unchanged".
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _full_filter_for(table, instance_id="main"):
+    entry = next(t for t in cleaner._build_targets(instance_id) if t[0] == table)
+    return cleaner._build_filter(_FakeR(), _criteria_of(entry), combine=_combine_of(entry))
+
+
+def test_scoped_instance_id_tables_match_main_pipe_hash():
+    for tbl in ("GraphNexusDiscoveredStocks", "GraphNexusMarketTrends",
+                "GraphNexusTradeOutcomes", "GraphNexusOutcomeSeries",
+                "GraphNexusAnalystPanel"):
+        pred = _full_filter_for(tbl)
+        assert pred.fn({"instance_id": "main|734add9fabe9356b7ccfa181"}) is True, (
+            f"{tbl} must match the scoped instance_id 'main|<hash>'"
+        )
+        assert pred.fn({"instance_id": "main"}) is True, (
+            f"{tbl} must still match legacy bare 'main'"
+        )
+
+
+def test_rotation_cooldown_id_matches_scoped():
+    pred = _full_filter_for("GraphNexusRotationCooldown")
+    assert pred.fn({"id": "main|734add9fabe9356b7ccfa181"}) is True
+    assert pred.fn({"id": "main"}) is True
+
+
+def test_learning_cache_matches_cleanup_done_and_coholdings_markers():
+    pred = _full_filter_for("GraphNexusLearningCache")
+    # the gate marker that makes the strategy skip its own cleanup
+    assert pred.fn({"id": "cleanup_done|main|734add9fabe9356b7ccfa181"}) is True
+    assert pred.fn({"id": "inst_co_holdings|main|2026-01"}) is True
+    # existing matches preserved
+    assert pred.fn({"id": "main"}) is True
+    assert pred.fn({"id": "main|734add"}) is True
+
+
+def test_scoped_clear_does_not_leak_across_instances():
+    # Clearing 'foo' must NOT touch instance 'main' scoped rows.
+    pred = _full_filter_for("GraphNexusDiscoveredStocks", instance_id="foo")
+    assert pred.fn({"instance_id": "main|734add9fabe9356b7ccfa181"}) is False
+    pred_lc = _full_filter_for("GraphNexusLearningCache", instance_id="foo")
+    assert pred_lc.fn({"id": "cleanup_done|main|734add"}) is False
+    # an instance whose name is a prefix of another must not collide
+    pred_main = _full_filter_for("GraphNexusDiscoveredStocks", instance_id="main")
+    assert pred_main.fn({"instance_id": "maine|abc"}) is False
+    assert pred_main.fn({"instance_id": "maincorp"}) is False
+
+
+def test_backend_clear_instance_state_targets_match_script():
+    """backend/clear_instance_state.py (used by the UI 'clear state' button) must
+    stay in lock-step with this CLI script: same tables, criteria, combine."""
+    import sys as _sys
+    _BACKEND = str(Path(__file__).resolve().parents[1])
+    if _BACKEND not in _sys.path:
+        _sys.path.insert(0, _BACKEND)
+    import clear_instance_state as backend_cleaner
+
+    def _norm(entry):
+        return (frozenset(tuple(c) for c in _criteria_of(entry)), _combine_of(entry))
+
+    script_targets = {t[0]: _norm(t) for t in cleaner._build_targets("main")}
+    backend_targets = {
+        t[0]: _norm(t) for t in backend_cleaner._full_instance_targets("main")
+    }
+    assert backend_targets == script_targets, (
+        "backend/clear_instance_state.py and scripts/clear_main_instance_lookback_state.py "
+        "full-instance targets drifted — keep them in sync"
+    )

@@ -95,37 +95,54 @@ def _build_targets(instance_id: str):
         # so a per-instance filter would match 0 rows. WAL cleanup is the
         # operator's manual responsibility (see live-launch-checklist.md).
         # Removed from per-instance cleanup in the 2026-05-21 bug-sweep.
+        # Discovery / trend / outcome state is namespaced under the SCOPED
+        # instance id ("main|<config-hash>"), NOT bare "main". Match the exact
+        # id (legacy bare rows) OR the "<id>|" prefix (current scoped rows).
+        # 2026-05-25 CRITICAL: exact-only matched 0 scoped rows, so a full
+        # clear was a silent no-op for these tables.
         ("GraphNexusDiscoveredStocks", [
             ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
         ]),
         ("GraphNexusMarketTrends", [
             ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
         ]),
         # GraphNexusRotationCooldown / GraphNexusLearningCache /
         # GraphNexusDiscoverySnapshots: ``id`` is the per-instance PK; there
-        # is no separate ``instance_id`` field. Filtering on ``instance_id``
-        # matches 0 rows (silently no-ops in production -- bug-sweep
-        # 2026-05-21 CRITICAL). GraphNexusLearningCache additionally writes
-        # keys shaped like ``{instance_id}|...`` (e.g. ``cleanup_done|main``),
-        # so match both via OR-mode.
+        # is no separate ``instance_id`` field. RotationCooldown ids are also
+        # scoped ("main|<hash>"), so add the prefix.
         ("GraphNexusRotationCooldown", [
             ("id", instance_id, "exact"),
+            ("id", f"{instance_id}|", "prefix"),
         ]),
         ("GraphNexusTradeOutcomes", [
             ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
         ]),
+        # GraphNexusLearningCache holds the cleanup-gate marker
+        # ("cleanup_done|<scoped-id>") and the co-holdings cache
+        # ("inst_co_holdings|<scoped-id>|<period>"). Both embed the instance id
+        # AFTER a prefix, so "<id>"/"<id>|" miss them — leaving the gate marker
+        # alive, which is why the strategy kept logging "already cleaned,
+        # config unchanged" after a full clear (2026-05-25 fix).
         ("GraphNexusLearningCache", [
             ("id", instance_id, "exact"),
             ("id", f"{instance_id}|", "prefix"),
+            ("id", f"cleanup_done|{instance_id}", "exact"),
+            ("id", f"cleanup_done|{instance_id}|", "prefix"),
+            ("id", f"inst_co_holdings|{instance_id}|", "prefix"),
         ]),
         ("GraphNexusDiscoverySnapshots", [
             ("id", instance_id, "exact"),
         ]),
         ("GraphNexusOutcomeSeries", [
             ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
         ]),
         ("GraphNexusAnalystPanel", [
             ("instance_id", instance_id, "exact"),
+            ("instance_id", f"{instance_id}|", "prefix"),
         ]),
     ]
 
