@@ -15613,6 +15613,38 @@ def _max_peer_raw_in_sector(ticker: str, aggregated: dict, sector_map: dict) -> 
     return best
 
 
+def _cap_propagation_fanout_per_seed(edges: list[dict], config: dict) -> list[dict]:
+    """Cap how many 1-hop propagation edges a single source ("seed") contributes,
+    keeping the strongest-coupled neighbors (by confidence, then revenue_pct).
+
+    Prevents one news item (e.g. a HOOD earnings hit) from injecting its entire
+    COMPETES_WITH cohort (~90+ names at one score) into scoring and flooding the
+    propagation/backfill queue. Disabled (returns the same list object, no-op)
+    when propagation_max_per_seed <= 0.
+    """
+    max_per_seed = int(config.get("propagation_max_per_seed", 0) or 0)
+    if max_per_seed <= 0 or not edges:
+        return edges
+    by_source: dict[str, list[dict]] = {}
+    for e in edges:
+        by_source.setdefault(str(e.get("source") or ""), []).append(e)
+    keep: set[int] = set()
+    for group in by_source.values():
+        if len(group) <= max_per_seed:
+            keep.update(id(e) for e in group)
+        else:
+            ranked = sorted(
+                group,
+                key=lambda e: (
+                    float(e.get("confidence", 0.0) or 0.0),
+                    float(e.get("revenue_pct", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )[:max_per_seed]
+            keep.update(id(e) for e in ranked)
+    return [e for e in edges if id(e) in keep]
+
+
 def _compute_propagated_scores(
     driver,
     sentiment_data: dict,
