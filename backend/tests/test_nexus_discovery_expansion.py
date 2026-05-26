@@ -148,9 +148,9 @@ def test_sector_fill_candidates_respects_exclusions():
 def test_effective_config_expansion_defaults():
     cfg = gna._get_effective_nexus_config({})
     assert cfg["max_discovered_stocks"] == 90
-    assert cfg["pool_a_base"] == 12
-    assert cfg["pool_b_base"] == 6
-    assert cfg["max_stock_buys_per_day"] == 12
+    assert cfg["pool_a_base"] == 10
+    assert cfg["pool_b_base"] == 4
+    assert cfg["max_stock_buys_per_day"] == 8
     assert cfg["allocation_max_new_stock_buys"] == 6
     assert cfg["momentum_discovery_max_per_day"] == 6
 
@@ -176,12 +176,13 @@ def _schema_config() -> dict:
 def test_schema_template_expansion_defaults():
     schema = _schema_config()
     assert schema["max_discovered_stocks"] == 90
-    assert schema["llm_overlay_max_stock_candidates"] == 40
-    assert schema["pool_a_base"] == 12
-    assert schema["pool_b_base"] == 6
-    assert schema["max_stock_buys_per_day"] == 12
+    assert schema["llm_overlay_max_stock_candidates"] == 30
+    assert schema["pool_a_base"] == 10
+    assert schema["pool_b_base"] == 4
+    assert schema["max_stock_buys_per_day"] == 8
     assert schema["allocation_max_new_stock_buys"] == 6
     assert schema["momentum_discovery_max_per_day"] == 6
     assert schema["momentum_discovery_min_20d_return"] == 15.0
     assert schema["momentum_discovery_min_60d_return"] == 40.0
     assert schema["momentum_discovery_protect_days"] == 10
+    assert schema["momentum_discovery_exclude_leveraged_etfs"] is True

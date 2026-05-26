@@ -971,11 +971,11 @@ def test_nexus_buy_guard_does_not_block_buy_when_other_strategy_also_votes_buy()
 
 def test_effective_config_reports_v9_defaults():
     cfg = _get_effective_nexus_config({})
-    # Discovery expansion (2026-05-25): widen the buy funnel — pool_a 8→12,
-    # pool_b 4→6, buys/day 10→12 — so a larger discovered set reaches buys.
-    assert cfg["pool_a_base"] == 12
-    assert cfg["pool_b_base"] == 6
-    assert cfg["max_stock_buys_per_day"] == 12
+    # Discovery-expansion fix (2026-05-26): concentrate the buy funnel — pool_a 12→10,
+    # pool_b 6→4, buys/day 12→8 — so fixed capital isn't diluted into tiny tickets.
+    assert cfg["pool_a_base"] == 10
+    assert cfg["pool_b_base"] == 4
+    assert cfg["max_stock_buys_per_day"] == 8
     assert cfg["portfolio_drawdown_halt_pct"] == 15.0
     assert cfg["portfolio_drawdown_resume_up_days"] == 2
     # 2026-05-07: default flipped from "warn" → "block" (fail-closed). Empty

@@ -427,8 +427,8 @@ def test_config_defaults_consistency():
     schema_config = json.loads(config_json)
 
     check(
-        "Schema: llm_overlay_max_stock_candidates = 40",
-        schema_config.get("llm_overlay_max_stock_candidates") == 40,
+        "Schema: llm_overlay_max_stock_candidates = 30",
+        schema_config.get("llm_overlay_max_stock_candidates") == 30,
         f"got {schema_config.get('llm_overlay_max_stock_candidates')}",
     )
     check(
@@ -471,8 +471,8 @@ def test_config_defaults_consistency():
 
     # Check llm_overlay_max_stock_candidates default in config.get call
     check(
-        'config.get("llm_overlay_max_stock_candidates", 40) in code',
-        'config.get("llm_overlay_max_stock_candidates", 40)' in content,
+        'config.get("llm_overlay_max_stock_candidates", 30) in code',
+        'config.get("llm_overlay_max_stock_candidates", 30)' in content,
     )
     check(
         'config.get("max_etf_buys_per_day", 3) in code',
