@@ -9,7 +9,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from strategies.graph_nexus_analysis import _cap_propagation_fanout_per_seed
+import json
+import pathlib
+
+from strategies.graph_nexus_analysis import _cap_propagation_fanout_per_seed, _get_effective_nexus_config
 
 
 def _edges(src, n, conf_base=0.5):
@@ -52,3 +55,17 @@ def test_multiple_seeds_capped_independently_order_preserved():
 
 def test_empty_edges_is_noop():
     assert _cap_propagation_fanout_per_seed([], {"propagation_max_per_seed": 8}) == []
+
+
+def test_effective_config_resolves_per_seed_default_and_value():
+    # absent -> code default 0 (disabled, backward-safe)
+    assert _get_effective_nexus_config({})["propagation_max_per_seed"] == 0
+    assert _get_effective_nexus_config({"propagation_max_per_seed": 8})["propagation_max_per_seed"] == 8
+
+
+def test_schema_line_is_valid_json_and_declares_new_knob():
+    src = pathlib.Path(__file__).resolve().parents[1] / "strategies" / "graph_nexus_analysis.py"
+    first_line = src.read_text(encoding="utf-8").splitlines()[0]
+    blob = first_line.split("INTELLISTOCK_SCHEMA:", 1)[1].strip()
+    parsed = json.loads(blob)
+    assert parsed["config"]["propagation_max_per_seed"] == 8

@@ -1108,6 +1108,7 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             'winner_add_fraction_of_initial': ('Winner add-on size as a fraction of initial entry notional (default 0.50)', 0.50),
             'winner_add_max_count': ('Maximum winner add-on count per live position (default 1)', 1),
             'max_propagated_scoring_slots': ('Max ephemeral propagation scoring expansion slots (default 15)', 15),
+            'propagation_max_per_seed': ('Max 1-hop propagation edges per source seed; caps news-item fan-out (0=off, default 8)', 8),
             'overlay_price_lookback_days': ('Price history lookback for LLM overlay (default 30)', 30),
             'llm_overlay_max_stock_candidates': ('Max stock candidates for LLM trade overlay (default 30)', 30),
             'llm_overlay_max_etf_candidates': ('Max ETF candidates for LLM trade overlay (default 6)', 6),
