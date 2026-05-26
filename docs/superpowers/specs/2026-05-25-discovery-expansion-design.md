@@ -100,6 +100,28 @@ cache absorbs repeats). These are global strategy defaults — they change live 
 monitored names, modestly faster rotation, higher overlay LLM spend). The operator controls rollout via
 deploy and per-instance config; defaults are reasonable for live.
 
+## Implementation notes (bug-sweep outcomes)
+
+- Logic 2A gained a third helper, `_select_discovered_to_trim`, added during the
+  pre-push bug-sweep. `_find_discovery_eviction_candidate` already skipped protected
+  momentum rows, but `_trim_discovered_stock_cap` trimmed everything past the cap by
+  rank — so a shielded mover could still be evicted if retention bucket 0 ever exceeded
+  the cap. The trim now routes through `_select_discovered_to_trim`, which excludes
+  protected momentum rows (the pool may transiently exceed the cap rather than evict a
+  shielded name). Covered by `test_trim_selection_*`.
+- Operator-monitor items (not code defects — validate, then tune if needed):
+  - **Book turnover:** `allocation_max_new_stock_buys` 4→6 and `max_stock_buys_per_day`
+    10→12 with `max_positions` unchanged means faster rotation against fixed slots, so
+    more realized churn in live. Watch turnover / realized-loss rate.
+  - **LLM cost/bar:** overlay 24→40 (+67% overlay calls, hard-capped); ~80% more names
+    scored, but sentiment is cached so marginal cost ≈ first-time scoring of new names.
+  - **Shield crowding:** worst case ~6/day × 10 days ≈ 60 protected momentum rows of the
+    90 cap (bounded + self-clearing). If validation shows trend/sector/propagation
+    discovery starved, lower `momentum_discovery_protect_days` (10→7) or
+    `momentum_discovery_max_per_day`.
+  - **Regime caps** (bull/chop/bear/crash via `max_positions_*`) still bound held
+    positions; the wider funnel only enlarges the candidate set, so it stays subordinate.
+
 ## Validation (post-merge, operator-run)
 
 Operator runs ≥2 date ranges; analyze: total return, whether previously-missed movers now get

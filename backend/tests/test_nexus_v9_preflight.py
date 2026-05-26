@@ -971,9 +971,11 @@ def test_nexus_buy_guard_does_not_block_buy_when_other_strategy_also_votes_buy()
 
 def test_effective_config_reports_v9_defaults():
     cfg = _get_effective_nexus_config({})
-    assert cfg["pool_a_base"] == 8
-    assert cfg["pool_b_base"] == 4
-    assert cfg["max_stock_buys_per_day"] == 10
+    # Discovery expansion (2026-05-25): widen the buy funnel — pool_a 8→12,
+    # pool_b 4→6, buys/day 10→12 — so a larger discovered set reaches buys.
+    assert cfg["pool_a_base"] == 12
+    assert cfg["pool_b_base"] == 6
+    assert cfg["max_stock_buys_per_day"] == 12
     assert cfg["portfolio_drawdown_halt_pct"] == 15.0
     assert cfg["portfolio_drawdown_resume_up_days"] == 2
     # 2026-05-07: default flipped from "warn" → "block" (fail-closed). Empty
@@ -1012,7 +1014,8 @@ def test_effective_config_reports_v9_defaults():
     assert cfg["priority_min_position_size"] == 100.0
     assert cfg["priority_budget_can_bypass_regular_min"] is True
     assert cfg["allocation_profile"] == "balanced"
-    assert cfg["allocation_max_new_stock_buys"] == 4
+    # Discovery expansion (2026-05-25): 4→6 executable new buys/cycle.
+    assert cfg["allocation_max_new_stock_buys"] == 6
     assert cfg["allocation_execute_min_raw_score"] == 0.35
     assert cfg["allocation_top2_min_raw_score"] == 0.50
     assert cfg["winner_add_enabled"] is True
@@ -1024,7 +1027,8 @@ def test_effective_config_reports_v9_defaults():
     assert cfg["winner_add_max_count"] == 1
     assert cfg["max_sector_peer_discoveries_per_day"] == 3
     assert cfg["max_competitor_discoveries_per_day"] == 3
-    assert cfg["momentum_discovery_max_per_day"] == 3
+    # Discovery expansion (2026-05-25): 3→6 momentum promotions/day.
+    assert cfg["momentum_discovery_max_per_day"] == 6
     assert cfg["sector_fill_max_per_sector"] == 6
     assert cfg["max_propagated_scoring_slots"] == 15
     assert cfg["sector_watchlist_keys"] == []

@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 50, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 24, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 20.0, "momentum_discovery_min_60d_return": 50.0, "momentum_discovery_max_per_day": 3, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 8, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 10, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 4, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "sell_enforcement_min_hold_days": 5, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
+# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 40, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 12, "pool_b_base": 6, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 12, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "sell_enforcement_min_hold_days": 5, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
 # INTELLISTOCK_DESCRIPTION: Advanced graph-based news contagion analysis with market trend tracking, Benzinga data sources, outcome tracking, and learning stage. Fetches today's news from Alpaca AND Google News (macro/geopolitical), enriches with Benzinga data (analyst ratings, analyst insights, insider trades, government trades, M&A, upcoming IPOs, stock splits, earnings calendar, company actions, prediction markets — all enable/disable configurable), uses LLM to classify sentiment AND event type per ticker, classifies macro news into sectors/themes and resolves to tickers via Neo4j (hybrid: structured classification + Gemini tool-calling fallback), then propagates through Neo4j using relationship-aware weights (10 edge types with directional propagation, sentiment inversion for competitors, edge confidence/revenue/obligation weighting, event-type amplification, sector peer contagion, macro sector-to-sector supply flows, 2-hop supply chain chains, patent partnership depth, and institutional co-holding correlation with position-size weighting). Tracks market trends across runs, discovers new stocks from trends, enforces sells on trend reversals. Outcome tracking stores event→price outcomes in RethinkDB for LLM pattern recognition. Learning stage pre-loads past outcome patterns before first trade (configurable lookback, cached). Uses TOON format for token-efficient LLM inputs. Returns symbol -> score with detailed graph reasoning. Runs once per loop (run_once).
 # DIFFICULTY: 8
 """
@@ -8136,12 +8136,12 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "trailing_stop_pct": float(config.get("trailing_stop_pct", 8.0) or 8.0),
         "trailing_stop_commodity_etf_pct": float(config.get("trailing_stop_commodity_etf_pct", 12.0) or 12.0),
         "trailing_stop_sector_etf_pct": float(config.get("trailing_stop_sector_etf_pct", 10.0) or 10.0),
-        "pool_a_base": int(config.get("pool_a_base", 8) or 8),
-        "pool_b_base": int(config.get("pool_b_base", 4) or 4),
+        "pool_a_base": int(config.get("pool_a_base", 12) or 12),
+        "pool_b_base": int(config.get("pool_b_base", 6) or 6),
         "pool_a_min": int(config.get("pool_a_min", 3) or 3),
         "pool_b_min": int(config.get("pool_b_min", 2) or 2),
-        "max_stock_buys_per_day": int(config.get("max_stock_buys_per_day", 10) or 10),
-        "max_discovered_stocks": int(config.get("max_discovered_stocks", 50) or 50),
+        "max_stock_buys_per_day": int(config.get("max_stock_buys_per_day", 12) or 12),
+        "max_discovered_stocks": int(config.get("max_discovered_stocks", 90) or 90),
         "min_market_cap": float(config.get("min_market_cap", 500_000_000) or 500_000_000),
         "min_avg_volume": float(config.get("min_avg_volume", 200_000) or 200_000),
         "propagation_min_paths": int(config.get("propagation_min_paths", 2) or 2),
@@ -8210,7 +8210,7 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "priority_min_position_size": float(config.get("priority_min_position_size", 100.0) or 100.0),
         "priority_budget_can_bypass_regular_min": bool(config.get("priority_budget_can_bypass_regular_min", True)),
         "allocation_profile": str(config.get("allocation_profile", "balanced") or "balanced").strip().lower(),
-        "allocation_max_new_stock_buys": int(config.get("allocation_max_new_stock_buys", 4) or 4),
+        "allocation_max_new_stock_buys": int(config.get("allocation_max_new_stock_buys", 6) or 6),
         "allocation_execute_min_raw_score": float(config.get("allocation_execute_min_raw_score", 0.35) or 0.35),
         "allocation_top2_min_raw_score": float(config.get("allocation_top2_min_raw_score", 0.50) or 0.50),
         "winner_add_enabled": bool(config.get("winner_add_enabled", True)),
@@ -8222,7 +8222,7 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "winner_add_max_count": int(config.get("winner_add_max_count", 1) or 1),
         "max_sector_peer_discoveries_per_day": int(config.get("max_sector_peer_discoveries_per_day", 3) or 3),
         "max_competitor_discoveries_per_day": int(config.get("max_competitor_discoveries_per_day", 3) or 3),
-        "momentum_discovery_max_per_day": int(config.get("momentum_discovery_max_per_day", 3) or 3),
+        "momentum_discovery_max_per_day": int(config.get("momentum_discovery_max_per_day", 6) or 6),
         "sector_fill_max_per_sector": int(config.get("sector_fill_max_per_sector", 6) or 6),
         "max_propagated_scoring_slots": int(config.get("max_propagated_scoring_slots", 15) or 15),
         "max_events_in_prompt": int(event_limits["max_events_in_prompt"]),
@@ -10024,7 +10024,37 @@ def _discovery_source_priority(source: str) -> int:
     return int(_DISCOVERY_SOURCE_PRIORITY.get(str(source or "").strip().lower(), 50))
 
 
-def _sort_discovered_docs_for_retention(docs: list[dict], protected_tickers: set[str] | None = None) -> list[dict]:
+def _is_momentum_protected(doc: dict, date_key: str | None, protect_days: int) -> bool:
+    """A momentum-discovered row is shielded from eviction for ``protect_days``
+    after discovery, so a quiet pre-breakout mover stays monitored long enough
+    to run. Time-bounded: names that never move age out and free their slot."""
+    try:
+        days = int(protect_days or 0)
+    except (TypeError, ValueError):
+        return False
+    if days <= 0 or not date_key:
+        return False
+    if str(doc.get("source") or "").strip().lower() != "momentum":
+        return False
+    disc = str(doc.get("discovered_date") or "")[:10]
+    if not disc:
+        return False
+    from datetime import datetime as _dt
+    try:
+        d0 = _dt.strptime(disc, "%Y-%m-%d")
+        d1 = _dt.strptime(str(date_key)[:10], "%Y-%m-%d")
+    except ValueError:
+        return False
+    return 0 <= (d1 - d0).days <= days
+
+
+def _sort_discovered_docs_for_retention(
+    docs: list[dict],
+    protected_tickers: set[str] | None = None,
+    *,
+    date_key: str | None = None,
+    protect_days: int = 0,
+) -> list[dict]:
     protected = {str(t).strip().upper() for t in (protected_tickers or set()) if str(t).strip()}
 
     def _key(doc: dict) -> tuple[Any, ...]:
@@ -10033,12 +10063,13 @@ def _sort_discovered_docs_for_retention(docs: list[dict], protected_tickers: set
         priority = _discovery_source_priority(source)
         propagation_score = abs(_safe_float(doc.get("propagation_score"), 0.0))
         watchlist_match = ticker in protected or source == "sector_watchlist"
+        retained = watchlist_match or _is_momentum_protected(doc, date_key, protect_days)
         last_signal_date = str(doc.get("last_signal_date") or doc.get("discovered_date") or "").replace("-", "")
         discovered_date = str(doc.get("discovered_date") or "").replace("-", "")
         last_signal_rank = int(last_signal_date) if last_signal_date.isdigit() else 0
         discovered_rank = int(discovered_date) if discovered_date.isdigit() else 0
         return (
-            0 if watchlist_match else 1,
+            0 if retained else 1,
             priority,
             -propagation_score,
             -last_signal_rank,
@@ -10055,18 +10086,50 @@ def _find_discovery_eviction_candidate(
     *,
     non_evictable_tickers: set[str] | None = None,
     protected_tickers: set[str] | None = None,
+    date_key: str | None = None,
+    protect_days: int = 0,
 ) -> str | None:
     non_evictable = {str(t).strip().upper() for t in (non_evictable_tickers or set()) if str(t).strip()}
     protected = {str(t).strip().upper() for t in (protected_tickers or set()) if str(t).strip()}
-    docs = _sort_discovered_docs_for_retention(_get_all_discovered_stock_docs(conn, instance_id), protected)
+    docs = _sort_discovered_docs_for_retention(
+        _get_all_discovered_stock_docs(conn, instance_id), protected,
+        date_key=date_key, protect_days=protect_days,
+    )
     for doc in reversed(docs):
         ticker = str(doc.get("ticker") or "").strip().upper()
         if not ticker or ticker in non_evictable or ticker in protected:
             continue
         if str(doc.get("source") or "").strip().lower() == "sector_watchlist":
             continue
+        if _is_momentum_protected(doc, date_key, protect_days):
+            continue
         return ticker
     return None
+
+
+def _select_discovered_to_trim(
+    docs: list[dict],
+    max_allowed: int,
+    *,
+    protected_tickers: set[str] | None = None,
+    date_key: str | None = None,
+    protect_days: int = 0,
+) -> list[dict]:
+    """Discovered-stock docs to sell to enforce the cap: those ranked beyond
+    ``max_allowed`` in retention order, EXCLUDING momentum rows still inside
+    their protection window. A protected mover is never trimmed (the pool may
+    transiently exceed the cap rather than evict a shielded name), keeping this
+    consistent with the explicit skip in _find_discovery_eviction_candidate."""
+    allowed = max(0, int(max_allowed or 0))
+    if allowed <= 0:
+        return []
+    ordered = _sort_discovered_docs_for_retention(
+        docs, protected_tickers, date_key=date_key, protect_days=protect_days,
+    )
+    return [
+        doc for doc in ordered[allowed:]
+        if not _is_momentum_protected(doc, date_key, protect_days)
+    ]
 
 
 def _trim_discovered_stock_cap(
@@ -10076,15 +10139,17 @@ def _trim_discovered_stock_cap(
     *,
     date_key: str,
     protected_tickers: set[str] | None = None,
+    protect_days: int = 0,
 ) -> list[str]:
     max_allowed = max(0, int(max_discovered or 0))
     if conn is None or _r is None or max_allowed <= 0:
         return []
-    docs = _sort_discovered_docs_for_retention(_get_all_discovered_stock_docs(conn, instance_id), protected_tickers)
-    if len(docs) <= max_allowed:
-        return []
+    to_trim = _select_discovered_to_trim(
+        _get_all_discovered_stock_docs(conn, instance_id), max_allowed,
+        protected_tickers=protected_tickers, date_key=date_key, protect_days=protect_days,
+    )
     removed: list[str] = []
-    for doc in docs[max_allowed:]:
+    for doc in to_trim:
         ticker = str(doc.get("ticker") or "").strip().upper()
         if not ticker:
             continue
@@ -10309,7 +10374,7 @@ def _discover_stocks(
         return []
     _ensure_discovered_stocks_table(conn)
 
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
     existing_set = set(existing_discovered)
@@ -10383,7 +10448,7 @@ def _discover_stocks_from_propagation(
     # Require a stronger signal than base buy_threshold for propagation discovery
     min_raw = float(config.get("propagation_discovery_min_score", max(buy_thresh * 1.2, buy_thresh + 0.05)))
     min_paths = int(config.get("propagation_discovery_min_paths", 1))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
 
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -10475,7 +10540,7 @@ def _discover_stocks_from_sector_peers(
     if not config.get("sector_peer_discovery_enabled", True):
         return []
     max_per_day = int(config.get("max_sector_peer_discoveries_per_day", 3))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -10542,7 +10607,7 @@ def _discover_stocks_from_etf_co_holdings(
     if not config.get("etf_co_holdings_discovery_enabled", True):
         return []
     max_per_day = int(config.get("max_etf_co_holdings_discoveries_per_day", 5))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     existing_set = set(existing_discovered)
@@ -10588,6 +10653,22 @@ def _discover_stocks_from_etf_co_holdings(
     return newly_discovered
 
 
+def _sector_fill_candidates_for_sector(
+    cache: dict, sector_label: str, excluded: set[str] | None = None,
+) -> list[str]:
+    """Deterministically collect stock-sector-cache tickers related to
+    ``sector_label`` minus ``excluded``. Sorted so a larger sector universe
+    does not depend on cache/dict iteration order."""
+    excluded = excluded or set()
+    out: set[str] = set()
+    for cache_key, tickers in (cache or {}).items():
+        if _sector_labels_related(sector_label, cache_key):
+            for t in (tickers or []):
+                if t and t not in excluded:
+                    out.add(t)
+    return sorted(out)
+
+
 def _discover_stocks_from_sector_fill(
     conn, active_trends: list[dict], instance_id: str,
     current_symbols: set[str], config: dict, date_key: str,
@@ -10612,7 +10693,7 @@ def _discover_stocks_from_sector_fill(
         return []
     min_strength = float(config.get("sector_fill_min_strength", 0.40))
     max_per_sector = int(config.get("sector_fill_max_per_sector", 6))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     watchlist_reserved_slots = max(0, int(config.get("sector_watchlist_reserved_slots", 0) or 0))
     watchlist_max_per_sector = max(0, int(config.get("sector_watchlist_max_per_sector", 0) or 0))
     watchlist_force_discovery = bool(config.get("sector_watchlist_force_discovery", False))
@@ -10687,6 +10768,8 @@ def _discover_stocks_from_sector_fill(
                     instance_id,
                     non_evictable_tickers=set(open_positions) | set(watchlist_evicted_this_pass),
                     protected_tickers=set(watchlist_added) | set(matched_watchlist) | active_watchlist_priority_tickers,
+                    date_key=date_key,
+                    protect_days=int(config.get("momentum_discovery_protect_days", 10) or 0),
                 )
                 if not evicted:
                     watchlist_blocked.append(f"{ticker}:no_evictable_candidate")
@@ -10725,15 +10808,10 @@ def _discover_stocks_from_sector_fill(
     for sector_label in bullish_sectors:
         if current_count >= hard_limit:
             break
-        matched_tickers: list[str] = []
         newly_set = set(newly_discovered)
-        for cache_key, tickers in cache.items():
-            if _sector_labels_related(sector_label, cache_key):
-                for t in tickers:
-                    if (t not in current_symbols and t not in existing_set
-                            and t not in newly_set
-                            and t not in matched_tickers):
-                        matched_tickers.append(t)
+        matched_tickers = _sector_fill_candidates_for_sector(
+            cache, sector_label, set(current_symbols) | existing_set | newly_set
+        )
         added_for_sector = 0
         for ticker in matched_tickers[:max_per_sector]:
             if current_count >= hard_limit or added_for_sector >= max_per_sector:
@@ -10788,7 +10866,7 @@ def _discover_stocks_from_competitors(
     if not config.get("competitor_discovery_enabled", True):
         return []
     max_per_day = int(config.get("max_competitor_discoveries_per_day", 3))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -10914,8 +10992,8 @@ def _discover_stocks_from_momentum(
         return []
     if not config.get("momentum_discovery_enabled", True):
         return []
-    min_20d = float(config.get("momentum_discovery_min_20d_return", 20.0))
-    min_60d = float(config.get("momentum_discovery_min_60d_return", 50.0))
+    min_20d = float(config.get("momentum_discovery_min_20d_return", 15.0))
+    min_60d = float(config.get("momentum_discovery_min_60d_return", 40.0))
     # Z1.1 (2026-05-15): add parabolic ceiling — backtest 299903 surfaced AIOS
     # at +5,200% YTD and the strategy bought it at $22.33, then watched it
     # drop to $17.44 for a -$400 loss. No ceiling existed before; with
@@ -10925,8 +11003,8 @@ def _discover_stocks_from_momentum(
     # _rediscover_momentum_comebacks:9320-9325 which already has these.
     max_20d = float(config.get("momentum_discovery_max_20d_return", 80.0) or 0.0)
     max_60d = float(config.get("momentum_discovery_max_60d_return", 200.0) or 0.0)
-    max_per_day = int(config.get("momentum_discovery_max_per_day", 3))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_per_day = int(config.get("momentum_discovery_max_per_day", 6))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -18116,7 +18194,7 @@ def _apply_ml_and_overlay_to_scores(
         # Split into separate stock and ETF batches (Fix 8)
         stock_overlay_inputs = [item for item in overlay_inputs if item["sym"] not in _ALL_ETF_TICKERS]
         etf_overlay_inputs = [item for item in overlay_inputs if item["sym"] in _ALL_ETF_TICKERS]
-        max_stock_candidates = max(0, int(config.get("llm_overlay_max_stock_candidates", 30) or 30))
+        max_stock_candidates = max(0, int(config.get("llm_overlay_max_stock_candidates", 40) or 40))
         max_etf_candidates = max(0, int(config.get("llm_overlay_max_etf_candidates", 6) or 6))
         if max_stock_candidates and len(stock_overlay_inputs) > max_stock_candidates:
             _skipped_stocks = len(stock_overlay_inputs) - max_stock_candidates
@@ -21035,7 +21113,7 @@ class GraphNexusAnalysis:
         if bz_data and stock_finder and conn_trends is not None and config.get("benzinga_discovery_enabled", True):
             bz_discovery = _extract_benzinga_discovery_candidates(bz_data, set(symbols_list), date_key)
             if bz_discovery:
-                max_discovered = int(config.get("max_discovered_stocks", 50))
+                max_discovered = int(config.get("max_discovered_stocks", 90))
                 _existing_active_disc = _get_all_discovered_stocks(conn_trends, instance_id)
                 current_discovered_count = len(_existing_active_disc)
                 reuse_stamp = _nexus_reuse_stamp_from_config(config, instance_id)
@@ -21963,7 +22041,7 @@ class GraphNexusAnalysis:
         # All discovery sources (trend, Benzinga, propagation, sector, competitor) have independent
         # caps, but they can collectively exceed the intended hard limit. Enforce a global ceiling.
         if conn_trends is not None:
-            _global_max = int(config.get("max_discovered_stocks", 50) or 50)
+            _global_max = int(config.get("max_discovered_stocks", 90) or 90)
             _protected_disc = _normalize_cache_string_set(strategy_cache, "_active_watchlist_priority_tickers")
             if portfolio_emulator is not None:
                 _protected_disc.update(
@@ -21977,6 +22055,7 @@ class GraphNexusAnalysis:
                 _global_max,
                 date_key=date_key,
                 protected_tickers=_protected_disc,
+                protect_days=int(config.get("momentum_discovery_protect_days", 10) or 0),
             )
             if _trimmed_disc:
                 for _ot in _trimmed_disc:
@@ -22676,8 +22755,8 @@ class GraphNexusAnalysis:
                 _pool_b_candidates = [s for s in _pool_b_candidates if s not in _fl_blacklist]
 
                 # Symmetric overflow
-                _pool_a_base = int(config.get("pool_a_base", 8))
-                _pool_b_base = int(config.get("pool_b_base", 4))
+                _pool_a_base = int(config.get("pool_a_base", 12))
+                _pool_b_base = int(config.get("pool_b_base", 6))
                 _pool_a_min = int(config.get("pool_a_min", 3))
                 _pool_b_min = int(config.get("pool_b_min", 2))
                 if len(_pool_a_candidates) < _pool_a_min:
@@ -22748,7 +22827,7 @@ class GraphNexusAnalysis:
 
                 # --- Apply new-buy cap + headroom only to new entries ---
                 _sell_count = len(sell_syms) if sell_syms else 0
-                _base_buy_cap = int(config.get("max_stock_buys_per_day", 10))
+                _base_buy_cap = int(config.get("max_stock_buys_per_day", 12))
                 # Downtrend protection: cap buys during sustained bearish conditions
                 if _downtrend_active:
                     _dt_cap = int(config.get("downtrend_protection_max_buys_override", 2))

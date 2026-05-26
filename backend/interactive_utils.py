@@ -6600,7 +6600,7 @@ def action_nexus_config_get(conn, instance_id):
         "trend_tracking_enabled": True,
         "stock_finder_enabled": True,
         "sell_enforcement_enabled": True,
-        "max_discovered_stocks": 30,
+        "max_discovered_stocks": 90,
         "trend_min_strength_to_buy": 0.5,
         "trend_max_age_days": 90,
         "nexus_portfolio_pct": 0.80,
