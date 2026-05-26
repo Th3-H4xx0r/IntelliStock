@@ -15792,6 +15792,10 @@ def _compute_propagated_scores(
         )
         _log(f"  1-hop query in: done | edges={len(in_edges)}", "cyan")
         all_1hop = out_edges + in_edges
+        # B (2026-05-26): cap per-seed fan-out so one news item (e.g. a HOOD
+        # earnings hit) can't inject its whole COMPETES_WITH cohort. No-op when
+        # propagation_max_per_seed <= 0.
+        all_1hop = _cap_propagation_fanout_per_seed(all_1hop, config)
 
         for edge in all_1hop:
             src_data = sentiment_data.get(edge["source"])
