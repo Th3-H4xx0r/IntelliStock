@@ -485,8 +485,8 @@ def test_config_defaults_consistency():
         cli_content = f.read()
 
     check(
-        "CLI: overlay candidates default 40",
-        "Max stock candidates for LLM trade overlay (default 40)" in cli_content,
+        "CLI: overlay candidates default 30",
+        "Max stock candidates for LLM trade overlay (default 30)" in cli_content,
     )
     check(
         "CLI: max_etf_buys_per_day default 3",

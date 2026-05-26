@@ -11156,7 +11156,8 @@ def _rediscover_momentum_comebacks(
 
     candidates = [d for d in sold_docs
                   if str(d.get("ticker") or "").strip().upper() not in exclude_symbols
-                  and str(d.get("ticker") or "").strip().upper() not in _fl_blacklist]
+                  and str(d.get("ticker") or "").strip().upper() not in _fl_blacklist
+                  and not _is_excluded_momentum_etf(d.get("ticker") or "", config)]
     if not candidates:
         return []
 
@@ -12235,18 +12236,27 @@ _LEVERAGED_INVERSE_ETF_TICKERS = frozenset({
     "COPX", "COPZ", "CPER", "KCOP", "SLVX", "SLVO",
 })
 
-# Union with the existing commodity-ETF set — both are noise in momentum EQUITY discovery.
-_MOMENTUM_EXCLUDED_ETF_TICKERS = _LEVERAGED_INVERSE_ETF_TICKERS | set(_COMMODITY_ETF_TICKERS)
+# Union with the existing commodity-ETF set — both are noise in momentum EQUITY
+# discovery. frozenset so it cannot be mutated accidentally at runtime.
+_MOMENTUM_EXCLUDED_ETF_TICKERS = frozenset(_LEVERAGED_INVERSE_ETF_TICKERS | _COMMODITY_ETF_TICKERS)
+
+
+def _is_excluded_momentum_etf(ticker: str, config: dict) -> bool:
+    """True if ``ticker`` is a leveraged/inverse/commodity ETF that should be kept
+    out of momentum EQUITY discovery / rediscovery / watchlist. Gated by
+    ``momentum_discovery_exclude_leveraged_etfs`` (default True). Single source of
+    truth so every momentum entry path stays consistent (backtest 404780)."""
+    if not config.get("momentum_discovery_exclude_leveraged_etfs", True):
+        return False
+    return str(ticker).strip().upper() in _MOMENTUM_EXCLUDED_ETF_TICKERS
 
 
 def _filter_momentum_etf_candidates(
     candidates: list[tuple[str, float, float]], config: dict,
 ) -> list[tuple[str, float, float]]:
     """Drop leveraged/inverse/commodity ETFs from momentum equity-discovery
-    candidates. Gated by ``momentum_discovery_exclude_leveraged_etfs`` (default True)."""
-    if not config.get("momentum_discovery_exclude_leveraged_etfs", True):
-        return candidates
-    return [c for c in candidates if str(c[0]).strip().upper() not in _MOMENTUM_EXCLUDED_ETF_TICKERS]
+    candidates (list of (ticker, ret20, ret60) tuples)."""
+    return [c for c in candidates if not _is_excluded_momentum_etf(c[0], config)]
 
 # Tier-3 A3 (2026-05-17): macro-event reasons that supersede LLM-sentiment
 # veto on pending future trades. Backtest 901920 cancelled SNDK's 2025-11-28
@@ -17215,6 +17225,11 @@ def _build_momentum_watchlist(
     for ticker in candidates:
         sym = str(ticker).strip().upper()
         if not sym or sym in watchlist or sym in seen_this_call:
+            continue
+        # Fix (2026-05-26): keep leveraged/inverse/commodity ETFs out of the momentum
+        # watchlist too — otherwise they re-enter the buy funnel via the rank/rotation
+        # paths, bypassing the discovery-side exclusion (backtest 404780).
+        if _is_excluded_momentum_etf(sym, cfg):
             continue
         seen_this_call.add(sym)
         if len(watchlist) >= max_size:

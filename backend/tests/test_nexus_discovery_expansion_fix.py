@@ -74,3 +74,47 @@ def test_effective_config_concentrated_buyside_defaults():
     assert eff["momentum_discovery_max_per_day"] == 6
     # new gate defaults on
     assert eff["momentum_discovery_exclude_leveraged_etfs"] is True
+
+
+# ── Shared exclusion predicate (used by discovery, rediscovery, watchlist) ────
+
+def test_is_excluded_momentum_etf_true_for_leveraged_and_commodity():
+    cfg = {"momentum_discovery_exclude_leveraged_etfs": True}
+    for t in ("SOXS", "OILD", "BOIL", "PSLV", "UNG", "COPX"):
+        assert gna._is_excluded_momentum_etf(t, cfg) is True, t
+
+
+def test_is_excluded_momentum_etf_false_for_equities():
+    cfg = {"momentum_discovery_exclude_leveraged_etfs": True}
+    for t in ("INTC", "ICHR", "NGD", "GEV", "slab"):  # case-insensitive
+        assert gna._is_excluded_momentum_etf(t, cfg) is False, t
+
+
+def test_is_excluded_momentum_etf_respects_gate_off():
+    assert gna._is_excluded_momentum_etf("SOXS", {"momentum_discovery_exclude_leveraged_etfs": False}) is False
+
+
+def test_is_excluded_momentum_etf_default_on_when_key_absent():
+    assert gna._is_excluded_momentum_etf("OILD", {}) is True
+
+
+def test_momentum_watchlist_excludes_leveraged_etfs():
+    # _build_momentum_watchlist takes no DB — pure dict accumulation.
+    cache: dict = {}
+    wl = gna._build_momentum_watchlist(
+        cache,
+        ["INTC", "SOXS", "ICHR", "BOIL"],
+        config={"momentum_discovery_exclude_leveraged_etfs": True},
+    )
+    assert "INTC" in wl and "ICHR" in wl
+    assert "SOXS" not in wl and "BOIL" not in wl
+
+
+def test_momentum_watchlist_keeps_etfs_when_gate_off():
+    cache: dict = {}
+    wl = gna._build_momentum_watchlist(
+        cache,
+        ["INTC", "SOXS"],
+        config={"momentum_discovery_exclude_leveraged_etfs": False},
+    )
+    assert "INTC" in wl and "SOXS" in wl
