@@ -26,7 +26,10 @@ DOC_ID = 179
 # The dry-run prints the real current values regardless.
 CHANGES: dict[str, tuple[object, object]] = {
     # Recalibrate override floors to the 1.8 raw-score ceiling (current floors
-    # are above the ceiling -> mathematically dead).
+    # are above the ceiling -> mathematically dead). expected_current for the
+    # break_glass keys is the OBSERVED live doc-179 effective value (3.50/2.50),
+    # not the schema default (2.75/2.25); a DRIFT note here just means the live
+    # doc differs from what we observed — verify the dry-run output before --apply.
     "rotation_winner_lock_bypass_min_raw_score": (1.8, 1.5),
     "rotation_break_glass_raw_score": (3.50, 1.5),
     "rotation_break_glass_delta": (2.50, 1.0),
