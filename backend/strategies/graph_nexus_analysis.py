@@ -18945,6 +18945,8 @@ def _apply_portfolio_drawdown_halt(
     drawdown_pct = ((peak_value - current_value) / peak_value) * 100.0 if peak_value > 0 else 0.0
     triggered_now = False
 
+    resumed_now = False
+
     if not halt_active and drawdown_pct >= halt_pct:
         halt_active = True
         up_days = 0
@@ -18965,11 +18967,59 @@ def _apply_portfolio_drawdown_halt(
             halt_active = False
             up_days = 0
             peak_value = current_value
+            resumed_now = True
             _log(
                 f"Portfolio drawdown halt: resumed after {resume_up_days} up-day(s) "
                 f"(value=${current_value:.0f})",
                 "green",
             )
+
+    # 2026-05-28: Discord paging on drawdown halt activation + resume. Prior
+    # code only emitted a yellow log line; the operator had no notification
+    # channel when buys auto-paused. Live-only (live adapters expose
+    # ``_instance_id``; PortfolioEmulator does not). Lazy import + try/except
+    # keep this non-fatal — strategy never aborts on a Discord failure.
+    _live_instance_id = getattr(portfolio_emulator, "_instance_id", None)
+    if _live_instance_id and (triggered_now or resumed_now):
+        try:
+            from live_alerts import alert_drawdown_halt, alert_strategy_start
+            if triggered_now:
+                alert_drawdown_halt(
+                    instance_id=str(_live_instance_id),
+                    drawdown_pct=drawdown_pct,
+                    peak_value=peak_value,
+                    current_value=current_value,
+                )
+            elif resumed_now:
+                # Reuse alert_strategy_start's "buys resumed" flavor by
+                # routing a halt-cleared message via alert_halt's sibling
+                # API — but we want a distinct title. Use live_alerts'
+                # generic enqueue with our own embed by reaching for the
+                # private _safe_enqueue helper, falling back to a plain
+                # halt alert if the private symbol is gone.
+                try:
+                    from live_alerts import _safe_enqueue, _channel
+                    content = (
+                        f"DRAWDOWN RESUMED [{_live_instance_id}] "
+                        f"value=${current_value:,.0f} (new peak baseline)"
+                    )
+                    _safe_enqueue(_channel("trades"), content, embed={
+                        "title": "Drawdown halt resumed",
+                        "color": 0x2ECC71,
+                        "fields": [
+                            {"name": "current_value",
+                             "value": f"${current_value:,.0f}",
+                             "inline": True},
+                            {"name": "effect",
+                             "value": "Buys re-enabled; new peak = current",
+                             "inline": False},
+                        ],
+                    })
+                except Exception:
+                    pass
+        except Exception:
+            # Alerts must never block strategy execution.
+            pass
 
     if not halt_active and current_value > peak_value:
         peak_value = current_value

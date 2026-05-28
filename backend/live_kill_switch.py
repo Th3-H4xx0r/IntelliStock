@@ -59,21 +59,84 @@ def halt_live_trading(reason: str = "manual halt", cancel_open_orders: bool = Tr
                 brokerages = []
             for b in brokerages:
                 bt = (b.get("brokerage_type") or "alpaca").strip().lower()
-                if bt != "alpaca":
-                    continue  # Only Alpaca is wired for live; Robinhood scaffolded only.
-                try:
-                    from secret_store import decrypt
-                    k = decrypt(b.get("alpaca_key"))
-                    s = decrypt(b.get("alpaca_secret"))
-                    paper = bool(b.get("alpaca_paper", True))
-                    if not k or not s:
-                        continue
-                    from alpaca.trading.client import TradingClient
-                    client = TradingClient(api_key=k, secret_key=s, paper=paper)
-                    canceled = client.cancel_orders() or []
-                    summary["orders_canceled"] += len(canceled)
-                except Exception as e:
-                    summary["errors"].append(f"brokerage {b.get('id')}: {e}")
+                if bt == "alpaca":
+                    try:
+                        from secret_store import decrypt
+                        k = decrypt(b.get("alpaca_key"))
+                        s = decrypt(b.get("alpaca_secret"))
+                        paper = bool(b.get("alpaca_paper", True))
+                        if not k or not s:
+                            continue
+                        from alpaca.trading.client import TradingClient
+                        client = TradingClient(api_key=k, secret_key=s, paper=paper)
+                        canceled = client.cancel_orders() or []
+                        summary["orders_canceled"] += len(canceled)
+                    except Exception as e:
+                        summary["errors"].append(f"brokerage {b.get('id')}: {e}")
+                    continue
+
+                if bt == "robinhood":
+                    # 2026-05-28: Robinhood support. Mirrors the Alpaca branch:
+                    # decrypt creds, build a minimal RobinhoodClient, list open
+                    # orders for the linked sub-account, cancel each one.
+                    # We do NOT respect RH_DRY_RUN here — the kill switch is
+                    # an emergency stop; if there are real open orders we cancel
+                    # them regardless of the dry-run flag.
+                    try:
+                        from secret_store import decrypt
+                        access = decrypt(b.get("robinhood_access_token")) or None
+                        refresh = decrypt(b.get("robinhood_refresh_token")) or None
+                        device = decrypt(b.get("robinhood_device_token")) or None
+                        account_number = (b.get("robinhood_account_number") or "").strip() or None
+                        account_url = (b.get("robinhood_account_url") or "").strip() or None
+                        obtained_at = b.get("robinhood_obtained_at_epoch")
+                        expires_in = b.get("robinhood_expires_in")
+                        if not access or not refresh:
+                            summary["errors"].append(
+                                f"brokerage {b.get('id')}: robinhood creds missing/blank after decrypt"
+                            )
+                            continue
+                        from robinhood_engine import RobinhoodClient, RobinhoodSessionState
+                        state = RobinhoodSessionState(
+                            access_token=access,
+                            refresh_token=refresh,
+                            token_type="Bearer",
+                            device_token=device,
+                            account_number=account_number,
+                            account_url=account_url,
+                            obtained_at_epoch=int(obtained_at) if obtained_at else None,
+                            expires_in=int(expires_in) if expires_in else None,
+                        )
+                        client = RobinhoodClient(state=state, timeout_sec=20)
+                        open_orders = client.list_orders(
+                            state="open",
+                            limit=500,
+                            account_number=account_number,
+                        ) or []
+                        for o in open_orders:
+                            oid = o.get("id")
+                            cancel_url = o.get("cancel")
+                            if not (oid or cancel_url):
+                                continue
+                            try:
+                                ok = client.cancel_order(
+                                    cancel_url=cancel_url,
+                                    order_id=oid,
+                                )
+                                if ok:
+                                    summary["orders_canceled"] += 1
+                            except Exception as inner:
+                                summary["errors"].append(
+                                    f"brokerage {b.get('id')} order {oid}: {inner}"
+                                )
+                    except Exception as e:
+                        summary["errors"].append(f"brokerage {b.get('id')}: {e}")
+                    continue
+
+                # Unknown brokerage_type — note and skip
+                summary["errors"].append(
+                    f"brokerage {b.get('id')}: unsupported brokerage_type={bt!r}"
+                )
 
         # Step 3: Discord alert.
         try:
