@@ -4,20 +4,31 @@ MERGE-ONLY: reads the full Instances row, sets ONLY ``clean_room_mode`` and
 ``initial_value`` via a partial update, and leaves every other field
 (brokerage_id, secret, strategy_id, max_usage, status, etc.) untouched.
 
-Once applied, the next time the broker daemon boots for ``main`` it will:
+Once applied, the next time the broker daemon boots for ``main`` it does
+ALL the rest automatically (broker.py:~5285+):
 
-  1. Read these two fields at backend/broker.py:5285+ (clean_room_mode +
-     initial_value resolution block).
-  2. Pass clean_room_mode=True and initial_value=<value> to the adapter
-     factory.
-  3. RobinhoodAdapter.__init__ runs the WAL classifier instead of blindly
-     adopting whatever positions sit in the Robinhood account.
-  4. The migration detector at broker.py:5685+ catches the stale backtest
-     peak ($19,977.60 vs the new $6,434.48 baseline) and — IF the env
-     ``LIVE_AUTO_RESET_ON_MIGRATION=true`` is set — auto-clears the
-     migration-sensitive keys (_portfolio_drawdown_state, _sold_cooldown,
-     _v32_*, _deployment_bar_index, etc.) so the strategy boots with a
-     clean drawdown baseline.
+  1. Reads clean_room_mode + initial_value from this row.
+  2. Detects "first clean_room boot for this instance" via the LiveBootAudit
+     table being empty for ``main`` (live_boot_setup.is_first_clean_room_boot)
+     and auto-runs the per-instance cleanup (preserves backtest snapshots)
+     so the operator no longer has to run clear_main_instance_lookback_state.py
+     separately. Idempotent: subsequent boots skip the cleanup.
+  3. Passes clean_room_mode=True + initial_value to the adapter factory;
+     RobinhoodAdapter.__init__ runs the WAL classifier instead of adopting
+     whatever positions sit in the Robinhood account.
+  4. The migration detector at broker.py:5685+ auto-resets stale snapshot
+     keys (_portfolio_drawdown_state, _sold_cooldown, _v32_*,
+     _deployment_bar_index, etc.) when it detects the cached backtest peak
+     mismatching live equity — clean_room_mode=true is the default trigger
+     for auto-reset (operator can still force-disable with the env var
+     LIVE_AUTO_RESET_ON_MIGRATION=false if they want to investigate).
+  5. Writes a LiveBootAudit row marking this boot, which makes subsequent
+     boots see >=1 audit row and skip the auto-cleanup.
+
+So the FULL launch sequence after this script applies is just:
+
+  INTELLISTOCK_CRED_KEY=<key> RH_DRY_RUN=true RETHINKDB_HOST=... \\
+      python3 backend/broker.py --instance main
 
 Read-only by default. Pass ``--apply`` to write. Pass ``--initial-value N``
 to override the default ($6,434.48 = the actual Robinhood cash balance per
@@ -28,7 +39,7 @@ Usage:
     # dry-run with defaults
   RETHINKDB_HOST=REDACTED-IP python3 scripts/apply_main_clean_room_config.py --apply
     # write with defaults
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/apply_main_clean_room_config.py \
+  RETHINKDB_HOST=REDACTED-IP python3 scripts/apply_main_clean_room_config.py \\
     --instance main --initial-value 7000 --apply
     # custom value
 """

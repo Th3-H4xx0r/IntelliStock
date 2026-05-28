@@ -5339,6 +5339,55 @@ elif mode == MODE_LIVE:
                 f"cid_prefix={_cid_prefix!r}",
                 "yellow",
             )
+            # ----- First-clean-room-boot auto-cleanup (2026-05-28) -----
+            # When the operator opts into clean_room_mode via the Instances row,
+            # we want the daemon to do the same per-instance state wipe the
+            # operator would otherwise run via
+            # scripts/clear_main_instance_lookback_state.py --apply, but only
+            # once: detect "first clean-room boot" by checking LiveBootAudit
+            # row count for this instance. Idempotent — subsequent boots see
+            # >=1 audit row and skip the cleanup so legitimate live-accumulated
+            # operational state is preserved across normal restarts.
+            try:
+                from live_boot_setup import (
+                    is_first_clean_room_boot as _is_first_cr_boot,
+                    run_first_clean_room_boot_cleanup as _run_cr_cleanup,
+                )
+                _setup_conn = get_conn_retry(max_attempts=3, delay=2)
+                if _setup_conn is not None:
+                    try:
+                        if _is_first_cr_boot(r, _setup_conn, str(instance_id)):
+                            _log(
+                                f"[live_boot] FIRST clean_room boot for {instance_id} "
+                                "— running auto-cleanup of per-instance operational state "
+                                "(preserves backtest snapshots)",
+                                "yellow",
+                            )
+                            _cleanup_result = _run_cr_cleanup(r, _setup_conn, str(instance_id))
+                            if _cleanup_result.get("error"):
+                                _log(
+                                    f"[live_boot] auto-cleanup error (non-fatal, continuing): "
+                                    f"{_cleanup_result.get('error')}",
+                                    "red",
+                                )
+                            else:
+                                _log(
+                                    f"[live_boot] auto-cleanup complete: "
+                                    f"{_cleanup_result.get('total_deleted', 0)} rows deleted across "
+                                    f"{len(_cleanup_result.get('tables') or [])} tables",
+                                    "green",
+                                )
+                    finally:
+                        try:
+                            _setup_conn.close()
+                        except Exception:
+                            pass
+            except Exception as _e_cr_setup:
+                _log(
+                    f"[live_boot] clean_room auto-setup module load failed "
+                    f"(non-fatal): {_e_cr_setup}",
+                    "yellow",
+                )
 
         try:
             live_adapter = _build_adapter(
@@ -5710,10 +5759,21 @@ elif mode == MODE_LIVE:
                         )
                     except Exception:
                         pass
-                    _auto_reset = (
-                        os.environ.get("LIVE_AUTO_RESET_ON_MIGRATION", "")
-                        or ""
-                    ).strip().lower() in ("1", "true", "yes")
+                    # 2026-05-28: clean_room_mode implies operator intent
+                    # to start fresh, so the migration detector auto-resets
+                    # by default. Explicit LIVE_AUTO_RESET_ON_MIGRATION=false
+                    # still overrides (operator override always wins).
+                    try:
+                        from live_boot_setup import should_auto_reset_on_migration as _should_auto_reset
+                        _auto_reset = _should_auto_reset(
+                            os.environ.get("LIVE_AUTO_RESET_ON_MIGRATION"),
+                            _clean_room_mode,
+                        )
+                    except Exception:
+                        _auto_reset = (
+                            os.environ.get("LIVE_AUTO_RESET_ON_MIGRATION", "")
+                            or ""
+                        ).strip().lower() in ("1", "true", "yes")
                     # Keys to reset on migration. Conservative — peak/halt
                     # are the must-clear; the rest are belt-and-suspenders so
                     # cooldowns / queues from the prior account don't bleed
