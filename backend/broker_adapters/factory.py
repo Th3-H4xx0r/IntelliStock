@@ -33,6 +33,14 @@ def build_adapter(
     rh_expires_in: int | None = None,
     rh_account_url: str | None = None,
     rh_brokerage_id: str | None = None,
+    # 2026-05-28 — clean-room mode threading. When clean_room_mode=True the
+    # adapter reconciles broker state against this-instance's LiveOrderWAL
+    # at boot (strategy-owned vs external split). Defaults False -> existing
+    # legacy behavior unchanged for back-compat.
+    clean_room_mode: bool = False,
+    cid_prefix: str | None = None,
+    clean_room_retention_days: int = 180,
+    seed_trades_from_broker: bool = True,
 ) -> BrokerAdapter:
     """Build a live BrokerAdapter for the given broker_type.
 
@@ -55,6 +63,10 @@ def build_adapter(
             instance_id=instance_id,
             wal=wal,
             initial_value=initial_value,
+            seed_trades_from_broker=seed_trades_from_broker,
+            clean_room_mode=clean_room_mode,
+            cid_prefix=cid_prefix,
+            clean_room_retention_days=clean_room_retention_days,
         )
     if t == "robinhood":
         from broker_adapters.robinhood import RobinhoodAdapter
@@ -70,5 +82,9 @@ def build_adapter(
             expires_in=rh_expires_in,
             account_url=rh_account_url,
             brokerage_id=rh_brokerage_id,
+            seed_trades_from_broker=seed_trades_from_broker,
+            clean_room_mode=clean_room_mode,
+            cid_prefix=cid_prefix,
+            clean_room_retention_days=clean_room_retention_days,
         )
     raise BrokerError(f"unknown broker_type: {broker_type!r}")

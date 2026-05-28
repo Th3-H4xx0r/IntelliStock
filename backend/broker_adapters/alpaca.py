@@ -136,18 +136,36 @@ class AlpacaAdapter(BrokerAdapter):
         wal: LiveOrderWAL,
         initial_value: Optional[float] = None,
         seed_trades_from_broker: bool = True,
+        # Clean-room mode (2026-05-28): when True, broker state is reconciled
+        # against this-instance's LiveOrderWAL. Broker positions matched to a
+        # filled WAL row are strategy-owned; everything else is quarantined
+        # in self._external_positions and the strategy never reads it.
+        # Backward-compatible: defaults False -> existing legacy behavior.
+        clean_room_mode: bool = False,
+        cid_prefix: Optional[str] = None,
+        clean_room_retention_days: int = 180,
+        # Test-only injection points. Production callers leave these None.
+        # When provided, the adapter skips the lazy alpaca-py import (which
+        # is heavy and may not be installed in the test environment).
+        _test_client: Optional[Any] = None,
+        _test_stream_cls: Optional[Any] = None,
     ):
-        try:
-            from alpaca.trading.client import TradingClient
-            from alpaca.trading.stream import TradingStream
-        except ImportError as e:
-            raise BrokerError(
-                "alpaca-py not installed. pip install alpaca-py to enable live trading."
-            ) from e
+        if _test_client is not None:
+            self._TradingClient = type(_test_client) if not isinstance(_test_client, type) else _test_client
+            self._TradingStreamCls = _test_stream_cls or type(_test_client)
+            self._client = _test_client
+        else:
+            try:
+                from alpaca.trading.client import TradingClient
+                from alpaca.trading.stream import TradingStream
+            except ImportError as e:
+                raise BrokerError(
+                    "alpaca-py not installed. pip install alpaca-py to enable live trading."
+                ) from e
 
-        self._TradingClient = TradingClient
-        self._TradingStreamCls = TradingStream
-        self._client = TradingClient(api_key=api_key, secret_key=api_secret, paper=paper)
+            self._TradingClient = TradingClient
+            self._TradingStreamCls = TradingStream
+            self._client = TradingClient(api_key=api_key, secret_key=api_secret, paper=paper)
         # 2026-05-03 live-hang investigation: alpaca-py uses requests.Session
         # without a default timeout; half-open TCP through Docker NAT after
         # idle periods wedges get_account/get_all_positions forever. Inject
@@ -174,6 +192,11 @@ class AlpacaAdapter(BrokerAdapter):
 
         self._instance_id = instance_id
         self._wal = wal
+        # Clean-room state (always populated; only used when clean_room_mode=True).
+        self._clean_room_mode = bool(clean_room_mode)
+        self._cid_prefix = cid_prefix or ""
+        self._clean_room_retention_days = int(clean_room_retention_days)
+        self._external_positions: dict[str, dict] = {}
 
         # 2026-04-22 Discord alert function refs cached at construction so
         # (a) we don't re-import per trade event, and (b) an ImportError is
@@ -250,30 +273,72 @@ class AlpacaAdapter(BrokerAdapter):
         self.refresh_cash()
         self.refresh_positions()
 
-        # CRITICAL: seed _trades from recent filled orders so strategies that
-        # look back via `reversed(_trades)` for entry prices continue to see
-        # pre-restart positions. Without this, V32 risk exits (trailing stop,
-        # fast-loser, hold-limit, deep-loser) silently disable for any position
-        # held across a broker restart.
-        if seed_trades_from_broker:
-            try:
-                self._seed_trades_from_broker(limit=500)
-            except Exception:
-                # Seeding is best-effort; never block adapter construction on it.
-                pass
+        if self._clean_room_mode:
+            # Clean-room: broker positions just populated by refresh_positions
+            # are the FULL broker view. Reconcile against this-instance's
+            # LiveOrderWAL to split into strategy-owned (_positions) and
+            # external (_external_positions). _trades is rebuilt from WAL,
+            # not from the broker-history fetch.
+            from ._classifier import classify_broker_positions, derive_cid_prefix
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            _now = _dt.now(_tz.utc)
+            _cutoff_iso = (_now - _td(days=self._clean_room_retention_days)).isoformat()
+            _prefix = self._cid_prefix or derive_cid_prefix(self._instance_id)
+            _wal_rows = self._wal.list_filled_for_prefix(_prefix, since_utc=_cutoff_iso)
 
-        # Use Alpaca's authoritative `account.equity` (cash + positions valued
-        # at live market) for _initial_value rather than reconstructing it from
-        # cash + positions_value({}), which evaluates positions at $0 since the
-        # empty prices dict returns 0 for every holding.
-        if initial_value is not None:
+            # Convert the dict[ticker->qty] in self._positions into PositionDTO-like
+            # entries for the classifier. Use _last_prices (seeded by refresh_positions)
+            # for market_value where available.
+            _broker_view = []
+            for _sym, _qty in (self._positions or {}).items():
+                _broker_view.append({
+                    "symbol": _sym,
+                    "qty": float(_qty),
+                    "market_value": float(self._last_prices.get(_sym, 0.0) or 0.0) * float(_qty),
+                })
+            _owned, _external, _wal_trades = classify_broker_positions(
+                positions=_broker_view,
+                wal_rows=_wal_rows,
+                instance_id=self._instance_id,
+                cid_prefix=_prefix,
+                retention_days=self._clean_room_retention_days,
+                now_utc=_now,
+            )
+            self._positions = dict(_owned)
+            self._external_positions = dict(_external)
+            self._trades = list(_wal_trades)
+
+            # initial_value is REQUIRED in clean_room_mode; broker equity is
+            # NOT a safe fallback (it includes external/bad-test positions).
+            if initial_value is None:
+                raise BrokerError(
+                    "AlpacaAdapter clean_room_mode=True requires an explicit "
+                    "initial_value (configure Instances.<id>.initial_value or "
+                    "pass LIVE_INITIAL_VALUE env)."
+                )
             self._initial_value = float(initial_value)
         else:
-            try:
-                acct_dto = self.refresh_account()
-                self._initial_value = float(acct_dto.equity)
-            except Exception:
-                self._initial_value = self._cash + self.get_positions_value({})
+            # Legacy path: seed _trades from broker history; equity from broker.
+            if seed_trades_from_broker:
+                try:
+                    self._seed_trades_from_broker(limit=500)
+                except Exception:
+                    # Seeding is best-effort; never block adapter construction on it.
+                    pass
+
+            # Use Alpaca's authoritative `account.equity` (cash + positions valued
+            # at live market) for _initial_value rather than reconstructing it from
+            # cash + positions_value({}), which evaluates positions at $0 since the
+            # empty prices dict returns 0 for every holding.
+            if initial_value is not None:
+                self._initial_value = float(initial_value)
+            else:
+                try:
+                    acct_dto = self.refresh_account()
+                    self._initial_value = float(acct_dto.equity)
+                except Exception:
+                    self._initial_value = self._cash + self.get_positions_value({})
+
         if self._initial_value <= 0:
             raise BrokerError(
                 "AlpacaAdapter init: account equity <= 0. "
