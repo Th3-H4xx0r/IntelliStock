@@ -8,14 +8,25 @@ other key (incl. plaintext secrets) and every other top-level field is preserved
 Read-only by default. Pass --apply to write.
 
 Usage:
-  RETHINKDB_HOST=REDACTED-IP python scripts/apply_doc179_winner_depth_fix.py            # dry-run
-  RETHINKDB_HOST=REDACTED-IP python scripts/apply_doc179_winner_depth_fix.py --apply    # write
+  python scripts/apply_doc179_winner_depth_fix.py            # dry-run
+  python scripts/apply_doc179_winner_depth_fix.py --apply    # write
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+
+# Auto-load .env so RETHINKDB_HOST + INTELLISTOCK_CRED_KEY come from the
+# operator's local config (mirrors backend/api/main.py:15-17).
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_BACKEND_DIR = os.path.join(_REPO_ROOT, "backend")
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(_BACKEND_DIR, ".env"))
+    _load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+except ImportError:
+    pass
 
 DB_NAME = "IntelliStock"
 DOC_ID = 179

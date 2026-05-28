@@ -35,11 +35,11 @@ to override the default ($6,434.48 = the actual Robinhood cash balance per
 inspect_broker_state.py 2026-05-28).
 
 Usage:
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/apply_main_clean_room_config.py
+  python3 scripts/apply_main_clean_room_config.py
     # dry-run with defaults
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/apply_main_clean_room_config.py --apply
+  python3 scripts/apply_main_clean_room_config.py --apply
     # write with defaults
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/apply_main_clean_room_config.py \\
+  python3 scripts/apply_main_clean_room_config.py \\
     --instance main --initial-value 7000 --apply
     # custom value
 """
@@ -48,6 +48,18 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+
+# Auto-load .env so RETHINKDB_HOST + INTELLISTOCK_CRED_KEY (the same the
+# broker daemon reads) come from the operator's local config. Mirrors
+# backend/api/main.py:15-17.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_BACKEND_DIR = os.path.join(_REPO_ROOT, "backend")
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(_BACKEND_DIR, ".env"))
+    _load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+except ImportError:
+    pass
 
 DB_NAME = "IntelliStock"
 DEFAULT_INSTANCE_ID = "main"

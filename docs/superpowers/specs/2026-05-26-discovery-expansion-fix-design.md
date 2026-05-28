@@ -89,7 +89,7 @@ Target: avg ticket back toward ~$1,200, recovering the −$5,068 under-capture.
 ## 7. Operational / Live-Money
 
 - ⚠️ **Strategies doc 179 is shared by `main`, `nexus-live` (real money), and `nexus-testing`.** Before iterating, **decouple `nexus-live` to its own Strategies doc** pinned to a safe config, so backtest-config changes never touch real money. This also resolves the still-open keep/revert/decouple decision.
-- **Division of labor:** code/config/tests + smoke analysis are mine; **operator runs redeploy → clear → full backtest**; I analyze the result ID. (SSH to REDACTED-HOST is denied to the assistant; the backtest is operator-gated and costs real LLM spend.)
+- **Division of labor:** code/config/tests + smoke analysis are mine; **operator runs redeploy → clear → full backtest**; I analyze the result ID. (SSH to the deployment host is denied to the assistant; the backtest is operator-gated and costs real LLM spend.)
 - Code-default config changes here are for *new* instances; the prod `main` config (doc 179) is updated separately by an operator DB write (merge-only, never print `api_key`).
 
 ## 8. Testing Strategy

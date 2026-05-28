@@ -462,7 +462,7 @@ Iterate: implement fixes → re-run Task 4 tests → if still clean, proceed. Do
 
 ## Task 6: Pre-deploy ops (production RethinkDB)
 
-**Files:** none modified — production ops via Tailscale to `REDACTED-IP:28015`
+**Files:** none modified — production ops via Tailscale to `<RETHINKDB_HOST>:<RETHINKDB_PORT>` (from .env)
 
 - [ ] **Step 6.1: Stop backtest 877964**
 
@@ -470,7 +470,7 @@ Iterate: implement fixes → re-run Task 4 tests → if still clean, proceed. Do
 # Use the API endpoint for graceful shutdown
 import urllib.request, json
 req = urllib.request.Request(
-    "https://REDACTED-DOMAIN/backtests/877964/stop",
+    "<INTELLISTOCK_API_URL>/backtests/877964/stop",
     method="POST",
     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     data=b"{}",
@@ -482,7 +482,7 @@ OR direct RethinkDB:
 ```python
 from rethinkdb import RethinkDB
 r = RethinkDB()
-conn = r.connect(host='REDACTED-IP', port=28015, db='IntelliStock')
+conn = r.connect(host=<RETHINKDB_HOST from .env>, port=28015, db='IntelliStock')
 # Find the BacktestInstances row corresponding to backtest 877964 (instance="main", status="running")
 candidates = list(r.table('BacktestInstances').filter({'instance': 'main', 'run': True}).run(conn))
 for c in candidates:

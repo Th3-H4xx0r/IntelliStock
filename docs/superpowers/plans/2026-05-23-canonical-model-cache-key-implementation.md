@@ -394,8 +394,8 @@ def test_already_canonical_skipped():
 Old id: {schema}|{article_hash}|{provider}|{model_ref}|{prompt_version}
 New id: {schema}|{article_hash}|{canonical}|{prompt_version}
 
-Run dry first:  python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST
-Then apply:     python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST --apply
+Run dry first:  python3 scripts/migrate_llm_cache_to_canonical.py --host <your-rethinkdb-host>
+Then apply:     python3 scripts/migrate_llm_cache_to_canonical.py --host <your-rethinkdb-host> --apply
 """
 from __future__ import annotations
 import argparse, os, sys
@@ -429,8 +429,8 @@ def _canonical_from_old_id(old_id: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="REDACTED-HOST")
-    ap.add_argument("--port", type=int, default=28015)
+    ap.add_argument("--host", default=os.environ.get("RETHINKDB_HOST", "localhost"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("RETHINKDB_PORT", "28015")))
     ap.add_argument("--db", default="IntelliStock")
     ap.add_argument("--apply", action="store_true", help="write changes (default: dry-run)")
     ap.add_argument("--cleanup", action="store_true", help="delete old ids after re-keying")
@@ -486,7 +486,7 @@ EOF
 
 - [ ] **Step 1:** `python3 -m pytest backend/tests/ -k "canonical or nexus_canonical or migrate_llm or bedrock or ollama or resolver or models_api" --ignore=backend/tests/test_intellistock_logger.py --ignore=backend/tests/test_redact_logger.py -q` → all green.
 - [ ] **Step 2:** `cd frontend && npm run build` → clean.
-- [ ] **Step 3:** Migration **dry-run** against prod: `python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST` → review the planned re-keys (confirm the Azure `gpt-oss-120b-MEDIUM` rows map to `gpt-oss-120b@medium`). **STOP and confirm with the operator before running with `--apply`** (prod-data write).
+- [ ] **Step 3:** Migration **dry-run** against prod: `python3 scripts/migrate_llm_cache_to_canonical.py --host <your-rethinkdb-host>` → review the planned re-keys (confirm the Azure `gpt-oss-120b-MEDIUM` rows map to `gpt-oss-120b@medium`). **STOP and confirm with the operator before running with `--apply`** (prod-data write).
 
 ---
 

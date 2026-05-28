@@ -15,7 +15,7 @@ _OLLAMA_ROW = {
     "provider": "ollama",
     "model": "gpt-oss:20b",
     "api_key": "",
-    "ollama_base_url": "http://REDACTED-IP:11434",
+    "ollama_base_url": "http://192.0.2.107:11434",
     "ollama_keep_alive": "5m",
     "ollama_think": "medium",
     "openai_base_url": "",
@@ -44,7 +44,7 @@ def test_resolver_propagates_ollama_fields_into_role_config():
         out = resolve_model_refs_in_config(conn=None, config=cfg)
     assert out["lookback_sentiment_llm_provider"] == "ollama"
     assert out["lookback_sentiment_llm_model"] == "gpt-oss:20b"
-    assert out["lookback_sentiment_ollama_base_url"] == "http://REDACTED-IP:11434"
+    assert out["lookback_sentiment_ollama_base_url"] == "http://192.0.2.107:11434"
     assert out["lookback_sentiment_ollama_keep_alive"] == "5m"
     assert out["lookback_sentiment_ollama_think"] == "medium"
 

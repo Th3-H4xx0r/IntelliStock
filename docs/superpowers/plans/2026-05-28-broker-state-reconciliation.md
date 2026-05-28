@@ -1136,7 +1136,7 @@ def test_robinhood_clean_room_classifies_strategy_owned():
             api_key="k", api_secret="s",
             instance_id="main",
             wal_store=_StubWAL(),
-            account_number="REDACTED-ACCT",
+            account_number="<redacted>",
             device_token="dt",
             seed_trades_from_broker=False,
             initial_value=10000.0,
@@ -1713,7 +1713,7 @@ boot under clean_room_mode WOULD adopt (strategy-owned) and quarantine
 NOT mutate any DB state.
 
 Usage:
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/inspect_broker_state.py --instance main
+  python3 scripts/inspect_broker_state.py --instance main
 """
 from __future__ import annotations
 
@@ -1951,7 +1951,7 @@ so the next refresh classifies it as strategy-owned with the entry price
 you specify.
 
 Usage:
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/migrate_external_position.py \
+  python3 scripts/migrate_external_position.py \
     --instance main --ticker AAPL --qty 50.0 --avg-price 184.70
 """
 from __future__ import annotations

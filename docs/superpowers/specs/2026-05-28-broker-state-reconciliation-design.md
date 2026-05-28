@@ -224,7 +224,7 @@ Read-only pre-flight. Does NOT boot the broker. Instead:
 
 ```
 Instance: main  (broker: robinhood)
-Brokerage account: REDACTED-ACCT
+Brokerage account: <redacted>
 Cash at broker: $9,876.54
 Positions at broker: 3 total
   - AAPL  50.0sh  mv=$9,234   matched WAL row cid=intellistock-main-20260520-1234 (BUY 50sh @ $184.70 on 2026-05-20)  →  STRATEGY-OWNED

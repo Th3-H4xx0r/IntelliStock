@@ -10,9 +10,9 @@ WANT the strategy to manage, this script writes a synthetic WAL row
 it as strategy-owned with the entry price you specify.
 
 Usage:
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/migrate_external_position.py \\
+  python3 scripts/migrate_external_position.py \\
     --instance main --ticker AAPL --qty 50.0 --avg-price 184.70           # dry-run
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/migrate_external_position.py \\
+  python3 scripts/migrate_external_position.py \\
     --instance main --ticker AAPL --qty 50.0 --avg-price 184.70 --apply   # write
 """
 from __future__ import annotations

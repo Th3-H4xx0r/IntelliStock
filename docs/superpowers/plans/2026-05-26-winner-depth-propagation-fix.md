@@ -6,7 +6,7 @@
 
 **Architecture:** A = value-only writes to prod Strategies doc 179 (authoritative; code already reads via `config.get`, so no code edit). B = one pure helper `_cap_propagation_fanout_per_seed` wired into the 1-hop propagation loop, gated by a new knob `propagation_max_per_seed` (code default 0 = disabled; shipped on at 8 in doc 179 + schema + cli).
 
-**Tech Stack:** Python, pytest, RethinkDB (prod doc 179 via RETHINKDB_HOST=REDACTED-IP:28015), single strategy file `backend/strategies/graph_nexus_analysis.py`.
+**Tech Stack:** Python, pytest, RethinkDB (prod doc 179 via <RETHINKDB_HOST>:<RETHINKDB_PORT> from .env), single strategy file `backend/strategies/graph_nexus_analysis.py`.
 
 ---
 

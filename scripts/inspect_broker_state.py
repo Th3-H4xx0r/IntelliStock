@@ -7,7 +7,7 @@ quarantine as external. Does NOT boot the broker daemon, submit orders,
 or mutate any DB / brokerage state.
 
 Usage:
-  RETHINKDB_HOST=REDACTED-IP python3 scripts/inspect_broker_state.py --instance main
+  python3 scripts/inspect_broker_state.py --instance main
 
 Exit codes:
   0  -- successfully inspected and printed report (broker may still be dirty)
@@ -211,7 +211,7 @@ def main():
             "are Fernet-encrypted in the DB and cannot be decrypted without it. "
             "Export the same INTELLISTOCK_CRED_KEY the broker daemon uses, e.g.:\n"
             "    export INTELLISTOCK_CRED_KEY=<base64-Fernet-key>\n"
-            "    RETHINKDB_HOST=REDACTED-IP python3 scripts/inspect_broker_state.py --instance main",
+            "    python3 scripts/inspect_broker_state.py --instance main",
             file=sys.stderr,
         )
         return 3

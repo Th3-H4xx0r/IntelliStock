@@ -126,7 +126,7 @@ For `GraphNexusNewsLLMCompany` + `GraphNexusNewsLLMMacro`:
 6. Idempotent (re-keying canonical → canonical is stable). Old ids left as harmless orphans;
    `--cleanup` deletes them. `--dry-run` prints the planned re-keys without writing.
 
-Run against `REDACTED-HOST` (like the index migration), with `--dry-run` first.
+Run against `<your-rethinkdb-host>` (like the index migration), with `--dry-run` first.
 
 ### 4.6 Reasoning-in-key bug
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-15
 **Status:** v2 design, addresses 5 BLOCKERS and 2 SERIOUS findings from adversarial review. Pending operator sign-off before plan/implementation.
-**Source backtest:** `BacktestResults.id = 299903` (RethinkDB `REDACTED-IP/IntelliStock`)
+**Source backtest:** `BacktestResults.id = 299903` (RethinkDB `<RETHINKDB_HOST>/IntelliStock`)
 **Strategy:** `graph_nexus_analysis` (`backend/strategies/graph_nexus_analysis.py`, ~22.5K LOC)
 
 ## 1. Problem statement

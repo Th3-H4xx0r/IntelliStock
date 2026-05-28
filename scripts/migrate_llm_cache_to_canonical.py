@@ -16,9 +16,9 @@ This script re-keys existing rows so a Bedrock config immediately reuses an
 Azure-built cache. It uses the SAME _auto_normalize_model helper the runtime
 lookup uses, so migrated ids match runtime keys exactly.
 
-Run dry first:   python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST
-Then apply:      python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST --apply
-Cleanup orphans: python3 scripts/migrate_llm_cache_to_canonical.py --host REDACTED-HOST --apply --cleanup
+Run dry first:   python3 scripts/migrate_llm_cache_to_canonical.py            
+Then apply:      python3 scripts/migrate_llm_cache_to_canonical.py             --apply
+Cleanup orphans: python3 scripts/migrate_llm_cache_to_canonical.py             --apply --cleanup
 
 Limitation: this re-keys using the auto-normalized model only. It cannot apply a
 ``model_cache_family`` override (that lives on the Models row, not the cache row,
@@ -70,7 +70,7 @@ def _canonical_from_old_id(old_id):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="REDACTED-HOST")
+    ap.add_argument("--host", default=os.environ.get("RETHINKDB_HOST", "localhost"))
     ap.add_argument("--port", type=int, default=28015)
     ap.add_argument("--db", default="IntelliStock")
     ap.add_argument("--apply", action="store_true", help="write changes (default: dry-run)")

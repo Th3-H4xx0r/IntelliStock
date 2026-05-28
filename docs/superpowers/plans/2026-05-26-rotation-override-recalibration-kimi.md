@@ -312,8 +312,8 @@ Read-only by default. Pass --apply to write. DO NOT --apply until a cold kimi
 backtest of this config has cleared the +113% baseline (operator backtest gate).
 
 Usage:
-  RETHINKDB_HOST=REDACTED-IP python scripts/apply_doc179_rotation_override_fix.py          # dry-run
-  RETHINKDB_HOST=REDACTED-IP python scripts/apply_doc179_rotation_override_fix.py --apply   # write
+  python scripts/apply_doc179_rotation_override_fix.py          # dry-run
+  python scripts/apply_doc179_rotation_override_fix.py --apply   # write
 """
 from __future__ import annotations
 

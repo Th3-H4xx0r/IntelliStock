@@ -162,18 +162,17 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     _load_dotenv(repo_root)
 
-    # Hard-coded prod default — operator's public IntelliStock API.
+    # Require INTELLISTOCK_API_URL in .env (or --api-url) — operator-specific.
     # The in-Docker hostname (``http://intellistock-api:8011`` from API_URL
-    # in .env) isn't reachable from a developer laptop, so we intentionally
-    # IGNORE that env var here and prefer the public URL. Override with
-    # --api-url or INTELLISTOCK_API_URL=... when running against staging
-    # / another environment.
-    _PROD_API_URL = "https://REDACTED-DOMAIN"
-    api_url = (
-        args.api_url
-        or os.environ.get("INTELLISTOCK_API_URL")
-        or _PROD_API_URL
-    ).rstrip("/")
+    # in .env) typically isn't reachable from a developer laptop; set
+    # INTELLISTOCK_API_URL to the public/Tailscale URL your deployment uses.
+    api_url = (args.api_url or os.environ.get("INTELLISTOCK_API_URL") or "").rstrip("/")
+    if not api_url:
+        raise SystemExit(
+            "INTELLISTOCK_API_URL is not set. Either pass --api-url=https://... or "
+            "add INTELLISTOCK_API_URL=https://... to your .env (this script does not "
+            "ship with a hardcoded production default)."
+        )
 
     # Prefer a long-lived bearer token if set; otherwise login with user/pass.
     token = (os.environ.get("INTELLISTOCK_API_TOKEN") or "").strip()
