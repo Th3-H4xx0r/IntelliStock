@@ -123,6 +123,62 @@ def test_alpaca_clean_room_classifies_strategy_owned_and_external():
     assert adapter._trades[0]["source"] == "wal"
 
 
+def test_alpaca_clean_room_refresh_does_not_readopt_external():
+    """2-A (bug-sweep 2026-05-28): a forced refresh_positions must NOT re-merge
+    a quarantined external position back into strategy-owned. Mirrors the
+    RobinhoodAdapter fix."""
+    from broker_adapters._wal import LiveOrderWAL, InMemoryStore
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    store = InMemoryStore()
+    store.insert({
+        "client_order_id": "main-tsla-0", "symbol": "TSLA", "side": "BUY",
+        "state": "filled", "filled_qty": 10.0, "filled_avg_price": 200.0,
+        "updated_at_utc": (now - timedelta(days=8)).isoformat(), "broker_order_id": "bx-1",
+    })
+    wal = LiveOrderWAL(store)
+    adapter = _build_alpaca_clean_room(
+        positions=[
+            _mock_alpaca_position("TSLA", 10.0, 2200.0),
+            _mock_alpaca_position("AAPL", 5.0, 920.0),
+        ],
+        wal=wal, initial_value=10000.0,
+    )
+    assert adapter._positions == {"TSLA": 10.0}
+    assert "AAPL" in adapter._external_positions
+
+    # Re-run refresh (broker still reports BOTH). AAPL must STAY quarantined.
+    adapter.refresh_positions()
+    assert adapter._positions == {"TSLA": 10.0}, \
+        f"external AAPL re-adopted on refresh: {adapter._positions}"
+    assert "AAPL" in adapter._external_positions
+
+
+def test_alpaca_clean_room_refresh_preserves_partial_external_split():
+    """2-A partial: broker 50sh, WAL implies 30 owned -> 30 owned / 20 external.
+    A refresh must keep owned == 30 (not re-merge the 20 external shares)."""
+    from broker_adapters._wal import LiveOrderWAL, InMemoryStore
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    store = InMemoryStore()
+    store.insert({
+        "client_order_id": "main-nvda-0", "symbol": "NVDA", "side": "BUY",
+        "state": "filled", "filled_qty": 30.0, "filled_avg_price": 180.0,
+        "updated_at_utc": (now - timedelta(days=10)).isoformat(), "broker_order_id": "bx-2",
+    })
+    wal = LiveOrderWAL(store)
+    adapter = _build_alpaca_clean_room(
+        positions=[_mock_alpaca_position("NVDA", 50.0, 10000.0)],
+        wal=wal, initial_value=10000.0,
+    )
+    assert adapter._positions == {"NVDA": 30.0}
+    assert adapter._external_positions["NVDA"]["qty"] == 20.0
+
+    adapter.refresh_positions()
+    assert adapter._positions == {"NVDA": 30.0}, \
+        f"partial-external re-merged on refresh: {adapter._positions}"
+
+
 def test_alpaca_clean_room_requires_initial_value():
     """clean_room_mode=True without initial_value raises BrokerError."""
     from broker_adapters._wal import LiveOrderWAL, InMemoryStore

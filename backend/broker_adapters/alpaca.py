@@ -1153,7 +1153,25 @@ class AlpacaAdapter(BrokerAdapter):
                 continue
         # Atomic rebind (GIL-protected in CPython). See docstring.
         with self._lock:
-            self._positions = new_positions
+            # 2-A (bug-sweep 2026-05-28): enforce the clean-room quarantine on
+            # every rebind so a forced refresh can't re-adopt external positions.
+            # owned_qty = broker_qty - external_qty. Mirror of RobinhoodAdapter.
+            if self._clean_room_mode:
+                owned_new: dict[str, float] = {}
+                for _sym, _bqty in new_positions.items():
+                    _ext = max(0.0, float((self._external_positions.get(_sym) or {}).get("qty", 0.0) or 0.0))
+                    _owned_qty = float(_bqty) - _ext
+                    if _owned_qty > 1e-6:
+                        owned_new[_sym] = _owned_qty
+                for _sym in list(self._external_positions.keys()):
+                    if _sym not in new_positions:
+                        self._external_positions.pop(_sym, None)
+                    else:
+                        _row = self._external_positions[_sym]
+                        _row["qty"] = min(float(_row.get("qty", 0.0) or 0.0), float(new_positions[_sym]))
+                self._positions = owned_new
+            else:
+                self._positions = new_positions
             # Successful REST refresh — clear the staleness flag set by
             # any prior outage so SELL branches stop suppressing.
             if self._positions_stale_since is not None:

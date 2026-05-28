@@ -108,6 +108,66 @@ def _is_dry_run() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+def _available_cash_for_sizing(settled_cash: float, buying_power: float) -> float:
+    """Spendable cash for position sizing AND portfolio valuation.
+
+    1-A (bug-sweep 2026-05-28): Robinhood's ``buying_power`` on a margin /
+    Instant / Gold account EXCEEDS settled cash (e.g. main acct REDACTED-ACCT:
+    bp $6,967.67 vs settled $6,434.48). The strategy is a cash-deployment
+    system (cash_reserve_floor etc.) and must NOT silently deploy instant /
+    margin credit. We cap at settled cash so deployment never exceeds what the
+    operator actually has, and use the LOWER of the two so a hold that pushes
+    buying_power below settled is also respected. On a cash account
+    settled == buying_power, so this is a no-op. Clamped to >= 0 so a margin
+    debit (negative cash) or a garbage reading can never over-deploy.
+    """
+    try:
+        s = float(settled_cash or 0.0)
+        b = float(buying_power or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(s, b))
+
+
+def _order_style_for_now(price: float, side: str, qty: Optional[float], in_rth: bool) -> dict:
+    """Order type/limit/extended_hours/tif appropriate for the current session.
+
+    2-F (bug-sweep 2026-05-28): the live trade-gate treats extended hours as
+    'open', but a plain extended_hours=False MARKET order submitted in pre/after
+    hours cannot fill until the next regular-hours open — while the strategy's
+    books treat the exit as issued. Outside RTH we want a marketable LIMIT with
+    extended_hours=True so a forced exit actually fills.
+
+    HARD CONSTRAINT: Robinhood prohibits fractional shares in extended hours AND
+    fractional limit orders (robinhood_engine.py:1224-1236). The graph_nexus
+    strategy trades fractional shares, so a fractional off-hours order MUST stay a
+    regular-hours market order (it queues to the next open) — turning it into an
+    ext-hours limit would be rejected outright. Only WHOLE-share quantities can use
+    the ext-hours limit path. qty=None (notional buys) is treated as fractional.
+    """
+    is_fractional = qty is None or abs(float(qty) - round(float(qty))) > 1e-9
+    if in_rth or is_fractional:
+        return {"order_type": "market", "limit_price": None, "extended_hours": False, "tif": "day"}
+    try:
+        buffer_pct = float(os.environ.get("RH_EXTENDED_HOURS_SLIPPAGE_PCT", "0.005"))
+    except (TypeError, ValueError):
+        buffer_pct = 0.005
+    limit = round(float(price) * (1.0 + buffer_pct if side == "buy" else 1.0 - buffer_pct), 2)
+    if limit <= 0:
+        limit = round(float(price), 2)
+    return {"order_type": "limit", "limit_price": limit, "extended_hours": True, "tif": "gfd"}
+
+
+def _in_regular_hours(now_utc) -> bool:
+    """RTH check that fails OPEN to regular-hours semantics if the calendar is
+    unavailable (so we never accidentally route a fractional order to ext-hours)."""
+    try:
+        from live_calendar import is_nyse_open
+        return bool(is_nyse_open(now_utc))
+    except Exception:
+        return True
+
+
 def _map_rh_error_to_broker(e: Exception) -> BrokerError:
     """Translate a typed RobinhoodAPIError sub-class to the BrokerAdapter
     error taxonomy strategies isinstance() against.
@@ -1988,7 +2048,38 @@ class RobinhoodAdapter(BrokerAdapter):
                 market_value=mv,
             ))
         with self._lock:
-            self._positions = new_positions
+            # 2-A (bug-sweep 2026-05-28): in clean_room_mode the boot-time
+            # classifier split broker positions into strategy-owned vs external
+            # (quarantined). A naive rebind to the full broker set here would
+            # silently RE-ADOPT the quarantined external shares on the warm-boot
+            # force probe (broker.py) and every post-fill refresh, defeating the
+            # split before the strategy even runs. Enforce the quarantine on every
+            # rebind: owned_qty = broker_qty - external_qty. This correctly handles
+            # fully-external (owned 0), partial-external (owned = broker - external),
+            # fully-owned (external 0), and brand-new strategy buys (external 0 ->
+            # full qty owned). Legacy (non-clean-room) path is byte-for-byte unchanged.
+            if self._clean_room_mode:
+                owned_new: dict[str, float] = {}
+                for _sym, _bqty in new_positions.items():
+                    _ext = float((self._external_positions.get(_sym) or {}).get("qty", 0.0) or 0.0)
+                    _ext = max(0.0, _ext)
+                    _owned_qty = float(_bqty) - _ext
+                    if _owned_qty > 1e-6:
+                        owned_new[_sym] = _owned_qty
+                # Keep the external quarantine current: drop entries the broker no
+                # longer shows (operator flattened) and clamp qty down if the
+                # broker now shows fewer shares than the boot snapshot.
+                for _sym in list(self._external_positions.keys()):
+                    if _sym not in new_positions:
+                        self._external_positions.pop(_sym, None)
+                    else:
+                        _row = self._external_positions[_sym]
+                        _row["qty"] = min(
+                            float(_row.get("qty", 0.0) or 0.0), float(new_positions[_sym])
+                        )
+                self._positions = owned_new
+            else:
+                self._positions = new_positions
             self._last_prices.update(new_last_prices)
             self._positions_stale_since = None
         # Update TTL cache so subsequent non-force callers (snapshot every 3s)
@@ -2023,11 +2114,25 @@ class RobinhoodAdapter(BrokerAdapter):
             cash=cash, buying_power=bp,
             daytrading_buying_power=dtbp, unsettled=unsettled,
         )
+        # 1-A (bug-sweep 2026-05-28): broker.py treats _cash as available-to-spend
+        # AND get_portfolio_value() = get_cash() + positions_value drives the
+        # drawdown baseline. Cap at SETTLED cash so a margin/Instant account's
+        # inflated buying_power never deploys non-settled credit nor inflates the
+        # valuation. On a cash account settled == bp, so this is a no-op.
+        available = _available_cash_for_sizing(cash, bp)
         with self._lock:
-            self._cash = bp  # broker.py treats _cash as available-to-spend → use buying_power
+            self._cash = available
             self._buying_power = bp
             self._settled_cash = cash
             self._last_cash_dto = dto
+        if bp - cash > 1.0:
+            _alog(
+                "BROKER",
+                f"refresh_cash: buying_power ${bp:,.2f} exceeds settled cash "
+                f"${cash:,.2f} (Δ ${bp - cash:,.2f}; margin/Instant). Sizing + "
+                f"valuation capped to settled cash ${available:,.2f}.",
+                "yellow",
+            )
         return dto
 
     def refresh_account(self, *, force: bool = False) -> AccountDTO:
@@ -2650,11 +2755,14 @@ class RobinhoodAdapter(BrokerAdapter):
 
     def buy(self, ticker: str, shares: float, price: float, timestamp: Optional[datetime] = None) -> bool:
         try:
-            cid = make_client_order_id(self._instance_id, ticker, (timestamp or datetime.now(timezone.utc)).isoformat(), "buy", 0)
+            ts = timestamp or datetime.now(timezone.utc)
+            cid = make_client_order_id(self._instance_id, ticker, ts.isoformat(), "buy", 0)
+            style = _order_style_for_now(price, "buy", shares, _in_regular_hours(ts))
             self.submit_order(
                 symbol=ticker, side="buy", qty=shares, notional=None,
-                order_type="market", limit_price=None, tif="day",
-                extended_hours=False, client_order_id=cid,
+                order_type=style["order_type"], limit_price=style["limit_price"],
+                tif=style["tif"], extended_hours=style["extended_hours"],
+                client_order_id=cid,
             )
             return True
         except BrokerError as e:
@@ -2663,11 +2771,14 @@ class RobinhoodAdapter(BrokerAdapter):
 
     def sell(self, ticker: str, shares: float, price: float, timestamp: Optional[datetime] = None) -> bool:
         try:
-            cid = make_client_order_id(self._instance_id, ticker, (timestamp or datetime.now(timezone.utc)).isoformat(), "sell", 0)
+            ts = timestamp or datetime.now(timezone.utc)
+            cid = make_client_order_id(self._instance_id, ticker, ts.isoformat(), "sell", 0)
+            style = _order_style_for_now(price, "sell", shares, _in_regular_hours(ts))
             self.submit_order(
                 symbol=ticker, side="sell", qty=shares, notional=None,
-                order_type="market", limit_price=None, tif="day",
-                extended_hours=False, client_order_id=cid,
+                order_type=style["order_type"], limit_price=style["limit_price"],
+                tif=style["tif"], extended_hours=style["extended_hours"],
+                client_order_id=cid,
             )
             return True
         except BrokerError as e:
@@ -2703,11 +2814,14 @@ class RobinhoodAdapter(BrokerAdapter):
         if sell_qty <= 0:
             return False
         try:
-            cid = make_client_order_id(self._instance_id, ticker, (timestamp or datetime.now(timezone.utc)).isoformat(), "sell", 0)
+            ts = timestamp or datetime.now(timezone.utc)
+            cid = make_client_order_id(self._instance_id, ticker, ts.isoformat(), "sell", 0)
+            style = _order_style_for_now(price, "sell", sell_qty, _in_regular_hours(ts))
             self.submit_order(
                 symbol=ticker, side="sell", qty=sell_qty, notional=None,
-                order_type="market", limit_price=None, tif="day",
-                extended_hours=False, client_order_id=cid,
+                order_type=style["order_type"], limit_price=style["limit_price"],
+                tif=style["tif"], extended_hours=style["extended_hours"],
+                client_order_id=cid,
             )
             return True
         except BrokerError as e:

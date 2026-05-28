@@ -32,20 +32,40 @@ def _get_conn():
     return r, r.connect(host=host, port=port, timeout=10)
 
 
-def halt_live_trading(reason: str = "manual halt", cancel_open_orders: bool = True) -> dict:
-    """Halt every running live instance. Returns a summary dict for reporting."""
+def halt_live_trading(
+    reason: str = "manual halt",
+    cancel_open_orders: bool = True,
+    instance_id: str | None = None,
+) -> dict:
+    """Halt live trading. Returns a summary dict for reporting.
+
+    1-B (bug-sweep 2026-05-28): blast-radius control. When ``instance_id`` is
+    None (the manual CLI), this halts EVERY instance and cancels open orders on
+    EVERY linked brokerage — the operator-initiated emergency stop. When
+    ``instance_id`` is provided (the AUTOMATIC LLM-critical abort path), it must
+    halt ONLY that instance and cancel orders ONLY on that instance's linked
+    brokerage, so e.g. a paper instance's LLM failure can never flip
+    runCommand=False on the real-money 'main' instance or cancel its Robinhood
+    orders. If the instance has no linked brokerage_id we cancel NOTHING (fail
+    safe) rather than falling back to touching every account.
+    """
     r, conn = _get_conn()
-    summary = {"instances_halted": 0, "orders_canceled": 0, "errors": []}
+    summary = {
+        "instances_halted": 0,
+        "orders_canceled": 0,
+        "errors": [],
+        "scope": instance_id or "<all>",
+    }
 
     try:
-        # Step 1: bulk-flip runCommand=False (triggers instance.py to exit).
+        # Step 1: flip runCommand=False (triggers instance.py to exit).
+        # Scoped to the one instance when instance_id is given.
         try:
-            res = (
-                r.db(DB_NAME)
-                .table("Instances")
-                .update({"runCommand": False, "halt_reason": reason, "halted_at": r.now()})
-                .run(conn)
-            )
+            _tbl = r.db(DB_NAME).table("Instances")
+            _q = _tbl.filter(lambda row: row["id"] == instance_id) if instance_id is not None else _tbl
+            res = _q.update(
+                {"runCommand": False, "halt_reason": reason, "halted_at": r.now()}
+            ).run(conn)
             summary["instances_halted"] = int(res.get("replaced", 0) or 0) + int(res.get("unchanged", 0) or 0)
         except Exception as e:
             summary["errors"].append(f"instances update: {e}")
@@ -57,6 +77,24 @@ def halt_live_trading(reason: str = "manual halt", cancel_open_orders: bool = Tr
             except Exception as e:
                 summary["errors"].append(f"brokerages fetch: {e}")
                 brokerages = []
+            # Scope to the failing instance's linked brokerage when instance_id
+            # is given. Fail SAFE: if the link can't be resolved, cancel nothing
+            # rather than touching every account.
+            if instance_id is not None:
+                linked_bid = None
+                try:
+                    _inst = r.db(DB_NAME).table("Instances").get(instance_id).run(conn) or {}
+                    linked_bid = _inst.get("brokerage_id")
+                except Exception as e:
+                    summary["errors"].append(f"instance {instance_id} lookup: {e}")
+                if linked_bid:
+                    brokerages = [b for b in brokerages if b.get("id") == linked_bid]
+                else:
+                    summary["errors"].append(
+                        f"instance {instance_id}: no linked brokerage_id resolved; "
+                        f"skipping order-cancel (fail-safe, won't touch other accounts)"
+                    )
+                    brokerages = []
             for b in brokerages:
                 bt = (b.get("brokerage_type") or "alpaca").strip().lower()
                 if bt == "alpaca":
@@ -141,7 +179,7 @@ def halt_live_trading(reason: str = "manual halt", cancel_open_orders: bool = Tr
         # Step 3: Discord alert.
         try:
             from live_alerts import alert_halt
-            alert_halt(instance_id="<all>", reason=f"{reason} "
+            alert_halt(instance_id=(instance_id or "<all>"), reason=f"{reason} "
                                                      f"({summary['instances_halted']} instances, "
                                                      f"{summary['orders_canceled']} orders canceled)")
         except Exception as e:

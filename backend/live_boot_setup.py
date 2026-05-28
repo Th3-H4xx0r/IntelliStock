@@ -38,10 +38,18 @@ _AUDIT_TABLE = "LiveBootAudit"
 
 
 def is_first_clean_room_boot(r: Any, conn: Any, instance_id: str) -> bool:
-    """Return True iff no prior boot audit row exists for this instance.
+    """Return True iff no prior CLEAN-ROOM boot audit row exists for this instance.
 
     Treats "LiveBootAudit table absent" as "first boot" — the very first
     clean-room launch happens before the audit table has ever been created.
+
+    0-B (bug-sweep 2026-05-28): count ONLY rows with ``mode == "clean_room"``.
+    The per-boot audit row is written on EVERY boot, including legacy/smoke boots
+    (``mode="legacy"``, broker.py:5461). The old "any row" check meant a single
+    prior legacy boot would suppress the first clean-room cleanup, leaving stale
+    per-instance state on a real-money launch. A crash-before-the-audit-write just
+    re-runs the cleanup next boot, which is harmless (the wipe is idempotent and
+    preserves the origin=backtest snapshot).
 
     Best-effort: any RethinkDB error returns False (default to NOT re-running
     cleanup) so a transient DB hiccup doesn't trigger an unnecessary wipe.
@@ -52,17 +60,68 @@ def is_first_clean_room_boot(r: Any, conn: Any, instance_id: str) -> bool:
         tables = set(r.db(_DB_NAME).table_list().run(conn))
         if _AUDIT_TABLE not in tables:
             return True
-        count = int(
+        rows = list(
             r.db(_DB_NAME).table(_AUDIT_TABLE)
             .filter(lambda row: row["instance_id"] == str(instance_id))
-            .count()
             .run(conn)
-            or 0
         )
-        return count == 0
+        clean_room_rows = [x for x in rows if (x or {}).get("mode") == "clean_room"]
+        return len(clean_room_rows) == 0
     except Exception:
         # Fail-safe: if we cannot tell, do NOT re-run cleanup.
         return False
+
+
+def rebaseline_clean_room_drawdown(cache: dict, live_equity: float) -> Optional[dict]:
+    """Re-baseline a backtest-origin drawdown state to the live account (2-B).
+
+    In clean_room_mode the only NexusStrategyCache row the cleanup preserves is
+    the ``origin="backtest"`` snapshot, so any ``_portfolio_drawdown_state`` that
+    the boot hydrate merged carries the BACKTEST peak / halt flag. The account-
+    migration detector only re-baselines when the cached peak exceeds live equity
+    by >1.40x AND there are 0 positions; a matched-equity or modest-peak backtest
+    leaves a stale peak that silently demotes (or halts) day-1 buys.
+
+    This resets the drawdown state to a clean live baseline (peak == last ==
+    live_equity, halt cleared) whenever a drawdown state is present. Returns the
+    new state, or None if there was nothing to reset (so the caller can log).
+    """
+    dd = cache.get("_portfolio_drawdown_state")
+    if not isinstance(dd, dict) or not dd:
+        return None
+    try:
+        eq = float(live_equity)
+    except (TypeError, ValueError):
+        return None
+    new_state = {
+        "peak_value": eq,
+        "last_value": eq,
+        "halt_active": False,
+        "up_days": 0,
+    }
+    cache["_portfolio_drawdown_state"] = new_state
+    return new_state
+
+
+def strip_stale_momentum_baseline(cache: dict) -> int:
+    """Drop backtest-era ``first_seen_price`` from hydrated momentum-watchlist
+    entries (2-E).
+
+    ``_momentum_watchlist`` rides the origin="backtest" snapshot into live. Each
+    entry's ``first_seen_price`` was captured the bar the ticker first entered the
+    watchlist during the backtest — possibly 120+ days stale — and is used as a
+    runup ceiling in the buy gate. Stripping it on hydrate lets the baseline
+    re-establish from live bars. Returns the number of entries cleaned.
+    """
+    wl = cache.get("_momentum_watchlist")
+    if not isinstance(wl, dict):
+        return 0
+    n = 0
+    for entry in wl.values():
+        if isinstance(entry, dict) and "first_seen_price" in entry:
+            entry.pop("first_seen_price", None)
+            n += 1
+    return n
 
 
 def run_first_clean_room_boot_cleanup(

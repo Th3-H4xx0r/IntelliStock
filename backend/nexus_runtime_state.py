@@ -141,6 +141,12 @@ class WALStore:
                 continue
             if not row.get("filled_qty"):
                 continue
+            # 0-A (bug-sweep 2026-05-28): exclude RH_DRY_RUN synthetic fills
+            # (broker_order_id 'dry-*'). They were never sent to the broker, so
+            # the clean-room classifier (the only caller of this query) must not
+            # reconstruct them as real strategy positions/trades.
+            if str(row.get("broker_order_id") or "").startswith("dry-"):
+                continue
             if since_utc is not None:
                 ts = row.get("updated_at_utc") or row.get("created_at_utc")
                 if ts is not None and ts < since_utc:

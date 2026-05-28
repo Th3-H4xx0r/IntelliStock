@@ -182,6 +182,9 @@ class InMemoryStore:
                 continue
             if not r.get("filled_qty"):
                 continue
+            # 0-A: exclude RH_DRY_RUN synthetic fills (mirror of WALStore).
+            if str(r.get("broker_order_id") or "").startswith("dry-"):
+                continue
             if since_utc is not None:
                 ts = r.get("updated_at_utc") or r.get("created_at_utc")
                 if ts is not None and ts < since_utc:

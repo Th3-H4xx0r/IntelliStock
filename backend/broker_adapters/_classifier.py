@@ -115,13 +115,36 @@ def classify_broker_positions(
 
     # Defensive re-filter on prefix + retention so the classifier is safe
     # even if the caller didn't filter.
+    #
+    # 0-A (bug-sweep 2026-05-28): EXCLUDE RH_DRY_RUN synthetic fills. _dry_run_submit
+    # writes a terminal 'filled' WAL row with broker_order_id 'dry-<uuid>' that was
+    # NEVER sent to the broker. Feeding it into classification or the _trades rebuild
+    # would fabricate phantom positions, bogus recent_sell_block entries, and bad V32
+    # entry anchors on a clean-room boot taken AFTER a dry-run cycle. Real fills carry
+    # a genuine broker_order_id and are kept.
+    #
+    # 2-C: track tickers whose only prefix-matching BUY provenance is BEYOND the
+    # retention cutoff so a position quarantined below can be labeled 'aged-out'
+    # (had WAL provenance) vs 'no WAL trace' (truly unknown). We deliberately do NOT
+    # auto-adopt an aged-out position: a holding older than retention is fail-safe
+    # quarantined (the strategy's max_hold_days would have exited a real position long
+    # ago), and auto-adopting could resurrect a manual long-term hold and force-sell it.
     filtered: list[dict] = []
+    aged_out_buy_tickers: set[str] = set()
     for row in wal_rows or []:
         cid = row.get("client_order_id") or ""
         if not cid.startswith(prefix):
             continue
+        if str(row.get("broker_order_id") or "").startswith("dry-"):
+            continue
         ts = _parse_iso(row.get("updated_at_utc") or row.get("created_at_utc"))
         if ts is not None and ts < cutoff:
+            if (row.get("side") or "").upper() == "BUY" and row.get("symbol"):
+                try:
+                    if float(row.get("filled_qty") or 0.0) > 0:
+                        aged_out_buy_tickers.add(row.get("symbol"))
+                except (TypeError, ValueError):
+                    pass
             continue
         filtered.append(row)
 
@@ -211,11 +234,21 @@ def classify_broker_positions(
         tol = max(_QTY_ABS_TOL, min(0.5, _QTY_REL_TOL * abs(broker_qty)))
 
         if wal_qty <= _QTY_ABS_TOL:
-            # No WAL trace -> fully external
+            # No WAL trace within retention -> external (quarantined). Distinguish
+            # 'aged-out' (had a prefix-matching BUY beyond the retention window) from
+            # 'no WAL trace' (truly unknown / manual) for operator visibility (2-C).
+            if ticker in aged_out_buy_tickers:
+                note = (
+                    f"aged-out: WAL BUY provenance exists but is beyond the "
+                    f"{retention_days}d retention window. Quarantined fail-safe "
+                    f"(not auto-adopted); adopt manually if this is a strategy position."
+                )
+            else:
+                note = "no WAL trace within retention window"
             external[ticker] = {
                 "qty": broker_qty,
                 "market_value": mv,
-                "note": "no WAL trace within retention window",
+                "note": note,
                 "first_seen_utc": now.isoformat(),
             }
         elif abs(wal_qty - broker_qty) <= tol:

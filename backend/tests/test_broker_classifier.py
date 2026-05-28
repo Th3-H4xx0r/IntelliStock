@@ -417,6 +417,98 @@ def test_classifier_handles_tz_naive_wal_timestamp():
     assert len(trades) == 1
 
 
+def test_classifier_excludes_dry_run_synthetic_fills():
+    """0-A (bug-sweep 2026-05-28): RH_DRY_RUN synthetic fills are written to the
+    WAL as terminal 'filled' rows with broker_order_id 'dry-*' but were NEVER
+    submitted to the broker. They must NOT feed classification or the _trades
+    rebuild, else a clean-room boot after a dry-run cycle fabricates bogus
+    recent_sell_block entries and V32 entry anchors on the real account."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [
+        _wal_row("main-real-0", "TSLA", "BUY", 4.0, 200.0, now - timedelta(days=5)),
+        # dry-run synthetic fill for the SAME ticker — must be ignored entirely
+        {**_wal_row("main-dry-0", "TSLA", "BUY", 6.0, 200.0, now - timedelta(days=4)),
+         "broker_order_id": "dry-abc123"},
+        # a dry-run SELL on another ticker that would otherwise pollute recent_sell_block
+        {**_wal_row("main-dry-1", "AAPL", "SELL", 3.0, 180.0, now - timedelta(days=2)),
+         "broker_order_id": "dry-def456"},
+    ]
+    owned, external, trades = classify_broker_positions(
+        positions=[_pos("TSLA", 4.0, mv=800.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    # Only the real 4sh counts; broker shows 4sh -> fully owned, dry 6sh ignored.
+    assert owned == {"TSLA": 4.0}
+    assert external == {}
+    # _trades has ONLY the real fill — no dry rows.
+    assert len(trades) == 1
+    assert trades[0]["client_order_id"] == "main-real-0"
+    assert all(not str(t.get("broker_order_id") or "").startswith("dry-") for t in trades)
+
+
+def test_classifier_aged_out_note_distinguishes_from_never_seen():
+    """2-C (bug-sweep 2026-05-28): a still-held position whose only WAL BUY is
+    beyond the retention window is quarantined FAIL-SAFE (we do not auto-adopt —
+    the strategy's max_hold_days would have exited a real holding long ago), but
+    its external note must distinguish 'aged-out' (had WAL provenance) from
+    'no WAL trace' (truly unknown) so the operator can adopt manually if wanted."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [_wal_row("main-old-0", "AAPL", "BUY", 5.0, 180.0, now - timedelta(days=400))]
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("AAPL", 5.0, mv=920.0)],
+        wal_rows=rows,
+        instance_id="main",
+        retention_days=180,
+        now_utc=now,
+    )
+    assert owned == {}
+    assert "AAPL" in external
+    note = external["AAPL"]["note"].lower()
+    assert "aged-out" in note, f"note should flag aged-out provenance distinctly: {note!r}"
+
+
+def test_classifier_truly_external_note_unchanged():
+    """A position with NO WAL provenance at all keeps the plain 'no WAL trace' note
+    (the aged-out distinction must not bleed into the never-seen case)."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("AAPL", 5.0, mv=920.0)],
+        wal_rows=[],
+        instance_id="main",
+        now_utc=now,
+    )
+    assert "AAPL" in external
+    assert "no WAL trace" in external["AAPL"]["note"]
+    assert "aged-out" not in external["AAPL"]["note"].lower()
+
+
+def test_inmemory_store_excludes_dry_run_fills():
+    """Defense-in-depth: the boot-only WAL query also drops dry-* synthetic fills."""
+    from broker_adapters._wal import InMemoryStore
+    store = InMemoryStore()
+    store.insert({
+        "client_order_id": "main-real-0", "symbol": "TSLA", "side": "BUY",
+        "state": "filled", "filled_qty": 10.0, "filled_avg_price": 200.0,
+        "updated_at_utc": "2026-05-20T00:00:00+00:00", "broker_order_id": "bx-1",
+    })
+    store.insert({
+        "client_order_id": "main-dry-0", "symbol": "TSLA", "side": "BUY",
+        "state": "filled", "filled_qty": 6.0, "filled_avg_price": 200.0,
+        "updated_at_utc": "2026-05-20T00:00:00+00:00", "broker_order_id": "dry-xyz",
+    })
+    rows = store.list_filled_for_prefix("main-")
+    assert len(rows) == 1
+    assert rows[0]["client_order_id"] == "main-real-0"
+
+
 def test_classifier_sell_to_zero_then_rebuy_nets_correctly():
     """BUY 10 -> SELL 10 -> BUY 5 should yield net 5 (broker shows 5)."""
     from broker_adapters._classifier import classify_broker_positions

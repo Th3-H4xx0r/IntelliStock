@@ -13054,10 +13054,18 @@ def _fetch_articles_cached(
     min_articles: int,
     *,
     sentiment_cache_scope_id: str = "",
+    force_fresh: bool = False,
 ) -> tuple[list, bool, dict | None]:
     """
     Return (articles, from_cache, cached_sentiment) for the given date range.
     Uses RethinkDB cache when available; cached_sentiment is dict or None.
+
+    1-C (bug-sweep 2026-05-28): ``force_fresh=True`` bypasses the cache HIT so a
+    live run never serves articles + aggregated LLM sentiment that a backtest may
+    have written for this same date_key (date_key is the only cache key). A fresh
+    Alpaca fetch is performed and re-cached, and cached_sentiment comes back None
+    so the caller re-runs the LLM on the fresh articles instead of adopting the
+    stale backtest sentiment (which would skip the LLM entirely).
     """
     conn = _get_nexus_db_conn()
     if conn:
@@ -13067,7 +13075,7 @@ def _fetch_articles_cached(
             date_key,
             sentiment_cache_scope_id=sentiment_cache_scope_id,
         )
-        if cached_articles is not None and len(cached_articles) >= min_articles:
+        if (not force_fresh) and cached_articles is not None and len(cached_articles) >= min_articles:
             return cached_articles, True, cached_sentiment
     _log(f"Article cache MISS for {date_key}; fetching from Alpaca (limit={limit})", "cyan")
     articles = _fetch_alpaca_news_all(start_dt, end_dt, alpaca_key, alpaca_secret, limit=limit)
@@ -20647,11 +20655,31 @@ class GraphNexusAnalysis:
                     _fill_outcome_prices(_conn_out, instance_id, date_key, prices, overlay_bars=_ob)
                     _update_indefinite_outcomes(_conn_out, instance_id, date_key, prices)
 
+        # 1-C (bug-sweep 2026-05-28): the FIRST time a live run touches a given
+        # trading date, bypass any pre-existing article/sentiment cache for that
+        # date — it may have been written by a backtest that ended on this date
+        # (stale, LLM-skipped). Recompute once; the fresh result is re-cached so
+        # later same-day live cycles reuse it (preserving the cost-saving design).
+        # Excludes the historical_lookback prepass (it legitimately rebuilds days).
+        _live_first_touch = False
+        try:
+            if (globals().get("_GN_LIVE_MODE_FLAG", False)
+                    and not historical_lookback_mode
+                    and isinstance(strategy_cache, dict)):
+                _refreshed = strategy_cache.setdefault("_live_news_refreshed_dates", [])
+                if isinstance(_refreshed, list) and date_key not in _refreshed:
+                    _live_first_touch = True
+                    _refreshed.append(date_key)
+                    if len(_refreshed) > 10:
+                        del _refreshed[:-10]
+        except Exception:
+            _live_first_touch = False
         try:
             articles, from_cache, cached_sentiment = _fetch_articles_cached(
                 date_key, start_dt, end_dt, alpaca_key, alpaca_secret,
                 limit=num_articles, min_articles=min_articles,
                 sentiment_cache_scope_id=sentiment_cache_scope_id,
+                force_fresh=_live_first_touch,
             )
         except Exception as e:
             _log(f"News fetch error: {e}", "red")

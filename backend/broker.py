@@ -5586,6 +5586,17 @@ elif mode == MODE_LIVE:
                     )
                     if _snap_cache is not None:
                         _scp_merge_boot(_nexus_cache, _snap_cache)
+                        # 2-E (bug-sweep 2026-05-28): the momentum watchlist rides
+                        # the backtest snapshot; its first_seen_price baselines are
+                        # stale (possibly 120+ days old) and skew the runup buy-gate.
+                        # Strip them so they re-baseline from live bars.
+                        try:
+                            from live_boot_setup import strip_stale_momentum_baseline as _strip_mom
+                            _stripped = _strip_mom(_nexus_cache)
+                            if _stripped:
+                                _log(f"[snapshot] stripped stale first_seen_price from {_stripped} momentum entries", "cyan")
+                        except Exception as _mom_e:
+                            _log(f"[snapshot] momentum-baseline strip failed (non-fatal): {_mom_e}", "yellow")
                         _log(
                             f"[snapshot] hydrated {len(_snap_cache)} keys into _strategy_cache[{_nexus_name!r}] "
                             f"(bar_index={_nexus_cache.get('_deployment_bar_index')}, "
@@ -5847,6 +5858,27 @@ elif mode == MODE_LIVE:
                     f"{type(_mig_e).__name__}: {_mig_e}",
                     "yellow",
                 )
+
+            # 2-B (bug-sweep 2026-05-28): in clean_room_mode the hydrated snapshot
+            # is the origin="backtest" row, so its _portfolio_drawdown_state carries
+            # the BACKTEST peak/halt. The migration detector above only re-baselines
+            # when cached peak > 1.40x equity AND 0 positions; in the 1.0-1.40x band
+            # (or with any position) a stale peak silently demotes or halts day-1
+            # buys. Re-baseline the drawdown state to live equity unconditionally on
+            # a clean-room boot so the new account starts measuring drawdown from its
+            # own equity, not a historical backtest high-water mark.
+            if _clean_room_mode:
+                try:
+                    from live_boot_setup import rebaseline_clean_room_drawdown as _rebaseline_dd
+                    _cur_eq = float(getattr(live_adapter, "_initial_value", 0.0) or 0.0)
+                    if _rebaseline_dd(_nexus_cache, _cur_eq) is not None:
+                        _log(
+                            f"[live_boot] clean-room drawdown re-baselined to live "
+                            f"equity ${_cur_eq:,.2f} (cleared backtest-origin peak/halt).",
+                            "cyan",
+                        )
+                except Exception as _dd_e:
+                    _log(f"[live_boot] drawdown re-baseline failed (non-fatal): {_dd_e}", "yellow")
             globals()["_strategy_cache_loaded_from_db"] = True
         except Exception as _scp_be:
             try:

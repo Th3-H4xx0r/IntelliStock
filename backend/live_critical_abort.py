@@ -16,10 +16,10 @@ _state_lock = threading.RLock()
 _already_alerted = False
 
 
-def _halt_live_trading(*, reason: str) -> dict:
+def _halt_live_trading(*, reason: str, instance_id: str | None = None) -> dict:
     """Isolated for test mocking."""
     from live_kill_switch import halt_live_trading
-    return halt_live_trading(reason=reason)
+    return halt_live_trading(reason=reason, instance_id=instance_id)
 
 
 def _alert_strategy_error(*, instance_id: str, tag: str, message: str) -> None:
@@ -39,11 +39,16 @@ def handle(*, instance_id: str, failure) -> None:
 
     sample = (failure.attempts[-1].get("body_sample") or "") if failure.attempts else ""
 
-    # 1. Halt (existing infra: flip runCommand + cancel orders + alert_halt)
+    # 1. Halt (existing infra: flip runCommand + cancel orders + alert_halt).
+    # 1-B (bug-sweep 2026-05-28): scope the AUTOMATIC abort to the FAILING
+    # instance only — a paper instance's LLM failure must not halt the
+    # real-money 'main' instance or cancel its Robinhood orders. The global
+    # blast radius is reserved for the manual `python -m backend.live_kill_switch`.
     halt_summary: dict[str, Any] = {}
     try:
         halt_summary = _halt_live_trading(
-            reason=f"LLM critical: {failure.class_tag}"
+            reason=f"LLM critical: {failure.class_tag}",
+            instance_id=instance_id,
         ) or {}
     except Exception as e:
         try:

@@ -175,21 +175,40 @@ def _fetch_broker_positions_and_cash(brokerage_row: dict):
         ) or {}
         cash = float(account.get("cash") or 0.0)
         equity = float(account.get("equity") or 0.0)
-        return (
-            [
-                {
-                    "symbol": p.get("symbol") or "",
-                    "qty": float(p.get("quantity") or 0.0),
-                    "market_value": (
-                        float(p.get("quantity") or 0.0)
-                        * float(p.get("average_buy_price") or 0.0)
-                    ),
-                }
-                for p in positions
-            ],
-            cash,
-            equity,
-        )
+        # 0-C (bug-sweep 2026-05-28): RH /positions/ dicts have NO 'symbol'
+        # field — only an 'instrument' URL. The old `p.get("symbol")` therefore
+        # produced "" for every position, so the inspector reported 0 owned /
+        # 0 external for EVERY Robinhood instance (a falsely-clean pre-flight).
+        # Resolve the symbol via the instrument URL (cached) and normalize to the
+        # dash-form the clean-room classifier matches against.
+        _inst_sym_cache: dict[str, str] = {}
+
+        def _resolve_symbol(pos: dict) -> str:
+            raw = (pos.get("symbol") or "").strip()
+            if raw:
+                return raw.upper().replace(".", "-")
+            url = (pos.get("instrument") or "").strip()
+            if not url:
+                return ""
+            if url not in _inst_sym_cache:
+                try:
+                    sym = (client.get_instrument(url).get("symbol") or "").strip()
+                except Exception:
+                    sym = ""
+                _inst_sym_cache[url] = sym.upper().replace(".", "-")
+            return _inst_sym_cache[url]
+
+        out_positions = []
+        for p in positions:
+            qty = float(p.get("quantity") or 0.0)
+            if qty == 0.0:
+                continue
+            out_positions.append({
+                "symbol": _resolve_symbol(p),
+                "qty": qty,
+                "market_value": qty * float(p.get("average_buy_price") or 0.0),
+            })
+        return (out_positions, cash, equity)
     raise SystemExit(f"unknown brokerage_type {btype!r} on this instance")
 
 

@@ -67,12 +67,19 @@ def main():
     cid_prefix = _derive_cid_prefix(args.instance)
     cid = f"{cid_prefix}MIGRATED-{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc)
+    # 2-D (bug-sweep 2026-05-28): normalize dot->dash so the synthetic symbol
+    # matches the dash-form RobinhoodAdapter.refresh_positions keys positions by
+    # (RH's instruments endpoint returns "BRK-B", never "BRK.B"). Mirrors
+    # backend/broker_adapters/_symbols.py::normalize_broker_symbol — keep in sync.
+    # Without this a share-class adoption writes a dot-form WAL symbol the
+    # classifier can never match, so the position stays quarantined as external.
+    norm_symbol = args.ticker.strip().upper().replace(".", "-")
     row = {
         "id": cid,                          # primary key on LiveOrderWAL is the cid
         "client_order_id": cid,
         "broker_order_id": f"MIGRATED-{uuid.uuid4().hex[:12]}",
         "state": "filled",
-        "symbol": args.ticker.upper(),
+        "symbol": norm_symbol,
         "side": "BUY",
         "qty": float(args.qty),
         "notional": float(args.qty) * float(args.avg_price),
