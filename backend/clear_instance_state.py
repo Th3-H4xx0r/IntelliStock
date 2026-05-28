@@ -158,6 +158,12 @@ def _full_instance_targets(instance_id: str):
             ("instance_id", instance_id, "exact"),
             ("instance_id", f"{instance_id}|", "prefix"),
         ]),
+        # 2026-05-28: LiveBootAudit (one row per broker boot, id pattern
+        # "<instance>|<iso-timestamp>"; instance_id field also present).
+        ("LiveBootAudit", [
+            ("instance_id", instance_id, "exact"),
+            ("id", f"{instance_id}|", "prefix"),
+        ]),
     ]
 
 
