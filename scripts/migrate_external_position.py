@@ -23,6 +23,16 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+# Match backend/api/main.py: load .env so operator doesn't have to export by hand.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_BACKEND_DIR = os.path.join(_REPO_ROOT, "backend")
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(_BACKEND_DIR, ".env"))
+    _load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+except ImportError:
+    pass
+
 
 def _connect_db():
     from rethinkdb import RethinkDB

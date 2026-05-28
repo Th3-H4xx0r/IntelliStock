@@ -21,6 +21,19 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+# Load env (incl. INTELLISTOCK_CRED_KEY for credential decryption) from .env
+# files BEFORE the os.environ checks below. Mirrors backend/api/main.py:15-17
+# so the inspector uses the same key the broker daemon uses.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_BACKEND_DIR = os.path.join(_REPO_ROOT, "backend")
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(_BACKEND_DIR, ".env"))
+    _load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+except ImportError:
+    # python-dotenv not installed; operator must export the env var manually.
+    pass
+
 
 def _connect_db():
     from rethinkdb import RethinkDB
@@ -60,9 +73,37 @@ def _scan_wal_rows_for_instance(r, conn, cid_prefix: str, retention_days: int) -
     return out
 
 
+def _decrypt_or_passthrough(value):
+    """Decrypt a Fernet-encrypted secret_store value, or pass through if it's
+    plaintext (legacy). Mirrors backend/broker.py:_load_live_credentials_from_db
+    + _load_robinhood_extras_from_db which both call secret_store.decrypt
+    transparently. Without this, the inspector would feed encrypted ciphertext
+    to the broker as a bearer token and get a 401 JWT verification failed.
+    """
+    if value is None or value == "":
+        return value
+    # backend/ on sys.path was inserted in main()
+    from secret_store import decrypt
+    try:
+        return decrypt(value)
+    except Exception:
+        # If decrypt fails, fall back to passthrough (legacy plaintext rows).
+        # The broker itself does the same when the field has no fernet: tag.
+        return value
+
+
 def _fetch_broker_positions_and_cash(brokerage_row: dict):
     """Read-only broker call: positions + cash + open orders. Mirrors the
-    adapter's REST refresh path without booting the adapter."""
+    adapter's REST refresh path without booting the adapter.
+
+    IMPORTANT: BrokerageAccounts rows store Fernet-encrypted credentials per
+    backend/secret_store.py. broker.py decrypts them at boot via
+    _load_live_credentials_from_db (alpaca_key, alpaca_secret,
+    robinhood_access_token, robinhood_refresh_token) and
+    _load_robinhood_extras_from_db (robinhood_device_token). We replicate
+    that here so the broker API call uses the actual bearer token, not the
+    Fernet ciphertext. Requires INTELLISTOCK_CRED_KEY env to be set.
+    """
     btype = (brokerage_row.get("brokerage_type") or "").lower()
     if btype == "alpaca":
         try:
@@ -71,9 +112,12 @@ def _fetch_broker_positions_and_cash(brokerage_row: dict):
             raise SystemExit(
                 f"alpaca-py not installed; cannot inspect Alpaca broker state ({e})."
             )
+        # Decrypt Alpaca credentials (see broker.py:629-631)
+        _ak = _decrypt_or_passthrough(brokerage_row.get("alpaca_key"))
+        _as = _decrypt_or_passthrough(brokerage_row.get("alpaca_secret"))
         client = TradingClient(
-            api_key=brokerage_row.get("alpaca_key"),
-            secret_key=brokerage_row.get("alpaca_secret"),
+            api_key=_ak,
+            secret_key=_as,
             paper=bool(brokerage_row.get("alpaca_paper", True)),
         )
         positions = client.get_all_positions() or []
@@ -95,20 +139,30 @@ def _fetch_broker_positions_and_cash(brokerage_row: dict):
     if btype == "robinhood":
         # Lazy import via backend/ path. Operator must run with PYTHONPATH=backend.
         try:
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
             from robinhood_engine import RobinhoodClient, RobinhoodSessionState  # type: ignore
         except ImportError as e:
             raise SystemExit(
                 f"robinhood_engine import failed ({e}); run from repo root."
             )
+        # Decrypt RH credentials (see broker.py:644-645 + 530)
+        _access = _decrypt_or_passthrough(brokerage_row.get("robinhood_access_token"))
+        _refresh = _decrypt_or_passthrough(brokerage_row.get("robinhood_refresh_token"))
+        _device = _decrypt_or_passthrough(brokerage_row.get("robinhood_device_token"))
+        if not _access or not _refresh:
+            raise SystemExit(
+                "Robinhood access_token / refresh_token are empty after decrypt. "
+                "Either the brokerage row is missing tokens (re-link via UI), "
+                "or INTELLISTOCK_CRED_KEY is set incorrectly in this shell. "
+                "Export the same INTELLISTOCK_CRED_KEY the broker daemon uses."
+            )
         # Mirror backend/broker.py:_load_robinhood_extras_from_db
         state = RobinhoodSessionState(
-            access_token=brokerage_row.get("robinhood_access_token") or "",
-            refresh_token=brokerage_row.get("robinhood_refresh_token") or "",
+            access_token=_access,
+            refresh_token=_refresh,
             token_type="Bearer",
-            device_token=brokerage_row.get("robinhood_device_token") or None,
-            account_number=brokerage_row.get("robinhood_account_number") or None,
-            account_url=brokerage_row.get("robinhood_account_url") or None,
+            device_token=_device or None,
+            account_number=(brokerage_row.get("robinhood_account_number") or "").strip() or None,
+            account_url=(brokerage_row.get("robinhood_account_url") or "").strip() or None,
             obtained_at_epoch=int(brokerage_row.get("robinhood_obtained_at_epoch") or 0),
             expires_in=int(brokerage_row.get("robinhood_expires_in") or 0),
         )
@@ -145,6 +199,23 @@ def main():
     p.add_argument("--retention-days", type=int, default=180)
     args = p.parse_args()
 
+    # Make backend importable (for secret_store + robinhood_engine + classifier).
+    # Must happen BEFORE any decryption call.
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+
+    # The decrypt helper requires INTELLISTOCK_CRED_KEY; without it the broker
+    # tokens cannot be decrypted and any subsequent broker API call will 401.
+    if not os.environ.get("INTELLISTOCK_CRED_KEY"):
+        print(
+            "ERROR: INTELLISTOCK_CRED_KEY env var is not set. The brokerage credentials "
+            "are Fernet-encrypted in the DB and cannot be decrypted without it. "
+            "Export the same INTELLISTOCK_CRED_KEY the broker daemon uses, e.g.:\n"
+            "    export INTELLISTOCK_CRED_KEY=<base64-Fernet-key>\n"
+            "    RETHINKDB_HOST=REDACTED-IP python3 scripts/inspect_broker_state.py --instance main",
+            file=sys.stderr,
+        )
+        return 3
+
     try:
         r, conn = _connect_db()
     except Exception as e:
@@ -159,8 +230,6 @@ def main():
             print(f"ERROR: brokerage_id missing on Instances row '{args.instance}'", file=sys.stderr)
             return 2
 
-        # Make backend importable for the classifier
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
         from broker_adapters._classifier import classify_broker_positions, derive_cid_prefix
 
         cid_prefix = derive_cid_prefix(args.instance)
