@@ -5255,6 +5255,77 @@ elif mode == MODE_LIVE:
                     "Set RH_DRY_RUN=false to enable real-money trading.",
                     "yellow",
                 )
+
+        # ----- Clean-room mode resolution (2026-05-28) ---------------------
+        # Sources of truth, in precedence order:
+        #   1. env LIVE_CLEAN_ROOM_MODE (per-host force)
+        #   2. Instances.<id>.clean_room_mode (per-instance DB field)
+        #   3. default False (backward-compatible legacy behavior)
+        _instance_row_for_clean_room = {}
+        try:
+            _cr_conn = get_conn_retry(max_attempts=3, delay=1)
+            if _cr_conn is not None:
+                try:
+                    _instance_row_for_clean_room = (
+                        r.db("IntelliStock").table("Instances").get(str(instance_id)).run(_cr_conn)
+                        or {}
+                    )
+                finally:
+                    try:
+                        _cr_conn.close()
+                    except Exception:
+                        pass
+        except Exception as _e_inst_cr:
+            _log(f"[live_boot] could not read Instances row for clean_room resolution: {_e_inst_cr}", "yellow")
+
+        _env_cr = (os.environ.get("LIVE_CLEAN_ROOM_MODE", "") or "").strip().lower()
+        if _env_cr in ("1", "true", "yes", "on"):
+            _clean_room_mode = True
+        elif _env_cr in ("0", "false", "no", "off"):
+            _clean_room_mode = False
+        else:
+            _clean_room_mode = bool(_instance_row_for_clean_room.get("clean_room_mode", False))
+
+        # initial_value resolution: env > Instances row > None (let the
+        # adapter raise BrokerError under clean_room_mode if absent).
+        _env_iv = (os.environ.get("LIVE_INITIAL_VALUE", "") or "").strip()
+        _initial_value = None
+        if _env_iv:
+            try:
+                _initial_value = float(_env_iv)
+            except ValueError:
+                _initial_value = None
+        if _initial_value is None:
+            _iv_field = _instance_row_for_clean_room.get("initial_value")
+            if _iv_field is not None:
+                try:
+                    _initial_value = float(_iv_field)
+                except (TypeError, ValueError):
+                    _initial_value = None
+
+        # WAL retention window (days) used by the classifier.
+        try:
+            _clean_room_retention_days = int(
+                os.environ.get("LIVE_CLEAN_ROOM_WAL_RETENTION_DAYS", "180") or 180
+            )
+        except ValueError:
+            _clean_room_retention_days = 180
+
+        # cid prefix per broker_adapters/_client_order_id.py::_safe(instance, 8)
+        try:
+            from broker_adapters._classifier import derive_cid_prefix as _derive_cid_prefix
+            _cid_prefix = _derive_cid_prefix(str(instance_id))
+        except Exception:
+            _cid_prefix = None
+
+        if _clean_room_mode:
+            _log(
+                f"[live_boot] CLEAN_ROOM_MODE=true instance={instance_id} "
+                f"initial_value={_initial_value} retention_days={_clean_room_retention_days} "
+                f"cid_prefix={_cid_prefix!r}",
+                "yellow",
+            )
+
         try:
             live_adapter = _build_adapter(
                 broker_type=live_broker_type,
@@ -5273,6 +5344,14 @@ elif mode == MODE_LIVE:
                 rh_expires_in=_rh_expires_in,
                 rh_account_url=_rh_account_url,
                 rh_brokerage_id=live_brokerage_id,
+                # 2026-05-28 — clean-room mode threading. Backward-compatible:
+                # clean_room_mode defaults False; when False the adapter
+                # uses the legacy "adopt broker state at boot" behavior.
+                initial_value=_initial_value,
+                clean_room_mode=_clean_room_mode,
+                cid_prefix=_cid_prefix,
+                clean_room_retention_days=_clean_room_retention_days,
+                seed_trades_from_broker=(not _clean_room_mode),
             )
             live_adapter.start_trade_updates()
         except _BrokerError as _be:
@@ -5305,6 +5384,72 @@ elif mode == MODE_LIVE:
                 live_adapter.refresh_orders_today()
         except Exception as _e:
             _log(f"refresh_orders_today warning: {_e}", "yellow")
+
+        # ----- LiveBootAudit row (2026-05-28) ------------------------------
+        # One row per broker boot: forensic record of what the adapter
+        # adopted as strategy-owned vs quarantined as external. Non-fatal
+        # on failure (the live broker keeps running).
+        try:
+            from live_boot_audit import build_audit_row as _build_audit, persist_audit_row as _persist_audit
+            _ext_at_boot = dict(getattr(live_adapter, "_external_positions", {}) or {})
+            _audit_row = _build_audit(
+                instance_id=str(instance_id),
+                broker_type=str(live_broker_type or "unknown"),
+                mode=("clean_room" if _clean_room_mode else "legacy"),
+                broker_cash_at_boot=float(getattr(live_adapter, "_cash", 0.0) or 0.0),
+                broker_positions_total=(
+                    len(getattr(live_adapter, "_positions", {}) or {}) + len(_ext_at_boot)
+                ),
+                strategy_owned=dict(getattr(live_adapter, "_positions", {}) or {}),
+                external=_ext_at_boot,
+                initial_value=float(getattr(live_adapter, "_initial_value", 0.0) or 0.0),
+                initial_value_source=(
+                    "explicit" if _initial_value is not None
+                    else ("snapshot" if _clean_room_mode else "broker_equity")
+                ),
+                snapshot_loaded=False,  # set true once F1 snapshot hydrate completes (see below)
+                snapshot_keys=0,
+                trades_seeded=len(getattr(live_adapter, "_trades", []) or []),
+                trades_seeded_source=("wal" if _clean_room_mode else "broker_history"),
+                notes=[],
+            )
+            _audit_conn = get_conn_retry(max_attempts=3, delay=2)
+            if _audit_conn is not None:
+                try:
+                    _persist_audit(r=r, conn=_audit_conn, row=_audit_row)
+                except Exception as _e:
+                    _log(f"[live_boot] audit write failed (non-fatal): {_e}", "yellow")
+                finally:
+                    try:
+                        _audit_conn.close()
+                    except Exception:
+                        pass
+        except Exception as _e:
+            _log(f"[live_boot] audit module load failed (non-fatal): {_e}", "yellow")
+
+        # ----- External-positions alert (2026-05-28) -----------------------
+        _ext_now = dict(getattr(live_adapter, "_external_positions", {}) or {})
+        if _ext_now:
+            _ext_summary = ", ".join(
+                f"{t}={(v or {}).get('qty', 0):.4f}sh" for t, v in sorted(_ext_now.items())
+            )
+            _log(
+                f"[live_boot] EXTERNAL positions quarantined (NOT managed by strategy): {_ext_summary}",
+                "yellow",
+            )
+            try:
+                _alert_strategy_error(
+                    instance_id=str(instance_id),
+                    tag="external_positions_detected",
+                    message=(
+                        f"External (non-strategy) positions found at boot: {_ext_summary}. "
+                        "Strategy will NOT sell these. Run "
+                        "scripts/inspect_broker_state.py for details, or "
+                        "scripts/migrate_external_position.py to adopt one."
+                    ),
+                )
+            except Exception:
+                pass
 
         # 2026-04-23 F1 + F1b: strategy_cache boot sequence.
         #   F1 loads the persisted `_deployment_bar_index` /
