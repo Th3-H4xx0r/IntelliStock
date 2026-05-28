@@ -110,3 +110,16 @@ def test_inmemory_store_list_filled_for_prefix():
     rows = store.list_filled_for_prefix("main-")
     assert len(rows) == 1
     assert rows[0]["symbol"] == "TSLA"
+
+
+def test_base_adapter_has_external_positions_default():
+    """The ABC must declare _external_positions and a default
+    get_external_positions() that returns {}."""
+    from broker_adapters.base import BrokerAdapter
+    assert hasattr(BrokerAdapter, "get_external_positions"), \
+        "BrokerAdapter must expose get_external_positions()"
+    import inspect
+    method = inspect.getattr_static(BrokerAdapter, "get_external_positions")
+    assert method is not None
+    # _external_positions is an annotated class attribute (not in __dict__)
+    assert "_external_positions" in BrokerAdapter.__annotations__

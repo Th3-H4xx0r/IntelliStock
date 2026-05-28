@@ -79,6 +79,18 @@ class BrokerAdapter(ABC):
     _initial_value: float
     _cash: float
     _last_prices: dict[str, float]
+    # Populated only by adapters running in clean_room_mode. Quarantine
+    # for broker-side positions that lacked WAL provenance at boot — the
+    # strategy NEVER reads this. For operator visibility (audit + alerts).
+    _external_positions: dict[str, dict]
+
+    # --- External-position quarantine (clean-room mode) ---
+    def get_external_positions(self) -> dict[str, dict]:
+        """Return the quarantined external positions dict (empty if not
+        in clean_room_mode). Concrete adapters populate ``_external_positions``
+        during __init__ when ``clean_room_mode=True``; otherwise this stays
+        ``{}`` and the strategy sees no externals."""
+        return getattr(self, "_external_positions", {}) or {}
 
     # --- Order submission ---
     @abstractmethod
