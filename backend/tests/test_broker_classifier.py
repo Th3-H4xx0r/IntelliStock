@@ -123,3 +123,232 @@ def test_base_adapter_has_external_positions_default():
     assert method is not None
     # _external_positions is an annotated class attribute (not in __dict__)
     assert "_external_positions" in BrokerAdapter.__annotations__
+
+
+def _pos(symbol: str, qty: float, mv: float = 0.0):
+    """Helper: build a PositionDTO-shaped object for classifier tests."""
+    from broker_adapters.base import PositionDTO
+    return PositionDTO(symbol=symbol, qty=qty, avg_entry_price=0.0, market_value=mv)
+
+
+def _wal_row(cid: str, symbol: str, side: str, filled_qty: float,
+             filled_avg_price: float, ts_utc: datetime, state: str = "filled") -> dict:
+    return {
+        "client_order_id": cid,
+        "symbol": symbol,
+        "side": side,
+        "state": state,
+        "filled_qty": filled_qty,
+        "filled_avg_price": filled_avg_price,
+        "updated_at_utc": ts_utc.isoformat(),
+        "broker_order_id": f"bx-{cid}",
+    }
+
+
+def test_derive_cid_prefix_handles_special_chars():
+    """Mirrors broker_adapters/_client_order_id.py::_safe(instance, 8):
+    strip non-alphanumerics, then truncate to 8."""
+    from broker_adapters._classifier import derive_cid_prefix
+    assert derive_cid_prefix("main") == "main-"
+    # "nexus-live" -> "nexuslive" -> [:8] = "nexusliv"
+    assert derive_cid_prefix("nexus-live") == "nexusliv-"
+    # "nexus-testing" -> "nexustesting" -> [:8] = "nexustes"
+    assert derive_cid_prefix("nexus-testing") == "nexustes-"
+    assert derive_cid_prefix("") == "x-"
+    assert derive_cid_prefix("!!!") == "x-"
+
+
+def test_derive_cid_prefix_matches_actual_make_client_order_id():
+    """Cross-check that the prefix we derive actually matches what
+    make_client_order_id produces for the same instance id."""
+    from broker_adapters._classifier import derive_cid_prefix
+    from broker_adapters._client_order_id import make_client_order_id
+
+    cid = make_client_order_id(
+        instance_id="main", symbol="TSLA", bar_iso="2026-05-28T13:00:00", side="BUY", retry_n=0
+    )
+    prefix = derive_cid_prefix("main")
+    assert cid.startswith(prefix), f"cid {cid!r} should start with prefix {prefix!r}"
+
+
+def test_classifier_strategy_owned_match():
+    """Broker has TSLA 10sh; WAL has filled BUY 10sh with matching prefix -> strategy-owned."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [_wal_row("main-abc-0", "TSLA", "BUY", 10.0, 200.0, now - timedelta(days=8))]
+    owned, external, trades = classify_broker_positions(
+        positions=[_pos("TSLA", 10.0, mv=2200.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {"TSLA": 10.0}
+    assert external == {}
+    assert len(trades) == 1
+    assert trades[0]["ticker"] == "TSLA"
+    assert trades[0]["source"] == "wal"
+
+
+def test_classifier_external_no_wal_match():
+    """Broker has AAPL 5sh; WAL has no rows -> external."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    owned, external, trades = classify_broker_positions(
+        positions=[_pos("AAPL", 5.0, mv=920.0)],
+        wal_rows=[],
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {}
+    assert "AAPL" in external
+    assert external["AAPL"]["qty"] == 5.0
+    assert "no WAL trace" in external["AAPL"]["note"]
+    assert trades == []
+
+
+def test_classifier_cross_instance_cid_is_external():
+    """WAL has matching symbol but DIFFERENT instance's prefix -> external."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    # CID "other-xyz-0" does NOT start with "main-"
+    rows = [_wal_row("other-xyz-0", "TSLA", "BUY", 10.0, 200.0, now - timedelta(days=8))]
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("TSLA", 10.0, mv=2200.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {}
+    assert "TSLA" in external
+
+
+def test_classifier_partial_external_split():
+    """Broker shows 50sh; WAL implies only 30sh (10 BUY + 20 BUY) -> 30 owned + 20 external."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [
+        _wal_row("main-a-0", "NVDA", "BUY", 10.0, 180.0, now - timedelta(days=27)),
+        _wal_row("main-b-0", "NVDA", "BUY", 20.0, 200.0, now - timedelta(days=18)),
+    ]
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("NVDA", 50.0, mv=10000.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {"NVDA": 30.0}
+    assert "NVDA" in external
+    assert external["NVDA"]["qty"] == 20.0
+    assert "partial external" in external["NVDA"]["note"]
+
+
+def test_classifier_retention_window_excludes_old_buys():
+    """A BUY older than retention_days does NOT count toward strategy ownership."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [_wal_row("main-old-0", "AAPL", "BUY", 5.0, 180.0, now - timedelta(days=400))]
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("AAPL", 5.0, mv=920.0)],
+        wal_rows=rows,
+        instance_id="main",
+        retention_days=180,
+        now_utc=now,
+    )
+    assert owned == {}
+    assert "AAPL" in external
+
+
+def test_classifier_manual_sell_during_downtime():
+    """WAL says 10sh held; broker shows ZERO of that ticker -> not classified at all."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [_wal_row("main-old-0", "MSFT", "BUY", 10.0, 400.0, now - timedelta(days=5))]
+    # Broker shows AAPL (no MSFT)
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("AAPL", 5.0, mv=920.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    # AAPL has no WAL trace -> external; MSFT is absent from broker entirely
+    assert owned == {}
+    assert "AAPL" in external
+    assert "MSFT" not in owned and "MSFT" not in external
+
+
+def test_classifier_wal_implies_more_trusts_broker():
+    """WAL says 15sh held; broker shows 10sh (mid-stream manual partial sell)
+    -> owned == broker reality (10), no external row added."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [
+        _wal_row("main-a-0", "MSFT", "BUY", 10.0, 400.0, now - timedelta(days=10)),
+        _wal_row("main-b-0", "MSFT", "BUY", 5.0, 410.0, now - timedelta(days=8)),
+    ]
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("MSFT", 10.0, mv=4150.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {"MSFT": 10.0}
+    assert external == {}
+
+
+def test_classifier_handles_malformed_wal_row():
+    """A WAL row with None qty or missing side does not crash the classifier."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [
+        {  # malformed: filled_qty None
+            "client_order_id": "main-bad-0", "symbol": "TSLA", "side": "BUY",
+            "state": "filled", "filled_qty": None, "filled_avg_price": 200.0,
+            "updated_at_utc": (now - timedelta(days=1)).isoformat(),
+        },
+        {  # missing side
+            "client_order_id": "main-bad-1", "symbol": "TSLA",
+            "state": "filled", "filled_qty": 5.0, "filled_avg_price": 200.0,
+            "updated_at_utc": (now - timedelta(days=1)).isoformat(),
+        },
+        _wal_row("main-good-0", "TSLA", "BUY", 10.0, 200.0, now - timedelta(days=1)),
+    ]
+    owned, _, _ = classify_broker_positions(
+        positions=[_pos("TSLA", 10.0, mv=2200.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {"TSLA": 10.0}
+
+
+def test_classifier_sell_to_zero_then_rebuy_nets_correctly():
+    """BUY 10 -> SELL 10 -> BUY 5 should yield net 5 (broker shows 5)."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [
+        _wal_row("main-a-0", "TSLA", "BUY", 10.0, 200.0, now - timedelta(days=15)),
+        _wal_row("main-b-0", "TSLA", "SELL", 10.0, 220.0, now - timedelta(days=10)),
+        _wal_row("main-c-0", "TSLA", "BUY", 5.0, 215.0, now - timedelta(days=3)),
+    ]
+    owned, external, trades = classify_broker_positions(
+        positions=[_pos("TSLA", 5.0, mv=1075.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {"TSLA": 5.0}
+    assert external == {}
+    # All three trades reconstructed (oldest first)
+    assert len(trades) == 3
+    assert trades[0]["action"] == "BUY"
+    assert trades[1]["action"] == "SELL"
+    assert trades[2]["action"] == "BUY"
