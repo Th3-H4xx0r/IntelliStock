@@ -17,6 +17,7 @@ What this SCRIPT CLEARS (only for the chosen --instance, default 'main'):
 - GraphNexusDiscoverySnapshots: discovery snapshots
 - GraphNexusOutcomeSeries: outcome time-series
 - GraphNexusAnalystPanel: panel decisions
+- LiveBootAudit: per-instance boot audit rows
 
 What this SCRIPT does NOT touch:
 - LiveOrderWAL: globally-scoped (no instance_id field); operator clears
@@ -158,6 +159,12 @@ def _build_targets(instance_id: str):
         ("GraphNexusAnalystPanel", [
             ("instance_id", instance_id, "exact"),
             ("instance_id", f"{instance_id}|", "prefix"),
+        ]),
+        # 2026-05-28: LiveBootAudit (one row per broker boot, id pattern
+        # "<instance>|<iso-timestamp>"; instance_id field also present).
+        ("LiveBootAudit", [
+            ("instance_id", instance_id, "exact"),
+            ("id", f"{instance_id}|", "prefix"),
         ]),
     ]
 
