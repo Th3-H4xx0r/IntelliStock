@@ -187,6 +187,7 @@ def test_classifier_strategy_owned_match():
     assert external == {}
     assert len(trades) == 1
     assert trades[0]["ticker"] == "TSLA"
+    assert trades[0]["action"] == "buy"   # MUST be lowercase to satisfy strategy consumers
     assert trades[0]["source"] == "wal"
 
 
@@ -329,6 +330,93 @@ def test_classifier_handles_malformed_wal_row():
     assert owned == {"TSLA": 10.0}
 
 
+def test_classifier_skips_zero_qty_broker_position():
+    """Broker reports a zero-qty row (Alpaca occasionally does after liquidation).
+    Bug-sweep 2026-05-28: must not pollute _external_positions with empty rows."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("AAPL", 0.0, mv=0.0)],
+        wal_rows=[],
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {}
+    assert external == {}, "zero-qty broker position must not appear in either dict"
+
+
+def test_classifier_quarantines_short_position():
+    """Alpaca supports shorting; the long-only strategy must not adopt a short.
+    Bug-sweep 2026-05-28: negative broker_qty -> quarantined as external
+    regardless of WAL state."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    # WAL says we bought 5 of TSLA, but broker now shows -10 (short)
+    rows = [_wal_row("main-a-0", "TSLA", "BUY", 5.0, 200.0, now - timedelta(days=2))]
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("TSLA", -10.0, mv=-2200.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {}, "short position must not enter strategy-owned"
+    assert "TSLA" in external
+    assert external["TSLA"]["qty"] == -10.0
+    assert "short" in external["TSLA"]["note"]
+
+
+def test_classifier_tolerance_capped_at_half_share():
+    """Bug-sweep 2026-05-28: 1% relative tolerance is CAPPED at 0.5sh so a
+    50-share gap on a 9050-share position falls through to partial-external
+    (would previously have been silently swallowed as owned)."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    # WAL: 9000 shares; broker: 9050 shares; gap = 50sh
+    rows = [
+        _wal_row("main-a-0", "MEGA", "BUY", 9000.0, 10.0, now - timedelta(days=10)),
+    ]
+    owned, external, _ = classify_broker_positions(
+        positions=[_pos("MEGA", 9050.0, mv=90500.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    # 50sh > 0.5sh cap -> must split partial-external, NOT swallow.
+    assert owned == {"MEGA": 9000.0}
+    assert "MEGA" in external
+    assert external["MEGA"]["qty"] == 50.0
+
+
+def test_classifier_handles_tz_naive_wal_timestamp():
+    """Bug-sweep 2026-05-28: a tz-naive ISO string in updated_at_utc must
+    not crash the cutoff comparison ('can't compare offset-naive and
+    offset-aware datetimes'); it must be treated as UTC."""
+    from broker_adapters._classifier import classify_broker_positions
+
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [
+        {
+            "client_order_id": "main-tz-0",
+            "symbol": "TSLA", "side": "BUY", "state": "filled",
+            "filled_qty": 10.0, "filled_avg_price": 200.0,
+            # NO tz suffix
+            "updated_at_utc": "2026-05-20T13:00:00",
+        }
+    ]
+    # Should not raise; should classify as owned.
+    owned, _, trades = classify_broker_positions(
+        positions=[_pos("TSLA", 10.0, mv=2200.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {"TSLA": 10.0}
+    assert len(trades) == 1
+
+
 def test_classifier_sell_to_zero_then_rebuy_nets_correctly():
     """BUY 10 -> SELL 10 -> BUY 5 should yield net 5 (broker shows 5)."""
     from broker_adapters._classifier import classify_broker_positions
@@ -349,6 +437,6 @@ def test_classifier_sell_to_zero_then_rebuy_nets_correctly():
     assert external == {}
     # All three trades reconstructed (oldest first)
     assert len(trades) == 3
-    assert trades[0]["action"] == "BUY"
-    assert trades[1]["action"] == "SELL"
-    assert trades[2]["action"] == "BUY"
+    assert trades[0]["action"] == "buy"
+    assert trades[1]["action"] == "sell"
+    assert trades[2]["action"] == "buy"

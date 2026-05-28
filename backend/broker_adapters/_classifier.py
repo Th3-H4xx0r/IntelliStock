@@ -54,16 +54,23 @@ def derive_cid_prefix(instance_id: str) -> str:
 
 
 def _parse_iso(ts: Any) -> Optional[datetime]:
-    """Best-effort ISO timestamp parse. Returns None on failure."""
+    """Best-effort ISO timestamp parse. Returns None on failure.
+
+    Normalizes any tz-naive datetime to UTC so callers can safely compare
+    against a tz-aware cutoff (bug-sweep 2026-05-28: prior version crashed
+    with "can't compare offset-naive and offset-aware datetimes" if any
+    WAL row was ever written without a tz suffix).
+    """
     if ts is None:
         return None
     if isinstance(ts, datetime):
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     if isinstance(ts, str):
         try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     return None
 
 
@@ -147,7 +154,12 @@ def classify_broker_positions(
             price = 0.0
         trades.append({
             "ticker": symbol,
-            "action": side,
+            # Lowercase to match the convention every other _trades writer
+            # uses (alpaca.py:1396, robinhood.py:1640/2407, _seed_trades_from_broker).
+            # Strategy consumers do bare-equality `action == "buy"`
+            # (graph_nexus_analysis.py:16365 and others); uppercase would
+            # silently disable V32 risk pipeline for WAL-seeded positions.
+            "action": side.lower(),
             "shares": qty,
             "price": price,
             "timestamp": _parse_iso(row.get("updated_at_utc") or row.get("created_at_utc")) or now,
@@ -173,8 +185,30 @@ def classify_broker_positions(
         if not ticker:
             continue
 
+        # Defense-in-depth (bug-sweep 2026-05-28):
+        # - Zero-qty positions are not worth recording (broker occasionally
+        #   leaves a zero-qty row in the response window after liquidation).
+        # - Negative broker_qty (short position) is quarantined regardless of
+        #   WAL state. The graph_nexus strategy is long-only and has no
+        #   notion of managing a short; letting one through as strategy-owned
+        #   would corrupt sell-fraction math and get_positions_value.
+        if broker_qty == 0.0:
+            continue
+        if broker_qty < 0.0:
+            external[ticker] = {
+                "qty": broker_qty,
+                "market_value": mv,
+                "note": "short position quarantined (strategy is long-only)",
+                "first_seen_utc": now.isoformat(),
+            }
+            continue
+
         wal_qty = max(0.0, net_qty_by_ticker.get(ticker, 0.0))
-        tol = max(_QTY_ABS_TOL, _QTY_REL_TOL * broker_qty)
+        # Tolerance: ABS_TOL covers floating-point rounding; REL_TOL covers
+        # fractional-share precision but is CAPPED at 0.5 share absolute so a
+        # 1% gap on a $1M position (potentially $10K of unaccounted external)
+        # does not get silently swallowed as "owned" (bug-sweep 2026-05-28).
+        tol = max(_QTY_ABS_TOL, min(0.5, _QTY_REL_TOL * abs(broker_qty)))
 
         if wal_qty <= _QTY_ABS_TOL:
             # No WAL trace -> fully external
@@ -188,12 +222,14 @@ def classify_broker_positions(
             # Match within tolerance -> fully strategy-owned
             owned[ticker] = broker_qty
         elif wal_qty < broker_qty:
-            # WAL implies less than broker shows -> partial-external split
+            # WAL implies less than broker shows -> partial-external split.
+            # broker_qty > wal_qty > _QTY_ABS_TOL > 0 by this branch's guards,
+            # so the division is safe.
             owned[ticker] = wal_qty
             excess = broker_qty - wal_qty
             external[ticker] = {
                 "qty": excess,
-                "market_value": mv * (excess / broker_qty) if broker_qty > 0 else 0.0,
+                "market_value": mv * (excess / broker_qty),
                 "note": f"partial external: WAL implies {wal_qty:.4f}sh, broker shows {broker_qty:.4f}sh",
                 "first_seen_utc": now.isoformat(),
             }

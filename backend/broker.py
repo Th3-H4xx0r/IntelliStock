@@ -5288,11 +5288,14 @@ elif mode == MODE_LIVE:
 
         # initial_value resolution: env > Instances row > None (let the
         # adapter raise BrokerError under clean_room_mode if absent).
+        # Track which source set the value for the LiveBootAudit row.
         _env_iv = (os.environ.get("LIVE_INITIAL_VALUE", "") or "").strip()
         _initial_value = None
+        _initial_value_source = "none"
         if _env_iv:
             try:
                 _initial_value = float(_env_iv)
+                _initial_value_source = "env"
             except ValueError:
                 _initial_value = None
         if _initial_value is None:
@@ -5300,8 +5303,19 @@ elif mode == MODE_LIVE:
             if _iv_field is not None:
                 try:
                     _initial_value = float(_iv_field)
+                    _initial_value_source = "instance_row"
                 except (TypeError, ValueError):
                     _initial_value = None
+        # Bug-sweep 2026-05-28: reject NaN/inf which would slip past the
+        # adapter's <= 0 guard and propagate through portfolio math.
+        if _initial_value is not None and (
+            _initial_value != _initial_value  # NaN check
+            or _initial_value == float("inf") or _initial_value == float("-inf")
+        ):
+            _log(f"[live_boot] LIVE_INITIAL_VALUE / instance_row.initial_value is "
+                 f"non-finite ({_initial_value!r}); ignoring.", "yellow")
+            _initial_value = None
+            _initial_value_source = "none"
 
         # WAL retention window (days) used by the classifier.
         try:
@@ -5404,8 +5418,8 @@ elif mode == MODE_LIVE:
                 external=_ext_at_boot,
                 initial_value=float(getattr(live_adapter, "_initial_value", 0.0) or 0.0),
                 initial_value_source=(
-                    "explicit" if _initial_value is not None
-                    else ("snapshot" if _clean_room_mode else "broker_equity")
+                    _initial_value_source if _initial_value is not None
+                    else "broker_equity"
                 ),
                 snapshot_loaded=False,  # set true once F1 snapshot hydrate completes (see below)
                 snapshot_keys=0,
