@@ -109,6 +109,46 @@ class WALStore:
             rows = list(_r.db(DB_NAME).table(WAL_TABLE).run(c))
         return [r for r in rows if r.get("state") not in terminal]
 
+    def list_filled_for_prefix(
+        self,
+        cid_prefix: str,
+        since_utc: Optional[str] = None,
+    ) -> list[dict]:
+        """Return WAL rows whose client_order_id starts with ``cid_prefix``
+        and have a non-zero ``filled_qty``, optionally filtered by
+        ``updated_at_utc >= since_utc``.
+
+        Used by the broker-state classifier (broker_adapters/_classifier.py)
+        to determine which broker positions are strategy-owned at boot.
+
+        WAL is globally-scoped (no instance_id field); the cid prefix is the
+        ONLY signal that distinguishes one live instance's fills from
+        another's. For instance_id="main", the prefix is "main-" — see
+        broker_adapters/_client_order_id.py for the exact format.
+
+        NOTE: this scans the WAL table without a secondary index. Fine for
+        the few-thousand-row WAL typical of a single live instance over six
+        months. If we deploy many concurrent instances we should add an
+        index on client_order_id.
+        """
+        _assert_table_allowed(WAL_TABLE)
+        with _conn() as c:
+            rows = list(_r.db(DB_NAME).table(WAL_TABLE).run(c))
+        out: list[dict] = []
+        for row in rows:
+            cid = row.get("client_order_id") or ""
+            if not cid.startswith(cid_prefix):
+                continue
+            if not row.get("filled_qty"):
+                continue
+            if since_utc is not None:
+                ts = row.get("updated_at_utc") or row.get("created_at_utc")
+                if ts is not None and ts < since_utc:
+                    continue
+            row.pop("id", None)
+            out.append(row)
+        return out
+
 
 # ---- NexusRuntimeState accessors ----
 

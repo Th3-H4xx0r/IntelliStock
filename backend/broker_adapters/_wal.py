@@ -125,6 +125,25 @@ class LiveOrderWAL:
                 out.append(rec)
         return out
 
+    def list_filled_for_prefix(
+        self,
+        cid_prefix: str,
+        since_utc: Optional[str] = None,
+    ) -> list[dict]:
+        """Return WAL rows whose client_order_id starts with ``cid_prefix``
+        and have a non-zero ``filled_qty``.
+
+        Delegates to the underlying store. Returns empty list if the store
+        does not implement the query method (custom test stubs without it).
+
+        Used by the broker-state classifier at adapter boot under
+        ``clean_room_mode=True``.
+        """
+        fn = getattr(self._store, "list_filled_for_prefix", None)
+        if fn is None:
+            return []
+        return fn(cid_prefix, since_utc=since_utc)
+
 
 class InMemoryStore:
     """Test-only store."""
@@ -147,3 +166,25 @@ class InMemoryStore:
             dict(r) for r in self._rows.values()
             if r.get("state") not in TERMINAL_STATES
         ]
+
+    def list_filled_for_prefix(
+        self,
+        cid_prefix: str,
+        since_utc: Optional[str] = None,
+    ) -> list[dict]:
+        """Mirror of WALStore.list_filled_for_prefix for tests. Returns
+        rows whose client_order_id starts with ``cid_prefix`` and have
+        non-zero ``filled_qty``."""
+        out: list[dict] = []
+        for r in self._rows.values():
+            cid = r.get("client_order_id") or ""
+            if not cid.startswith(cid_prefix):
+                continue
+            if not r.get("filled_qty"):
+                continue
+            if since_utc is not None:
+                ts = r.get("updated_at_utc") or r.get("created_at_utc")
+                if ts is not None and ts < since_utc:
+                    continue
+            out.append(dict(r))
+        return out
