@@ -12969,6 +12969,23 @@ def _save_cached_articles(conn, date_key: str, articles: list, start_iso: str, e
         _log(f"Article cache save error: {e}", "yellow")
 
 
+def _invalidate_cached_articles(conn, date_key: str, *, sentiment_cache_scope_id: str = "") -> None:
+    """Delete the cached article doc for ``date_key`` (Scope D C1).
+
+    Used when a live first-touch ``force_fresh`` fetch returns EMPTY: the existing
+    doc may be a stale backtest-written entry, and leaving it lets the next
+    same-day live cycle (``force_fresh=False``) serve the backtest articles +
+    aggregated LLM sentiment (skipping the live LLM). Removing it forces the next
+    cycle to MISS the cache and re-fetch fresh. Best-effort."""
+    if conn is None:
+        return
+    try:
+        _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).delete().run(conn)
+        _log(f"Article cache INVALIDATE for {date_key} (force_fresh fetch returned empty)", "cyan")
+    except Exception as e:
+        _log(f"Article cache invalidate error: {e}", "yellow")
+
+
 def _fetch_alpaca_news_all(start_dt: datetime, end_dt: datetime, key: str, secret: str, limit: int = 50) -> list[dict]:
     """Fetch Alpaca news for all symbols without relying on the legacy news strategy module."""
     if not key or not secret:
@@ -13084,6 +13101,12 @@ def _fetch_articles_cached(
         start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         _save_cached_articles(conn, date_key, articles, start_iso, end_iso)
+    elif conn and force_fresh:
+        # Scope D C1: a live first-touch force_fresh fetch came back EMPTY. The
+        # existing cached doc may be a stale backtest entry; leaving it lets the
+        # next same-day cycle (force_fresh=False) serve it. Invalidate so the next
+        # cycle re-fetches fresh instead of adopting backtest articles+sentiment.
+        _invalidate_cached_articles(conn, date_key, sentiment_cache_scope_id=sentiment_cache_scope_id)
     return articles or [], False, None
 
 
@@ -17422,6 +17445,17 @@ def _score_momentum_rank(
         if closes[-1] < buy_price_floor:
             continue
         first_price = float(info.get("first_seen_price", 0) or 0)
+        if first_price <= 0:
+            # Scope D A2: re-establish the runup baseline from the current live
+            # bar when it is missing (e.g. stripped on a backtest->live boot, or
+            # an entry the builder created without a price). Scope C popped
+            # first_seen_price but nothing re-seeded it, permanently disabling
+            # the runup ceiling for every hydrated watchlist ticker. Persisting
+            # closes[-1] re-baselines from live bars (the strip's stated intent)
+            # without changing this cycle's score (closes[-1] > closes[-1]*runup
+            # is always False).
+            first_price = closes[-1]
+            info["first_seen_price"] = first_price
         if first_price > 0 and closes[-1] > first_price * max_runup:
             continue
         score = 0.0

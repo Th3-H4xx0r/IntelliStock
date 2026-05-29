@@ -147,7 +147,8 @@ def _order_style_for_now(price: float, side: str, qty: Optional[float], in_rth: 
     """
     is_fractional = qty is None or abs(float(qty) - round(float(qty))) > 1e-9
     if in_rth or is_fractional:
-        return {"order_type": "market", "limit_price": None, "extended_hours": False, "tif": "day"}
+        return {"order_type": "market", "limit_price": None, "extended_hours": False,
+                "tif": "day", "market_hours": "regular_hours"}
     try:
         buffer_pct = float(os.environ.get("RH_EXTENDED_HOURS_SLIPPAGE_PCT", "0.005"))
     except (TypeError, ValueError):
@@ -155,14 +156,38 @@ def _order_style_for_now(price: float, side: str, qty: Optional[float], in_rth: 
     limit = round(float(price) * (1.0 + buffer_pct if side == "buy" else 1.0 - buffer_pct), 2)
     if limit <= 0:
         limit = round(float(price), 2)
-    return {"order_type": "limit", "limit_price": limit, "extended_hours": True, "tif": "gfd"}
+    # 2-F / Scope D B1: market_hours is the field RH actually routes orders by.
+    # extended_hours=True WITHOUT market_hours="extended_hours" is routed to the
+    # regular session and will not fill off-hours.
+    return {"order_type": "limit", "limit_price": limit, "extended_hours": True,
+            "tif": "gfd", "market_hours": "extended_hours"}
+
+
+_RH_CALENDAR_FALLBACK_WARNED = False
 
 
 def _in_regular_hours(now_utc) -> bool:
     """RTH check that fails OPEN to regular-hours semantics if the calendar is
-    unavailable (so we never accidentally route a fractional order to ext-hours)."""
+    unavailable (so we never accidentally route a fractional order to ext-hours).
+
+    Scope D (half-day): warn ONCE if exchange_calendars is missing. The weekday
+    fallback hardcodes a 16:00 close and ignores holidays / half-day early
+    closes, so on an early-close day a post-13:00 ET order is mis-classified as
+    in-RTH (plain market) when the regular session is already closed.
+    """
+    global _RH_CALENDAR_FALLBACK_WARNED
     try:
-        from live_calendar import is_nyse_open
+        from live_calendar import is_nyse_open, _HAS_LIB
+        if not _HAS_LIB and not _RH_CALENDAR_FALLBACK_WARNED:
+            _RH_CALENDAR_FALLBACK_WARNED = True
+            _alog(
+                "BROKER",
+                "live_calendar: exchange_calendars NOT installed — RTH / "
+                "extended-hours order routing uses a weekday fallback that does "
+                "NOT honor holidays or half-day early closes. Install it "
+                "(`pip install exchange_calendars`) for correct off-hours routing.",
+                "red",
+            )
         return bool(is_nyse_open(now_utc))
     except Exception:
         return True
@@ -531,9 +556,15 @@ class RobinhoodAdapter(BrokerAdapter):
             from ._classifier import classify_broker_positions, derive_cid_prefix
             from datetime import datetime as _dt, timedelta as _td, timezone as _tz
             _now = _dt.now(_tz.utc)
-            _cutoff_iso = (_now - _td(days=self._clean_room_retention_days)).isoformat()
             _prefix = self._cid_prefix or derive_cid_prefix(self._instance_id)
-            _wal_rows = self._wal.list_filled_for_prefix(_prefix, since_utc=_cutoff_iso)
+            # Scope D D1: pass since_utc=None so the classifier receives ALL
+            # filled rows and applies retention itself (it computes its own cutoff
+            # and re-filters). The store-level since_utc pre-filter dropped rows
+            # older than the cutoff BEFORE the classifier could use them to tag an
+            # aged-out (beyond-retention) still-held position vs a never-seen one
+            # (2-C). The full-table scan cost is unchanged (the store scans all
+            # rows regardless; since_utc only trimmed the returned list).
+            _wal_rows = self._wal.list_filled_for_prefix(_prefix, since_utc=None)
             _broker_view = []
             for _sym, _qty in (self._positions or {}).items():
                 _broker_view.append({
@@ -1080,6 +1111,7 @@ class RobinhoodAdapter(BrokerAdapter):
         tif: str,
         extended_hours: bool,
         client_order_id: str,
+        market_hours: str = "regular_hours",
     ) -> OrderRef:
         """Serialized full-body submit. The HIGH-#6 agent finding noted
         that the previous implementation only held ``self._lock`` for tiny
@@ -1100,6 +1132,7 @@ class RobinhoodAdapter(BrokerAdapter):
                 symbol=symbol, side=side, qty=qty, notional=notional,
                 order_type=order_type, limit_price=limit_price, tif=tif,
                 extended_hours=extended_hours, client_order_id=client_order_id,
+                market_hours=market_hours,
             )
 
     def _submit_order_locked(
@@ -1114,6 +1147,7 @@ class RobinhoodAdapter(BrokerAdapter):
         tif: str,
         extended_hours: bool,
         client_order_id: str,
+        market_hours: str = "regular_hours",
     ) -> OrderRef:
         from robinhood_engine import RobinhoodAPIError
         # Bug-check fix #1 (BLOCKER): reject empty/whitespace cid. uuid5(NS, "")
@@ -1124,13 +1158,14 @@ class RobinhoodAdapter(BrokerAdapter):
                 "submit_order: client_order_id is required and must be non-empty "
                 "(deterministic ref_id derivation depends on it)."
             )
-        symbol = (symbol or "").strip().upper()
         # 2026-04-30 — agent MED #23: RH instruments endpoint accepts dash-
         # form tickers (BRK-A, BF-B) but rejects the dot-form (BRK.A).
         # Normalize once at adapter entry so every downstream call (instrument
         # lookup, ref_id, WAL, order POST, fill bookkeeping) uses the same
-        # symbol shape.
-        symbol = symbol.replace(".", "-")
+        # symbol shape. 2-D / Scope D C3: use the shared helper so the WAL write
+        # path and the classifier read path can't diverge.
+        from ._symbols import normalize_broker_symbol
+        symbol = normalize_broker_symbol(symbol)
         side_lc = (side or "").strip().lower()
         order_type_lc = (order_type or "market").strip().lower()
         ref_id = self._ref_id_from_cid(client_order_id)
@@ -1499,6 +1534,7 @@ class RobinhoodAdapter(BrokerAdapter):
                 limit_price=limit_price,
                 time_in_force=rh_tif,
                 extended_hours=bool(extended_hours),
+                market_hours=market_hours,
                 ref_id=ref_id,
             )
         except RobinhoodAPIError as e:
@@ -1591,6 +1627,7 @@ class RobinhoodAdapter(BrokerAdapter):
                         limit_price=limit_price,
                         time_in_force=rh_tif,
                         extended_hours=bool(extended_hours),
+                        market_hours=market_hours,
                         ref_id=ref_id,
                     )
                 except RobinhoodAPIError as e2:
@@ -2058,6 +2095,23 @@ class RobinhoodAdapter(BrokerAdapter):
             # fully-external (owned 0), partial-external (owned = broker - external),
             # fully-owned (external 0), and brand-new strategy buys (external 0 ->
             # full qty owned). Legacy (non-clean-room) path is byte-for-byte unchanged.
+            # 2-A (bug-sweep 2026-05-28): in clean_room_mode the boot-time
+            # classifier split broker positions into strategy-owned vs external
+            # (quarantined). A naive rebind to the full broker set here would
+            # silently RE-ADOPT the quarantined external shares on the warm-boot
+            # force probe (broker.py) and every post-fill refresh, defeating the
+            # split before the strategy even runs. Enforce the quarantine on every
+            # rebind: owned_qty = broker_qty - external_qty. This correctly handles
+            # fully-external (owned 0), partial-external (owned = broker - external),
+            # fully-owned (external 0), and brand-new strategy buys (external 0 ->
+            # full qty owned). Legacy (non-clean-room) path is byte-for-byte unchanged.
+            #
+            # NOTE (Scope D): a reconcile that anchored owned on self._positions was
+            # tried and REVERTED — RobinhoodAdapter._handle_order_transition does NOT
+            # update self._positions on live fills (only the RH_DRY_RUN path does), so
+            # anchoring on it stranded every post-boot real buy as external. The
+            # operator-partial-sell-of-an-external-lot edge (owned mis-charged) remains
+            # a known latent MEDIUM; the correct fix is RH fill-level position tracking.
             if self._clean_room_mode:
                 owned_new: dict[str, float] = {}
                 for _sym, _bqty in new_positions.items():
@@ -2762,6 +2816,7 @@ class RobinhoodAdapter(BrokerAdapter):
                 symbol=ticker, side="buy", qty=shares, notional=None,
                 order_type=style["order_type"], limit_price=style["limit_price"],
                 tif=style["tif"], extended_hours=style["extended_hours"],
+                market_hours=style["market_hours"],
                 client_order_id=cid,
             )
             return True
@@ -2778,6 +2833,7 @@ class RobinhoodAdapter(BrokerAdapter):
                 symbol=ticker, side="sell", qty=shares, notional=None,
                 order_type=style["order_type"], limit_price=style["limit_price"],
                 tif=style["tif"], extended_hours=style["extended_hours"],
+                market_hours=style["market_hours"],
                 client_order_id=cid,
             )
             return True
@@ -2821,6 +2877,7 @@ class RobinhoodAdapter(BrokerAdapter):
                 symbol=ticker, side="sell", qty=sell_qty, notional=None,
                 order_type=style["order_type"], limit_price=style["limit_price"],
                 tif=style["tif"], extended_hours=style["extended_hours"],
+                market_hours=style["market_hours"],
                 client_order_id=cid,
             )
             return True

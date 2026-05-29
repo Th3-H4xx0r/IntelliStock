@@ -72,6 +72,48 @@ def is_first_clean_room_boot(r: Any, conn: Any, instance_id: str) -> bool:
         return False
 
 
+def write_clean_room_cleanup_marker(r: Any, conn: Any, instance_id: str) -> bool:
+    """Write the dedicated 'cleanup-done' sentinel (Scope D A3).
+
+    Scope C gated the destructive first-clean-room cleanup's idempotency solely
+    on the forensic ``LiveBootAudit`` row, which is written AFTER ``_build_adapter``
+    (and after a ``sys.exit`` on adapter-build failure) on a SEPARATE connection.
+    A first-boot cleanup followed by an adapter-build failure left no marker, so
+    the next boot re-ran the destructive wipe (doom-loop on a stale token).
+
+    This writes a minimal sentinel on the SAME connection used for the cleanup,
+    immediately after it succeeds and BEFORE ``_build_adapter``. The sentinel is
+    a ``LiveBootAudit`` row with a FIXED id (``<instance>|cleanup-done``) and
+    ``mode="clean_room"`` so the existing :func:`is_first_clean_room_boot`
+    (which counts ``mode=="clean_room"`` rows) treats subsequent boots as
+    not-first regardless of whether the forensic row was ever written.
+
+    Best-effort: returns True on success, False on any failure (never raises).
+    """
+    if not instance_id:
+        return False
+    try:
+        from datetime import datetime, timezone
+        db = r.db(_DB_NAME)
+        try:
+            if _AUDIT_TABLE not in set(db.table_list().run(conn)):
+                db.table_create(_AUDIT_TABLE, primary_key="id").run(conn)
+        except Exception:
+            # Likely a create race with another worker; fall through to insert.
+            pass
+        row = {
+            "id": f"{instance_id}|cleanup-done",
+            "instance_id": str(instance_id),
+            "mode": "clean_room",
+            "marker": "cleanup-done",
+            "boot_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        db.table(_AUDIT_TABLE).insert(row, conflict="replace").run(conn)
+        return True
+    except Exception:
+        return False
+
+
 def rebaseline_clean_room_drawdown(cache: dict, live_equity: float) -> Optional[dict]:
     """Re-baseline a backtest-origin drawdown state to the live account (2-B).
 
@@ -101,6 +143,33 @@ def rebaseline_clean_room_drawdown(cache: dict, live_equity: float) -> Optional[
     }
     cache["_portfolio_drawdown_state"] = new_state
     return new_state
+
+
+def should_reset_backtest_state_on_boot(
+    snapshot_origin: Any,
+    is_first_clean_room_boot: bool,
+) -> bool:
+    """Gate the 2-B drawdown re-baseline and 2-E momentum strip (Scope D A1/A2).
+
+    Scope C ran both on EVERY clean-room boot (gated only on the persistent
+    ``clean_room_mode`` flag). After day 1 the daemon persists an
+    ``origin="live"`` snapshot whose ``_portfolio_drawdown_state`` carries the
+    LIVE high-water mark + an active drawdown halt, and whose
+    ``_momentum_watchlist`` carries LIVE first_seen_price baselines. Re-running
+    the reset on every restart silently cleared the live halt and wiped the
+    live peak — disabling real-money drawdown protection.
+
+    Reset (return True) only when the hydrated snapshot is backtest-origin:
+      - origin == "backtest"            -> True  (the day-1 backtest->live state)
+      - origin == "live"                -> False (NEVER reset live-accumulated state)
+      - unknown/blank origin (legacy)   -> True only on the genuine first boot
+    """
+    origin = (str(snapshot_origin) if snapshot_origin is not None else "").strip().lower()
+    if origin == "live":
+        return False
+    if origin == "backtest":
+        return True
+    return bool(is_first_clean_room_boot)
 
 
 def strip_stale_momentum_baseline(cache: dict) -> int:

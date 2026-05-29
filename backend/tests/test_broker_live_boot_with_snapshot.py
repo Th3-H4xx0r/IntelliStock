@@ -141,7 +141,7 @@ def test_live_boot_loads_snapshot_when_present(monkeypatch):
         {"_momentum_watchlist": ["AAPL"]}, "ok", {"end_date": _today_iso()}
     ))
     from backend import broker_snapshot_helpers as bsh
-    cache, reason, gap_dates = bsh._invoke_load_snapshot_with_gap(
+    cache, reason, gap_dates, _origin = bsh._invoke_load_snapshot_with_gap(
         conn=object(), r=object(),
         instance_id="main", strategy_name="graph_nexus_analysis",
         current_config_hash="abc", current_module_hash="mod",
@@ -158,7 +158,7 @@ def test_live_boot_returns_gap_dates_when_snapshot_partial(monkeypatch):
         {"k": 1}, "ok", {"end_date": three_days_ago}
     ))
     from backend import broker_snapshot_helpers as bsh
-    cache, reason, gap_dates = bsh._invoke_load_snapshot_with_gap(
+    cache, reason, gap_dates, _origin = bsh._invoke_load_snapshot_with_gap(
         conn=object(), r=object(),
         instance_id="main", strategy_name="graph_nexus_analysis",
         current_config_hash="abc", current_module_hash="mod",
@@ -177,7 +177,7 @@ def test_live_boot_falls_back_when_snapshot_missing(monkeypatch):
     """Snapshot not found -> cache=None, gap=None (signal full lookback)."""
     monkeypatch.setattr(scp, "load_with_fallback", lambda *a, **kw: (None, "no_match", None))
     from backend import broker_snapshot_helpers as bsh
-    cache, reason, gap_dates = bsh._invoke_load_snapshot_with_gap(
+    cache, reason, gap_dates, _origin = bsh._invoke_load_snapshot_with_gap(
         conn=object(), r=object(),
         instance_id="main", strategy_name="graph_nexus_analysis",
         current_config_hash="abc", current_module_hash="mod",
@@ -185,6 +185,36 @@ def test_live_boot_falls_back_when_snapshot_missing(monkeypatch):
     assert cache is None
     assert reason == "no_match"
     assert gap_dates is None
+
+
+def test_live_boot_returns_snapshot_origin(monkeypatch):
+    """Scope D A1: the loader surfaces the hydrated snapshot's origin so the
+    boot can gate the backtest-state re-baseline (a live-origin snapshot must
+    never be reset). 4th tuple element is the origin string."""
+    monkeypatch.setattr(scp, "load_with_fallback", lambda *a, **kw: (
+        {"k": 1}, "ok", {"end_date": _today_iso(), "origin": "live"}
+    ))
+    from backend import broker_snapshot_helpers as bsh
+    cache, reason, gap_dates, origin = bsh._invoke_load_snapshot_with_gap(
+        conn=object(), r=object(),
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        current_config_hash="abc", current_module_hash="mod",
+    )
+    assert reason == "ok"
+    assert origin == "live"
+
+
+def test_live_boot_origin_none_when_no_snapshot(monkeypatch):
+    """No snapshot -> origin is None (caller treats as unknown)."""
+    monkeypatch.setattr(scp, "load_with_fallback", lambda *a, **kw: (None, "no_match", None))
+    from backend import broker_snapshot_helpers as bsh
+    cache, reason, gap_dates, origin = bsh._invoke_load_snapshot_with_gap(
+        conn=object(), r=object(),
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        current_config_hash="abc", current_module_hash="mod",
+    )
+    assert cache is None
+    assert origin is None
 
 
 def test_live_runtime_save_passes_new_kwargs(monkeypatch):

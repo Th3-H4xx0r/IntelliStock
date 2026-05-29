@@ -32,6 +32,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from ._symbols import normalize_broker_symbol
+
 # Tolerance for qty matching when classifying. We use the LARGER of an
 # absolute float-epsilon and 1% of broker qty so fractional-share rounding
 # does not tip a fully-owned position into "partial external".
@@ -142,7 +144,7 @@ def classify_broker_positions(
             if (row.get("side") or "").upper() == "BUY" and row.get("symbol"):
                 try:
                     if float(row.get("filled_qty") or 0.0) > 0:
-                        aged_out_buy_tickers.add(row.get("symbol"))
+                        aged_out_buy_tickers.add(normalize_broker_symbol(row.get("symbol")))
                 except (TypeError, ValueError):
                     pass
             continue
@@ -164,7 +166,11 @@ def classify_broker_positions(
             continue
         if qty <= 0:
             continue
-        symbol = row.get("symbol")
+        # 2-D / Scope D C3: normalize dot->dash so a WAL symbol written in dot
+        # form (BRK.B) matches the dash-form key RH's instruments endpoint
+        # returns for the broker position (BRK-B). Read + write paths must agree
+        # or a share-class position stays quarantined as external (unsellable).
+        symbol = normalize_broker_symbol(row.get("symbol"))
         if not symbol:
             continue
 
@@ -205,6 +211,9 @@ def classify_broker_positions(
             ticker = getattr(pos, "symbol", None)
             broker_qty = float(getattr(pos, "qty", 0.0) or 0.0)
             mv = float(getattr(pos, "market_value", 0.0) or 0.0)
+        # 2-D / Scope D C3: normalize the broker symbol to the same dash form the
+        # WAL net is keyed by, so dot/dash share-class tickers reconcile.
+        ticker = normalize_broker_symbol(ticker)
         if not ticker:
             continue
 

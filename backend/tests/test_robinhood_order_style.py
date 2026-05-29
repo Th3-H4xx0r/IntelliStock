@@ -52,3 +52,30 @@ def test_offhours_notional_buy_stays_regular_market():
     s = _order_style_for_now(price=100.0, side="buy", qty=None, in_rth=False)
     assert s["order_type"] == "market"
     assert s["extended_hours"] is False
+
+
+# --- Scope D B1: market_hours is the field RH actually routes by ---------
+# Scope C set extended_hours=True but never set market_hours; the engine
+# defaults market_hours="regular_hours", so the off-hours limit was routed to
+# the REGULAR session and never filled off-hours. _order_style_for_now must now
+# also return market_hours, and the adapter must thread it to place_order_equity.
+
+
+def test_offhours_whole_share_sets_extended_market_hours():
+    from broker_adapters.robinhood import _order_style_for_now
+    s = _order_style_for_now(price=100.0, side="sell", qty=10.0, in_rth=False)
+    assert s["market_hours"] == "extended_hours"
+
+
+def test_rth_sets_regular_market_hours():
+    from broker_adapters.robinhood import _order_style_for_now
+    s = _order_style_for_now(price=100.0, side="buy", qty=10.0, in_rth=True)
+    assert s["market_hours"] == "regular_hours"
+
+
+def test_offhours_fractional_stays_regular_market_hours():
+    """RH rejects fractional ext-hours/limit -> fractional off-hours must keep
+    market_hours='regular_hours' to match the regular-market fallback."""
+    from broker_adapters.robinhood import _order_style_for_now
+    s = _order_style_for_now(price=100.0, side="sell", qty=1.7233, in_rth=False)
+    assert s["market_hours"] == "regular_hours"

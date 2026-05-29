@@ -152,10 +152,14 @@ def _invoke_load_snapshot_with_gap(
 ) -> tuple:
     """Call ``load_with_fallback`` and compute a gap-day list for shortened lookback.
 
-    Returns ``(cache_dict_or_None, reason, gap_dates_list_or_None)``:
+    Returns ``(cache_dict_or_None, reason, gap_dates_list_or_None, origin_or_None)``:
       - cache=None, gap_dates=None  -> snapshot not usable; caller runs FULL lookback.
       - cache=dict, gap_dates=[]    -> snapshot covers today; caller skips lookback.
       - cache=dict, gap_dates=[...] -> snapshot partial; caller runs lookback for those days.
+
+    ``origin`` is the loaded snapshot's origin ("backtest" / "live" / ""), used
+    by the boot to gate the 2-B drawdown re-baseline + 2-E momentum strip
+    (Scope D: never reset a live-origin snapshot). None when no snapshot loaded.
 
     Looks up ``load_with_fallback`` on the live module object (not as a
     re-imported local symbol) so the standard test pattern of
@@ -169,7 +173,7 @@ def _invoke_load_snapshot_with_gap(
             import strategy_cache_persistence as _scp  # type: ignore[no-redef]
     except Exception:
         # If the helper module isn't importable, treat as no match — caller falls back.
-        return None, "no_match", None
+        return None, "no_match", None, None
     try:
         cache, reason, meta = _scp.load_with_fallback(
             conn=conn,
@@ -181,9 +185,10 @@ def _invoke_load_snapshot_with_gap(
             staleness_days=staleness_days,
         )
     except Exception:
-        return None, "no_match", None
+        return None, "no_match", None, None
     if cache is None:
-        return None, reason, None
+        return None, reason, None, None
+    origin = (meta or {}).get("origin", "") if meta else ""
     try:
         import datetime as _dt
         end_date_str = (meta or {}).get("end_date", "") if meta else ""
@@ -195,10 +200,10 @@ def _invoke_load_snapshot_with_gap(
             if cursor.weekday() < 5:  # weekdays only; lookback skips holidays via data availability
                 gap_dates.append(cursor.isoformat())
             cursor += _dt.timedelta(days=1)
-        return cache, reason, gap_dates
+        return cache, reason, gap_dates, origin
     except Exception:
         # Bad date parse -> conservative: return cache but no gap (caller will skip lookback).
-        return cache, reason, []
+        return cache, reason, [], origin
 
 
 def _invoke_save_strategy_cache(

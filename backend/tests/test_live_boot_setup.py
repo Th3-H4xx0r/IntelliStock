@@ -197,3 +197,86 @@ def test_run_cleanup_catches_execute_failure():
     assert "error" in result
     assert "boom" in result["error"]
     assert result["total_deleted"] == 0
+
+
+# --------- should_reset_backtest_state_on_boot (Scope D A1/A2) ----------
+# Gates the 2-B drawdown re-baseline AND the 2-E momentum strip so they fire
+# only when the boot-hydrated state is BACKTEST-origin. A live-origin snapshot
+# carries live-accumulated drawdown/halt + first_seen_price and must NEVER be
+# reset (the Scope-C bug: it fired on every clean-room restart, silently
+# clearing an active drawdown halt and the live high-water mark).
+
+
+def test_should_reset_backtest_origin_resets():
+    from live_boot_setup import should_reset_backtest_state_on_boot
+    assert should_reset_backtest_state_on_boot("backtest", is_first_clean_room_boot=False) is True
+    assert should_reset_backtest_state_on_boot("backtest", is_first_clean_room_boot=True) is True
+
+
+def test_should_reset_live_origin_never_resets():
+    """A live-origin snapshot must NOT be reset, even on a (mis-detected) first boot."""
+    from live_boot_setup import should_reset_backtest_state_on_boot
+    assert should_reset_backtest_state_on_boot("live", is_first_clean_room_boot=True) is False
+    assert should_reset_backtest_state_on_boot("live", is_first_clean_room_boot=False) is False
+    # case / whitespace insensitive
+    assert should_reset_backtest_state_on_boot("  LIVE ", is_first_clean_room_boot=True) is False
+
+
+def test_should_reset_unknown_origin_only_on_first_boot():
+    """Legacy/blank-origin rows (no origin field): reset only on the genuine
+    first clean-room boot; on a restart, preserve whatever was hydrated."""
+    from live_boot_setup import should_reset_backtest_state_on_boot
+    for origin in (None, "", "   ", "legacy"):
+        assert should_reset_backtest_state_on_boot(origin, is_first_clean_room_boot=True) is True
+        assert should_reset_backtest_state_on_boot(origin, is_first_clean_room_boot=False) is False
+
+
+# --------- write_clean_room_cleanup_marker (Scope D A3) -----------------
+# Scope C gated the destructive first-boot cleanup's idempotency solely on the
+# forensic LiveBootAudit row, written AFTER _build_adapter (and after a sys.exit
+# on adapter-build failure) on a SEPARATE connection. A first-boot cleanup
+# followed by an adapter failure left no marker -> the next boot re-ran the wipe.
+# A3 writes a dedicated 'cleanup-done' sentinel on the SAME connection right
+# after cleanup, before _build_adapter.
+
+
+def test_write_cleanup_marker_inserts_clean_room_sentinel():
+    from live_boot_setup import write_clean_room_cleanup_marker
+    r = MagicMock()
+    db = MagicMock()
+    r.db.return_value = db
+    db.table_list.return_value.run.return_value = ["LiveBootAudit"]
+    tbl = MagicMock()
+    db.table.return_value = tbl
+    ok = write_clean_room_cleanup_marker(r, conn=MagicMock(), instance_id="main")
+    assert ok is True
+    args, kwargs = tbl.insert.call_args
+    row = args[0]
+    assert row["id"] == "main|cleanup-done"
+    assert row["mode"] == "clean_room"
+    assert row["instance_id"] == "main"
+    assert kwargs.get("conflict") == "replace"
+
+
+def test_write_cleanup_marker_makes_first_boot_false():
+    """The mode='clean_room' sentinel makes is_first_clean_room_boot False even
+    if the later forensic audit row never gets written."""
+    from live_boot_setup import is_first_clean_room_boot
+    r = _fake_r_for_first_boot(
+        audit_table_exists=True,
+        audit_rows_for_main=[{"instance_id": "main", "mode": "clean_room", "marker": "cleanup-done"}],
+    )
+    assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id="main") is False
+
+
+def test_write_cleanup_marker_empty_instance_id_is_noop():
+    from live_boot_setup import write_clean_room_cleanup_marker
+    assert write_clean_room_cleanup_marker(MagicMock(), MagicMock(), "") is False
+
+
+def test_write_cleanup_marker_swallows_db_error():
+    """Best-effort: a DB failure returns False, never raises into broker boot."""
+    from live_boot_setup import write_clean_room_cleanup_marker
+    r = MagicMock()
+    r.db.side_effect = RuntimeError("conn dropped")
+    assert write_clean_room_cleanup_marker(r, MagicMock(), "main") is False

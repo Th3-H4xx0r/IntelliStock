@@ -282,9 +282,11 @@ class AlpacaAdapter(BrokerAdapter):
             from ._classifier import classify_broker_positions, derive_cid_prefix
             from datetime import datetime as _dt, timedelta as _td, timezone as _tz
             _now = _dt.now(_tz.utc)
-            _cutoff_iso = (_now - _td(days=self._clean_room_retention_days)).isoformat()
             _prefix = self._cid_prefix or derive_cid_prefix(self._instance_id)
-            _wal_rows = self._wal.list_filled_for_prefix(_prefix, since_utc=_cutoff_iso)
+            # Scope D D1: since_utc=None so the classifier (which computes its own
+            # retention cutoff + re-filters) can see beyond-retention rows and tag
+            # aged-out still-held positions (2-C). Mirror of RobinhoodAdapter.
+            _wal_rows = self._wal.list_filled_for_prefix(_prefix, since_utc=None)
 
             # Convert the dict[ticker->qty] in self._positions into PositionDTO-like
             # entries for the classifier. Use _last_prices (seeded by refresh_positions)
@@ -1156,6 +1158,11 @@ class AlpacaAdapter(BrokerAdapter):
             # 2-A (bug-sweep 2026-05-28): enforce the clean-room quarantine on
             # every rebind so a forced refresh can't re-adopt external positions.
             # owned_qty = broker_qty - external_qty. Mirror of RobinhoodAdapter.
+            # 2-A (bug-sweep 2026-05-28): enforce the clean-room quarantine on
+            # every rebind so a forced refresh can't re-adopt external positions.
+            # owned_qty = broker_qty - external_qty. (Scope D: a reconcile that
+            # anchored on self._positions was reverted — see RobinhoodAdapter for
+            # the rationale; kept symmetric.)
             if self._clean_room_mode:
                 owned_new: dict[str, float] = {}
                 for _sym, _bqty in new_positions.items():

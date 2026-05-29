@@ -532,3 +532,22 @@ def test_classifier_sell_to_zero_then_rebuy_nets_correctly():
     assert trades[0]["action"] == "buy"
     assert trades[1]["action"] == "sell"
     assert trades[2]["action"] == "buy"
+
+
+def test_classifier_matches_dot_form_wal_to_dash_form_broker():
+    """Scope D C3: a dot-form WAL symbol (BRK.B) must match the dash-form broker
+    position (BRK-B) that RH's instruments endpoint returns. Without normalizing
+    BOTH read paths, a share-class position the strategy actually owns stays
+    quarantined as external (unsellable by the strategy)."""
+    from broker_adapters._classifier import classify_broker_positions
+    now = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    rows = [_wal_row("main-brkb-0", "BRK.B", "BUY", 4.0, 400.0, now - timedelta(days=5))]
+    owned, external, trades = classify_broker_positions(
+        positions=[_pos("BRK-B", 4.0, mv=1600.0)],
+        wal_rows=rows,
+        instance_id="main",
+        now_utc=now,
+    )
+    assert owned == {"BRK-B": 4.0}, f"dot-form WAL must match dash-form broker, got {owned}/{external}"
+    assert external == {}
+    assert trades and trades[0]["ticker"] == "BRK-B"

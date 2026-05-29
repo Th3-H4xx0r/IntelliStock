@@ -32,6 +32,43 @@ def _get_conn():
     return r, r.connect(host=host, port=port, timeout=10)
 
 
+def _persist_rh_refreshed_token(r, conn, brokerage_row: dict, client) -> bool:
+    """Write a kill-switch-refreshed Robinhood token back to the BrokerageAccounts
+    row (Scope D B2) so the DB token doesn't desync after the emergency refresh.
+
+    Best-effort: a write failure never blocks the cancel (the in-memory client
+    is already refreshed; worst case the next daemon boot refreshes again).
+    """
+    bid = (brokerage_row or {}).get("id")
+    if not bid:
+        return False
+    try:
+        try:
+            from secret_store import encrypt as _encrypt
+        except Exception:
+            _encrypt = lambda v: v  # noqa: E731 — plaintext fallback (no Fernet key)
+        st = getattr(client, "state", None)
+        access = getattr(st, "access_token", "") or ""
+        refresh_tok = getattr(st, "refresh_token", "") or ""
+        try:
+            enc_access = _encrypt(access)
+            enc_refresh = _encrypt(refresh_tok)
+        except RuntimeError:
+            enc_access, enc_refresh = access, refresh_tok
+        import time as _t
+        import datetime as _dt
+        r.db(DB_NAME).table("BrokerageAccounts").get(bid).update({
+            "robinhood_access_token": enc_access,
+            "robinhood_refresh_token": enc_refresh,
+            "robinhood_obtained_at_epoch": int(getattr(st, "obtained_at_epoch", 0) or int(_t.time())),
+            "robinhood_expires_in": int(getattr(st, "expires_in", 0) or 86400),
+            "last_refresh_at": _dt.datetime.utcnow().isoformat(),
+        }).run(conn)
+        return True
+    except Exception:
+        return False
+
+
 def halt_live_trading(
     reason: str = "manual halt",
     cancel_open_orders: bool = True,
@@ -146,20 +183,48 @@ def halt_live_trading(
                             expires_in=int(expires_in) if expires_in else None,
                         )
                         client = RobinhoodClient(state=state, timeout_sec=20)
-                        open_orders = client.list_orders(
-                            state="open",
-                            limit=500,
-                            account_number=account_number,
-                        ) or []
+
+                        # Scope D B2: the kill switch is most needed when the
+                        # daemon is DOWN — and if it's been down past the RH
+                        # access-token lifetime, the stored token is expired.
+                        # _request_json does NOT auto-refresh on 401, so list OR
+                        # cancel would silently 401 and leave real orders open.
+                        # Wrap EVERY RH call in a ONE-SHOT refresh+retry (covers
+                        # both list_orders and each cancel_order, since a 401 can
+                        # surface first on either) and persist the rotated token so
+                        # the DB doesn't desync. Single-shot so it cannot loop.
+                        _rh_refreshed = {"done": False}
+
+                        def _with_401_refresh(fn):
+                            try:
+                                return fn()
+                            except Exception as _e_rh:
+                                if (
+                                    int(getattr(_e_rh, "status_code", 0) or 0) == 401
+                                    and not _rh_refreshed["done"]
+                                    and callable(getattr(client, "refresh", None))
+                                ):
+                                    _rh_refreshed["done"] = True
+                                    client.refresh()
+                                    _persist_rh_refreshed_token(r, conn, b, client)
+                                    return fn()
+                                raise
+
+                        open_orders = _with_401_refresh(
+                            lambda: client.list_orders(
+                                state="open", limit=500, account_number=account_number,
+                            ) or []
+                        )
                         for o in open_orders:
                             oid = o.get("id")
                             cancel_url = o.get("cancel")
                             if not (oid or cancel_url):
                                 continue
                             try:
-                                ok = client.cancel_order(
-                                    cancel_url=cancel_url,
-                                    order_id=oid,
+                                ok = _with_401_refresh(
+                                    lambda: client.cancel_order(
+                                        cancel_url=cancel_url, order_id=oid,
+                                    )
                                 )
                                 if ok:
                                     summary["orders_canceled"] += 1

@@ -99,6 +99,133 @@ def test_robinhood_cancel_path_invokes_cancel_for_each_open_order(monkeypatch):
     assert summary["errors"] == [], summary["errors"]
 
 
+def test_robinhood_cancel_refreshes_on_stale_token_401(monkeypatch):
+    """Scope D B2: the kill switch is most needed when the daemon is DOWN — and
+    if it's been down past the ~24h RH access-token lifetime, the stored token is
+    expired. _request_json does NOT auto-refresh on 401, so the first list_orders
+    401s. The kill switch must refresh the token and retry, not silently leave
+    real orders open."""
+    import live_kill_switch as lks
+
+    rh_brokerage = {
+        "id": "rh-1",
+        "brokerage_type": "robinhood",
+        "robinhood_access_token": "<stale access>",
+        "robinhood_refresh_token": "<refresh>",
+        "robinhood_device_token": "<device>",
+        "robinhood_account_number": "REDACTED-ACCT",
+        "robinhood_account_url": "https://api.robinhood.com/accounts/REDACTED-ACCT/",
+        "robinhood_obtained_at_epoch": 1779000000,
+        "robinhood_expires_in": 2400000,
+    }
+    fake_r, fake_conn = _fake_r_with_brokerages([rh_brokerage])
+    monkeypatch.setattr(lks, "_get_conn", lambda: (fake_r, fake_conn))
+    monkeypatch.setitem(sys.modules, "secret_store", type(sys)("secret_store"))
+    sys.modules["secret_store"].decrypt = lambda v: v
+
+    fake_engine = type(sys)("robinhood_engine")
+
+    class _FakeState:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class _StaleTokenError(Exception):
+        def __init__(self, msg, status_code=None):
+            super().__init__(msg)
+            self.status_code = status_code
+
+    class _FakeClient:
+        def __init__(self, *, state, timeout_sec=20, **_):
+            self.state = state
+            self.refreshed = 0
+            self._list_calls = 0
+
+        def list_orders(self, *, state, limit, account_number):
+            self._list_calls += 1
+            if self.refreshed == 0:
+                raise _StaleTokenError("Unauthorized", status_code=401)
+            return [{"id": "ord-1", "cancel": "https://api.robinhood.com/orders/ord-1/cancel/"}]
+
+        def refresh(self):
+            self.refreshed += 1
+            self.state.access_token = "fresh"
+            return self.state
+
+        def cancel_order(self, *, cancel_url=None, order_id=None):
+            return True
+
+    fake_engine.RobinhoodSessionState = _FakeState
+    fake_engine.RobinhoodClient = _FakeClient
+    monkeypatch.setitem(sys.modules, "robinhood_engine", fake_engine)
+
+    fake_alerts = type(sys)("live_alerts")
+    fake_alerts.alert_halt = lambda **_: None
+    monkeypatch.setitem(sys.modules, "live_alerts", fake_alerts)
+
+    summary = lks.halt_live_trading(reason="emergency")
+    assert summary["orders_canceled"] == 1, f"expected refresh+retry to cancel the order, got {summary}"
+    assert summary["errors"] == [], summary["errors"]
+
+
+def test_robinhood_cancel_refreshes_on_stale_token_401_during_cancel(monkeypatch):
+    """Scope D B2 (bug-sweep): a 401 surfacing first on cancel_order (not just
+    list_orders) must ALSO trigger the one-shot refresh+retry, else a real order
+    is silently left open."""
+    import live_kill_switch as lks
+
+    rh_brokerage = {
+        "id": "rh-1", "brokerage_type": "robinhood",
+        "robinhood_access_token": "<stale>", "robinhood_refresh_token": "<refresh>",
+        "robinhood_device_token": "<device>", "robinhood_account_number": "REDACTED-ACCT",
+        "robinhood_account_url": "https://api.robinhood.com/accounts/REDACTED-ACCT/",
+        "robinhood_obtained_at_epoch": 1779000000, "robinhood_expires_in": 2400000,
+    }
+    fake_r, fake_conn = _fake_r_with_brokerages([rh_brokerage])
+    monkeypatch.setattr(lks, "_get_conn", lambda: (fake_r, fake_conn))
+    monkeypatch.setitem(sys.modules, "secret_store", type(sys)("secret_store"))
+    sys.modules["secret_store"].decrypt = lambda v: v
+
+    fake_engine = type(sys)("robinhood_engine")
+
+    class _FakeState:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class _StaleTokenError(Exception):
+        def __init__(self, msg, status_code=None):
+            super().__init__(msg)
+            self.status_code = status_code
+
+    class _FakeClient:
+        def __init__(self, *, state, timeout_sec=20, **_):
+            self.state = state
+            self.refreshed = 0
+
+        def list_orders(self, *, state, limit, account_number):
+            return [{"id": "ord-1", "cancel": "https://api.robinhood.com/orders/ord-1/cancel/"}]
+
+        def refresh(self):
+            self.refreshed += 1
+            self.state.access_token = "fresh"
+            return self.state
+
+        def cancel_order(self, *, cancel_url=None, order_id=None):
+            if self.refreshed == 0:
+                raise _StaleTokenError("Unauthorized", status_code=401)
+            return True
+
+    fake_engine.RobinhoodSessionState = _FakeState
+    fake_engine.RobinhoodClient = _FakeClient
+    monkeypatch.setitem(sys.modules, "robinhood_engine", fake_engine)
+    fake_alerts = type(sys)("live_alerts")
+    fake_alerts.alert_halt = lambda **_: None
+    monkeypatch.setitem(sys.modules, "live_alerts", fake_alerts)
+
+    summary = lks.halt_live_trading(reason="emergency")
+    assert summary["orders_canceled"] == 1, f"cancel 401 must refresh+retry, got {summary}"
+    assert summary["errors"] == [], summary["errors"]
+
+
 def test_robinhood_cancel_path_skips_when_creds_missing(monkeypatch):
     """A brokerage row with no decryptable RH tokens should be skipped
     with an error message, not crash."""

@@ -46,3 +46,48 @@ def test_force_fresh_bypasses_cache_and_nulls_sentiment(monkeypatch):
     assert from_cache is False
     assert sent is None
     assert arts and arts[0]["headline"] == "fresh-overnight"
+
+
+def test_force_fresh_empty_fetch_invalidates_stale_cache(monkeypatch):
+    """Scope D C1: if a first-touch force_fresh fetch returns EMPTY, the stale
+    (possibly backtest-written) cached doc must be INVALIDATED so a later same-day
+    live cycle (force_fresh=False) can't serve it. Scope C left the stale doc and
+    only re-saved on a non-empty fetch, so the backtest articles+sentiment leaked
+    into the next cycle."""
+    dt = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    g = _patch_news(monkeypatch, ["c1", "c2", "c3"], {"AAPL": 0.5}, [])  # fresh fetch empty
+    invalidated = []
+    monkeypatch.setattr(g, "_invalidate_cached_articles",
+                        lambda conn, dk, **k: invalidated.append(dk))
+    arts, from_cache, sent = g._fetch_articles_cached(
+        "2026-05-28", dt, dt, "k", "s", limit=30, min_articles=2, force_fresh=True,
+    )
+    assert arts == []
+    assert from_cache is False
+    assert invalidated == ["2026-05-28"], "stale cache must be invalidated on empty force_fresh"
+
+
+def test_force_fresh_nonempty_does_not_invalidate(monkeypatch):
+    """A non-empty force_fresh fetch overwrites the doc via save; no invalidate."""
+    dt = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    g = _patch_news(monkeypatch, ["c1"], {"AAPL": 0.5},
+                    [{"headline": "fresh", "created_at": "2026-05-28T08:00:00Z"}])
+    invalidated = []
+    monkeypatch.setattr(g, "_invalidate_cached_articles",
+                        lambda conn, dk, **k: invalidated.append(dk))
+    g._fetch_articles_cached("2026-05-28", dt, dt, "k", "s",
+                             limit=30, min_articles=2, force_fresh=True)
+    assert invalidated == []
+
+
+def test_non_force_fresh_empty_does_not_invalidate(monkeypatch):
+    """A normal (not force_fresh) empty fetch must NOT delete the cache — only the
+    force_fresh decontamination path invalidates."""
+    dt = datetime(2026, 5, 28, tzinfo=timezone.utc)
+    g = _patch_news(monkeypatch, None, None, [])  # no cache, empty fetch
+    invalidated = []
+    monkeypatch.setattr(g, "_invalidate_cached_articles",
+                        lambda conn, dk, **k: invalidated.append(dk))
+    g._fetch_articles_cached("2026-05-28", dt, dt, "k", "s",
+                             limit=30, min_articles=2, force_fresh=False)
+    assert invalidated == []

@@ -5332,6 +5332,11 @@ elif mode == MODE_LIVE:
         except Exception:
             _cid_prefix = None
 
+        # Scope D (A1/A2/A3): whether THIS boot is the genuine first clean-room
+        # boot. Captured in the cleanup block below and reused to gate the 2-B
+        # drawdown re-baseline + 2-E momentum strip so they never reset
+        # live-accumulated state on a restart. Default False = conservative.
+        _clean_room_first_boot = False
         if _clean_room_mode:
             _log(
                 f"[live_boot] CLEAN_ROOM_MODE=true instance={instance_id} "
@@ -5352,11 +5357,15 @@ elif mode == MODE_LIVE:
                 from live_boot_setup import (
                     is_first_clean_room_boot as _is_first_cr_boot,
                     run_first_clean_room_boot_cleanup as _run_cr_cleanup,
+                    write_clean_room_cleanup_marker as _write_cr_marker,
                 )
                 _setup_conn = get_conn_retry(max_attempts=3, delay=2)
                 if _setup_conn is not None:
                     try:
-                        if _is_first_cr_boot(r, _setup_conn, str(instance_id)):
+                        _clean_room_first_boot = bool(
+                            _is_first_cr_boot(r, _setup_conn, str(instance_id))
+                        )
+                        if _clean_room_first_boot:
                             _log(
                                 f"[live_boot] FIRST clean_room boot for {instance_id} "
                                 "— running auto-cleanup of per-instance operational state "
@@ -5376,6 +5385,38 @@ elif mode == MODE_LIVE:
                                     f"{_cleanup_result.get('total_deleted', 0)} rows deleted across "
                                     f"{len(_cleanup_result.get('tables') or [])} tables",
                                     "green",
+                                )
+                            # Scope D A3: write the cleanup-done sentinel NOW, on
+                            # this same connection, BEFORE _build_adapter — but ONLY
+                            # when the cleanup actually SUCCEEDED. Scope C relied on
+                            # the forensic LiveBootAudit row (written after
+                            # _build_adapter), so an adapter-build sys.exit left no
+                            # marker and the next boot re-ran the wipe. The sentinel
+                            # makes cleanup idempotent independent of the rest of
+                            # boot succeeding. Writing it on a FAILED/partial cleanup
+                            # would mark cleanup "done" and permanently suppress the
+                            # retry (is_first_clean_room_boot counts any clean_room
+                            # row) — leaving backtest-era state live. On error, leave
+                            # no marker so the next boot re-runs the idempotent wipe.
+                            if not _cleanup_result.get("error"):
+                                if _write_cr_marker(r, _setup_conn, str(instance_id)):
+                                    _log(
+                                        "[live_boot] cleanup-done sentinel written "
+                                        "(first-boot cleanup will not re-run).",
+                                        "green",
+                                    )
+                                else:
+                                    _log(
+                                        "[live_boot] WARNING: cleanup-done sentinel write "
+                                        "FAILED — if adapter build now fails, the next boot "
+                                        "could re-run the destructive cleanup.",
+                                        "red",
+                                    )
+                            else:
+                                _log(
+                                    "[live_boot] cleanup-done sentinel NOT written "
+                                    "(cleanup errored) — next boot will retry the wipe.",
+                                    "yellow",
                                 )
                     finally:
                         try:
@@ -5551,6 +5592,9 @@ elif mode == MODE_LIVE:
             # load path (gated on `_strategy_cache_loaded_from_db`).
             _nexus_name = "graph_nexus_analysis"
             _nexus_cache = _strategy_cache.setdefault(_nexus_name, {})
+            # Scope D (A1/A2): origin of the hydrated snapshot ("backtest" /
+            # "live" / ""), used to gate the 2-B re-baseline + 2-E strip.
+            _snap_origin = None
             if _boot_conn is not None:
                 try:
                     # Build config_hash + module_hash for the snapshot lookup
@@ -5571,7 +5615,7 @@ elif mode == MODE_LIVE:
                     })
                     _nexus_module_path = _resolve_nexus_module_path() or ""
                     _current_module_hash = _compute_module_hash(_nexus_module_path) if _nexus_module_path else "missing"
-                    _snap_cache, _snap_reason, _gap_dates = _invoke_load_snapshot_with_gap(
+                    _snap_cache, _snap_reason, _gap_dates, _snap_origin = _invoke_load_snapshot_with_gap(
                         conn=_boot_conn,
                         r=r,
                         instance_id=str(instance_id),
@@ -5586,17 +5630,6 @@ elif mode == MODE_LIVE:
                     )
                     if _snap_cache is not None:
                         _scp_merge_boot(_nexus_cache, _snap_cache)
-                        # 2-E (bug-sweep 2026-05-28): the momentum watchlist rides
-                        # the backtest snapshot; its first_seen_price baselines are
-                        # stale (possibly 120+ days old) and skew the runup buy-gate.
-                        # Strip them so they re-baseline from live bars.
-                        try:
-                            from live_boot_setup import strip_stale_momentum_baseline as _strip_mom
-                            _stripped = _strip_mom(_nexus_cache)
-                            if _stripped:
-                                _log(f"[snapshot] stripped stale first_seen_price from {_stripped} momentum entries", "cyan")
-                        except Exception as _mom_e:
-                            _log(f"[snapshot] momentum-baseline strip failed (non-fatal): {_mom_e}", "yellow")
                         _log(
                             f"[snapshot] hydrated {len(_snap_cache)} keys into _strategy_cache[{_nexus_name!r}] "
                             f"(bar_index={_nexus_cache.get('_deployment_bar_index')}, "
@@ -5632,6 +5665,29 @@ elif mode == MODE_LIVE:
                             )
                         # None signals "run full lookback" to the caller below.
                         globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = None
+                    # 2-E (Scope D A2): strip stale backtest first_seen_price from
+                    # the hydrated momentum watchlist so the runup baseline
+                    # re-establishes from live bars (the consumer re-seeds it on the
+                    # next score). Runs after EITHER load path. Gated like 2-B: ONLY
+                    # on a backtest-origin / first-boot hydrate — NEVER strip a
+                    # live-origin snapshot (Scope C re-stripped live baselines on
+                    # every restart, permanently disabling the runup ceiling).
+                    try:
+                        from live_boot_setup import (
+                            strip_stale_momentum_baseline as _strip_mom,
+                            should_reset_backtest_state_on_boot as _should_reset_bt2,
+                        )
+                        if _should_reset_bt2(_snap_origin, _clean_room_first_boot):
+                            _stripped = _strip_mom(_nexus_cache)
+                            if _stripped:
+                                _log(
+                                    f"[snapshot] stripped stale first_seen_price from "
+                                    f"{_stripped} momentum entries "
+                                    f"(origin={_snap_origin!r} first_boot={_clean_room_first_boot})",
+                                    "cyan",
+                                )
+                    except Exception as _mom_e:
+                        _log(f"[snapshot] momentum-baseline strip failed (non-fatal): {_mom_e}", "yellow")
                 finally:
                     try:
                         _boot_conn.close()
@@ -5869,12 +5925,29 @@ elif mode == MODE_LIVE:
             # own equity, not a historical backtest high-water mark.
             if _clean_room_mode:
                 try:
-                    from live_boot_setup import rebaseline_clean_room_drawdown as _rebaseline_dd
-                    _cur_eq = float(getattr(live_adapter, "_initial_value", 0.0) or 0.0)
-                    if _rebaseline_dd(_nexus_cache, _cur_eq) is not None:
+                    from live_boot_setup import (
+                        rebaseline_clean_room_drawdown as _rebaseline_dd,
+                        should_reset_backtest_state_on_boot as _should_reset_bt,
+                    )
+                    # Scope D A1: only re-baseline when the hydrated snapshot is
+                    # backtest-origin (or the genuine first clean-room boot).
+                    # NEVER reset a live-origin snapshot — Scope C fired this on
+                    # EVERY restart, silently clearing the live drawdown halt and
+                    # high-water mark on a real-money account.
+                    if _should_reset_bt(_snap_origin, _clean_room_first_boot):
+                        _cur_eq = float(getattr(live_adapter, "_initial_value", 0.0) or 0.0)
+                        if _rebaseline_dd(_nexus_cache, _cur_eq) is not None:
+                            _log(
+                                f"[live_boot] clean-room drawdown re-baselined to live "
+                                f"equity ${_cur_eq:,.2f} (cleared backtest-origin peak/halt; "
+                                f"origin={_snap_origin!r} first_boot={_clean_room_first_boot}).",
+                                "cyan",
+                            )
+                    else:
                         _log(
-                            f"[live_boot] clean-room drawdown re-baselined to live "
-                            f"equity ${_cur_eq:,.2f} (cleared backtest-origin peak/halt).",
+                            f"[live_boot] drawdown re-baseline SKIPPED — preserving "
+                            f"live-accumulated peak/halt (origin={_snap_origin!r} "
+                            f"first_boot={_clean_room_first_boot}).",
                             "cyan",
                         )
                 except Exception as _dd_e:

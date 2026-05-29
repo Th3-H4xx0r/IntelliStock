@@ -160,6 +160,39 @@ def test_default_weights_keys_collapse_safely_at_coarse_cadence():
     assert isinstance(scored, list)
 
 
+def test_scorer_reseeds_missing_first_seen_price_from_live_bar():
+    """Scope D A2: a watchlist entry whose first_seen_price was stripped on a
+    backtest->live boot must re-establish its runup baseline from the current
+    live bar. Scope C popped first_seen_price but nothing re-seeded it, so the
+    runup ceiling stayed permanently disabled for every hydrated ticker."""
+    cfg = {"_resolved_time_increment_sec": 3600}
+    bars = _build_synthetic_history(80, start_close=10.0)  # last close = 17.9
+    # 25 entries to clear min_watchlist; NONE carry first_seen_price (stripped).
+    watchlist = {f"T{i:02d}": {"first_seen_bar": 0} for i in range(25)}
+    cache = {"_overlay_bars_raw": {sym: bars for sym in watchlist}}
+    _score_momentum_rank(watchlist, cache, "2025-12-31", cfg)
+    last_close = bars[-1]["c"]
+    # Every eligible entry now carries a positive first_seen_price == its latest
+    # live close (the re-baseline), not 0/absent.
+    for sym, info in watchlist.items():
+        assert info.get("first_seen_price", 0) == last_close, (
+            f"{sym} first_seen_price not re-seeded from live bar"
+        )
+
+
+def test_scorer_does_not_overwrite_existing_first_seen_price():
+    """Re-seed must only fill a MISSING baseline; an existing first_seen_price
+    (live or otherwise) is preserved so the runup ceiling keeps measuring from
+    the true entry."""
+    cfg = {"_resolved_time_increment_sec": 3600}
+    bars = _build_synthetic_history(80, start_close=10.0)
+    watchlist = {f"T{i:02d}": {"first_seen_price": 11.0} for i in range(25)}
+    cache = {"_overlay_bars_raw": {sym: bars for sym in watchlist}}
+    _score_momentum_rank(watchlist, cache, "2025-12-31", cfg)
+    for sym, info in watchlist.items():
+        assert info["first_seen_price"] == 11.0
+
+
 def test_baseline_3600s_behavior_unchanged():
     """Backwards-compat: at the 3600s baseline cadence, the scorer
     must produce exactly the same ranking it did before the fix.

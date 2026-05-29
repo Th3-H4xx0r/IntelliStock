@@ -33,6 +33,11 @@ try:
 except ImportError:
     pass
 
+# 2-D / Scope D C3: import the SHARED symbol-normalizer so the synthetic WAL
+# symbol this script writes matches the dash-form the classifier reads.
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 
 def _connect_db():
     from rethinkdb import RethinkDB
@@ -69,11 +74,12 @@ def main():
     now = datetime.now(timezone.utc)
     # 2-D (bug-sweep 2026-05-28): normalize dot->dash so the synthetic symbol
     # matches the dash-form RobinhoodAdapter.refresh_positions keys positions by
-    # (RH's instruments endpoint returns "BRK-B", never "BRK.B"). Mirrors
-    # backend/broker_adapters/_symbols.py::normalize_broker_symbol — keep in sync.
-    # Without this a share-class adoption writes a dot-form WAL symbol the
-    # classifier can never match, so the position stays quarantined as external.
-    norm_symbol = args.ticker.strip().upper().replace(".", "-")
+    # (RH's instruments endpoint returns "BRK-B", never "BRK.B"). Scope D C3: use
+    # the SHARED helper (not an inline copy) so the write path and the classifier
+    # read path can't diverge. Without this a share-class adoption writes a
+    # dot-form WAL symbol the classifier can never match (stays external).
+    from broker_adapters._symbols import normalize_broker_symbol
+    norm_symbol = normalize_broker_symbol(args.ticker)
     row = {
         "id": cid,                          # primary key on LiveOrderWAL is the cid
         "client_order_id": cid,
