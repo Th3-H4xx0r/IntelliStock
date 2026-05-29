@@ -5605,6 +5605,34 @@ elif mode == MODE_LIVE:
                          if str((s or {}).get("strategy") or "").strip() == _nexus_name),
                         None,
                     )
+                    # Scope E (2026-05-29): on a LIVE boot this snapshot-load block
+                    # runs BEFORE the live strategy specs are loaded (~line 6034),
+                    # so `_run_once_specs` is still the empty default here and the
+                    # config_hash would be computed from {} — which never matches a
+                    # stored snapshot (reason=no_match), forcing a full re-lookback
+                    # on EVERY boot. Load the nexus config inline via the SAME
+                    # pipeline the live save-writer uses (DB load -> resolve model
+                    # refs -> apply live overrides) so the config_hash matches and
+                    # the snapshot/gap-fill path can hit. module_hash stays strict,
+                    # so a snapshot built on different code is still rejected.
+                    if _nexus_spec_for_load is None and mode != MODE_BACKTEST:
+                        try:
+                            _ehp_strats, _, _ = load_strategies_from_db()
+                            for _ehp_s in (_ehp_strats or []):
+                                if str(_ehp_s.get("strategy") or "").strip().lower() == _nexus_name:
+                                    _ehp_cfg = _ehp_s.get("config") or {}
+                                    try:
+                                        _ehp_conn = get_conn()
+                                        _ehp_cfg = resolve_model_refs_in_config(_ehp_conn, _ehp_cfg, force_refresh=True)
+                                        _ehp_conn.close()
+                                    except Exception:
+                                        pass
+                                    if mode == MODE_LIVE:
+                                        _ehp_cfg = _apply_live_overrides(_ehp_cfg)
+                                    _nexus_spec_for_load = {"strategy": _nexus_name, "config": _ehp_cfg}
+                                    break
+                        except Exception as _ehp_e:
+                            _log(f"[snapshot] config-hash spec preload failed (non-fatal): {_ehp_e}", "yellow")
                     _bt_cfg_load = (_nexus_spec_for_load or {}).get("config") or {}
                     _current_config_hash = _compute_config_hash({
                         "strategy_name": _nexus_name,
@@ -6688,8 +6716,16 @@ if mode == MODE_LIVE:
             _lb_caches = _run_live_historic_lookback(
                 _run_once_specs,
                 symbols,
-                key or os.environ.get("KEY", ""),
-                secret or os.environ.get("SECRET", ""),
+                # Scope E (2026-05-29): the LIVE historic lookback must fetch
+                # bars/news with the DATA-source brokerage creds (data_key/
+                # data_secret), NOT the trading creds (key/secret) — which for a
+                # Robinhood-trading instance are not valid Alpaca data creds AND
+                # are wiped to "" after the adapter build (~line 6007). Passing
+                # empty/trading creds let the stale doc-179 alpaca_key win and
+                # 401'd every data.alpaca.markets bars call (then fell back to RH).
+                # Mirrors the per-tick path's _strat_data_key (data_key or key).
+                data_key or key or os.environ.get("KEY", ""),
+                data_secret or secret or os.environ.get("SECRET", ""),
                 restrict_to_dates=_gap_for_lookback if _gap_for_lookback is not None else None,
             ) or {}
         # Seed the module-level _strategy_cache with whatever the prepass
