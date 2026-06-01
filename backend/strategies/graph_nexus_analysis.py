@@ -3510,6 +3510,39 @@ def _classify_company_article_chunk(
     return docs, [dict(trace)]
 
 
+def _macro_fields_have_signal(
+    route: str = "",
+    reason: str = "",
+    impact_strength: Any = 0.0,
+    macro_signal_type: str = "",
+    impact_direction: str = "",
+) -> bool:
+    """True if a macro-article classification carries any usable signal.
+
+    Used to detect genuine "skeleton" LLM output (article refs echoed back with
+    only default/empty fields) so it isn't cached as a real result. NOTE:
+    route="ignore" is a REAL verdict ("article is irrelevant"), NOT a skeleton —
+    counting it as signal lets it be cached so it isn't re-fetched and
+    re-classified every cycle. Only the default route ("" / "macro") with no
+    other populated field is a true skeleton. Single source of truth for both
+    the per-chunk check and the defense-in-depth pre-cache filter.
+    """
+    if (str(reason or "")).strip():
+        return True
+    try:
+        if float(impact_strength or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if (str(macro_signal_type or "")).strip() not in ("", "general"):
+        return True
+    if (str(impact_direction or "")).strip() not in ("", "neutral"):
+        return True
+    if (str(route or "")).strip() not in ("", "macro"):
+        return True
+    return False
+
+
 def _classify_macro_article_chunk(
     chunk: list[tuple[dict, str]],
     *,
@@ -3578,19 +3611,16 @@ def _classify_macro_article_chunk(
         )
     # Detect skeleton output — model returned refs but no actual classification data
     if raw is not None and hasattr(raw, "articles") and raw.articles:
-        def _macro_article_has_data(a: Any) -> bool:
-            if (getattr(a, "reason", "") or "").strip():
-                return True
-            if float(getattr(a, "impact_strength", 0) or 0) > 0:
-                return True
-            if (getattr(a, "macro_signal_type", "") or "").strip() not in ("", "general"):
-                return True
-            if (getattr(a, "impact_direction", "") or "").strip() not in ("", "neutral"):
-                return True
-            if (getattr(a, "route", "") or "").strip() not in ("", "macro", "ignore"):
-                return True
-            return False
-        _has_real_data = any(_macro_article_has_data(a) for a in raw.articles)
+        _has_real_data = any(
+            _macro_fields_have_signal(
+                route=getattr(a, "route", ""),
+                reason=getattr(a, "reason", ""),
+                impact_strength=getattr(a, "impact_strength", 0),
+                macro_signal_type=getattr(a, "macro_signal_type", ""),
+                impact_direction=getattr(a, "impact_direction", ""),
+            )
+            for a in raw.articles
+        )
         if not _has_real_data:
             _log(f"Macro article LLM returned skeleton output ({len(raw.articles)} refs, no data) — treating as failure", "yellow")
             raw = None
@@ -3965,11 +3995,13 @@ def _classify_macro_article_records(
     _pre_filter = len(docs_to_store)
     docs_to_store = [
         d for d in docs_to_store
-        if (d.get("reason") or "").strip()
-        or float(d.get("impact_strength", 0) or 0) > 0
-        or (d.get("macro_signal_type") or "") not in ("", "general")
-        or (d.get("impact_direction") or "") not in ("", "neutral")
-        or (d.get("route") or "") not in ("", "macro", "ignore")
+        if _macro_fields_have_signal(
+            route=d.get("route", ""),
+            reason=d.get("reason", ""),
+            impact_strength=d.get("impact_strength", 0),
+            macro_signal_type=d.get("macro_signal_type", ""),
+            impact_direction=d.get("impact_direction", ""),
+        )
     ]
     _n_macro_skipped = _pre_filter - len(docs_to_store)
     _store_llm_cache_rows(conn, NEXUS_NEWS_LLM_MACRO_TABLE, docs_to_store)
