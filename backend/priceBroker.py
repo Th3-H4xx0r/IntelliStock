@@ -103,6 +103,7 @@ config_doc_feed.start()
 
 # Robinhood API via robinhood_engine (public market data; no auth required)
 from robinhood_engine import instruments_batch, quotes_batch, price_from_quote, BATCH_SIZE
+from robinhood_data_policy import robinhood_data_fallback_allowed
 
 # Main thread: poll Robinhood every minute (batch) and write to RethinkDB
 intellistock_logger.log("Opening RethinkDB connection for LivePrices / PriceHistory.", "white", service="PriceBroker")
@@ -113,8 +114,23 @@ symbols = [t[2:] if t.startswith("T.") else t for t in tickers]
 symbol_to_ticker = {sym.upper(): tickers[i] for i, sym in enumerate(symbols)}
 
 _first_run = True
+_data_off_logged = False
 
 while True:
+    # Kill switch: this poller ONLY exists to hit Robinhood's public market-data
+    # endpoints. When the Robinhood data fallback is disabled (env
+    # ROBINHOOD_DATA_FALLBACK off), pause polling entirely so the server IP stops
+    # touching Robinhood — independent of any trading instance.
+    if not robinhood_data_fallback_allowed("robinhood"):
+        if not _data_off_logged:
+            intellistock_logger.log(
+                "Robinhood data fallback disabled (ROBINHOOD_DATA_FALLBACK off); pausing Robinhood polling.",
+                "yellow", service="PriceBroker")
+            _data_off_logged = True
+        time.sleep(POLL_INTERVAL_SEC)
+        continue
+    _data_off_logged = False
+
     now = datetime.now(timezone.utc)
     bucket = now.strftime("%Y-%m-%dT%H:%M")
     storage_ts = bucket + ":00.000Z"
