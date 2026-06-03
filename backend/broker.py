@@ -25,6 +25,7 @@ from portfolio_emulator import PortfolioEmulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason
+from robinhood_data_policy import robinhood_data_fallback_allowed
 
 try:
     from llm_telemetry import llm_call_context as telemetry_llm_call_context
@@ -343,7 +344,8 @@ def _bounded_adapter_call(name: str, fn, timeout: float = 12.0):
             pass
         global _snap_last_diagnostic_epoch
         _now = time.time()
-        if _now - _snap_last_diagnostic_epoch > _RH_DIAGNOSTIC_INTERVAL_SEC:
+        if (_now - _snap_last_diagnostic_epoch > _RH_DIAGNOSTIC_INTERVAL_SEC
+                and robinhood_data_fallback_allowed(live_broker_type)):
             try:
                 _diagnose_rh_network()
             except Exception:
@@ -1329,7 +1331,7 @@ def fetch_alpaca_historical_bars(
                     # R13.1: strategy-config opt-in for backtest RH fallback
                     # via allow_backtest_rh_fallback kwarg. When the strategy
                     # doesn't pass it (default False), backtest stays pure.
-                    _should_fallback = (mode != MODE_BACKTEST) or bool(locals().get("allow_backtest_rh_fallback", False))
+                    _should_fallback = (mode != MODE_BACKTEST and robinhood_data_fallback_allowed(live_broker_type)) or bool(locals().get("allow_backtest_rh_fallback", False))
                     if _should_fallback:
                         _status_code = None
                         try:
@@ -2202,6 +2204,11 @@ def _fetch_price_for_symbol(symbol: str, current_time, key=None, secret=None, fe
                     return _yp
             except Exception:
                 pass
+            # Robinhood data fallback is gated: only when Robinhood is the trading
+            # broker (a non-RH instance, e.g. Alpaca, must NEVER call Robinhood from
+            # the server IP). yfinance above still runs for every caller.
+            if not robinhood_data_fallback_allowed(live_broker_type):
+                return None
             try:
                 from robinhood_engine import get_price_history as _rh_ph
                 import datetime as _dt2
@@ -2289,7 +2296,11 @@ def _fetch_price_with_fallback(symbol: str, current_time, key: str = "", secret:
         if log_fn:
             log_fn("[Pending] Fetched price %s=%.2f via yfinance fallback" % (symbol, price), "cyan")
         return price
-    # yfinance also failed — try Robinhood public API (no auth needed)
+    # yfinance also failed — try Robinhood public API (no auth needed) — but only
+    # when Robinhood is the trading broker (a non-RH instance must not call
+    # Robinhood from the server IP).
+    if not robinhood_data_fallback_allowed(live_broker_type):
+        return None
     try:
         import datetime as _dt
         import math as _math
@@ -3288,7 +3299,7 @@ def _fetch_daily_close_prices(symbols, start_date, end_date, alpaca_key, alpaca_
         # Mirrors the fetch_alpaca_historical_bars RH fallback policy so live
         # lookback's daily-close prefetch covers SIP-only / delisted / IEX-
         # restricted tickers without operator intervention.
-        if _alpaca_auth_failed and not collected:
+        if _alpaca_auth_failed and not collected and robinhood_data_fallback_allowed(live_broker_type):
             try:
                 from robinhood_engine import get_price_history as _rh_ph
                 df = _rh_ph(sym, interval="day", span="year")
@@ -7382,7 +7393,12 @@ while not shutdown_requested:
                 prices = _get_prices_at_time(data, symbols, current_time)
                 price_history = get_price_history_up_to_current(data, symbols_for_data, current_time)
         else:
-            prices = get_live_prices(symbols)
+            # get_live_prices() hits Robinhood's batch-quotes endpoint. Only call it
+            # when Robinhood is the trading broker — a non-RH (e.g. Alpaca) instance
+            # must NOT call Robinhood from the server IP. Held-position prices are
+            # backfilled by _ensure_prices_include_positions (Alpaca/yfinance) and the
+            # per-symbol fetchers + pre-submit quote refresh cover the rest.
+            prices = get_live_prices(symbols) if robinhood_data_fallback_allowed(live_broker_type) else {}
             price_history = None
 
         # Backtest: every bar, execute any pending future trades for TODAY before running strategies.
