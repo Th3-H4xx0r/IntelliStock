@@ -182,10 +182,15 @@ SUPPLY_CHAIN_MIN_CONFIDENCE     = float(os.environ.get("GRAPH_NEXUS_SUPPLY_CHAIN
 # External data sources — all free
 BEA_API_KEY           = os.environ.get("BEA_API_KEY", "").strip()           # free at apps.bea.gov/API/signup
 GLEIF_MAX_COMPANIES   = int(os.environ.get("GLEIF_MAX_COMPANIES", "10000"))    # GLEIF API calls per run
-GLEIF_MAX_REQUESTS_PER_MIN = max(1, int(os.environ.get("GLEIF_MAX_REQUESTS_PER_MIN", "40")))
+GLEIF_MAX_REQUESTS_PER_MIN = max(1, int(os.environ.get("GLEIF_MAX_REQUESTS_PER_MIN", "60")))  # within GLEIF's observed safe ceiling; the parallel cache-warm keeps this saturated
 GLEIF_COOLDOWN_EVERY  = int(os.environ.get("GLEIF_COOLDOWN_EVERY", "100"))    # pause every N companies to avoid 429
 GLEIF_COOLDOWN_SECONDS = int(os.environ.get("GLEIF_COOLDOWN_SECONDS", "60"))  # 1 min pause when cooldown triggers
-GLEIF_REQUEST_DELAY = float(os.environ.get("GLEIF_REQUEST_DELAY", "1.0"))
+GLEIF_REQUEST_DELAY = float(os.environ.get("GLEIF_REQUEST_DELAY", "0.0"))     # 0 => the per-min rate cap is the sole limiter
+# Phase 6 cache-warm concurrency. Per-company GLEIF I/O is disk-cache-backed (read-first),
+# so warm those caches with N threads through the SAME thread-safe rate gate, then the
+# existing sequential resolve loop runs from warm cache. Workers do ONLY cached network I/O
+# and mutate nothing shared (no Neo4j writes off the main thread). Set 1 to disable.
+GLEIF_PREFETCH_WORKERS = max(1, min(12, int(os.environ.get("GLEIF_PREFETCH_WORKERS", "6"))))
 GLEIF_SEARCH_CACHE_VERSION = max(1, int(os.environ.get("GRAPH_NEXUS_GLEIF_SEARCH_CACHE_VERSION", "2")))
 PHASE6_EX21_MAX_FILINGS_PER_COMPANY = max(1, int(os.environ.get("PHASE6_EX21_MAX_FILINGS_PER_COMPANY", "12")))
 PHASE6_EX21_LOOKBACK_DAYS = max(365, int(os.environ.get("PHASE6_EX21_LOOKBACK_DAYS", "3650")))
@@ -213,7 +218,20 @@ PHASE12_ETF_LIST_CACHE_VERSION = max(3, int(os.environ.get("PHASE12_ETF_LIST_CAC
 GLEIF_SKIP_HEALTHY_COOLDOWN = os.environ.get(
     "GLEIF_SKIP_HEALTHY_COOLDOWN", "true"
 ).strip().lower() in ("1", "true", "yes")
-USASPENDING_MAX_ROWS  = int(os.environ.get("USASPENDING_MAX_ROWS", "500000"))  # cursor pagination bypasses 50k offset limit
+USASPENDING_MAX_ROWS  = int(os.environ.get("USASPENDING_MAX_ROWS", "600000"))  # GLOBAL ceiling across ALL windows (cursor pagination bypasses 50k offset limit)
+# Per-window cap. The fetch is split into N 90d windows; previously the GLOBAL cap was
+# checked inside every window, so window 1 (the OLDEST quarter) saturated it and windows
+# 2..N never ran — silently dropping the entire recent contract history. Distribute the
+# budget instead: each window pulls up to this many awards (sorted by Award Amount desc,
+# i.e. the most material contracts), so all windows run and 13*40k ~= prior total volume
+# (so runtime is unchanged) while covering the full ~3.25y span. Env-tunable.
+USASPENDING_MAX_ROWS_PER_WINDOW = max(
+    1, int(os.environ.get("USASPENDING_MAX_ROWS_PER_WINDOW", "40000"))
+)
+# Per-request retry: more attempts + capped exponential backoff so transient 500s /
+# RemoteDisconnected bursts don't silently drop a page of awards.
+USASPENDING_REQUEST_MAX_ATTEMPTS = max(3, int(os.environ.get("USASPENDING_REQUEST_MAX_ATTEMPTS", "4")))
+USASPENDING_REQUEST_BACKOFF_CAP_SEC = max(5, int(os.environ.get("USASPENDING_REQUEST_BACKOFF_CAP_SEC", "60")))
 USASPENDING_BREAK_EVERY = int(os.environ.get("USASPENDING_BREAK_EVERY", "3500"))   # pause for cooldown every N rows to avoid rate limits
 USASPENDING_BREAK_SECONDS = int(os.environ.get("USASPENDING_BREAK_SECONDS", "5"))  # 5s pause when cooldown triggers
 USASPENDING_REQUEST_WINDOW_SECONDS = max(
@@ -3405,10 +3423,23 @@ def _nexus_read_cached_json(path: str, max_age_sec: int) -> dict | list | None:
 
 
 def _nexus_write_cached_json(path: str, data: dict | list) -> None:
-    """Write JSON to cache file."""
+    """Write JSON to cache file atomically (temp file + os.replace) so concurrent writers
+    — e.g. the Phase 6 GLEIF parallel cache-warm hitting the same path for a duplicate name
+    or shared LEI — can't produce a torn/partial file, and concurrent readers see only the
+    old or new complete file."""
     import json
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=0)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=0)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        raise
 
 
 def _nexus_read_cached_file(path: str, max_age_sec: int) -> bytes | None:
@@ -6316,7 +6347,7 @@ def _gleif_http_session():
 
         session = requests.Session()
         session.headers.update({"Accept": "application/json"})
-        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=2, max_retries=0)
+        adapter = HTTPAdapter(pool_connections=GLEIF_PREFETCH_WORKERS, pool_maxsize=GLEIF_PREFETCH_WORKERS, max_retries=0)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         _GLEIF_HTTP_SESSION[0] = session
@@ -9512,6 +9543,60 @@ def phase6_gleif_hierarchy(session):
             gleif_no_parent_data_count += 1
         return True
 
+    # ── Concurrent cache-warm (safe speedup) ──────────────────────────────────────────────
+    # The per-company GLEIF I/O below (LEI search, relationships, subsidiary-candidate search)
+    # is disk-cache-backed and read-cache-first. Warm those caches in parallel through the
+    # SAME thread-safe rate gate, then the sequential resolve loop runs from warm cache
+    # (near-instant, no network) with ZERO change to its stateful, graph-writing logic.
+    # Workers do ONLY cached network I/O and mutate nothing shared — no Neo4j writes occur
+    # off the main thread, so ordering/dedup/parent-resolution are byte-for-byte unchanged.
+    if GLEIF_PREFETCH_WORKERS > 1 and len(companies) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        _pf_done = [0]
+        _pf_lock = threading.Lock()
+        _log(
+            f"Phase 6: warming GLEIF caches with {GLEIF_PREFETCH_WORKERS} workers "
+            f"({len(companies)} companies, ~{GLEIF_MAX_REQUESTS_PER_MIN}/min rate cap) "
+            "before sequential resolve...",
+            "cyan",
+        )
+
+        def _gleif_prefetch_company(company: dict) -> None:
+            try:
+                nm = company.get("canonical_name") or company.get("name") or company.get("ticker") or ""
+                cn = _gleif_clean_company_name(nm)
+                lei, _sd, _ln, _ms, serr = _gleif_search_lei(cn)
+                if serr:
+                    return
+                has_parent = False
+                if lei:
+                    rels, rerr = _gleif_fetch_relationships(lei)
+                    if not rerr and isinstance(rels, dict):
+                        has_parent = bool(rels.get("direct_parent_lei") or rels.get("ultimate_parent_lei"))
+                    # Mirror the loop: subsidiary-candidate search only runs when no parent was found.
+                    if not has_parent:
+                        _pub, cands, cerr = _gleif_search_candidate_records(cn)
+                        if not cerr and cands:
+                            # Mirror the loop exactly: it fetches relationships for the
+                            # FILTERED + RANKED accepted set, not the raw candidate list, so warm
+                            # the same child LEIs the loop will actually read from cache.
+                            accepted, _rej = _gleif_split_alternate_child_candidates(cn, lei or "", cands)
+                            for c in accepted[:GLEIF_ALT_CHILD_CANDIDATE_LIMIT]:
+                                cl = str((c or {}).get("lei") or "").strip()
+                                if cl:
+                                    _gleif_fetch_relationships(cl)
+            except Exception:
+                return  # best-effort warm; the sequential loop below is the source of truth
+            finally:
+                with _pf_lock:
+                    _pf_done[0] += 1
+                    if conn and _pf_done[0] % 250 == 0:
+                        _phase6_report_progress(conn, _pf_done[0], total, f"GLEIF cache warm {_pf_done[0]}/{total}")
+
+        with ThreadPoolExecutor(max_workers=GLEIF_PREFETCH_WORKERS, thread_name_prefix="gleif-prefetch") as _pf_pool:
+            list(_pf_pool.map(_gleif_prefetch_company, companies))
+        _log("Phase 6: GLEIF cache warm complete; resolving from warm cache.", "green")
+
     for i, company in enumerate(companies):
         if i > 0 and i % GLEIF_COOLDOWN_EVERY == 0 and GLEIF_COOLDOWN_SECONDS > 0 and not (GLEIF_SKIP_HEALTHY_COOLDOWN and failures_since_cooldown == 0):
             _flush_lei_batch()
@@ -10012,6 +10097,28 @@ def phase6b_sec_ex21_hierarchy(session):
         evidence_source="SEC_EX21",
     )
 
+    # Discovery-collapse guard: finding 0 annual filings AND 0 EX-21 filings across hundreds
+    # of issuers is not a real empty result (thousands of these companies file EX-21 exhibits) —
+    # it's a SEC/network outage (cold cache + failed data.sec.gov fetches) that previously went
+    # silently "green" and even marked the phase bootstrap-complete. Make it loud and refuse to
+    # advance the manifest so the next run retries; existing hierarchy edges are left intact.
+    total_with_cik = len(issuers_with_cik)
+    phase6b_discovery_collapsed = (
+        total_with_cik >= 500
+        and issuers_with_annual_filings == 0
+        and ex21_filings_processed == 0
+    )
+    if phase6b_discovery_collapsed:
+        _log_stage_error(
+            "Phase 6B: SEC EX-21 hierarchy",
+            "annual-filing discovery",
+            f"Discovery collapsed: 0 annual filings and 0 EX-21 filings across {total_with_cik} "
+            "issuers with a CIK — almost certainly a SEC/network outage, not a real empty result. "
+            "Not marking the phase complete or advancing coverage so it retries next run; "
+            "existing hierarchy edges are kept.",
+            color="red",
+        )
+
     _log(
         f"Phase 6B: {ex21_filings_processed} EX-21 filings processed, "
         f"{legal_entities_written} LegalEntity upserts, {entity_edges_written} PARENT_OF_ENTITY edge upserts, "
@@ -10052,7 +10159,7 @@ def phase6b_sec_ex21_hierarchy(session):
             )
     except Exception as e:
         _log_stage_error("Phase 6B: SEC EX-21 hierarchy", "retire legacy hierarchy edges", str(e), e, color="yellow")
-    if history_start_date:
+    if history_start_date and not phase6b_discovery_collapsed:
         coverage_start = _normalize_historical_iso_date(phase_manifest.get("coverage_start")) or history_start_date
         coverage_end = _normalize_historical_iso_date(phase_end_date) or today_iso
         _nexus_update_phase_manifest(
@@ -12624,22 +12731,35 @@ def phase9_usaspending(session):
         max_rate_limit_cooldowns = 3
         abort_fetch = False
         fetch_complete = True
+        dropped_requests = 0
+        dropped_request_windows: set[int] = set()
         request_timestamps: deque[float] = deque()
 
         for window_index, (window_start, window_end) in enumerate(fetch_windows, start=1):
             if len(results) >= USASPENDING_MAX_ROWS or abort_fetch:
+                _log(
+                    f"Phase 8: global cap {USASPENDING_MAX_ROWS} reached or fetch aborted; "
+                    f"skipping windows {window_index}..{len(fetch_windows)}.",
+                    "yellow",
+                )
                 break
             last_record_unique_id = None
             last_record_sort_value = None
             rows_since_last_break = 0
             reached_end = False
             rows_before_window = len(results)
+            # Per-window ceiling = min(per-window cap, remaining headroom under the global cap).
+            # This is what lets every window run instead of window 1 eating the whole budget.
+            window_row_target = len(results) + min(
+                USASPENDING_MAX_ROWS_PER_WINDOW,
+                max(0, USASPENDING_MAX_ROWS - len(results)),
+            )
             _log(
                 f"Phase 8: Window {window_index}/{len(fetch_windows)} {window_start} -> {window_end} starting "
                 f"({len(results)} rows fetched so far).",
                 "cyan",
             )
-            while len(results) < USASPENDING_MAX_ROWS and not reached_end and not abort_fetch:
+            while len(results) < window_row_target and not reached_end and not abort_fetch:
                 active_break_every = USASPENDING_BREAK_EVERY
                 active_break_seconds = USASPENDING_BREAK_SECONDS
                 payload = {
@@ -12650,7 +12770,7 @@ def phase9_usaspending(session):
                     "fields": ["Recipient Name", "Awarding Agency", "Award Amount", "Start Date", "End Date"],
                     "sort": "Award Amount",
                     "order": "desc",
-                    "limit": min(USASPENDING_PAGE_SIZE, USASPENDING_MAX_ROWS - len(results)),
+                    "limit": min(USASPENDING_PAGE_SIZE, window_row_target - len(results)),
                 }
                 if last_record_unique_id is not None and last_record_sort_value is not None:
                     payload["last_record_unique_id"] = last_record_unique_id
@@ -12660,7 +12780,7 @@ def phase9_usaspending(session):
                 _usaspending_wait_for_request_window(request_timestamps)
                 request_num += 1
                 resp_data = None
-                for attempt in range(3):
+                for attempt in range(USASPENDING_REQUEST_MAX_ATTEMPTS):
                     try:
                         resp = _usaspending_http_session().post(
                             "https://api.usaspending.gov/api/v2/search/spending_by_award/",
@@ -12684,8 +12804,8 @@ def phase9_usaspending(session):
                         if _usaspending_is_transient_fetch_error(e):
                             transient_failure_times.append(time.monotonic())
                             _usaspending_reset_http_session()
-                        if attempt < 2:
-                            wait = 5 * (attempt + 1)
+                        if attempt < USASPENDING_REQUEST_MAX_ATTEMPTS - 1:
+                            wait = min(USASPENDING_REQUEST_BACKOFF_CAP_SEC, 5 * (2 ** attempt))
                             _log(
                                 f"Phase 8: Window {window_index}/{len(fetch_windows)} request {request_num} "
                                 f"attempt {attempt + 1} failed ({e}), retrying in {wait}s...",
@@ -12695,16 +12815,18 @@ def phase9_usaspending(session):
                         else:
                             _log(
                                 f"Phase 8: Window {window_index}/{len(fetch_windows)} request {request_num} "
-                                f"failed after 3 attempts ({e}).",
+                                f"failed after {USASPENDING_REQUEST_MAX_ATTEMPTS} attempts ({e}); dropping this page.",
                                 "yellow",
                             )
                             consecutive_failures += 1
+                            dropped_requests += 1
+                            dropped_request_windows.add(window_index)
                     except Exception as e:
                         if _usaspending_is_transient_fetch_error(e):
                             transient_failure_times.append(time.monotonic())
                             _usaspending_reset_http_session()
-                        if attempt < 2:
-                            wait = 5 * (attempt + 1)
+                        if attempt < USASPENDING_REQUEST_MAX_ATTEMPTS - 1:
+                            wait = min(USASPENDING_REQUEST_BACKOFF_CAP_SEC, 5 * (2 ** attempt))
                             _log(
                                 f"Phase 8: Window {window_index}/{len(fetch_windows)} request {request_num} "
                                 f"attempt {attempt + 1} failed ({e}), retrying in {wait}s...",
@@ -12714,10 +12836,12 @@ def phase9_usaspending(session):
                         else:
                             _log(
                                 f"Phase 8: Window {window_index}/{len(fetch_windows)} request {request_num} "
-                                f"failed after 3 attempts ({e}).",
+                                f"failed after {USASPENDING_REQUEST_MAX_ATTEMPTS} attempts ({e}); dropping this page.",
                                 "yellow",
                             )
                             consecutive_failures += 1
+                            dropped_requests += 1
+                            dropped_request_windows.add(window_index)
 
                 now_mono = time.monotonic()
                 transient_failure_times = [
@@ -12852,6 +12976,14 @@ def phase9_usaspending(session):
                 "green" if not abort_fetch else "yellow",
             )
 
+        if dropped_requests:
+            _log(
+                f"Phase 8: WARNING {dropped_requests} page-fetch attempt(s) exhausted all "
+                f"{USASPENDING_REQUEST_MAX_ATTEMPTS} retries (re-attempted in place, not skipped) across "
+                f"{len(dropped_request_windows)} window(s) {sorted(dropped_request_windows)}; "
+                "awards in those windows may be incomplete for this run.",
+                "red",
+            )
         if results and fetch_complete:
             _nexus_write_cached_json(cache_path, results)
             _nexus_stage_download(1)
@@ -14993,6 +15125,11 @@ def phase12_8k_agreements(session):
     cached = _nexus_read_cached_json(cache_path, _nexus_cache_max_age("phase12_8k"))
     stage_partner_pairs: set[tuple[str, str]] = set()
     raw_8k_matches = [0]
+    # Observability holders (function-scope so the final log can't NameError): lets us tell
+    # a legit "quiet incremental window" (filings scanned > 0, 0 matches) apart from a SILENT
+    # SEC-fetch failure (0 filings scanned). None = non-historical / not captured.
+    filings_scanned = [None]
+    scan_window = [("", "")]
 
     def _write_batch_to_neo4j(batch_edges: list) -> tuple[set[tuple[str, str]], int]:
         """Write a batch of edges to Neo4j. Returns (matched unique pair keys, raw valid row count)."""
@@ -15158,6 +15295,8 @@ def phase12_8k_agreements(session):
             _log_stage_error("Phase 11: 8-K agreements", "scrape_8k_agreements_since", str(e), e, color="yellow")
 
         created = _8k_created[0]
+        filings_scanned[0] = int(summary.get("filings_processed") or 0)
+        scan_window[0] = (fetch_start, fetch_end)
         scan_end = _normalize_historical_iso_date(summary.get("end_date")) or fetch_end or _nexus_today_iso()
         _nexus_update_phase_manifest(
             "phase12",
@@ -15310,10 +15449,27 @@ def phase12_8k_agreements(session):
         source_scope="SEC_8K_ITEM_1_01",
         directed=False,
     )
+    _fs = filings_scanned[0]
+    if raw_8k_matches[0] == 0 and not stage_partner_pairs:
+        if _fs == 0:
+            _log(
+                "Phase 11 WARNING: 0 raw 8-K matches AND 0 Item-1.01 filings scanned in window "
+                f"[{scan_window[0][0]}..{scan_window[0][1]}] — this may be a SILENT SEC-fetch failure "
+                "(check for data.sec.gov timeouts above), not a quiet period.",
+                "red",
+            )
+        elif _fs is not None:
+            _log(
+                f"Phase 11: 0 new 8-K matches ({_fs} Item-1.01 filings scanned in window "
+                f"[{scan_window[0][0]}..{scan_window[0][1]}]) — expected during a quiet incremental window.",
+                "white",
+            )
     _log(
         "Phase 11 done: "
         f"{live_8k_edges} live STRATEGIC_PARTNER edges from 8-K agreements "
-        f"({len(stage_partner_pairs)} unique relationship upserts from {raw_8k_matches[0]} raw 8-K matches).",
+        f"({len(stage_partner_pairs)} unique relationship upserts from {raw_8k_matches[0]} raw 8-K matches"
+        + (f", {_fs} Item-1.01 filings scanned" if _fs is not None else "")
+        + ").",
         "green",
     )
     _progress(PHASE_PCT[14], f"Phase 11 done: {live_8k_edges} live 8-K strategic partner edges.", "green")
