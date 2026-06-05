@@ -289,6 +289,13 @@ WIKIDATA_MAX_RETRIES  = int(os.environ.get("WIKIDATA_MAX_RETRIES", "3"))     # r
 PATENTSVIEW_MAX_ROWS  = int(os.environ.get("PATENTSVIEW_MAX_ROWS", "100000")) # PatentsView total (paginated 1000/page via after)
 PATENTSVIEW_PAGE_SIZE = 1000   # API max per request
 PATENTSVIEW_API_KEY   = os.environ.get("PATENTSVIEW_API_KEY", "").strip()   # required for Phase 10; request at patentsview.org
+# Endpoint is configurable so a future source swap needs no code change. The legacy
+# host below was decommissioned by USPTO in 2026 (PatentsView -> data.uspto.gov ODP).
+PATENTSVIEW_BASE_URL  = os.environ.get("PATENTSVIEW_BASE_URL", "https://search.patentsview.org/api/v1/patent/").strip()
+# Phase 10 is DISABLED by default: the legacy PatentsView Search API was decommissioned
+# (no live REST replacement yet). Set PATENTSVIEW_ENABLED=true once a working
+# PATENTSVIEW_BASE_URL + key are wired. Disabled = clean skip, existing edges untouched.
+PATENTSVIEW_ENABLED   = (os.environ.get("PATENTSVIEW_ENABLED", "false").strip().lower() not in ("0", "false", "no", "off", ""))
 
 _POLYGON_CALL_TIMES: list[float] = []
 _EDGE_DENYLIST_CACHE: dict[str, set[tuple[str, str]]] | None = None
@@ -14649,7 +14656,7 @@ def _fetch_patentsview_coassignees(
                     for attempt in range(3):
                         try:
                             resp = requests.get(
-                                "https://search.patentsview.org/api/v1/patent/",
+                                PATENTSVIEW_BASE_URL,
                                 params=params,
                                 headers={"X-Api-Key": PATENTSVIEW_API_KEY, "Accept": "application/json"},
                                 timeout=60,
@@ -14658,6 +14665,19 @@ def _fetch_patentsview_coassignees(
                             data = resp.json()
                             break
                         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                            # A vanished host (DNS NameResolutionError) is permanent — don't burn
+                            # ~30s of backoff per batch sleeping through it across hundreds of
+                            # batches (that wasted 23 min on the 2026-06-05 run). Fail fast on it.
+                            _emsg = str(e).lower()
+                            _dns_dead = (
+                                "nameresolutionerror" in _emsg
+                                or "name or service not known" in _emsg
+                                or "failed to resolve" in _emsg
+                                or "nodename nor servname" in _emsg
+                            )
+                            if _dns_dead:
+                                _log(f"Phase 10: PatentsView host unreachable (DNS) — aborting batch without retry: {e}", "yellow")
+                                return batch_patents
                             if attempt < 2:
                                 time.sleep(10 * (attempt + 1))
                             else:
@@ -14832,6 +14852,14 @@ def phase11_patents(session):
     """Phase 10: PatentsView (PATENT_PARTNER). Batch write + RethinkDB progress."""
     _nexus_stage_reset()
     _progress(PHASE_PCT[12], "Phase 10: PatentsView co-assigned patents...", "cyan")
+    if not PATENTSVIEW_ENABLED:
+        _log("Phase 10: PatentsView disabled (PATENTSVIEW_ENABLED off) — the legacy "
+             "search.patentsview.org API was decommissioned by USPTO (2026) and has no live "
+             "REST replacement. Skipping; existing PATENT_PARTNER edges are left untouched. "
+             "Set PATENTSVIEW_ENABLED=true with a working PATENTSVIEW_BASE_URL to re-enable.",
+             "yellow")
+        _progress(PHASE_PCT[13], "Phase 10 skipped (PatentsView disabled).", "yellow")
+        return
     conn = _nexus_rethink_conn
     valid_c = _cypher_valid_company_listing_predicate("c")
 
