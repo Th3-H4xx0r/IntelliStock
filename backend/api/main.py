@@ -379,13 +379,6 @@ def get_current_user(
     }
 
 
-def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
-    """Dependency: require role admin. Returns current_user."""
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-    return current_user
-
-
 def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]:
     provider = (body.provider or "").strip().lower()
     config: dict[str, Any] = {}
@@ -871,11 +864,11 @@ def api_help():
             {"path": "POST /chatbot/conversations/{id}/turn", "body": "ChatbotTurnBody", "description": "Send a message and run the LLM↔tool loop"},
             {"path": "POST /chatbot/conversations/{id}/confirm-tool", "body": "ChatbotConfirmBody", "description": "Approve or decline a pending tool call"},
             {"path": "GET /chatbot/tools", "description": "Get the curated tool catalog the chatbot can use"},
-            {"path": "GET /auth/users", "description": "List users (admin only)"},
-            {"path": "POST /auth/users", "body": "CreateUserBody", "description": "Create user (admin only)"},
-            {"path": "GET /auth/users/{id}", "description": "Get user (admin or self)"},
-            {"path": "PUT /auth/users/{id}", "body": "UpdateUserBody", "description": "Update user (admin or self)"},
-            {"path": "DELETE /auth/users/{id}", "description": "Delete user (admin only)"},
+            {"path": "GET /auth/users", "description": "List users"},
+            {"path": "POST /auth/users", "body": "CreateUserBody", "description": "Create user"},
+            {"path": "GET /auth/users/{id}", "description": "Get user"},
+            {"path": "PUT /auth/users/{id}", "body": "UpdateUserBody", "description": "Update user"},
+            {"path": "DELETE /auth/users/{id}", "description": "Delete user"},
             {"path": "GET /status", "description": "Config, service flags, and engines status table (all services/engines with running state and details)"},
             {"path": "GET /tickers", "description": "List tickers (LivePricesStocks)"},
             {"path": "POST /tickers", "body": {"symbols": ["AAPL", "MSFT"]}, "description": "Add ticker(s)"},
@@ -980,9 +973,9 @@ def api_me(current_user: dict = Depends(get_current_user), conn=Depends(conn_dep
 @app.get("/auth/users", response_class=JSONResponse)
 def api_list_auth_users(
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
-    """List all users. Admin only."""
+    """List all users. Any authenticated user."""
     users = list_users(conn)
     return {"users": users}
 
@@ -991,9 +984,9 @@ def api_list_auth_users(
 def api_create_auth_user(
     body: CreateUserBody,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Create a new user. Admin only. No secret_auth_key required."""
+    """Create a new user. Any authenticated user. No secret_auth_key required."""
     try:
         user = create_user(conn, body.username, body.password, role=body.role, email=body.email)
         return user
@@ -1007,9 +1000,7 @@ def api_get_auth_user(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get user by id. Admin or self."""
-    if current_user.get("role") != "admin" and current_user.get("id") != user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    """Get user by id. Any authenticated user."""
     user = get_user_by_id(conn, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1023,11 +1014,7 @@ def api_update_auth_user(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update user. Admin can change role; user can change own password/email."""
-    if current_user.get("role") != "admin" and current_user.get("id") != user_id:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    if current_user.get("role") != "admin" and body.role is not None:
-        raise HTTPException(status_code=403, detail="Only admin can change role")
+    """Update user. Any authenticated user can change password/email/role."""
     try:
         user = update_user(conn, user_id, password=body.password, role=body.role, email=body.email)
         return user
@@ -1039,9 +1026,9 @@ def api_update_auth_user(
 def api_delete_auth_user(
     user_id: str,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Delete user. Admin only."""
+    """Delete user. Any authenticated user."""
     if current_user.get("id") == user_id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     try:
@@ -1849,17 +1836,17 @@ def api_clear_instance_state(
 
 
 @app.post("/config/terminate-price", response_class=JSONResponse)
-def api_terminate_price(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_terminate_price(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(action_terminate_price, conn)
 
 
 @app.post("/config/terminate-discover", response_class=JSONResponse)
-def api_terminate_discover(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_terminate_discover(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(action_terminate_discover, conn)
 
 
 @app.post("/config/start-broker", response_class=JSONResponse)
-def api_start_broker(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_start_broker(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(action_start_broker, conn)
 
 
@@ -2552,12 +2539,12 @@ def api_get_nexus_graph_build_logs(build_id: str, since_line: int = 0, conn=Depe
 #
 # GET  /instances/{id}/live-state     — UI poll every 2s while active, 10s idle
 # GET  /instances/{id}/live-logs      — since_line cursor tailing (same contract as nexus)
-# POST /instances/{id}/live-command   — admin only: halt / close_position / submit_order
+# POST /instances/{id}/live-command   — halt / close_position / submit_order
 # GET  /live-commands/{command_id}    — UI polls command status until terminal
 #
-# The POST requires admin role because the destructive commands (halt,
-# close_position, submit_order) can move real money. Reads are authenticated
-# but not admin-gated so any authenticated user can monitor.
+# The POST is open to any authenticated user; the destructive commands (halt,
+# close_position, submit_order) can move real money, so the UI typed-confirm
+# modals provide the safety gate. Reads are authenticated too.
 
 class LiveCommandBody(BaseModel):
     type: str = Field(pattern="^(halt|close_position|submit_order)$")
@@ -2629,7 +2616,7 @@ def api_agent_control_get(conn=Depends(conn_dependency), current_user: dict = De
 
 
 @app.post("/agent/control", response_class=JSONResponse)
-def api_agent_control_set(body: AgentControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_agent_control_set(body: AgentControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start, stop, or pause/resume the AI backtesting agent. Send running and/or paused (omit to leave unchanged). Optional special_request: instruction for strategy generation (e.g. include a specific strategy in each)."""
     return _run(action_agent_control_set, conn, body.running, body.paused, body.special_request)
 
@@ -2792,7 +2779,7 @@ def api_nexus_control_get(conn=Depends(conn_dependency), current_user: dict = De
 
 
 @app.post("/nexus/control", response_class=JSONResponse)
-def api_nexus_control_set(body: NexusControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_nexus_control_set(body: NexusControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Start or stop the Graph Nexus service. Optional phase selectors accept execution-order 1-14 or labels like 2B / 6B."""
     return _run(
         action_nexus_control_set,
@@ -2825,7 +2812,7 @@ def api_nexus_cache(current_user: dict = Depends(get_current_user)):
 
 
 @app.post("/nexus/rebuild", response_class=JSONResponse)
-def api_nexus_rebuild(body: NexusRebuildBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_nexus_rebuild(body: NexusRebuildBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Queue a Nexus rebuild. Optionally select destructive mode and/or delete selected cache entries from the mounted cache root or the running Nexus container before restart."""
     if not body.confirm:
         raise HTTPException(status_code=400, detail="Send {\"confirm\": true} to confirm rebuild.")
@@ -2839,7 +2826,7 @@ def api_nexus_rebuild(body: NexusRebuildBody, conn=Depends(conn_dependency), cur
 
 
 @app.post("/nexus/delete-edges", response_class=JSONResponse)
-def api_nexus_delete_edges(body: NexusDeleteBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
+def api_nexus_delete_edges(body: NexusDeleteBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Delete selected Nexus graph phase outputs and track live progress through the Nexus control document."""
     return _run(action_nexus_delete_edges, conn, body.selected_phases)
 

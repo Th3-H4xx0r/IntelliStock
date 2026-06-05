@@ -326,8 +326,7 @@ onUnmounted(() => {
     <div v-if="!status.loading && !status.installed && !status.error" class="space-y-2">
       <p class="text-slate-400">
         Codex CLI is not installed on the server. One-click install uses
-        <span class="font-mono">{{ status.install_method === 'brew' ? 'brew install codex' : 'npm install -g @openai/codex' }}</span>
-        — requires admin role.
+        <span class="font-mono">{{ status.install_method === 'brew' ? 'brew install codex' : 'npm install -g @openai/codex' }}</span>.
       </p>
       <div v-if="status.install_method === 'unknown'" class="space-y-1.5">
         <p class="text-amber-300">

@@ -154,11 +154,6 @@ async function submitCommand(type, payload) {
       headers: authHeaders(),
       body: JSON.stringify({ type, payload: payload || {} }),
     })
-    if (res.status === 403) {
-      commandToast.value = { id: null, type, status: 'failed', error: 'Admin role required.', result: null }
-      setTimeout(() => { commandToast.value = null }, 6000)
-      return null
-    }
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }))
       commandToast.value = { id: null, type, status: 'failed', error: body?.detail || `HTTP ${res.status}`, result: null }
