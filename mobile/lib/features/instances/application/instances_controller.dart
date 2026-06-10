@@ -259,6 +259,7 @@ class InstanceDetailController
   Timer? _uptimeTicker;
   Timer? _btPollTimer;
   String? _instanceId;
+  bool _disposed = false;
 
   @override
   Future<InstanceDetailState> build() async {
@@ -266,6 +267,7 @@ class InstanceDetailController
     if (_instanceId == null) return const InstanceDetailState();
 
     ref.onDispose(() {
+      _disposed = true;
       _uptimeTicker?.cancel();
       _btPollTimer?.cancel();
     });
@@ -326,9 +328,7 @@ class InstanceDetailController
   Future<void> _pollBtProgress() async {
     if (state case AsyncData(:final value)) {
       final running = value.backtests.where((b) {
-        final s = (value.btProgress[b.id] != null)
-            ? b.status.toLowerCase()
-            : b.status.toLowerCase();
+        final s = b.status.toLowerCase();
         return s == 'running' || s == 'queued' || s == 'pending';
       }).toList();
 
@@ -341,17 +341,28 @@ class InstanceDetailController
       final updatedProgress = Map<String, int>.from(value.btProgress);
       bool needRefresh = false;
 
-      for (final bt in running) {
-        try {
-          final statusData = await repo.getBacktestStatus(bt.id);
-          final p = (statusData['progress'] as num?)?.toInt();
-          if (p != null) updatedProgress[bt.id] = p;
-          final s = (statusData['status'] ?? '').toString().toLowerCase();
-          if (['completed', 'finished', 'stopped', 'failed', 'error',
-              'cancelled'].contains(s)) {
-            needRefresh = true;
+      final results = await Future.wait(
+        running.map((bt) async {
+          try {
+            return MapEntry(bt.id, await repo.getBacktestStatus(bt.id));
+          } catch (_) {
+            return null;
           }
-        } catch (_) {}
+        }),
+      );
+
+      if (_disposed) return;
+
+      for (final entry in results) {
+        if (entry == null) continue;
+        final statusData = entry.value;
+        final p = (statusData['progress'] as num?)?.toInt();
+        if (p != null) updatedProgress[entry.key] = p;
+        final s = (statusData['status'] ?? '').toString().toLowerCase();
+        if (['completed', 'finished', 'stopped', 'failed', 'error',
+            'cancelled'].contains(s)) {
+          needRefresh = true;
+        }
       }
 
       if (state case AsyncData(:final value)) {

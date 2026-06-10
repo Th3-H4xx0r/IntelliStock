@@ -52,11 +52,13 @@ class _StepConnectState extends ConsumerState<StepConnect> {
       final brData = results[1];
 
       final insts =
-          ((instData['instances'] ?? instData['items'] ?? []) as List)
-              .cast<Map<String, dynamic>>();
+          (instData['instances'] as List? ?? instData['items'] as List? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .toList();
       final brs =
-          ((brData['accounts'] ?? brData['items'] ?? []) as List)
-              .cast<Map<String, dynamic>>();
+          (brData['accounts'] as List? ?? brData['items'] as List? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .toList();
 
       setState(() {
         _instances = insts;

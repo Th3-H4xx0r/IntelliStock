@@ -107,7 +107,7 @@ abstract class PollingNotifier<T> extends AutoDisposeAsyncNotifier<T> {
 
   @override
   Future<T> build() async {
-    final lifecycle = ref.watch(appLifecycleProvider);
+    final lifecycle = ref.read(appLifecycleProvider);
     final data = await fetch();
 
     _poller = IntervalPoller(

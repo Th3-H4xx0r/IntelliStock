@@ -54,10 +54,14 @@ class _LockScreenState extends ConsumerState<LockScreen> {
   }
 
   Future<void> _logout() async {
+    // Capture the lock notifier BEFORE the first await — session.clear()
+    // triggers a router redirect that may dispose this screen, making
+    // ref.read unsafe after the await.
+    final lockCtrl = ref.read(appLockControllerProvider.notifier);
     await ref.read(sessionProvider).clear();
     // The router's redirect logic will navigate to /login once session is
     // cleared; AppLockController.build() will disable lock on next app start.
-    await ref.read(appLockControllerProvider.notifier).disable();
+    await lockCtrl.disable();
   }
 
   String _unlockLabel(List<dynamic> types) {

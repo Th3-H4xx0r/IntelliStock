@@ -70,6 +70,30 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
     });
   }
 
+  /// Allowed route prefixes for navigate directives.
+  static const _allowedRoutePrefixes = [
+    '/dashboard',
+    '/instances',
+    '/backtests',
+    '/strategies',
+    '/brokerages',
+    '/agent-runs',
+    '/nexus',
+    '/models',
+    '/token-usage',
+    '/settings',
+  ];
+
+  /// Returns true only if [route] is a known safe in-app path.
+  static bool _isAllowedRoute(String route) {
+    if (!route.startsWith('/')) return false;
+    if (route.startsWith('//')) return false;
+    for (final prefix in _allowedRoutePrefixes) {
+      if (route == prefix || route.startsWith('$prefix/')) return true;
+    }
+    return false;
+  }
+
   /// Parse and fire navigate directives from assistant messages.
   void _handleNavigates(List<ChatMessage> messages) {
     for (final msg in messages) {
@@ -80,11 +104,13 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
           final key = '${msg.id}:$route';
           if (!_navigateHandled.contains(key)) {
             _navigateHandled.add(key);
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              try {
-                context.go(route);
-              } catch (_) {}
-            });
+            if (_isAllowedRoute(route)) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                try {
+                  context.go(route);
+                } catch (_) {}
+              });
+            }
           }
         }
       }

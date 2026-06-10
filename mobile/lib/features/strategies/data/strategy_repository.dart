@@ -20,7 +20,8 @@ class StrategyRepository {
 
   /// GET /strategies/:id
   Future<Map<String, dynamic>> get(String id) async {
-    return _client.get<Map<String, dynamic>>('/strategies/$id');
+    final data = await _client.get<Map<String, dynamic>>('/strategies/$id');
+    return (data['strategy'] as Map<String, dynamic>?) ?? data;
   }
 
   /// PUT /strategies/:id
@@ -31,7 +32,7 @@ class StrategyRepository {
   /// GET /strategies/available → list of available strategy type names.
   Future<List<String>> available() async {
     final data = await _client.get<Map<String, dynamic>>('/strategies/available');
-    return (data['available'] as List? ?? const [])
+    return (data['strategies'] as List? ?? const [])
         .map((e) => e.toString())
         .toList();
   }

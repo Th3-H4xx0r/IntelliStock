@@ -713,8 +713,9 @@ class _GraphCountsCard extends StatelessWidget {
 
   String _fmtNum(dynamic v) {
     if (v == null) return '—';
-    final n = (v as num?)?.toInt();
-    if (n == null) return '—';
+    final num? parsed = v is num ? v : num.tryParse(v.toString());
+    if (parsed == null) return '—';
+    final n = parsed.toInt();
     if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
     if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}k';
     return n.toString();
@@ -1684,9 +1685,10 @@ class _PhaseDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Ensure value is in list; fallback to first
-    final safeValue =
-        options.any((o) => o.value == value) ? value : options.first.value;
+    // Ensure value is in list; fallback to first (guard against empty list)
+    final safeValue = options.isEmpty
+        ? value
+        : (options.any((o) => o.value == value) ? value : options.first.value);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),

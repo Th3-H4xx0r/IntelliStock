@@ -44,13 +44,12 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
     super.dispose();
   }
 
-  late final _provider = liveStateProvider(widget.instanceId);
-
-  LiveStateNotifier get _notifier => ref.read(_provider.notifier);
+  LiveStateNotifier get _notifier =>
+      ref.read(liveStateProvider(widget.instanceId).notifier);
 
   @override
   Widget build(BuildContext context) {
-    final asyncState = ref.watch(_provider);
+    final asyncState = ref.watch(liveStateProvider(widget.instanceId));
 
     return Scaffold(
       backgroundColor: AppColors.canvas,
@@ -64,7 +63,8 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
                 error: (e, _) => Center(
                   child: ErrorBanner(
                     message: e.toString(),
-                    onRetry: () => ref.invalidate(_provider),
+                    onRetry: () =>
+                        ref.invalidate(liveStateProvider(widget.instanceId)),
                   ),
                 ),
                 data: (s) => _buildBody(context, s),
@@ -359,7 +359,7 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
 
     // Scrub overlay: show the scrubbed value or live equity.
     double displayEquity = ls.equity;
-    if (_scrubIndex != null && history != null) {
+    if (_scrubIndex != null && history != null && history.values.isNotEmpty) {
       final idx = _scrubIndex!.clamp(0, history.values.length - 1);
       displayEquity = history.values[idx];
     }
@@ -817,9 +817,17 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
 
   // ── Halt modal ───────────────────────────────────────────────────────────────
 
+  void _closeHaltModal() {
+    setState(() {
+      _haltModalOpen = false;
+      _haltConfirmed = false;
+    });
+    _haltReasonCtrl.text = 'risk breach';
+  }
+
   Widget _buildHaltModal(BuildContext context) {
     return GestureDetector(
-      onTap: () => setState(() => _haltModalOpen = false),
+      onTap: _closeHaltModal,
       child: Container(
         color: Colors.black.withValues(alpha: 0.65),
         child: Center(
@@ -859,7 +867,7 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
                             const Spacer(),
                             IconButton(
                               icon: Icon(Icons.close, size: 18, color: AppColors.textMuted),
-                              onPressed: () => setState(() => _haltModalOpen = false),
+                              onPressed: _closeHaltModal,
                             ),
                           ],
                         ),
@@ -935,8 +943,7 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
                             Expanded(
                               child: AppButton.ghost(
                                 label: 'Cancel',
-                                onPressed: () =>
-                                    setState(() => _haltModalOpen = false),
+                                onPressed: _closeHaltModal,
                               ),
                             ),
                             const SizedBox(width: 12),
@@ -946,7 +953,7 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
                                 color: AppColors.danger,
                                 onPressed: _haltConfirmed
                                     ? () async {
-                                        setState(() => _haltModalOpen = false);
+                                        _closeHaltModal();
                                         await _notifier.runCommand('halt', {
                                           'reason': _haltReasonCtrl.text.trim().isNotEmpty
                                               ? _haltReasonCtrl.text.trim()

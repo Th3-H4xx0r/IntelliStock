@@ -94,17 +94,16 @@ const _sentinel = Object();
 /// Per-instance adaptive polling notifier.
 /// 3s when tradingActive, 10s otherwise.
 /// Create via [liveStateProvider].
-class LiveStateNotifier extends AutoDisposeAsyncNotifier<LiveTradingState> {
-  LiveStateNotifier(this.instanceId);
-
-  final String instanceId;
+class LiveStateNotifier
+    extends AutoDisposeFamilyAsyncNotifier<LiveTradingState, String> {
+  String get instanceId => arg;
 
   IntervalPoller? _poller;
   Timer? _commandPollTimer;
   Timer? _toastDismissTimer;
 
   @override
-  Future<LiveTradingState> build() async {
+  Future<LiveTradingState> build(String arg) async {
     final lifecycle = ref.watch(appLifecycleProvider);
     final initial = await _fetchState();
 
@@ -255,17 +254,21 @@ class LiveStateNotifier extends AutoDisposeAsyncNotifier<LiveTradingState> {
     }
   }
 
-  void _pollCommandStatus(String commandId) {
+  void _pollCommandStatus(String commandId, {int attempt = 0}) {
     _commandPollTimer?.cancel();
     _commandPollTimer = Timer(const Duration(seconds: 1), () async {
+      // Stop if this toast is no longer active.
+      final toastNow = state.valueOrNull?.commandToast;
+      if (toastNow?.commandId != commandId) return;
+
       try {
         final result =
             await ref.read(liveRepositoryProvider).commandStatus(commandId);
-        final toastNow = state.valueOrNull?.commandToast;
-        if (toastNow?.commandId != commandId) return;
+        final toastAfter = state.valueOrNull?.commandToast;
+        if (toastAfter?.commandId != commandId) return;
         _setToast(CommandToast(
           commandId: commandId,
-          type: toastNow!.type,
+          type: toastAfter!.type,
           status: result.status,
           error: result.error,
           result: result.result,
@@ -274,10 +277,23 @@ class LiveStateNotifier extends AutoDisposeAsyncNotifier<LiveTradingState> {
           _scheduleDismiss();
           unawaited(refreshNow());
         } else {
-          _pollCommandStatus(commandId);
+          _pollCommandStatus(commandId, attempt: attempt + 1);
         }
       } catch (_) {
-        _pollCommandStatus(commandId);
+        if (attempt >= 29) {
+          // ~30 failed attempts — give up and surface a timeout toast.
+          final toastNow2 = state.valueOrNull?.commandToast;
+          if (toastNow2?.commandId != commandId) return;
+          _setToast(CommandToast(
+            commandId: commandId,
+            type: toastNow2!.type,
+            status: 'failed',
+            error: 'Timed out polling command',
+          ));
+          _scheduleDismiss(const Duration(seconds: 6));
+        } else {
+          _pollCommandStatus(commandId, attempt: attempt + 1);
+        }
       }
     });
   }
@@ -301,17 +317,11 @@ class LiveStateNotifier extends AutoDisposeAsyncNotifier<LiveTradingState> {
   }
 }
 
-// ── Provider factory ──────────────────────────────────────────────────────────
+// ── Provider family ───────────────────────────────────────────────────────────
 
-/// Returns a fresh auto-dispose provider scoped to [instanceId].
-/// The provider is re-created if instanceId changes (router navigation).
+/// Family provider — deduplicated by Riverpod per instanceId.
 /// Usage:
-///   final p = liveStateProvider(instanceId);
-///   ref.watch(p)         -> AsyncValue of LiveTradingState
-///   ref.read(p.notifier) → LiveStateNotifier
-AutoDisposeAsyncNotifierProvider<LiveStateNotifier, LiveTradingState>
-    liveStateProvider(String instanceId) {
-  return AutoDisposeAsyncNotifierProvider<LiveStateNotifier, LiveTradingState>(
-    () => LiveStateNotifier(instanceId),
-  );
-}
+///   ref.watch(liveStateProvider(instanceId))          → AsyncValue<LiveTradingState>
+///   ref.read(liveStateProvider(instanceId).notifier)  → LiveStateNotifier
+final liveStateProvider = AutoDisposeAsyncNotifierProvider.family<
+    LiveStateNotifier, LiveTradingState, String>(LiveStateNotifier.new);

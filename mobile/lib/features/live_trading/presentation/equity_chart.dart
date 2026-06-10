@@ -112,6 +112,9 @@ class _EquityChartState extends State<EquityChart> {
     Widget chartWidget;
     if (widget.style == ChartStyle.candle) {
       final candles = _bucketCandles(pts);
+      if (candles.isEmpty) {
+        return SizedBox(height: widget.height);
+      }
       chartWidget = SfCartesianChart(
         backgroundColor: Colors.transparent,
         plotAreaBorderWidth: 0,

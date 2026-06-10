@@ -461,7 +461,9 @@ class _SpendTrendCard extends StatelessWidget {
           ]),
           const SizedBox(height: 16),
           hasData
-              ? SfCartesianChart(
+              ? SizedBox(
+                  height: 240,
+                  child: SfCartesianChart(
                   backgroundColor: Colors.transparent,
                   plotAreaBorderWidth: 0,
                   margin: EdgeInsets.zero,
@@ -493,7 +495,7 @@ class _SpendTrendCard extends StatelessWidget {
                   ),
                   tooltipBehavior: TooltipBehavior(enable: true),
                   series: series,
-                )
+                ))
               : Container(
                   height: 180,
                   decoration: BoxDecoration(

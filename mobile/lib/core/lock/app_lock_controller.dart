@@ -69,6 +69,19 @@ class AppLockState {
       );
 }
 
+// ── Seed provider (overridden in main() before runApp) ────────────────────────
+
+/// Holds the lock state pre-computed in [main] so the first frame rendered by
+/// [AppLockController] is already correct (no async gap / cold-launch flash).
+///
+/// Override this provider on the root [ProviderContainer] before [runApp]:
+///   container.updateOverrides([
+///     appLockSeedProvider.overrideWithValue(AppLockState(...)),
+///   ]);
+final appLockSeedProvider = Provider<AppLockState>(
+  (_) => const AppLockState(),
+);
+
 // ── Controller ────────────────────────────────────────────────────────────────
 
 /// Manages app biometric lock lifecycle.
@@ -85,45 +98,33 @@ class AppLockController extends Notifier<AppLockState>
 
   FlutterSecureStorage get _storage => ref.read(secureStorageProvider);
   BiometricService get _biometrics => ref.read(biometricServiceProvider);
-  SessionStore get _session => ref.read(sessionProvider);
 
   @override
   AppLockState build() {
     WidgetsBinding.instance.addObserver(this);
     ref.onDispose(() => WidgetsBinding.instance.removeObserver(this));
-    _init();
-    return const AppLockState();
+    // Use the seed state pre-computed in main() — this is the synchronous first
+    // state so the lock gate is correct with no async gap.
+    return ref.read(appLockSeedProvider);
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-  Future<void> _init() async {
-    final enabledStr = await _storage.read(key: _kLockEnabled);
-    final timeoutStr = await _storage.read(key: _kLockTimeout);
-    final enabled = enabledStr == 'true';
-    final timeout = LockTimeout.fromStorageString(timeoutStr);
-
-    // Lock immediately on start if enabled and the user is authenticated.
-    final shouldLock = enabled && _session.isAuthenticated;
-    state = AppLockState(
-      enabled: enabled,
-      locked: shouldLock,
-      timeout: timeout,
-    );
-  }
-
   @override
   void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
-    if (lifecycle == AppLifecycleState.paused) {
+    // Record pausedAt on BOTH inactive AND paused so iOS (which fires
+    // inactive→resumed without a paused event during a biometric prompt)
+    // does not see a null pausedAt after unlock, which would cause an
+    // immediate re-lock.
+    if (lifecycle == AppLifecycleState.paused ||
+        lifecycle == AppLifecycleState.inactive) {
       pausedAt = DateTime.now();
     } else if (lifecycle == AppLifecycleState.resumed) {
       if (!state.enabled) return;
       final paused = pausedAt;
-      if (paused == null) {
-        // No recorded pause time — lock to be safe.
-        state = state.copyWith(locked: true);
-        return;
-      }
+      // pausedAt == null means we never backgrounded (e.g. trailing resumed
+      // after a successful unlock cleared it) — do NOT lock in that case.
+      if (paused == null) return;
       final elapsed = DateTime.now().difference(paused);
       final timeout = state.timeout.duration;
       // Duration.zero means "immediately", so any elapsed time triggers lock.
@@ -143,6 +144,9 @@ class AppLockController extends Notifier<AppLockState>
     );
     if (ok) {
       state = state.copyWith(locked: false);
+      // Clear pausedAt so a trailing `resumed` lifecycle event (common on iOS
+      // after the biometric prompt) does not immediately re-lock the app.
+      pausedAt = null;
     }
     return ok;
   }

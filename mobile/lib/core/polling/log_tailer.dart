@@ -127,6 +127,7 @@ class LogTailer {
   Timer? _timer;
   bool _paused = false;
   bool _disposed = false;
+  bool _polling = false;
   int _errorStreak = 0;
 
   Stream<LogTailerState> get stream => _controller.stream;
@@ -142,7 +143,8 @@ class LogTailer {
   }
 
   Future<void> _poll() async {
-    if (_disposed || _paused) return;
+    if (_disposed || _paused || _polling) return;
+    _polling = true;
     try {
       final data = await client.get<Map<String, dynamic>>(
         pathBuilder(_state.nextLine),
@@ -186,6 +188,8 @@ class LogTailer {
       _emit(_state.copyWith(loading: false, error: e));
       final idx = (_errorStreak - 1).clamp(0, _backoff.length - 1);
       _scheduleNext(Duration(seconds: _backoff[idx]));
+    } finally {
+      _polling = false;
     }
   }
 

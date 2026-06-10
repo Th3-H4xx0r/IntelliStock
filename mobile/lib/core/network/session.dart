@@ -44,6 +44,8 @@ class SessionStore extends ChangeNotifier {
     await _storage.write(key: _kToken, value: token);
     if (user != null) {
       await _storage.write(key: _kUser, value: jsonEncode(user));
+    } else {
+      await _storage.delete(key: _kUser);
     }
     notifyListeners();
   }

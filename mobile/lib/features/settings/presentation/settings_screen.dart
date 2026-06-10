@@ -4,8 +4,8 @@ import 'package:go_router/go_router.dart';
 import '../../../core/lock/app_lock_controller.dart';
 import '../../../core/lock/biometric_service.dart';
 import '../../../core/network/api_config.dart';
-import '../../../core/network/api_client.dart';
 import '../../../core/network/session.dart';
+import '../../onboarding/data/onboarding_repository.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/app_background.dart';
@@ -94,8 +94,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (!confirmed || !mounted) return;
 
     try {
-      await ref.read(apiClientProvider).post<dynamic>('/onboarding/reset');
-      if (mounted) context.go('/onboarding');
+      final res = await ref.read(onboardingRepositoryProvider).reset();
+      final user = res['user'];
+      if (user is Map<String, dynamic>) {
+        await ref.read(sessionProvider).setUser(user);
+      }
+      if (!context.mounted) return;
+      context.go('/onboarding');
     } catch (e) {
       if (mounted) _showSnack('Failed to reset onboarding: $e');
     }

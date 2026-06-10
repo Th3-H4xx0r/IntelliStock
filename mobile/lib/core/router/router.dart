@@ -29,7 +29,10 @@ final _rootKey = GlobalKey<NavigatorState>();
 /// gates. The biometric lock gate is layered on in `app.dart` via the
 /// `MaterialApp.router` builder.
 final goRouterProvider = Provider<GoRouter>((ref) {
-  final session = ref.watch(sessionProvider);
+  // Use ref.read (not ref.watch) so the GoRouter object is created once and
+  // NOT recreated (losing the back stack) on every session change.
+  // refreshListenable: session handles redirect re-evaluation on session changes.
+  final session = ref.read(sessionProvider);
 
   return GoRouter(
     navigatorKey: _rootKey,
@@ -45,7 +48,17 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         return onLogin ? null : '/login?redirect=${Uri.encodeComponent(loc)}';
       }
       if (onLogin) {
-        return session.hasCompletedOnboarding ? '/dashboard' : '/onboarding';
+        if (!session.hasCompletedOnboarding) return '/onboarding';
+        // Honor ?redirect= only if it's a safe relative in-app path.
+        final redirectParam = state.uri.queryParameters['redirect'];
+        if (redirectParam != null &&
+            redirectParam.startsWith('/') &&
+            !redirectParam.startsWith('//') &&
+            !redirectParam.contains(':') &&
+            !redirectParam.contains('@')) {
+          return redirectParam;
+        }
+        return '/dashboard';
       }
       if (!session.hasCompletedOnboarding && !onOnboarding) {
         return '/onboarding';

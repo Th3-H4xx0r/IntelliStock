@@ -438,7 +438,9 @@ class _StrategyCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final ctrl = ref.read(instanceDetailControllerProvider.notifier);
     final stratName = (inst.strategy?['name'] ?? inst.strategyId ?? '—').toString();
-    final subStrategies = inst.strategy?['strategies'] as List? ?? const [];
+    final subStrategies = (inst.strategy?['strategies'] is List)
+        ? inst.strategy!['strategies'] as List
+        : const [];
 
     return GlassCard(
       child: Column(
@@ -970,7 +972,7 @@ class _ClearStateSheetState extends ConsumerState<_ClearStateSheet> {
           .read(instanceDetailControllerProvider.notifier)
           .applyClearState(_scope);
       final deleted = result['total_deleted'] ?? 0;
-      final tables = (result['tables'] as List?)?.length ?? 0;
+      final tables = (result['tables'] is List) ? (result['tables'] as List).length : 0;
       if (mounted) {
         setState(() {
           _successMsg = 'Deleted $deleted row(s) across $tables table(s).';

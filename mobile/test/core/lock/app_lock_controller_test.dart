@@ -115,10 +115,19 @@ ProviderContainer _makeContainer({
 
   final storage = FakeSecureStorage(initial);
 
+  // Mirror what main() does: seed the lock state from persisted prefs so the
+  // controller's first state is correct (the controller reads appLockSeedProvider).
+  final seed = AppLockState(
+    enabled: storedEnabled == 'true',
+    locked: storedEnabled == 'true' && authenticated,
+    timeout: LockTimeout.fromStorageString(storedTimeout),
+  );
+
   return ProviderContainer(
     overrides: [
       biometricServiceProvider.overrideWithValue(biometrics),
       secureStorageProvider.overrideWithValue(storage),
+      appLockSeedProvider.overrideWithValue(seed),
       sessionProvider.overrideWith(
         (ref) => authenticated
             ? _FakeAuthenticatedSession()

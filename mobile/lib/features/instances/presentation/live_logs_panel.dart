@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -24,6 +26,7 @@ class LiveLogsPanel extends ConsumerStatefulWidget {
 
 class _LiveLogsPanelState extends ConsumerState<LiveLogsPanel> {
   late LogTailer _tailer;
+  StreamSubscription<LogTailerState>? _sub;
   LogTailerState _tailerState = LogTailerState();
   final ScrollController _scrollCtrl = ScrollController();
   final TextEditingController _searchCtrl = TextEditingController();
@@ -51,7 +54,7 @@ class _LiveLogsPanelState extends ConsumerState<LiveLogsPanel> {
       runningInterval: const Duration(seconds: 5),
       idleInterval: const Duration(seconds: 15),
     );
-    _tailer.stream.listen((s) {
+    _sub = _tailer.stream.listen((s) {
       if (!mounted) return;
       setState(() => _tailerState = s);
       if (_autoScroll && _open) {
@@ -64,6 +67,8 @@ class _LiveLogsPanelState extends ConsumerState<LiveLogsPanel> {
   void didUpdateWidget(LiveLogsPanel old) {
     super.didUpdateWidget(old);
     if (old.instanceId != widget.instanceId) {
+      _sub?.cancel();
+      _sub = null;
       _tailer.dispose();
       setState(() {
         _tailerState = LogTailerState();
@@ -75,6 +80,8 @@ class _LiveLogsPanelState extends ConsumerState<LiveLogsPanel> {
 
   @override
   void dispose() {
+    _sub?.cancel();
+    _sub = null;
     _tailer.dispose();
     _scrollCtrl.dispose();
     _searchCtrl.dispose();
