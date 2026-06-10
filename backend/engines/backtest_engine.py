@@ -603,6 +603,18 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         'USE_NNPACK': '0',
         'GLOG_minloglevel': '2',
     }
+    # Phase α.3 (2026-05-18, BT109429 follow-up): forward determinism env
+    # vars into the spawned broker container. PYTHONHASHSEED must be set
+    # in the container env BEFORE python starts (the interpreter reads it
+    # at startup; setting it from inside the process is too late) — passing
+    # it via the `env` dict to `docker run` does exactly that. BACKTEST_SEED
+    # is also forwarded so operators can pin a specific RNG seed across
+    # paired re-runs of the same backtest_id.
+    # Default PYTHONHASHSEED=0 (+ forward BACKTEST_SEED when set) so the spawned
+    # broker gets deterministic set iteration even if the deployment env omits
+    # it. Helper is unit-tested in tests/test_phase_alpha_variance.py.
+    from _phase_alpha_helpers import backtest_determinism_env_vars
+    env.update(backtest_determinism_env_vars(os.environ))
     if avg_difficulty is not None:
         env['BACKTEST_DIFFICULTY'] = str(avg_difficulty)
     neo4j_uri = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
@@ -669,6 +681,34 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
     # Named volume for persistent backtest log files
     log_volume_name = os.environ.get('BACKTEST_LOG_VOLUME', 'backtest_logs')
     container_volumes = {log_volume_name: {'bind': log_dir, 'mode': 'rw'}}
+
+    # Share the host's claude login into the spawned broker container so
+    # strategies (graph_nexus, earnings, ml_news, …) that select a
+    # claude-cli model can hit the operator's Pro/Max subscription. The
+    # backtest-engine service itself receives this path via the
+    # CLAUDE_HOST_HOME env (see docker-compose.yml); if it's unset, skip
+    # the mount and let any claude-cli strategy call surface a clear
+    # "Not logged in" error.
+    claude_host_home = (os.environ.get('CLAUDE_HOST_HOME') or '').strip()
+    if claude_host_home:
+        # Read-only mount: CC only needs to read the operator's OAuth
+        # state, never to mutate it during a backtest.
+        container_volumes[claude_host_home] = {'bind': '/root/.claude', 'mode': 'ro'}
+        # CC also requires $HOME/.claude.json (sibling of .claude/) in
+        # MCP mode — missing it surfaces a misleading "Not logged in"
+        # error even with valid creds in .claude/. Mount it too when
+        # the operator has configured CLAUDE_HOST_CONFIG.
+        claude_host_config = (os.environ.get('CLAUDE_HOST_CONFIG') or '').strip()
+        if claude_host_config:
+            container_volumes[claude_host_config] = {'bind': '/root/.claude.json', 'mode': 'ro'}
+
+    # Share the codex-cli OAuth state via the named volume that the api
+    # service writes to during device-code login. Unlike claude (which
+    # bind-mounts the host's ~/.claude RO), codex auth lives in a
+    # container-local Docker volume so the web-UI login flow can write
+    # to it without ever touching the host filesystem. RW because codex
+    # may refresh tokens during a long-running call.
+    container_volumes['codex_auth'] = {'bind': '/root/.codex', 'mode': 'rw'}
 
     try:
         client = _get_docker_client()

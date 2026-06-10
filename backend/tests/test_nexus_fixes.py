@@ -427,8 +427,8 @@ def test_config_defaults_consistency():
     schema_config = json.loads(config_json)
 
     check(
-        "Schema: llm_overlay_max_stock_candidates = 24",
-        schema_config.get("llm_overlay_max_stock_candidates") == 24,
+        "Schema: llm_overlay_max_stock_candidates = 30",
+        schema_config.get("llm_overlay_max_stock_candidates") == 30,
         f"got {schema_config.get('llm_overlay_max_stock_candidates')}",
     )
     check(
@@ -441,16 +441,24 @@ def test_config_defaults_consistency():
         schema_config.get("momentum_discovery_enabled") is True,
     )
     check(
-        "Schema: momentum_discovery_min_20d_return = 20.0",
-        schema_config.get("momentum_discovery_min_20d_return") == 20.0,
+        "Schema: momentum_discovery_min_20d_return = 15.0",
+        schema_config.get("momentum_discovery_min_20d_return") == 15.0,
     )
     check(
-        "Schema: momentum_discovery_min_60d_return = 50.0",
-        schema_config.get("momentum_discovery_min_60d_return") == 50.0,
+        "Schema: momentum_discovery_min_60d_return = 40.0",
+        schema_config.get("momentum_discovery_min_60d_return") == 40.0,
     )
     check(
-        "Schema: momentum_discovery_max_per_day = 5",
-        schema_config.get("momentum_discovery_max_per_day") == 5,
+        "Schema: momentum_discovery_max_per_day = 6",
+        schema_config.get("momentum_discovery_max_per_day") == 6,
+    )
+    check(
+        "Schema: max_discovered_stocks = 90",
+        schema_config.get("max_discovered_stocks") == 90,
+    )
+    check(
+        "Schema: momentum_discovery_protect_days = 10",
+        schema_config.get("momentum_discovery_protect_days") == 10,
     )
     check(
         "Schema: sector_price_context_enabled = True",
@@ -463,8 +471,8 @@ def test_config_defaults_consistency():
 
     # Check llm_overlay_max_stock_candidates default in config.get call
     check(
-        'config.get("llm_overlay_max_stock_candidates", 24) in code',
-        'config.get("llm_overlay_max_stock_candidates", 24)' in content,
+        'config.get("llm_overlay_max_stock_candidates", 30) in code',
+        'config.get("llm_overlay_max_stock_candidates", 30)' in content,
     )
     check(
         'config.get("max_etf_buys_per_day", 3) in code',
@@ -477,8 +485,8 @@ def test_config_defaults_consistency():
         cli_content = f.read()
 
     check(
-        "CLI: overlay candidates default 24",
-        "default 24" in cli_content,
+        "CLI: overlay candidates default 30",
+        "Max stock candidates for LLM trade overlay (default 30)" in cli_content,
     )
     check(
         "CLI: max_etf_buys_per_day default 3",

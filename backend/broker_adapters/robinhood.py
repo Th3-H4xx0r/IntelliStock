@@ -108,6 +108,91 @@ def _is_dry_run() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+def _available_cash_for_sizing(settled_cash: float, buying_power: float) -> float:
+    """Spendable cash for position sizing AND portfolio valuation.
+
+    1-A (bug-sweep 2026-05-28): Robinhood's ``buying_power`` on a margin /
+    Instant / Gold account EXCEEDS settled cash (buying_power can sit a few
+    hundred dollars above settled cash). The strategy is a cash-deployment
+    system (cash_reserve_floor etc.) and must NOT silently deploy instant /
+    margin credit. We cap at settled cash so deployment never exceeds what the
+    operator actually has, and use the LOWER of the two so a hold that pushes
+    buying_power below settled is also respected. On a cash account
+    settled == buying_power, so this is a no-op. Clamped to >= 0 so a margin
+    debit (negative cash) or a garbage reading can never over-deploy.
+    """
+    try:
+        s = float(settled_cash or 0.0)
+        b = float(buying_power or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(s, b))
+
+
+def _order_style_for_now(price: float, side: str, qty: Optional[float], in_rth: bool) -> dict:
+    """Order type/limit/extended_hours/tif appropriate for the current session.
+
+    2-F (bug-sweep 2026-05-28): the live trade-gate treats extended hours as
+    'open', but a plain extended_hours=False MARKET order submitted in pre/after
+    hours cannot fill until the next regular-hours open — while the strategy's
+    books treat the exit as issued. Outside RTH we want a marketable LIMIT with
+    extended_hours=True so a forced exit actually fills.
+
+    HARD CONSTRAINT: Robinhood prohibits fractional shares in extended hours AND
+    fractional limit orders (robinhood_engine.py:1224-1236). The graph_nexus
+    strategy trades fractional shares, so a fractional off-hours order MUST stay a
+    regular-hours market order (it queues to the next open) — turning it into an
+    ext-hours limit would be rejected outright. Only WHOLE-share quantities can use
+    the ext-hours limit path. qty=None (notional buys) is treated as fractional.
+    """
+    is_fractional = qty is None or abs(float(qty) - round(float(qty))) > 1e-9
+    if in_rth or is_fractional:
+        return {"order_type": "market", "limit_price": None, "extended_hours": False,
+                "tif": "day", "market_hours": "regular_hours"}
+    try:
+        buffer_pct = float(os.environ.get("RH_EXTENDED_HOURS_SLIPPAGE_PCT", "0.005"))
+    except (TypeError, ValueError):
+        buffer_pct = 0.005
+    limit = round(float(price) * (1.0 + buffer_pct if side == "buy" else 1.0 - buffer_pct), 2)
+    if limit <= 0:
+        limit = round(float(price), 2)
+    # 2-F / Scope D B1: market_hours is the field RH actually routes orders by.
+    # extended_hours=True WITHOUT market_hours="extended_hours" is routed to the
+    # regular session and will not fill off-hours.
+    return {"order_type": "limit", "limit_price": limit, "extended_hours": True,
+            "tif": "gfd", "market_hours": "extended_hours"}
+
+
+_RH_CALENDAR_FALLBACK_WARNED = False
+
+
+def _in_regular_hours(now_utc) -> bool:
+    """RTH check that fails OPEN to regular-hours semantics if the calendar is
+    unavailable (so we never accidentally route a fractional order to ext-hours).
+
+    Scope D (half-day): warn ONCE if exchange_calendars is missing. The weekday
+    fallback hardcodes a 16:00 close and ignores holidays / half-day early
+    closes, so on an early-close day a post-13:00 ET order is mis-classified as
+    in-RTH (plain market) when the regular session is already closed.
+    """
+    global _RH_CALENDAR_FALLBACK_WARNED
+    try:
+        from live_calendar import is_nyse_open, _HAS_LIB
+        if not _HAS_LIB and not _RH_CALENDAR_FALLBACK_WARNED:
+            _RH_CALENDAR_FALLBACK_WARNED = True
+            _alog(
+                "BROKER",
+                "live_calendar: exchange_calendars NOT installed — RTH / "
+                "extended-hours order routing uses a weekday fallback that does "
+                "NOT honor holidays or half-day early closes. Install it "
+                "(`pip install exchange_calendars`) for correct off-hours routing.",
+                "red",
+            )
+        return bool(is_nyse_open(now_utc))
+    except Exception:
+        return True
+
+
 def _map_rh_error_to_broker(e: Exception) -> BrokerError:
     """Translate a typed RobinhoodAPIError sub-class to the BrokerAdapter
     error taxonomy strategies isinstance() against.
@@ -179,91 +264,123 @@ class RobinhoodAdapter(BrokerAdapter):
         # rotates the refresh_token in memory only; on next backend
         # restart we boot on a stale (now invalid) refresh_token.
         brokerage_id: Optional[str] = None,
+        # Clean-room mode (2026-05-28): when True, broker state is reconciled
+        # against this-instance's LiveOrderWAL. Broker positions matched to a
+        # filled WAL row are strategy-owned; everything else is quarantined.
+        # Backward-compatible: defaults False -> existing legacy behavior.
+        clean_room_mode: bool = False,
+        cid_prefix: Optional[str] = None,
+        clean_room_retention_days: int = 180,
+        # Test-only injection point. Production callers leave this None.
+        # When provided, the adapter skips the lazy robinhood_engine import
+        # (which is heavy and may not be installed in the test environment)
+        # AND skips select_default_account, instead trusting the operator
+        # to wire account_number / account_url directly.
+        _test_client: Optional[Any] = None,
     ):
-        try:
-            from robinhood_engine import (
-                RobinhoodClient,
-                RobinhoodSessionState,
-                get_live_prices as _rh_get_live_prices,
-            )
-        except ImportError as e:
-            raise BrokerError(
-                "robinhood_engine import failed; cannot start RobinhoodAdapter."
-            ) from e
+        if _test_client is not None:
+            # Test path: skip the real robinhood_engine import + session setup
+            # so the adapter can be exercised in unit tests without the unofficial
+            # RH SDK available. Tests pass account_number / account_url directly.
+            self._RobinhoodClient = type(_test_client) if not isinstance(_test_client, type) else _test_client
+            self._rh_get_live_prices = lambda *a, **kw: {}
+            _RH_TEST_MODE = True
+        else:
+            try:
+                from robinhood_engine import (
+                    RobinhoodClient,
+                    RobinhoodSessionState,
+                    get_live_prices as _rh_get_live_prices,
+                )
+            except ImportError as e:
+                raise BrokerError(
+                    "robinhood_engine import failed; cannot start RobinhoodAdapter."
+                ) from e
 
-        self._RobinhoodClient = RobinhoodClient
-        self._rh_get_live_prices = _rh_get_live_prices
+            self._RobinhoodClient = RobinhoodClient
+            self._rh_get_live_prices = _rh_get_live_prices
+            _RH_TEST_MODE = False
 
         # Session state — refresh_token is mandatory for unattended trading
         # (access_token rotates every 24h; the credential_service refreshes
         # in the background but the adapter must accept refreshed values
         # too). Both come pre-decrypted from broker.py:_load_live_credentials.
-        if not api_key or not api_secret:
+        if not _RH_TEST_MODE and (not api_key or not api_secret):
             raise BrokerError(
                 "RobinhoodAdapter requires both access_token and refresh_token. "
                 "Re-link the brokerage from the UI or run "
                 "`python robinhood_cli.py --paste-tokens`."
             )
-        # 2026-04-30 — seed obtained_at_epoch + expires_in + account_url so
-        # _maybe_refresh_token has real values to compute against. Default
-        # expires_in to 86400 (RH's standard 24h) when DB is missing it; the
-        # adapter then assumes a worst-case "token may already be old" and
-        # the first refresh-gate check forces a refresh on first poll tick.
-        # Defaulting obtained_at_epoch to now() rather than 0 prevents the
-        # legacy ``obtained <= 0`` early-return; if the DB row genuinely
-        # lacks the field we treat the in-memory token as just-minted, but
-        # _maybe_refresh_token's persistence helper will write the real
-        # value on the first refresh.
-        _seed_obtained = int(obtained_at_epoch) if (obtained_at_epoch and obtained_at_epoch > 0) else int(time.time())
-        # 2026-05-02: derive real TTL from JWT exp claim. RH issues 31-day
-        # tokens but historic link code stored the wrong 86400 default; use
-        # the JWT's authoritative expiry to override stale DB values.
-        _seed_expires = int(expires_in) if (expires_in and expires_in > 0) else 86400
-        try:
-            _jwt_exp = _decode_jwt_expires_in(api_key)
-            if _jwt_exp and _jwt_exp > _seed_expires:
-                _seed_expires = _jwt_exp
-        except Exception:
-            pass
-        state = RobinhoodSessionState(
-            access_token=api_key,
-            refresh_token=api_secret,
-            token_type="Bearer",
-            device_token=device_token or None,
-            account_number=account_number or None,
-            account_url=account_url or None,
-            obtained_at_epoch=_seed_obtained,
-            expires_in=_seed_expires,
-        )
-        # 2026-05-05 third-pass: match live_broker_fetch's RobinhoodClient
-        # default (timeout_sec=20). Prior 30s was longer than the snapshot
-        # bound (12s), so requests' own timeout never had a chance to fire
-        # before our wrapper aborted. With 20s here + 25s outer bound, the
-        # requests-level timeout fires FIRST on real outages and produces a
-        # clean RobinhoodAPIError exception instead of an executor abandonment.
-        self._client = RobinhoodClient(state=state, timeout_sec=20, debug_http=False)
+        if _RH_TEST_MODE:
+            # Skip JWT decoding + RobinhoodClient construction in test mode.
+            self._client = _test_client
+        else:
+            # 2026-04-30 — seed obtained_at_epoch + expires_in + account_url so
+            # _maybe_refresh_token has real values to compute against. Default
+            # expires_in to 86400 (RH's standard 24h) when DB is missing it; the
+            # adapter then assumes a worst-case "token may already be old" and
+            # the first refresh-gate check forces a refresh on first poll tick.
+            # Defaulting obtained_at_epoch to now() rather than 0 prevents the
+            # legacy ``obtained <= 0`` early-return; if the DB row genuinely
+            # lacks the field we treat the in-memory token as just-minted, but
+            # _maybe_refresh_token's persistence helper will write the real
+            # value on the first refresh.
+            _seed_obtained = int(obtained_at_epoch) if (obtained_at_epoch and obtained_at_epoch > 0) else int(time.time())
+            # 2026-05-02: derive real TTL from JWT exp claim. RH issues 31-day
+            # tokens but historic link code stored the wrong 86400 default; use
+            # the JWT's authoritative expiry to override stale DB values.
+            _seed_expires = int(expires_in) if (expires_in and expires_in > 0) else 86400
+            try:
+                _jwt_exp = _decode_jwt_expires_in(api_key)
+                if _jwt_exp and _jwt_exp > _seed_expires:
+                    _seed_expires = _jwt_exp
+            except Exception:
+                pass
+            state = RobinhoodSessionState(
+                access_token=api_key,
+                refresh_token=api_secret,
+                token_type="Bearer",
+                device_token=device_token or None,
+                account_number=account_number or None,
+                account_url=account_url or None,
+                obtained_at_epoch=_seed_obtained,
+                expires_in=_seed_expires,
+            )
+            # 2026-05-05 third-pass: match live_broker_fetch's RobinhoodClient
+            # default (timeout_sec=20). Prior 30s was longer than the snapshot
+            # bound (12s), so requests' own timeout never had a chance to fire
+            # before our wrapper aborted. With 20s here + 25s outer bound, the
+            # requests-level timeout fires FIRST on real outages and produces a
+            # clean RobinhoodAPIError exception instead of an executor abandonment.
+            self._client = RobinhoodClient(state=state, timeout_sec=20, debug_http=False)
         # Brokerage row id for token persistence (auth chain CRITICAL #2).
         self._brokerage_id = (brokerage_id or "").strip() or None
 
         # Resolve account_number / account_url. If caller passed account_number,
         # use it; otherwise pick the first active account.
-        try:
-            picked = self._client.select_default_account(
-                preferred_account_number=account_number,
-            )
-        except Exception as e:
-            # Bug-check fix #11: close the requests.Session on failed init so
-            # we don't leak the connection pool. The session was opened by
-            # RobinhoodClient.__init__ at line ~136 above.
+        if _RH_TEST_MODE:
+            picked = {
+                "account_number": account_number or "TEST-ACCT",
+                "url": account_url or "https://api.robinhood.com/accounts/TEST/",
+            }
+        else:
             try:
-                if getattr(self._client, "session", None) is not None:
-                    self._client.session.close()
-            except Exception:
-                pass
-            raise BrokerError(
-                f"RobinhoodAdapter: select_default_account failed ({type(e).__name__}: {e}). "
-                "Token may be expired — try refresh from the UI."
-            ) from e
+                picked = self._client.select_default_account(
+                    preferred_account_number=account_number,
+                )
+            except Exception as e:
+                # Bug-check fix #11: close the requests.Session on failed init so
+                # we don't leak the connection pool. The session was opened by
+                # RobinhoodClient.__init__ at line ~136 above.
+                try:
+                    if getattr(self._client, "session", None) is not None:
+                        self._client.session.close()
+                except Exception:
+                    pass
+                raise BrokerError(
+                    f"RobinhoodAdapter: select_default_account failed ({type(e).__name__}: {e}). "
+                    "Token may be expired — try refresh from the UI."
+                ) from e
         self._account_number = (picked.get("account_number") or "").strip()
         self._account_url = (picked.get("url") or "").strip()
         if not self._account_url:
@@ -273,6 +390,11 @@ class RobinhoodAdapter(BrokerAdapter):
 
         self._instance_id = instance_id
         self._wal = wal
+        # Clean-room state (always set; only used when clean_room_mode=True).
+        self._clean_room_mode = bool(clean_room_mode)
+        self._cid_prefix = cid_prefix or ""
+        self._clean_room_retention_days = int(clean_room_retention_days)
+        self._external_positions: dict[str, dict] = {}
         # `paper` is meaningless for Robinhood (no paper account exists).
         # We expose a distinct "_paper" attribute for the UI badge so the
         # operator sees the dry-run state truthfully instead of "paper".
@@ -429,20 +551,62 @@ class RobinhoodAdapter(BrokerAdapter):
         self.refresh_cash()
         self.refresh_positions(force=True)
 
-        if seed_trades_from_broker:
-            try:
-                self._seed_trades_from_broker(limit=200)
-            except Exception:
-                pass
+        if self._clean_room_mode:
+            # Reconcile broker view against this-instance's LiveOrderWAL.
+            from ._classifier import classify_broker_positions, derive_cid_prefix
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            _now = _dt.now(_tz.utc)
+            _prefix = self._cid_prefix or derive_cid_prefix(self._instance_id)
+            # Scope D D1: pass since_utc=None so the classifier receives ALL
+            # filled rows and applies retention itself (it computes its own cutoff
+            # and re-filters). The store-level since_utc pre-filter dropped rows
+            # older than the cutoff BEFORE the classifier could use them to tag an
+            # aged-out (beyond-retention) still-held position vs a never-seen one
+            # (2-C). The full-table scan cost is unchanged (the store scans all
+            # rows regardless; since_utc only trimmed the returned list).
+            _wal_rows = self._wal.list_filled_for_prefix(_prefix, since_utc=None)
+            _broker_view = []
+            for _sym, _qty in (self._positions or {}).items():
+                _broker_view.append({
+                    "symbol": _sym,
+                    "qty": float(_qty),
+                    "market_value": float(self._last_prices.get(_sym, 0.0) or 0.0) * float(_qty),
+                })
+            _owned, _external, _wal_trades = classify_broker_positions(
+                positions=_broker_view,
+                wal_rows=_wal_rows,
+                instance_id=self._instance_id,
+                cid_prefix=_prefix,
+                retention_days=self._clean_room_retention_days,
+                now_utc=_now,
+            )
+            self._positions = dict(_owned)
+            self._external_positions = dict(_external)
+            self._trades = list(_wal_trades)
 
-        if initial_value is not None:
+            if initial_value is None:
+                raise BrokerError(
+                    "RobinhoodAdapter clean_room_mode=True requires an explicit "
+                    "initial_value (configure Instances.<id>.initial_value or "
+                    "pass LIVE_INITIAL_VALUE env)."
+                )
             self._initial_value = float(initial_value)
         else:
-            try:
-                acct_dto = self.refresh_account(force=True)
-                self._initial_value = float(acct_dto.equity)
-            except Exception:
-                self._initial_value = self._cash + self.get_positions_value({})
+            if seed_trades_from_broker:
+                try:
+                    self._seed_trades_from_broker(limit=200)
+                except Exception:
+                    pass
+
+            if initial_value is not None:
+                self._initial_value = float(initial_value)
+            else:
+                try:
+                    acct_dto = self.refresh_account(force=True)
+                    self._initial_value = float(acct_dto.equity)
+                except Exception:
+                    self._initial_value = self._cash + self.get_positions_value({})
+
         if self._initial_value <= 0:
             raise BrokerError(
                 "RobinhoodAdapter init: account equity <= 0. "
@@ -947,6 +1111,7 @@ class RobinhoodAdapter(BrokerAdapter):
         tif: str,
         extended_hours: bool,
         client_order_id: str,
+        market_hours: str = "regular_hours",
     ) -> OrderRef:
         """Serialized full-body submit. The HIGH-#6 agent finding noted
         that the previous implementation only held ``self._lock`` for tiny
@@ -967,6 +1132,7 @@ class RobinhoodAdapter(BrokerAdapter):
                 symbol=symbol, side=side, qty=qty, notional=notional,
                 order_type=order_type, limit_price=limit_price, tif=tif,
                 extended_hours=extended_hours, client_order_id=client_order_id,
+                market_hours=market_hours,
             )
 
     def _submit_order_locked(
@@ -981,6 +1147,7 @@ class RobinhoodAdapter(BrokerAdapter):
         tif: str,
         extended_hours: bool,
         client_order_id: str,
+        market_hours: str = "regular_hours",
     ) -> OrderRef:
         from robinhood_engine import RobinhoodAPIError
         # Bug-check fix #1 (BLOCKER): reject empty/whitespace cid. uuid5(NS, "")
@@ -991,13 +1158,14 @@ class RobinhoodAdapter(BrokerAdapter):
                 "submit_order: client_order_id is required and must be non-empty "
                 "(deterministic ref_id derivation depends on it)."
             )
-        symbol = (symbol or "").strip().upper()
         # 2026-04-30 — agent MED #23: RH instruments endpoint accepts dash-
         # form tickers (BRK-A, BF-B) but rejects the dot-form (BRK.A).
         # Normalize once at adapter entry so every downstream call (instrument
         # lookup, ref_id, WAL, order POST, fill bookkeeping) uses the same
-        # symbol shape.
-        symbol = symbol.replace(".", "-")
+        # symbol shape. 2-D / Scope D C3: use the shared helper so the WAL write
+        # path and the classifier read path can't diverge.
+        from ._symbols import normalize_broker_symbol
+        symbol = normalize_broker_symbol(symbol)
         side_lc = (side or "").strip().lower()
         order_type_lc = (order_type or "market").strip().lower()
         ref_id = self._ref_id_from_cid(client_order_id)
@@ -1366,6 +1534,7 @@ class RobinhoodAdapter(BrokerAdapter):
                 limit_price=limit_price,
                 time_in_force=rh_tif,
                 extended_hours=bool(extended_hours),
+                market_hours=market_hours,
                 ref_id=ref_id,
             )
         except RobinhoodAPIError as e:
@@ -1458,6 +1627,7 @@ class RobinhoodAdapter(BrokerAdapter):
                         limit_price=limit_price,
                         time_in_force=rh_tif,
                         extended_hours=bool(extended_hours),
+                        market_hours=market_hours,
                         ref_id=ref_id,
                     )
                 except RobinhoodAPIError as e2:
@@ -1915,7 +2085,55 @@ class RobinhoodAdapter(BrokerAdapter):
                 market_value=mv,
             ))
         with self._lock:
-            self._positions = new_positions
+            # 2-A (bug-sweep 2026-05-28): in clean_room_mode the boot-time
+            # classifier split broker positions into strategy-owned vs external
+            # (quarantined). A naive rebind to the full broker set here would
+            # silently RE-ADOPT the quarantined external shares on the warm-boot
+            # force probe (broker.py) and every post-fill refresh, defeating the
+            # split before the strategy even runs. Enforce the quarantine on every
+            # rebind: owned_qty = broker_qty - external_qty. This correctly handles
+            # fully-external (owned 0), partial-external (owned = broker - external),
+            # fully-owned (external 0), and brand-new strategy buys (external 0 ->
+            # full qty owned). Legacy (non-clean-room) path is byte-for-byte unchanged.
+            # 2-A (bug-sweep 2026-05-28): in clean_room_mode the boot-time
+            # classifier split broker positions into strategy-owned vs external
+            # (quarantined). A naive rebind to the full broker set here would
+            # silently RE-ADOPT the quarantined external shares on the warm-boot
+            # force probe (broker.py) and every post-fill refresh, defeating the
+            # split before the strategy even runs. Enforce the quarantine on every
+            # rebind: owned_qty = broker_qty - external_qty. This correctly handles
+            # fully-external (owned 0), partial-external (owned = broker - external),
+            # fully-owned (external 0), and brand-new strategy buys (external 0 ->
+            # full qty owned). Legacy (non-clean-room) path is byte-for-byte unchanged.
+            #
+            # NOTE (Scope D): a reconcile that anchored owned on self._positions was
+            # tried and REVERTED — RobinhoodAdapter._handle_order_transition does NOT
+            # update self._positions on live fills (only the RH_DRY_RUN path does), so
+            # anchoring on it stranded every post-boot real buy as external. The
+            # operator-partial-sell-of-an-external-lot edge (owned mis-charged) remains
+            # a known latent MEDIUM; the correct fix is RH fill-level position tracking.
+            if self._clean_room_mode:
+                owned_new: dict[str, float] = {}
+                for _sym, _bqty in new_positions.items():
+                    _ext = float((self._external_positions.get(_sym) or {}).get("qty", 0.0) or 0.0)
+                    _ext = max(0.0, _ext)
+                    _owned_qty = float(_bqty) - _ext
+                    if _owned_qty > 1e-6:
+                        owned_new[_sym] = _owned_qty
+                # Keep the external quarantine current: drop entries the broker no
+                # longer shows (operator flattened) and clamp qty down if the
+                # broker now shows fewer shares than the boot snapshot.
+                for _sym in list(self._external_positions.keys()):
+                    if _sym not in new_positions:
+                        self._external_positions.pop(_sym, None)
+                    else:
+                        _row = self._external_positions[_sym]
+                        _row["qty"] = min(
+                            float(_row.get("qty", 0.0) or 0.0), float(new_positions[_sym])
+                        )
+                self._positions = owned_new
+            else:
+                self._positions = new_positions
             self._last_prices.update(new_last_prices)
             self._positions_stale_since = None
         # Update TTL cache so subsequent non-force callers (snapshot every 3s)
@@ -1950,11 +2168,25 @@ class RobinhoodAdapter(BrokerAdapter):
             cash=cash, buying_power=bp,
             daytrading_buying_power=dtbp, unsettled=unsettled,
         )
+        # 1-A (bug-sweep 2026-05-28): broker.py treats _cash as available-to-spend
+        # AND get_portfolio_value() = get_cash() + positions_value drives the
+        # drawdown baseline. Cap at SETTLED cash so a margin/Instant account's
+        # inflated buying_power never deploys non-settled credit nor inflates the
+        # valuation. On a cash account settled == bp, so this is a no-op.
+        available = _available_cash_for_sizing(cash, bp)
         with self._lock:
-            self._cash = bp  # broker.py treats _cash as available-to-spend → use buying_power
+            self._cash = available
             self._buying_power = bp
             self._settled_cash = cash
             self._last_cash_dto = dto
+        if bp - cash > 1.0:
+            _alog(
+                "BROKER",
+                f"refresh_cash: buying_power ${bp:,.2f} exceeds settled cash "
+                f"${cash:,.2f} (Δ ${bp - cash:,.2f}; margin/Instant). Sizing + "
+                f"valuation capped to settled cash ${available:,.2f}.",
+                "yellow",
+            )
         return dto
 
     def refresh_account(self, *, force: bool = False) -> AccountDTO:
@@ -2577,11 +2809,15 @@ class RobinhoodAdapter(BrokerAdapter):
 
     def buy(self, ticker: str, shares: float, price: float, timestamp: Optional[datetime] = None) -> bool:
         try:
-            cid = make_client_order_id(self._instance_id, ticker, (timestamp or datetime.now(timezone.utc)).isoformat(), "buy", 0)
+            ts = timestamp or datetime.now(timezone.utc)
+            cid = make_client_order_id(self._instance_id, ticker, ts.isoformat(), "buy", 0)
+            style = _order_style_for_now(price, "buy", shares, _in_regular_hours(ts))
             self.submit_order(
                 symbol=ticker, side="buy", qty=shares, notional=None,
-                order_type="market", limit_price=None, tif="day",
-                extended_hours=False, client_order_id=cid,
+                order_type=style["order_type"], limit_price=style["limit_price"],
+                tif=style["tif"], extended_hours=style["extended_hours"],
+                market_hours=style["market_hours"],
+                client_order_id=cid,
             )
             return True
         except BrokerError as e:
@@ -2590,11 +2826,15 @@ class RobinhoodAdapter(BrokerAdapter):
 
     def sell(self, ticker: str, shares: float, price: float, timestamp: Optional[datetime] = None) -> bool:
         try:
-            cid = make_client_order_id(self._instance_id, ticker, (timestamp or datetime.now(timezone.utc)).isoformat(), "sell", 0)
+            ts = timestamp or datetime.now(timezone.utc)
+            cid = make_client_order_id(self._instance_id, ticker, ts.isoformat(), "sell", 0)
+            style = _order_style_for_now(price, "sell", shares, _in_regular_hours(ts))
             self.submit_order(
                 symbol=ticker, side="sell", qty=shares, notional=None,
-                order_type="market", limit_price=None, tif="day",
-                extended_hours=False, client_order_id=cid,
+                order_type=style["order_type"], limit_price=style["limit_price"],
+                tif=style["tif"], extended_hours=style["extended_hours"],
+                market_hours=style["market_hours"],
+                client_order_id=cid,
             )
             return True
         except BrokerError as e:
@@ -2630,11 +2870,15 @@ class RobinhoodAdapter(BrokerAdapter):
         if sell_qty <= 0:
             return False
         try:
-            cid = make_client_order_id(self._instance_id, ticker, (timestamp or datetime.now(timezone.utc)).isoformat(), "sell", 0)
+            ts = timestamp or datetime.now(timezone.utc)
+            cid = make_client_order_id(self._instance_id, ticker, ts.isoformat(), "sell", 0)
+            style = _order_style_for_now(price, "sell", sell_qty, _in_regular_hours(ts))
             self.submit_order(
                 symbol=ticker, side="sell", qty=sell_qty, notional=None,
-                order_type="market", limit_price=None, tif="day",
-                extended_hours=False, client_order_id=cid,
+                order_type=style["order_type"], limit_price=style["limit_price"],
+                tif=style["tif"], extended_hours=style["extended_hours"],
+                market_hours=style["market_hours"],
+                client_order_id=cid,
             )
             return True
         except BrokerError as e:

@@ -18,6 +18,13 @@ shape. If you deploy outside of it (multi-tenant, public signup,
 shared host with other workloads), several assumptions become
 load-bearing — call them out explicitly when you do.
 
+**No privilege separation between authenticated users.** Every account
+created with the signup key is fully trusted: it can manage users (create,
+delete, reset any password), brokerages, instances, and live trading. There
+is no admin/non-admin tier inside the app. Only provision accounts for people
+you would trust with full operator access, and never expose signup to the
+public internet.
+
 In scope:
 - Brokerage credential confidentiality at rest.
 - Order-execution authorisation (no order fires without a strategy

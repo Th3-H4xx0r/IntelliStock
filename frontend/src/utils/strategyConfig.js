@@ -306,6 +306,10 @@ export const LLM_PROVIDER_OPTIONS = [
   { value: 'openai', label: 'OpenAI Compatible' },
   { value: 'azure', label: 'Azure OpenAI' },
   { value: 'nvidia', label: 'NVIDIA NIM' },
+  { value: 'ollama', label: 'Ollama (local / cloud)' },
+  { value: 'bedrock', label: 'AWS Bedrock' },
+  { value: 'claude-cli', label: 'Claude Code CLI (subscription)' },
+  { value: 'codex-cli', label: 'OpenAI Codex CLI (subscription)' },
 ]
 
 export const LLM_REASONING_EFFORT_OPTIONS = [
@@ -320,6 +324,41 @@ export const NVIDIA_REASONING_EFFORT_OPTIONS = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High (full reasoning)' },
+]
+
+// Ollama's ``think`` parameter accepts a bool (true / false) or an
+// effort string (low / medium / high). The same value is sent to every
+// model; whether a given model honours it depends on the model itself.
+// Most non-reasoning models silently ignore the field.
+export const OLLAMA_THINK_OPTIONS = [
+  { value: '', label: 'Default (model decides)' },
+  { value: 'false', label: 'Off (disable thinking)' },
+  { value: 'true', label: 'On (enable thinking)' },
+  { value: 'low', label: 'Low effort' },
+  { value: 'medium', label: 'Medium effort' },
+  { value: 'high', label: 'High effort' },
+]
+
+// AWS Bedrock reasoning. Maps to Converse additionalModelRequestFields on the
+// backend, model-family-specific: Claude 3.7+ gets a thinking-token budget,
+// OpenAI gpt-oss gets reasoning_effort (low/medium/high). Other families are
+// omitted. "off" = no reasoning.
+export const BEDROCK_REASONING_OPTIONS = [
+  { value: 'off', label: 'Off' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+]
+
+// Maps to the claude CLI's `--effort` flag. CC supports five levels;
+// the default ("") lets CC decide.
+export const CLAUDE_CLI_EFFORT_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' },
+  { value: 'max', label: 'Max' },
 ]
 
 const KNOWN_LLM_ROLE_LABELS = {
@@ -657,7 +696,21 @@ export function buildStrategyLlmTestPayload(draft) {
   if (provider === 'nvidia') {
     payload.openai_base_url = String(draft?.nvidiaBaseUrl || 'https://integrate.api.nvidia.com/v1').trim()
   }
-  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia') {
+  if (provider === 'ollama') {
+    payload.ollama_base_url = String(draft?.ollamaBaseUrl || 'http://localhost:11434').trim()
+    const keepAlive = String(draft?.ollamaKeepAlive || '').trim()
+    if (keepAlive) payload.ollama_keep_alive = keepAlive
+    const think = String(draft?.ollamaThink || '').trim()
+    if (think) payload.ollama_think = think
+    // api_key is already populated above for cloud Ollama; leave empty for local.
+  }
+  if (provider === 'bedrock') {
+    payload.bedrock_region = String(draft?.bedrockRegion || '').trim()
+    const reasoning = String(draft?.bedrockReasoning || '').trim().toLowerCase()
+    if (reasoning) payload.bedrock_reasoning = reasoning
+    // api_key is the Bedrock bearer token, populated above.
+  }
+  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'codex-cli') {
     const reasoningEffort = String(draft?.reasoningEffort || '').trim().toLowerCase()
     if (reasoningEffort) payload.reasoning_effort = reasoningEffort
   }

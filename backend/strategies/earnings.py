@@ -59,6 +59,14 @@ except Exception:
     def _log(msg, color="white"):
         print(f"[EarningsStrategy] {msg}")
 
+try:
+    from llm_telemetry import llm_call_context
+except Exception:
+    from contextlib import contextmanager
+    @contextmanager
+    def llm_call_context(**_kwargs):
+        yield
+
 # ── RethinkDB persistent cache ──────────────────────────────────────────────
 try:
     from rethinkdb import RethinkDB
@@ -309,7 +317,7 @@ def _to_bool(value, default: bool = False) -> bool:
 
 def _normalize_llm_provider(provider: str) -> str:
     name = (provider or "gemini").strip().lower()
-    return name if name in ("gemini", "deepseek", "openai", "azure") else "gemini"
+    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "codex-cli", "anthropic") else "gemini"
 
 
 def _default_model_for_provider(provider: str) -> str:
@@ -324,6 +332,10 @@ def _default_model_for_provider(provider: str) -> str:
             or os.environ.get("AZURE_OPENAI_MODEL")
             or "gpt-4.1-mini"
         ).strip()
+    if provider in ("claude-cli", "anthropic"):
+        return "claude-sonnet-4-6"
+    if provider == "codex-cli":
+        return "gpt-5-codex"
     return "gemini-2.0-flash-exp"
 
 
@@ -335,10 +347,19 @@ def _default_api_key_for_provider(provider: str) -> str:
         return os.environ.get("OPENAI_API_KEY", "").strip()
     if provider == "azure":
         return os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+    if provider == "anthropic":
+        return os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if provider == "claude-cli":
+        # Sentinel so ``if not api_key`` short-circuits don't skip the
+        # whole pipeline — claude-cli authenticates via the local binary,
+        # not an API key. llm_utils' claude-cli branch ignores the value.
+        return "claude-cli-no-api-key"
+    if provider == "codex-cli":
+        return "codex-cli-no-api-key"
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
-def _resolve_provider_config(config: dict, provider: str) -> dict[str, str]:
+def _resolve_provider_config(config: dict, provider: str) -> dict:
     provider = _normalize_llm_provider(provider)
     if provider == "azure":
         endpoint = (
@@ -364,6 +385,26 @@ def _resolve_provider_config(config: dict, provider: str) -> dict[str, str]:
             or "https://integrate.api.nvidia.com/v1"
         )
         return {"base_url": base_url}
+    if provider == "claude-cli":
+        cli_path = (config.get("cli_path") or "claude").strip() or "claude"
+        extra_args = config.get("extra_args") or ""
+        out: dict = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        reasoning = (config.get("llm_reasoning_effort") or "").strip()
+        if reasoning:
+            out["reasoning_effort"] = reasoning
+        return out
+    if provider == "codex-cli":
+        cli_path = (config.get("cli_path") or "codex").strip() or "codex"
+        extra_args = config.get("extra_args") or ""
+        out = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        reasoning = (config.get("llm_reasoning_effort") or "").strip()
+        if reasoning:
+            out["reasoning_effort"] = reasoning
+        return out
     return {}
 
 
@@ -1248,17 +1289,18 @@ Reply with ONLY a JSON object, one key per ticker (e.g. "AAPL", "MSFT"). Each va
 Example: {{"AAPL": {{"sentiment": "POSITIVE", "allocation_pct": 60, "confidence": 0.74}}, "MSFT": {{"sentiment": "NEGATIVE", "allocation_pct": 0, "confidence": 0.68, "avoid": true, "avoid_reason": "high earnings volatility"}}}}"""
 
         try:
-            raw, from_cache = call_llm_with_prompt_cache(
-                provider,
-                api_key,
-                model,
-                prompt,
-                max_output_tokens=0,
-                provider_config=provider_config,
-                db_conn=db_conn,
-                db_name=DB_NAME,
-                prompt_cache_table="EarningsLLMPromptCache",
-            )
+            with llm_call_context(strategy="Earnings", call_site="main"):
+                raw, from_cache = call_llm_with_prompt_cache(
+                    provider,
+                    api_key,
+                    model,
+                    prompt,
+                    max_output_tokens=0,
+                    provider_config=provider_config,
+                    db_conn=db_conn,
+                    db_name=DB_NAME,
+                    prompt_cache_table="EarningsLLMPromptCache",
+                )
             raw_response = raw or ""
             if from_cache and raw:
                 parsed = _parse_sentiment_raw_response(raw)

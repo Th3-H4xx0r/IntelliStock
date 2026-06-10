@@ -1098,11 +1098,31 @@ def action_get_instance(conn, instance_id):
     try:
         ensure_backtest_instances_table(conn)
         tables = list(r.db(DB_NAME).table_list().run(conn))
-        bt_rows = list(
-            r.db(DB_NAME).table("BacktestInstances")
-            .filter(r.row["instance"] == str(doc.get("id", instance_id)))
-            .run(conn)
-        )
+        # Use the "instance" secondary index when present — same
+        # optimisation as action_list_backtests. Falls back to filter()
+        # when the index isn't ready (e.g. first deploy of that index).
+        # Without this, the instance detail page scanned the entire
+        # BacktestInstances table on every load, which gets slow once
+        # an instance has dozens of historical backtests.
+        _bt_instance_filter = str(doc.get("id", instance_id))
+        try:
+            _bt_idx = set(
+                r.db(DB_NAME).table("BacktestInstances").index_list().run(conn)
+            )
+        except Exception:
+            _bt_idx = set()
+        if "instance" in _bt_idx:
+            bt_rows = list(
+                r.db(DB_NAME).table("BacktestInstances")
+                .get_all(_bt_instance_filter, index="instance")
+                .run(conn)
+            )
+        else:
+            bt_rows = list(
+                r.db(DB_NAME).table("BacktestInstances")
+                .filter(r.row["instance"] == _bt_instance_filter)
+                .run(conn)
+            )
         has_results = "BacktestResults" in tables
         for row in bt_rows:
             rid = row.get("id")
@@ -4913,6 +4933,22 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
     def _is_terminal_status(status):
         return str(status or "").strip().lower() in ("finished", "completed", "stopped", "failed", "error", "cancelled")
 
+    def _normalize_status_for_display(status):
+        """Collapse paused_llm_critical / paused_<anything> down to "paused"
+        for UI consumption. Without this the listing keeps the raw DB
+        status and the sort + filter logic in this function (and in the
+        frontend) doesn't recognise the row as a paused backtest — so it
+        sorts to the bottom of the page and falls off page-1 entirely
+        when there are 100+ rows."""
+        s = str(status or "").strip().lower()
+        if s.startswith("paused"):
+            return "paused"
+        return s
+
+    def _is_active_status(status):
+        s = str(status or "").strip().lower()
+        return s in ("running", "queued", "pending", "paused") or s.startswith("paused")
+
     def _to_seconds(value):
         try:
             if value is None:
@@ -5016,6 +5052,10 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
             status = str(row.get("status") or "").strip() or ""
             if queue_row is not None and bool(queue_row.get("paused")) and status.lower() in ("running", "queued", "pending"):
                 status = "paused"
+            # Collapse paused_llm_critical / paused_<anything> → paused so
+            # the listing's sort + the frontend's status switch both see
+            # the row as a paused backtest (active rank, top of list).
+            status = _normalize_status_for_display(status) if str(status).lower().startswith("paused") else status
             completed_at_raw = row.get("completed_at")
             if completed_at_raw is None and _is_terminal_status(status):
                 completed_at_raw = row.get("timestamp")
@@ -5042,6 +5082,7 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
         status = str(row.get("status") or current.get("status") or "").strip() or ""
         if queue_row is not None and bool(queue_row.get("paused")) and status.lower() in ("running", "queued", "pending"):
             status = "paused"
+        status = _normalize_status_for_display(status) if str(status).lower().startswith("paused") else status
         completed_at_raw = row.get("completed_at")
         if completed_at_raw is None and _is_terminal_status(status):
             completed_at_raw = row.get("timestamp")
@@ -5066,7 +5107,10 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
                 return None
 
         status = str(item.get("status") or "").strip().lower()
-        is_active = status in ("running", "queued", "pending", "paused")
+        # Active includes paused_llm_critical and any "paused_<tag>" variant
+        # — without this an LLM-critical pause lands as active_rank=1 and
+        # gets sorted to the bottom of the list, off page-1 entirely.
+        is_active = _is_active_status(status)
         active_rank = 0 if is_active else 1
 
         if sort_by == "pnl":
@@ -5107,6 +5151,28 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
         "per_page": per_page,
         "total_pages": math.ceil(total / per_page) if per_page else 1,
     }
+
+
+def action_clear_instance_state(conn, instance_id: str, scope: str = "lookback_only",
+                                 apply: bool = False) -> dict:
+    """Dry-run / apply per-instance state wipe.
+
+    Thin wrapper around ``clear_instance_state.execute``. ``apply=False``
+    just counts what would be deleted; ``apply=True`` performs the
+    deletes. Returns the same shape either way so the UI can render a
+    "before" preview and an "after" confirmation with one code path.
+
+    Raises ``ValueError`` on unknown scope (the API maps that to 400).
+    """
+    from clear_instance_state import execute as _execute
+    if not (instance_id and str(instance_id).strip()):
+        raise ValueError("instance_id is required")
+    return _execute(
+        conn,
+        instance_id=str(instance_id).strip(),
+        scope=str(scope or "lookback_only").strip(),
+        apply=bool(apply),
+    )
 
 
 def action_create_backtest(
@@ -5555,6 +5621,16 @@ def action_summarize_backtest(conn, backtest_id):
         "portfolio_value_low": min(float(h.get("value") or 0) for h in portfolio_value_history) if portfolio_value_history else None,
         "strategy_schema": doc.get("strategy_schema"),
         "strategy_id": doc.get("strategy_id"),
+        "pause_reason_tag":   doc.get("pause_reason_tag"),
+        "pause_reason_text":  doc.get("pause_reason_text"),
+        "pause_provider":     doc.get("pause_provider"),
+        "pause_model":        doc.get("pause_model"),
+        "pause_call_site":    doc.get("pause_call_site"),
+        "pause_attempts":     doc.get("pause_attempts"),
+        "pause_bar_time":     doc.get("pause_bar_time"),
+        "pause_sample":       doc.get("pause_sample"),
+        "paused_at":          doc.get("paused_at"),
+        "resumed_at":         doc.get("resumed_at"),
     }
 
 
@@ -6524,7 +6600,7 @@ def action_nexus_config_get(conn, instance_id):
         "trend_tracking_enabled": True,
         "stock_finder_enabled": True,
         "sell_enforcement_enabled": True,
-        "max_discovered_stocks": 30,
+        "max_discovered_stocks": 90,
         "trend_min_strength_to_buy": 0.5,
         "trend_max_age_days": 90,
         "nexus_portfolio_pct": 0.80,
@@ -7849,15 +7925,127 @@ def action_get_model(conn, model_id):
     return _mask_model_doc(doc)
 
 
+def _validate_claude_cli_extra_args(extra_args):
+    """Run the extra_args string through the provider's allowlist validator.
+    Raised ValueError on disallowed flags so the API layer can return 400."""
+    if extra_args is None:
+        return ""
+    s = str(extra_args).strip()
+    if not s:
+        return ""
+    try:
+        from chatbot.claude_cli_provider import validate_extra_args
+    except Exception:
+        # If the provider module isn't importable yet (e.g. during a partial
+        # migration) we still want to reject obviously-dangerous flags.
+        return s
+    # Will raise ValueError on a hard-rejected or unknown flag.
+    validate_extra_args(s)
+    return s
+
+
+def _validate_codex_cli_extra_args(extra_args):
+    """Run codex-cli's extra_args string through the provider's allowlist.
+    Mirrors _validate_claude_cli_extra_args but delegates to the codex
+    provider's own (different) allowlist."""
+    if extra_args is None:
+        return ""
+    s = str(extra_args).strip()
+    if not s:
+        return ""
+    try:
+        from chatbot.codex_cli_provider import validate_extra_args
+    except Exception:
+        return s
+    # validate_extra_args raises CodexCliValidationError; let it propagate
+    # (the API layer catches generic Exception and returns 400). Normalize
+    # to ValueError so action callers can rely on a stable exception type.
+    try:
+        validate_extra_args(s)
+    except Exception as e:
+        raise ValueError(str(e)) from e
+    return s
+
+
+_PROVIDER_MODEL_INCOMPAT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "gemini": ("claude-", "gpt-", "o1-", "o3-", "o4-"),
+    "openai": ("claude-", "gemini-"),
+    "nvidia": ("claude-", "gemini-"),
+    "anthropic": ("gpt-", "gemini-", "o1-", "o3-", "o4-"),
+    "claude-cli": ("gpt-", "gemini-", "o1-", "o3-", "o4-"),
+    "codex-cli": ("claude-", "gemini-"),
+    # Azure deliberately omitted — deployment names are operator-defined
+    # and can legitimately be any string.
+}
+
+
+def _validate_provider_model_compat(provider: str, model: str) -> None:
+    """Reject obviously-incompatible provider+model combinations at save
+    time so the operator can't ship a row like ``provider=gemini`` paired
+    with ``model=claude-sonnet-4-6`` (which produces 404 NOT_FOUND on
+    every call). See ``_PROVIDER_MODEL_INCOMPAT_PREFIXES`` for the per-
+    provider blocklist.
+
+    Skips validation for unrecognized providers (forward-compat) and for
+    azure (deployment names are arbitrary). Empty values pass — callers
+    have separate emptiness handling.
+
+    Raises ValueError with a user-facing hint about the likely correct
+    provider for the model.
+    """
+    p = (provider or "").strip().lower()
+    m = (model or "").strip().lower()
+    if not p or not m:
+        return
+    blocklist = _PROVIDER_MODEL_INCOMPAT_PREFIXES.get(p)
+    if not blocklist:
+        return
+    for prefix in blocklist:
+        if m.startswith(prefix):
+            # Suggest the likely correct provider given the model prefix.
+            suggestion_map = {
+                "claude-": "'anthropic' or 'claude-cli'",
+                "gpt-": "'openai' or 'azure'",
+                "o1-": "'openai' or 'azure'",
+                "o3-": "'openai' or 'azure'",
+                "o4-": "'openai' or 'azure'",
+                "gemini-": "'gemini'",
+            }
+            suggestion = suggestion_map.get(prefix, "the appropriate vendor")
+            raise ValueError(
+                f"Incompatible provider+model: provider={p!r} does not "
+                f"serve models named {model!r} (prefix {prefix!r}). "
+                f"Change provider to {suggestion}, or change the model "
+                f"name to match {p}. (Azure deployments are exempt — "
+                f"if you're using an Azure deployment named like a Claude "
+                f"or GPT model, set provider='azure'.)"
+            )
+
+
 def action_create_model(conn, name, provider, model, api_key=None,
                         openai_base_url=None, nvidia_base_url=None,
                         azure_openai_endpoint=None, azure_openai_api_version=None,
-                        reasoning_effort=None):
+                        reasoning_effort=None,
+                        cli_path=None, extra_args=None,
+                        ollama_base_url=None, ollama_keep_alive=None,
+                        ollama_think=None,
+                        bedrock_region=None, bedrock_reasoning=None,
+                        model_cache_family=None,
+                        input_cost_per_1m=None, output_cost_per_1m=None,
+                        cache_creation_cost_per_1m=None,
+                        cache_read_cost_per_1m=None):
     _ensure_models_table(conn)
+    provider_n = (provider or "").strip().lower()
+    _validate_provider_model_compat(provider_n, model)
+    extra_args_clean = ""
+    if provider_n == "claude-cli":
+        extra_args_clean = _validate_claude_cli_extra_args(extra_args)
+    elif provider_n == "codex-cli":
+        extra_args_clean = _validate_codex_cli_extra_args(extra_args)
     now = datetime.datetime.utcnow().isoformat() + "Z"
     doc = {
         "name": (name or "").strip(),
-        "provider": (provider or "").strip().lower(),
+        "provider": provider_n,
         "model": (model or "").strip(),
         "api_key": (api_key or "").strip(),
         "openai_base_url": (openai_base_url or "").strip(),
@@ -7865,6 +8053,26 @@ def action_create_model(conn, name, provider, model, api_key=None,
         "azure_openai_endpoint": (azure_openai_endpoint or "").strip(),
         "azure_openai_api_version": (azure_openai_api_version or "2024-10-21").strip(),
         "reasoning_effort": (reasoning_effort or "").strip(),
+        "cli_path": (cli_path or "").strip(),
+        "extra_args": extra_args_clean,
+        # Ollama-specific (empty strings for non-ollama rows is fine; the
+        # dispatcher only reads them when provider == "ollama").
+        "ollama_base_url": (ollama_base_url or "").strip(),
+        "ollama_keep_alive": (ollama_keep_alive or "").strip(),
+        "ollama_think": (ollama_think or "").strip().lower(),
+        # Bedrock-specific (empty for non-bedrock rows; the dispatcher only
+        # reads them when provider == "bedrock"). region is required at call
+        # time; reasoning is "off"/"low"/"medium"/"high".
+        "bedrock_region": (bedrock_region or "").strip(),
+        "bedrock_reasoning": (bedrock_reasoning or "").strip().lower(),
+        # Cache-grouping tag (canonical_model_cache_key override).
+        "model_cache_family": (model_cache_family or "").strip().lower(),
+        # Optional per-model pricing override ($/1M tokens). None means
+        # "use llm_pricing.yaml defaults" at cost-computation time.
+        "input_cost_per_1m": input_cost_per_1m,
+        "output_cost_per_1m": output_cost_per_1m,
+        "cache_creation_cost_per_1m": cache_creation_cost_per_1m,
+        "cache_read_cost_per_1m": cache_read_cost_per_1m,
         "created_at": now,
         "updated_at": now,
     }
@@ -7878,23 +8086,102 @@ def action_edit_model(conn, model_id, **kwargs):
     doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
+    # If the resulting provider is claude-cli, validate extra_args before
+    # persisting. We re-run the allowlist check against whichever value
+    # would end up on disk: the incoming kwargs override, or the existing
+    # value already in the doc. This catches a case where the user only
+    # changes the provider (e.g. ``gemini`` → ``claude-cli``) and leaves a
+    # stale ``extra_args`` in place that would never have been valid for
+    # the new provider — saving that combination would have left a banned
+    # flag persisted because validation only ran when ``extra_args`` itself
+    # was in kwargs.
+    new_provider = (kwargs.get("provider") or doc.get("provider") or "").strip().lower()
+    # Validate the EFFECTIVE provider+model combination after applying
+    # incoming kwargs over the existing doc. Without this, an operator
+    # could edit just one of the two fields and leave the row in an
+    # incompatible state (e.g. flip provider to 'gemini' while keeping
+    # model='claude-sonnet-4-6'). Mirrors the extra_args validator
+    # immediately below.
+    effective_model = (
+        kwargs["model"] if ("model" in kwargs and kwargs["model"] is not None)
+        else doc.get("model")
+    )
+    _validate_provider_model_compat(new_provider, effective_model)
+    if new_provider == "claude-cli":
+        effective_extra = (
+            kwargs["extra_args"] if ("extra_args" in kwargs and kwargs["extra_args"] is not None)
+            else doc.get("extra_args")
+        )
+        if effective_extra:
+            validated = _validate_claude_cli_extra_args(effective_extra)
+            # Persist the canonical (validator-emitted) value so any
+            # numeric/enum rewrites land in the doc.
+            kwargs["extra_args"] = validated
+    elif new_provider == "codex-cli":
+        effective_extra = (
+            kwargs["extra_args"] if ("extra_args" in kwargs and kwargs["extra_args"] is not None)
+            else doc.get("extra_args")
+        )
+        if effective_extra:
+            validated = _validate_codex_cli_extra_args(effective_extra)
+            kwargs["extra_args"] = validated
+    # The four cost-override fields special-case explicit None as "clear
+    # the override" so a user can remove a previously-set pricing override
+    # from the UI. All other fields treat None as "leave unchanged" (the
+    # historical contract; callers omit fields they don't want to touch).
+    _PRICING_FIELDS = (
+        "input_cost_per_1m", "output_cost_per_1m",
+        "cache_creation_cost_per_1m", "cache_read_cost_per_1m",
+    )
     update = {"updated_at": datetime.datetime.utcnow().isoformat() + "Z"}
     for field in ("name", "provider", "model", "api_key", "openai_base_url",
                   "nvidia_base_url", "azure_openai_endpoint",
-                  "azure_openai_api_version", "reasoning_effort"):
-        if field in kwargs and kwargs[field] is not None:
-            val = kwargs[field]
-            if isinstance(val, str):
-                val = val.strip()
-                if field == "provider":
-                    val = val.lower()
-            update[field] = val
+                  "azure_openai_api_version", "reasoning_effort",
+                  "cli_path", "extra_args",
+                  "ollama_base_url", "ollama_keep_alive", "ollama_think",
+                  "bedrock_region", "bedrock_reasoning", "model_cache_family",
+                  "input_cost_per_1m", "output_cost_per_1m",
+                  "cache_creation_cost_per_1m", "cache_read_cost_per_1m"):
+        if field not in kwargs:
+            continue
+        val = kwargs[field]
+        if val is None:
+            if field in _PRICING_FIELDS:
+                # Clear the override.
+                update[field] = None
+            # Otherwise leave the doc field untouched.
+            continue
+        if isinstance(val, str):
+            val = val.strip()
+            if field == "provider":
+                val = val.lower()
+        update[field] = val
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).update(update).run(conn)
     updated = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
-    # Invalidate runtime cache
+    # If the conversation is using a claude-cli session with this model,
+    # the session manager will close + respawn on the next turn when it
+    # notices the model/system_prompt/extra_args signature changed.
+    # Invalidate runtime cache (model_resolver doc cache + llm_utils
+    # terminal-failure cache). Without the latter, a user who fixed a
+    # misconfigured provider+model would keep hitting the suppression
+    # short-circuit until the worker restarted — the very symptom we're
+    # trying to avoid by surfacing terminal errors clearly.
     try:
         from model_resolver import invalidate_model_cache
         invalidate_model_cache(model_id)
+    except Exception:
+        pass
+    try:
+        from llm_utils import invalidate_terminal_failure_cache
+        prev_provider = (doc.get("provider") or "").strip().lower()
+        prev_model = (doc.get("model") or "").strip()
+        invalidate_terminal_failure_cache(prev_provider, prev_model)
+        # Also clear by the NEW values in case the user swapped to a
+        # different combo that itself had been terminal previously.
+        new_provider = (updated.get("provider") or "").strip().lower()
+        new_model = (updated.get("model") or "").strip()
+        if (new_provider, new_model) != (prev_provider, prev_model):
+            invalidate_terminal_failure_cache(new_provider, new_model)
     except Exception:
         pass
     return {"updated": True, "model": _mask_model_doc(updated)}
@@ -7938,6 +8225,11 @@ def _restore_inline_from_model(conn, model_id, model_doc):
                     cfg[f"{prefix}azure_openai_api_key"] = model_doc.get("api_key", "")
                     cfg[f"{prefix}azure_openai_endpoint"] = model_doc.get("azure_openai_endpoint", "")
                     cfg[f"{prefix}azure_openai_api_version"] = model_doc.get("azure_openai_api_version", "2024-10-21")
+                if (model_doc.get("provider") or "").lower() in ("claude-cli", "codex-cli"):
+                    if model_doc.get("cli_path"):
+                        cfg[f"{prefix}cli_path"] = model_doc["cli_path"]
+                    if model_doc.get("extra_args"):
+                        cfg[f"{prefix}extra_args"] = model_doc["extra_args"]
                 if model_doc.get("openai_base_url"):
                     cfg[f"{prefix}openai_base_url"] = model_doc["openai_base_url"]
                 if model_doc.get("nvidia_base_url"):
@@ -7971,6 +8263,14 @@ def action_delete_model(conn, model_id, force=False):
     try:
         from model_resolver import invalidate_model_cache
         invalidate_model_cache(model_id)
+    except Exception:
+        pass
+    try:
+        from llm_utils import invalidate_terminal_failure_cache
+        invalidate_terminal_failure_cache(
+            (doc.get("provider") or "").strip().lower(),
+            (doc.get("model") or "").strip(),
+        )
     except Exception:
         pass
     return {"deleted": True, "id": model_id}

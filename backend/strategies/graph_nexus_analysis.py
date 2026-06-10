@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 50, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 24, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 20.0, "momentum_discovery_min_60d_return": 50.0, "momentum_discovery_max_per_day": 3, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 8, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 10, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 4, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "sell_enforcement_min_hold_days": 5, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
+# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
 # INTELLISTOCK_DESCRIPTION: Advanced graph-based news contagion analysis with market trend tracking, Benzinga data sources, outcome tracking, and learning stage. Fetches today's news from Alpaca AND Google News (macro/geopolitical), enriches with Benzinga data (analyst ratings, analyst insights, insider trades, government trades, M&A, upcoming IPOs, stock splits, earnings calendar, company actions, prediction markets — all enable/disable configurable), uses LLM to classify sentiment AND event type per ticker, classifies macro news into sectors/themes and resolves to tickers via Neo4j (hybrid: structured classification + Gemini tool-calling fallback), then propagates through Neo4j using relationship-aware weights (10 edge types with directional propagation, sentiment inversion for competitors, edge confidence/revenue/obligation weighting, event-type amplification, sector peer contagion, macro sector-to-sector supply flows, 2-hop supply chain chains, patent partnership depth, and institutional co-holding correlation with position-size weighting). Tracks market trends across runs, discovers new stocks from trends, enforces sells on trend reversals. Outcome tracking stores event→price outcomes in RethinkDB for LLM pattern recognition. Learning stage pre-loads past outcome patterns before first trade (configurable lookback, cached). Uses TOON format for token-efficient LLM inputs. Returns symbol -> score with detailed graph reasoning. Runs once per loop (run_once).
 # DIFFICULTY: 8
 """
@@ -80,10 +80,12 @@ try:
     from llm_utils import (
         call_llm_by_provider,
         call_structured_llm_by_provider,
+        _call_structured_llm_with_critical_guard as _scl_guarded,
         configure_llm_prompt_cache,
         get_last_structured_llm_call_metadata,
         get_prompt_cache_stats,
         google_cse_search,
+        canonical_model_cache_key,
         llm_model_reference,
         normalize_reasoning_effort,
     )
@@ -95,13 +97,22 @@ except ImportError:
     from llm_utils import (
         call_llm_by_provider,
         call_structured_llm_by_provider,
+        _call_structured_llm_with_critical_guard as _scl_guarded,
         configure_llm_prompt_cache,
         get_last_structured_llm_call_metadata,
         get_prompt_cache_stats,
         google_cse_search,
+        canonical_model_cache_key,
         llm_model_reference,
         normalize_reasoning_effort,
     )
+
+try:
+    from llm_telemetry import llm_call_context
+except Exception:
+    @contextmanager
+    def llm_call_context(**_kwargs):
+        yield
 
 try:
     from strategies.ml_news import _score_finbert_batch as _ml_news_score_finbert_batch
@@ -480,10 +491,28 @@ def _ensure_learning_cache_table(conn):
         _log(f"Could not ensure learning cache table: {e}", "yellow")
 
 
-def _ensure_nexus_history_table(conn, table_name: str) -> None:
+def _ensure_nexus_history_table(
+    conn,
+    table_name: str,
+    *,
+    indexes: tuple[str, ...] = (),
+) -> None:
+    """Ensure the table exists AND each named simple-field index is built.
+
+    ``indexes`` lets writers declare which secondary indexes the table
+    needs. The first call per (table, index) pair triggers
+    ``index_create`` + ``index_wait`` — on a heavy existing table this
+    can take a few minutes, but it runs at most once per process and
+    every subsequent startup pays nothing. Without the index, the
+    instance-scoped ``filter()`` queries the broker runs at lookback
+    prep time degrade to multi-minute full-table scans
+    (backtest 953929 stalled ~4 min on this exact query)."""
     if conn is None or not table_name:
         return
-    if table_name in _nexus_history_tables_ensured:
+    needs_index_check = bool(indexes) and not all(
+        f"{table_name}::{idx}" in _nexus_history_tables_ensured for idx in indexes
+    )
+    if table_name in _nexus_history_tables_ensured and not needs_index_check:
         return
     try:
         dbs = list(_r.db_list().run(conn))
@@ -493,6 +522,29 @@ def _ensure_nexus_history_table(conn, table_name: str) -> None:
         if table_name not in tables:
             _r.db(DB_NAME).table_create(table_name).run(conn)
         _nexus_history_tables_ensured.add(table_name)
+        if indexes:
+            existing = set(
+                _r.db(DB_NAME).table(table_name).index_list().run(conn)
+            )
+            for idx in indexes:
+                marker = f"{table_name}::{idx}"
+                if idx in existing:
+                    _nexus_history_tables_ensured.add(marker)
+                    continue
+                _log(
+                    f"Creating index '{idx}' on {table_name} "
+                    f"(one-time; may take a few minutes on first run)...",
+                    "cyan",
+                )
+                _t0 = perf_counter()
+                _r.db(DB_NAME).table(table_name).index_create(idx).run(conn)
+                _r.db(DB_NAME).table(table_name).index_wait(idx).run(conn)
+                _log(
+                    f"Index '{idx}' on {table_name} ready in "
+                    f"{perf_counter() - _t0:.1f}s",
+                    "cyan",
+                )
+                _nexus_history_tables_ensured.add(marker)
     except Exception as exc:
         _log(f"Could not ensure table {table_name}: {exc}", "yellow")
 
@@ -571,7 +623,17 @@ _NEXUS_OVERLAY_LLM_WORKERS = 10
 _NEXUS_COMPANY_PROMPT_BUDGET_CHARS = 6000
 _NEXUS_MACRO_PROMPT_BUDGET_CHARS = 8000
 
-_NEXUS_VALID_PROVIDERS = {"gemini", "deepseek", "openai", "azure", "nvidia"}
+_NEXUS_VALID_PROVIDERS = {
+    "gemini", "deepseek", "openai", "azure", "nvidia",
+    "claude-cli", "codex-cli", "anthropic", "ollama", "bedrock",
+}
+# Module-level dedup cache for `LLM key source for role=...` diagnostic
+# log. Each (role, source_tag, masked_key) tuple is logged at most once
+# per process lifetime so operators can spot stale inline credentials.
+_LLM_KEY_SOURCE_LOG_SEEN: set[tuple[str, str, str]] = set()
+# Dedup cache for provider/model mismatch warnings (one log per
+# (role, provider, model) signature per process).
+_LLM_PROVIDER_MODEL_MISMATCH_SEEN: set[tuple[str, str, str]] = set()
 _NEXUS_GOVERNMENT_ACTION_TYPES = {
     "monetary_policy", "fiscal_policy", "interest_rate_hike", "interest_rate_cut",
     "inflation_policy", "trade_policy", "tariffs", "sanctions", "war_declared",
@@ -692,6 +754,21 @@ def _default_model_for_provider(provider: str) -> str:
         return "gpt-4.1-mini"
     if provider == "nvidia":
         return "nvidia/nemotron-3-super-120b-a12b"
+    if provider in ("claude-cli", "anthropic"):
+        return "claude-sonnet-4-6"
+    if provider == "codex-cli":
+        return "gpt-5-codex"
+    if provider == "ollama":
+        # No universal Ollama default — the operator's installed models
+        # vary widely. Pick a small, broadly-available reasoning model.
+        return os.environ.get("GRAPH_NEXUS_OLLAMA_MODEL", "llama3.2").strip() or "llama3.2"
+    if provider == "bedrock":
+        # Default to a broadly-available cross-region Claude inference profile
+        # (us-* regions). Overridable per-model and via env.
+        return (
+            os.environ.get("GRAPH_NEXUS_BEDROCK_MODEL")
+            or "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+        ).strip() or "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
     return "gemini-3-flash-preview"
 
 
@@ -705,10 +782,46 @@ def _default_api_key_for_provider(provider: str) -> str:
         return os.environ.get("OPENAI_API_KEY", "").strip()
     if provider == "nvidia":
         return os.environ.get("NVIDIA_API_KEY", "").strip()
+    if provider == "anthropic":
+        return os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if provider == "claude-cli":
+        # claude-cli authenticates via the locally-installed binary (Pro/Max
+        # subscription) — no API key. Return a sentinel non-empty value so
+        # the ``if not api_key`` short-circuit in role callers doesn't skip
+        # the entire pipeline. The downstream LLM dispatcher accepts an
+        # empty api_key for this provider.
+        return "claude-cli-no-api-key"
+    if provider == "codex-cli":
+        # codex-cli authenticates via the operator's ChatGPT subscription
+        # (tokens in ~/.codex/auth.json). Sentinel matches the claude-cli
+        # convention so the short-circuit doesn't skip the pipeline.
+        return "codex-cli-no-api-key"
+    if provider == "bedrock":
+        return os.environ.get("BEDROCK_API_KEY", "").strip()
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
 def _resolve_role_llm_provider_config(config: dict, role: str) -> dict[str, Any]:
+    """Provider config for a role, plus the operator's model_cache_family override
+    (so canonical_model_cache_key can force-group same-model-different-name rows).
+    Thin wrapper over the per-provider field resolver to add the field once."""
+    out = dict(_resolve_role_llm_provider_config_fields(config, role))
+    role_l = str(role or "").strip().lower()
+    prefix = f"{role_l}_" if role_l else ""
+    lookback = bool(config.get("historical_lookback_mode", False))
+    fam = ""
+    if lookback:
+        fam = (config.get(f"lookback_{prefix}model_cache_family") or "").strip()
+        if not fam and prefix:
+            fam = (config.get("lookback_model_cache_family") or "").strip()
+    if not fam:
+        fam = (config.get(f"{prefix}model_cache_family") or config.get("model_cache_family") or "").strip()
+    if fam:
+        out["model_cache_family"] = fam.lower()
+    return out
+
+
+def _resolve_role_llm_provider_config_fields(config: dict, role: str) -> dict[str, Any]:
     role = str(role or "").strip().lower()
     prefix = f"{role}_" if role else ""
     lookback = bool(config.get("historical_lookback_mode", False))
@@ -765,6 +878,100 @@ def _resolve_role_llm_provider_config(config: dict, role: str) -> dict[str, Any]
         out: dict[str, Any] = {"base_url": base_url}
         if reasoning_effort:
             out["reasoning_effort"] = reasoning_effort
+        return out
+    if provider == "claude-cli":
+        # claude-cli uses the locally-installed `claude` binary. Pull the
+        # cli_path + free-text extra_args from the per-role config so the
+        # model_resolver-injected fields propagate into the strategy call.
+        cli_path = (
+            _lb_cfg("cli_path")
+            or (config.get(f"{prefix}cli_path") or "").strip()
+            or (config.get("cli_path") or "").strip()
+            or "claude"
+        )
+        extra_args = (
+            _lb_cfg("extra_args")
+            or (config.get(f"{prefix}extra_args") or "").strip()
+            or (config.get("extra_args") or "").strip()
+            or ""
+        )
+        out: dict[str, Any] = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        if reasoning_effort:
+            out["reasoning_effort"] = reasoning_effort
+        return out
+    if provider == "codex-cli":
+        # codex-cli uses the locally-installed `codex` binary. Same shape
+        # as claude-cli, just a different default cli_path.
+        cli_path = (
+            _lb_cfg("cli_path")
+            or (config.get(f"{prefix}cli_path") or "").strip()
+            or (config.get("cli_path") or "").strip()
+            or "codex"
+        )
+        extra_args = (
+            _lb_cfg("extra_args")
+            or (config.get(f"{prefix}extra_args") or "").strip()
+            or (config.get("extra_args") or "").strip()
+            or ""
+        )
+        out: dict[str, Any] = {"cli_path": cli_path}
+        if extra_args:
+            out["extra_args"] = extra_args
+        if reasoning_effort:
+            out["reasoning_effort"] = reasoning_effort
+        return out
+    if provider == "ollama":
+        # Pull the Ollama-specific config the model_resolver injects
+        # (ollama_base_url / ollama_keep_alive / ollama_think) so the
+        # dispatcher receives them. Without this branch the dispatcher
+        # silently falls back to OLLAMA_BASE_URL=http://localhost:11434,
+        # which is the wrong host for any non-local Ollama row.
+        base_url = (
+            _lb_cfg("ollama_base_url")
+            or (config.get(f"{prefix}ollama_base_url") or "").strip()
+            or (config.get("ollama_base_url") or "").strip()
+            or os.environ.get("OLLAMA_BASE_URL", "").strip()
+            or "http://localhost:11434"
+        )
+        keep_alive = (
+            _lb_cfg("ollama_keep_alive")
+            or (config.get(f"{prefix}ollama_keep_alive") or "").strip()
+            or (config.get("ollama_keep_alive") or "").strip()
+        )
+        think = (
+            _lb_cfg("ollama_think")
+            or (config.get(f"{prefix}ollama_think") or "").strip()
+            or (config.get("ollama_think") or "").strip()
+        )
+        out: dict[str, Any] = {"ollama_base_url": base_url}
+        if keep_alive:
+            out["ollama_keep_alive"] = keep_alive
+        if think:
+            out["ollama_think"] = think
+        return out
+    if provider == "bedrock":
+        # Pull bedrock_region (required) + bedrock_reasoning that the
+        # model_resolver injects, so the dispatcher's _resolve_provider_config
+        # receives them. Mirrors the ollama branch above.
+        region = (
+            _lb_cfg("bedrock_region")
+            or (config.get(f"{prefix}bedrock_region") or "").strip()
+            or (config.get("bedrock_region") or "").strip()
+            or os.environ.get("BEDROCK_REGION", "").strip()
+            or os.environ.get("AWS_REGION", "").strip()
+        )
+        reasoning = (
+            _lb_cfg("bedrock_reasoning")
+            or (config.get(f"{prefix}bedrock_reasoning") or "").strip()
+            or (config.get("bedrock_reasoning") or "").strip()
+        )
+        out: dict[str, Any] = {}
+        if region:
+            out["bedrock_region"] = region
+        if reasoning:
+            out["bedrock_reasoning"] = reasoning
         return out
     if provider != "azure":
         return {}
@@ -823,19 +1030,69 @@ def _resolve_role_llm_config(config: dict, role: str) -> tuple[str, str, str, st
         or os.environ.get(f"GRAPH_NEXUS_{role.upper()}_LLM_PROVIDER", "").strip()
         or os.environ.get("GRAPH_NEXUS_LLM_PROVIDER", "gemini").strip()
     )
-    api_key = (
-        _lb_cfg("azure_openai_api_key")
-        or _lb_cfg("llm_api_key")
-        or (config.get(f"{prefix}azure_openai_api_key") or "").strip()
-        or os.environ.get(f"GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", "").strip()
-        or (config.get(f"{prefix}llm_api_key") or "").strip()
-        or os.environ.get(f"GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", "").strip()
-        or (config.get("azure_openai_api_key") or "").strip()
-        or os.environ.get("GRAPH_NEXUS_AZURE_OPENAI_API_KEY", "").strip()
-        or (config.get("llm_api_key") or "").strip()
-        or os.environ.get("GRAPH_NEXUS_LLM_API_KEY", "").strip()
-        or _default_api_key_for_provider(provider)
+    # Resolve api_key with an explicit source tag so operators can see
+    # *which* config/env layer supplied the credential. Without this,
+    # an inline `*_llm_api_key` field in the strategy config silently
+    # shadows a freshly-updated Models-table model_doc and produces
+    # confusing 401s after a successful UI "Test & Save".
+    #
+    # Provider-aware ordering: legacy `*_azure_openai_api_key` and
+    # `GRAPH_NEXUS_*_AZURE_OPENAI_API_KEY` keys are ONLY consulted
+    # when the active provider is azure. Without this guard a stale
+    # Azure key in a strategy config that was later switched to
+    # nvidia/openai/etc. would be sent to the wrong endpoint and
+    # produce a confusing 401 (observed in production 2026-05-19).
+    _is_azure = (provider == "azure")
+    _api_key_candidates: list[tuple[str, str]] = []
+    if _is_azure:
+        _api_key_candidates += [
+            ("lookback_azure_openai_api_key", _lb_cfg("azure_openai_api_key")),
+        ]
+    _api_key_candidates += [
+        ("lookback_llm_api_key", _lb_cfg("llm_api_key")),
+    ]
+    if _is_azure:
+        _api_key_candidates += [
+            (f"config.{prefix}azure_openai_api_key", (config.get(f"{prefix}azure_openai_api_key") or "").strip()),
+            (f"env.GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", os.environ.get(f"GRAPH_NEXUS_{role.upper()}_AZURE_OPENAI_API_KEY", "").strip()),
+        ]
+    _api_key_candidates += [
+        (f"config.{prefix}llm_api_key", (config.get(f"{prefix}llm_api_key") or "").strip()),
+        (f"env.GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", os.environ.get(f"GRAPH_NEXUS_{role.upper()}_LLM_API_KEY", "").strip()),
+    ]
+    if _is_azure:
+        _api_key_candidates += [
+            ("config.azure_openai_api_key", (config.get("azure_openai_api_key") or "").strip()),
+            ("env.GRAPH_NEXUS_AZURE_OPENAI_API_KEY", os.environ.get("GRAPH_NEXUS_AZURE_OPENAI_API_KEY", "").strip()),
+        ]
+    _api_key_candidates += [
+        ("config.llm_api_key", (config.get("llm_api_key") or "").strip()),
+        ("env.GRAPH_NEXUS_LLM_API_KEY", os.environ.get("GRAPH_NEXUS_LLM_API_KEY", "").strip()),
+        (f"env_default_for_{provider}", _default_api_key_for_provider(provider)),
+    ]
+    api_key = ""
+    _api_key_source = "<none>"
+    for _src, _val in _api_key_candidates:
+        if _val:
+            api_key = _val
+            _api_key_source = _src
+            break
+    # Diagnostic: log the resolution path once per (role, source,
+    # masked-key) signature so operators can spot stale inline
+    # `*_llm_api_key` config entries shadowing freshly-updated
+    # Models-table rows. De-duplication via module-level set keeps
+    # log volume bounded across many resolution calls per bar.
+    _masked = (
+        f"len={len(api_key)} prefix={api_key[:4]} suffix={api_key[-4:]}"
+        if len(api_key) >= 8 else f"len={len(api_key)}"
     )
+    _key_sig = (role or "default", _api_key_source, _masked)
+    if _key_sig not in _LLM_KEY_SOURCE_LOG_SEEN:
+        _LLM_KEY_SOURCE_LOG_SEEN.add(_key_sig)
+        _log(
+            f"LLM key source for role={role or 'default'}: {_api_key_source} ({_masked})",
+            "cyan",
+        )
     model = (
         _lb_cfg("llm_model")
         or (config.get(f"{prefix}llm_model") or "").strip()
@@ -844,6 +1101,55 @@ def _resolve_role_llm_config(config: dict, role: str) -> tuple[str, str, str, st
         or os.environ.get("GRAPH_NEXUS_LLM_MODEL", "").strip()
         or _default_model_for_provider(provider)
     )
+
+    # Provider/model sanity check. Strategies that switched providers
+    # without clearing the legacy `*_llm_model` value can land on a
+    # combination that looks valid (e.g. provider=nvidia + model=gpt-4o)
+    # but produces a 404 at request time. We don't auto-correct (the
+    # operator may have intentionally configured an OpenAI-compatible
+    # gateway), but we surface a one-time warning so the mismatch is
+    # discoverable from the backtest log.
+    _mismatch_sig = (role or "default", provider, str(model).strip().lower())
+    if _mismatch_sig not in _LLM_PROVIDER_MODEL_MISMATCH_SEEN:
+        _LLM_PROVIDER_MODEL_MISMATCH_SEEN.add(_mismatch_sig)
+        _model_lc = str(model).strip().lower()
+        _hint = None
+        if provider == "nvidia":
+            # NVIDIA NIM model ids generally look like "vendor/name" with a slash
+            # (moonshotai/kimi-k2.6, nvidia/llama-3.1-nemotron, ...). A bare
+            # "gpt-..." or "claude-..." string almost always means the model
+            # field was left over from a prior Azure/OpenAI/Anthropic config.
+            if _model_lc.startswith(("gpt-", "claude-", "gemini-", "deepseek")):
+                _hint = "looks like a non-NVIDIA model id"
+            elif "/" not in _model_lc:
+                _hint = "NVIDIA NIM ids usually contain a '/' (vendor/name)"
+        elif provider == "azure":
+            # Azure deployments are user-named strings; no canonical pattern,
+            # but they should not contain a '/' (that's NVIDIA-style).
+            if "/" in _model_lc:
+                _hint = "contains '/' — looks like an NVIDIA NIM id"
+        elif provider == "openai":
+            if _model_lc.startswith(("claude-", "gemini-", "moonshotai/", "nvidia/")):
+                _hint = "looks like a non-OpenAI model id"
+        elif provider == "anthropic":
+            if not _model_lc.startswith("claude-"):
+                _hint = "Anthropic ids start with 'claude-'"
+        elif provider == "gemini":
+            if not _model_lc.startswith(("gemini-", "models/gemini")):
+                _hint = "Gemini ids start with 'gemini-'"
+        elif provider == "ollama":
+            # Ollama model names are arbitrary Modelfile tags (llama3.2,
+            # qwen3.6:35b, gpt-oss:20b, my-custom-modelfile, …) — no
+            # canonical pattern to validate against. Skip the hint.
+            pass
+        if _hint:
+            _log(
+                f"LLM provider/model mismatch hint for role={role or 'default'}: "
+                f"provider={provider} model={model!r} — {_hint}. "
+                f"If 401/404 follows, clear the stale `{prefix}llm_model` / "
+                f"`lookback_{prefix}llm_model` field in the strategy config.",
+                "yellow",
+            )
     prompt_version = (
         (config.get(f"{prefix}llm_prompt_version") or "").strip()
         or (config.get("llm_overlay_prompt_version") or "").strip()
@@ -1113,6 +1419,7 @@ def _get_event_maintenance_prompt_limits(config: dict | None) -> dict[str, Any]:
             effective_batch_size = oss_batch_size
             auto_reduced = True
 
+
     return {
         "provider": str(provider or "").strip().lower(),
         "model_ref": model_ref,
@@ -1371,10 +1678,19 @@ def _build_llm_trace(role: str, provider: str, model: str, prompt: str, system_p
         "system_prompt_preview_truncated": len(system_prompt_text) > system_head_chars,
         "logged_at": datetime.utcnow().isoformat() + "Z",
     }
+    # Include the underlying error reason on failures so operators can
+    # see WHY the call failed (timeout, validation, terminal-not-found,
+    # subprocess crash, etc.) without having to dig into the engine
+    # container's stderr — which isn't included in the per-backtest log.
+    err_suffix = ""
+    if not trace["ok"]:
+        err_text = trace.get("error") or ""
+        if err_text:
+            err_suffix = f" error={err_text[:220]!r}"
     _log(
         f"LLM/{role}: provider={trace['provider']} model={trace['effective_model']} ok={trace['ok']} "
         f"fallback={trace['fallback_used']} raw_json_fallback={trace['raw_json_fallback_used']} "
-        f"prompt={trace['prompt_hash'][:10]}...",
+        f"prompt={trace['prompt_hash'][:10]}...{err_suffix}",
         "cyan" if trace["ok"] else "yellow",
     )
     return trace
@@ -1875,10 +2191,29 @@ def _extract_benzinga_direct_signals(
         if deal_type in ("acquisition", "merger", "takeover") and ticker not in signals:
             signals[ticker] = {"sentiment": 1, "event": f"ma_target:{r.get('acquirer', '')}", "source": "benzinga"}
 
-    if signals:
-        _log(f"Benzinga direct signals: {len(signals)} tickers "
-             f"({sum(1 for s in signals.values() if s['sentiment'] > 0)} bullish, "
-             f"{sum(1 for s in signals.values() if s['sentiment'] < 0)} bearish)", "green")
+    # Phase δ observability sweep (2026-05-18, BT232179 follow-up): the prior
+    # `if signals: _log(...)` gate hid the empty-result case. Always log the
+    # outcome — operators need to distinguish "Benzinga enabled but produced
+    # no signals today" from "Benzinga API error" from "Benzinga disabled".
+    _n_signals = len(signals)
+    if _n_signals > 0:
+        _log(
+            f"Benzinga direct signals: {_n_signals} tickers "
+            f"({sum(1 for s in signals.values() if s['sentiment'] > 0)} bullish, "
+            f"{sum(1 for s in signals.values() if s['sentiment'] < 0)} bearish)",
+            "green",
+        )
+    else:
+        # Yellow not red — empty results are common (most days have no
+        # qualifying ratings/insider/M&A clusters). Surfaces the case
+        # for audit without alarming the operator.
+        _log(
+            f"Benzinga direct signals: 0 tickers (no qualifying analyst "
+            f"actions / insider clusters / gov trades / M&A in "
+            f"bz_data buckets={list(bz_data.keys())[:6]} for "
+            f"date_key={date_key})",
+            "yellow",
+        )
     return signals
 
 
@@ -2585,12 +2920,17 @@ def _build_learning_context(
         "Return a numbered list of patterns (plain text, no JSON needed)."
     )
     try:
-        summary_resp = call_structured_llm_by_provider(
+        summary_resp = _scl_guarded(
             llm_provider,
             llm_key,
             llm_model,
             prompt,
             _LearningSummaryResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "learning_summary",
+            },
             system_prompt=(
                 "Return a concise structured summary of learned market outcome patterns. "
                 "Do not include markdown or commentary outside the summary field."
@@ -2614,9 +2954,14 @@ def _build_learning_context(
                     "2. Defense stocks rise +1.5% on government contract news\n\n"
                     "Return ONLY the numbered list, no other text."
                 )
-                _retry_resp = call_structured_llm_by_provider(
+                _retry_resp = _scl_guarded(
                     llm_provider, llm_key, llm_model, _retry_prompt,
                     _LearningSummaryResponse,
+                    attribution_keys={
+                        "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                        "instance_id": (config or {}).get("_telemetry_instance_id"),
+                        "call_site": "learning_summary_retry",
+                    },
                     system_prompt="Return a numbered list of market patterns in the summary field.",
                     max_output_tokens=0, retries=1, output_retries=1,
                     provider_config=provider_config,
@@ -2864,12 +3209,13 @@ def _score_finbert_for_articles(conn, normalized_articles: list[dict], strategy_
 def _llm_cached_doc_id(
     schema_type: str,
     article_hash: str,
-    provider: str,
     model: str,
     prompt_version: str,
     provider_config: dict[str, Any] | None = None,
 ) -> str:
-    return f"{schema_type}|{article_hash}|{provider}|{_llm_model_ref(model, provider_config)}|{prompt_version}"
+    # Provider-agnostic + effort-aware: same underlying model under different
+    # provider/name strings shares cache; changing reasoning level invalidates.
+    return f"{schema_type}|{article_hash}|{canonical_model_cache_key(model, provider_config)}|{prompt_version}"
 
 
 def _load_llm_cache_rows(conn, table_name: str, cache_ids: list[str]) -> dict[str, dict]:
@@ -2941,9 +3287,15 @@ def _classify_company_article_chunk(
     use_toon: bool,
     instance_id: str,
     system_prompt: str,
+    config: dict | None = None,
     _split_depth: int = 0,
 ) -> tuple[list[dict], list[dict]]:
-    output_retries = 0 if _normalize_llm_provider(provider) == "azure" else 2
+    # 2026-05-15: azure used to special-case to 0 retries but that meant
+    # skeleton-output responses (model returns article refs with no
+    # classifications) were discarded without retry. gpt-5-mini-MEDIUM
+    # frequently produces these on the first try then succeeds on the
+    # second. Match the other providers at 2 retries.
+    output_retries = 2
     # Scale output tokens with batch size: ~4000 tokens per article (accounts for
     # reasoning model overhead where thinking tokens eat into completion budget),
     # minimum 8192 for single articles.
@@ -2980,20 +3332,31 @@ def _classify_company_article_chunk(
         '{"articles":[{"ref":"a1","classifications":[{"t":"AAPL","et":"earnings","id":"bullish","is":0.8,"rs":0.9,"re":"Beat Q3"}]}]}\n'
         f"Articles: {prompt_payload_text}"
     )
-    raw = call_structured_llm_by_provider(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _CompanyArticleBatchResponse,
-        system_prompt=system_prompt,
-        retries=2,
-        output_retries=output_retries,
-        max_output_tokens=_batch_output_tokens,
-        timeout_sec=120,
-        provider_config=provider_config,
-        prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-    )
+    with llm_call_context(
+        backtest_id=(config or {}).get("_telemetry_backtest_id"),
+        instance_id=(config or {}).get("_telemetry_instance_id"),
+        strategy="GraphNexusAnalysis",
+        call_site="company_classification",
+    ):
+        raw = _scl_guarded(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _CompanyArticleBatchResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "company_article",
+            },
+            system_prompt=system_prompt,
+            retries=2,
+            output_retries=output_retries,
+            max_output_tokens=_batch_output_tokens,
+            timeout_sec=120,
+            provider_config=provider_config,
+            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+        )
     # Detect skeleton output — model returned refs but no classifications field at all.
     # Empty classifications:[] is valid (article has no company-specific content).
     if raw is not None and hasattr(raw, "articles") and raw.articles:
@@ -3004,36 +3367,62 @@ def _classify_company_article_chunk(
         if not _has_real_data:
             _log(f"Company article LLM returned skeleton output ({len(raw.articles)} refs, no classifications field) — treating as failure", "yellow")
             raw = None
-    if raw is None and len(chunk) == 1:
+    # If the call failed with a TERMINAL error (model 404, deployment
+    # missing, etc.), splitting the batch or retrying the single-article
+    # path won't help — every sub-call hits the same configuration
+    # problem. Bail out of both fallback paths so a misconfigured Model
+    # doesn't cost ~25s per cycle in retry thrash. The first call's
+    # terminal classification is also cached in llm_utils so subsequent
+    # calls in this run skip the round-trip entirely.
+    _last_meta = get_last_structured_llm_call_metadata() if raw is None else {}
+    _llm_call_was_terminal = bool(_last_meta.get("is_terminal"))
+    if _llm_call_was_terminal:
+        _log(
+            f"Company article LLM: terminal provider error — skipping single-article "
+            f"and chunk-split fallback. Reason: {_last_meta.get('error', '')[:200]}",
+            "red",
+        )
+    if raw is None and not _llm_call_was_terminal and len(chunk) == 1:
         single_row = chunk_rows[0]
         single_prompt = (
             f"Today is {date_key}.\n"
             "Classify the company-level impact of this financial news article for the supplied tickers.\n"
             f"Article: {_to_prompt_payload(_article_prompt_entry(single_row, include_symbols=True, prompt_role='company'), use_toon=use_toon)}"
         )
-        raw = call_structured_llm_by_provider(
-            provider,
-            api_key,
-            model,
-            single_prompt,
-            _CompanyArticleClassificationResponse,
-            system_prompt=system_prompt,
-            retries=2,
-            output_retries=output_retries,
-            max_output_tokens=0,
-            timeout_sec=120,
-            provider_config=provider_config,
-            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-        )
+        with llm_call_context(
+            backtest_id=(config or {}).get("_telemetry_backtest_id"),
+            instance_id=(config or {}).get("_telemetry_instance_id"),
+            strategy="GraphNexusAnalysis",
+            call_site="company_classification",
+        ):
+            raw = _scl_guarded(
+                provider,
+                api_key,
+                model,
+                single_prompt,
+                _CompanyArticleClassificationResponse,
+                attribution_keys={
+                    "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                    "instance_id": (config or {}).get("_telemetry_instance_id"),
+                    "call_site": "company_article_single",
+                },
+                system_prompt=system_prompt,
+                retries=2,
+                output_retries=output_retries,
+                max_output_tokens=0,
+                timeout_sec=120,
+                provider_config=provider_config,
+                prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+            )
         prompt = single_prompt
-    if raw is None and len(chunk) > 1 and _split_depth < 2:
+    if raw is None and not _llm_call_was_terminal and len(chunk) > 1 and _split_depth < 2:
         mid = max(1, len(chunk) // 2)
         _log(f"Company article LLM chunk fallback: splitting batch of {len(chunk)} article(s) into {mid}+{len(chunk)-mid}", "yellow")
         split_kwargs = dict(
             provider=provider, api_key=api_key, model=model,
             prompt_version=prompt_version, provider_config=provider_config,
             date_key=date_key, use_toon=use_toon, instance_id=instance_id,
-            system_prompt=system_prompt, _split_depth=_split_depth + 1,
+            system_prompt=system_prompt, config=config, _split_depth=_split_depth + 1,
         )
         with ThreadPoolExecutor(max_workers=2) as split_ex:
             left_fut = split_ex.submit(_classify_company_article_chunk, chunk[:mid], **split_kwargs)
@@ -3121,6 +3510,39 @@ def _classify_company_article_chunk(
     return docs, [dict(trace)]
 
 
+def _macro_fields_have_signal(
+    route: str = "",
+    reason: str = "",
+    impact_strength: Any = 0.0,
+    macro_signal_type: str = "",
+    impact_direction: str = "",
+) -> bool:
+    """True if a macro-article classification carries any usable signal.
+
+    Used to detect genuine "skeleton" LLM output (article refs echoed back with
+    only default/empty fields) so it isn't cached as a real result. NOTE:
+    route="ignore" is a REAL verdict ("article is irrelevant"), NOT a skeleton —
+    counting it as signal lets it be cached so it isn't re-fetched and
+    re-classified every cycle. Only the default route ("" / "macro") with no
+    other populated field is a true skeleton. Single source of truth for both
+    the per-chunk check and the defense-in-depth pre-cache filter.
+    """
+    if (str(reason or "")).strip():
+        return True
+    try:
+        if float(impact_strength or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if (str(macro_signal_type or "")).strip() not in ("", "general"):
+        return True
+    if (str(impact_direction or "")).strip() not in ("", "neutral"):
+        return True
+    if (str(route or "")).strip() not in ("", "macro"):
+        return True
+    return False
+
+
 def _classify_macro_article_chunk(
     chunk: list[tuple[dict, str]],
     *,
@@ -3133,9 +3555,15 @@ def _classify_macro_article_chunk(
     use_toon: bool,
     instance_id: str,
     system_prompt: str,
+    config: dict | None = None,
     _split_depth: int = 0,
 ) -> tuple[list[dict], list[dict]]:
-    output_retries = 0 if _normalize_llm_provider(provider) == "azure" else 2
+    # 2026-05-15: azure used to special-case to 0 retries but that meant
+    # skeleton-output responses (model returns article refs with no
+    # classifications) were discarded without retry. gpt-5-mini-MEDIUM
+    # frequently produces these on the first try then succeeds on the
+    # second. Match the other providers at 2 retries.
+    output_retries = 2
     model_ref = _llm_model_ref(model, provider_config)
     chunk_rows = [row for row, _ in chunk]
     prompt_ref_map = { _prompt_ref_for_index(idx): str(row.get("article_hash") or "").strip() for idx, row in enumerate(chunk_rows) }
@@ -3156,39 +3584,58 @@ def _classify_macro_article_chunk(
         '{"articles":[{"ref":"a1","rt":"macro","mt":"trade_policy","gt":"tariff","gb":"USTR","id":"bearish","is":0.7,"as":["Technology"],"re":"New tariffs"}]}\n'
         f"Articles: {_to_prompt_payload(prompt_payload, use_toon=use_toon)}"
     )
-    raw = call_structured_llm_by_provider(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _MacroArticleBatchResponse,
-        system_prompt=system_prompt,
-        retries=2,
-        output_retries=output_retries,
-        max_output_tokens=0,
-        timeout_sec=90,
-        provider_config=provider_config,
-        prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-    )
+    with llm_call_context(
+        backtest_id=(config or {}).get("_telemetry_backtest_id"),
+        instance_id=(config or {}).get("_telemetry_instance_id"),
+        strategy="GraphNexusAnalysis",
+        call_site="macro_classification",
+    ):
+        raw = _scl_guarded(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _MacroArticleBatchResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "macro_article",
+            },
+            system_prompt=system_prompt,
+            retries=2,
+            output_retries=output_retries,
+            max_output_tokens=0,
+            timeout_sec=90,
+            provider_config=provider_config,
+            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+        )
     # Detect skeleton output — model returned refs but no actual classification data
     if raw is not None and hasattr(raw, "articles") and raw.articles:
-        def _macro_article_has_data(a: Any) -> bool:
-            if (getattr(a, "reason", "") or "").strip():
-                return True
-            if float(getattr(a, "impact_strength", 0) or 0) > 0:
-                return True
-            if (getattr(a, "macro_signal_type", "") or "").strip() not in ("", "general"):
-                return True
-            if (getattr(a, "impact_direction", "") or "").strip() not in ("", "neutral"):
-                return True
-            if (getattr(a, "route", "") or "").strip() not in ("", "macro", "ignore"):
-                return True
-            return False
-        _has_real_data = any(_macro_article_has_data(a) for a in raw.articles)
+        _has_real_data = any(
+            _macro_fields_have_signal(
+                route=getattr(a, "route", ""),
+                reason=getattr(a, "reason", ""),
+                impact_strength=getattr(a, "impact_strength", 0),
+                macro_signal_type=getattr(a, "macro_signal_type", ""),
+                impact_direction=getattr(a, "impact_direction", ""),
+            )
+            for a in raw.articles
+        )
         if not _has_real_data:
             _log(f"Macro article LLM returned skeleton output ({len(raw.articles)} refs, no data) — treating as failure", "yellow")
             raw = None
-    if raw is None and len(chunk) == 1:
+    # Same terminal-error guard as the company-article path — a permanent
+    # provider 404 won't resolve by splitting the batch or singling out
+    # one article. Bail out so the run doesn't burn ~25s/cycle thrashing.
+    _last_meta = get_last_structured_llm_call_metadata() if raw is None else {}
+    _llm_call_was_terminal = bool(_last_meta.get("is_terminal"))
+    if _llm_call_was_terminal:
+        _log(
+            f"Macro article LLM: terminal provider error — skipping single-article "
+            f"and chunk-split fallback. Reason: {_last_meta.get('error', '')[:200]}",
+            "red",
+        )
+    if raw is None and not _llm_call_was_terminal and len(chunk) == 1:
         single_row = chunk_rows[0]
         single_prompt = (
             f"Today is {date_key}.\n"
@@ -3200,29 +3647,40 @@ def _classify_macro_article_chunk(
             "- id (impact_direction): MUST be one of: bullish, bearish, neutral\n"
             f"Article: {_to_prompt_payload(_article_prompt_entry(single_row, include_symbols=False, prompt_role='macro'), use_toon=use_toon)}"
         )
-        raw = call_structured_llm_by_provider(
-            provider,
-            api_key,
-            model,
-            single_prompt,
-            _MacroArticleClassificationResponse,
-            system_prompt=system_prompt,
-            retries=2,
-            output_retries=output_retries,
-            max_output_tokens=0,
-            timeout_sec=90,
-            provider_config=provider_config,
-            prefer_raw_json=_normalize_llm_provider(provider) == "azure",
-        )
+        with llm_call_context(
+            backtest_id=(config or {}).get("_telemetry_backtest_id"),
+            instance_id=(config or {}).get("_telemetry_instance_id"),
+            strategy="GraphNexusAnalysis",
+            call_site="macro_classification",
+        ):
+            raw = _scl_guarded(
+                provider,
+                api_key,
+                model,
+                single_prompt,
+                _MacroArticleClassificationResponse,
+                attribution_keys={
+                    "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                    "instance_id": (config or {}).get("_telemetry_instance_id"),
+                    "call_site": "macro_article_single",
+                },
+                system_prompt=system_prompt,
+                retries=2,
+                output_retries=output_retries,
+                max_output_tokens=0,
+                timeout_sec=90,
+                provider_config=provider_config,
+                prefer_raw_json=_normalize_llm_provider(provider) == "azure",
+            )
         prompt = single_prompt
-    if raw is None and len(chunk) > 1 and _split_depth < 2:
+    if raw is None and not _llm_call_was_terminal and len(chunk) > 1 and _split_depth < 2:
         mid = max(1, len(chunk) // 2)
         _log(f"Macro article LLM chunk fallback: splitting batch of {len(chunk)} article(s) into {mid}+{len(chunk)-mid}", "yellow")
         split_kwargs = dict(
             provider=provider, api_key=api_key, model=model,
             prompt_version=prompt_version, provider_config=provider_config,
             date_key=date_key, use_toon=use_toon, instance_id=instance_id,
-            system_prompt=system_prompt, _split_depth=_split_depth + 1,
+            system_prompt=system_prompt, config=config, _split_depth=_split_depth + 1,
         )
         with ThreadPoolExecutor(max_workers=2) as split_ex:
             left_fut = split_ex.submit(_classify_macro_article_chunk, chunk[:mid], **split_kwargs)
@@ -3311,7 +3769,7 @@ def _classify_company_article_records(
     results: list[dict] = []
     traces: list[dict] = []
     cache_pairs = [
-        (row, _llm_cached_doc_id("company", row["article_hash"], provider, model, prompt_version, provider_config))
+        (row, _llm_cached_doc_id("company", row["article_hash"], model, prompt_version, provider_config))
         for row in articles
     ]
     cached = _load_llm_cache_rows(conn, NEXUS_NEWS_LLM_COMPANY_TABLE, [cache_id for _, cache_id in cache_pairs])
@@ -3366,6 +3824,7 @@ def _classify_company_article_records(
                     use_toon=use_toon,
                     instance_id=instance_id,
                     system_prompt=system_prompt,
+                    config=config,
                 ): chunk
                 for chunk in chunks
             }
@@ -3435,7 +3894,7 @@ def _classify_macro_article_records(
     results: list[dict] = []
     traces: list[dict] = []
     cache_pairs = [
-        (row, _llm_cached_doc_id("macro", row["article_hash"], provider, model, prompt_version, provider_config))
+        (row, _llm_cached_doc_id("macro", row["article_hash"], model, prompt_version, provider_config))
         for row in articles
     ]
     cached = _load_llm_cache_rows(conn, NEXUS_NEWS_LLM_MACRO_TABLE, [cache_id for _, cache_id in cache_pairs])
@@ -3451,6 +3910,28 @@ def _classify_macro_article_records(
         f"Macro article LLM classification: {len(articles)} article(s) total | cache_hits={len(results)} | uncached={len(uncached_rows)}",
         "cyan",
     )
+    # Diagnostic: when we miss the cache entirely but rows exist in the
+    # table, surface the constructed key alongside one or two existing
+    # keys for the same instance so the operator can see why they don't
+    # line up (typical causes: provider switched azure↔codex-cli, model
+    # name changed including the -EFFORT suffix, prompt_version bumped).
+    if articles and not results and conn is not None:
+        try:
+            _attempted_key = cache_pairs[0][1] if cache_pairs else "?"
+            sample_cursor = (
+                _r.db(DB_NAME).table(NEXUS_NEWS_LLM_MACRO_TABLE)
+                .filter({"schema_type": "macro"}).limit(3).pluck("id").run(conn)
+            )
+            sample_ids = [str(d.get("id", ""))[:200] for d in sample_cursor if isinstance(d, dict)]
+            if sample_ids:
+                _log(
+                    f"Macro article cache miss diagnostic: attempted="
+                    f"{_attempted_key[:200]!r} | sample existing rows="
+                    f"{sample_ids}",
+                    "yellow",
+                )
+        except Exception:
+            pass
     batch_size = max(1, min(20, int(config.get("macro_article_llm_batch_size", _NEXUS_MACRO_BATCH_SIZE) or _NEXUS_MACRO_BATCH_SIZE)))
     prompt_budget_chars = max(1200, int(config.get("macro_article_llm_prompt_budget_chars", _NEXUS_MACRO_PROMPT_BUDGET_CHARS) or _NEXUS_MACRO_PROMPT_BUDGET_CHARS))
     if uncached_rows:
@@ -3487,6 +3968,7 @@ def _classify_macro_article_records(
                     use_toon=use_toon,
                     instance_id=instance_id,
                     system_prompt=system_prompt,
+                    config=config,
                 ): chunk
                 for chunk in chunks
             }
@@ -3513,11 +3995,13 @@ def _classify_macro_article_records(
     _pre_filter = len(docs_to_store)
     docs_to_store = [
         d for d in docs_to_store
-        if (d.get("reason") or "").strip()
-        or float(d.get("impact_strength", 0) or 0) > 0
-        or (d.get("macro_signal_type") or "") not in ("", "general")
-        or (d.get("impact_direction") or "") not in ("", "neutral")
-        or (d.get("route") or "") not in ("", "macro", "ignore")
+        if _macro_fields_have_signal(
+            route=d.get("route", ""),
+            reason=d.get("reason", ""),
+            impact_strength=d.get("impact_strength", 0),
+            macro_signal_type=d.get("macro_signal_type", ""),
+            impact_direction=d.get("impact_direction", ""),
+        )
     ]
     _n_macro_skipped = _pre_filter - len(docs_to_store)
     _store_llm_cache_rows(conn, NEXUS_NEWS_LLM_MACRO_TABLE, docs_to_store)
@@ -3930,18 +4414,11 @@ def _maintain_active_events(
             return reused
     if api_key and (current_events or candidates):
         system_prompt = (
-            "Maintain the lifecycle of active macro/government events. "
-            "Return only structured updates as minimal JSON. End or invalidate events only when today's evidence clearly warrants it. "
-            "Use short alias keys: a (action), ck (event_cluster_key), en (event_name), et (event_type), "
-            "gt (government_action_type), s (status), ed (expected_end_date), c (confidence), "
-            "as (affected_sectors), at (affected_themes), ac (affected_commodities), aa (affected_agencies), "
-            "ak (affected_tickers), re (reason). "
-            "Omit fields with default/empty values. Keep event_name under 8 words, reason under 10 words. "
-            "Max 3 items per affected_* list. Minimize total output tokens. "
-            "Output compact minified JSON — no indentation, no extra spaces, no newlines. "
-            "Do NOT wrap the JSON in any container object. "
-            "Do NOT use wrapper keys like 'final', 'result', 'output', 'answer', or 'response'. "
-            "Your response must begin with { and end with } — nothing else."
+            "Maintain active macro/government events. Return minified JSON updates only; no wrapper keys. "
+            "End or invalidate events only when today's evidence clearly warrants it. "
+            "Alias keys: a, ck, en, et, gt, s, ed, c, as, at, ac, aa, ak, re. "
+            "Omit empty fields. Names ≤8 words, reasons ≤10 words, lists ≤3 items. "
+            "Response must begin with { and end with }."
         )
         _maint_limits = _get_event_maintenance_prompt_limits(config)
         _MAINT_CANDIDATE_BATCH = int(_maint_limits["candidate_batch_size"])
@@ -3949,6 +4426,7 @@ def _maintain_active_events(
             "supporting_article_hashes", "article_hash", "history_scope_id",
             "base_instance_id", "history_model_stamp", "strategy_config_hash",
             "feature_version", "cache_scope_id", "instance_id",
+            "actual_end_date",
         }
         candidate_batches = [candidates[i:i + _MAINT_CANDIDATE_BATCH] for i in range(0, max(1, len(candidates)), _MAINT_CANDIDATE_BATCH)] if candidates else [[]]
         n_batches = len(candidate_batches)
@@ -3964,7 +4442,22 @@ def _maintain_active_events(
                 key=lambda e: (e.get("last_confirmed_date", ""), float(e.get("confidence") or 0)),
                 reverse=True,
             )[:_max_events_in_prompt]
-        current_capped = [{k: v for k, v in ev.items() if k not in _MAINT_STRIP_KEYS} for ev in _prompt_events]
+        _MAINT_LIST_FIELDS = {"affected_sectors", "affected_themes", "affected_commodities", "affected_agencies", "affected_tickers"}
+
+        def _trim_event_for_prompt(ev: dict, strip_keys: set) -> dict:
+            out = {}
+            for k, v in ev.items():
+                if k in strip_keys:
+                    continue
+                if k == "confidence":
+                    out[k] = round(float(v or 0), 1)
+                elif k in _MAINT_LIST_FIELDS and isinstance(v, list):
+                    out[k] = v[:3]
+                else:
+                    out[k] = v
+            return out
+
+        current_capped = [_trim_event_for_prompt(ev, _MAINT_STRIP_KEYS) for ev in _prompt_events]
         if _maint_limits["auto_reduced"]:
             _log(
                 f"Active-event maintenance: auto-reduced prompt context for {_maint_limits['model_ref']} | "
@@ -3975,11 +4468,14 @@ def _maintain_active_events(
         _log(f"Active-event maintenance: {n_batches} parallel batch(es) | current={len(current_events)} (prompt={len(_prompt_events)}) candidates={len(candidates)}", "cyan")
 
         _is_lookback = bool(config.get("historical_lookback_mode", False))
-        _maint_timeout = 90 if _is_lookback else 120
+        # 2026-05-15: 90/120 -> 180/240. With max_output_tokens uncapped and
+        # HIGH-effort reasoning models, individual calls routinely take
+        # 70-90s. The 90s lookback timeout was firing on every batch and
+        # the retry path didn't help because retries also timed out.
+        _maint_timeout = int(config.get("event_maintenance_timeout_sec", 180 if _is_lookback else 240) or (180 if _is_lookback else 240))
         _maint_outer_retries = 1 if _is_lookback else 2
-
         def _run_maint_batch(batch_candidates: list, max_outer_retries: int = _maint_outer_retries) -> tuple:
-            stripped_candidates = [{k: v for k, v in c.items() if k not in _MAINT_STRIP_KEYS} for c in batch_candidates]
+            stripped_candidates = [_trim_event_for_prompt(c, _MAINT_STRIP_KEYS) for c in batch_candidates]
             batch_prompt_events = list(current_capped)
             _min_retry_events = 20 if _maint_limits["is_gpt_oss"] else 30
             r, t = None, None
@@ -3991,17 +4487,38 @@ def _maintain_active_events(
                     'Output example: {"updates":[{"a":"confirm","ck":"tariff-china-2026","en":"China tariff hike","et":"tariff","s":"live","c":0.8,"as":["Technology"],"re":"Confirmed by USTR"}]}\n'
                     "Return updates that create, confirm, narrow, broaden, end, or invalidate events."
                 )
-                r = call_structured_llm_by_provider(
-                    provider, api_key, model, batch_prompt,
-                    _ActiveEventMaintenanceResponse,
-                    system_prompt=system_prompt,
-                    max_output_tokens=0,
-                    retries=2,
-                    output_retries=2,
-                    timeout_sec=_maint_timeout,
-                    provider_config=provider_config,
-                    prefer_raw_json=True,
-                )
+                with llm_call_context(
+                    backtest_id=(config or {}).get("_telemetry_backtest_id"),
+                    instance_id=(config or {}).get("_telemetry_instance_id"),
+                    strategy="GraphNexusAnalysis",
+                    call_site="active_event_maintenance",
+                ):
+                    r = _scl_guarded(
+                        provider, api_key, model, batch_prompt,
+                        _ActiveEventMaintenanceResponse,
+                        attribution_keys={
+                            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                            "instance_id": (config or {}).get("_telemetry_instance_id"),
+                            "call_site": "event_maintenance",
+                        },
+                        system_prompt=system_prompt,
+                        # 2026-05-15: 1024 -> 4096 -> 8192 -> 0 (uncapped).
+                        # Each ceiling was insufficient because reasoning
+                        # models (gpt-5-mini-MEDIUM/HIGH, claude-sonnet w/
+                        # extended thinking) consume their entire budget on
+                        # reasoning and leave nothing for the response.
+                        # 8192 still hit the cap on HIGH effort
+                        # (output=8192 reasoning=8192). Matching the
+                        # macro_classification call site which also uses 0
+                        # (uncapped) — let the model decide its own budget.
+                        max_output_tokens=0,
+                        retries=2,
+                        output_retries=2,
+                        timeout_sec=_maint_timeout,
+                        provider_config=provider_config,
+                        prefer_raw_json=True,
+                        use_prompt_cache=True,
+                    )
                 t = _build_llm_trace("event_maintenance", provider, model, batch_prompt, system_prompt, prompt_version, r is not None)
                 if r is not None:
                     break
@@ -4022,8 +4539,12 @@ def _maintain_active_events(
 
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
         batch_results = []
-        # In lookback mode, cap parallelism to 2 workers to reduce resource pressure
-        _maint_max_workers = min(2, n_batches) if _is_lookback else n_batches
+        # In lookback mode, cap parallelism. Provider here is azure (gpt-oss-120b),
+        # not subject to the CLAUDE_CLI_MAX_CONCURRENT semaphore. Old cap was 2,
+        # which serialised 6 batches into 3 rounds and let the bg-thread join
+        # block the foreground for 170s+. Cap=6 lets all batches run in one
+        # round; azure handles its own per-key TPM throttling.
+        _maint_max_workers = min(6, n_batches) if _is_lookback else n_batches
         if n_batches == 1:
             batch_results.append(_run_maint_batch(candidate_batches[0]))
         else:
@@ -4336,15 +4857,21 @@ def _v32_momentum_ath_or_mcap_block(
     Either fail-open when data missing (never blocks on unknown-mcap or thin history).
     """
     # T1-c near-ATH gate
-    if bool(config.get("portfolio_swap_ath_gate_enabled", False)):
+    # Z1.2 (2026-05-15): default flipped to True. Backtest 299903 showed AIOS
+    # bought at $22.33 after +5,200% YTD parabolic; this gate already existed
+    # and would have blocked AIOS but was disabled by default.
+    if bool(config.get("portfolio_swap_ath_gate_enabled", True)):
         try:
-            ath_max_delta = float(config.get("portfolio_swap_ath_gate_max_pct", 0.02) or 0.02)
+            # Z1.2: widened from 2% to 5% (matches the spec target band)
+            ath_max_delta = float(config.get("portfolio_swap_ath_gate_max_pct", 0.05) or 0.05)
         except Exception:
-            ath_max_delta = 0.02
+            ath_max_delta = 0.05
         try:
-            bypass_raw = float(config.get("portfolio_swap_ath_gate_bypass_raw", 1.80) or 1.80)
+            # Z1.2: bypass raised from 1.80 to 2.50 so only extraordinary
+            # conviction can override the near-ATH block
+            bypass_raw = float(config.get("portfolio_swap_ath_gate_bypass_raw", 2.50) or 2.50)
         except Exception:
-            bypass_raw = 1.80
+            bypass_raw = 2.50
         try:
             lookback = int(config.get("portfolio_swap_ath_gate_lookback", 60) or 60)
         except Exception:
@@ -4364,11 +4891,14 @@ def _v32_momentum_ath_or_mcap_block(
                         pass
                 return True, reason
     # T2-a market-cap gate on momentum lanes
-    if bool(config.get("momentum_watchlist_mcap_prefilter_enabled", False)):
+    # Z1.3 (2026-05-15): default flipped to True. min_market_cap raised from
+    # $500M to $2B so micro-caps (AIOS-class) can't enter via momentum
+    # watchlist rotation.
+    if bool(config.get("momentum_watchlist_mcap_prefilter_enabled", True)):
         try:
-            min_mcap = float(config.get("momentum_watchlist_min_market_cap", 500_000_000) or 500_000_000)
+            min_mcap = float(config.get("momentum_watchlist_min_market_cap", 2_000_000_000) or 2_000_000_000)
         except Exception:
-            min_mcap = 500_000_000.0
+            min_mcap = 2_000_000_000.0
         mc = _v32_get_market_cap(symbol, strategy_cache, config)
         if mc is not None and mc > 0 and mc < min_mcap:
             reason = (
@@ -4705,6 +5235,7 @@ def _in_initial_grace_period(
     unrealized_pct: float,
     config: dict,
     market_regime: str = "bull",
+    conviction_tier: str | None = None,
 ) -> tuple[bool, bool, str]:
     if not bool(config.get("initial_grace_enabled", True)):
         return (False, False, "")
@@ -4713,19 +5244,92 @@ def _in_initial_grace_period(
     grace_bars = int(config.get("initial_grace_bars", 14) or 14)
     if grace_bars <= 0 or days_held >= grace_bars:
         return (False, False, "")
-    # Escape A — single-bar catastrophic
-    catastrophic_pct = float(config.get("initial_grace_catastrophic_loss_pct", -15.0) or -15.0)
+    # Phase ε.C.0' (BT294837 follow-up, 2026-05-19): Escape A previously
+    # fired at a tier-blind -15% threshold, which force-sold SNDK (resolved
+    # by γ.1+γ.5 as tier=HIGH mcap=84502M) on day 11 at -18.3% — bypassing
+    # the HIGH conviction floor of -25% that the circuit_breaker would have
+    # honored. The escape_A threshold is now tier-aware so HIGH/MID
+    # conviction stocks survive deeper drawdowns inside the grace window.
+    # NO TICKER HARDCODING — works for any HIGH/MID conviction stock per
+    # γ.5 telemetry.
+    _tier_norm = (str(conviction_tier or "").strip().upper()) or "LOW"
+    if _tier_norm == "HIGH":
+        _cat_default = float(
+            config.get("initial_grace_catastrophic_loss_pct_high", -25.0) or -25.0
+        )
+    elif _tier_norm == "MID":
+        _cat_default = float(
+            config.get("initial_grace_catastrophic_loss_pct_mid", -20.0) or -20.0
+        )
+    else:
+        _cat_default = float(
+            config.get("initial_grace_catastrophic_loss_pct", -15.0) or -15.0
+        )
+    catastrophic_pct = _cat_default
     if unrealized_pct <= catastrophic_pct:
-        return (True, True, f"escape_A_catastrophic({unrealized_pct:.1f}%≤{catastrophic_pct:.1f}%)")
-    # Escape B — cumulative bleed
-    cumulative_pct = float(config.get("initial_grace_cumulative_loss_pct", -10.0) or -10.0)
-    cumulative_min_days = int(config.get("initial_grace_cumulative_min_days", 5) or 5)
+        return (
+            True,
+            True,
+            f"escape_A_catastrophic({unrealized_pct:.1f}%≤{catastrophic_pct:.1f}%, tier={_tier_norm})",
+        )
+    # Escape B — cumulative bleed.
+    # Phase ε.C.0' fix (bug-sweep adversarial finding A1): escape_B was
+    # tier-blind which made the whole tier-aware patch silently inert —
+    # SNDK at -18.3% day 11 (the canonical fix scenario) still escaped via
+    # escape_B (-18.3% ≤ -10% AND 11 ≥ 5) regardless of HIGH tier resolution.
+    # Tier-aware cumulative thresholds parallel the catastrophic ones:
+    # HIGH stocks get -18% / 10 days, MID get -14% / 7 days, LOW unchanged
+    # -10% / 5 days. The wider HIGH/MID bands match the wider circuit_breaker
+    # floors for those tiers.
+    if _tier_norm == "HIGH":
+        # 5pp narrower than escape_A (-25%), so HIGH cumulative bands cap
+        # at -20% with 10-day window. SNDK-class at -18.3% day 11 stays
+        # protected (the canonical fix scenario).
+        cumulative_pct = float(
+            config.get("initial_grace_cumulative_loss_pct_high", -20.0) or -20.0
+        )
+        cumulative_min_days = int(
+            config.get("initial_grace_cumulative_min_days_high", 10) or 10
+        )
+    elif _tier_norm == "MID":
+        cumulative_pct = float(
+            config.get("initial_grace_cumulative_loss_pct_mid", -15.0) or -15.0
+        )
+        cumulative_min_days = int(
+            config.get("initial_grace_cumulative_min_days_mid", 7) or 7
+        )
+    else:
+        cumulative_pct = float(config.get("initial_grace_cumulative_loss_pct", -10.0) or -10.0)
+        cumulative_min_days = int(config.get("initial_grace_cumulative_min_days", 5) or 5)
     if unrealized_pct <= cumulative_pct and days_held >= cumulative_min_days:
-        return (True, True, f"escape_B_cumulative({unrealized_pct:.1f}%≤{cumulative_pct:.1f}% after {days_held}d)")
-    # Escape C — regime/correlation deterioration
+        return (
+            True,
+            True,
+            f"escape_B_cumulative({unrealized_pct:.1f}%≤{cumulative_pct:.1f}% after {days_held}d, tier={_tier_norm})",
+        )
+    # Escape C — regime/correlation deterioration.
+    # Phase ε.C.0' fix (A1 cont.): escape_C fires in bear regime for ANY
+    # negative pnl, tier-blind. Tier-aware: HIGH stocks need pnl <= -8%
+    # in bear (don't bail at -1% just because regime flipped); MID needs
+    # <= -5%; LOW unchanged (any negative).
     if bool(config.get("initial_grace_regime_escape_enabled", True)):
-        if str(market_regime or "bull").lower() == "bear" and unrealized_pct < 0.0:
-            return (True, True, f"escape_C_regime(bear+pnl{unrealized_pct:.1f}%)")
+        if str(market_regime or "bull").lower() == "bear":
+            if _tier_norm == "HIGH":
+                _esc_c_pnl = float(
+                    config.get("initial_grace_regime_escape_pnl_pct_high", -8.0) or -8.0
+                )
+            elif _tier_norm == "MID":
+                _esc_c_pnl = float(
+                    config.get("initial_grace_regime_escape_pnl_pct_mid", -5.0) or -5.0
+                )
+            else:
+                _esc_c_pnl = 0.0  # LOW: any negative pnl triggers (legacy behavior)
+            if unrealized_pct <= _esc_c_pnl and unrealized_pct < 0.0:
+                return (
+                    True,
+                    True,
+                    f"escape_C_regime(bear+pnl{unrealized_pct:.1f}%≤{_esc_c_pnl:.1f}%, tier={_tier_norm})",
+                )
     # In grace, no escape — caller must suppress sell-overrides
     return (True, False, "")
 
@@ -5064,6 +5668,18 @@ def _enforce_sector_portfolio_cap(
     config: dict,
     prices: dict | None = None,
     price_history: dict | None = None,
+    *,
+    # η.G — Phase η (2026-05-20): optional context for conditional swap.
+    # When all of (scores, nexus_sell_enforcement, date_key) are provided
+    # and eta_v31_swap_enabled is True, the function attempts to swap a
+    # weaker held same-sector position for an eligible HIGH-conviction
+    # new buy before demoting it.
+    scores: dict | None = None,
+    strategy_cache: dict | None = None,
+    propagated: dict | None = None,
+    nexus_sell_enforcement: set | None = None,
+    sentiment_data: dict | None = None,
+    date_key: str | None = None,
 ) -> list[dict]:
     if not bool(config.get("max_sector_portfolio_enabled", True)):
         return funded_slate
@@ -5078,6 +5694,8 @@ def _enforce_sector_portfolio_cap(
         for t in tickers:
             ticker_to_sector.setdefault(str(t).strip().upper(), sector_kw)
     sector_dollars: dict[str, float] = {}
+    # η.G: also track held-by-sector with per-position dollar amounts for swap eligibility.
+    held_by_sector: dict[str, list[tuple[str, float]]] = {}
     # Existing position dollar exposure
     if portfolio_emulator is not None:
         positions = getattr(portfolio_emulator, "_positions", {}) or {}
@@ -5091,10 +5709,14 @@ def _enforce_sector_portfolio_cap(
             sym_u = str(sym).strip().upper()
             sector = ticker_to_sector.get(sym_u, "unknown")
             price = _resolve_symbol_price(sym_u, prices, price_history, portfolio_emulator=portfolio_emulator) or 0.0
-            sector_dollars[sector] = sector_dollars.get(sector, 0.0) + qty_f * float(price or 0.0)
+            held_dollars = qty_f * float(price or 0.0)
+            sector_dollars[sector] = sector_dollars.get(sector, 0.0) + held_dollars
+            held_by_sector.setdefault(sector, []).append((sym_u, held_dollars))
     # Add new buys to sector exposure
+    new_buy_tickers: set[str] = set()
     for item in funded_slate:
         sym_u = str(item.get("ticker") or "").strip().upper()
+        new_buy_tickers.add(sym_u)
         sector = ticker_to_sector.get(sym_u, "unknown")
         buy_cash = float(item.get("buy_cash", 0.0) or 0.0)
         sector_dollars[sector] = sector_dollars.get(sector, 0.0) + buy_cash
@@ -5102,6 +5724,34 @@ def _enforce_sector_portfolio_cap(
     over_cap = {s: amt for s, amt in sector_dollars.items() if amt > cap_dollars}
     if not over_cap:
         return funded_slate
+    # η.G — Phase η (2026-05-20): conditional-swap context.
+    _eta_g_enabled = bool(config.get("eta_v31_swap_enabled", True))
+    # Default eligible-source set covers all HIGH-conviction momentum
+    # and propagation-expansion paths so the swap can rescue any of
+    # them (bug-sweep H-1: original default omitted the η.E
+    # portfolio_swap and breakout_add sub-variants).
+    _eta_g_sources = {
+        str(s).strip().lower()
+        for s in config.get(
+            "eta_v31_swap_eligible_sources",
+            [
+                "momentum_watchlist",
+                "momentum_watchlist_portfolio_swap",
+                "momentum_breakout_add",
+                "propagation_expansion",
+            ],
+        )
+        if s
+    }
+    _eta_g_min_hold = int(config.get("eta_v31_swap_min_hold_days", 3) or 3)
+    _eta_g_max_pnl = float(config.get("eta_v31_swap_max_pnl", 0.15) or 0.15)
+    _eta_g_can_run = (
+        _eta_g_enabled
+        and scores is not None
+        and nexus_sell_enforcement is not None
+        and date_key is not None
+    )
+    _eta_g_swaps: list[str] = []
     demoted_tickers: list[str] = []
     for sector, total_in_sector in over_cap.items():
         excess = total_in_sector - cap_dollars
@@ -5120,6 +5770,86 @@ def _enforce_sector_portfolio_cap(
             item_cash = float(item.get("buy_cash", 0.0) or 0.0)
             if item_cash <= 0:
                 continue
+            # η.G — try conditional swap BEFORE demoting eligible items.
+            if _eta_g_can_run:
+                _eta_g_item_source = str(item.get("signal_source") or "").strip().lower()
+                if _eta_g_item_source in _eta_g_sources:
+                    _eta_g_new_eff = float(item.get("raw_net_score", 0.0) or 0.0)
+                    _eta_g_candidates: list[tuple[float, str, float]] = []
+                    for _eta_g_held_sym, _eta_g_held_dollars in held_by_sector.get(sector, []):
+                        if _eta_g_held_sym in new_buy_tickers:
+                            continue  # defensive: don't swap something also being bought
+                        _eta_g_held_doc = scores.get(_eta_g_held_sym, {}) or {}
+                        _eta_g_held_eff = float(_eta_g_held_doc.get("raw_net_score", 0.0) or 0.0)
+                        if _eta_g_held_eff >= _eta_g_new_eff:
+                            continue
+                        _eta_g_age = _get_open_position_held_days(
+                            portfolio_emulator, _eta_g_held_sym, date_key
+                        ) or 0
+                        if int(_eta_g_age) < _eta_g_min_hold:
+                            continue
+                        _eta_g_entry = _get_open_position_entry_trade(
+                            portfolio_emulator, _eta_g_held_sym
+                        )
+                        if not _eta_g_entry:
+                            continue
+                        _eta_g_entry_price = float(_eta_g_entry.get("price", 0.0) or 0.0)
+                        _eta_g_cur_price = _resolve_symbol_price(
+                            _eta_g_held_sym, prices, price_history,
+                            portfolio_emulator=portfolio_emulator,
+                        ) or 0.0
+                        if _eta_g_entry_price <= 0 or _eta_g_cur_price <= 0:
+                            continue
+                        _eta_g_pnl_pct = (
+                            (_eta_g_cur_price - _eta_g_entry_price) / _eta_g_entry_price
+                        )
+                        if _eta_g_pnl_pct > _eta_g_max_pnl:
+                            continue
+                        _eta_g_tier = _resolve_conviction_tier_at_exit(
+                            _eta_g_held_sym, config, strategy_cache, propagated
+                        )
+                        _eta_g_regime = str(
+                            (strategy_cache or {}).get("_market_regime") or "bull"
+                        )
+                        _eta_g_in_grace, _eta_g_esc, _ = _in_initial_grace_period(
+                            int(_eta_g_age),
+                            float(_eta_g_pnl_pct * 100.0),
+                            config,
+                            _eta_g_regime,
+                            conviction_tier=_eta_g_tier,
+                        )
+                        if _eta_g_in_grace and not _eta_g_esc:
+                            continue
+                        if _eta_g_tier == "HIGH" and _eta_g_in_grace:
+                            continue
+                        _eta_g_candidates.append(
+                            (_eta_g_held_eff, _eta_g_held_sym, _eta_g_held_dollars)
+                        )
+                    if _eta_g_candidates:
+                        _eta_g_candidates.sort()  # weakest first
+                        _eta_g_target_eff, _eta_g_target, _eta_g_target_dollars = (
+                            _eta_g_candidates[0]
+                        )
+                        nexus_sell_enforcement.add(_eta_g_target)
+                        if isinstance(scores, dict):
+                            scores.setdefault(_eta_g_target, {})["raw_net_score"] = 0.0
+                        _eta_g_swaps.append(_eta_g_target)
+                        _log(
+                            f"[ETA.G] V31 conditional swap: sell existing {_eta_g_target} "
+                            f"(eff={_eta_g_target_eff:.3f}, ${_eta_g_target_dollars:.0f}) to keep "
+                            f"new buy {item.get('ticker')} (eff={_eta_g_new_eff:.3f}) "
+                            f"in sector={sector}",
+                            "magenta",
+                        )
+                        # Selling the held frees its dollars from sector accounting.
+                        excess -= _eta_g_target_dollars
+                        sector_dollars[sector] = max(0.0, sector_dollars.get(sector, 0.0) - _eta_g_target_dollars)
+                        # Remove the swap target from held_by_sector so it can't be picked twice.
+                        held_by_sector[sector] = [
+                            (t, d) for (t, d) in held_by_sector.get(sector, [])
+                            if t != _eta_g_target
+                        ]
+                        continue  # do NOT demote this item
             item["buy_cash"] = 0.0
             item["sector_cap_demoted"] = True
             excess -= item_cash
@@ -5129,6 +5859,12 @@ def _enforce_sector_portfolio_cap(
             f"V31 sector portfolio cap: demoted {len(demoted_tickers)} buy(s) "
             f"({', '.join(demoted_tickers[:6])}) — sectors over {cap_pct*100:.0f}% cap",
             "yellow",
+        )
+    if _eta_g_swaps:
+        _log(
+            f"[ETA.G] V31 swap summary: {len(_eta_g_swaps)} held position(s) "
+            f"sold to rescue eligible new buys ({', '.join(_eta_g_swaps[:6])})",
+            "magenta",
         )
     return [item for item in funded_slate if float(item.get("buy_cash", 0.0) or 0.0) > 0.0]
 
@@ -5209,6 +5945,818 @@ def _detect_market_regime(
         except Exception:
             pass
         return "bull"
+
+
+def _nexus_regime_classify(
+    spy_20d_return: float | None,
+    v31_regime: str | None,
+    vix: float | None = None,
+    *,
+    spy_intraday_drop_pct: float | None = None,
+) -> str:
+    """Z4.1 + Section 5: classify the package-wide regime as one of
+    bull / chop / bear / crash. Used to gate capacity, position sizing,
+    and momentum-driven discovery lanes per the spec.
+
+    Precedence (most defensive first):
+    - crash: VIX > 40 OR SPY -8% intraday
+    - bear:  V31=bear OR SPY 20d < -5%
+    - bull:  V31=bull AND SPY 20d > +2%
+    - chop:  otherwise
+    """
+    try:
+        if vix is not None and vix > 40:
+            return "crash"
+        if spy_intraday_drop_pct is not None and spy_intraday_drop_pct <= -0.08:
+            return "crash"
+        v31 = str(v31_regime or "").strip().lower()
+        # Snapshot-loader backcompat: when SPY 20d return is unavailable
+        # (cold start, old strategy_cache before _overlay_bars_raw was
+        # populated) AND V31 says bull, default to bull rather than chop —
+        # otherwise the first bar of a live run would silently halve
+        # max_positions before the overlay bars cache backfills.
+        if spy_20d_return is None and v31 == "bull":
+            return "bull"
+        spy = spy_20d_return if spy_20d_return is not None else 0.0
+        if v31 == "bear" or spy < -0.05:
+            return "bear"
+        if v31 == "bull" and spy > 0.02:
+            return "bull"
+        return "chop"
+    except Exception:
+        return "chop"
+
+
+def _spy_20d_return(strategy_cache: dict | None, date_key: str) -> float | None:
+    """Z2.3: return SPY's 20-day return as a fraction (e.g. +0.0374 for +3.74%),
+    or None if not enough data. Used by ``_compute_macro_risk_scale`` to gate
+    the macro-bearish haircut on price-action corroboration.
+    """
+    try:
+        if not isinstance(strategy_cache, dict):
+            return None
+        bars_cache = strategy_cache.get("_overlay_bars_raw") or {}
+        if not isinstance(bars_cache, dict):
+            return None
+        for candidate in ("SPY", "QQQ", "VOO"):
+            bars = bars_cache.get(candidate)
+            if not isinstance(bars, list) or not bars:
+                continue
+            date_str = str(date_key or "")[:10]
+            closes: list[float] = []
+            for b in bars:
+                if not isinstance(b, dict):
+                    continue
+                ts = b.get("t", b.get("date", ""))
+                ts_str = str(ts or "")[:10]
+                if ts_str > date_str:
+                    continue
+                c_raw = b.get("c", 0)
+                try:
+                    c_val = float(c_raw) if c_raw is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                if c_val > 0:
+                    closes.append(c_val)
+            if len(closes) >= 21 and closes[-21] > 0:
+                return (closes[-1] - closes[-21]) / closes[-21]
+        return None
+    except Exception:
+        return None
+
+
+def _realized_vol_20d(prices: list[float]) -> float:
+    """Z3.x: return per-symbol 20-day annualized realized volatility as a
+    fraction (e.g. 0.30 for 30% annualized).
+
+    Used by Z3.1 (vol-scaled loss floor) and Z3.2 (vol-scaled trailing-stop
+    activation) so AORT (high-vol biotech) gets different thresholds than
+    AZN (low-vol large-cap pharma). Returns 0.0 when too few bars to
+    compute, so callers can fall back to their absolute default thresholds.
+    """
+    try:
+        if not prices or len(prices) < 5:
+            return 0.0
+        series = [float(p) for p in (prices[-20:] if len(prices) >= 20 else prices) if p and float(p) > 0]
+        if len(series) < 5:
+            return 0.0
+        import math as _math
+        returns = []
+        for i in range(1, len(series)):
+            if series[i-1] > 0 and series[i] > 0:
+                returns.append(_math.log(series[i] / series[i-1]))
+        if len(returns) < 4:
+            return 0.0
+        mean = sum(returns) / len(returns)
+        var = sum((r - mean) ** 2 for r in returns) / len(returns)
+        return _math.sqrt(var) * _math.sqrt(252)
+    except Exception:
+        return 0.0
+
+
+def _recent_closes_for_symbol(
+    sym: str,
+    price_history: dict | None,
+    portfolio_emulator=None,
+) -> list[float]:
+    """Pull recent close prices for a single symbol from the available
+    price history. Used by Z3.1 / Z3.2 to feed _realized_vol_20d.
+    """
+    closes: list[float] = []
+    try:
+        if isinstance(price_history, dict):
+            bars = price_history.get(sym) or []
+            if isinstance(bars, list):
+                for b in bars:
+                    if isinstance(b, dict):
+                        c = b.get("c", b.get("close", 0))
+                        try:
+                            cv = float(c) if c is not None else 0.0
+                        except (TypeError, ValueError):
+                            continue
+                        if cv > 0:
+                            closes.append(cv)
+                    elif isinstance(b, (int, float)):
+                        cv = float(b)
+                        if cv > 0:
+                            closes.append(cv)
+        if not closes and portfolio_emulator is not None:
+            ph = getattr(portfolio_emulator, "_price_history", None)
+            if isinstance(ph, dict):
+                bars = ph.get(sym) or []
+                if isinstance(bars, list):
+                    for b in bars:
+                        if isinstance(b, dict):
+                            c = b.get("c", b.get("close", 0))
+                            try:
+                                cv = float(c) if c is not None else 0.0
+                            except (TypeError, ValueError):
+                                continue
+                            if cv > 0:
+                                closes.append(cv)
+    except Exception:
+        return closes
+    return closes
+
+
+# ── Tier-3 P&L max: conviction-aware loss floor matrix ──────────────────────
+# 2026-05-17: Backtest 901920 revealed an 80% false-positive rate on the
+# circuit-breaker -15% floor (SNDK -18.3% → +487% missed, FGL -22.8% → +338%
+# missed, ROLR -22.5% → +77% missed, ORLA -16.3% → +34% missed). CAR was the
+# only vindicated exit. Tier-3 spec A1 introduces a conviction-tier resolver:
+# HIGH-conviction positions get a wider absolute floor (-25%) with vol-scaling
+# disabled. MID-conviction get -20%. LOW-conviction retain the current -15%.
+#
+# 2026-05-18 (BT136708 P1.5): thresholds lowered after BT136708 returned LOW
+# for 18/18 evaluations under the original 50B/1.5 thresholds. New defaults:
+# HIGH = (mcap >= $30B OR raw_score >= 1.0); MID = (mcap >= $10B OR raw_score
+# >= 0.6); LOW = else. SNDK (~$36B) now resolves to HIGH and gets -25% floor.
+# See docs/superpowers/specs/2026-05-17-nexus-tier3-missed-rally-fixes-design.md
+# §13 addendum for the BT136708 calibration details.
+
+
+def _resolve_position_market_cap(
+    sym: str,
+    strategy_cache: dict | None,
+) -> float | None:
+    """Return cached market cap in USD for ``sym`` or None if unknown.
+
+    Reads from the existing `_yf_market_cap_cache` (already populated by
+    `_get_quality_metadata_for_ticker` and Benzinga). Returns None if the
+    cache miss makes the conviction tier undecidable (caller treats as MID).
+    """
+    if not isinstance(strategy_cache, dict):
+        return None
+    cache = strategy_cache.get("_yf_market_cap_cache") or {}
+    try:
+        v = cache.get(str(sym or "").strip().upper())
+        if v is None:
+            return None
+        return float(v) if float(v) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _preseed_mcap_cache_from_universe(
+    symbols_list: list,
+    strategy_cache: dict | None,
+    config: dict,
+    *,
+    portfolio_emulator=None,
+) -> int:
+    """Pre-populate ``_yf_market_cap_cache`` for a backtest universe.
+
+    BT136708 calibration (2026-05-18): without this, the cache stays empty in
+    backtest (no fresh discovery happens against a static universe), and the
+    Tier-3 A1 HIGH-tier resolution via mcap never fires for mega-caps. SNDK
+    (~$36B) defaulted to LOW conviction tier in BT136708 and got the -15%
+    floor → cut at -18.3% → missed +619% recovery.
+
+    Phase α.4 (BT109429 follow-up, 2026-05-18): the original ``if populated:``
+    log gate silently hid the ``populated=0`` outcome in prod (yfinance
+    returned 0 marketCap for all 8 BT109429 tickers — likely rate-limit or
+    missing ``info`` dict — and the except swallowed the exception). Always
+    log the per-source counters now (neo4j/yf hits/zeros/failures) regardless
+    of outcome. Added 3-retry exponential backoff for yfinance fetches.
+
+    Phase γ.1 (BT232179 follow-up, 2026-05-18): in pure-discovery mode
+    (operator's primary backtest configuration) the caller's ``symbols_list``
+    is EMPTY at run_once entry — the function correctly short-circuited but
+    A1 was left with an empty mcap cache for the whole run. Now the
+    pre-seed universe is built from THREE sources:
+
+      1. operator-provided ``symbols_list`` (legacy path, BT136708-style)
+      2. currently-held tickers from ``portfolio_emulator._positions`` (so
+         every position the A1 tier-resolver inspects has mcap)
+      3. top-N BFQ candidates from ``strategy_cache['_backfill_queue']``
+         (so the next-bar-execution candidates have mcap before they're
+         executed). Cap controlled by ``mcap_preseed_bfq_top_n`` (default 20).
+
+    Idempotency contract change: the prior ``bool`` flag
+    ``_yf_market_cap_cache_preseeded`` is replaced by a ``set[str]`` of
+    already-seeded tickers under ``_yf_market_cap_cache_preseeded_tickers``,
+    so subsequent calls can extend the universe (newly-held positions, BFQ
+    entrants) without re-fetching what was already seeded. A legacy bool
+    flag (left in persisted live state from a pre-γ.1 deploy) is migrated
+    on first encounter: its presence is honored as "everything previously
+    processed" — function returns 0 for that one call, and the new set
+    is initialized from the current ``_yf_market_cap_cache`` keys.
+
+    Sources (in order, per ticker):
+      1. ``_neo4j_market_cap_cache`` (already populated at module load)
+      2. yfinance (one-time per ticker, with retry), gated on
+         ``mcap_preseed_use_yfinance`` config flag (default True).
+
+    Config knobs (all optional):
+      * ``mcap_preseed_use_yfinance`` (default True)
+      * ``mcap_preseed_yfinance_max_attempts`` (default 3)
+      * ``mcap_preseed_yfinance_base_delay_sec`` (default 0.5)
+      * ``mcap_preseed_bfq_top_n`` (default 20, γ.1)
+
+    Returns the count of tickers populated this call (neo4j_hits + yf_hits).
+    """
+    if not isinstance(strategy_cache, dict):
+        _log("mcap pre-seed: skipped — strategy_cache not a dict", "yellow")
+        return 0
+
+    # γ.1 (Phase γ, 2026-05-18): one-shot migration of the legacy bool flag
+    # to the new set[str] semantics. If the persisted live state (or an
+    # older test fixture) still carries the bool, honor its intent
+    # ("everything already processed") and short-circuit this call. The
+    # current `_yf_market_cap_cache` keys are carried forward as the set
+    # contents so subsequent calls naturally skip them.
+    legacy_flag = strategy_cache.pop("_yf_market_cap_cache_preseeded", None)
+    if legacy_flag:
+        _legacy_cache = strategy_cache.get("_yf_market_cap_cache") or {}
+        _legacy_keys = {
+            str(k or "").strip().upper()
+            for k in _legacy_cache.keys()
+            if str(k or "").strip()
+        }
+        _existing_set = strategy_cache.get("_yf_market_cap_cache_preseeded_tickers")
+        if isinstance(_existing_set, set):
+            _legacy_keys |= _existing_set
+        strategy_cache["_yf_market_cap_cache_preseeded_tickers"] = _legacy_keys
+        _log(
+            f"mcap pre-seed: migrated legacy bool flag → set[str] "
+            f"({len(_legacy_keys)} ticker(s) carried forward); honoring "
+            f"legacy short-circuit for this call (Phase γ.1).",
+            "yellow",
+        )
+        return 0
+
+    # γ.1: read (or initialize) the set[str] idempotency contract.
+    already_seeded_raw = strategy_cache.get("_yf_market_cap_cache_preseeded_tickers")
+    if isinstance(already_seeded_raw, set):
+        already_seeded = already_seeded_raw
+    else:
+        try:
+            already_seeded = set(already_seeded_raw or [])
+        except TypeError:
+            already_seeded = set()
+
+    # γ.1: build the pre-seed universe from operator symbols + held positions
+    # + top-N BFQ. BT232179 silent-inertness rooted here: α.4 never fired
+    # because operator's pure-discovery seed (8 tickers) makes symbols_list
+    # empty at the run_once entry point — the function correctly short-
+    # circuited but A1 ran the whole backtest with an empty mcap cache.
+    operator_tickers: set[str] = set()
+    for s in (symbols_list or []):
+        s_u = str(s or "").strip().upper()
+        if s_u:
+            operator_tickers.add(s_u)
+
+    held_tickers: set[str] = set()
+    if portfolio_emulator is not None:
+        try:
+            # Direct `_positions` read mirrors the breach-heal pattern at
+            # graph_nexus_analysis.py:21701 (defensive against unset attr).
+            _positions = getattr(portfolio_emulator, "_positions", {}) or {}
+            for t, q in _positions.items():
+                try:
+                    if float(q or 0) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                t_u = str(t or "").strip().upper()
+                if t_u:
+                    held_tickers.add(t_u)
+        except Exception as _held_exc:
+            _log(
+                f"mcap pre-seed: held-position read failed (non-fatal): {_held_exc!r}",
+                "yellow",
+            )
+            held_tickers = set()
+
+    bfq_tickers: set[str] = set()
+    try:
+        bfq = strategy_cache.get("_backfill_queue") or {}
+        if isinstance(bfq, dict) and bfq:
+            try:
+                bfq_cap = max(0, int(config.get("mcap_preseed_bfq_top_n", 20) or 20))
+            except (TypeError, ValueError):
+                bfq_cap = 20
+
+            def _bfq_raw(item):
+                v = item[1] if isinstance(item[1], dict) else {}
+                try:
+                    return float((v or {}).get("raw_score", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            bfq_sorted = sorted(bfq.items(), key=_bfq_raw, reverse=True)[:bfq_cap]
+            for t, _meta in bfq_sorted:
+                t_u = str(t or "").strip().upper()
+                if t_u:
+                    bfq_tickers.add(t_u)
+    except Exception as _bfq_exc:
+        _log(
+            f"mcap pre-seed: BFQ read failed (non-fatal): {_bfq_exc!r}",
+            "yellow",
+        )
+        bfq_tickers = set()
+
+    universe = operator_tickers | held_tickers | bfq_tickers
+    new_to_seed_set = universe - already_seeded
+    if not universe:
+        _log(
+            "mcap pre-seed: skipped — empty universe "
+            "(no operator symbols_list, no held positions, no BFQ "
+            "candidates; pure-discovery mode with cold start)",
+            "yellow",
+        )
+        return 0
+    if not new_to_seed_set:
+        # All ticker sources already covered by a prior call this run — no-op.
+        return 0
+
+    # Deterministic iteration order for paired-rerun determinism (Phase α.3
+    # PYTHONHASHSEED handling makes plain set iteration deterministic too,
+    # but explicit sort costs O(n log n) on tiny inputs and removes the
+    # implicit dependency.).
+    new_to_seed = sorted(new_to_seed_set)
+    cache = strategy_cache.setdefault("_yf_market_cap_cache", {})
+    n_total = len(new_to_seed)
+    neo4j_hits = 0
+    yf_hits = 0
+    yf_zeros = 0
+    yf_failures = 0
+    yf_attempted = 0
+
+    # Phase 1: neo4j cache (cheap, no network)
+    for sym_u in new_to_seed:
+        if sym_u in cache:
+            continue
+        try:
+            neo_mc = float(_neo4j_market_cap_cache.get(sym_u, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            neo_mc = 0.0
+        if neo_mc > 0:
+            cache[sym_u] = neo_mc
+            neo4j_hits += 1
+
+    # Phase 2: yfinance for misses (network — only in backtest pre-seed path)
+    use_yf = bool(config.get("mcap_preseed_use_yfinance", True))
+    try:
+        max_attempts = max(1, int(config.get("mcap_preseed_yfinance_max_attempts", 3) or 3))
+    except (TypeError, ValueError):
+        max_attempts = 3
+    try:
+        base_delay = max(0.0, float(config.get("mcap_preseed_yfinance_base_delay_sec", 0.5) or 0.5))
+    except (TypeError, ValueError):
+        base_delay = 0.5
+    if use_yf:
+        try:
+            import yfinance as _yf_mod
+        except Exception as _imp_exc:
+            _yf_mod = None
+            _log(
+                f"mcap pre-seed: yfinance import failed ({_imp_exc!r}); "
+                "skipping network fetch",
+                "yellow",
+            )
+        if _yf_mod is not None:
+            import time as _time_mod_yf
+            for sym_u in new_to_seed:
+                if sym_u in cache:
+                    continue
+                yf_attempted += 1
+                mc = 0.0
+                last_exc: BaseException | None = None
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        info = _yf_mod.Ticker(sym_u).info or {}
+                        mc = float(info.get("marketCap") or 0)
+                        last_exc = None
+                        break
+                    except Exception as _yf_exc:
+                        last_exc = _yf_exc
+                        if attempt < max_attempts:
+                            sleep_for = base_delay * (2 ** (attempt - 1))
+                            _log(
+                                f"mcap pre-seed: yfinance attempt {attempt}/{max_attempts} "
+                                f"failed for {sym_u}: {_yf_exc!r}; retrying in {sleep_for:.2f}s",
+                                "yellow",
+                            )
+                            # Bug-sweep 2026-05-18: time.sleep() only raises
+                            # KeyboardInterrupt (BaseException), which propagates
+                            # past `except Exception:`. The narrow OSError guard
+                            # below covers rare-but-real signal-induced EINTR.
+                            try:
+                                _time_mod_yf.sleep(sleep_for)
+                            except OSError:
+                                pass
+                if last_exc is not None:
+                    yf_failures += 1
+                    # Bug-sweep 2026-05-18: don't pollute cache with 0.0 on
+                    # hard failure — leaves the slot open for a later code
+                    # path that may successfully resolve mcap via Benzinga
+                    # or another network probe.
+                    _log(
+                        f"mcap pre-seed: yfinance exhausted {max_attempts} retries "
+                        f"for {sym_u}: {last_exc!r}",
+                        "yellow",
+                    )
+                else:
+                    cache[sym_u] = mc
+                    if mc > 0:
+                        yf_hits += 1
+                    else:
+                        # yfinance returned but marketCap was 0/missing — common
+                        # signal for rate-limit (empty .info dict).
+                        yf_zeros += 1
+
+    # γ.1: extend the idempotency set with every ticker that REACHED the
+    # cache this call (neo4j_hits OR yf_hits OR yf_zeros). yf_failures are
+    # NOT marked seeded so a future call can retry if network conditions
+    # improve. This preserves the Phase α.4 "don't lock under all-failures"
+    # behavior at finer granularity (per-ticker, not whole-call).
+    seeded_this_call: set[str] = set()
+    for sym_u in new_to_seed:
+        if sym_u in cache:
+            seeded_this_call.add(sym_u)
+    already_seeded |= seeded_this_call
+    strategy_cache["_yf_market_cap_cache_preseeded_tickers"] = already_seeded
+
+    populated = neo4j_hits + yf_hits
+    # Phase α.4: ALWAYS log the per-source counters. The prior `if populated:`
+    # gate hid the silent-fail mode in BT109429 (populated=0 → no log line →
+    # inert Phase 1 fixes). Phase γ.1 extends with per-source universe counts
+    # so the operator can see exactly where the pre-seed input came from.
+    color = "cyan" if populated > 0 else "red"
+    _log(
+        f"mcap pre-seed: {populated}/{n_total} populated "
+        f"(neo4j_hits={neo4j_hits}, yf_hits={yf_hits}, yf_zeros={yf_zeros}, "
+        f"yf_failures={yf_failures}, yf_attempted={yf_attempted}, "
+        f"universe_sources=symbols:{len(operator_tickers)}/held:{len(held_tickers)}/bfq:{len(bfq_tickers)})",
+        color,
+    )
+    if populated == 0 and n_total > 0:
+        _log(
+            "mcap pre-seed: 0 tickers populated — Tier-3 A1 conviction-tier "
+            "resolution will fall back to raw_score path for all symbols, "
+            "demoting mega-caps to LOW (the BT109429 silent-fail mode). "
+            "Check Neo4j ingestion (_neo4j_market_cap_cache) and yfinance "
+            "reachability.",
+            "red",
+        )
+    return populated
+
+
+def _resolve_conviction_tier_at_exit(
+    sym: str,
+    config: dict,
+    strategy_cache: dict | None,
+    propagated: dict | None,
+) -> str:
+    """Return ``"HIGH"`` / ``"MID"`` / ``"LOW"`` for ``sym``.
+
+    HIGH triggers (any of):
+      * Market cap >= ``circuit_breaker_high_conviction_mcap_threshold_usd`` (30B default)
+      * Current raw_net_score >= ``circuit_breaker_high_conviction_raw_score_threshold`` (1.0 default)
+
+    MID triggers (any of):
+      * Market cap >= ``circuit_breaker_mid_conviction_mcap_threshold_usd`` (10B default)
+      * Current raw_net_score >= ``circuit_breaker_mid_conviction_raw_score_threshold`` (0.6 default)
+
+    LOW: default fallback.
+
+    BT136708 calibration (2026-05-18): the original HIGH thresholds (50B mcap,
+    1.5 raw) returned LOW for 18/18 evaluations — SNDK (~$36B mcap) got the
+    -15% floor and was cut at -18.3% missing the +619% recovery to $1407.
+    Lowered to 30B / 1.0 + added a MID mcap path (10B) so structurally
+    lower-vol mid/mega-caps get a wider floor than pure micro-cap propagation
+    picks.
+
+    Phase γ.5 (2026-05-18, BT232179 follow-up): wire per-resolution
+    `conviction_tier:` log line for production audit. BT232179 showed 5/5
+    LOW resolutions (0 HIGH, 0 MID) without ANY visibility into WHY each
+    one demoted — operator had to grep for downstream "circuit_breaker"
+    fires and reverse-engineer the tier. Now each call emits the resolved
+    tier + path (mcap_high / raw_high / mcap_mid / raw_mid / default_low)
+    so operators can audit A1 decisions post-hoc. Gated by
+    `conviction_telemetry_log_enabled` config knob (default True).
+    """
+    sym = str(sym or "").strip().upper()
+    if not sym:
+        return "LOW"
+    try:
+        mcap_threshold = float(
+            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 30e9) or 30e9
+        )
+    except (TypeError, ValueError):
+        mcap_threshold = 30e9
+    try:
+        mcap_mid_threshold = float(
+            config.get("circuit_breaker_mid_conviction_mcap_threshold_usd", 10e9) or 10e9
+        )
+    except (TypeError, ValueError):
+        mcap_mid_threshold = 10e9
+    try:
+        raw_high = float(
+            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.0) or 1.0
+        )
+    except (TypeError, ValueError):
+        raw_high = 1.0
+    try:
+        raw_mid = float(
+            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.6) or 0.6
+        )
+    except (TypeError, ValueError):
+        raw_mid = 0.6
+
+    mcap = _resolve_position_market_cap(sym, strategy_cache)
+    raw_score = 0.0
+    if isinstance(propagated, dict):
+        entry = propagated.get(sym) or {}
+        if isinstance(entry, dict):
+            try:
+                raw_score = float(entry.get("raw_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                raw_score = 0.0
+            # Bug-sweep 2026-05-18: NaN/inf would silently make all comparisons
+            # False and demote HIGH→LOW. Coerce non-finite to 0.0.
+            import math as _math_local
+            if not _math_local.isfinite(raw_score):
+                raw_score = 0.0
+
+    # Phase γ.5: track resolution path so the telemetry log can disambiguate
+    # WHICH branch promoted the tier (mcap-mega vs raw-high vs default-low).
+    if mcap is not None and mcap >= mcap_threshold:
+        tier, path = "HIGH", "mcap_high"
+    elif raw_score >= raw_high:
+        tier, path = "HIGH", "raw_high"
+    elif mcap is not None and mcap >= mcap_mid_threshold:
+        tier, path = "MID", "mcap_mid"
+    elif raw_score >= raw_mid:
+        tier, path = "MID", "raw_mid"
+    else:
+        tier, path = "LOW", "default_low"
+
+    # Phase γ.5 (BT232179 follow-up, 2026-05-18): emit per-resolution audit
+    # log. Bounded volume: caller invokes once per (open position, bar) →
+    # ~max_positions * total_bars per backtest (~600 lines for an 8-position
+    # 75-bar run). Cheap relative to V28 ROT EVAL volume.
+    if bool(config.get("conviction_telemetry_log_enabled", True)):
+        try:
+            _mcap_m_str = f"{mcap / 1e6:.0f}" if (mcap is not None and mcap > 0) else "?"
+        except (TypeError, ValueError):
+            _mcap_m_str = "?"
+        _log(
+            f"conviction_tier: sym={sym} tier={tier} mcap={_mcap_m_str}M "
+            f"raw_score={raw_score:.3f} path={path}",
+            "cyan",
+        )
+
+    return tier
+
+
+def _compute_conviction_score(
+    sym: str,
+    config: dict,
+    strategy_cache: dict | None,
+    propagated: dict | None,
+) -> float:
+    """Tier-3 Phase 3: compute a continuous conviction score [0.0, 1.0] for
+    telemetry. NOT yet used for behavior decisions (Phase 1 uses discrete
+    tier resolution). After 30 days of backtest telemetry the score
+    distribution will be inspected and the score can be bound to A1's
+    floor matrix as a continuous knob.
+
+    Components (capped at 1.0):
+      raw_score quartile contribution (0..0.35)
+      mcap log contribution (0..0.25)
+      llm sentiment (0..0.20) — placeholder; uses propagated.sentiment if present
+      catalyst hint (0..0.20) — placeholder; uses propagated.is_catalyst if present
+    """
+    # Bug-sweep 2026-05-17: defensive None guard so callers passing config=None
+    # don't crash. Original implementation assumed dict-like config.
+    if not isinstance(config, dict):
+        config = {}
+    sym = str(sym or "").strip().upper()
+    if not sym:
+        return 0.0
+    raw_score = 0.0
+    sentiment = 0.0
+    has_catalyst = False
+    if isinstance(propagated, dict):
+        entry = propagated.get(sym) or {}
+        if isinstance(entry, dict):
+            try:
+                raw_score = float(entry.get("raw_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                raw_score = 0.0
+            try:
+                sentiment = float(entry.get("sentiment", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                sentiment = 0.0
+            has_catalyst = bool(entry.get("is_catalyst") or entry.get("has_benzinga_catalyst"))
+    raw_component = max(0.0, min(0.35, raw_score / 4.0 * 0.35))  # raw=4.0 → cap
+    mcap = _resolve_position_market_cap(sym, strategy_cache) or 0.0
+    mcap_component = 0.0
+    if mcap > 0:
+        import math as _math
+        # log10($50B)=10.7, log10($1B)=9 → normalize ~9..11 → 0..0.25
+        log_mcap = _math.log10(max(1e6, mcap))
+        mcap_component = max(0.0, min(0.25, (log_mcap - 9.0) / 2.0 * 0.25))
+    sent_component = max(0.0, min(0.20, max(0.0, sentiment) * 0.20))
+    cat_component = 0.20 if has_catalyst else 0.0
+    return round(raw_component + mcap_component + sent_component + cat_component, 4)
+
+
+def _get_conviction_aware_floor(
+    tier: str,
+    config: dict,
+    *,
+    regime: str | None = None,
+) -> tuple[float, float, float]:
+    """Return ``(floor_pct, vol_mult, low_vol_disable_threshold)`` for ``tier``.
+
+    ``floor_pct``: absolute loss floor (e.g. -25.0 for HIGH).
+    ``vol_mult``: vol-scaling multiplier. HIGH disables vol scaling (0.0) so
+        the absolute floor dominates. MID/LOW use the existing
+        ``max_open_loss_vol_multiplier`` config (default 2.0).
+    ``low_vol_disable_threshold``: realized-vol below which vol scaling is
+        skipped entirely (default 0.08 = 8% annualized). SNDK's 5-7% vol made
+        the Tier-2 vol-scaled floor TIGHTER than the absolute default; this
+        threshold prevents that pathology.
+
+    ``regime`` is optional (Tier-3 Phase 2b A2). When provided as
+    ``"bull"``/``"chop"``/``"bear"``/``"crash"``, applies the regime
+    adjustment. ``"crash"`` returns a special floor of 0.0 to indicate
+    emergency-exit (caller treats as immediate sell).
+    """
+    tier = str(tier or "LOW").upper()
+    if tier == "HIGH":
+        floor = float(
+            config.get("circuit_breaker_floor_high_conviction_pct", -25.0) or -25.0
+        )
+        vol_mult = 0.0  # disable vol scaling — absolute floor dominates
+    elif tier == "MID":
+        floor = float(
+            config.get("circuit_breaker_floor_mid_conviction_pct", -20.0) or -20.0
+        )
+        vol_mult = float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0)
+    else:
+        floor = float(
+            config.get("circuit_breaker_floor_low_conviction_pct", -15.0) or -15.0
+        )
+        vol_mult = float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0)
+
+    low_vol_threshold = float(
+        config.get("circuit_breaker_low_vol_disable_threshold_pct", 0.08) or 0.08
+    )
+
+    # Phase 2b A2: regime adjustment. Bull widens (lets winners breathe); bear
+    # tightens (capital preservation); crash forces emergency exit.
+    if regime is not None:
+        regime_lower = str(regime or "").strip().lower()
+        if regime_lower == "crash":
+            return 0.0, 0.0, low_vol_threshold  # sentinel: caller treats as exit
+        try:
+            bull_pp = float(
+                config.get("circuit_breaker_regime_adjustment_bull_pp", 5.0) or 5.0
+            )
+        except (TypeError, ValueError):
+            bull_pp = 5.0
+        try:
+            bear_pp = float(
+                config.get("circuit_breaker_regime_adjustment_bear_pp", -5.0) or -5.0
+            )
+        except (TypeError, ValueError):
+            bear_pp = -5.0
+        if regime_lower == "bull":
+            floor = floor + bull_pp  # widens floor (less negative)
+        elif regime_lower == "bear":
+            floor = floor + bear_pp  # tightens floor (more negative)
+        # chop / unknown: no adjustment
+
+    return floor, vol_mult, low_vol_threshold
+
+
+def _get_scaled_cash_reserve_floor_pct(
+    config: dict,
+    initial_value: float,
+) -> float:
+    """Return the cash-reserve floor pct scaled by account size.
+
+    Tier-3 B1: small accounts ($7K-$50K) had 10% × $7K = $700 permanently
+    reserved, making it impossible to fund late-arriving high-conviction
+    signals (LITE raw=1.500). Scale down for small accounts.
+    """
+    try:
+        small_threshold = float(
+            config.get("cash_reserve_floor_threshold_small_usd", 50_000.0) or 50_000.0
+        )
+        mid_threshold = float(
+            config.get("cash_reserve_floor_threshold_mid_usd", 200_000.0) or 200_000.0
+        )
+        small_pct = float(config.get("cash_reserve_floor_small_pct", 0.05) or 0.05)
+        mid_pct = float(config.get("cash_reserve_floor_mid_pct", 0.075) or 0.075)
+        large_pct = float(config.get("cash_reserve_floor_large_pct", 0.10) or 0.10)
+    except (TypeError, ValueError):
+        # Fallback to current behavior on bad config
+        return float(config.get("cash_reserve_floor_pct", 0.10) or 0.10)
+
+    # Explicit override always wins (back-compat).
+    explicit = config.get("cash_reserve_floor_pct")
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        iv = float(initial_value or 0.0)
+    except (TypeError, ValueError):
+        iv = 0.0
+    if iv < small_threshold:
+        return small_pct
+    if iv < mid_threshold:
+        return mid_pct
+    return large_pct
+
+
+def _get_scaled_max_new_stock_buys(
+    config: dict,
+    initial_value: float,
+) -> int:
+    """Return the per-cycle new-buy budget cap scaled by account size.
+
+    Tier-3 B2: small accounts need more diversification per cycle to escape
+    the LITE/MU starvation pattern. Defaults: small=6, mid=8, large=12.
+    """
+    # Explicit override wins (back-compat).
+    explicit = config.get("allocation_max_new_stock_buys")
+    if explicit is not None:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+    try:
+        small_threshold = float(
+            config.get("allocation_max_new_stock_buys_small_threshold_usd", 50_000.0)
+            or 50_000.0
+        )
+        mid_threshold = float(
+            config.get("allocation_max_new_stock_buys_mid_threshold_usd", 500_000.0)
+            or 500_000.0
+        )
+        small_max = int(config.get("allocation_max_new_stock_buys_small", 6) or 6)
+        mid_max = int(config.get("allocation_max_new_stock_buys_mid", 8) or 8)
+        large_max = int(config.get("allocation_max_new_stock_buys_large", 12) or 12)
+    except (TypeError, ValueError):
+        return 4  # back-compat fallback
+
+    try:
+        iv = float(initial_value or 0.0)
+    except (TypeError, ValueError):
+        iv = 0.0
+    if iv < small_threshold:
+        return max(1, small_max)
+    if iv < mid_threshold:
+        return max(1, mid_max)
+    return max(1, large_max)
 
 
 def _entry_marker_from_value(value: Any) -> str:
@@ -5340,8 +6888,10 @@ def _rotation_winner_lock_active(
         return False, "disabled"
     if not is_equity:
         return False, "non_equity"
-    min_hold_days = max(0, int(config.get("rotation_winner_lock_min_hold_days", 5) or 5))
-    min_pnl_pct = float(config.get("rotation_winner_lock_min_pnl_pct", 3.0) or 3.0)
+    # Tier-3 B3: relaxed defaults so LITE-class high-conviction late-arrivers
+    # can displace marginal winners. 5d→3d hold, 3%→2% pnl gate.
+    min_hold_days = max(0, int(config.get("rotation_winner_lock_min_hold_days", 3) or 3))
+    min_pnl_pct = float(config.get("rotation_winner_lock_min_pnl_pct", 2.0) or 2.0)
     min_raw_score = float(config.get("rotation_winner_lock_min_raw_score", -0.10) or -0.10)
     max_peak_drawdown_pct = float(config.get("rotation_winner_lock_max_peak_drawdown_pct", 8.0) or 8.0)
     if held_days is None or int(held_days) < min_hold_days:
@@ -5433,6 +6983,21 @@ def _evaluate_trend_sell_enforcement(
 
     pos_qty = float((portfolio_emulator._positions or {}).get(ticker, 0.0) or 0.0)
     if pos_qty <= 0.0:
+        # Phase ε.A.3 (BT294837 follow-up, 2026-05-19): a stock we don't
+        # hold cannot be force-sold. Pre-ε.A.3 this branch returned with
+        # the default `allow_force_sell=True`, which caused the caller at
+        # `nexus_sell_enforcement.add(ticker)` to add non-held tickers
+        # whenever propagation's stale negative-sentiment (e.g.
+        # `SNDK=-1.000(12p)` carried from a prior sell-day) routed them
+        # to the trend-reversal sell signal. In BT901920 this flipped
+        # SNDK's $274 rebuy to a phantom SELL, consuming the buy slot
+        # and missing the +487% rally. Generalizes to any non-held
+        # ticker with stale negative propagation.
+        result["allow_force_sell"] = False
+        result["skip_reason"] = (
+            f"[sell-flip-guard] {ticker} skipped — pos=0 (no holding to sell; "
+            f"stale propagation cannot force-sell a non-held ticker)"
+        )
         return result
 
     # V31 Section 1.1: trend-reversal sell suppressed during initial grace period
@@ -5446,8 +7011,16 @@ def _evaluate_trend_sell_enforcement(
     if _grace_entry_price > 0.0 and _grace_current_price > 0.0:
         _grace_unrealized_pct = ((_grace_current_price - _grace_entry_price) / _grace_entry_price) * 100.0
     _grace_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
+    # Phase ε.C.0' (2026-05-19): resolve the live conviction tier so grace
+    # escape_A's catastrophic threshold is tier-aware. SNDK at HIGH tier in
+    # BT294837 was force-sold at -18.3% via tier-blind escape_A — γ.5 wiring
+    # gives us the resolved tier; thread it through.
+    _grace_tier = _resolve_conviction_tier_at_exit(
+        ticker, config, strategy_cache, propagated
+    )
     _g_in, _g_esc, _g_reason = _in_initial_grace_period(
-        _grace_held_days, _grace_unrealized_pct, config, _grace_regime
+        _grace_held_days, _grace_unrealized_pct, config, _grace_regime,
+        conviction_tier=_grace_tier,
     )
     if _g_in and not _g_esc:
         result["allow_force_sell"] = False
@@ -5696,10 +7269,13 @@ def _compute_backfill_budget_partition(
     if total <= 0.0 or not has_pending_queue:
         return total, 0.0
     # V26 Fix C: when the queue contains a high-conviction item (raw >= 1.5),
-    # bump the reserve from 0.20 -> backfill_budget_reserve_pct_high_conviction
-    # (default 0.35) so SNDK/MU/LITE-style names actually have cash to execute
-    # against. Self-disabling: when no high-conviction item is in queue, this
-    # reverts to the standard 0.20 reserve.
+    # bump the reserve so SNDK/MU/LITE-style names actually have cash to
+    # execute against. Self-disabling: when no high-conviction item is in
+    # queue, this reverts to the standard reserve.
+    # Z4.4 (2026-05-15): defaults lowered (0.35→0.25 HC, 0.20→0.10 standard)
+    # because backtest 299903 showed reserves perpetually held against
+    # queues that didn't drain due to TTL/headroom limits — Z4.3 + Z4.1
+    # address the drain mechanics, so the reserve cushion can be smaller.
     if has_high_conviction_in_queue:
         reserve_pct = max(
             0.0,
@@ -5708,14 +7284,14 @@ def _compute_backfill_budget_partition(
                 float(
                     config.get(
                         "backfill_budget_reserve_pct_high_conviction",
-                        0.35,
+                        0.25,
                     )
-                    or 0.35
+                    or 0.25
                 ),
             ),
         )
     else:
-        reserve_pct = max(0.0, min(0.95, float(config.get("backfill_budget_reserve_pct", 0.20) or 0.20)))
+        reserve_pct = max(0.0, min(0.95, float(config.get("backfill_budget_reserve_pct", 0.10) or 0.10)))
     reserve_budget = total * reserve_pct
     primary_budget = max(0.0, total - reserve_budget)
     return primary_budget, reserve_budget
@@ -5829,7 +7405,11 @@ def _should_reject_backfill_candidate(
     # 2026-05-07 granularity-scaling: grace bars protect a queued candidate
     # from rejection while its score recovers; the wall-clock window must
     # match the baseline regardless of bar cadence.
-    grace_bars = max(0, _scale_bars(int(config.get("backfill_queue_grace_bars", 3) or 3), config))
+    # Tier-3 B5 (2026-05-17): grace bars 3 → 7. MU expired from the backfill
+    # queue after 11 bars in BT901920 without cash materializing; 7-bar grace
+    # combined with B1 scaled cash reserve + B2 scaled max-new-buys should
+    # let high-conviction late-arrivers (raw=0.650 like MU) actually execute.
+    grace_bars = max(0, _scale_bars(int(config.get("backfill_queue_grace_bars", 7) or 7), config))
     priority_grace_bars = max(grace_bars, _scale_bars(int(config.get("backfill_queue_priority_grace_bars", 8) or 8), config))
     bars_in_queue = max(0, int(queue_item.get("bars_in_queue", 0) or 0))
     signal_source = str(queue_item.get("signal_source") or "").strip().lower()
@@ -5985,28 +7565,74 @@ def _rotation_candidate_allowed(
     incoming_rotation_score: float,
     config: dict,
     incoming_meta: dict | None = None,
+    market_regime: str = "bull",
 ) -> tuple[bool, float, str]:
     _cfg = lambda k, d: float(d if (v := config.get(k)) is None else v)
     # V26 Fix B: when the incoming candidate is high-conviction (top_momentum or
     # raw>=nexus_high_conviction_threshold), use shorter min-hold thresholds so
-    # SNDK/MU/LITE-style names can rotate against winners earlier in their run.
+    # high-conviction late-arrivers can rotate against winners earlier in their run.
     # The break_glass delta gates downstream still prevent weak rotations.
     _meta = incoming_meta or {}
     _is_high_conv_inflow = bool(_meta.get("is_top_momentum") or _meta.get("is_high_conviction"))
+    # Phase ε.C.2 (BT294837 follow-up, 2026-05-19): regime-aware time-floor
+    # decay. The dominant rotation-rejection cluster in BT294837 was
+    # `profitable_min_hold` (52% of rejections, 4444 events) + `min_hold`
+    # (26%, 2201 events) — 78% of rejections are time-based, not
+    # conviction-based. In chop regime, holding winners for 20 days before
+    # allowing displacement effectively freezes the portfolio against the
+    # high-conviction discoveries the propagation engine surfaces. The fix:
+    # per-regime min_hold floors, defaulting to half-length in chop. Bull
+    # and bear regimes unchanged (let winners run / stay defensive).
+    # NO TICKER HARDCODING — works for any stock, regime-scoped only.
+    _regime_norm = str(market_regime or "bull").strip().lower()
     if _is_high_conv_inflow:
-        min_hold_days = max(0, int(config.get("high_conviction_loser_min_hold_days", 5) or 5))
-        profitable_full_exit_min_hold_days = max(0, int(_cfg("high_conviction_profitable_min_hold_days", 10)))
+        _base_min_hold = int(config.get("high_conviction_loser_min_hold_days", 5) or 5)
+        _base_prof_min_hold = int(_cfg("high_conviction_profitable_min_hold_days", 10))
     else:
-        min_hold_days = max(0, int(config.get("rotation_min_hold_days", 10) or 10))
-        profitable_full_exit_min_hold_days = max(0, int(_cfg("rotation_profitable_full_exit_min_hold_days", 20)))
+        _base_min_hold = int(config.get("rotation_min_hold_days", 10) or 10)
+        _base_prof_min_hold = int(_cfg("rotation_profitable_full_exit_min_hold_days", 20))
+    if _regime_norm == "chop":
+        _min_hold_chop = int(
+            config.get(
+                "rotation_min_hold_days_chop",
+                max(0, _base_min_hold // 2),
+            )
+            or max(0, _base_min_hold // 2)
+        )
+        _prof_min_hold_chop = int(
+            config.get(
+                "rotation_profitable_full_exit_min_hold_days_chop",
+                max(0, _base_prof_min_hold // 2),
+            )
+            or max(0, _base_prof_min_hold // 2)
+        )
+        min_hold_days = max(0, _min_hold_chop)
+        profitable_full_exit_min_hold_days = max(0, _prof_min_hold_chop)
+    elif _regime_norm == "bear":
+        # Bear: keep defensive — same as base (do not loosen in bear)
+        min_hold_days = max(0, int(config.get("rotation_min_hold_days_bear", _base_min_hold) or _base_min_hold))
+        profitable_full_exit_min_hold_days = max(0, int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bear", _base_prof_min_hold)
+            or _base_prof_min_hold
+        ))
+    else:
+        # Bull (default): keep base behavior so winners get the full hold window
+        min_hold_days = max(0, int(config.get("rotation_min_hold_days_bull", _base_min_hold) or _base_min_hold))
+        profitable_full_exit_min_hold_days = max(0, int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bull", _base_prof_min_hold)
+            or _base_prof_min_hold
+        ))
     min_delta = _cfg("rotation_min_delta", 0.15)
-    profitable_min_delta = _cfg("rotation_profitable_min_delta", 1.50)
+    # Tier-3 B3: relax rotation thresholds so high-conviction late-arrivers
+    # (LITE raw=1.500 in BT901920) can displace marginal winners.
+    profitable_min_delta = _cfg("rotation_profitable_min_delta", 1.00)
     # V11: Widen rotation loss threshold from -3.0 to -0.5
     replace_loss_threshold_pct = _cfg("rotation_replace_loss_threshold_pct", -0.5)
     min_score = _cfg("rotation_min_score", 0.40)
     profitable_min_incoming_raw_score = _cfg("rotation_profitable_min_incoming_raw_score", 2.0)
     break_glass_raw_score = _cfg("rotation_break_glass_raw_score", 2.75)
-    break_glass_delta = _cfg("rotation_break_glass_delta", 2.25)
+    # Tier-3 B3: lower break-glass delta so raw=1.500 signals can break locks.
+    break_glass_delta = _cfg("rotation_break_glass_delta", 1.50)
     delta = float(incoming_rotation_score or 0.0) - float(held_rotation_score or 0.0)
 
     if float(incoming_raw_score or 0.0) < min_score:
@@ -6032,6 +7658,26 @@ def _rotation_candidate_allowed(
                     return True, delta, "top_momentum_break_glass"
             if float(incoming_raw_score or 0.0) >= break_glass_raw_score and delta >= break_glass_delta:
                 return True, delta, "break_glass_trim"
+            # Phase γ.4 (2026-05-18, BT232179 follow-up): raw>=1.8 displacement
+            # bypass. APLD/CRWV/PLTR/CEG/CLF/ON/WMT all surfaced at raw=1.800
+            # (the model's high-conviction ceiling) but were blocked by
+            # winner_lock against CSCO at +8.8%/9d held. Existing thresholds
+            # didn't fit: break_glass_raw_score is 2.75 (too strict for
+            # raw=1.8), top_momentum_break_glass requires is_top_momentum
+            # (APLD wasn't in the top-momentum set). Add a dedicated bypass:
+            # incoming raw>=1.8 AND held pnl<10% → full eviction. True
+            # winners (pnl>=10%) remain protected by the existing thresholds.
+            _g4_bypass_min_raw = float(
+                config.get("rotation_winner_lock_bypass_min_raw_score", 1.8) or 1.8
+            )
+            _g4_bypass_max_held_pnl = float(
+                config.get("rotation_winner_lock_bypass_max_held_pnl_pct", 10.0) or 10.0
+            )
+            if (
+                float(incoming_raw_score or 0.0) >= _g4_bypass_min_raw
+                and float(held_pnl_pct or 0.0) < _g4_bypass_max_held_pnl
+            ):
+                return True, delta, "gamma_winner_lock_bypass"
             return False, delta, "winner_lock"
         # V28.2: profitable hold WITHOUT winner_lock (e.g., pnl 0-3%, or held >= 5d
         # but raw_score went negative, or drop_from_peak > 8%). For HC inflows
@@ -6060,6 +7706,28 @@ def _rotation_candidate_allowed(
             ):
                 return True, delta, "v28_hc_profitable_break_glass"
         if held_days is not None and held_days < profitable_full_exit_min_hold_days:
+            # Kimi-recalibration: the dominant rotation blocker (profitable_min_hold,
+            # 52% of rejections) had no conviction path — a max-conviction challenger
+            # (raw at the 1.8 model ceiling) could not displace a merely time-locked,
+            # marginally-profitable incumbent. Mirror the gamma winner_lock bypass for
+            # this branch. Flag-gated (default off) so non-kimi deployments are
+            # unaffected. No ticker hardcoding — score/pnl-scoped only.
+            if bool(config.get("profitable_min_hold_conviction_override_enabled", False)):
+                _pmh_raw = float(config.get("profitable_min_hold_conviction_min_raw_score", 1.5) or 1.5)
+                _pmh_delta = float(config.get("profitable_min_hold_conviction_min_delta", 1.0) or 1.0)
+                _pmh_max_pnl = float(config.get("profitable_min_hold_conviction_max_held_pnl_pct", 10.0) or 10.0)
+                # held_days >= min_hold_days floor (regime-aware, mirrors the v28_hc
+                # guard): only displace an AGING marginal hold (past the regime
+                # min-hold), never a fresh/tiny winner — preserves the V32 Phase 3
+                # B-5 protection against churning new positions. held_days is not
+                # None here (guaranteed by the enclosing condition).
+                if (
+                    held_days >= min_hold_days
+                    and float(incoming_raw_score or 0.0) >= _pmh_raw
+                    and delta >= _pmh_delta
+                    and float(held_pnl_pct or 0.0) < _pmh_max_pnl
+                ):
+                    return True, delta, "profitable_min_hold_conviction_override"
             # V31.7 Fix F: release profitable_min_hold when the winner has faded
             # enough from its peak. TTD case Mar 17: days=13, pnl=+8.4%, peak_drop=15.9%
             # was held here while giving back 19pts from peak. Release lets the
@@ -6175,15 +7843,44 @@ def _plan_executable_stock_buy_slate(
     min_position_size: float,
     config: dict,
     blocked_tickers: set[str] | None = None,
+    initial_value: float = 0.0,
 ) -> tuple[list[dict], list[str], dict[str, Any]]:
     profile = str(config.get("allocation_profile", "balanced") or "balanced").strip().lower()
-    max_new_stock_buys = max(1, int(config.get("allocation_max_new_stock_buys", 4) or 4))
+    # Tier-3 B2: scale per-cycle new-buy cap by account size. Explicit override wins.
+    # ``initial_value`` is the broker's _initial_value (passed by run_once caller).
+    # Falls back to ``config["_account_initial_value"]`` for callers that prefer
+    # to thread the value via config.
+    _alloc_initial_value = 0.0
+    try:
+        _alloc_initial_value = float(initial_value or 0.0)
+    except (TypeError, ValueError):
+        _alloc_initial_value = 0.0
+    if _alloc_initial_value <= 0 and isinstance(config, dict):
+        try:
+            _alloc_initial_value = float(config.get("_account_initial_value") or 0.0)
+        except (TypeError, ValueError):
+            _alloc_initial_value = 0.0
+    max_new_stock_buys = _get_scaled_max_new_stock_buys(config, _alloc_initial_value)
     # V20: Add reserved propagation slots so propagation-discovered stocks
     # can get executed even when the generic slate is full.
     _prop_reserved = int(config.get("propagation_execution_reserved_slots", 2) or 0)
     _prop_count = sum(1 for c in candidates if bool((c or {}).get("is_propagation_expansion")))
     if _prop_count > 0 and _prop_reserved > 0:
         max_new_stock_buys = max(max_new_stock_buys, max_new_stock_buys + min(_prop_reserved, _prop_count))
+    # Tier-3 B4 (2026-05-17): tiered momentum budget. Reserve N slots that
+    # ONLY momentum-source candidates can fill, so propagation candidates
+    # don't monopolize the slate. MU (raw=0.08, momentum #2) was crowded out
+    # in BT901920 because propagation filled the 4-slot budget first.
+    _mom_reserved = int(config.get("momentum_execution_reserved_slots", 2) or 0)
+    _momentum_sources = ("momentum_watchlist", "momentum", "momentum_rediscovery", "price_momentum")
+    _mom_count = sum(
+        1
+        for c in candidates
+        if str((c or {}).get("signal_source") or "").lower() in _momentum_sources
+        and not bool((c or {}).get("is_propagation_expansion"))
+    )
+    if _mom_count > 0 and _mom_reserved > 0:
+        max_new_stock_buys = max(max_new_stock_buys, max_new_stock_buys + min(_mom_reserved, _mom_count))
     execute_min_raw_score = float(config.get("allocation_execute_min_raw_score", 0.35) or 0.35)
     top2_min_raw_score = float(config.get("allocation_top2_min_raw_score", 0.50) or 0.50)
     priority_min_position_size = max(0.0, float(config.get("priority_min_position_size", 100.0) or 100.0))
@@ -6493,12 +8190,13 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "trailing_stop_pct": float(config.get("trailing_stop_pct", 8.0) or 8.0),
         "trailing_stop_commodity_etf_pct": float(config.get("trailing_stop_commodity_etf_pct", 12.0) or 12.0),
         "trailing_stop_sector_etf_pct": float(config.get("trailing_stop_sector_etf_pct", 10.0) or 10.0),
-        "pool_a_base": int(config.get("pool_a_base", 8) or 8),
+        "pool_a_base": int(config.get("pool_a_base", 10) or 10),
         "pool_b_base": int(config.get("pool_b_base", 4) or 4),
         "pool_a_min": int(config.get("pool_a_min", 3) or 3),
         "pool_b_min": int(config.get("pool_b_min", 2) or 2),
-        "max_stock_buys_per_day": int(config.get("max_stock_buys_per_day", 10) or 10),
-        "max_discovered_stocks": int(config.get("max_discovered_stocks", 50) or 50),
+        "max_stock_buys_per_day": int(config.get("max_stock_buys_per_day", 8) or 8),
+        "llm_overlay_max_stock_candidates": int(config.get("llm_overlay_max_stock_candidates", 30) or 30),
+        "max_discovered_stocks": int(config.get("max_discovered_stocks", 90) or 90),
         "min_market_cap": float(config.get("min_market_cap", 500_000_000) or 500_000_000),
         "min_avg_volume": float(config.get("min_avg_volume", 200_000) or 200_000),
         "propagation_min_paths": int(config.get("propagation_min_paths", 2) or 2),
@@ -6506,7 +8204,8 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "sell_enforcement_min_hold_days": int(config.get("sell_enforcement_min_hold_days", 5) or 5),
         "sell_enforcement_hysteresis_threshold": float(config.get("sell_enforcement_hysteresis_threshold", -0.50) or -0.50),
         "sell_enforcement_consecutive_neutral_days": int(config.get("sell_enforcement_consecutive_neutral_days", 3) or 3),
-        "backfill_budget_reserve_pct": float(config.get("backfill_budget_reserve_pct", 0.20) or 0.20),
+        "backfill_budget_reserve_pct": float(config.get("backfill_budget_reserve_pct", 0.10) or 0.10),
+        "backfill_budget_reserve_pct_high_conviction": float(config.get("backfill_budget_reserve_pct_high_conviction", 0.25) or 0.25),
         "portfolio_drawdown_halt_pct": float(config.get("portfolio_drawdown_halt_pct", 15.0) or 15.0),
         "portfolio_drawdown_resume_up_days": int(config.get("portfolio_drawdown_resume_up_days", 2) or 2),
         "portfolio_drawdown_halt_backfill_budget_pct": float(config.get("portfolio_drawdown_halt_backfill_budget_pct", 0.50) or 0.50),
@@ -6516,17 +8215,30 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "benzinga_lookahead_days": int(config.get("benzinga_lookahead_days", 0) or 0),
         "quality_filter_missing_metadata_policy": missing_meta_policy,
         "quality_market_cap_mode": "warn-only" if missing_meta_policy == "warn" else missing_meta_policy,
-        "backfill_queue_grace_bars": int(config.get("backfill_queue_grace_bars", 3) or 3),
+        # Z1-Z5 (2026-05-15 P&L max package): surface new knobs to diagnostic
+        "momentum_discovery_max_20d_return": float(config.get("momentum_discovery_max_20d_return", 80.0) or 0.0),
+        "momentum_discovery_max_60d_return": float(config.get("momentum_discovery_max_60d_return", 200.0) or 0.0),
+        "portfolio_swap_ath_gate_enabled": bool(config.get("portfolio_swap_ath_gate_enabled", True)),
+        "momentum_watchlist_mcap_prefilter_enabled": bool(config.get("momentum_watchlist_mcap_prefilter_enabled", True)),
+        "momentum_watchlist_min_market_cap": float(config.get("momentum_watchlist_min_market_cap", 2_000_000_000) or 2_000_000_000),
+        "max_open_loss_vol_multiplier": float(config.get("max_open_loss_vol_multiplier", 2.0) or 0.0),
+        "trailing_stop_activation_vol_multiplier": float(config.get("trailing_stop_activation_vol_multiplier", 0.75) or 0.0),
+        "trailing_stop_activation_vol_cap_pct": float(config.get("trailing_stop_activation_vol_cap_pct", 15.0) or 15.0),
+        "sector_cap_override_raw_net_score": float(config.get("sector_cap_override_raw_net_score", 0.8) or 0.8),
+        "sector_cap_override_min_paths": int(config.get("sector_cap_override_min_paths", 5) or 5),
+        "nexus_regime_capacity_gating_enabled": bool(config.get("nexus_regime_capacity_gating_enabled", True)),
+        "backfill_queue_grace_bars": int(config.get("backfill_queue_grace_bars", 7) or 7),
         "backfill_queue_priority_grace_bars": int(config.get("backfill_queue_priority_grace_bars", 8) or 8),
+        "backfill_queue_priority_max_bars_floor": int(config.get("backfill_queue_priority_max_bars_floor", 15) or 15),
         "backfill_queue_reserved_priority_slots": int(config.get("backfill_queue_reserved_priority_slots", 10) or 10),
-        "backfill_queue_max_size": int(config.get("backfill_queue_max_size", 30) or 30),
+        "backfill_queue_max_size": int(config.get("backfill_queue_max_size", 50) or 50),
         "rotation_min_hold_days": int(config.get("rotation_min_hold_days", 10) or 10),
-        "rotation_profitable_min_delta": float(config.get("rotation_profitable_min_delta", 1.50) or 1.50),
+        "rotation_profitable_min_delta": float(config.get("rotation_profitable_min_delta", 1.00) or 1.00),
         "rotation_profitable_full_exit_min_hold_days": int(config.get("rotation_profitable_full_exit_min_hold_days", 20) or 20),
         "rotation_profitable_min_incoming_raw_score": float(config.get("rotation_profitable_min_incoming_raw_score", 2.0) or 2.0),
         "rotation_winner_lock_enabled": bool(config.get("rotation_winner_lock_enabled", True)),
-        "rotation_winner_lock_min_hold_days": int(config.get("rotation_winner_lock_min_hold_days", 5) or 5),
-        "rotation_winner_lock_min_pnl_pct": float(config.get("rotation_winner_lock_min_pnl_pct", 3.0) or 3.0),
+        "rotation_winner_lock_min_hold_days": int(config.get("rotation_winner_lock_min_hold_days", 3) or 3),
+        "rotation_winner_lock_min_pnl_pct": float(config.get("rotation_winner_lock_min_pnl_pct", 2.0) or 2.0),
         "rotation_winner_lock_min_raw_score": float(-0.10 if (v := config.get("rotation_winner_lock_min_raw_score")) is None else v),
         "rotation_winner_lock_max_peak_drawdown_pct": float(config.get("rotation_winner_lock_max_peak_drawdown_pct", 8.0) or 8.0),
         # V28.6: BFQ winner-lock bypass — release valve for post-cascade drainage deadlock
@@ -6538,7 +8250,7 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "backfill_rotation_winner_lock_bypass_min_held_pnl_pct": float(config.get("backfill_rotation_winner_lock_bypass_min_held_pnl_pct", 5.0) or 5.0),
         "backfill_rotation_winner_lock_bypass_min_held_hold_days": int(config.get("backfill_rotation_winner_lock_bypass_min_held_hold_days", 5) or 5),
         "rotation_break_glass_raw_score": float(config.get("rotation_break_glass_raw_score", 2.75) or 2.75),
-        "rotation_break_glass_delta": float(config.get("rotation_break_glass_delta", 2.25) or 2.25),
+        "rotation_break_glass_delta": float(config.get("rotation_break_glass_delta", 1.50) or 1.50),
         "rotation_break_glass_sell_fraction": float(config.get("rotation_break_glass_sell_fraction", 0.50) or 0.50),
         "rotation_replace_loss_threshold_pct": float(-0.5 if (v := config.get("rotation_replace_loss_threshold_pct")) is None else v),
         "propagation_floor_requires_min_paths": bool(config.get("propagation_floor_requires_min_paths", True)),
@@ -6553,7 +8265,7 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "priority_min_position_size": float(config.get("priority_min_position_size", 100.0) or 100.0),
         "priority_budget_can_bypass_regular_min": bool(config.get("priority_budget_can_bypass_regular_min", True)),
         "allocation_profile": str(config.get("allocation_profile", "balanced") or "balanced").strip().lower(),
-        "allocation_max_new_stock_buys": int(config.get("allocation_max_new_stock_buys", 4) or 4),
+        "allocation_max_new_stock_buys": int(config.get("allocation_max_new_stock_buys", 6) or 6),
         "allocation_execute_min_raw_score": float(config.get("allocation_execute_min_raw_score", 0.35) or 0.35),
         "allocation_top2_min_raw_score": float(config.get("allocation_top2_min_raw_score", 0.50) or 0.50),
         "winner_add_enabled": bool(config.get("winner_add_enabled", True)),
@@ -6565,9 +8277,11 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "winner_add_max_count": int(config.get("winner_add_max_count", 1) or 1),
         "max_sector_peer_discoveries_per_day": int(config.get("max_sector_peer_discoveries_per_day", 3) or 3),
         "max_competitor_discoveries_per_day": int(config.get("max_competitor_discoveries_per_day", 3) or 3),
-        "momentum_discovery_max_per_day": int(config.get("momentum_discovery_max_per_day", 3) or 3),
+        "momentum_discovery_max_per_day": int(config.get("momentum_discovery_max_per_day", 6) or 6),
+        "momentum_discovery_exclude_leveraged_etfs": bool(config.get("momentum_discovery_exclude_leveraged_etfs", True)),
         "sector_fill_max_per_sector": int(config.get("sector_fill_max_per_sector", 6) or 6),
         "max_propagated_scoring_slots": int(config.get("max_propagated_scoring_slots", 15) or 15),
+        "propagation_max_per_seed": int(config.get("propagation_max_per_seed", 0) or 0),
         "max_events_in_prompt": int(event_limits["max_events_in_prompt"]),
         "event_maintenance_candidate_batch_size": int(event_limits["candidate_batch_size"]),
         "event_maintenance_model_ref": str(event_limits["model_ref"] or ""),
@@ -6577,6 +8291,216 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         "sentiment_llm_model_ref": str(sentiment_limits["model_ref"] or ""),
         "sentiment_prompt_auto_reduced": bool(sentiment_limits["auto_reduced"]),
         "sector_watchlist_keys": watchlist_keys,
+        # Tier-3 (2026-05-17 missed-rally fixes): surface all new knobs
+        # A1 conviction-aware loss floor matrix:
+        "circuit_breaker_floor_high_conviction_pct": float(
+            config.get("circuit_breaker_floor_high_conviction_pct", -25.0) or -25.0
+        ),
+        "circuit_breaker_floor_mid_conviction_pct": float(
+            config.get("circuit_breaker_floor_mid_conviction_pct", -20.0) or -20.0
+        ),
+        "circuit_breaker_floor_low_conviction_pct": float(
+            config.get("circuit_breaker_floor_low_conviction_pct", -15.0) or -15.0
+        ),
+        "circuit_breaker_high_conviction_mcap_threshold_usd": float(
+            config.get("circuit_breaker_high_conviction_mcap_threshold_usd", 30e9) or 30e9
+        ),
+        "circuit_breaker_mid_conviction_mcap_threshold_usd": float(
+            config.get("circuit_breaker_mid_conviction_mcap_threshold_usd", 10e9) or 10e9
+        ),
+        "circuit_breaker_high_conviction_raw_score_threshold": float(
+            config.get("circuit_breaker_high_conviction_raw_score_threshold", 1.0) or 1.0
+        ),
+        "circuit_breaker_mid_conviction_raw_score_threshold": float(
+            config.get("circuit_breaker_mid_conviction_raw_score_threshold", 0.6) or 0.6
+        ),
+        "circuit_breaker_low_vol_disable_threshold_pct": float(
+            config.get("circuit_breaker_low_vol_disable_threshold_pct", 0.08) or 0.08
+        ),
+        # A2 regime-gated floor adjustments (active when Phase 2b ships):
+        "circuit_breaker_regime_gating_enabled": bool(
+            config.get("circuit_breaker_regime_gating_enabled", True)
+        ),
+        "circuit_breaker_regime_adjustment_bull_pp": float(
+            config.get("circuit_breaker_regime_adjustment_bull_pp", 5.0) or 5.0
+        ),
+        "circuit_breaker_regime_adjustment_chop_pp": float(
+            # Surfaced for operator tuning; default 0 (chop = no adjustment).
+            # The helper currently treats unrecognized/chop regime as no-op;
+            # this knob is reserved for future binding when chop deserves a
+            # distinct adjustment. Bug-sweep finding 2026-05-17.
+            config.get("circuit_breaker_regime_adjustment_chop_pp", 0.0) or 0.0
+        ),
+        "circuit_breaker_regime_adjustment_bear_pp": float(
+            config.get("circuit_breaker_regime_adjustment_bear_pp", -5.0) or -5.0
+        ),
+        # B1 account-size-scaled cash reserve floor:
+        "cash_reserve_floor_small_pct": float(
+            config.get("cash_reserve_floor_small_pct", 0.05) or 0.05
+        ),
+        "cash_reserve_floor_mid_pct": float(
+            config.get("cash_reserve_floor_mid_pct", 0.075) or 0.075
+        ),
+        "cash_reserve_floor_large_pct": float(
+            config.get("cash_reserve_floor_large_pct", 0.10) or 0.10
+        ),
+        "cash_reserve_floor_threshold_small_usd": float(
+            config.get("cash_reserve_floor_threshold_small_usd", 50_000.0) or 50_000.0
+        ),
+        "cash_reserve_floor_threshold_mid_usd": float(
+            config.get("cash_reserve_floor_threshold_mid_usd", 200_000.0) or 200_000.0
+        ),
+        # B2 account-size-scaled max new buys per cycle:
+        "allocation_max_new_stock_buys_small": int(
+            config.get("allocation_max_new_stock_buys_small", 6) or 6
+        ),
+        "allocation_max_new_stock_buys_mid": int(
+            config.get("allocation_max_new_stock_buys_mid", 8) or 8
+        ),
+        "allocation_max_new_stock_buys_large": int(
+            config.get("allocation_max_new_stock_buys_large", 12) or 12
+        ),
+        # A3 macro override:
+        "macro_supersedes_sentiment_enabled": bool(
+            config.get("macro_supersedes_sentiment_enabled", True)
+        ),
+        # B4 tiered momentum budget:
+        "momentum_execution_reserved_slots": int(
+            config.get("momentum_execution_reserved_slots", 2) or 2
+        ),
+        # A4 post-sell watch + re-entry:
+        "post_sell_watch_enabled": bool(
+            config.get("post_sell_watch_enabled", True)
+        ),
+        "post_sell_watch_window_days": int(
+            config.get("post_sell_watch_window_days", 60) or 60
+        ),
+        "post_sell_recovery_threshold_pct": float(
+            config.get("post_sell_recovery_threshold_pct", 0.05) or 0.05
+        ),
+        "post_sell_resistance_break_pct": float(
+            config.get("post_sell_resistance_break_pct", 0.005) or 0.005
+        ),
+        "post_sell_resistance_lookback_days": int(
+            config.get("post_sell_resistance_lookback_days", 10) or 10
+        ),
+        "post_sell_reentry_min_raw_score": float(
+            config.get("post_sell_reentry_min_raw_score", 0.40) or 0.40
+        ),
+        "post_sell_reentry_size_fraction": float(
+            config.get("post_sell_reentry_size_fraction", 0.50) or 0.50
+        ),
+        # A5 post-sell cooldown lift threshold + Phase 3 telemetry:
+        "post_sell_cooldown_lift_threshold_pct": float(
+            config.get("post_sell_cooldown_lift_threshold_pct", 0.10) or 0.10
+        ),
+        "conviction_telemetry_enabled": bool(
+            config.get("conviction_telemetry_enabled", True)
+        ),
+        # BT136708 fix: price floor tiering (P1.3)
+        "buy_price_floor": float(config.get("buy_price_floor", 5.0) or 0.0),
+        "buy_price_floor_propagation": float(
+            config.get("buy_price_floor_propagation", 3.50) or 0.0
+        ),
+        "buy_price_floor_absolute_min": float(
+            config.get("buy_price_floor_absolute_min", 2.00) or 0.0
+        ),
+        # BT136708 fix: A4 daily re-entry execution wiring (P1.7)
+        "post_sell_watch_reentry_execution_enabled": bool(
+            config.get("post_sell_watch_reentry_execution_enabled", False)
+        ),
+        # Phase α (BT109429 follow-up, 2026-05-18): variance-containment knobs
+        "mcap_preseed_use_yfinance": bool(
+            config.get("mcap_preseed_use_yfinance", True)
+        ),
+        "mcap_preseed_yfinance_max_attempts": int(
+            config.get("mcap_preseed_yfinance_max_attempts", 3) or 3
+        ),
+        "mcap_preseed_yfinance_base_delay_sec": float(
+            config.get("mcap_preseed_yfinance_base_delay_sec", 0.5) or 0.5
+        ),
+        # Phase γ.1 (BT232179 follow-up, 2026-05-18): BFQ top-N cap on the
+        # mcap pre-seed universe expansion. Bounds yfinance load per call;
+        # default 20 picked to cover the realistic propagation-fanout cone
+        # without flooding rate limits.
+        "mcap_preseed_bfq_top_n": int(
+            config.get("mcap_preseed_bfq_top_n", 20) or 20
+        ),
+        # Phase γ.3 (BT232179 follow-up, 2026-05-18): breach-heal winner_lock
+        # bypass threshold. Pre-γ.3 the heal loop skipped ALL winner_lock'd
+        # positions, which meant in early bars (5/5 LOW conviction, no true
+        # winners yet) the loop freed 0 slots on 79% of breaches. Now the
+        # skip only fires for held positions with pnl >= this threshold —
+        # modest (+2% to +15%) "winners" become eligible candidates.
+        "breach_heal_winner_lock_bypass_max_pnl_pct": float(
+            config.get("breach_heal_winner_lock_bypass_max_pnl_pct", 15.0) or 15.0
+        ),
+        # Phase γ.4 (BT232179 follow-up, 2026-05-18): V28 rotation winner_lock
+        # displacement bypass. Incoming candidates at raw>=1.8 (the model's
+        # high-conviction ceiling, observed across APLD/CRWV/PLTR/CEG/CLF/ON
+        # /WMT in BT232179) may displace a winner_lock'd held position if
+        # held pnl<10% (modest winner, not a true conviction-locked win).
+        # Existing break_glass thresholds (raw>=2.75, delta>=1.5) were too
+        # strict for raw=1.8 candidates; this bypass closes the gap.
+        "rotation_winner_lock_bypass_min_raw_score": float(
+            config.get("rotation_winner_lock_bypass_min_raw_score", 1.8) or 1.8
+        ),
+        "rotation_winner_lock_bypass_max_held_pnl_pct": float(
+            config.get("rotation_winner_lock_bypass_max_held_pnl_pct", 10.0) or 10.0
+        ),
+        # Phase γ.5 (BT232179 follow-up, 2026-05-18): per-resolution
+        # `conviction_tier:` log emission. Distinct from the prior
+        # `conviction_telemetry_enabled` (which gates the in-memory buffer
+        # at L15089-L15116 for offline analysis) — this one writes a single
+        # line to the live broker log per evaluation so operators can grep
+        # `tier=LOW` directly. BT232179 showed 5/5 LOW resolutions WITHOUT
+        # any audit trail; this closes the observability gap.
+        "conviction_telemetry_log_enabled": bool(
+            config.get("conviction_telemetry_log_enabled", True)
+        ),
+        # Phase ε Stage 2 (BT294837 follow-up, 2026-05-19) knobs:
+        # ε.C.4 ETF allocation cap
+        "max_positions_etf": int(config.get("max_positions_etf", 4) or 4),
+        # ε.C.0' V31 grace tier-aware catastrophic threshold
+        "initial_grace_catastrophic_loss_pct_high": float(
+            config.get("initial_grace_catastrophic_loss_pct_high", -25.0) or -25.0
+        ),
+        "initial_grace_catastrophic_loss_pct_mid": float(
+            config.get("initial_grace_catastrophic_loss_pct_mid", -20.0) or -20.0
+        ),
+        # ε.C.2 regime-aware rotation time-floors (chop relaxed to half-length)
+        "rotation_min_hold_days_chop": int(
+            config.get("rotation_min_hold_days_chop", 5) or 5
+        ),
+        "rotation_min_hold_days_bull": int(
+            config.get("rotation_min_hold_days_bull", 10) or 10
+        ),
+        "rotation_min_hold_days_bear": int(
+            config.get("rotation_min_hold_days_bear", 10) or 10
+        ),
+        "rotation_profitable_full_exit_min_hold_days_chop": int(
+            config.get("rotation_profitable_full_exit_min_hold_days_chop", 10) or 10
+        ),
+        "rotation_profitable_full_exit_min_hold_days_bull": int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bull", 20) or 20
+        ),
+        "rotation_profitable_full_exit_min_hold_days_bear": int(
+            config.get("rotation_profitable_full_exit_min_hold_days_bear", 20) or 20
+        ),
+        # ε.C.6 V31.4 cooldown-lift force-promotion
+        "post_sell_breakout_force_promote_enabled": bool(
+            config.get("post_sell_breakout_force_promote_enabled", True)
+        ),
+        "nexus_sentiment_cache_force_in_backtest": bool(
+            config.get("nexus_sentiment_cache_force_in_backtest", True)
+        ),
+        "nexus_neo4j_snapshot_granularity": str(
+            config.get("nexus_neo4j_snapshot_granularity", "weekly") or "weekly"
+        ).strip().lower(),
+        "nexus_neo4j_snapshot_lru_cap": int(
+            config.get("nexus_neo4j_snapshot_lru_cap", _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP)
+            or _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP
+        ),
     }
 
 def _get_deployment_ramp_caps(config: dict) -> list[float]:
@@ -6651,7 +8575,9 @@ def _compute_available_buy_budget(
     )
     cash_after_sells = cash_now + sell_proceeds
     initial_value = float(getattr(portfolio_emulator, "_initial_value", 0.0) or 0.0)
-    floor_pct = float(config.get("cash_reserve_floor_pct", 0.10) or 0.10)
+    # Tier-3 B1: scale cash-reserve floor by account size. Small accounts
+    # (<$50K) get 5% floor; mid 7.5%; large 10%. Explicit override wins.
+    floor_pct = _get_scaled_cash_reserve_floor_pct(config, initial_value)
     cash_floor = max(0.0, initial_value * floor_pct)
     cash_after_floor = max(0.0, cash_after_sells - cash_floor)
 
@@ -6866,7 +8792,19 @@ def _compute_macro_risk_scale(
     macro_rows: list[dict] | None,
     active_events: list[dict] | None,
     config: dict | None = None,
+    spy_20d_return: float | None = None,
 ) -> tuple[float, dict[str, float]]:
+    """Compute a buy-budget haircut from macro-event news flow.
+
+    Z2.3 fix: previously this used ``max(0.5, confidence)`` which made every
+    macro row contribute at least 0.5 even when its actual confidence was
+    lower — producing false-bearish readings on news-heavy but
+    fundamentally bullish tapes (backtest 299903: net=-12.9 on a +3.74% SPY
+    move). The floor is removed; low-confidence rows now contribute their
+    actual weight. Additionally, when ``spy_20d_return`` is provided and
+    >= 0, the haircut is suppressed entirely — macro pessimism must be
+    corroborated by price action before reducing buy budget.
+    """
     config = config or {}
     if not bool(config.get("macro_risk_scaling_enabled", True)):
         return 1.0, {
@@ -6880,14 +8818,18 @@ def _compute_macro_risk_scale(
     bearish_score = 0.0
     for row in macro_rows or []:
         direction = str(row.get("impact_direction") or "").strip().lower()
-        weight = max(0.5, float(row.get("confidence", 0.0) or 0.0))
+        weight = float(row.get("confidence", 0.0) or 0.0)
+        if weight <= 0:
+            continue
         if direction == "bullish":
             bullish_score += weight
         elif direction == "bearish":
             bearish_score += weight
     for event in active_events or []:
         direction = str(event.get("impact_direction") or "").strip().lower()
-        weight = max(0.5, float(event.get("confidence", 0.0) or 0.0)) * 1.25
+        weight = float(event.get("confidence", 0.0) or 0.0) * 1.25
+        if weight <= 0:
+            continue
         if direction == "bullish":
             bullish_score += weight
         elif direction == "bearish":
@@ -6898,26 +8840,40 @@ def _compute_macro_risk_scale(
     scale_min = max(0.0, min(1.0, float(config.get("macro_risk_scale_min", 0.60) or 0.60)))
     scale = 1.0
     if net_score < 0:
-        scale = max(scale_min, 1.0 - (abs(net_score) * scale_step))
+        # Z2.3: require price-action corroboration before applying the haircut.
+        # If SPY 20d return is positive, the bearish macro flow is contradicted
+        # by the tape — don't haircut. Only apply the scale when both signals
+        # agree (macro negative AND SPY 20d negative).
+        if spy_20d_return is None or spy_20d_return < 0:
+            scale = max(scale_min, 1.0 - (abs(net_score) * scale_step))
 
     return scale, {
         "bullish_score": round(bullish_score, 4),
         "bearish_score": round(bearish_score, 4),
         "net_score": round(net_score, 4),
         "scale": round(scale, 4),
+        "spy_20d_return": round(spy_20d_return, 4) if spy_20d_return is not None else None,
     }
 
 
 def _retrieve_historical_analogs(conn, instance_id: str, as_of_date: str, candidate: dict) -> list[dict]:
     if conn is None:
         return []
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     gov_action = str(candidate.get("government_action_type") or "").strip().lower()
     event_type = str(candidate.get("dominant_event_type") or "").strip().lower()
     try:
-        cursor = _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["entry_date"].lt(as_of_date))
-        ).order_by(_r.desc("latest_observation_date")).limit(80).run(conn)
+        cursor = (
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_OUTCOMES_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(lambda doc: doc["entry_date"].lt(as_of_date))
+            .order_by(_r.desc("latest_observation_date"))
+            .limit(80)
+            .run(conn)
+        )
         analogs = []
         for doc in cursor:
             if gov_action and str(doc.get("government_action_type") or "").strip().lower() == gov_action:
@@ -7166,8 +9122,12 @@ def _save_trade_contexts_and_outcomes(
 ) -> None:
     if conn is None:
         return
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_CONTEXTS_TABLE)
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_CONTEXTS_TABLE, indexes=("instance_id",)
+    )
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     base_instance_id = str(config.get("base_instance_id") or "").strip() or str(instance_id or "").strip()
     history_scope_id = str(config.get("history_scope_id") or "").strip()
     history_model_stamp = dict(config.get("history_model_stamp") or {})
@@ -7256,11 +9216,18 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
     if conn is None or not prices:
         return
     _ensure_nexus_history_table(conn, NEXUS_OUTCOME_SERIES_TABLE)
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     try:
-        cursor = _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["entry_date"].lt(date_key))
-        ).limit(500).run(conn)
+        cursor = (
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_OUTCOMES_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(lambda doc: doc["entry_date"].lt(date_key))
+            .limit(500)
+            .run(conn)
+        )
         series_docs = []
         for doc in cursor:
             symbol = str(doc.get("symbol") or "").strip().upper()
@@ -7315,16 +9282,37 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
 def _load_training_rows(conn, instance_id: str, date_key: str, lookback_days: int) -> list[dict]:
     if conn is None:
         return []
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_CONTEXTS_TABLE)
-    _ensure_nexus_history_table(conn, NEXUS_TRADE_OUTCOMES_TABLE)
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_CONTEXTS_TABLE, indexes=("instance_id",)
+    )
+    _ensure_nexus_history_table(
+        conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
+    )
     try:
         start_key = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=max(1, int(lookback_days or 90)))).strftime("%Y-%m-%d")
-        contexts = list(_r.db(DB_NAME).table(NEXUS_TRADE_CONTEXTS_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["date_key"].ge(start_key)) & (doc["date_key"].lt(date_key))
-        ).run(conn))
-        outcomes = list(_r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["entry_date"].ge(start_key)) & (doc["entry_date"].lt(date_key))
-        ).run(conn))
+        # get_all(...) on the instance_id index scopes the scan to rows
+        # for this instance only — same shape as the old filter() but
+        # O(rows-for-this-instance) instead of O(everything in table).
+        contexts = list(
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_CONTEXTS_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(
+                lambda doc: doc["date_key"].ge(start_key)
+                & doc["date_key"].lt(date_key)
+            )
+            .run(conn)
+        )
+        outcomes = list(
+            _r.db(DB_NAME)
+            .table(NEXUS_TRADE_OUTCOMES_TABLE)
+            .get_all(instance_id, index="instance_id")
+            .filter(
+                lambda doc: doc["entry_date"].ge(start_key)
+                & doc["entry_date"].lt(date_key)
+            )
+            .run(conn)
+        )
     except Exception:
         return []
     outcome_by_id = {str(doc.get("id")): dict(doc) for doc in outcomes if doc.get("id")}
@@ -8093,7 +10081,37 @@ def _discovery_source_priority(source: str) -> int:
     return int(_DISCOVERY_SOURCE_PRIORITY.get(str(source or "").strip().lower(), 50))
 
 
-def _sort_discovered_docs_for_retention(docs: list[dict], protected_tickers: set[str] | None = None) -> list[dict]:
+def _is_momentum_protected(doc: dict, date_key: str | None, protect_days: int) -> bool:
+    """A momentum-discovered row is shielded from eviction for ``protect_days``
+    after discovery, so a quiet pre-breakout mover stays monitored long enough
+    to run. Time-bounded: names that never move age out and free their slot."""
+    try:
+        days = int(protect_days or 0)
+    except (TypeError, ValueError):
+        return False
+    if days <= 0 or not date_key:
+        return False
+    if str(doc.get("source") or "").strip().lower() != "momentum":
+        return False
+    disc = str(doc.get("discovered_date") or "")[:10]
+    if not disc:
+        return False
+    from datetime import datetime as _dt
+    try:
+        d0 = _dt.strptime(disc, "%Y-%m-%d")
+        d1 = _dt.strptime(str(date_key)[:10], "%Y-%m-%d")
+    except ValueError:
+        return False
+    return 0 <= (d1 - d0).days <= days
+
+
+def _sort_discovered_docs_for_retention(
+    docs: list[dict],
+    protected_tickers: set[str] | None = None,
+    *,
+    date_key: str | None = None,
+    protect_days: int = 0,
+) -> list[dict]:
     protected = {str(t).strip().upper() for t in (protected_tickers or set()) if str(t).strip()}
 
     def _key(doc: dict) -> tuple[Any, ...]:
@@ -8102,12 +10120,13 @@ def _sort_discovered_docs_for_retention(docs: list[dict], protected_tickers: set
         priority = _discovery_source_priority(source)
         propagation_score = abs(_safe_float(doc.get("propagation_score"), 0.0))
         watchlist_match = ticker in protected or source == "sector_watchlist"
+        retained = watchlist_match or _is_momentum_protected(doc, date_key, protect_days)
         last_signal_date = str(doc.get("last_signal_date") or doc.get("discovered_date") or "").replace("-", "")
         discovered_date = str(doc.get("discovered_date") or "").replace("-", "")
         last_signal_rank = int(last_signal_date) if last_signal_date.isdigit() else 0
         discovered_rank = int(discovered_date) if discovered_date.isdigit() else 0
         return (
-            0 if watchlist_match else 1,
+            0 if retained else 1,
             priority,
             -propagation_score,
             -last_signal_rank,
@@ -8124,18 +10143,50 @@ def _find_discovery_eviction_candidate(
     *,
     non_evictable_tickers: set[str] | None = None,
     protected_tickers: set[str] | None = None,
+    date_key: str | None = None,
+    protect_days: int = 0,
 ) -> str | None:
     non_evictable = {str(t).strip().upper() for t in (non_evictable_tickers or set()) if str(t).strip()}
     protected = {str(t).strip().upper() for t in (protected_tickers or set()) if str(t).strip()}
-    docs = _sort_discovered_docs_for_retention(_get_all_discovered_stock_docs(conn, instance_id), protected)
+    docs = _sort_discovered_docs_for_retention(
+        _get_all_discovered_stock_docs(conn, instance_id), protected,
+        date_key=date_key, protect_days=protect_days,
+    )
     for doc in reversed(docs):
         ticker = str(doc.get("ticker") or "").strip().upper()
         if not ticker or ticker in non_evictable or ticker in protected:
             continue
         if str(doc.get("source") or "").strip().lower() == "sector_watchlist":
             continue
+        if _is_momentum_protected(doc, date_key, protect_days):
+            continue
         return ticker
     return None
+
+
+def _select_discovered_to_trim(
+    docs: list[dict],
+    max_allowed: int,
+    *,
+    protected_tickers: set[str] | None = None,
+    date_key: str | None = None,
+    protect_days: int = 0,
+) -> list[dict]:
+    """Discovered-stock docs to sell to enforce the cap: those ranked beyond
+    ``max_allowed`` in retention order, EXCLUDING momentum rows still inside
+    their protection window. A protected mover is never trimmed (the pool may
+    transiently exceed the cap rather than evict a shielded name), keeping this
+    consistent with the explicit skip in _find_discovery_eviction_candidate."""
+    allowed = max(0, int(max_allowed or 0))
+    if allowed <= 0:
+        return []
+    ordered = _sort_discovered_docs_for_retention(
+        docs, protected_tickers, date_key=date_key, protect_days=protect_days,
+    )
+    return [
+        doc for doc in ordered[allowed:]
+        if not _is_momentum_protected(doc, date_key, protect_days)
+    ]
 
 
 def _trim_discovered_stock_cap(
@@ -8145,15 +10196,17 @@ def _trim_discovered_stock_cap(
     *,
     date_key: str,
     protected_tickers: set[str] | None = None,
+    protect_days: int = 0,
 ) -> list[str]:
     max_allowed = max(0, int(max_discovered or 0))
     if conn is None or _r is None or max_allowed <= 0:
         return []
-    docs = _sort_discovered_docs_for_retention(_get_all_discovered_stock_docs(conn, instance_id), protected_tickers)
-    if len(docs) <= max_allowed:
-        return []
+    to_trim = _select_discovered_to_trim(
+        _get_all_discovered_stock_docs(conn, instance_id), max_allowed,
+        protected_tickers=protected_tickers, date_key=date_key, protect_days=protect_days,
+    )
     removed: list[str] = []
-    for doc in docs[max_allowed:]:
+    for doc in to_trim:
         ticker = str(doc.get("ticker") or "").strip().upper()
         if not ticker:
             continue
@@ -8346,6 +10399,26 @@ def _build_nexus_candidate_meta(
     }
 
 
+def _ordered_discovery_candidates(items, strength_getter=None):
+    """Deterministically order discovery ``(ticker, data)`` candidates so the
+    ``max_discovered_stocks`` cap boundary does not depend on dict/set
+    iteration order (which varies run-to-run unless PYTHONHASHSEED is pinned).
+
+    With ``strength_getter`` (called on each value), order is strongest-first
+    then ticker ascending; otherwise ticker ascending. Belt-and-suspenders
+    behind PYTHONHASHSEED=0 so determinism does not rely on env alone.
+    """
+    pairs = list(items)
+    if strength_getter is not None:
+        def _strength(value):
+            try:
+                return float(strength_getter(value) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        return sorted(pairs, key=lambda kv: (-_strength(kv[1]), str(kv[0])))
+    return sorted(pairs, key=lambda kv: str(kv[0]))
+
+
 def _discover_stocks(
     conn, trend_buy_signals: dict[str, dict], instance_id: str,
     current_symbols: set[str], config: dict, date_key: str,
@@ -8358,7 +10431,7 @@ def _discover_stocks(
         return []
     _ensure_discovered_stocks_table(conn)
 
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
     existing_set = set(existing_discovered)
@@ -8366,7 +10439,12 @@ def _discover_stocks(
 
     hard_limit = max_discovered
     newly_discovered = []
-    for ticker, data in trend_buy_signals.items():
+    # Order by trend score (bullish +1 wins the cap over bearish -1), ticker
+    # tiebreak. trend_buy_signals values carry "score" (not "strength").
+    for ticker, data in _ordered_discovery_candidates(
+        trend_buy_signals.items(),
+        strength_getter=lambda d: (d or {}).get("score", 0),
+    ):
         if current_count >= hard_limit:
             break
         if ticker in current_symbols or ticker in existing_set:
@@ -8427,7 +10505,7 @@ def _discover_stocks_from_propagation(
     # Require a stronger signal than base buy_threshold for propagation discovery
     min_raw = float(config.get("propagation_discovery_min_score", max(buy_thresh * 1.2, buy_thresh + 0.05)))
     min_paths = int(config.get("propagation_discovery_min_paths", 1))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
 
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -8519,7 +10597,7 @@ def _discover_stocks_from_sector_peers(
     if not config.get("sector_peer_discovery_enabled", True):
         return []
     max_per_day = int(config.get("max_sector_peer_discoveries_per_day", 3))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -8586,7 +10664,7 @@ def _discover_stocks_from_etf_co_holdings(
     if not config.get("etf_co_holdings_discovery_enabled", True):
         return []
     max_per_day = int(config.get("max_etf_co_holdings_discoveries_per_day", 5))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     existing_set = set(existing_discovered)
@@ -8632,6 +10710,22 @@ def _discover_stocks_from_etf_co_holdings(
     return newly_discovered
 
 
+def _sector_fill_candidates_for_sector(
+    cache: dict, sector_label: str, excluded: set[str] | None = None,
+) -> list[str]:
+    """Deterministically collect stock-sector-cache tickers related to
+    ``sector_label`` minus ``excluded``. Sorted so a larger sector universe
+    does not depend on cache/dict iteration order."""
+    excluded = excluded or set()
+    out: set[str] = set()
+    for cache_key, tickers in (cache or {}).items():
+        if _sector_labels_related(sector_label, cache_key):
+            for t in (tickers or []):
+                if t and t not in excluded:
+                    out.add(t)
+    return sorted(out)
+
+
 def _discover_stocks_from_sector_fill(
     conn, active_trends: list[dict], instance_id: str,
     current_symbols: set[str], config: dict, date_key: str,
@@ -8656,7 +10750,7 @@ def _discover_stocks_from_sector_fill(
         return []
     min_strength = float(config.get("sector_fill_min_strength", 0.40))
     max_per_sector = int(config.get("sector_fill_max_per_sector", 6))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     watchlist_reserved_slots = max(0, int(config.get("sector_watchlist_reserved_slots", 0) or 0))
     watchlist_max_per_sector = max(0, int(config.get("sector_watchlist_max_per_sector", 0) or 0))
     watchlist_force_discovery = bool(config.get("sector_watchlist_force_discovery", False))
@@ -8731,6 +10825,8 @@ def _discover_stocks_from_sector_fill(
                     instance_id,
                     non_evictable_tickers=set(open_positions) | set(watchlist_evicted_this_pass),
                     protected_tickers=set(watchlist_added) | set(matched_watchlist) | active_watchlist_priority_tickers,
+                    date_key=date_key,
+                    protect_days=int(config.get("momentum_discovery_protect_days", 10) or 0),
                 )
                 if not evicted:
                     watchlist_blocked.append(f"{ticker}:no_evictable_candidate")
@@ -8769,15 +10865,10 @@ def _discover_stocks_from_sector_fill(
     for sector_label in bullish_sectors:
         if current_count >= hard_limit:
             break
-        matched_tickers: list[str] = []
         newly_set = set(newly_discovered)
-        for cache_key, tickers in cache.items():
-            if _sector_labels_related(sector_label, cache_key):
-                for t in tickers:
-                    if (t not in current_symbols and t not in existing_set
-                            and t not in newly_set
-                            and t not in matched_tickers):
-                        matched_tickers.append(t)
+        matched_tickers = _sector_fill_candidates_for_sector(
+            cache, sector_label, set(current_symbols) | existing_set | newly_set
+        )
         added_for_sector = 0
         for ticker in matched_tickers[:max_per_sector]:
             if current_count >= hard_limit or added_for_sector >= max_per_sector:
@@ -8832,7 +10923,7 @@ def _discover_stocks_from_competitors(
     if not config.get("competitor_discovery_enabled", True):
         return []
     max_per_day = int(config.get("max_competitor_discoveries_per_day", 3))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -8958,10 +11049,19 @@ def _discover_stocks_from_momentum(
         return []
     if not config.get("momentum_discovery_enabled", True):
         return []
-    min_20d = float(config.get("momentum_discovery_min_20d_return", 20.0))
-    min_60d = float(config.get("momentum_discovery_min_60d_return", 50.0))
-    max_per_day = int(config.get("momentum_discovery_max_per_day", 3))
-    max_discovered = int(config.get("max_discovered_stocks", 50))
+    min_20d = float(config.get("momentum_discovery_min_20d_return", 15.0))
+    min_60d = float(config.get("momentum_discovery_min_60d_return", 40.0))
+    # Z1.1 (2026-05-15): add parabolic ceiling — backtest 299903 surfaced AIOS
+    # at +5,200% YTD and the strategy bought it at $22.33, then watched it
+    # drop to $17.44 for a -$400 loss. No ceiling existed before; with
+    # backstop defaults below (and intent to recompute from rolling 3yr
+    # cross-sectional distribution annually), parabolic candidates are
+    # rejected at discovery time. Use 0 to disable. Mirrors
+    # _rediscover_momentum_comebacks:9320-9325 which already has these.
+    max_20d = float(config.get("momentum_discovery_max_20d_return", 80.0) or 0.0)
+    max_60d = float(config.get("momentum_discovery_max_60d_return", 200.0) or 0.0)
+    max_per_day = int(config.get("momentum_discovery_max_per_day", 6))
+    max_discovered = int(config.get("max_discovered_stocks", 90))
     _ensure_discovered_stocks_table(conn)
     existing_discovered = _get_all_discovered_stocks(conn, instance_id)
     current_count = len(existing_discovered)
@@ -8993,6 +11093,14 @@ def _discover_stocks_from_momentum(
             r20 = features.get("recent_return_20", 0.0)
             r60 = features.get("recent_return_60", 0.0)
             if r20 >= min_20d or r60 >= min_60d:
+                # Z1.1: skip parabolic candidates
+                if (max_20d > 0 and r20 > max_20d) or (max_60d > 0 and r60 > max_60d):
+                    _log(
+                        f"  Momentum ceiling block: {sym} 20d={r20:+.1f}% 60d={r60:+.1f}% "
+                        f"(caps 20d={max_20d:.0f}%, 60d={max_60d:.0f}%)",
+                        "yellow",
+                    )
+                    continue
                 candidates.append((sym, r20, r60))
 
     # Source 2: overlay bars universe — catches ETFs and popular momentum stocks
@@ -9021,7 +11129,22 @@ def _discover_stocks_from_momentum(
                 r20 = ((latest - closes[-21]) / closes[-21] * 100.0) if len(closes) > 21 and closes[-21] > 0 else 0.0
                 r60 = ((latest - closes[-61]) / closes[-61] * 100.0) if len(closes) > 61 and closes[-61] > 0 else 0.0
                 if r20 >= min_20d or r60 >= min_60d:
+                    # Z1.1: skip parabolic candidates
+                    if (max_20d > 0 and r20 > max_20d) or (max_60d > 0 and r60 > max_60d):
+                        _log(
+                            f"  Momentum ceiling block: {sym} 20d={r20:+.1f}% 60d={r60:+.1f}% "
+                            f"(caps 20d={max_20d:.0f}%, 60d={max_60d:.0f}%)",
+                            "yellow",
+                        )
+                        continue
                     candidates.append((sym, r20, r60))
+
+    # Fix (2026-05-26, backtest 404780): exclude leveraged/inverse/commodity ETFs
+    # from momentum EQUITY discovery before ranking. See _filter_momentum_etf_candidates.
+    _pre_etf = len(candidates)
+    candidates = _filter_momentum_etf_candidates(candidates, config)
+    if len(candidates) < _pre_etf:
+        _log(f"  Momentum ETF exclusion: dropped {_pre_etf - len(candidates)} leveraged/inverse/commodity ETF candidate(s)", "yellow")
 
     # Sort by strongest momentum first; ticker ASC tiebreak for full determinism
     # (P1B widens the window where ties matter via the overflow budget).
@@ -9088,7 +11211,8 @@ def _rediscover_momentum_comebacks(
 
     candidates = [d for d in sold_docs
                   if str(d.get("ticker") or "").strip().upper() not in exclude_symbols
-                  and str(d.get("ticker") or "").strip().upper() not in _fl_blacklist]
+                  and str(d.get("ticker") or "").strip().upper() not in _fl_blacklist
+                  and not _is_excluded_momentum_etf(d.get("ticker") or "", config)]
     if not candidates:
         return []
 
@@ -9262,26 +11386,61 @@ def _update_discovered_stock_sell_streak(conn, instance_id: str, ticker: str, da
         return 0
 
 
-def _mark_discovered_stock_sold(conn, instance_id: str, ticker: str, reason: str = "", date_key: str = ""):
-    """Mark a discovered stock as sold."""
+def _mark_discovered_stock_sold(
+    conn,
+    instance_id: str,
+    ticker: str,
+    reason: str = "",
+    date_key: str = "",
+    *,
+    forced_exit: bool = False,
+    exit_price: float | None = None,
+    entry_conviction_tier: str | None = None,
+):
+    """Mark a discovered stock as sold or post_sell_watch (Tier-3 A4).
+
+    ``forced_exit=True`` writes ``status="post_sell_watch"`` plus the
+    ``exit_price`` and ``entry_conviction_tier`` so the daily re-entry
+    eligibility check (Tier-3 A4) can observe whether the ticker recovers
+    past ``exit_price * (1 + post_sell_recovery_threshold_pct)`` within
+    ``post_sell_watch_window_days``. Normal (non-forced) sells continue to
+    write ``status="sold"`` per pre-Tier-3 behavior so the existing
+    discovery-cooldown logic (`_get_recently_sold_discovered_tickers`)
+    keeps working.
+    """
     if conn is None or _r is None:
         return
     _ensure_discovered_stocks_table(conn)
     doc_id = f"{instance_id}_{ticker}"
     try:
         update = {
-            "status": "sold",
+            "status": "post_sell_watch" if forced_exit else "sold",
             "sell_reason": (reason or "Trend reversal")[:200],
         }
         if date_key:
             update["sold_date"] = date_key
+        if forced_exit:
+            if exit_price is not None:
+                try:
+                    update["exit_price"] = float(exit_price)
+                except (TypeError, ValueError):
+                    pass
+            if entry_conviction_tier:
+                update["entry_conviction_tier"] = str(entry_conviction_tier)[:8]
         _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update(update).run(conn)
     except Exception:
         pass
 
 
 def _get_recently_sold_discovered_tickers(conn, instance_id: str, date_key: str, cooldown_days: int = 7) -> set[str]:
-    """Return tickers sold within the last `cooldown_days` to prevent immediate re-discovery."""
+    """Return tickers sold within the last `cooldown_days` to prevent immediate re-discovery.
+
+    Tier-3 A4 (2026-05-17): include ``post_sell_watch`` rows so forced-exit
+    cooldowns still apply during the watch window. Re-entry happens via the
+    separate `_get_post_sell_watch_candidates` flow which examines recovery
+    triggers — pure re-discovery (which doesn't know the ticker is being
+    monitored) must continue to be cooldown-blocked.
+    """
     if conn is None or _r is None or not date_key:
         return set()
     _ensure_discovered_stocks_table(conn)
@@ -9289,13 +11448,314 @@ def _get_recently_sold_discovered_tickers(conn, instance_id: str, date_key: str,
         cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
         cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
             lambda doc: (doc["instance_id"] == instance_id)
-            & (doc["status"] == "sold")
+            & ((doc["status"] == "sold") | (doc["status"] == "post_sell_watch"))
             & (doc.has_fields("sold_date"))
             & (doc["sold_date"] >= cutoff)
         ).run(conn)
         return {doc["ticker"] for doc in cursor if doc.get("ticker")}
     except Exception:
         return set()
+
+
+def _get_post_sell_watch_candidates(
+    conn,
+    instance_id: str,
+    date_key: str,
+    window_days: int = 60,
+) -> list[dict]:
+    """Return list of {ticker, exit_price, exit_date, entry_conviction_tier}
+    for tickers currently in post_sell_watch status within ``window_days``.
+
+    Tier-3 A4: feeds the daily re-entry eligibility check. Rows older than
+    ``window_days`` should already have been transitioned to "forgotten" by
+    the TTL sweep; this filter is a safety net.
+    """
+    out: list[dict] = []
+    if conn is None or _r is None or not date_key or not instance_id:
+        return out
+    try:
+        _ensure_discovered_stocks_table(conn)
+    except Exception:
+        return out
+    try:
+        cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=int(window_days))).strftime("%Y-%m-%d")
+    except Exception:
+        return out
+    try:
+        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
+            lambda doc: (doc["instance_id"] == instance_id)
+            & (doc["status"] == "post_sell_watch")
+            & (doc.has_fields("sold_date"))
+            & (doc["sold_date"] >= cutoff)
+        ).run(conn)
+        for doc in cursor:
+            ticker = doc.get("ticker")
+            if not ticker:
+                continue
+            try:
+                exit_price = float(doc.get("exit_price") or 0.0)
+            except (TypeError, ValueError):
+                exit_price = 0.0
+            out.append({
+                "ticker": str(ticker).strip().upper(),
+                "exit_price": exit_price,
+                "exit_date": str(doc.get("sold_date") or ""),
+                "entry_conviction_tier": str(doc.get("entry_conviction_tier") or "LOW"),
+                "sell_reason": str(doc.get("sell_reason") or ""),
+            })
+    except Exception:
+        return out
+    return out
+
+
+def _is_post_sell_reentry_eligible(
+    *,
+    current_price: float,
+    exit_price: float,
+    fresh_raw_score: float,
+    config: dict,
+    recent_high_after_exit: float | None = None,
+) -> tuple[bool, str]:
+    """Decide whether a post_sell_watch ticker qualifies for re-entry now.
+
+    Tier-3 A4 triggers (any of):
+      1. ``current_price >= exit_price * (1 + post_sell_recovery_threshold_pct)``
+      2. ``current_price >= recent_high_after_exit * (1 + post_sell_resistance_break_pct)``
+
+    Mandatory filter (in both cases):
+      * ``fresh_raw_score >= post_sell_reentry_min_raw_score`` — prevents
+        pure-bounce re-entries. SNDK rallied because thesis was sound; the
+        score should re-confirm the buy. ROLR/FGL similar.
+
+    Returns ``(eligible, reason_text)``.
+    """
+    if exit_price <= 0 or current_price <= 0:
+        return False, "missing price data"
+
+    min_score = float(config.get("post_sell_reentry_min_raw_score", 0.40) or 0.40)
+    if fresh_raw_score < min_score:
+        return False, (
+            f"fresh raw_score {fresh_raw_score:.3f} < min {min_score:.2f} "
+            f"(prevents pure-bounce re-entry)"
+        )
+
+    recovery_pct = float(config.get("post_sell_recovery_threshold_pct", 0.05) or 0.05)
+    if current_price >= exit_price * (1.0 + recovery_pct):
+        return True, (
+            f"recovery_threshold hit: cur=${current_price:.2f} >= "
+            f"exit×{1.0 + recovery_pct:.3f}=${exit_price * (1.0 + recovery_pct):.2f} "
+            f"(score={fresh_raw_score:.2f})"
+        )
+
+    if recent_high_after_exit is not None and recent_high_after_exit > 0:
+        break_pct = float(config.get("post_sell_resistance_break_pct", 0.005) or 0.005)
+        if current_price >= recent_high_after_exit * (1.0 + break_pct):
+            return True, (
+                f"resistance_break: cur=${current_price:.2f} >= "
+                f"10d_high×{1.0 + break_pct:.3f}=${recent_high_after_exit * (1.0 + break_pct):.2f} "
+                f"(score={fresh_raw_score:.2f})"
+            )
+
+    return False, (
+        f"no trigger fired (cur=${current_price:.2f}, exit=${exit_price:.2f}, "
+        f"recovery_needed=${exit_price * (1.0 + recovery_pct):.2f})"
+    )
+
+
+def _mark_discovered_stock_re_entered(conn, instance_id: str, ticker: str, date_key: str = ""):
+    """Transition a post_sell_watch row back to ``status="active"`` after
+    successful re-entry. Caller (run_once) sets this when the planner has
+    actually allocated cash to the ticker, not just identified it as eligible.
+    """
+    if conn is None or _r is None:
+        return
+    doc_id = f"{instance_id}_{ticker}"
+    try:
+        update = {"status": "active", "re_entered_date": date_key} if date_key else {"status": "active"}
+        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update(update).run(conn)
+    except Exception:
+        pass
+
+
+def _mark_discovered_stock_forgotten(conn, instance_id: str, ticker: str):
+    """TTL sweep: transition post_sell_watch rows past the watch window to
+    ``status="forgotten"`` so they no longer block re-discovery via the
+    cooldown filter and don't accumulate as stale state.
+    """
+    if conn is None or _r is None:
+        return
+    doc_id = f"{instance_id}_{ticker}"
+    try:
+        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update({"status": "forgotten"}).run(conn)
+    except Exception:
+        pass
+
+
+# ── A4 in-memory post_sell_watch (BT136708 fix P1.7, 2026-05-18) ──────────
+# Backtest mode currently gates the post_sell_watch DB write off via
+# _GN_LIVE_MODE_FLAG so backtest re-runs don't pollute the shared
+# GraphNexusDiscoveredStocks table. To exercise the daily re-entry pipeline
+# in backtest WITHOUT writing to the live DB, mirror the writes to an
+# in-memory dict on strategy_cache. Lives only for the duration of one
+# backtest run (cleared between runs by broker.py migration-reset list).
+_POST_SELL_WATCH_INMEM_KEY = "_post_sell_watch_inmem"
+
+
+def _post_sell_watch_inmem_write(
+    strategy_cache: dict | None,
+    ticker: str,
+    *,
+    exit_price: float,
+    entry_conviction_tier: str,
+    sell_reason: str,
+    date_key: str,
+) -> None:
+    """Mirror an A4 sell-side write to strategy_cache for backtest exercise.
+
+    Bug-sweep 2026-05-18: rows with exit_price <= 0 cause downstream silent
+    skips in `_is_post_sell_reentry_eligible` (which requires exit_price > 0).
+    Skip the write entirely so a useless row doesn't accumulate.
+    """
+    if not isinstance(strategy_cache, dict):
+        return
+    sym = str(ticker or "").strip().upper()
+    if not sym or not date_key:
+        return
+    try:
+        _ep = float(exit_price or 0.0)
+    except (TypeError, ValueError):
+        _ep = 0.0
+    if _ep <= 0:
+        _log(
+            f"A4 post_sell_watch write skipped: {sym} has exit_price=0 — "
+            f"re-entry would be silently blocked. Investigate sell-side price resolution.",
+            "yellow",
+        )
+        return
+    bucket = strategy_cache.setdefault(_POST_SELL_WATCH_INMEM_KEY, {})
+    bucket[sym] = {
+        "ticker": sym,
+        "status": "post_sell_watch",
+        "exit_price": _ep,
+        "entry_conviction_tier": str(entry_conviction_tier or "LOW")[:8],
+        "sell_reason": str(sell_reason or "")[:200],
+        "sold_date": str(date_key),
+    }
+
+
+def _post_sell_watch_inmem_get_candidates(
+    strategy_cache: dict | None,
+    date_key: str,
+    window_days: int = 60,
+) -> list[dict]:
+    """Read in-memory post_sell_watch candidates within ``window_days``."""
+    out: list[dict] = []
+    if not isinstance(strategy_cache, dict) or not date_key:
+        return out
+    bucket = strategy_cache.get(_POST_SELL_WATCH_INMEM_KEY) or {}
+    if not isinstance(bucket, dict) or not bucket:
+        return out
+    try:
+        cutoff = (
+            datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=int(window_days))
+        ).strftime("%Y-%m-%d")
+    except Exception:
+        return out
+    for sym, doc in bucket.items():
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("status") != "post_sell_watch":
+            continue
+        sold_date = str(doc.get("sold_date") or "")
+        if not sold_date or sold_date < cutoff:
+            continue
+        out.append({
+            "ticker": str(sym),
+            "exit_price": float(doc.get("exit_price") or 0.0),
+            "exit_date": sold_date,
+            "entry_conviction_tier": str(doc.get("entry_conviction_tier") or "LOW"),
+            "sell_reason": str(doc.get("sell_reason") or ""),
+        })
+    return out
+
+
+def _post_sell_watch_inmem_mark_re_entered(
+    strategy_cache: dict | None, ticker: str, date_key: str = ""
+) -> None:
+    """Transition an in-memory row back to active after successful re-entry."""
+    if not isinstance(strategy_cache, dict):
+        return
+    bucket = strategy_cache.get(_POST_SELL_WATCH_INMEM_KEY) or {}
+    sym = str(ticker or "").strip().upper()
+    doc = bucket.get(sym) if isinstance(bucket, dict) else None
+    if not isinstance(doc, dict):
+        return
+    doc["status"] = "active"
+    if date_key:
+        doc["re_entered_date"] = date_key
+
+
+def _post_sell_watch_inmem_forget_expired(
+    strategy_cache: dict | None, date_key: str, window_days: int = 60
+) -> int:
+    """TTL sweep: drop rows older than ``window_days`` from in-memory storage.
+
+    Bug-sweep 2026-05-18: a silent return on malformed date_key would let
+    rows accumulate indefinitely; log a warning so operator sees the leak.
+    """
+    if not isinstance(strategy_cache, dict) or not date_key:
+        return 0
+    bucket = strategy_cache.get(_POST_SELL_WATCH_INMEM_KEY)
+    if not isinstance(bucket, dict) or not bucket:
+        return 0
+    try:
+        cutoff = (
+            datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=int(window_days))
+        ).strftime("%Y-%m-%d")
+    except Exception as _ttl_exc:
+        _log(
+            f"A4 TTL sweep skipped: malformed date_key={date_key!r} ({_ttl_exc}). "
+            f"In-memory post_sell_watch rows will not be expired this cycle.",
+            "yellow",
+        )
+        return 0
+    removed = 0
+    for sym in list(bucket.keys()):
+        doc = bucket.get(sym)
+        if not isinstance(doc, dict):
+            continue
+        if str(doc.get("sold_date") or "") < cutoff and doc.get("status") == "post_sell_watch":
+            doc["status"] = "forgotten"
+            removed += 1
+    return removed
+
+
+def _get_post_sell_watch_candidates_combined(
+    conn,
+    strategy_cache: dict | None,
+    instance_id: str,
+    date_key: str,
+    *,
+    window_days: int = 60,
+) -> list[dict]:
+    """Merge DB-backed and in-memory post_sell_watch candidates.
+
+    Live mode: DB-backed (`_get_post_sell_watch_candidates`).
+    Backtest mode: in-memory (`_post_sell_watch_inmem_get_candidates`).
+    Live + in-memory tolerated (in-memory wins via dict-merge dedupe).
+    """
+    by_sym: dict[str, dict] = {}
+    for src in (
+        _get_post_sell_watch_candidates(conn, instance_id, date_key, window_days=window_days)
+        if conn is not None
+        else [],
+        _post_sell_watch_inmem_get_candidates(strategy_cache, date_key, window_days=window_days),
+    ):
+        for item in src or []:
+            sym = str(item.get("ticker") or "").strip().upper()
+            if sym:
+                by_sym[sym] = item
+    return list(by_sym.values())
 
 
 # ── Trend-to-Signal conversion ─────────────────────────────────────────────
@@ -9815,6 +12275,75 @@ _SECTOR_ETF_TICKERS = frozenset({
     "QQQ", "SPY", "DIA", "IWM", "VTI", "VOO",
 })
 
+# Fix (2026-05-26, backtest 404780): leveraged/inverse/commodity ETFs that top a
+# 20-day return screen and masquerade as momentum EQUITIES. With mom/day raised to
+# 12, _build_momentum_scan_universe's deliberate ETF scan flooded the equity pool
+# with these (SOXS/OILD/BOIL/KOLD/COPZ...), saturating the backfill queue and
+# starving genuine winners (INTC/SLAB/TWST). They are excluded from momentum equity
+# discovery only; broad/sector ETF exposure still flows through the dedicated,
+# already-capped ETF-allocation path (max_etf_buys_per_day / max_positions_etf).
+_LEVERAGED_INVERSE_ETF_TICKERS = frozenset({
+    "SOXL", "SOXS", "OILU", "OILD", "BOIL", "KOLD", "NRGU", "NRGD", "GUSH", "DRIP",
+    "LABU", "LABD", "TQQQ", "SQQQ", "UVXY", "SVXY", "UVIX", "TNA", "TZA", "FAS", "FAZ",
+    "YINN", "YANG", "UCO", "SCO", "UGL", "GLL", "AGQ", "ZSL", "JNUG", "JDST",
+    "NUGT", "DUST", "ERX", "ERY", "TECL", "TECS", "SPXL", "SPXS", "UPRO", "SPXU",
+    "UDOW", "SDOW", "TMF", "TMV", "BITX", "CONL", "DPST", "WANT", "CWEB",
+    "COPX", "COPZ", "CPER", "KCOP", "SLVX", "SLVO",
+})
+
+# Union with the existing commodity-ETF set — both are noise in momentum EQUITY
+# discovery. frozenset so it cannot be mutated accidentally at runtime.
+_MOMENTUM_EXCLUDED_ETF_TICKERS = frozenset(_LEVERAGED_INVERSE_ETF_TICKERS | _COMMODITY_ETF_TICKERS)
+
+
+def _is_excluded_momentum_etf(ticker: str, config: dict) -> bool:
+    """True if ``ticker`` is a leveraged/inverse/commodity ETF that should be kept
+    out of momentum EQUITY discovery / rediscovery / watchlist. Gated by
+    ``momentum_discovery_exclude_leveraged_etfs`` (default True). Single source of
+    truth so every momentum entry path stays consistent (backtest 404780)."""
+    if not config.get("momentum_discovery_exclude_leveraged_etfs", True):
+        return False
+    return str(ticker).strip().upper() in _MOMENTUM_EXCLUDED_ETF_TICKERS
+
+
+def _filter_momentum_etf_candidates(
+    candidates: list[tuple[str, float, float]], config: dict,
+) -> list[tuple[str, float, float]]:
+    """Drop leveraged/inverse/commodity ETFs from momentum equity-discovery
+    candidates (list of (ticker, ret20, ret60) tuples)."""
+    return [c for c in candidates if not _is_excluded_momentum_etf(c[0], config)]
+
+# Tier-3 A3 (2026-05-17): macro-event reasons that supersede LLM-sentiment
+# veto on pending future trades. Backtest 901920 cancelled SNDK's 2025-11-28
+# scheduled buy ("S&P 500 entry" signal) because fresh LLM sentiment was
+# negative; SNDK then rallied +487%. These reasons are objectively verifiable
+# (index addition is a public event), so LLM sentiment can't be more right
+# than the macro signal. Matched case-insensitively as substrings.
+_MACRO_OVERRIDE_REASON_KEYWORDS: tuple[str, ...] = (
+    "s&p 500",
+    "s&p500",
+    "index addition",
+    "index entry",
+    "index reweight",
+    "russell",
+    "nasdaq 100",
+    "buyout",
+    "acquisition target",
+    "m&a",
+    "merger",
+    "tender offer",
+    "insider buy",
+    "strong benzinga",
+)
+
+
+def _macro_event_supersedes_sentiment(reason: str) -> bool:
+    """True if ``reason`` matches a macro event that LLM sentiment cannot veto."""
+    if not reason:
+        return False
+    text = str(reason).lower()
+    return any(kw in text for kw in _MACRO_OVERRIDE_REASON_KEYWORDS)
+
 # Neo4j driver handle (set by run_once, used by module-level helpers)
 _shared_neo4j_driver = None
 
@@ -9829,9 +12358,26 @@ _neo4j_market_cap_cache: dict[str, float] = {}
 
 
 def _load_neo4j_market_cap_cache(driver) -> None:
-    """Load yf_market_cap from Neo4j Company nodes (set by graph engine Phase 1b)."""
+    """Load yf_market_cap from Neo4j Company nodes (set by graph engine Phase 1b).
+
+    Phase δ observability sweep (2026-05-18, BT232179 follow-up): the prior
+    `if _neo4j_market_cap_cache: _log(...)` gate + `except Exception: pass`
+    silent-swallow combo could hide BOTH the Neo4j-empty case AND the
+    Neo4j-driver-error case. BT232179 showed mcap pre-seed running with an
+    empty Neo4j cache; this function's silent failure modes are an upstream
+    contributor. Always log the outcome (populated count OR error) so
+    operators can correlate downstream A1 misses with the load-time state.
+    """
     global _neo4j_market_cap_cache
-    if _neo4j_market_cap_cache or driver is None:
+    if _neo4j_market_cap_cache:
+        # Already populated this session — nothing to do.
+        return
+    if driver is None:
+        _log(
+            "Neo4j market_cap cache: skipped — no Neo4j driver "
+            "(graph engine Phase 1b may not have initialized)",
+            "yellow",
+        )
         return
     try:
         with driver.session() as session:
@@ -9844,10 +12390,35 @@ def _load_neo4j_market_cap_cache(driver) -> None:
                 mc = float(rec.get("mc") or 0)
                 if t and mc > 0:
                     _neo4j_market_cap_cache[t] = mc
-        if _neo4j_market_cap_cache:
-            _log(f"Neo4j market_cap cache loaded: {len(_neo4j_market_cap_cache)} companies", "green")
-    except Exception:
-        pass  # Phase 1b may not have run yet — silent fallback
+        _n_loaded = len(_neo4j_market_cap_cache)
+        if _n_loaded > 0:
+            _log(
+                f"Neo4j market_cap cache loaded: {_n_loaded} companies",
+                "green",
+            )
+        else:
+            # Phase δ: SURFACE the empty-load case. Prior silent-fail
+            # mode left operators chasing "A1 returns LOW for everything"
+            # downstream without any audit trail of WHY the mcap cache
+            # was empty.
+            _log(
+                "Neo4j market_cap cache: 0 companies loaded — A1 mega-cap "
+                "tier resolution will fall back to raw_score for ALL "
+                "symbols (BT109429/BT232179 silent-fail mode). Verify "
+                "graph engine Phase 1b ingestion (yf_market_cap property "
+                "on Company nodes).",
+                "red",
+            )
+    except Exception as _mc_exc:
+        # Phase δ: SURFACE the exception. Prior `pass` swallowed driver
+        # connection errors, schema mismatches, etc. — leaving downstream
+        # callers to debug "A1 silently LOW" with no upstream signal.
+        _log(
+            f"Neo4j market_cap cache: load failed ({_mc_exc!r}) — A1 mcap "
+            f"path will be inert for this run. Phase 1b may not have run "
+            f"yet, or the Neo4j driver is misconfigured.",
+            "red",
+        )
 
 
 # V16: Removed duplicate _load_neo4j_market_cap_cache definition and duplicate _neo4j_market_cap_cache declaration
@@ -10430,6 +13001,23 @@ def _save_cached_articles(conn, date_key: str, articles: list, start_iso: str, e
         _log(f"Article cache save error: {e}", "yellow")
 
 
+def _invalidate_cached_articles(conn, date_key: str, *, sentiment_cache_scope_id: str = "") -> None:
+    """Delete the cached article doc for ``date_key`` (Scope D C1).
+
+    Used when a live first-touch ``force_fresh`` fetch returns EMPTY: the existing
+    doc may be a stale backtest-written entry, and leaving it lets the next
+    same-day live cycle (``force_fresh=False``) serve the backtest articles +
+    aggregated LLM sentiment (skipping the live LLM). Removing it forces the next
+    cycle to MISS the cache and re-fetch fresh. Best-effort."""
+    if conn is None:
+        return
+    try:
+        _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).delete().run(conn)
+        _log(f"Article cache INVALIDATE for {date_key} (force_fresh fetch returned empty)", "cyan")
+    except Exception as e:
+        _log(f"Article cache invalidate error: {e}", "yellow")
+
+
 def _fetch_alpaca_news_all(start_dt: datetime, end_dt: datetime, key: str, secret: str, limit: int = 50) -> list[dict]:
     """Fetch Alpaca news for all symbols without relying on the legacy news strategy module."""
     if not key or not secret:
@@ -10515,10 +13103,18 @@ def _fetch_articles_cached(
     min_articles: int,
     *,
     sentiment_cache_scope_id: str = "",
+    force_fresh: bool = False,
 ) -> tuple[list, bool, dict | None]:
     """
     Return (articles, from_cache, cached_sentiment) for the given date range.
     Uses RethinkDB cache when available; cached_sentiment is dict or None.
+
+    1-C (bug-sweep 2026-05-28): ``force_fresh=True`` bypasses the cache HIT so a
+    live run never serves articles + aggregated LLM sentiment that a backtest may
+    have written for this same date_key (date_key is the only cache key). A fresh
+    Alpaca fetch is performed and re-cached, and cached_sentiment comes back None
+    so the caller re-runs the LLM on the fresh articles instead of adopting the
+    stale backtest sentiment (which would skip the LLM entirely).
     """
     conn = _get_nexus_db_conn()
     if conn:
@@ -10528,7 +13124,7 @@ def _fetch_articles_cached(
             date_key,
             sentiment_cache_scope_id=sentiment_cache_scope_id,
         )
-        if cached_articles is not None and len(cached_articles) >= min_articles:
+        if (not force_fresh) and cached_articles is not None and len(cached_articles) >= min_articles:
             return cached_articles, True, cached_sentiment
     _log(f"Article cache MISS for {date_key}; fetching from Alpaca (limit={limit})", "cyan")
     articles = _fetch_alpaca_news_all(start_dt, end_dt, alpaca_key, alpaca_secret, limit=limit)
@@ -10537,6 +13133,12 @@ def _fetch_articles_cached(
         start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         _save_cached_articles(conn, date_key, articles, start_iso, end_iso)
+    elif conn and force_fresh:
+        # Scope D C1: a live first-touch force_fresh fetch came back EMPTY. The
+        # existing cached doc may be a stale backtest entry; leaving it lets the
+        # next same-day cycle (force_fresh=False) serve it. Invalidate so the next
+        # cycle re-fetches fresh instead of adopting backtest articles+sentiment.
+        _invalidate_cached_articles(conn, date_key, sentiment_cache_scope_id=sentiment_cache_scope_id)
     return articles or [], False, None
 
 
@@ -10807,7 +13409,7 @@ def _build_private_entity_alias_lookup(alias_index: list[dict]) -> dict[str, lis
 
 def _hierarchy_llm_config() -> tuple[str, str, str]:
     provider = (os.environ.get("GRAPH_NEXUS_HIERARCHY_LLM_PROVIDER", "deepseek") or "deepseek").strip().lower()
-    if provider not in ("gemini", "deepseek", "openai", "azure"):
+    if provider not in _NEXUS_VALID_PROVIDERS:
         provider = "deepseek"
     model = (os.environ.get("GRAPH_NEXUS_HIERARCHY_LLM_MODEL", "") or "").strip()
     if not model:
@@ -10820,6 +13422,23 @@ def _hierarchy_llm_config() -> tuple[str, str, str]:
 
 def _hierarchy_llm_provider_config() -> dict[str, Any]:
     provider = (os.environ.get("GRAPH_NEXUS_HIERARCHY_LLM_PROVIDER", "deepseek") or "deepseek").strip().lower()
+    if provider == "bedrock":
+        # Bedrock requires a region — unlike ollama (which defaults to
+        # localhost), _call_bedrock returns "" with no region, so the
+        # env-driven hierarchy provider must supply one.
+        region = (
+            os.environ.get("GRAPH_NEXUS_HIERARCHY_BEDROCK_REGION")
+            or os.environ.get("BEDROCK_REGION")
+            or os.environ.get("AWS_REGION")
+            or ""
+        ).strip()
+        reasoning = (os.environ.get("GRAPH_NEXUS_HIERARCHY_BEDROCK_REASONING") or "").strip().lower()
+        out: dict[str, Any] = {}
+        if region:
+            out["bedrock_region"] = region
+        if reasoning and reasoning != "off":
+            out["bedrock_reasoning"] = reasoning
+        return out
     if provider != "azure":
         return {}
     return {
@@ -10857,12 +13476,15 @@ def _structured_hierarchy_validation(prompt: str, output_type: Any, *, system_pr
         )
 
     tools = [google_search_tool] if allow_search else None
-    raw = call_structured_llm_by_provider(
+    # TODO: thread `config` into this helper to attribute critical-guard
+    # failures back to the originating backtest/instance.
+    raw = _scl_guarded(
         provider,
         api_key,
         model,
         prompt,
         output_type,
+        attribution_keys={"call_site": "structured_hierarchy_validation"},
         system_prompt=system_prompt,
         tools=tools,
         max_output_tokens=0,
@@ -11670,26 +14292,41 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             f"Daily sentiment LLM: prompt ~{_est_prompt_tokens:,} tokens | headlines={len(headlines)} | max_output={_max_output_tokens if _max_output_tokens > 0 else 'unlimited'}",
             "cyan",
         )
-        raw = call_structured_llm_by_provider(
-            provider,
-            api_key,
-            model,
-            prompt,
-            _EnhancedSentimentResponse,
-            system_prompt=(
-                "Return only structured financial headline classifications as minimal JSON. "
-                "Use the short alias keys (t, s, e, sp, d, r). "
-                "Omit fields with default values, empty arrays/objects, and omit sp when it equals 1.0. "
-                "Max 5 words per reason/desc. Do NOT add explanations or commentary. "
-                "Target under 1500 total output tokens."
-            ),
-            max_output_tokens=_max_output_tokens,
-            retries=1 if sentiment_limits["is_gpt_oss"] else 2,
-            output_retries=1 if sentiment_limits["is_gpt_oss"] else 3,
-            timeout_sec=180 if sentiment_limits["is_gpt_oss"] else 360,
-            provider_config=provider_config,
-            prefer_raw_json=bool(sentiment_limits["is_gpt_oss"]),
+        _sent_instance_id = (
+            str((config or {}).get("runtime_instance_id") or "").strip()
+            or str((config or {}).get("instance_id") or "").strip()
         )
+        with llm_call_context(
+            backtest_id=(config or {}).get("_telemetry_backtest_id"),
+            instance_id=(config or {}).get("_telemetry_instance_id"),
+            strategy="GraphNexusAnalysis",
+            call_site="sentiment",
+        ):
+            raw = _scl_guarded(
+                provider,
+                api_key,
+                model,
+                prompt,
+                _EnhancedSentimentResponse,
+                attribution_keys={
+                    "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                    "instance_id": (config or {}).get("_telemetry_instance_id"),
+                    "call_site": "sentiment",
+                },
+                system_prompt=(
+                    "Return only structured financial headline classifications as minimal JSON. "
+                    "Use the short alias keys (t, s, e, sp, d, r). "
+                    "Omit fields with default values, empty arrays/objects, and omit sp when it equals 1.0. "
+                    "Max 5 words per reason/desc. Do NOT add explanations or commentary. "
+                    "Target under 1500 total output tokens."
+                ),
+                max_output_tokens=_max_output_tokens,
+                retries=1 if sentiment_limits["is_gpt_oss"] else 2,
+                output_retries=1 if sentiment_limits["is_gpt_oss"] else 3,
+                timeout_sec=180 if sentiment_limits["is_gpt_oss"] else 360,
+                provider_config=provider_config,
+                prefer_raw_json=bool(sentiment_limits["is_gpt_oss"]),
+            )
         _build_llm_trace("enhanced_sentiment", provider, model, prompt, (
             "Return only structured financial headline classifications. "
             "Use the schema fields exactly; omit markdown and free-form wrappers."
@@ -11764,7 +14401,14 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             _log(f"Enhanced sentiment: LLM returned {_n_raw} sentiment item(s) — all empty/invalid tickers or empty list", "yellow")
 
         # Parse future trades
+        # Phase δ observability sweep (2026-05-18, BT232179 follow-up): the
+        # prior `if future_trades: _log(...)` gate hid the empty-result case
+        # — operators couldn't distinguish "LLM returned 0 future events"
+        # from "LLM returned events but all failed validation" from "LLM
+        # crashed before reaching this path". Always log, with raw-vs-valid
+        # counts so the operator sees the filter funnel.
         future_trades = []
+        _ft_raw_count = len(raw.future) if raw.future else 0
         for ft in raw.future:
             ticker = str(ft.ticker).upper().strip()
             date = str(ft.date).strip()
@@ -11772,19 +14416,34 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
             reason = str(ft.reason).strip()
             if ticker and len(date) == 10 and signal in (1, -1):
                 future_trades.append({"ticker": ticker, "date": date, "signal": signal, "reason": reason})
-        if future_trades:
-            _log(f"LLM future events: {len(future_trades)} trades scheduled", "green")
+        if future_trades or _ft_raw_count > 0:
+            _ft_color = "green" if future_trades else "yellow"
+            _log(
+                f"LLM future events: {len(future_trades)}/{_ft_raw_count} "
+                f"trades scheduled (after ticker+date+signal validation)",
+                _ft_color,
+            )
 
         # Parse cancellation recommendations
         cancel_recommendations = []
+        _ct_raw_count = len(raw.cancel) if raw.cancel else 0
         for ct in raw.cancel:
             ticker = str(ct.ticker).upper().strip()
             date = str(ct.date).strip()
             reason = str(ct.reason).strip()
             if ticker and len(date) == 10:
                 cancel_recommendations.append({"ticker": ticker, "date": date, "reason": reason})
-        if cancel_recommendations:
-            _log(f"LLM cancel recommendations: {len(cancel_recommendations)} trades to review", "yellow")
+        # Phase δ: always log, including the 0-cancel case. A burst of cancels
+        # is operationally important and the prior gate could hide quiet
+        # periods where the LLM returned `cancel:[]` (vs the schema-error
+        # case where `raw.cancel` itself was malformed).
+        if cancel_recommendations or _ct_raw_count > 0:
+            _ct_color = "yellow" if cancel_recommendations else "cyan"
+            _log(
+                f"LLM cancel recommendations: {len(cancel_recommendations)}"
+                f"/{_ct_raw_count} trades to review (after ticker+date validation)",
+                _ct_color,
+            )
 
         # Parse trend updates
         trend_updates = raw.trends.model_dump(by_alias=True)
@@ -11792,8 +14451,15 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
         n_confirm = len(trend_updates.get("confirm") or [])
         n_weaken = len(trend_updates.get("weaken") or [])
         n_end = len(trend_updates.get("end") or [])
-        if n_new or n_confirm or n_weaken or n_end:
-            _log(f"LLM trends: {n_new} new, {n_confirm} confirmed, {n_weaken} weakening, {n_end} ended", "green")
+        # Phase δ: always log so the all-zeros case is visible too. Trend
+        # tracking is a key Phase 2 signal; zero-trend bars need an audit
+        # trail to distinguish "no movement" from "LLM trend parser broke".
+        _trend_color = "green" if (n_new or n_confirm or n_weaken or n_end) else "cyan"
+        _log(
+            f"LLM trends: {n_new} new, {n_confirm} confirmed, {n_weaken} "
+            f"weakening, {n_end} ended",
+            _trend_color,
+        )
 
         return result, future_trades, cancel_recommendations, trend_updates
     except Exception as e:
@@ -11889,12 +14555,15 @@ def _classify_macro_news_via_llm(
             "Keep reason under 8 words. Max 3 sectors per signal. "
             "Minimize total output tokens. No markdown or prose."
         )
-        raw = call_structured_llm_by_provider(
+        # TODO: thread `config` into _classify_macro_news_via_llm to attribute
+        # critical-guard failures back to the originating backtest/instance.
+        raw = _scl_guarded(
             provider,
             api_key,
             model,
             prompt,
             _MacroSignalsResponse,
+            attribution_keys={"call_site": "macro_news_classification"},
             system_prompt=macro_batch_sys,
             max_output_tokens=0,
             retries=2,
@@ -12143,12 +14812,15 @@ def _classify_macro_with_tools(
     )
 
     try:
-        raw = call_structured_llm_by_provider(
+        # TODO: thread `config` into _classify_macro_with_tools to attribute
+        # critical-guard failures back to the originating backtest/instance.
+        raw = _scl_guarded(
             "gemini",
             api_key,
             model,
             tool_prompt,
             _MacroSignalsResponse,
+            attribution_keys={"call_site": "macro_news_tools_fallback"},
             system_prompt=(
                 "Use the available Neo4j tools when needed, then return only structured macro signals. "
                 "Do not include markdown or explanatory prose outside the schema."
@@ -12847,7 +15519,226 @@ def _query_conglomerate_exposure(session, tickers: set, as_of_date: str = "") ->
 # Contagion propagation engine
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list, config: dict, date_key: str = "") -> dict:
+_NEO4J_SNAPSHOT_DEFAULT_LRU_CAP = 256
+
+
+def _neo4j_cached_query(
+    strategy_cache: dict | None,
+    config: dict,
+    query_name: str,
+    seeds,
+    date_key: str,
+    query_fn,
+):
+    """Phase α.2 (2026-05-18, BT109429 follow-up): cache Neo4j query
+    results to reduce cross-bar variance in paired backtest re-runs.
+
+    The variance/robustness agent attributed 25-35% of the 4.8x same-code
+    spread to graph-propagation seed sensitivity. If Neo4j is mutated
+    externally (e.g., a re-index running concurrently with a backtest),
+    per-bar queries drift. Snapshotting per ISO week locks the propagation
+    graph against external mutation across the snapshot window.
+
+    Snapshot granularity (``nexus_neo4j_snapshot_granularity`` config):
+      * ``"weekly"`` (default): one snapshot per ISO-week of ``date_key``.
+      * ``"once"``: one snapshot for the entire backtest run.
+      * ``"off"``: no snapshot — pass-through to ``query_fn``.
+
+    Live mode (``_GN_LIVE_MODE_FLAG=True``) ALWAYS bypasses the snapshot
+    so production trading sees fresh graph state.
+
+    Cache lives at ``strategy_cache["_neo4j_snapshot"]`` (an ``OrderedDict``
+    with LRU eviction, default cap 256 — tunable via
+    ``nexus_neo4j_snapshot_lru_cap``). Cleared per backtest restart via
+    persistence blacklist + migration_reset_keys.
+
+    **Mutation contract**: callers MUST treat the returned list/dict as
+    read-only. The helper does not deep-copy — mutating the result
+    pollutes the snapshot for subsequent same-key calls. All current
+    consumers in ``_compute_propagated_scores`` only iterate; if a new
+    caller needs to mutate, they must shallow-copy first.
+    """
+    if _GN_LIVE_MODE_FLAG or not isinstance(strategy_cache, dict):
+        return query_fn()
+    # Bare import (not `backend.`) because prod Docker layout is flat at /app/.
+    from _phase_alpha_helpers import neo4j_snapshot_key as _neo4j_snapshot_key
+    key_pair = _neo4j_snapshot_key(query_name, seeds, date_key, config)
+    if key_pair is None:
+        # granularity="off" OR broken iterable — bypass cache.
+        return query_fn()
+    cache_key, _granularity = key_pair
+    import collections as _collections_local
+    snapshot = strategy_cache.setdefault("_neo4j_snapshot", _collections_local.OrderedDict())
+    # If a prior helper version stored a plain dict, migrate to OrderedDict
+    # in place so LRU semantics work going forward.
+    if not isinstance(snapshot, _collections_local.OrderedDict):
+        snapshot = _collections_local.OrderedDict(snapshot)
+        strategy_cache["_neo4j_snapshot"] = snapshot
+    if cache_key in snapshot:
+        # LRU hit: bump to MRU end.
+        try:
+            snapshot.move_to_end(cache_key, last=True)
+        except KeyError:  # pragma: no cover — racy delete; treat as miss
+            pass
+        else:
+            stats = strategy_cache.setdefault("_neo4j_snapshot_stats", {"hits": 0, "misses": 0})
+            stats["hits"] = int(stats.get("hits", 0) or 0) + 1
+            return snapshot[cache_key]
+    result = query_fn()
+    snapshot[cache_key] = result
+    # LRU eviction: pop oldest if over cap. Default 256 entries is generous
+    # — a 6-month backtest produces ~26 weeks * 11 query types = ~286
+    # entries; 256 fits the common case without spilling, and overflow
+    # weeks evict cleanly. Operators can tune via the config knob.
+    try:
+        cap = max(8, int(config.get(
+            "nexus_neo4j_snapshot_lru_cap",
+            _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP,
+        ) or _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP))
+    except (TypeError, ValueError):
+        cap = _NEO4J_SNAPSHOT_DEFAULT_LRU_CAP
+    while len(snapshot) > cap:
+        try:
+            snapshot.popitem(last=False)
+        except KeyError:  # pragma: no cover
+            break
+    stats = strategy_cache.setdefault("_neo4j_snapshot_stats", {"hits": 0, "misses": 0})
+    stats["misses"] = int(stats.get("misses", 0) or 0) + 1
+    return result
+
+
+def _build_sector_map_for_aug(driver, tickers: set, strategy_cache) -> dict[str, str]:
+    """η.B' helper: return {ticker: sector_name} for the given tickers.
+
+    Cached per-run in strategy_cache["_eta_sector_map"]. Sectors don't
+    change mid-backtest so the cache is sound for the full run.
+    Uses OPTIONAL MATCH so tickers without an IN_SECTOR edge get a
+    sentinel "" entry (rather than being absent and re-queried every
+    bar — the original implementation had a negative-cache trap that
+    caused permanent re-querying). `_max_peer_raw_in_sector` already
+    treats "" sector as "no peer" via `if not sec: return 0.0`.
+    Returns empty dict if Neo4j unavailable AND nothing cached.
+    Tracks failures in strategy_cache["_eta_sector_map_failed_calls"]
+    so a connectivity bug after the first successful query surfaces in
+    the per-bar telemetry instead of silently zeroing out η.B'.
+    """
+    if not tickers:
+        return {}
+    if isinstance(strategy_cache, dict):
+        _cached = strategy_cache.get("_eta_sector_map")
+        if isinstance(_cached, dict):
+            _need = [t for t in tickers if t not in _cached]
+            if not _need:
+                return {t: _cached[t] for t in tickers if t in _cached}
+        else:
+            strategy_cache["_eta_sector_map"] = {}
+            _need = list(tickers)
+        _cache_dict = strategy_cache["_eta_sector_map"]
+    else:
+        _cache_dict = {}
+        _need = list(tickers)
+    if not driver:
+        return {t: _cache_dict[t] for t in tickers if t in _cache_dict}
+    try:
+        with driver.session() as session:
+            result = session.run(
+                "MATCH (c:Company) WHERE c.ticker IN $tickers "
+                "OPTIONAL MATCH (c)-[:IN_SECTOR]->(s) "
+                "RETURN c.ticker AS ticker, s.name AS sector",
+                tickers=list(_need),
+            )
+            _need_set = {str(t).strip().upper() for t in _need}
+            _seen: set[str] = set()
+            for row in result:
+                tk = row.get("ticker")
+                sec = row.get("sector")
+                if not isinstance(tk, str):
+                    continue
+                _tk_u = tk.strip().upper()
+                _seen.add(_tk_u)
+                # OPTIONAL MATCH returns sec=None when no IN_SECTOR edge.
+                # Cache sentinel "" so we don't re-query this ticker.
+                _cache_dict[_tk_u] = sec if isinstance(sec, str) else ""
+            # Tickers absent from the result entirely (no Company node).
+            # Cache sentinel so they don't re-query indefinitely.
+            for _missing in _need_set - _seen:
+                _cache_dict[_missing] = ""
+    except Exception as e:
+        if isinstance(strategy_cache, dict):
+            _fail_n = int(strategy_cache.get("_eta_sector_map_failed_calls", 0) or 0)
+            strategy_cache["_eta_sector_map_failed_calls"] = _fail_n + 1
+            if _fail_n == 0:
+                _log(
+                    f"[ETA.B] _build_sector_map_for_aug FAILED (fail-open, "
+                    f"first occurrence — subsequent failures counted in "
+                    f"strategy_cache._eta_sector_map_failed_calls): {e}",
+                    "red",
+                )
+        else:
+            _log(f"[ETA.B] _build_sector_map_for_aug failed (fail-open): {e}", "yellow")
+    return {t: _cache_dict[t] for t in tickers if t in _cache_dict}
+
+
+def _max_peer_raw_in_sector(ticker: str, aggregated: dict, sector_map: dict) -> float:
+    """η.B' helper: return the maximum raw_score among aggregated entries
+    whose ticker is in the same sector as the input ticker (excluding the
+    ticker itself). Returns 0.0 if no peer or sector unknown.
+    """
+    sec = sector_map.get(ticker)
+    if not sec:
+        return 0.0
+    best = 0.0
+    for peer, doc in aggregated.items():
+        if peer == ticker:
+            continue
+        if sector_map.get(peer) != sec:
+            continue
+        raw = float(doc.get("raw_score", 0.0) or 0.0)
+        if raw > best:
+            best = raw
+    return best
+
+
+def _cap_propagation_fanout_per_seed(edges: list[dict], config: dict) -> list[dict]:
+    """Cap how many 1-hop propagation edges a single source ("seed") contributes,
+    keeping the strongest-coupled neighbors (by confidence, then revenue_pct).
+
+    Prevents one news item (e.g. a HOOD earnings hit) from injecting its entire
+    COMPETES_WITH cohort (~90+ names at one score) into scoring and flooding the
+    propagation/backfill queue. Disabled (returns the same list object, no-op)
+    when propagation_max_per_seed <= 0.
+    """
+    max_per_seed = int(config.get("propagation_max_per_seed", 0) or 0)
+    if max_per_seed <= 0 or not edges:
+        return edges
+    by_source: dict[str, list[dict]] = {}
+    for e in edges:
+        by_source.setdefault(str(e.get("source") or ""), []).append(e)
+    keep: set[int] = set()
+    for group in by_source.values():
+        if len(group) <= max_per_seed:
+            keep.update(id(e) for e in group)
+        else:
+            ranked = sorted(
+                group,
+                key=lambda e: (
+                    float(e.get("confidence", 0.0) or 0.0),
+                    float(e.get("revenue_pct", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )[:max_per_seed]
+            keep.update(id(e) for e in ranked)
+    return [e for e in edges if id(e) in keep]
+
+
+def _compute_propagated_scores(
+    driver,
+    sentiment_data: dict,
+    symbols_list: list,
+    config: dict,
+    date_key: str = "",
+    strategy_cache: dict | None = None,
+) -> dict:
     """
     Full graph contagion engine. Takes LLM sentiment data, traverses Neo4j graph
     through multiple relationship types and hops, applies directional and event-aware
@@ -12858,6 +15749,11 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         sentiment_data: dict[ticker -> {"sentiment": int, "event": str}]
         symbols_list: list of tickers in the trading universe
         config: strategy configuration
+        date_key: ISO date for the bar being scored (drives Phase α.2
+            ISO-week snapshot keying).
+        strategy_cache: optional run_once-level cache. When provided in
+            backtest mode, enables the Phase α.2 Neo4j snapshot
+            (cleared per backtest restart). Pass-through in live mode.
 
     Returns:
         dict[ticker -> {"raw_score": float, "reasons": list[str]}]
@@ -12891,7 +15787,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
     with driver.session() as session:
         # Discover which relationship types exist in the DB; use only those (avoids "not available" warnings)
         _log("Graph metadata: relationship type discovery start", "cyan")
-        available = _get_available_relationship_types(session)
+        available = _neo4j_cached_query(
+            strategy_cache, config, "available_rels", None, date_key,
+            lambda: _get_available_relationship_types(session),
+        )
         _log(f"Graph metadata: relationship type discovery done | count={len(available)}", "cyan")
         rels_1hop = [r for r in _REL_TYPES_1HOP if r in available]
         rels_2hop = [r for r in _REL_TYPES_2HOP if r in available]
@@ -12899,14 +15798,90 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
             f"Graph: {n_seed} seed tickers | as_of={date_key or 'latest'} | 1-hop rels: {rels_1hop or '(none)'} | 2-hop rels: {rels_2hop or '(none)'} | sector: {'yes' if 'IN_SECTOR' in available else 'no'} | macro-flow: {'yes' if 'SUPPLIES_TO_SECTOR' in available else 'no'} | institutional: {'yes' if 'HOLDS' in available else 'no'}",
             "cyan",
         )
+        # ── Kick off the slow institutional co-holdings query as a bg future
+        # so it overlaps with the cheap 1-hop / sector / 2-hop queries below.
+        # In backtest 419346 this query was 37s of the 41s Neo4j budget; the
+        # rest collectively were ~4s. Each thread needs its OWN driver.session()
+        # — neo4j-python sessions are not thread-safe.
+        use_inst = config.get("use_institutional_correlation", True)
+        _inst_co_holdings_fut = None
+        _inst_snapshot_key: str | None = None  # set when α.2 snapshot is in play
+        _inst_seed_cap = int(config.get("institutional_seed_cap", 50) or 50)
+        if use_inst and "HOLDS" in available and config.get("_inst_co_holdings_cache") is None:
+            # Phase η bug-sweep: η.A seeds tickers with event="momentum_breakout"
+            # (a technical-momentum signal with no LLM news backing); treat it
+            # the same as its sibling "trend_momentum" for institutional-HOLDS
+            # propagation (i.e. excluded — institutional seeding should track
+            # news-derived sentiment, not engine-internal technical seeds).
+            _INST_EXCLUDE_EVENTS = {"trend_momentum", "momentum_breakout"}
+            _inst_seeds = {
+                t for t, d in sentiment_data.items()
+                if d.get("sentiment", 0) != 0
+                and d.get("event", "") not in _INST_EXCLUDE_EVENTS
+            }
+            _inst_pre_filter = len(_inst_seeds)
+            if len(_inst_seeds) > _inst_seed_cap:
+                _inst_seeds = set(sorted(_inst_seeds)[:_inst_seed_cap])
+            # Phase α.2 bug-sweep follow-up (2026-05-18): the institutional bg
+            # query was originally uncached and contributed ~15-25% of the
+            # remaining graph variance. Snapshot lookup BEFORE the bg launch:
+            # cache hit → set `_inst_co_holdings_cache` (which retrieval at
+            # line ~14681 already honors) and skip the thread; cache miss →
+            # launch as before and store after retrieval.
+            _inst_snap_pair = None
+            if not _GN_LIVE_MODE_FLAG and isinstance(strategy_cache, dict):
+                # Bare import (not `backend.`) because prod Docker is flat at /app/.
+                from _phase_alpha_helpers import (
+                    neo4j_snapshot_key as _neo4j_snapshot_key_local,
+                )
+                _inst_snap_pair = _neo4j_snapshot_key_local(
+                    "inst_co_holdings", _inst_seeds, date_key, config,
+                )
+            if _inst_snap_pair is not None:
+                _inst_snapshot_key, _ = _inst_snap_pair
+                _inst_snap_dict = strategy_cache.get("_neo4j_snapshot") if isinstance(strategy_cache, dict) else None
+                if _inst_snap_dict is not None and _inst_snapshot_key in _inst_snap_dict:
+                    config["_inst_co_holdings_cache"] = _inst_snap_dict[_inst_snapshot_key]
+                    _log(
+                        f"  Institutional co-holdings query: snapshot cache HIT "
+                        f"(seeds={len(_inst_seeds)})",
+                        "cyan",
+                    )
+                    _inst_co_holdings_fut = None
+            if config.get("_inst_co_holdings_cache") is None:
+                _log(
+                    f"  Institutional co-holdings query: start (bg) | "
+                    f"seeds={len(_inst_seeds)} (filtered={_inst_pre_filter} of {len(mentioned)} mentioned"
+                    f"{', capped' if _inst_pre_filter > _inst_seed_cap else ''})",
+                    "cyan",
+                )
+                def _inst_co_holdings_worker(_seeds=_inst_seeds, _dk=date_key):
+                    # New session per thread — neo4j-python sessions are not thread-safe.
+                    with driver.session() as _bg_inst_session:
+                        return _query_institutional_co_holdings(_bg_inst_session, _seeds, as_of_date=_dk)
+                from concurrent.futures import ThreadPoolExecutor as _InstTPE
+                _inst_executor = _InstTPE(max_workers=1)
+                _inst_co_holdings_fut = _inst_executor.submit(_inst_co_holdings_worker)
+                _inst_executor.shutdown(wait=False)
+
         # ── 1-hop: relationship-aware directional propagation ──────────────
         _log(f"  1-hop query out: start | seeds={len(mentioned)} | rels={len(rels_1hop)}", "cyan")
-        out_edges = _query_1hop(session, mentioned, "out", rels_1hop, as_of_date=date_key)
+        out_edges = _neo4j_cached_query(
+            strategy_cache, config, "1hop_out", mentioned, date_key,
+            lambda: _query_1hop(session, mentioned, "out", rels_1hop, as_of_date=date_key),
+        )
         _log(f"  1-hop query out: done | edges={len(out_edges)}", "cyan")
         _log(f"  1-hop query in: start | seeds={len(mentioned)} | rels={len(rels_1hop)}", "cyan")
-        in_edges = _query_1hop(session, mentioned, "in", rels_1hop, as_of_date=date_key)
+        in_edges = _neo4j_cached_query(
+            strategy_cache, config, "1hop_in", mentioned, date_key,
+            lambda: _query_1hop(session, mentioned, "in", rels_1hop, as_of_date=date_key),
+        )
         _log(f"  1-hop query in: done | edges={len(in_edges)}", "cyan")
         all_1hop = out_edges + in_edges
+        # B (2026-05-26): cap per-seed fan-out so one news item (e.g. a HOOD
+        # earnings hit) can't inject its whole COMPETES_WITH cohort. No-op when
+        # propagation_max_per_seed <= 0.
+        all_1hop = _cap_propagation_fanout_per_seed(all_1hop, config)
 
         for edge in all_1hop:
             src_data = sentiment_data.get(edge["source"])
@@ -12975,7 +15950,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         sector_edges = []
         if "IN_SECTOR" in available:
             _log(f"  Sector peer query: start | seeds={len(mentioned)}", "cyan")
-            sector_edges = _query_sector_peers(session, mentioned, as_of_date=date_key)
+            sector_edges = _neo4j_cached_query(
+                strategy_cache, config, "sector_peers", mentioned, date_key,
+                lambda: _query_sector_peers(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Sector peer query: done | edges={len(sector_edges)}", "cyan")
         else:
             _log("  Sector peers: skipped (IN_SECTOR not in graph)", "cyan")
@@ -13001,7 +15979,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         macro_edges = []
         if "SUPPLIES_TO_SECTOR" in available and "IN_SECTOR" in available:
             _log(f"  Macro sector flow query: start | seeds={len(mentioned)}", "cyan")
-            macro_edges = _query_macro_sector_flow(session, mentioned, as_of_date=date_key)
+            macro_edges = _neo4j_cached_query(
+                strategy_cache, config, "macro_sector_flow", mentioned, date_key,
+                lambda: _query_macro_sector_flow(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Macro sector flow query: done | edges={len(macro_edges)}", "cyan")
             # Normalize flow_value: find max to scale relative importance
             max_flow = max((e["flow_value"] for e in macro_edges), default=1.0) or 1.0
@@ -13032,10 +16013,16 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         max_hops = int(config.get("max_hops", 2))
         if max_hops >= 2 and rels_2hop:
             _log(f"  2-hop query out: start | seeds={len(mentioned)} | rels={len(rels_2hop)}", "cyan")
-            hop2_out = _query_2hop_chains(session, mentioned, "out", rels_2hop, as_of_date=date_key)
+            hop2_out = _neo4j_cached_query(
+                strategy_cache, config, "2hop_out", mentioned, date_key,
+                lambda: _query_2hop_chains(session, mentioned, "out", rels_2hop, as_of_date=date_key),
+            )
             _log(f"  2-hop query out: done | edges={len(hop2_out)}", "cyan")
             _log(f"  2-hop query in: start | seeds={len(mentioned)} | rels={len(rels_2hop)}", "cyan")
-            hop2_in = _query_2hop_chains(session, mentioned, "in", rels_2hop, as_of_date=date_key)
+            hop2_in = _neo4j_cached_query(
+                strategy_cache, config, "2hop_in", mentioned, date_key,
+                lambda: _query_2hop_chains(session, mentioned, "in", rels_2hop, as_of_date=date_key),
+            )
             _log(f"  2-hop query in: done | edges={len(hop2_in)}", "cyan")
             all_2hop = hop2_out + hop2_in
 
@@ -13068,39 +16055,63 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
             _log("  2-hop: skipped (no 2-hop relationship types in graph)", "cyan")
 
         # ── Institutional co-holding (only if HOLDS exists) ──────────────────
-        use_inst = config.get("use_institutional_correlation", True)
+        # `use_inst` was computed above (alongside the bg future kickoff).
         if use_inst and "HOLDS" in available:
             _inst_cache = config.get("_inst_co_holdings_cache")
             if _inst_cache is not None:
                 inst_edges = _inst_cache
                 _log(f"  Institutional co-holdings: reused cache | edges={len(inst_edges)}", "cyan")
+            elif _inst_co_holdings_fut is not None:
+                # Future was kicked off above — just collect the result. Most
+                # of the time it's already done because the 1-hop / sector /
+                # 2-hop queries take ~4s and the institutional query is ~37s.
+                try:
+                    inst_edges = _inst_co_holdings_fut.result(timeout=120)
+                except Exception as _inst_exc:
+                    _log(f"  Institutional co-holdings query failed: {_inst_exc}", "yellow")
+                    inst_edges = []
+                _log(f"  Institutional co-holdings query: done | edges={len(inst_edges)}", "cyan")
+                # Phase α.2 bug-sweep follow-up: store the bg result in the
+                # snapshot so subsequent same-week bars hit cache (the bg
+                # query was the largest single uncached variance source).
+                if (
+                    _inst_snapshot_key
+                    and not _GN_LIVE_MODE_FLAG
+                    and isinstance(strategy_cache, dict)
+                ):
+                    _inst_snap_store = strategy_cache.setdefault("_neo4j_snapshot", None)
+                    if _inst_snap_store is None:
+                        import collections as _collections_inst
+                        _inst_snap_store = _collections_inst.OrderedDict()
+                        strategy_cache["_neo4j_snapshot"] = _inst_snap_store
+                    _inst_snap_store[_inst_snapshot_key] = inst_edges
             else:
-                # Only query for tickers with non-zero sentiment AND real
-                # signal events — the universal momentum watchlist inflated
-                # sentiment_data with ~250+ "trend_momentum" entries (V31)
-                # causing combinatorial explosion in the 2-hop HOLDS traversal.
-                # Exclude trend_momentum: these are pure tracking with no
-                # LLM/news signal; institutional propagation from them is
-                # redundant (0.03 factor vs 0.20 sector 1-hop).
-                # Do NOT cache results — each day re-queries with its own
-                # seed set for full-quality edges.
-                _INST_EXCLUDE_EVENTS = {"trend_momentum"}
+                # Defensive fallback — sentiment_data became empty between the
+                # bg-kickoff branch and here, or HOLDS lookup changed. Inline.
+                # Phase η bug-sweep: include "momentum_breakout" alongside
+                # "trend_momentum" — both are engine-internal technical
+                # seeds without LLM news backing.
+                _INST_EXCLUDE_EVENTS = {"trend_momentum", "momentum_breakout"}
                 inst_seeds = {
                     t for t, d in sentiment_data.items()
                     if d.get("sentiment", 0) != 0
                     and d.get("event", "") not in _INST_EXCLUDE_EVENTS
                 }
-                _inst_pre_filter = len(inst_seeds)
-                _inst_seed_cap = int(config.get("institutional_seed_cap", 50) or 50)
+                _fallback_pre = len(inst_seeds)
                 if len(inst_seeds) > _inst_seed_cap:
                     inst_seeds = set(sorted(inst_seeds)[:_inst_seed_cap])
                 _log(
-                    f"  Institutional co-holdings query: start | "
-                    f"seeds={len(inst_seeds)} (filtered={_inst_pre_filter} of {len(mentioned)} mentioned"
-                    f"{', capped' if _inst_pre_filter > _inst_seed_cap else ''})",
+                    f"  Institutional co-holdings query: start (inline fallback) | "
+                    f"seeds={len(inst_seeds)} (filtered={_fallback_pre} of {len(mentioned)} mentioned"
+                    f"{', capped' if _fallback_pre > _inst_seed_cap else ''})",
                     "cyan",
                 )
-                inst_edges = _query_institutional_co_holdings(session, inst_seeds, as_of_date=date_key)
+                # Phase α.2 bug-sweep: wrap the inline-fallback branch too.
+                inst_edges = _neo4j_cached_query(
+                    strategy_cache, config, "inst_co_holdings",
+                    inst_seeds, date_key,
+                    lambda: _query_institutional_co_holdings(session, inst_seeds, as_of_date=date_key),
+                )
                 _log(f"  Institutional co-holdings query: done | edges={len(inst_edges)}", "cyan")
 
             for edge in inst_edges:
@@ -13143,7 +16154,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         if "SUPPLIER_OF" in available:
             all_affected = mentioned | {e["target"] for e in all_1hop}
             _log(f"  Supply chain concentration query: start | tickers={len(all_affected)}", "cyan")
-            sc_conc = _query_supply_chain_concentration(session, all_affected, as_of_date=date_key)
+            sc_conc = _neo4j_cached_query(
+                strategy_cache, config, "supply_chain_conc", all_affected, date_key,
+                lambda: _query_supply_chain_concentration(session, all_affected, as_of_date=date_key),
+            )
             _log(f"  Supply chain concentration query: done | tickers={len(sc_conc)}", "cyan")
             for ticker, counts in sc_conc.items():
                 if ticker not in contributions:
@@ -13162,7 +16176,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         # Competitors who share suppliers: negative news on one benefits the other more strongly
         if "COMPETES_WITH" in available and "SUPPLIER_OF" in available:
             _log(f"  Competitive overlap query: start | seeds={len(mentioned)}", "cyan")
-            comp_overlap = _query_competitive_overlap(session, mentioned, as_of_date=date_key)
+            comp_overlap = _neo4j_cached_query(
+                strategy_cache, config, "competitive_overlap", mentioned, date_key,
+                lambda: _query_competitive_overlap(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Competitive overlap query: done | edges={len(comp_overlap)}", "cyan")
             for edge in comp_overlap:
                 src_data = sentiment_data.get(edge["source"])
@@ -13182,7 +16199,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         # Subsidiaries of the same parent: news at one sibling signals parent-level issues
         if "PARENT_OF" in available or "CONTROLS" in available:
             _log(f"  Conglomerate sibling query: start | seeds={len(mentioned)}", "cyan")
-            sibling_edges = _query_conglomerate_exposure(session, mentioned, as_of_date=date_key)
+            sibling_edges = _neo4j_cached_query(
+                strategy_cache, config, "conglomerate", mentioned, date_key,
+                lambda: _query_conglomerate_exposure(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Conglomerate sibling query: done | edges={len(sibling_edges)}", "cyan")
             for edge in sibling_edges:
                 src_data = sentiment_data.get(edge["source"])
@@ -13201,7 +16221,10 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         # institutional herding means the stock moves more on sentiment shifts
         if use_inst and "HOLDS" in available:
             _log(f"  Institutional momentum query: start | seeds={len(mentioned)}", "cyan")
-            holder_counts = _query_institutional_holders_count(session, mentioned, as_of_date=date_key)
+            holder_counts = _neo4j_cached_query(
+                strategy_cache, config, "inst_holders_count", mentioned, date_key,
+                lambda: _query_institutional_holders_count(session, mentioned, as_of_date=date_key),
+            )
             _log(f"  Institutional momentum query: done | tickers={len(holder_counts)}", "cyan")
             for ticker, count in holder_counts.items():
                 if ticker not in contributions or count < 10:
@@ -13228,10 +16251,122 @@ def _compute_propagated_scores(driver, sentiment_data: dict, symbols_list: list,
         reasons = [r for _, r in contribs[:5]]
         aggregated[ticker] = {"raw_score": total, "reasons": reasons, "n_paths": len(contribs)}
 
+    # η.B' — Phase η (2026-05-20): post-aggregation sector-peer
+    # augmentation for momentum_watchlist tickers whose geometric-sum
+    # raw_score landed below threshold. Defensive belt-and-suspenders
+    # on top of existing IN_SECTOR / COMPETES_WITH propagation. Tagged
+    # with distinct "eta_b_aug" reason to make telemetry grep-able.
+    if config.get("eta_sector_augmentation_enabled", True):
+        _eta_b_thr = float(config.get("eta_augment_below_raw", 0.5) or 0.5)
+        _eta_b_fac = float(config.get("eta_augment_peer_factor", 0.3) or 0.3)
+        _eta_b_top_n = int(config.get("eta_augment_top_n", 5) or 5)
+        # Production schema fix (bug-sweep): scores live in
+        # _momentum_ranked_cache (list[(ticker, score)] sorted desc), not
+        # in _momentum_watchlist values. Intersect ranked-cache with
+        # current watchlist membership to get the top-N momentum tickers.
+        _eta_b_mw_ranked = (
+            strategy_cache.get("_momentum_ranked_cache", []) or []
+            if isinstance(strategy_cache, dict) else []
+        )
+        _eta_b_mw_members = (
+            set((strategy_cache.get("_momentum_watchlist") or {}).keys())
+            if isinstance(strategy_cache, dict) else set()
+        )
+        if _eta_b_mw_ranked and _eta_b_mw_members:
+            _eta_b_mw: set[str] = set()
+            for _eta_b_entry in _eta_b_mw_ranked:
+                if len(_eta_b_mw) >= _eta_b_top_n:
+                    break
+                try:
+                    _eta_b_cand = str(_eta_b_entry[0] or "").strip().upper()
+                except (IndexError, TypeError):
+                    continue
+                if _eta_b_cand and _eta_b_cand in _eta_b_mw_members:
+                    _eta_b_mw.add(_eta_b_cand)
+            _eta_b_sector_map = _build_sector_map_for_aug(
+                driver, _eta_b_mw, strategy_cache,
+            )
+            _eta_b_aug = 0
+            for _eta_b_tk in _eta_b_mw:
+                _eta_b_existing = aggregated.get(
+                    _eta_b_tk,
+                    {"raw_score": 0.0, "reasons": [], "n_paths": 0},
+                )
+                if float(_eta_b_existing.get("raw_score", 0.0)) >= _eta_b_thr:
+                    continue
+                _eta_b_peer = _max_peer_raw_in_sector(
+                    _eta_b_tk, aggregated, _eta_b_sector_map,
+                )
+                if _eta_b_peer < _eta_b_thr:
+                    continue
+                _eta_b_new_raw = (
+                    float(_eta_b_existing.get("raw_score", 0.0))
+                    + _eta_b_peer * _eta_b_fac
+                )
+                # Prepend the eta_b_aug tag so it never gets truncated by
+                # the 5-reason cap (bug-sweep: appending then slicing[:5]
+                # would silently drop the tag when existing reasons==5).
+                aggregated[_eta_b_tk] = {
+                    "raw_score": max(-1.0, min(1.0, _eta_b_new_raw)),
+                    "reasons": (
+                        [f"eta_b_aug(peer={_eta_b_peer:.2f}*{_eta_b_fac})"]
+                        + list(_eta_b_existing.get("reasons", []))[:4]
+                    ),
+                    "n_paths": int(_eta_b_existing.get("n_paths", 0)) + 1,
+                }
+                _eta_b_aug += 1
+            if _eta_b_aug:
+                _log(
+                    f"[ETA.B] augmented {_eta_b_aug} momentum tickers "
+                    f"(threshold={_eta_b_thr}, factor={_eta_b_fac})",
+                    "cyan",
+                )
+
+    # Bug-sweep 2026-05-18: ALWAYS log aggregation outcome. The prior
+    # `if aggregated:` gate hid the zero-tickers case (same antipattern as
+    # the α.4 mcap-preseed silent-fail). Zero-aggregated could mean "no
+    # seeds had nonzero sentiment", "all edges filtered out", or "no
+    # relationship types in graph" — operators need to distinguish.
     if aggregated:
         top = sorted(aggregated.items(), key=lambda x: abs(x[1]["raw_score"]), reverse=True)[:5]
         parts = [f"{t}={v['raw_score']:+.3f}({v['n_paths']}p)" for t, v in top]
         _log(f"Aggregated: {len(aggregated)} tickers with paths | top raw: {', '.join(parts)}", "cyan")
+    else:
+        _log(
+            f"Aggregated: 0 tickers with paths "
+            f"(n_seed={n_seed}, mentioned={len(mentioned)}, "
+            f"1hop_edges={len(all_1hop)}, contributions_dict={len(contributions)})",
+            "red",
+        )
+    # Phase α.2 bug-sweep follow-up: emit snapshot stats once per bar so
+    # operators can audit cache hit-rate without per-call log spam (11
+    # queries × ~125 bars would be ~1400 lines/backtest otherwise).
+    if isinstance(strategy_cache, dict):
+        _snap_stats = strategy_cache.get("_neo4j_snapshot_stats")
+        _snap_dict = strategy_cache.get("_neo4j_snapshot")
+        if _snap_stats:
+            _h = int(_snap_stats.get("hits", 0) or 0)
+            _m = int(_snap_stats.get("misses", 0) or 0)
+            _total = _h + _m
+            _hit_rate = (_h / _total) if _total else 0.0
+            _size = len(_snap_dict) if isinstance(_snap_dict, dict) else 0
+            _log(
+                f"neo4j snapshot: {_h}/{_total} hits ({_hit_rate:.0%}), "
+                f"{_size} entries cached",
+                "cyan",
+            )
+    # η — Phase η (2026-05-20): per-bar telemetry summary. η.B' is the
+    # only Phase η component that fires inside _compute_propagated_scores
+    # (η.A is in run_once, η.D in the V28.9 block, η.G in the V31 cap).
+    # The per-event [ETA.X] lines remain the primary grep target; this
+    # summary collects the propagation-stage components only when at
+    # least one of them fires so logs stay quiet on bars where η is inert.
+    _eta_b_aug_summary = locals().get("_eta_b_aug", 0) or 0
+    if _eta_b_aug_summary:
+        _log(
+            f"[ETA] propagation summary: augmented={_eta_b_aug_summary}",
+            "cyan",
+        )
     return aggregated
 
 
@@ -13333,11 +16468,116 @@ def _evaluate_position_risk(
                     elif _unrealized_pct >= 10 and _prop_raw > (-0.15 + _time_decay):
                         fresh_score = 0
                         fresh_reason = f"Winner protection: +{_unrealized_pct:.1f}% gain, raw={_prop_raw:.3f} insufficient to sell"
-                _max_open_loss_pct = float(config.get("max_open_loss_pct", -15.0))
-                if _unrealized_pct <= _max_open_loss_pct:
+                # Tier-3 A1 (2026-05-17): conviction-aware floor matrix.
+                # Pre-Tier-3 was a constant -15% with vol-scaling that ineffectively
+                # tightened low-vol names (SNDK 5-7% vol → vol-scaled -10% > -15%
+                # absolute, so absolute dominated; cut at -18% missed +487% rally).
+                # New scheme: resolve HIGH/MID/LOW tier from mcap + raw_score,
+                # then pick floor per tier. HIGH disables vol scaling entirely.
+                # Phase 2b A2 layers regime adjustment (bull widens, bear tightens,
+                # crash forces emergency exit).
+                _cb_regime = (
+                    str((strategy_cache or {}).get("_market_regime") or "")
+                    if isinstance(strategy_cache, dict)
+                    else ""
+                )
+                _cb_regime_gated = bool(
+                    config.get("circuit_breaker_regime_gating_enabled", True)
+                )
+                _cb_tier = _resolve_conviction_tier_at_exit(
+                    sym, config, strategy_cache, propagated
+                )
+                # Tier-3 Phase 3 (A5): record per-evaluation conviction telemetry
+                # for offline analysis. Disabled by default once 30 days of data
+                # is collected; the score will then be considered for binding to
+                # the floor matrix as a continuous knob.
+                if bool(config.get("conviction_telemetry_enabled", True)):
+                    try:
+                        _conv_score = _compute_conviction_score(
+                            sym, config, strategy_cache, propagated
+                        )
+                        if isinstance(strategy_cache, dict):
+                            _conv_log = strategy_cache.setdefault(
+                                "_nexus_conviction_telemetry", []
+                            )
+                            if isinstance(_conv_log, list):
+                                if len(_conv_log) < 2000:
+                                    _conv_log.append({
+                                        "sym": sym,
+                                        "date": date_key,
+                                        "tier": _cb_tier,
+                                        "score": _conv_score,
+                                        "unrealized_pct": round(_unrealized_pct, 2),
+                                    })
+                                elif not strategy_cache.get("_nexus_conviction_telemetry_capped_logged"):
+                                    # Log once when the cap is hit so operators
+                                    # see why the buffer stopped growing.
+                                    _log(
+                                        "Conviction telemetry buffer capped at 2000 entries — "
+                                        "older entries will not be overwritten; clear "
+                                        "_nexus_conviction_telemetry from strategy_cache to reset.",
+                                        "yellow",
+                                    )
+                                    strategy_cache["_nexus_conviction_telemetry_capped_logged"] = True
+                    except Exception:
+                        pass
+                _cb_floor_pct, _cb_vol_mult, _cb_low_vol_thresh = _get_conviction_aware_floor(
+                    _cb_tier, config, regime=(_cb_regime if _cb_regime_gated else None)
+                )
+                # Back-compat: explicit max_open_loss_pct config overrides the
+                # tier-resolved floor (used by tests / operator overrides).
+                _legacy_override = config.get("max_open_loss_pct")
+                if _legacy_override is not None:
+                    try:
+                        _cb_floor_pct = float(_legacy_override)
+                    except (TypeError, ValueError):
+                        pass
+                _legacy_vol_mult = config.get("max_open_loss_vol_multiplier")
+                if _legacy_vol_mult is not None and _cb_tier != "HIGH":
+                    # Operator override only applies to MID/LOW; HIGH always disables.
+                    try:
+                        _cb_vol_mult = float(_legacy_vol_mult)
+                    except (TypeError, ValueError):
+                        pass
+                # crash regime: sentinel 0.0 from helper means emergency exit
+                _cb_crash_emergency = False
+                if _cb_regime_gated and str(_cb_regime).strip().lower() == "crash":
+                    _cb_crash_emergency = True
+                _z31_floor_effective = _cb_floor_pct
+                if not _cb_crash_emergency and _cb_vol_mult > 0:
+                    _z31_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
+                    _z31_vol = _realized_vol_20d(_z31_closes)
+                    # Low-vol disable: skip vol-scaling on quiet names so the
+                    # absolute floor governs (fixes SNDK pathology).
+                    if _z31_vol > 0 and _z31_vol >= _cb_low_vol_thresh:
+                        _z31_vol_floor_pct = -_cb_vol_mult * _z31_vol * 100.0
+                        # Pick the TIGHTER (less negative) of the two floors.
+                        # max() of two negatives selects the one closer to zero.
+                        _z31_floor_effective = max(_cb_floor_pct, _z31_vol_floor_pct)
+                if _cb_crash_emergency or _unrealized_pct <= _z31_floor_effective:
                     fresh_score = -1
-                    fresh_reason = f"Circuit breaker: {_unrealized_pct:.1f}% loss hit hard floor {_max_open_loss_pct:.0f}%"
-                    _log(f"[sell-gate] {sym} | gate=circuit_breaker | unrealized={_unrealized_pct:.1f}% | floor={_max_open_loss_pct:.0f}% | result=fired", "red")
+                    if _cb_crash_emergency:
+                        fresh_reason = (
+                            f"Circuit breaker: crash regime emergency exit "
+                            f"({_unrealized_pct:.1f}% unrealized)"
+                        )
+                        _log(
+                            f"[sell-gate] {sym} | gate=circuit_breaker | regime=crash | "
+                            f"unrealized={_unrealized_pct:.1f}% | result=emergency_exit",
+                            "red",
+                        )
+                    else:
+                        fresh_reason = (
+                            f"Circuit breaker: {_unrealized_pct:.1f}% loss hit floor "
+                            f"{_z31_floor_effective:.1f}% (tier={_cb_tier} "
+                            f"base={_cb_floor_pct:.0f}% regime={_cb_regime or 'n/a'})"
+                        )
+                        _log(
+                            f"[sell-gate] {sym} | gate=circuit_breaker | tier={_cb_tier} | "
+                            f"regime={_cb_regime or 'n/a'} | unrealized={_unrealized_pct:.1f}% | "
+                            f"floor={_z31_floor_effective:.1f}% (base={_cb_floor_pct:.0f}%) | result=fired",
+                            "red",
+                        )
 
                 _peak_protected = False
                 _peak_pnl_pct_for_log = 0.0
@@ -13416,7 +16656,24 @@ def _evaluate_position_risk(
                                 _fl_blacklist[sym] = {"date": date_key, "bars_remaining": int(config.get("fast_loser_blacklist_days", 20)), "_created_this_bar": True}
                                 _log(f"Fast loser BLACKLIST: {sym} blocked for {_fl_blacklist[sym]['bars_remaining']} bars", "red")
 
-                _ts_activation = float(config.get("trailing_stop_activation_pct", 10.0))
+                # Z3.2 (2026-05-15): default activation lowered from 10% to 5%
+                # AND vol-scaled per-symbol with an upper cap so high-vol
+                # names don't need an unreasonable gain before trail kicks in.
+                # Spec: activation = clamp(max(5%, 0.75*vol), 5%, 15%).
+                # The 15% ceiling is critical — AMD ~40% vol would otherwise
+                # need +30% gain before trail engaged, defeating the
+                # purpose of the early-activation fix.
+                _ts_activation = float(config.get("trailing_stop_activation_pct", 5.0))
+                _z32_vol_mult = float(config.get("trailing_stop_activation_vol_multiplier", 0.75) or 0.0)
+                _z32_vol_cap = float(config.get("trailing_stop_activation_vol_cap_pct", 15.0) or 15.0)
+                if _z32_vol_mult > 0:
+                    _z32_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
+                    _z32_vol = _realized_vol_20d(_z32_closes)
+                    if _z32_vol > 0:
+                        _z32_target = _z32_vol_mult * _z32_vol * 100.0
+                        # Pick the larger of default and vol-scaled, capped
+                        # at the vol_cap_pct ceiling.
+                        _ts_activation = min(_z32_vol_cap, max(_ts_activation, _z32_target))
                 _default_trailing_pct = float(config.get("trailing_stop_pct", 8.0))
                 if sym in _COMMODITY_ETF_TICKERS:
                     _ts_drop = float(config.get("trailing_stop_commodity_etf_pct", 12.0))
@@ -13554,8 +16811,13 @@ def _evaluate_position_risk(
                     _grace_pnl = 0.0
                 else:
                     _grace_pnl = _unrealized_pct
+                    # Phase ε.C.0' (2026-05-19): tier-aware grace escape_A.
+                    _grace_tier_sell = _resolve_conviction_tier_at_exit(
+                        sym, config, strategy_cache, propagated
+                    )
                     _g_in_grace, _g_escape, _g_reason = _in_initial_grace_period(
-                        _grace_days, _grace_pnl, config, _grace_regime
+                        _grace_days, _grace_pnl, config, _grace_regime,
+                        conviction_tier=_grace_tier_sell,
                     )
                 if _g_in_grace and not _g_escape:
                     _log(
@@ -13590,6 +16852,13 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     Direct LLM sentiment takes priority; graph-propagated scores use configurable thresholds.
     Pending future trades are combined with the fresh analysis as additional votes.
     portfolio_emulator: optional PortfolioEmulator — used for hold-limit exit logic.
+
+    Z2.2 (2026-05-15): union currently-held positions into symbols_list so every
+    held name produces a decision record each bar. Backtest 299903 had AORT
+    in only 2 of 9 decision records (buy + final sell) — the strategy never
+    re-evaluated it during the -33% drawdown. With this change, held names
+    not in the active discovery universe still get scored, enabling the
+    stop-loss / drawdown logic to fire on every bar.
     """
     import datetime as _dt
     if strategy_cache is None:
@@ -13598,6 +16867,37 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     sell_thresh = float(config.get("sell_threshold", _DEFAULT_SELL_THRESHOLD))
     max_hold_days = int(config.get("max_hold_days", 90) or 90)
     pending_by_symbol = pending_by_symbol or {}
+
+    # Z2.2: union held positions into the scored universe so every held
+    # name produces a decision record each bar (enables stop-loss / drawdown
+    # logic to fire continuously). Use the public get_positions() accessor
+    # for thread-safety when running in live mode; fall back to the private
+    # attribute when get_positions() isn't available (older tests/mocks).
+    if portfolio_emulator is not None:
+        try:
+            if hasattr(portfolio_emulator, "get_positions"):
+                _held_positions = portfolio_emulator.get_positions() or {}
+            else:
+                _held_positions = getattr(portfolio_emulator, "_positions", None) or {}
+            _existing_set = set(symbols_list or [])
+            _held_added: list[str] = []
+            for _sym, _qty in _held_positions.items():
+                if _qty and _qty > 0 and _sym and _sym not in _existing_set:
+                    _existing_set.add(_sym)
+                    _held_added.append(_sym)
+            # Build the new list once outside the loop (was O(n^2) per spawn).
+            if _held_added:
+                symbols_list = list(symbols_list) + _held_added
+                # Z2.2 telemetry: log only when verbose mode is set so we
+                # don't drown BacktestResults.logs (500-line truncation).
+                if bool(config.get("nexus_held_reeval_verbose", False)):
+                    _log(
+                        f"Held-position re-eval (Z2.2): added {len(_held_added)} held name(s) to scoring "
+                        f"universe: {', '.join(_held_added[:10])}{'...' if len(_held_added) > 10 else ''}",
+                        "cyan",
+                    )
+        except Exception as _z22_err:
+            _log(f"Z2.2 held-position union skipped: {_z22_err}", "yellow")
 
     # Build per-ticker entry date of the CURRENT open position from portfolio emulator trade history.
     # "Entry date" = earliest buy AFTER the most recent sell (or earliest buy ever if never sold).
@@ -13740,7 +17040,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
             out[sym] = {
                 "score": final_score,
                 "reason": f"{fresh_reason} | scheduled: {ft_reasons}",
-                "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit"])),
+                "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
             }
             if "Profit take" in fresh_reason and final_score == -1:
                 out[sym]["sell_fraction"] = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
@@ -13748,7 +17048,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
             out[sym] = {
                 "score": fresh_score,
                 "reason": fresh_reason,
-                "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit"])),
+                "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
             }
             if "Profit take" in fresh_reason and fresh_score == -1:
                 out[sym]["sell_fraction"] = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
@@ -14048,6 +17348,11 @@ def _build_momentum_watchlist(
         sym = str(ticker).strip().upper()
         if not sym or sym in watchlist or sym in seen_this_call:
             continue
+        # Fix (2026-05-26): keep leveraged/inverse/commodity ETFs out of the momentum
+        # watchlist too — otherwise they re-enter the buy funnel via the rank/rotation
+        # paths, bypassing the discovery-side exclusion (backtest 404780).
+        if _is_excluded_momentum_etf(sym, cfg):
+            continue
         seen_this_call.add(sym)
         if len(watchlist) >= max_size:
             break
@@ -14172,6 +17477,17 @@ def _score_momentum_rank(
         if closes[-1] < buy_price_floor:
             continue
         first_price = float(info.get("first_seen_price", 0) or 0)
+        if first_price <= 0:
+            # Scope D A2: re-establish the runup baseline from the current live
+            # bar when it is missing (e.g. stripped on a backtest->live boot, or
+            # an entry the builder created without a price). Scope C popped
+            # first_seen_price but nothing re-seeded it, permanently disabling
+            # the runup ceiling for every hydrated watchlist ticker. Persisting
+            # closes[-1] re-baselines from live bars (the strip's stated intent)
+            # without changing this cycle's score (closes[-1] > closes[-1]*runup
+            # is always False).
+            first_price = closes[-1]
+            info["first_seen_price"] = first_price
         if first_price > 0 and closes[-1] > first_price * max_runup:
             continue
         score = 0.0
@@ -14313,11 +17629,23 @@ def _reserve_momentum_slots(
     held_momentum: set[str],
     open_positions: set[str],
     recent_sell_cooldown: set[str] | None = None,
+    force_promote: set[str] | None = None,
 ) -> list[dict]:
     """Select top momentum candidates for reserved slot allocation.
 
     Returns candidate dicts ready for the allocation pipeline.
     Skips already-held tickers and tickers on the momentum re-buy cooldown.
+
+    Phase ε.C.6 (BT294837 follow-up, 2026-05-19): the optional
+    ``force_promote`` set marks tickers whose V31.4 cooldown-lift fired
+    THIS bar (post-sell breakout / recovery_shortcut). Pre-ε.C.6 the
+    lifted ticker still had to compete for momentum_watchlist slots and
+    often lost to higher-ranking watchlist candidates (the operator's
+    SNDK rebuy audit found this happened at BT294837 L7499 — SNDK was
+    lifted but the slot went to LITE/TYRA which scored higher). Now
+    force-promote takes priority over ranking so the lift translates
+    to an executable buy intent. NO TICKER HARDCODING — works for any
+    ticker whose V31.4 lift fired this bar.
     """
     n_reserved = int(config.get("momentum_reserved_slots", 2) or 2)
     n_open_momentum = len(held_momentum & open_positions)
@@ -14326,23 +17654,62 @@ def _reserve_momentum_slots(
         return []
 
     _cooldown = recent_sell_cooldown or set()
+    _force = {str(s or "").strip().upper() for s in (force_promote or set()) if str(s or "").strip()}
     picks: list[dict] = []
-    for sym, score in ranked:
+    # Phase ε.C.6: prioritize force-promoted tickers (V31.4 lifted) first
+    # so they actually translate to executable buy intents instead of
+    # losing the slot to higher-scoring momentum candidates.
+    ranked_normalized = list(ranked or [])
+    if _force:
+        ranked_map = {str(s or "").strip().upper(): sc for s, sc in ranked_normalized}
+        forced_first: list[tuple[str, float]] = []
+        rest: list[tuple[str, float]] = []
+        for sym, score in ranked_normalized:
+            sym_u = str(sym or "").strip().upper()
+            if sym_u in _force and sym_u not in open_positions and sym_u not in _cooldown:
+                forced_first.append((sym, score))
+            else:
+                rest.append((sym, score))
+        # Append force-promote tickers NOT already in ranked (so a lifted
+        # ticker that fell out of momentum watchlist still gets a slot).
+        _ranked_keys = {str(s or "").strip().upper() for s, _ in ranked_normalized}
+        for sym_u in _force:
+            if sym_u in _ranked_keys or sym_u in open_positions or sym_u in _cooldown:
+                continue
+            # Synthesize a watchlist score floor — give force-promote tickers
+            # the watchlist priority min raw_score so they don't get rejected
+            # downstream for low score.
+            _fp_score = float(config.get("watchlist_priority_min_raw_score", 0.35) or 0.35)
+            forced_first.append((sym_u, _fp_score))
+        ranked_normalized = forced_first + rest
+    for sym, score in ranked_normalized:
         if sym in open_positions:
             continue
         if sym in _cooldown:
             continue
         if len(picks) >= n_needed:
             break
+        # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
+        # Preserves natural-signal info inside the floored value so downstream
+        # tie-breaks (η.G swap eligibility) and telemetry can see the
+        # underlying technical-momentum strength.
+        _eta_e_floored = max(score, 1.50)
+        if config.get("eta_floor_differentiator_enabled", True):
+            _eta_e_diff = min(0.20, max(0.0, float(score)) * 0.5)
+            _eta_e_raw_net = _eta_e_floored + _eta_e_diff
+        else:
+            _eta_e_raw_net = _eta_e_floored
         picks.append({
             "ticker": sym,
-            "raw_net_score": max(score, 1.50),
+            "raw_net_score": _eta_e_raw_net,
+            "raw_net_natural": float(score),
             "signal_source": "momentum_watchlist",
             "is_watchlist_member": True,
             "is_watchlist_priority": True,
             "is_propagation_expansion": False,
             "grace_eligible": True,
             "momentum_watchlist_score": score,
+            "is_force_promote": str(sym or "").strip().upper() in _force,
         })
     return picks
 
@@ -14685,12 +18052,17 @@ def _apply_trade_overlay(
         "Return only the bounded overlay decision."
     )
     _overlay_timeout = int(config.get("overlay_llm_timeout_sec", 60) or 60)
-    raw = call_structured_llm_by_provider(
+    raw = _scl_guarded(
         provider,
         api_key,
         model,
         prompt,
         _TradeOverlayResponse,
+        attribution_keys={
+            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+            "instance_id": (config or {}).get("_telemetry_instance_id"),
+            "call_site": "overlay",
+        },
         system_prompt=system_prompt,
         max_output_tokens=0,
         timeout_sec=_overlay_timeout,
@@ -14808,12 +18180,17 @@ def _apply_etf_trade_overlay(
         'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"],"ra":"Gold trend accelerating on Fed pivot"}\n'
         "Return only the bounded overlay decision."
     )
-    raw = call_structured_llm_by_provider(
+    raw = _scl_guarded(
         provider,
         api_key,
         model,
         prompt,
         _TradeOverlayResponse,
+        attribution_keys={
+            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+            "instance_id": (config or {}).get("_telemetry_instance_id"),
+            "call_site": "overlay_etf",
+        },
         system_prompt=system_prompt,
         max_output_tokens=0,
         retries=2,
@@ -15205,7 +18582,12 @@ def _apply_ml_and_overlay_to_scores(
         # Codex fix v2: use original entry price for P&L check (not most recent add-on),
         # and use peak tracking for drawdown check. Avoids expensive snapshot call.
         if final_score == -1 and not base.get("_forced_exit") and bool(config.get("winner_sell_protection_enabled", True)):
-            _wp_min_pnl = float(config.get("winner_sell_protection_min_pnl_pct", 10.0))
+            # Z3.3 (2026-05-15): default min_pnl lowered from 10% to 5%.
+            # Backtest 299903 sold AMD at +5% (locked) and SOXL at +10%
+            # — neither hit the 10% protection threshold, so weak negative
+            # signals were enough to sell. At 5%, AMD/SOXL would have
+            # required a real drawdown OR strong negative sentiment to exit.
+            _wp_min_pnl = float(config.get("winner_sell_protection_min_pnl_pct", 5.0))
             _wp_max_drawdown = float(config.get("winner_sell_protection_max_drawdown_pct", 8.0))
             # Use original entry price for true position P&L (not last add-on)
             _wp_orig = _get_open_position_entry_trade(portfolio_emulator, sym) if portfolio_emulator else None
@@ -15235,7 +18617,26 @@ def _apply_ml_and_overlay_to_scores(
                 _log(f"ML overlay SELL_BLOCK BYPASS: {sym} unrealized={_v11_unrealized_pct:+.1f}% <= {_sb_bypass_pct:.0f}% — sell allowed despite sell_block", "yellow")
             else:
                 final_score = 0
-                _log(f"ML overlay SELL_BLOCK: {sym} sell signal suppressed by overlay sell_block (forced_exit={base.get('_forced_exit', False)})", "yellow")
+                # Phase ε.A.2 (BT294837 follow-up, 2026-05-19): only emit the
+                # SELL_BLOCK log when there's an actual position to suppress.
+                # Pre-ε.A.2 the SELL_BLOCK fired for phantom positions (qty=0)
+                # because the ML overlay was applied to every ticker in the
+                # score dict — including ones that had been sold but were
+                # still present from prior bars. The operator's SNDK lifecycle
+                # audit found 4+ such phantom lines (lines 22804, 25653, 26268,
+                # 27558, 30795, 32129 in BT294837). final_score=0 is still
+                # set (correct behavior — phantom sells should be suppressed)
+                # but we skip the log noise that confuses post-hoc audits.
+                _sb_pos_qty = 0.0
+                if portfolio_emulator is not None:
+                    try:
+                        _sb_pos_qty = float(
+                            (portfolio_emulator._positions or {}).get(sym, 0.0) or 0.0
+                        )
+                    except Exception:
+                        _sb_pos_qty = 0.0
+                if _sb_pos_qty > 0:
+                    _log(f"ML overlay SELL_BLOCK: {sym} sell signal suppressed by overlay sell_block (forced_exit={base.get('_forced_exit', False)})", "yellow")
         # Strong graph propagation can still lift a name into the buy set as long as
         # it satisfies the current configured path-count floor.
         # V11: Do NOT override forced-exit sell signals (fast loser, trailing stop, deep-loser-protect).
@@ -15388,28 +18789,57 @@ def _apply_buy_price_floor(
     portfolio_emulator,
     config: dict,
 ) -> dict:
-    price_floor = float(config.get("buy_price_floor", 5.0) or 0.0)
-    if price_floor <= 0.0:
+    """Demote sub-floor buy signals.
+
+    BT136708 calibration (2026-05-18): the uniform $8 effective floor blocked
+    912 post-quality buys (65% rejection) including confirmed micro-cap
+    winners STRO ($0.81→$39, +4731%), FGL ($0.44→$1.91, +334%), MLEC
+    ($0.65→$8.34, +1146%). Added a tiered floor: propagation-discovered
+    signals (where the parent thesis is sound but the picked name is sub-$8)
+    get a lower floor (default $3.50) while primary discovery keeps the
+    higher floor. An absolute ABS_MIN gate still blocks pure penny-stock
+    dumpster picks under $2.
+    """
+    primary_floor = float(config.get("buy_price_floor", 5.0) or 0.0)
+    prop_floor = float(config.get("buy_price_floor_propagation", 3.50) or 0.0)
+    abs_min_floor = float(config.get("buy_price_floor_absolute_min", 2.00) or 0.0)
+    if primary_floor <= 0.0 and prop_floor <= 0.0 and abs_min_floor <= 0.0:
         return scores
 
-    demoted: list[tuple[str, float]] = []
+    demoted: list[tuple[str, float, float]] = []
     for sym in symbols_list:
         sc = scores.get(sym)
         if not isinstance(sc, dict) or sc.get("score") != 1:
             continue
         current_price = _resolve_symbol_price(sym, prices, price_history, portfolio_emulator=portfolio_emulator)
-        if current_price <= 0.0 or current_price >= price_floor:
+        if current_price <= 0.0:
+            continue
+        reason_lc = str(sc.get("reason") or "").lower()
+        is_propagation = (
+            "propagation" in reason_lc
+            or "expansion" in reason_lc
+            or bool(sc.get("is_propagation_expansion"))
+        )
+        effective_floor = prop_floor if (is_propagation and prop_floor > 0.0) else primary_floor
+        # Hard absolute minimum — pure penny-stock dumpster picks never buy.
+        if abs_min_floor > 0.0 and effective_floor < abs_min_floor:
+            effective_floor = abs_min_floor
+        if effective_floor <= 0.0 or current_price >= effective_floor:
             continue
         sc["score"] = 0
         sc["action_intent"] = "hold"
         orig_reason = str(sc.get("reason") or "")
-        sc["reason"] = f"PRICE_FLOOR: {sym} at ${current_price:.2f} is below ${price_floor:.2f} minimum | {orig_reason}"[:1500]
-        demoted.append((sym, current_price))
+        sc["reason"] = (
+            f"PRICE_FLOOR: {sym} at ${current_price:.2f} is below "
+            f"${effective_floor:.2f} {'(prop)' if is_propagation else '(primary)'} | {orig_reason}"
+        )[:1500]
+        demoted.append((sym, current_price, effective_floor))
 
     if demoted:
         _log(
-            f"Price floor: blocked {len(demoted)} sub-${price_floor:.0f} buy(s): "
-            f"{', '.join(f'{sym} (${price:.2f})' for sym, price in demoted[:8])}",
+            f"Price floor: blocked {len(demoted)} sub-floor buy(s) "
+            f"(primary=${primary_floor:.2f}, prop=${prop_floor:.2f}): "
+            f"{', '.join(f'{sym} (${price:.2f}<${floor:.2f})' for sym, price, floor in demoted[:8])}",
             "yellow",
         )
 
@@ -15589,6 +19019,8 @@ def _apply_portfolio_drawdown_halt(
     drawdown_pct = ((peak_value - current_value) / peak_value) * 100.0 if peak_value > 0 else 0.0
     triggered_now = False
 
+    resumed_now = False
+
     if not halt_active and drawdown_pct >= halt_pct:
         halt_active = True
         up_days = 0
@@ -15609,11 +19041,59 @@ def _apply_portfolio_drawdown_halt(
             halt_active = False
             up_days = 0
             peak_value = current_value
+            resumed_now = True
             _log(
                 f"Portfolio drawdown halt: resumed after {resume_up_days} up-day(s) "
                 f"(value=${current_value:.0f})",
                 "green",
             )
+
+    # 2026-05-28: Discord paging on drawdown halt activation + resume. Prior
+    # code only emitted a yellow log line; the operator had no notification
+    # channel when buys auto-paused. Live-only (live adapters expose
+    # ``_instance_id``; PortfolioEmulator does not). Lazy import + try/except
+    # keep this non-fatal — strategy never aborts on a Discord failure.
+    _live_instance_id = getattr(portfolio_emulator, "_instance_id", None)
+    if _live_instance_id and (triggered_now or resumed_now):
+        try:
+            from live_alerts import alert_drawdown_halt, alert_strategy_start
+            if triggered_now:
+                alert_drawdown_halt(
+                    instance_id=str(_live_instance_id),
+                    drawdown_pct=drawdown_pct,
+                    peak_value=peak_value,
+                    current_value=current_value,
+                )
+            elif resumed_now:
+                # Reuse alert_strategy_start's "buys resumed" flavor by
+                # routing a halt-cleared message via alert_halt's sibling
+                # API — but we want a distinct title. Use live_alerts'
+                # generic enqueue with our own embed by reaching for the
+                # private _safe_enqueue helper, falling back to a plain
+                # halt alert if the private symbol is gone.
+                try:
+                    from live_alerts import _safe_enqueue, _channel
+                    content = (
+                        f"DRAWDOWN RESUMED [{_live_instance_id}] "
+                        f"value=${current_value:,.0f} (new peak baseline)"
+                    )
+                    _safe_enqueue(_channel("trades"), content, embed={
+                        "title": "Drawdown halt resumed",
+                        "color": 0x2ECC71,
+                        "fields": [
+                            {"name": "current_value",
+                             "value": f"${current_value:,.0f}",
+                             "inline": True},
+                            {"name": "effect",
+                             "value": "Buys re-enabled; new peak = current",
+                             "inline": False},
+                        ],
+                    })
+                except Exception:
+                    pass
+        except Exception:
+            # Alerts must never block strategy execution.
+            pass
 
     if not halt_active and current_value > peak_value:
         peak_value = current_value
@@ -15744,10 +19224,23 @@ def _apply_sector_concentration_limit(
                 break
             survivors.append(item)
         survivor_set = {str(item.get("ticker") or "").strip().upper() for item in survivors}
+        # Z4.2 (2026-05-15): soft sector cap with priority override. Allow
+        # high-conviction buys (raw_net_score >= cap AND n_paths >= path floor)
+        # to bypass the sector cap. Backtest 299903 had ALAB/CRWD/NET stuck
+        # in queue despite Base=+1.0 / 22 paths because the hard sector cap
+        # blocked them outright. Configurable so operators can tighten.
+        _z42_raw_cap = float(config.get("sector_cap_override_raw_net_score", 0.8) or 0.8)
+        _z42_path_min = int(config.get("sector_cap_override_min_paths", 5) or 5)
         demoted_names: list[str] = []
+        bypassed_names: list[str] = []
         for item in ranked:
             sym = str(item.get("ticker") or "").strip().upper()
             if sym in survivor_set:
+                continue
+            _item_raw = float(item.get("raw_net_score", 0.0) or 0.0)
+            _item_paths = int(item.get("n_paths", 0) or 0)
+            if _item_raw >= _z42_raw_cap and _item_paths >= _z42_path_min:
+                bypassed_names.append(f"{sym}(raw={_item_raw:.2f},p={_item_paths})")
                 continue
             sc = scores.get(sym) or {}
             sc["score"] = 0
@@ -15759,6 +19252,13 @@ def _apply_sector_concentration_limit(
             )[:1500]
             demoted.append((sym, sector))
             demoted_names.append(sym)
+        if bypassed_names:
+            _log(
+                f"Sector concentration override (Z4.2): {sector} allowed "
+                f"{len(bypassed_names)} high-conviction buy(s): "
+                f"{', '.join(bypassed_names[:8])}",
+                "cyan",
+            )
         if demoted_names:
             protected_names = [str(item.get("ticker") or "").strip().upper() for item in survivors if str(item.get("ticker") or "").strip()]
             protected_logs.append(f"{sector}: kept {', '.join(protected_names[:max_per_sector])} | demoted {', '.join(demoted_names[:max_per_sector])}")
@@ -16052,7 +19552,7 @@ class GraphNexusAnalysis:
                     and _epr_reason
                     and any(
                         x in _epr_reason
-                        for x in ["Fast loser", "Trailing stop", "Hold-limit"]
+                        for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"]
                     )
                 ),
             }
@@ -16246,7 +19746,30 @@ class GraphNexusAnalysis:
         num_articles = max_daily_alpaca_articles
         num_articles_for_llm = int(config.get("num_articles_for_llm") or max_daily_alpaca_articles or 30)
         use_llm = config.get("use_llm_sentiment", True)
-        use_sentiment_cache = config.get("use_sentiment_cache", True)
+        # Phase α.1 (2026-05-18, BT109429 follow-up): force-enable sentiment
+        # cache in any non-live context for paired re-run determinism. The
+        # variance/robustness agent attributed 40-60% of the 4.8x same-code
+        # spread (BT901920 +247.6% / BT136708 +171.3% / BT109429 +51.9%) to
+        # LLM non-determinism (gpt-5.4-mini omits temperature -> OpenAI
+        # default 1.0). With the cache mandatory in backtest, the LLM only
+        # fires on (date, ticker, articles_hash) cache miss; subsequent
+        # paired runs hit the cache and emit identical sentiment. Live mode
+        # (live=True AND lookback=False) honors operator config. The
+        # (live=True AND lookback=True) "live with lookback pre-pass" path
+        # still hits the cache — pre-pass is deterministic-prep regardless.
+        # Logic extracted to _phase_alpha_helpers.resolve_use_sentiment_cache.
+        # Bare import (not `backend.`) because prod Docker layout is flat at /app/.
+        from _phase_alpha_helpers import (
+            resolve_use_sentiment_cache as _resolve_use_sentiment_cache,
+        )
+        use_sentiment_cache, _alpha1_forced = _resolve_use_sentiment_cache(config)
+        if _alpha1_forced:
+            _log(
+                "Phase alpha.1: forcing use_sentiment_cache=True in backtest mode "
+                "(operator config had False; set "
+                "`nexus_sentiment_cache_force_in_backtest=False` to opt out)",
+                "yellow",
+            )
         llm_provider, llm_key, llm_model, _ = _resolve_role_llm_config(config, "")
         llm_provider_config = _resolve_role_llm_provider_config(config, "")
         llm_model_ref = _llm_model_ref(llm_model, llm_provider_config)
@@ -16296,23 +19819,90 @@ class GraphNexusAnalysis:
         sentiment_cache_scope_doc = _enhanced_sentiment_cache_scope_doc(config, instance_id)
         active_event_history_scope_id = _active_event_history_scope_id(config)
         historical_lookback_mode = bool(config.get("historical_lookback_mode", False))
+        # Phase δ observability sweep (2026-05-18, BT232179 follow-up):
+        # surface the resolved sentiment_cache_scope_id at run_once entry
+        # so operators can verify paired re-runs of the same backtest share
+        # the same cache scope. Per the salt audit, the scope_id is derived
+        # from operator-configured static fields (history_scope_id,
+        # provider, model, prompt_version, use_toon_format,
+        # num_articles_for_llm, sentiment_cache_scope_salt). It does NOT
+        # auto-rotate per backtest run. If two paired runs of the same
+        # backtest_id log DIFFERENT scope_ids, the operator has changed
+        # one of those fields between runs (deliberately or via config
+        # drift) — α.1's cache will miss on both, neutering variance
+        # compression. Compare paired-run logs to confirm continuity.
+        # Emit ONCE per run (gated via strategy_cache flag) — the scope_id
+        # is invariant across bars by design, so per-bar emission would
+        # just inflate the log without adding info (per bug-sweep agent
+        # log-volume recommendation #2).
+        if (
+            not historical_lookback_mode
+            and isinstance(strategy_cache, dict)
+            and not strategy_cache.get("_sentiment_cache_scope_audit_emitted")
+        ):
+            _log(
+                f"sentiment cache scope: id={sentiment_cache_scope_id} "
+                f"provider={sentiment_cache_scope_doc.get('provider')} "
+                f"model={sentiment_cache_scope_doc.get('model')} "
+                f"prompt_v={sentiment_cache_scope_doc.get('prompt_version')} "
+                f"salt='{sentiment_cache_scope_doc.get('sentiment_cache_scope_salt')}' "
+                f"(stable across paired re-runs unless config changed)",
+                "cyan",
+            )
+            strategy_cache["_sentiment_cache_scope_audit_emitted"] = True
+        # BT136708 calibration (2026-05-18, P1.1): pre-seed _yf_market_cap_cache
+        # so the Tier-3 conviction-tier resolver can return HIGH for mega-caps
+        # in backtest. Without this, the cache is empty against a static
+        # universe (no fresh discovery runs), and SNDK-class mega-caps default
+        # to LOW conviction. Skip during the historical_lookback_mode pre-pass
+        # — only seed for actual runs.
+        # Phase γ.1 (2026-05-18, BT232179 follow-up): also pass
+        # `portfolio_emulator` so the pre-seed pulls currently-held tickers
+        # AND top-N BFQ candidates into the universe. Without this, pure-
+        # discovery mode (empty symbols_list) silently no-op'd the whole
+        # pre-seed and A1 ran the run with an empty mcap cache (BT232179
+        # mcap pre-seed: 0/0 populated for 49/49 bars). Idempotency is now
+        # a per-ticker set rather than a whole-call bool so newly-held or
+        # newly-BFQ'd tickers in subsequent bars get seeded too.
+        if isinstance(strategy_cache, dict) and not historical_lookback_mode:
+            try:
+                _preseed_mcap_cache_from_universe(
+                    symbols_list,
+                    strategy_cache,
+                    config,
+                    portfolio_emulator=portfolio_emulator,
+                )
+            except Exception as _ps_exc:
+                _log(f"mcap pre-seed error (non-fatal): {_ps_exc}", "yellow")
         # Position sizing: fraction of portfolio assigned to nexus stock buys / ETF buys
         nexus_portfolio_pct = float(config.get("nexus_portfolio_pct", 0.90))
         etf_portfolio_pct = float(config.get("etf_portfolio_pct", 0.10))
         # Backfill queue config
         _bfq_enabled = bool(config.get("backfill_queue_enabled", True))
-        _bfq_max_size = int(config.get("backfill_queue_max_size", 30))
+        # Tier-3 B5: queue size 30 → 50 so propagation + momentum candidates
+        # can both wait without flushing each other.
+        _bfq_max_size = int(config.get("backfill_queue_max_size", 50))
         # 2026-05-07 granularity-scaling: BFQ TTL is the headline regression
         # site for the 1200s-vs-3600s divergence. At 3600s a 10-bar TTL
         # gives a queued buy ~10 trading hours to find a slot; at 1200s the
         # same 10 bars is only ~3.3 hours, well below V28 leader-lock
         # rotation latency. Scale the configured value (and the literal
         # priority floor of 15) to preserve wall-clock semantics.
-        _bfq_max_bars = _scale_bars(int(config.get("backfill_queue_max_bars", 10)), config)
+        # Z4.3: backstop TTL minimums so dual-cadence collapse doesn't kill
+        # the queue. At 1200s granularity _scale_bars(10) was returning ~2
+        # bars in backtest 299903, expiring 20 queued names per bar. Floor
+        # the regular TTL at 5 bars and the priority TTL at 10 bars so
+        # high-conviction items get a real chance to fill before aging out.
+        _bfq_max_bars = max(5, _scale_bars(int(config.get("backfill_queue_max_bars", 10)), config))
         _bfq_reserved_priority_slots = int(config.get("backfill_queue_reserved_priority_slots", 10) or 10)
         _bfq_min_displace_delta = float(config.get("backfill_queue_min_displacement_delta", 0.3))
         _bfq_recurrence_bonus = float(config.get("backfill_queue_recurrence_bonus", 0.1))
-        _bfq_priority_max_bars = max(_bfq_max_bars, _scale_bars(15, config))
+        # BT136708 calibration (2026-05-18): MU expired from BFQ at bar 11 of
+        # 10 (priority TTL floor was 10 daily bars). Raised the floor to 15
+        # via backfill_queue_priority_max_bars_floor so MU-class mega-caps get
+        # a real chance to fill before aging out of the queue.
+        _bfq_priority_max_bars_floor = int(config.get("backfill_queue_priority_max_bars_floor", 15) or 15)
+        _bfq_priority_max_bars = max(_bfq_max_bars, max(_bfq_priority_max_bars_floor, _scale_bars(15, config)))
         _bfq_min_score = float(config.get("backfill_queue_min_score", 0.20))
         _bfq_staleness_pct = float(config.get("backfill_queue_staleness_pct", 20.0))
 
@@ -16445,6 +20035,25 @@ class GraphNexusAnalysis:
                     "yellow",
                 )
                 strategy_cache["_nexus_dual_cadence_warned_subhour"] = True
+            _dual_cadence_active = False
+        # Daily (or coarser) granularity already runs once per bar — the
+        # whole point of the dual-cadence gate (prevent multiple FULL
+        # cycles per day at sub-hourly ticks) doesn't apply. At 86400s,
+        # ``current_time`` typically lands at exactly close_pt (e.g.
+        # 17:00 PT), which trips the post-session ``>=`` check on every
+        # bar and silently skips every day of the backtest. Bypass the
+        # gate so the strategy actually runs.
+        if _dual_cadence_active and _ti_seconds and _ti_seconds > 3600:
+            if isinstance(strategy_cache, dict) and not strategy_cache.get(
+                "_nexus_dual_cadence_warned_daily"
+            ):
+                _log(
+                    f"Dual-cadence gate disabled at granularity {_ti_seconds}s "
+                    f"(> 3600s) — runs once per bar already; session windowing "
+                    f"would skip every bar that lands at/after close_pt.",
+                    "yellow",
+                )
+                strategy_cache["_nexus_dual_cadence_warned_daily"] = True
             _dual_cadence_active = False
 
         if _dual_cadence_active:
@@ -16808,7 +20417,7 @@ class GraphNexusAnalysis:
             f"{_effective_cfg['rotation_break_glass_sell_fraction']:.0%} "
             f"| discover=watch:{_effective_cfg['sector_watchlist_reserved_slots']}/{_effective_cfg['sector_watchlist_max_per_sector']} "
             f"peers:{_effective_cfg['max_sector_peer_discoveries_per_day']} comp:{_effective_cfg['max_competitor_discoveries_per_day']} "
-            f"mom:{_effective_cfg['momentum_discovery_max_per_day']} fill:{_effective_cfg['sector_fill_max_per_sector']} prop_slots:{_effective_cfg['max_propagated_scoring_slots']} "
+            f"mom:{_effective_cfg['momentum_discovery_max_per_day']} fill:{_effective_cfg['sector_fill_max_per_sector']} prop_slots:{_effective_cfg['max_propagated_scoring_slots']} seedcap:{_effective_cfg['propagation_max_per_seed']} "
             f"| prio=watch:{_effective_cfg['watchlist_priority_slots']}@{_effective_cfg['watchlist_priority_min_raw_score']:.2f} "
             f"prop:{_effective_cfg['propagation_expansion_reserved_slots']}@{_effective_cfg['propagation_expansion_min_raw_score']:.2f} "
             f"prot={_effective_cfg['watchlist_sector_protected_slots']} min=${_effective_cfg['priority_min_position_size']:.0f}/{str(_effective_cfg['priority_budget_can_bypass_regular_min']).lower()} "
@@ -17112,11 +20721,31 @@ class GraphNexusAnalysis:
                     _fill_outcome_prices(_conn_out, instance_id, date_key, prices, overlay_bars=_ob)
                     _update_indefinite_outcomes(_conn_out, instance_id, date_key, prices)
 
+        # 1-C (bug-sweep 2026-05-28): the FIRST time a live run touches a given
+        # trading date, bypass any pre-existing article/sentiment cache for that
+        # date — it may have been written by a backtest that ended on this date
+        # (stale, LLM-skipped). Recompute once; the fresh result is re-cached so
+        # later same-day live cycles reuse it (preserving the cost-saving design).
+        # Excludes the historical_lookback prepass (it legitimately rebuilds days).
+        _live_first_touch = False
+        try:
+            if (globals().get("_GN_LIVE_MODE_FLAG", False)
+                    and not historical_lookback_mode
+                    and isinstance(strategy_cache, dict)):
+                _refreshed = strategy_cache.setdefault("_live_news_refreshed_dates", [])
+                if isinstance(_refreshed, list) and date_key not in _refreshed:
+                    _live_first_touch = True
+                    _refreshed.append(date_key)
+                    if len(_refreshed) > 10:
+                        del _refreshed[:-10]
+        except Exception:
+            _live_first_touch = False
         try:
             articles, from_cache, cached_sentiment = _fetch_articles_cached(
                 date_key, start_dt, end_dt, alpaca_key, alpaca_secret,
                 limit=num_articles, min_articles=min_articles,
                 sentiment_cache_scope_id=sentiment_cache_scope_id,
+                force_fresh=_live_first_touch,
             )
         except Exception as e:
             _log(f"News fetch error: {e}", "red")
@@ -17459,6 +21088,82 @@ class GraphNexusAnalysis:
             _gn_fetch_future = _gn_executor.submit(_google_news_fetch)
             _gn_executor.shutdown(wait=False)
 
+        # Launch Google News fetch IMMEDIATELY so the macro pipeline can start
+        # alongside company classification (the two phases used to serialise:
+        # 125s of company → 178s of macro). The later _launch_google_news_fetch_bg()
+        # calls (alpaca / zero-alpaca paths) are now no-ops because the closure
+        # short-circuits on _gn_fetch_future being set.
+        _launch_google_news_fetch_bg()
+
+        # Background pipeline that resolves the GN fetch, applies the backtest
+        # time-filter, and runs macro classification — all in parallel with the
+        # foreground company classification. Combined CC concurrency is 4 (company)
+        # + 4 (macro) = 8, well under CLAUDE_CLI_MAX_CONCURRENT=10.
+        _macro_pipeline_fut = None
+        if _gn_fetch_future is not None:
+            def _macro_pipeline_worker():
+                try:
+                    _gn_to = max(60, int(config.get("google_news_fetch_timeout", 120)))
+                    _bg_gn_result = _gn_fetch_future.result(timeout=_gn_to)
+                except TimeoutError:
+                    _log(f"Macro pipeline: Google News fetch timed out after {_gn_to}s — skipping", "yellow")
+                    return [], [], [], []
+                except Exception as _bg_gn_exc:
+                    _log(f"Macro pipeline: Google News fetch failed: {_bg_gn_exc}", "yellow")
+                    return [], [], [], []
+                _bg_google_articles = _bg_gn_result.get("google_articles", []) if isinstance(_bg_gn_result, dict) else []
+                _bg_gn_normalized = _bg_gn_result.get("normalized", []) if isinstance(_bg_gn_result, dict) else []
+                if not isinstance(_bg_google_articles, list):
+                    _bg_google_articles = []
+                if not isinstance(_bg_gn_normalized, list):
+                    _bg_gn_normalized = []
+                # Backtest safety: same time-filter as the original foreground block.
+                if isinstance(current_time, datetime) and _bg_google_articles and not _is_daily:
+                    _bg_ct_iso = current_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _bg_pre = len(_bg_google_articles)
+                    _bg_kept_idx = set()
+                    for _bg_gi, _bg_ga in enumerate(_bg_google_articles):
+                        _bg_pub = _bg_ga.get("published_date") or _bg_ga.get("created_at") or ""
+                        if hasattr(_bg_pub, "strftime"):
+                            _bg_pub = _bg_pub.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if str(_bg_pub) <= _bg_ct_iso:
+                            _bg_kept_idx.add(_bg_gi)
+                    if len(_bg_kept_idx) < _bg_pre:
+                        _bg_google_articles = [_bg_google_articles[i] for i in sorted(_bg_kept_idx)]
+                        _bg_gn_normalized = [_bg_gn_normalized[i] for i in sorted(_bg_kept_idx) if i < len(_bg_gn_normalized)]
+                        _log(f"Backtest time filter: removed {_bg_pre - len(_bg_google_articles)} Google articles published after {_bg_ct_iso}", "cyan")
+                if not _bg_gn_normalized:
+                    return [], [], _bg_google_articles, _bg_gn_normalized
+                # Macro classification owns its own RethinkDB connection — _classify_*
+                # uses conn for response-cache hits, and the main `conn` belongs to
+                # the foreground thread.
+                _bg_macro_conn = None
+                try:
+                    _bg_macro_conn = _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT, timeout=10) if (_nexus_db_available and _r is not None) else None
+                except Exception as _bg_conn_exc:
+                    _log(f"Macro pipeline: RethinkDB connection unavailable, classifying without cache: {_bg_conn_exc}", "yellow")
+                    _bg_macro_conn = None
+                try:
+                    with _timed_stage("Macro article classification", start_details=f"articles={len(_bg_gn_normalized)}"):
+                        _bg_macro_rows, _bg_macro_traces = _classify_macro_article_records(
+                            _bg_gn_normalized, config, date_key=date_key, conn=_bg_macro_conn, instance_id=instance_id,
+                        )
+                    if not isinstance(_bg_macro_rows, list):
+                        _bg_macro_rows = []
+                    if not isinstance(_bg_macro_traces, list):
+                        _bg_macro_traces = []
+                    return _bg_macro_rows, _bg_macro_traces, _bg_google_articles, _bg_gn_normalized
+                finally:
+                    if _bg_macro_conn is not None:
+                        try:
+                            _bg_macro_conn.close()
+                        except Exception as _bg_close_exc:
+                            _log(f"Macro pipeline WARN: failed to close DB connection: {_bg_close_exc}", "yellow")
+            from concurrent.futures import ThreadPoolExecutor as _MacroPipelineTPE
+            _macro_pipeline_executor = _MacroPipelineTPE(max_workers=1)
+            _macro_pipeline_fut = _macro_pipeline_executor.submit(_macro_pipeline_worker)
+            _macro_pipeline_executor.shutdown(wait=False)
+
         with _timed_stage("Alpaca article normalization", start_details=f"articles={len(articles)}"):
             normalized_alpaca_articles = _store_nexus_news_raw(conn, date_key, "alpaca", articles, instance_id=instance_id, config=config)
         if not isinstance(normalized_alpaca_articles, list):
@@ -17664,7 +21369,7 @@ class GraphNexusAnalysis:
         if bz_data and stock_finder and conn_trends is not None and config.get("benzinga_discovery_enabled", True):
             bz_discovery = _extract_benzinga_discovery_candidates(bz_data, set(symbols_list), date_key)
             if bz_discovery:
-                max_discovered = int(config.get("max_discovered_stocks", 50))
+                max_discovered = int(config.get("max_discovered_stocks", 90))
                 _existing_active_disc = _get_all_discovered_stocks(conn_trends, instance_id)
                 current_discovered_count = len(_existing_active_disc)
                 reuse_stamp = _nexus_reuse_stamp_from_config(config, instance_id)
@@ -17672,7 +21377,9 @@ class GraphNexusAnalysis:
                 _bz_no_data = strategy_cache.get("_overlay_no_data_tickers", set()) if strategy_cache else set()
                 _bz_excl = set(symbols_list) | _sold_cooldown | set(_existing_active_disc) | _bz_no_data
                 _bz_newly_discovered = []
-                for ticker, sig in bz_discovery.items():
+                # Benzinga candidates carry no per-ticker magnitude (sentiment is
+                # a constant flag), so order deterministically by ticker.
+                for ticker, sig in _ordered_discovery_candidates(bz_discovery.items()):
                     if current_discovered_count >= hard_limit:
                         break
                     if ticker in _bz_excl:
@@ -17906,6 +21613,72 @@ class GraphNexusAnalysis:
                     sentiment_data[etf] = {"sentiment": 1, "event": "trend_momentum"}
                     mentioned.add(etf)
 
+            # η.A — Phase η (2026-05-20): bridge momentum_watchlist into
+            # sentiment_data so technical-momentum picks participate in
+            # propagation. The existing trend_buy_signals seeding above
+            # covers LLM-news-derived trends; this covers technical
+            # momentum_watchlist picks that lack news coverage (BT277953
+            # MU/LITE/PRAX case).
+            if config.get("eta_momentum_seeding_enabled", True):
+                _eta_mw_top_n = int(config.get("eta_momentum_seed_top_n", 5) or 5)
+                _eta_mw_min = float(config.get("eta_momentum_seed_min_score", 0.05) or 0.05)
+                # Production schema fix (bug-sweep): _momentum_watchlist values
+                # are {"first_seen_bar": ..., "first_seen_price": ...} — NO
+                # "score" field. Scores live in _momentum_ranked_cache (a
+                # list[(ticker, score)] populated by _score_momentum_rank
+                # later in this same bar). On bar N, η.A reads bar (N-1)'s
+                # ranked cache, intersected with the current watchlist
+                # membership. Bar 1 is a cold-start no-op (ranked_cache empty),
+                # which is the desired behavior — no scored picks to seed.
+                _eta_mw_ranked = (
+                    strategy_cache.get("_momentum_ranked_cache", []) or []
+                    if isinstance(strategy_cache, dict) else []
+                )
+                _eta_mw_members = (
+                    set((strategy_cache.get("_momentum_watchlist") or {}).keys())
+                    if isinstance(strategy_cache, dict) else set()
+                )
+                _eta_seeded = 0
+                _eta_considered = 0
+                if _eta_mw_ranked and _eta_mw_members:
+                    # ranked_cache is sorted desc by score; filter to active
+                    # watchlist members, take top-N.
+                    _eta_sorted: list[tuple[str, float]] = []
+                    for _eta_entry in _eta_mw_ranked:
+                        if len(_eta_sorted) >= _eta_mw_top_n:
+                            break
+                        try:
+                            _eta_t = str(_eta_entry[0] or "").strip().upper()
+                            _eta_s_raw = _eta_entry[1]
+                        except (IndexError, TypeError):
+                            continue
+                        if not _eta_t or _eta_t not in _eta_mw_members:
+                            continue
+                        _eta_sorted.append((_eta_t, float(_eta_s_raw or 0.0)))
+                    for _eta_t, _eta_s in _eta_sorted:
+                        _eta_considered += 1
+                        _eta_existing = sentiment_data.get(_eta_t)
+                        if _eta_existing and int(_eta_existing.get("sentiment", 0) or 0) != 0:
+                            continue
+                        if _eta_s < _eta_mw_min:
+                            continue
+                        sentiment_data[_eta_t] = {
+                            "sentiment": 1,
+                            "event": "momentum_breakout",
+                        }
+                        mentioned.add(_eta_t)
+                        _eta_seeded += 1
+                # Always-log per bug-sweep (Φ.η.0 validation needs to
+                # distinguish "feature ran, 0 qualified" from "feature
+                # gated off" from "ranked_cache empty").
+                _log(
+                    f"[ETA.A] seeded={_eta_seeded} considered={_eta_considered} "
+                    f"watchlist_members={len(_eta_mw_members)} "
+                    f"ranked_cache={len(_eta_mw_ranked)} "
+                    f"(top_n={_eta_mw_top_n}, min_score={_eta_mw_min})",
+                    "cyan",
+                )
+
             # Merge trend sell signals + build sell enforcement set
             # V9: Sell enforcement tuning — min hold period, confirmed downtrend,
             # signal hysteresis, and profitable hold protection.
@@ -17940,12 +21713,43 @@ class GraphNexusAnalysis:
                         if _skip_reason:
                             _log(_skip_reason, "cyan")
                         # Still set sentiment but don't force-sell
-                        if ticker not in sentiment_data:
+                        # Phase ε.C.5 (BT294837 follow-up, 2026-05-19): when
+                        # the trend-reversal sell was suppressed (e.g. by
+                        # ε.A.3's pos=0 guard), do NOT seed propagation with
+                        # negative sentiment for non-held tickers — this is
+                        # the "stale Neo4j sentiment" issue per ε.B.5 audit.
+                        # Pre-ε.C.5 the SELL signal flowed into
+                        # sentiment_data → propagation aggregator →
+                        # `SNDK=-1.000(12p)` anchor that resurfaces SNDK in
+                        # propagation_expansion SELL rows every bar even
+                        # though SNDK isn't held. Gate the seed on position
+                        # existence so non-held negative sentiment decays
+                        # naturally (no new seed each bar).
+                        _ec5_pos_qty = 0.0
+                        if portfolio_emulator is not None:
+                            try:
+                                _ec5_pos_qty = float(
+                                    (portfolio_emulator._positions or {}).get(ticker, 0.0) or 0.0
+                                )
+                            except Exception:
+                                _ec5_pos_qty = 0.0
+                        if ticker not in sentiment_data and _ec5_pos_qty > 0:
                             sentiment_data[ticker] = {"sentiment": sell_data["score"], "event": "general"}
                             mentioned.add(ticker)
                 elif ticker not in sentiment_data:
-                    sentiment_data[ticker] = {"sentiment": sell_data["score"], "event": "general"}
-                    mentioned.add(ticker)
+                    # Phase ε.C.5: same gate for the no-sell-enforcement-eval
+                    # path (sell_enforcement_enabled=False OR force=False).
+                    _ec5_pos_qty2 = 0.0
+                    if portfolio_emulator is not None:
+                        try:
+                            _ec5_pos_qty2 = float(
+                                (portfolio_emulator._positions or {}).get(ticker, 0.0) or 0.0
+                            )
+                        except Exception:
+                            _ec5_pos_qty2 = 0.0
+                    if _ec5_pos_qty2 > 0:
+                        sentiment_data[ticker] = {"sentiment": sell_data["score"], "event": "general"}
+                        mentioned.add(ticker)
 
             # Enforce sells on stale trend ETFs
             if stale_etfs and sell_enforcement_enabled:
@@ -17989,54 +21793,34 @@ class GraphNexusAnalysis:
             if len(symbols_list) > len(symbols or []):
                 _log(f"Symbols expanded: {len(symbols or [])} → {len(symbols_list)} (includes {len(symbols_list) - len(symbols or [])} discovered)", "cyan")
 
-        # ── 2a) Google News: collect fetched articles, run macro LLM on main thread ──
+        # ── 2a) Google News + macro classification: results from the bg pipeline
+        # that started alongside company classification. Joining here costs only
+        # the tail (max(macro, company) - company), not the full macro time.
         google_articles: list[dict] = []
         _gn_normalized: list[dict] = []
-        if _gn_fetch_future is not None:
-            if not _gn_fetch_future.done():
-                _log("Waiting for Google News fetch to finish...", "cyan")
+        if _macro_pipeline_fut is not None:
             try:
-                _gn_timeout = max(60, int(config.get("google_news_fetch_timeout", 120)))
-                _gn_fetch_result = _gn_fetch_future.result(timeout=_gn_timeout)
-                google_articles = _gn_fetch_result.get("google_articles", [])
-                _gn_normalized = _gn_fetch_result.get("normalized", [])
-                if not isinstance(google_articles, list):
-                    google_articles = []
-                if not isinstance(_gn_normalized, list):
-                    _gn_normalized = []
-                # Backtest safety: filter out Google articles published after current_time (intraday only)
-                if isinstance(current_time, datetime) and google_articles and not _is_daily:
-                    ct_iso = current_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    _pre_gn = len(google_articles)
-                    _kept_idx = set()
-                    for _gi, _ga in enumerate(google_articles):
-                        _pub = _ga.get("published_date") or _ga.get("created_at") or ""
-                        if hasattr(_pub, "strftime"):
-                            _pub = _pub.strftime("%Y-%m-%dT%H:%M:%SZ")
-                        if str(_pub) <= ct_iso:
-                            _kept_idx.add(_gi)
-                    if len(_kept_idx) < _pre_gn:
-                        google_articles = [google_articles[i] for i in sorted(_kept_idx)]
-                        _gn_normalized = [_gn_normalized[i] for i in sorted(_kept_idx) if i < len(_gn_normalized)]
-                        _log(f"Backtest time filter: removed {_pre_gn - len(google_articles)} Google articles published after {ct_iso}", "cyan")
-            except TimeoutError:
-                _log(f"Google News fetch timed out after {_gn_timeout}s — skipping", "yellow")
-                _gn_fetch_future.cancel()
-            except Exception as _gn_exc:
-                _log(f"Google News fetch failed: {_gn_exc}", "yellow")
-        # Run macro classification, then event maintenance + Google macro resolution in parallel.
-        # _maintain_active_events only writes to RethinkDB (no Neo4j) — safe to run concurrently
-        # with the Google macro Neo4j + LLM call.
-        if _gn_normalized:
-            with _timed_stage("Macro article classification", start_details=f"articles={len(_gn_normalized)}"):
-                macro_rows, _gn_macro_traces = _classify_macro_article_records(
-                    _gn_normalized, config, date_key=date_key, conn=conn, instance_id=instance_id,
-                )
+                with _timed_stage("Macro pipeline (join)", start_details="waiting for background macro classification"):
+                    macro_rows, _gn_macro_traces, google_articles, _gn_normalized = _macro_pipeline_fut.result(timeout=600)
                 if not isinstance(macro_rows, list):
                     macro_rows = []
                 if not isinstance(_gn_macro_traces, list):
                     _gn_macro_traces = []
+                if not isinstance(google_articles, list):
+                    google_articles = []
+                if not isinstance(_gn_normalized, list):
+                    _gn_normalized = []
                 llm_traces_global.extend(_gn_macro_traces)
+            except Exception as _macro_join_exc:
+                _log(f"Macro pipeline error (non-fatal): {_macro_join_exc}", "yellow")
+                macro_rows = []
+                _gn_macro_traces = []
+                google_articles = []
+                _gn_normalized = []
+        # Run event maintenance + Google macro resolution in parallel.
+        # _maintain_active_events only writes to RethinkDB (no Neo4j) — safe to run concurrently
+        # with the Google macro Neo4j + LLM call.
+        if _gn_normalized:
             # Submit event maintenance to a background thread.
             # RethinkDB connections are not thread-safe — the worker creates its own connection.
             def _maint_worker(_cfg=config, _iid=instance_id, _dk=date_key, _rows=macro_rows):
@@ -18161,7 +21945,25 @@ class GraphNexusAnalysis:
                     # - Pending buy (+1) but fresh sentiment is negative (-1)
                     # - Pending sell (-1) but fresh sentiment is positive (+1)
                     if fresh_sent != 0 and fresh_sent == -sig and cancel_trades:
-                        reason = trade.get("reason", "")[:40]
+                        reason = trade.get("reason", "")[:60]
+                        # Tier-3 A3 (2026-05-17): macro-event whitelist supersedes
+                        # sentiment veto. SNDK's 2025-11-28 "S&P 500 entry" scheduled
+                        # buy was cancelled by negative LLM sentiment in BT901920 and
+                        # the strategy missed +487% upside. Macro reasons are objectively
+                        # verifiable; LLM can warn but cannot veto. Operator can disable
+                        # this override with macro_supersedes_sentiment_enabled=False.
+                        if (
+                            bool(config.get("macro_supersedes_sentiment_enabled", True))
+                            and sig == 1  # only protect BUYS — sell cancels stay sentiment-driven
+                            and _macro_event_supersedes_sentiment(reason)
+                        ):
+                            _log(
+                                f"  Macro supersedes sentiment: keeping pending buy for {sym} on "
+                                f"{target_date} (reason='{reason}' — objectively verifiable; LLM "
+                                f"contra-sentiment={fresh_sent} ignored)",
+                                "green",
+                            )
+                            continue
                         removed = cancel_trades(strategy_cache, sym, target_date=target_date)
                         if removed:
                             cancelled_count += len(removed)
@@ -18228,7 +22030,14 @@ class GraphNexusAnalysis:
                         max_connection_pool_size=10,
                     )
                     _log("Neo4j: driver reconnected successfully", "green")
-                propagated = _compute_propagated_scores(_shared_neo4j_driver, sentiment_data, symbols_list, config, date_key=date_key)
+                propagated = _compute_propagated_scores(
+                    _shared_neo4j_driver,
+                    sentiment_data,
+                    symbols_list,
+                    config,
+                    date_key=date_key,
+                    strategy_cache=strategy_cache,
+                )
         except Exception as e:
             _log(f"Neo4j error: {e}", "yellow")
         # Persist institutional cache to in-memory strategy_cache and RethinkDB for cross-session reuse
@@ -18488,7 +22297,7 @@ class GraphNexusAnalysis:
         # All discovery sources (trend, Benzinga, propagation, sector, competitor) have independent
         # caps, but they can collectively exceed the intended hard limit. Enforce a global ceiling.
         if conn_trends is not None:
-            _global_max = int(config.get("max_discovered_stocks", 50) or 50)
+            _global_max = int(config.get("max_discovered_stocks", 90) or 90)
             _protected_disc = _normalize_cache_string_set(strategy_cache, "_active_watchlist_priority_tickers")
             if portfolio_emulator is not None:
                 _protected_disc.update(
@@ -18502,6 +22311,7 @@ class GraphNexusAnalysis:
                 _global_max,
                 date_key=date_key,
                 protected_tickers=_protected_disc,
+                protect_days=int(config.get("momentum_discovery_protect_days", 10) or 0),
             )
             if _trimmed_disc:
                 for _ot in _trimmed_disc:
@@ -18633,6 +22443,106 @@ class GraphNexusAnalysis:
             date_key,
         )
         _drawdown_halt_active = bool((((strategy_cache or {}).get("_portfolio_drawdown_state")) or {}).get("halt_active", False))
+
+        # ── A4 post_sell_watch re-entry phase (BT136708 P1.7, 2026-05-18) ────
+        # The Tier-3 spec defined the data plumbing for forced-exit re-entry
+        # but never wired the daily eligibility scan into the buy slate. As a
+        # result, SNDK's Nov-21 forced-exit had no auto-re-entry path; the
+        # eventual re-buy came 47 days late via momentum rotation and missed
+        # the +619% recovery to $1407. This phase reads post_sell_watch rows
+        # (DB in live, in-memory in backtest), checks recovery eligibility
+        # (current_price >= exit×1.05 OR 10d resistance break) AND fresh
+        # raw_score >= 0.40, and injects eligible candidates into the buy
+        # scoring dict so the existing slate planner picks them up.
+        # Feature-flagged OFF by default — operator enables with
+        # post_sell_watch_reentry_execution_enabled=True for A/B validation.
+        if (
+            bool(config.get("post_sell_watch_reentry_execution_enabled", False))
+            and not bool(config.get("historical_lookback_mode", False))
+        ):
+            try:
+                _a4_window_days = int(config.get("post_sell_watch_window_days", 60) or 60)
+                _a4_held_set = {
+                    str(_sym).strip().upper()
+                    for _sym, _qty in ((portfolio_emulator._positions or {}).items()
+                                       if portfolio_emulator is not None else [])
+                    if float(_qty or 0.0) > 0.0
+                }
+                _a4_candidates = _get_post_sell_watch_candidates_combined(
+                    conn_trends, strategy_cache, instance_id, date_key,
+                    window_days=_a4_window_days,
+                )
+                _a4_reentries: list[str] = []
+                _a4_skipped_held = 0
+                _a4_skipped_eligibility = 0
+                for _a4 in _a4_candidates:
+                    _a4_sym = str(_a4.get("ticker") or "").strip().upper()
+                    if not _a4_sym:
+                        continue
+                    if _a4_sym in _a4_held_set:
+                        _a4_skipped_held += 1
+                        continue
+                    _a4_existing = scores.get(_a4_sym)
+                    if isinstance(_a4_existing, dict) and int(_a4_existing.get("score", 0) or 0) != 0:
+                        # Already has a buy or sell signal from regular pipeline — skip.
+                        continue
+                    _a4_cur_price = _resolve_symbol_price(
+                        _a4_sym, prices, data, portfolio_emulator=portfolio_emulator,
+                    )
+                    try:
+                        _a4_cur_price_f = float(_a4_cur_price or 0.0)
+                    except (TypeError, ValueError):
+                        _a4_cur_price_f = 0.0
+                    if _a4_cur_price_f <= 0:
+                        continue
+                    _a4_fresh_raw = 0.0
+                    _a4_prop = (propagated or {}).get(_a4_sym) or {}
+                    if isinstance(_a4_prop, dict):
+                        try:
+                            _a4_fresh_raw = float(_a4_prop.get("raw_score", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            _a4_fresh_raw = 0.0
+                    _a4_ok, _a4_reason_text = _is_post_sell_reentry_eligible(
+                        current_price=_a4_cur_price_f,
+                        exit_price=float(_a4.get("exit_price") or 0.0),
+                        fresh_raw_score=_a4_fresh_raw,
+                        config=config,
+                        recent_high_after_exit=None,
+                    )
+                    if not _a4_ok:
+                        _a4_skipped_eligibility += 1
+                        continue
+                    scores[_a4_sym] = {
+                        "score": 1,
+                        "reason": f"A4 re-entry: {_a4_reason_text} (exited={_a4.get('exit_date', '?')})"[:1500],
+                        "raw_net_score": _a4_fresh_raw,
+                        "n_paths": int((_a4_existing or {}).get("n_paths", 0) or 0) if isinstance(_a4_existing, dict) else 0,
+                        "action_intent": "buy",
+                        "_is_post_sell_reentry": True,
+                        "_reentry_exit_price": float(_a4.get("exit_price") or 0.0),
+                        "_reentry_size_fraction": float(
+                            config.get("post_sell_reentry_size_fraction", 0.50) or 0.50
+                        ),
+                    }
+                    if _a4_sym not in symbols_list:
+                        symbols_list.append(_a4_sym)
+                    _a4_reentries.append(_a4_sym)
+                if _a4_reentries:
+                    _log(
+                        f"A4 re-entry phase: added {len(_a4_reentries)} candidate(s) to buy "
+                        f"slate: {', '.join(_a4_reentries[:8])} "
+                        f"(skipped_held={_a4_skipped_held}, skipped_eligibility={_a4_skipped_eligibility})",
+                        "magenta",
+                    )
+                # TTL sweep on in-memory storage so old rows don't linger past
+                # the watch window. DB sweep happens elsewhere (live cooldown).
+                if not _GN_LIVE_MODE_FLAG:
+                    _post_sell_watch_inmem_forget_expired(
+                        strategy_cache, date_key, window_days=_a4_window_days,
+                    )
+            except Exception as _a4_exc:
+                _log(f"A4 re-entry phase error (non-fatal): {_a4_exc}", "yellow")
+
         buys = sum(1 for v in scores.values() if (v.get("score") if isinstance(v, dict) else v) == 1)
         sells = sum(1 for v in scores.values() if (v.get("score") if isinstance(v, dict) else v) == -1)
         holds = len(symbols_list) - buys - sells
@@ -18917,17 +22827,35 @@ class GraphNexusAnalysis:
                 f"(open_positions={_count_open_positions(portfolio_emulator)}, min_positions={int(config.get('cash_reserve_hard_min_positions', 5) or 5)})",
                 "yellow",
             )
-        _macro_risk_scale, _macro_risk_meta = _compute_macro_risk_scale(macro_rows, active_events, config)
+        _spy_20d = _spy_20d_return(strategy_cache, date_key)
+        _macro_risk_scale, _macro_risk_meta = _compute_macro_risk_scale(
+            macro_rows, active_events, config, spy_20d_return=_spy_20d
+        )
         if _available_buy_budget > 0 and _macro_risk_scale < 0.999:
             _scaled_buy_budget = _available_buy_budget * _macro_risk_scale
             _log(
                 f"Macro risk scaling: bearish={_macro_risk_meta.get('bearish_score', 0.0):.2f} "
                 f"bullish={_macro_risk_meta.get('bullish_score', 0.0):.2f} "
                 f"net={_macro_risk_meta.get('net_score', 0.0):+.2f} "
+                f"spy_20d={_spy_20d if _spy_20d is None else f'{_spy_20d*100:+.2f}%'} "
                 f"-> buy budget ${_available_buy_budget:.0f} -> ${_scaled_buy_budget:.0f}",
                 "yellow",
             )
             _available_buy_budget = _scaled_buy_budget
+        elif (
+            _available_buy_budget > 0
+            and _spy_20d is not None
+            and _spy_20d >= 0
+            and float(_macro_risk_meta.get("net_score", 0.0) or 0.0) < 0
+        ):
+            # Only log SUPPRESSED when macro WOULD have wanted to haircut
+            # (net_score < 0) but SPY 20d disagreed. Avoids per-bar spam
+            # on healthy bull tapes with bullish macro.
+            _log(
+                f"Macro risk scaling: SUPPRESSED (SPY 20d={_spy_20d*100:+.2f}% >= 0, "
+                f"price action contradicts macro net={_macro_risk_meta.get('net_score', 0.0):+.2f})",
+                "cyan",
+            )
 
         # ── Buy budget floor: never let budget fall below X% of portfolio ──
         _buy_floor_pct = float(config.get("buy_budget_floor_pct", 0) or 0)
@@ -19012,11 +22940,11 @@ class GraphNexusAnalysis:
         if _reserved_backfill_budget > 0:
             _effective_reserve_pct = (
                 float(
-                    config.get("backfill_budget_reserve_pct_high_conviction", 0.35)
-                    or 0.35
+                    config.get("backfill_budget_reserve_pct_high_conviction", 0.25)
+                    or 0.25
                 )
                 if _has_hc_in_queue
-                else float(config.get("backfill_budget_reserve_pct", 0.20) or 0.20)
+                else float(config.get("backfill_budget_reserve_pct", 0.10) or 0.10)
             )
             _log(
                 f"Backfill budget reserve: holding ${_reserved_backfill_budget:.0f} "
@@ -19083,7 +23011,7 @@ class GraphNexusAnalysis:
                 _pool_b_candidates = [s for s in _pool_b_candidates if s not in _fl_blacklist]
 
                 # Symmetric overflow
-                _pool_a_base = int(config.get("pool_a_base", 8))
+                _pool_a_base = int(config.get("pool_a_base", 10))
                 _pool_b_base = int(config.get("pool_b_base", 4))
                 _pool_a_min = int(config.get("pool_a_min", 3))
                 _pool_b_min = int(config.get("pool_b_min", 2))
@@ -19155,7 +23083,7 @@ class GraphNexusAnalysis:
 
                 # --- Apply new-buy cap + headroom only to new entries ---
                 _sell_count = len(sell_syms) if sell_syms else 0
-                _base_buy_cap = int(config.get("max_stock_buys_per_day", 10))
+                _base_buy_cap = int(config.get("max_stock_buys_per_day", 8))
                 # Downtrend protection: cap buys during sustained bearish conditions
                 if _downtrend_active:
                     _dt_cap = int(config.get("downtrend_protection_max_buys_override", 2))
@@ -19265,14 +23193,36 @@ class GraphNexusAnalysis:
                                     # Prior fail-safe=PASS allowed false breakouts when
                                     # volume data was missing (reviewer-flagged).
                                     _ps_vol_ok = (_ps_vol_avg > 0) and (_ps_cur_vol >= _ps_vol_avg * _ps_vol_mult)
-                                    if _ps_breakout and _ps_vol_ok:
+                                    # Tier-3 A5 (2026-05-17): add a sell-price-recovery
+                                    # shortcut. SNDK exited at $195.77 → V31.4 only
+                                    # lifted when price > 20d_high × 1.05 (~$275),
+                                    # missing 80% of the recovery. The recovery
+                                    # shortcut fires when cur >= sell_price × (1 +
+                                    # post_sell_cooldown_lift_threshold_pct) (default
+                                    # 10%) so the cooldown lifts as soon as the dip
+                                    # measurably reverses, letting Tier-3 A4's
+                                    # re-entry pipeline take over earlier.
+                                    _ps_sell_price = float(_ps_info.get("sell_price", 0) or 0.0)
+                                    _ps_lift_thresh = float(
+                                        config.get("post_sell_cooldown_lift_threshold_pct", 0.10)
+                                        or 0.10
+                                    )
+                                    _ps_recovery_shortcut = bool(
+                                        _ps_sell_price > 0
+                                        and _ps_cur >= _ps_sell_price * (1.0 + _ps_lift_thresh)
+                                    )
+                                    if (_ps_breakout and _ps_vol_ok) or _ps_recovery_shortcut:
                                         _ps_blocked_lift.add(_ps_tk)
                                         _ps_reentry_cd[_ps_tk] = _ps_reentry_cd_days
                                         _ps_fires += 1
+                                        _ps_trigger = (
+                                            "recovery_shortcut" if _ps_recovery_shortcut and not (_ps_breakout and _ps_vol_ok)
+                                            else "20d_high_breakout"
+                                        )
                                         _log(
-                                            f"V31.4 post-sell breakout: lift cooldown for {_ps_tk} "
+                                            f"V31.4 post-sell breakout ({_ps_trigger}): lift cooldown for {_ps_tk} "
                                             f"(20d_high={_ps_20d_high:.2f}, cur={_ps_cur:.2f}, "
-                                            f"sold={_ps_info.get('sell_price', 0):.2f})",
+                                            f"sold={_ps_sell_price:.2f})",
                                             "magenta",
                                         )
                                 # Lift cooldown for identified breakout tickers.
@@ -19286,9 +23236,16 @@ class GraphNexusAnalysis:
                                             del _mw_cooldown_map[_ps_lift_sym]
                             except Exception as _ps_exc:
                                 _log(f"V31.4 post-sell breakout error: {_ps_exc}", "yellow")
+                        # Phase ε.C.6 (BT294837 follow-up, 2026-05-19):
+                        # V31.4 lift force-promotion. When the post-sell
+                        # breakout / recovery_shortcut lifts a cooldown
+                        # this bar, ensure the lifted ticker actually
+                        # takes a watchlist slot (don't lose it to higher-
+                        # scoring tickers — see ε.B.5 SNDK lifecycle audit).
                         _momentum_new_buys = _reserve_momentum_slots(
                             _mw_ranked, config, _momentum_held_set, _open_positions_set,
                             recent_sell_cooldown=_mw_cooldown_set,
+                            force_promote=_ps_blocked_lift if bool(config.get("post_sell_breakout_force_promote_enabled", True)) else None,
                         )
                         # Inject momentum picks into scores + prepend to candidates
                         _existing_candidates_set = set(_new_stock_candidates)
@@ -19324,6 +23281,14 @@ class GraphNexusAnalysis:
                             if _mp_ticker not in scores:
                                 scores[_mp_ticker] = {}
                             scores[_mp_ticker]["raw_net_score"] = _mp["raw_net_score"]
+                            # Phase η bug-sweep: propagate raw_net_natural
+                            # (added by η.E) from picks → scores so
+                            # downstream consumers (η.G, telemetry) see
+                            # the natural-signal value, not just the
+                            # floored+differentiated raw_net_score.
+                            scores[_mp_ticker]["raw_net_natural"] = _mp.get(
+                                "raw_net_natural", _mp["raw_net_score"]
+                            )
                             scores[_mp_ticker]["score"] = 1
                             scores[_mp_ticker]["action_intent"] = "momentum_watchlist_buy"
                             scores[_mp_ticker]["momentum_watchlist_score"] = _mp.get("momentum_watchlist_score", 0.0)
@@ -19410,6 +23375,37 @@ class GraphNexusAnalysis:
                 # Held adds and rotation TRIMS (sell side) still flow so the portfolio
                 # can naturally shrink toward the cap.
                 _max_positions = int(config.get("max_positions", 15) or 15)
+                # Z4.1 + Section 5 (2026-05-15): apply regime-based caps so
+                # capacity contracts in adverse markets without operator
+                # intervention. Defaults preserve current behavior in bull;
+                # chop halves the cap, bear quarters, crash halts new buys.
+                # Set nexus_regime_capacity_gating_enabled=false to disable.
+                if bool(config.get("nexus_regime_capacity_gating_enabled", True)):
+                    _z41_spy_20d = _spy_20d_return(strategy_cache, date_key)
+                    _z41_v31 = str((strategy_cache or {}).get("_market_regime") or "bull")
+                    _z41_vix = (strategy_cache or {}).get("_vix_latest") if isinstance(strategy_cache, dict) else None
+                    _z41_regime = _nexus_regime_classify(_z41_spy_20d, _z41_v31, _z41_vix)
+                    # BT136708 calibration (2026-05-18): chop default 8 caused
+                    # 9-10/8 V28.8.1 breach for ~95% of the run (BFQ stuck at
+                    # 48-60 for 175 days, avg 1.98 buys/day vs 6+ capacity).
+                    # Raised chop default 8→12 and bear default 4→8 so the
+                    # backfill queue can drain.
+                    _z41_caps = {
+                        "bull":  int(config.get("max_positions_bull",  _max_positions) or _max_positions),
+                        "chop":  int(config.get("max_positions_chop",  min(_max_positions, 12)) or 12),
+                        "bear":  int(config.get("max_positions_bear",  min(_max_positions, 8)) or 8),
+                        "crash": int(config.get("max_positions_crash", 0) or 0),
+                    }
+                    _z41_capped = _z41_caps.get(_z41_regime, _max_positions)
+                    if _z41_capped != _max_positions:
+                        _log(
+                            f"Regime capacity gate (Z4.1): regime={_z41_regime} "
+                            f"max_positions {_max_positions}->{_z41_capped} "
+                            f"(spy_20d={_z41_spy_20d if _z41_spy_20d is None else f'{_z41_spy_20d*100:+.2f}%'}, "
+                            f"v31={_z41_v31})",
+                            "cyan",
+                        )
+                        _max_positions = _z41_capped
                 _current_positions = len(portfolio_emulator.get_positions()) if portfolio_emulator and hasattr(portfolio_emulator, 'get_positions') else 0
                 _blocked_buys = []
                 # V28.8.1 (Codex-corrected): breach detection + strategy_cache flag
@@ -19432,7 +23428,27 @@ class GraphNexusAnalysis:
                     _breach_auto_heal = bool(config.get("max_positions_breach_auto_rotate", True))
                     _breach_slots_to_free = max(1, _current_positions - _max_positions)
                     _breach_min_hold_days = int(config.get("max_positions_breach_heal_min_hold_days", 3) or 3)
+                    # Phase γ.3 (2026-05-18, BT232179 follow-up): adversarial review
+                    # of BT232179 found the breach-heal loop was firing on 78% of
+                    # bars but `auto-heal freed 0` on 79% of those — every candidate
+                    # was filtered out by the winner_lock skip. Root cause: the
+                    # winner_lock predicate fires for held positions at +2%/+3 days
+                    # (CSCO at +8.8%/9d in BT232179), which is far short of the
+                    # "true winner" intent. Relax the skip so positions that are
+                    # winner_lock'd BUT only marginally profitable (pnl < 15%) are
+                    # still eligible for breach-heal eviction. True winners (>=15%
+                    # pnl) remain protected. Bounded: heal loop still caps at
+                    # _breach_slots_to_free closes per breach (not aggressive
+                    # sell-down). Knob is operator-tunable for Phase β follow-up.
+                    try:
+                        _breach_wlock_max_pnl = float(
+                            config.get("breach_heal_winner_lock_bypass_max_pnl_pct", 15.0)
+                            or 15.0
+                        )
+                    except (TypeError, ValueError):
+                        _breach_wlock_max_pnl = 15.0
                     _breach_healed = 0
+                    _breach_wlock_bypassed = 0
                     if _breach_auto_heal and portfolio_emulator is not None:
                         _breach_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
                         _breach_candidates: list[tuple[str, float, int]] = []
@@ -19465,12 +23481,23 @@ class GraphNexusAnalysis:
                                 # Don't force-sell positions that would be grace-
                                 # protected from trend_reversal — breach-heal
                                 # shouldn't bypass risk controls for young names.
+                                # Phase ε.C.0' (2026-05-19): tier-aware grace escape.
+                                _bh_tier = _resolve_conviction_tier_at_exit(
+                                    _bh_sym_u, config, strategy_cache, propagated
+                                )
                                 _bh_grace_in, _bh_grace_esc, _ = _in_initial_grace_period(
-                                    _bh_held_days, _bh_pnl, config, _breach_regime
+                                    _bh_held_days, _bh_pnl, config, _breach_regime,
+                                    conviction_tier=_bh_tier,
                                 )
                                 if _bh_grace_in and not _bh_grace_esc:
                                     continue
-                                # Respect winner_lock — don't heal by evicting a locked winner
+                                # Respect winner_lock — don't heal by evicting a TRUE
+                                # winner. Phase γ.3: only short-circuit when the
+                                # held position is BOTH winner_lock'd AND truly
+                                # profitable (pnl >= breach_heal_winner_lock_bypass_max_pnl_pct,
+                                # default 15%). Modest +2%-to-15% "winners" remain
+                                # eligible so the heal loop can free a slot for
+                                # raw=1.8 incoming candidates.
                                 _bh_wlock, _ = _rotation_winner_lock_active(
                                     held_pnl_pct=_bh_pnl,
                                     held_days=_bh_held_days,
@@ -19479,8 +23506,13 @@ class GraphNexusAnalysis:
                                     is_equity=bool(_bh_snap.get("is_equity", True)),
                                     config=config,
                                 )
-                                if _bh_wlock:
+                                if _bh_wlock and float(_bh_pnl or 0.0) >= _breach_wlock_max_pnl:
                                     continue
+                                if _bh_wlock:
+                                    # Audit: this candidate would have been
+                                    # blocked pre-γ.3. Counter incremented so
+                                    # the operator can see the relaxation working.
+                                    _breach_wlock_bypassed += 1
                                 _breach_candidates.append((_bh_sym_u, _bh_pnl, int(_bh_held_days)))
                             except Exception as _bh_exc:
                                 _log(f"V31.3 breach heal candidate skip {_bh_sym_u}: {_bh_exc}", "yellow")
@@ -19513,6 +23545,17 @@ class GraphNexusAnalysis:
                                 "magenta",
                             )
                         _current_positions -= _breach_healed
+                        # Phase γ.3: emit per-bar audit on the winner_lock relaxation
+                        # so operators can confirm the heal loop is actually doing
+                        # work that pre-γ.3 was silently no-op'd.
+                        if _breach_wlock_bypassed > 0:
+                            _log(
+                                f"V31.3 breach auto-heal γ.3: "
+                                f"{_breach_wlock_bypassed} winner_lock'd candidate(s) "
+                                f"admitted (pnl < {_breach_wlock_max_pnl:.1f}% bypass "
+                                f"threshold).",
+                                "magenta",
+                            )
                     # Re-evaluate breach state after heal attempt
                     if _current_positions > _max_positions:
                         _position_breach_active = True
@@ -19773,6 +23816,8 @@ class GraphNexusAnalysis:
                                         incoming_rotation_score=_bb_rotation_score,
                                         config=config,
                                         incoming_meta=_incoming_meta,
+                                        # Phase ε.C.2: regime-aware time-floor decay
+                                        market_regime=str((strategy_cache or {}).get("_market_regime") or "bull"),
                                     )
                                     # V28 Fix 4: log every rotation eval result so failed
                                     # rotations are visible (previously most failures
@@ -19818,7 +23863,45 @@ class GraphNexusAnalysis:
                                         }
                                         _is_break_glass_mode = _is_partial_trim_mode or _rotation_mode in {
                                             "v28_hc_profitable_break_glass",
+                                            # Full-exit (not partial-trim) but must still consult the
+                                            # eta.D HIGH-tier grace guard below so a fresh high-tier
+                                            # holding in its grace window is not evicted.
+                                            "profitable_min_hold_conviction_override",
                                         }
+                                        # η.D — Phase η (2026-05-20): refuse V28.9/break-glass
+                                        # eviction of a HIGH-tier holding that is still inside
+                                        # its grace window. Closes the ε.B gap — ε.B added
+                                        # tier-aware grace floors at _in_initial_grace_period
+                                        # but the break-glass rotation path (this block) did
+                                        # not consult them. BT277953 day 5: SNDK was evicted
+                                        # via this code path while in grace.
+                                        if (
+                                            _is_break_glass_mode
+                                            and config.get("eta_v289_protect_high_grace_enabled", True)
+                                        ):
+                                            _eta_d_tier = _resolve_conviction_tier_at_exit(
+                                                _wt, config, strategy_cache, propagated
+                                            )
+                                            _eta_d_grace_in, _eta_d_grace_esc, _ = _in_initial_grace_period(
+                                                int(_held_days_value or 0),
+                                                float(_wd.get("unrealized_pct", 0.0) or 0.0),
+                                                config,
+                                                str((strategy_cache or {}).get("_market_regime") or "bull"),
+                                                conviction_tier=_eta_d_tier,
+                                            )
+                                            if (
+                                                _eta_d_tier == "HIGH"
+                                                and _eta_d_grace_in
+                                                and not _eta_d_grace_esc
+                                            ):
+                                                _log(
+                                                    f"[ETA.D] V28.9 refused pair: loser={_wt} "
+                                                    f"HIGH-tier in grace (held={_held_days_label}, "
+                                                    f"pnl={float(_wd.get('unrealized_pct', 0.0) or 0.0):+.1f}%, "
+                                                    f"mode={_rotation_mode}); trying next pair",
+                                                    "yellow",
+                                                )
+                                                continue
                                         # V28.6: v28_hc_profitable_break_glass remains FULL EXIT (V28.4 floor
                                         # protects winners >2% pnl); v28_hc_losing_break_glass reverts to
                                         # partial trim to soften V28.5's expanded eviction so displaced names
@@ -20348,6 +24431,9 @@ class GraphNexusAnalysis:
                     min_position_size=_min_position_size,
                     config=config,
                     blocked_tickers=_v31_blocked_set,
+                    # Tier-3 B2: thread broker's _initial_value so scaled new-buy
+                    # cap can pick the right account-size bucket.
+                    initial_value=float(getattr(portfolio_emulator, "_initial_value", 0.0) or 0.0),
                 )
                 # V31 Section 4.3: vol-adjusted sizing — reweight slate so high-vol
                 # names get smaller positions and low-vol names get larger ones,
@@ -20373,6 +24459,15 @@ class GraphNexusAnalysis:
                         config,
                         prices=prices,
                         price_history=data,
+                        # η.G — Phase η (2026-05-20): supply context so the cap
+                        # enforcer can attempt a conditional swap before
+                        # demoting eligible HIGH-conviction new buys.
+                        scores=scores,
+                        strategy_cache=strategy_cache,
+                        propagated=propagated,
+                        nexus_sell_enforcement=nexus_sell_enforcement,
+                        sentiment_data=sentiment_data,
+                        date_key=date_key,
                     )
                 # HM fix: Deduct slate consumption so reserved slot doesn't double-allocate
                 _slate_spend = sum(float(f.get("buy_cash", 0.0) or 0.0) for f in _funded_stock_slate)
@@ -20408,10 +24503,90 @@ class GraphNexusAnalysis:
                 # Determine how many ETFs can be funded at the minimum
                 _max_fundable_etfs = max(1, int(_etf_budget_available / _etf_min)) if _etf_budget_available >= _etf_min else 0
                 _etf_to_fund = etf_buys[:_max_fundable_etfs] if _max_fundable_etfs > 0 else []
+                # Phase ε.C.4 (BT294837 follow-up, 2026-05-19, root cause of
+                # permanent V28.8.1 BREACH state): the ETF allocation channel
+                # pre-ε.C.4 wrote `nexus_position_sizes[sym] = {"asset_class":
+                # "etf", ...}` without consulting `_current_positions`,
+                # `_max_positions`, or `_v28_7_position_breach_active`. On
+                # bar 1 of BT294837, 4-6 trend ETFs (BOTZ/ROBT/WTAI/ARKQ/
+                # UBOT/AIQ) plus 8 stocks seated immediately → 12-14
+                # positions vs cap=8. ETFs are protected by profitable_
+                # min_hold/winner_lock and never roll off, leaving the
+                # portfolio in permanent BREACH. The breach flag then
+                # blocks BFQ dequeue + partial-trim rotations, starving
+                # all HC propagation discoveries (16 unfunded per breach
+                # bar in BT294837). The fix: enforce a per-account ETF
+                # position cap (`max_positions_etf`, default 4) using a
+                # cache-tracked held-ETF set. Existing held ETFs ride
+                # along; new ETF buys are skipped if at the cap. NO
+                # TICKER HARDCODING — works for any ETF universe.
+                try:
+                    _etf_max_held = max(0, int(config.get("max_positions_etf", 4) or 4))
+                except (TypeError, ValueError):
+                    _etf_max_held = 4
+                _held_etf_tracker = (
+                    strategy_cache.setdefault("_nexus_held_etfs", set())
+                    if strategy_cache is not None
+                    else set()
+                )
+                if not isinstance(_held_etf_tracker, set):
+                    # Persistence may have round-tripped to a list/dict
+                    try:
+                        _held_etf_tracker = set(_held_etf_tracker or [])
+                    except TypeError:
+                        _held_etf_tracker = set()
+                    if strategy_cache is not None:
+                        strategy_cache["_nexus_held_etfs"] = _held_etf_tracker
+                # Reconcile tracker against the LIVE portfolio.
+                # Phase ε.C.4 fix (bug-sweep adversarial finding B2): the
+                # tracker must do TWO operations each bar:
+                # (a) DROP sold ETFs (intersection_update with live held),
+                # (b) ADD currently-held ETFs from `etf_set` ∩ portfolio
+                # so warm-start with empty cache doesn't lose the live
+                # ETF count and permit over-allocation. `etf_set` is the
+                # known ETF universe in scope here; intersecting with live
+                # positions gives the actual held-ETF set.
+                _live_held_set: set[str] = set()
+                if portfolio_emulator is not None:
+                    try:
+                        _pe_positions = getattr(portfolio_emulator, "_positions", {}) or {}
+                        _live_held_set = {
+                            str(t or "").strip().upper()
+                            for t, q in _pe_positions.items()
+                            if float(q or 0) > 0
+                        }
+                    except Exception:
+                        _live_held_set = set()
+                # Restrict reconciliation domain to known ETFs (intersect with
+                # etf_set if available). This avoids accidentally classifying
+                # stock positions as ETFs.
+                _etf_universe: set[str] = set()
+                try:
+                    _etf_universe = {str(t or "").strip().upper() for t in (etf_set or set()) if str(t or "").strip()}
+                except (TypeError, ValueError):
+                    _etf_universe = set()
+                # (a) drop sold/non-existent entries from prior bars
+                _held_etf_tracker.intersection_update(_live_held_set)
+                # (b) add currently-held ETFs that aren't yet in the tracker
+                #     (warm-start case OR positions opened outside this strategy)
+                if _etf_universe:
+                    _held_etf_tracker.update(_live_held_set & _etf_universe)
+                _etf_slots_remaining = max(0, _etf_max_held - len(_held_etf_tracker))
+                if _etf_slots_remaining < len(_etf_to_fund):
+                    _etf_capped_out = _etf_to_fund[_etf_slots_remaining:]
+                    _etf_to_fund = _etf_to_fund[:_etf_slots_remaining]
+                    _log(
+                        f"[ε.C.4] ETF cap reached: max_positions_etf={_etf_max_held}, "
+                        f"currently_held={len(_held_etf_tracker)}, slots_remaining="
+                        f"{_etf_slots_remaining}. Skipping {len(_etf_capped_out)} "
+                        f"new ETF buy(s): {_etf_capped_out}",
+                        "yellow",
+                    )
                 if _etf_to_fund:
                     cash_per_etf = _etf_budget_available / len(_etf_to_fund)
                     for sym in _etf_to_fund:
                         nexus_position_sizes[sym] = {"buy_cash": round(cash_per_etf, 2), "asset_class": "etf", "signal_source": "etf"}
+                        _held_etf_tracker.add(str(sym or "").strip().upper())
                     if len(_etf_to_fund) < len(etf_buys):
                         _skipped_etfs = [s for s in etf_buys if s not in _etf_to_fund]
                         _log(f"ETF min-size filter: funded {len(_etf_to_fund)} ETF(s) @ ${cash_per_etf:.0f} each, skipped {len(_skipped_etfs)}: {_skipped_etfs} (min=${_etf_min:.0f})", "yellow")
@@ -20826,11 +25001,19 @@ class GraphNexusAnalysis:
                             # remove it to prevent double-bookkeeping.
                             if _mw_pf_sell in _mw_held:
                                 del _mw_held[_mw_pf_sell]
+                            # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
+                            _eta_e_pf_floored = max(_mw_pf_score, 1.50)
+                            if config.get("eta_floor_differentiator_enabled", True):
+                                _eta_e_pf_diff = min(0.20, max(0.0, float(_mw_pf_score)) * 0.5)
+                                _eta_e_pf_raw_net = _eta_e_pf_floored + _eta_e_pf_diff
+                            else:
+                                _eta_e_pf_raw_net = _eta_e_pf_floored
                             nexus_position_sizes[_mw_pf_buy] = {
                                 "buy_cash": round(_mw_pf_alloc, 2),
                                 "high_conviction": True,
                                 "asset_class": "stock",
-                                "raw_net_score": round(max(_mw_pf_score, 1.50), 4),
+                                "raw_net_score": round(_eta_e_pf_raw_net, 4),
+                                "raw_net_natural": float(_mw_pf_score),
                                 "signal_source": "momentum_watchlist_portfolio_swap",
                                 "is_propagation_expansion": False,
                                 "is_watchlist_member": True,
@@ -20840,7 +25023,8 @@ class GraphNexusAnalysis:
                             if _mw_pf_buy not in scores:
                                 scores[_mw_pf_buy] = {}
                             scores[_mw_pf_buy]["score"] = 1
-                            scores[_mw_pf_buy]["raw_net_score"] = max(_mw_pf_score, 1.50)
+                            scores[_mw_pf_buy]["raw_net_score"] = _eta_e_pf_raw_net
+                            scores[_mw_pf_buy]["raw_net_natural"] = float(_mw_pf_score)
                             scores[_mw_pf_buy]["action_intent"] = "momentum_watchlist_portfolio_swap"
                             _mw_pf_cooldown_bars = _scale_bars(int(config.get("momentum_sell_cooldown_bars", 5) or 5), config)
                             if _mw_pf_cooldown_bars > 0 and isinstance(strategy_cache, dict):
@@ -20882,7 +25066,11 @@ class GraphNexusAnalysis:
                     _mw_ba_min_free = float(config.get("momentum_breakout_min_free_cash", 200.0) or 200.0)
                     _mw_ba_min_pos = float(config.get("min_position_size", 100.0) or 100.0)
                     _mw_ba_max_per_bar = int(config.get("momentum_breakout_max_per_bar", 1) or 1)
-                    _mw_ba_max_positions = int(config.get("max_positions", 8) or 8)
+                    # BT136708 bug-sweep 2026-05-18: fallback default 8 conflicted with the
+                    # main path's max_positions default of 15 (line 21121). Normalise to 15
+                    # so a missing config key doesn't silently throttle the momentum-watchlist
+                    # breakout-add path below the global cap.
+                    _mw_ba_max_positions = int(config.get("max_positions", 15) or 15)
                     _mw_ba_buy_price_floor = float(config.get("buy_price_floor", 8.0) or 8.0)
                     _mw_ba_current_positions = len(_mw_open_set)
                     # V31.1 bug-sweep fix: count only NEW-entry buys (tickers not
@@ -20933,11 +25121,19 @@ class GraphNexusAnalysis:
                         _mw_ba_alloc = min(_mw_ba_free_cash * 0.95, max(_mw_ba_min_pos, _mw_ba_target))
                         if _mw_ba_alloc < _mw_ba_min_pos:
                             continue
+                        # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
+                        _eta_e_ba_floored = max(_mw_ba_score, 1.50)
+                        if config.get("eta_floor_differentiator_enabled", True):
+                            _eta_e_ba_diff = min(0.20, max(0.0, float(_mw_ba_score)) * 0.5)
+                            _eta_e_ba_raw_net = _eta_e_ba_floored + _eta_e_ba_diff
+                        else:
+                            _eta_e_ba_raw_net = _eta_e_ba_floored
                         nexus_position_sizes[_mw_ba_sym_u] = {
                             "buy_cash": round(_mw_ba_alloc, 2),
                             "high_conviction": True,
                             "asset_class": "stock",
-                            "raw_net_score": round(max(_mw_ba_score, 1.50), 4),
+                            "raw_net_score": round(_eta_e_ba_raw_net, 4),
+                            "raw_net_natural": float(_mw_ba_score),
                             "signal_source": "momentum_breakout_add",
                             "is_propagation_expansion": False,
                             "is_watchlist_member": True,
@@ -20947,7 +25143,8 @@ class GraphNexusAnalysis:
                         if _mw_ba_sym_u not in scores:
                             scores[_mw_ba_sym_u] = {}
                         scores[_mw_ba_sym_u]["score"] = 1
-                        scores[_mw_ba_sym_u]["raw_net_score"] = max(_mw_ba_score, 1.50)
+                        scores[_mw_ba_sym_u]["raw_net_score"] = _eta_e_ba_raw_net
+                        scores[_mw_ba_sym_u]["raw_net_natural"] = float(_mw_ba_score)
                         scores[_mw_ba_sym_u]["action_intent"] = "momentum_breakout_add"
                         _mw_held[_mw_ba_sym_u] = {
                             "bar_entered": _mw_bar,
@@ -20976,6 +25173,19 @@ class GraphNexusAnalysis:
         # so they cannot be overridden by broker aggregation, circuit breaker, or post-decision strategies.
         # Forced exits OVERRIDE momentum watchlist protection — a trailing stop or fast loser
         # must fire even for momentum-held positions.
+        # Tier-3 A4 (2026-05-17): also write status="post_sell_watch" so the
+        # daily re-entry eligibility check can monitor recovery.
+        #   Live mode + DB available → write to GraphNexusDiscoveredStocks.
+        #   Backtest mode             → mirror to strategy_cache in-memory
+        #                               storage (BT136708 P1.7, 2026-05-18) so
+        #                               re-entry pipeline can exercise without
+        #                               polluting the shared live DB.
+        #   Historical-lookback pre-pass → neither (suppressed entirely).
+        _psw_master = bool(config.get("post_sell_watch_enabled", True))
+        _psw_in_lookback = bool(config.get("historical_lookback_mode", False))
+        _psw_live = bool(globals().get("_GN_LIVE_MODE_FLAG", False))
+        _psw_db_write = _psw_master and _psw_live and not _psw_in_lookback
+        _psw_inmem_write = _psw_master and not _psw_live and not _psw_in_lookback
         for _fe_sym, _fe_data in scores.items():
             if isinstance(_fe_data, dict) and _fe_data.get("_forced_exit") and _fe_data.get("score") == -1:
                 if _fe_sym not in (nexus_sell_enforcement or set()):
@@ -20986,6 +25196,39 @@ class GraphNexusAnalysis:
                 entry = nexus_position_sizes.get(_fe_sym, {})
                 entry["sell_fraction"] = 1.0
                 nexus_position_sizes[_fe_sym] = entry
+                # Tier-3 A4: record post_sell_watch row for daily eligibility scan.
+                if _psw_db_write or _psw_inmem_write:
+                    try:
+                        _psw_exit_price = _resolve_symbol_price(
+                            _fe_sym, prices, data, portfolio_emulator=portfolio_emulator,
+                        )
+                        _psw_tier = _resolve_conviction_tier_at_exit(
+                            _fe_sym, config, strategy_cache, propagated,
+                        )
+                        _psw_reason = str(_fe_data.get("reason", "forced_exit"))[:200]
+                        _psw_exit_price_f = float(_psw_exit_price or 0.0)
+                        if _psw_db_write and conn_trends is not None:
+                            _mark_discovered_stock_sold(
+                                conn_trends,
+                                instance_id,
+                                _fe_sym,
+                                reason=_psw_reason,
+                                date_key=date_key,
+                                forced_exit=True,
+                                exit_price=_psw_exit_price_f,
+                                entry_conviction_tier=_psw_tier,
+                            )
+                        if _psw_inmem_write:
+                            _post_sell_watch_inmem_write(
+                                strategy_cache,
+                                _fe_sym,
+                                exit_price=_psw_exit_price_f,
+                                entry_conviction_tier=_psw_tier,
+                                sell_reason=_psw_reason,
+                                date_key=date_key,
+                            )
+                    except Exception as _psw_exc:
+                        _log(f"post_sell_watch write error: {_fe_sym}: {_psw_exc}", "yellow")
 
         # ── Two-phase rediscovery confirmation ──────────────────────
         # Rediscovered tickers were set to 'rediscovery_pending'. Now that

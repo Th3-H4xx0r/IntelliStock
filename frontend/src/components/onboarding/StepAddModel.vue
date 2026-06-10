@@ -23,6 +23,8 @@ const draft = ref({
   azureEndpoint: '',
   azureApiVersion: '2024-10-21',
   reasoningEffort: '',
+  cliPath: '',
+  extraArgs: '',
 })
 
 function updateDraft(next) { draft.value = next }
@@ -40,16 +42,19 @@ function _normalizeError(data, status) {
 }
 
 function _payload() {
+  const isCli = draft.value.provider === 'claude-cli'
   return {
     name: draft.value.name.trim(),
     provider: draft.value.provider,
     model: draft.value.model.trim(),
-    api_key: draft.value.apiKey.trim() || undefined,
-    openai_base_url: draft.value.openaiBaseUrl.trim() || undefined,
-    nvidia_base_url: draft.value.nvidiaBaseUrl.trim() || undefined,
-    azure_openai_endpoint: draft.value.azureEndpoint.trim() || undefined,
-    azure_openai_api_version: draft.value.azureApiVersion.trim() || undefined,
-    reasoning_effort: draft.value.reasoningEffort || undefined,
+    api_key: isCli ? undefined : (draft.value.apiKey.trim() || undefined),
+    openai_base_url: isCli ? undefined : (draft.value.openaiBaseUrl.trim() || undefined),
+    nvidia_base_url: isCli ? undefined : (draft.value.nvidiaBaseUrl.trim() || undefined),
+    azure_openai_endpoint: isCli ? undefined : (draft.value.azureEndpoint.trim() || undefined),
+    azure_openai_api_version: isCli ? undefined : (draft.value.azureApiVersion.trim() || undefined),
+    reasoning_effort: isCli ? undefined : (draft.value.reasoningEffort || undefined),
+    cli_path: isCli ? (draft.value.cliPath.trim() || undefined) : undefined,
+    extra_args: isCli ? (draft.value.extraArgs.trim() || undefined) : undefined,
   }
 }
 
@@ -93,7 +98,19 @@ async function testAndSave() {
     submitOk.value = true
     submitMsg.value = `Model "${data.name || body.name}" saved.`
     showForm.value = false
-    draft.value = { ...draft.value, name: '', model: '', apiKey: '' }
+    draft.value = {
+      name: '',
+      provider: 'gemini',
+      model: '',
+      apiKey: '',
+      openaiBaseUrl: '',
+      nvidiaBaseUrl: '',
+      azureEndpoint: '',
+      azureApiVersion: '2024-10-21',
+      reasoningEffort: '',
+      cliPath: '',
+      extraArgs: '',
+    }
     emit('added', data)
   } catch (e) {
     submitOk.value = false
@@ -139,7 +156,9 @@ function maskKey(k) {
           <div class="min-w-0 flex-1">
             <p class="text-sm font-medium text-slate-100 truncate">{{ m.name }}</p>
             <p class="text-[11px] text-slate-500 truncate font-mono">
-              {{ m.provider }} · {{ m.model }} <span v-if="m.api_key">· {{ maskKey(m.api_key) }}</span>
+              {{ m.provider }} · {{ m.model }}
+              <span v-if="m.provider === 'claude-cli'">· {{ m.cli_path || 'claude' }}</span>
+              <span v-else-if="m.api_key">· {{ maskKey(m.api_key) }}</span>
             </p>
           </div>
         </div>

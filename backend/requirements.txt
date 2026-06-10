@@ -51,7 +51,7 @@ toon-format
 # PydanticAI slim install with only the providers used here:
 # - Gemini via Google provider
 # - DeepSeek via OpenAI-compatible provider
-pydantic-ai-slim[google,openai]==1.0.18
+pydantic-ai-slim[google,openai,bedrock]==1.0.18
 # Live-mode trading (V32 Phase 5):
 # - alpaca-py: new TradingClient + TradingStream (supersedes alpaca_trade_api above for live order path)
 # - cryptography: Fernet-encrypted BrokerageAccounts credentials (secret_store.py)
@@ -59,3 +59,12 @@ pydantic-ai-slim[google,openai]==1.0.18
 alpaca-py>=0.43.0
 cryptography>=41.0.0
 exchange_calendars>=4.13.2
+# Ollama provider — official Python SDK for local + remote + cloud Ollama
+# hosts. We use Client/AsyncClient + ResponseError; httpx is a transitive
+# dep and we catch its network exceptions directly in ollama_client.py.
+ollama>=0.4,<1
+# Amazon Bedrock provider — boto3 drives the Converse API (plain + tools) and
+# the control-plane bedrock client (discovery). The pydantic-ai bedrock extra
+# above also pulls boto3, but we pin an explicit floor because Bedrock API-key
+# (bearer-token) auth requires a recent botocore.
+boto3>=1.40.0

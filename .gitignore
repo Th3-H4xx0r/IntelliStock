@@ -218,6 +218,8 @@ __marimo__/
 
 # Backtest logs
 backtest_logs/
+# Logs pulled locally via scripts/pull_backtest_logs.py
+backtests/
 
 # Local dev tooling state — Claude Code, MCP, Codex, hive-mind, RuFlo
 .gitnexus
@@ -251,3 +253,4 @@ ehthumbs.db
 
 # Vite cache
 frontend/.vite/
+.sessions/

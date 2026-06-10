@@ -20,6 +20,7 @@ import os
 import threading
 import logging
 from datetime import datetime
+from typing import Dict
 from rethinkdb import RethinkDB
 import socketio
 from waitress import serve
@@ -199,6 +200,92 @@ def _detect_container_network(client):
         return None
 
 
+def _claude_home_mount():
+    """Return the host->container claude-auth bind-mounts as a dict suitable
+    for the Docker SDK, or ``None`` if the operator hasn't configured a
+    ``CLAUDE_HOST_HOME`` path.
+
+    Spawned containers (live trading instances, AI backtesting agent,
+    daily digest, graph nexus) reuse the parent service's claude login
+    by bind-mounting:
+      - the host's ``~/.claude`` dir   at ``/root/.claude``
+      - the host's ``~/.claude.json`` file at ``/root/.claude.json``
+
+    Both are required for CC's MCP mode (the bare directory mount alone
+    triggers a misleading "Not logged in" error because CC also reads
+    the sibling config file at ``$HOME/.claude.json``). With no env var
+    set, we skip the mounts — claude-cli calls in the child will surface
+    a clean "Not logged in" error instead of failing obscurely on a
+    missing volume.
+
+    Mounted **read-only** so a compromised CC subprocess can't tamper
+    with the host's auth state. CC only reads ``.credentials.json``,
+    ``settings.json``, and ``.claude.json`` from this dir; it doesn't
+    write back during the short-lived calls we make.
+    """
+    host_home = (os.environ.get('CLAUDE_HOST_HOME') or '').strip()
+    if not host_home:
+        return None
+    mounts: Dict[str, Dict[str, str]] = {
+        host_home: {'bind': '/root/.claude', 'mode': 'ro'},
+    }
+    host_config = (os.environ.get('CLAUDE_HOST_CONFIG') or '').strip()
+    if host_config:
+        mounts[host_config] = {'bind': '/root/.claude.json', 'mode': 'ro'}
+    return mounts
+
+
+_CODEX_AUTH_VOLUME_NAME = "codex_auth"
+
+
+def _augment_volumes_with_claude(volumes):
+    """Append the claude-auth + codex-auth mounts to a ``volumes`` arg.
+
+    The Docker SDK accepts either a dict shape
+    ``{host_path: {bind, mode}}`` or a list of ``"name:/path"`` /
+    ``"host:/container"`` strings. The list-with-mode form
+    (``"host:/container:rw"``) is the Docker *CLI* syntax and is
+    inconsistently supported by the SDK across versions. To be safe we
+    always emit dict shape when any auth mount is added.
+
+    Returns a NEW container suitable for the SDK's ``volumes=`` arg.
+    - claude is mounted **read-only** (CC only reads
+      ``.credentials.json`` / ``settings.json``).
+    - codex_auth (named volume) is mounted **read-write** so spawned
+      strategies share the same auth.json the operator established via
+      the Models UI device-code login. The volume is created by
+      docker-compose; if it doesn't exist on this host, the mount is
+      skipped silently — the codex provider's auth probe will report
+      "not authenticated" cleanly.
+    """
+    claude_mounts = _claude_home_mount() or {}
+    # Convert any input shape to a dict.
+    out: Dict[str, Dict[str, str]] = {}
+    if isinstance(volumes, dict):
+        out = dict(volumes)
+    elif isinstance(volumes, list):
+        for entry in volumes:
+            if not isinstance(entry, str):
+                continue
+            parts = entry.split(":")
+            if len(parts) == 2:
+                host, bind = parts
+                out[host] = {"bind": bind, "mode": "rw"}
+            elif len(parts) == 3:
+                host, bind, mode = parts
+                out[host] = {"bind": bind, "mode": mode}
+            else:
+                out[entry] = {"bind": "/data", "mode": "rw"}
+    for host_path, spec in claude_mounts.items():
+        out[host_path] = spec
+    # Always try to mount the codex_auth named volume. The Docker SDK
+    # auto-creates a *new* named volume if it doesn't exist, which would
+    # be empty (no auth) — that's still safe; the codex provider just
+    # reports "not authenticated" cleanly.
+    out[_CODEX_AUTH_VOLUME_NAME] = {"bind": "/root/.codex", "mode": "rw"}
+    return out
+
+
 def _get_instance_network(client):
     """
     Return the Docker network name to attach instance containers to.
@@ -317,7 +404,7 @@ def start_instance_container(instance_id):
             name=name,
             environment=env,
             network=network,
-            volumes=volumes,
+            volumes=_augment_volumes_with_claude(volumes),
             detach=True,
             remove=False,
         )
@@ -464,6 +551,7 @@ def start_agent_container(force_restart=False):
             name=name,
             environment=env,
             network=network,
+            volumes=_augment_volumes_with_claude([]),
             detach=True,
             remove=False,
         )
@@ -572,6 +660,7 @@ def start_digest_container():
             name=name,
             environment=env,
             network=network,
+            volumes=_augment_volumes_with_claude([]),
             detach=True,
             remove=False,
         )
@@ -690,7 +779,7 @@ def start_discover_container():
             name=name,
             environment=_discover_container_env(),
             network=network,
-            volumes=[f'{DISCOVER_DATA_VOLUME_NAME}:/app/discoverStocks'],
+            volumes=_augment_volumes_with_claude([f'{DISCOVER_DATA_VOLUME_NAME}:/app/discoverStocks']),
             detach=True,
             remove=False,
         )
@@ -883,7 +972,7 @@ def start_nexus_container():
             name=name,
             environment=env,
             network=network,
-            volumes=volumes,
+            volumes=_augment_volumes_with_claude(volumes),
             detach=True,
             remove=False,
         )

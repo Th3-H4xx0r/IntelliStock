@@ -18,6 +18,7 @@ import hashlib
 import html
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
@@ -52,9 +53,13 @@ _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
-_REQUEST_DELAY = 1.0  # seconds between requests to avoid rate limiting
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = [2, 5, 10]  # seconds
+# Concurrency for RSS feed fetches. The keyword/topic sets are large (~145 feeds);
+# fetching them serially with a 1s/request delay took ~205s and blew the live
+# macro 120s budget. A bounded pool cuts wall-time to seconds; per-feed 429 retry
+# + backoff (in _fetch_rss_feed) still guards against rate limiting.
+_FETCH_WORKERS = 8
 
 # Google News predefined topic slugs
 TOPICS = {
@@ -281,15 +286,28 @@ def fetch_google_news(
     if keywords is None:
         keywords = DEFAULT_KEYWORDS
 
+    # Fetch all keyword feeds CONCURRENTLY (was serial with a 1s/request delay,
+    # ~205s for the full keyword set — which blew the live macro 120s budget).
+    # A bounded pool keeps Google RSS happy (per-feed 429 retry/backoff still
+    # applies in _fetch_rss_feed). Results are kept in keyword order so the
+    # downstream dedup + max_total cut stays deterministic.
+    urls = [_build_search_url(kw, start_date, end_date) for kw in keywords]
+    fetched: list[list[dict]] = [[] for _ in urls]
+    with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as ex:
+        fut_to_idx = {ex.submit(_fetch_rss_feed, url): i for i, url in enumerate(urls)}
+        for fut in as_completed(fut_to_idx):
+            i = fut_to_idx[fut]
+            try:
+                fetched[i] = fut.result() or []
+            except Exception as e:
+                _log(f"Google News keyword fetch failed: {e}", "yellow")
+                fetched[i] = []
+
     all_articles: list[dict] = []
     seen_urls: set[str] = set()
-
-    for i, kw in enumerate(keywords):
+    for articles in fetched:
         if len(all_articles) >= max_total:
             break
-        url = _build_search_url(kw, start_date, end_date)
-        articles = _fetch_rss_feed(url)
-
         for a in articles[:max_results_per_keyword]:
             art_url = a.get("url", "")
             if art_url in seen_urls:
@@ -311,10 +329,6 @@ def fetch_google_news(
             if len(all_articles) >= max_total:
                 break
 
-        # Rate limiting between keyword fetches
-        if i < len(keywords) - 1:
-            time.sleep(_REQUEST_DELAY)
-
     _log(f"Fetched {len(all_articles)} articles from {len(keywords)} keywords", "green")
     return all_articles
 
@@ -334,15 +348,24 @@ def fetch_google_news_by_topic(
     if topics is None:
         topics = DEFAULT_TOPICS
 
+    # Fetch all topic feeds CONCURRENTLY (see fetch_google_news for the why).
+    urls = [_build_topic_url(topic) for topic in topics]
+    fetched: list[list[dict]] = [[] for _ in urls]
+    with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as ex:
+        fut_to_idx = {ex.submit(_fetch_rss_feed, url): i for i, url in enumerate(urls)}
+        for fut in as_completed(fut_to_idx):
+            i = fut_to_idx[fut]
+            try:
+                fetched[i] = fut.result() or []
+            except Exception as e:
+                _log(f"Google News topic fetch failed: {e}", "yellow")
+                fetched[i] = []
+
     all_articles: list[dict] = []
     seen_urls: set[str] = set()
-
-    for i, topic in enumerate(topics):
+    for articles in fetched:
         if len(all_articles) >= max_total:
             break
-        url = _build_topic_url(topic)
-        articles = _fetch_rss_feed(url)
-
         for a in articles[:max_results_per_topic]:
             art_url = a.get("url", "")
             if art_url in seen_urls:
@@ -363,9 +386,6 @@ def fetch_google_news_by_topic(
             all_articles.append(a)
             if len(all_articles) >= max_total:
                 break
-
-        if i < len(topics) - 1:
-            time.sleep(_REQUEST_DELAY)
 
     _log(f"Fetched {len(all_articles)} articles from {len(topics)} topics", "green")
     return all_articles

@@ -31,6 +31,7 @@ load_dotenv(os.path.join(BACKEND_DIR, ".env"))
 load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), ".env"))
 
 from llm_utils import call_structured_llm_by_provider
+from llm_utils import _call_structured_llm_with_critical_guard as _scl_guarded
 
 # Discord status channel (ai-backtest-agent); messages go via RethinkDB outbox, bot posts to Discord
 DISCORD_AGENT_CHANNEL = "ai-backtest-agent"
@@ -375,7 +376,7 @@ def _env(key: str, default: str = "") -> str:
 
 def _normalize_llm_provider(provider: str) -> str:
     name = (provider or "gemini").strip().lower()
-    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia") else "gemini"
+    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic") else "gemini"
 
 
 def _default_model_for_provider(provider: str) -> str:
@@ -388,6 +389,8 @@ def _default_model_for_provider(provider: str) -> str:
         return (_env("AZURE_OPENAI_DEPLOYMENT") or _env("AZURE_OPENAI_MODEL") or "gpt-4.1-mini").strip()
     if provider == "nvidia":
         return "nvidia/nemotron-3-super-120b-a12b"
+    if provider in ("claude-cli", "anthropic"):
+        return "claude-sonnet-4-6"
     return "gemini-3-flash-preview"
 
 
@@ -401,6 +404,12 @@ def _default_api_key_for_provider(provider: str) -> str:
         return _env("AZURE_OPENAI_API_KEY")
     if provider == "nvidia":
         return _env("NVIDIA_API_KEY")
+    if provider == "anthropic":
+        return _env("ANTHROPIC_API_KEY")
+    if provider == "claude-cli":
+        # Sentinel so ``if not api_key`` short-circuits don't skip the
+        # whole pipeline — claude-cli authenticates via the local binary.
+        return "claude-cli-no-api-key"
     return _env("GEMINI_API_KEY")
 
 
@@ -590,8 +599,77 @@ def _get_llm_config(stage: str) -> dict:
     }
 
 
+_QUOTA_ABORT_SIGNALLED = False  # one-shot guard so we don't Discord-spam on repeats
+
+
+def _signal_quota_exhausted_and_abort(provider: str, model: str, error: str) -> None:
+    """Discord-notify + request stop-all when an LLM provider has run
+    out of paid usage. Idempotent within a single engine process — the
+    first quota signal wins and triggers the abort; subsequent calls
+    are no-ops so a barrage of in-flight LLM calls all hitting the
+    same upstream limit don't spam the channel."""
+    global _QUOTA_ABORT_SIGNALLED
+    if _QUOTA_ABORT_SIGNALLED:
+        return
+    _QUOTA_ABORT_SIGNALLED = True
+    _log(
+        f"LLM quota exhausted (provider={provider} model={model}) — "
+        f"aborting agent and notifying Discord", "red",
+    )
+    try:
+        _send_discord(embed={
+            "title": "AI Backtest Agent: LLM Quota Exhausted",
+            "description": (
+                f"The configured LLM provider has run out of paid usage. "
+                f"Stopping all running and queued backtests so the agent "
+                f"doesn't keep burning failed calls.\n\n"
+                f"**Provider:** {provider}\n"
+                f"**Model:** {model}\n"
+                f"**Upstream error:** ```{_safe_str(error, 600)}```\n"
+                f"Top up the account (or switch the model's provider in "
+                f"the Models UI) and use `!agent resume` to continue."
+            ),
+            "color": 0xE74C3C,
+        })
+    except Exception as _e:
+        _log_error("DISCORD_QUOTA_EXHAUSTED", _e)
+    # Setting the stop event ends the engine's outer loop on the next
+    # iteration; _request_stop_all_backtests asks the API to stop any
+    # currently-running backtest jobs that this engine kicked off.
+    try:
+        _stop_event.set()
+    except Exception:
+        pass
+
+
+def _check_for_quota_exhaustion_and_abort() -> bool:
+    """Inspect the last structured-LLM-call metadata for the quota
+    exhaustion marker and, if found, trigger the abort flow. Returns
+    True if abort was triggered so the caller can short-circuit its
+    current step."""
+    try:
+        from llm_utils import get_last_structured_llm_call_metadata
+        meta = get_last_structured_llm_call_metadata() or {}
+    except Exception:
+        return False
+    if str(meta.get("error_kind") or "") != "quota_exhausted":
+        return False
+    _signal_quota_exhausted_and_abort(
+        provider=str(meta.get("provider") or "?"),
+        model=str(meta.get("requested_model") or meta.get("effective_model") or "?"),
+        error=str(meta.get("error") or "quota exhausted"),
+    )
+    return True
+
+
 def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_prompt: str, max_output_tokens: int = 8192):
-    """Call an LLM provider through the shared structured-output helper."""
+    """Call an LLM provider through the shared structured-output helper.
+
+    On a return of None, inspect the per-thread metadata for a quota
+    exhaustion marker; if found, send a Discord notification and
+    request stop-all so we don't keep hammering an upstream that's
+    out of paid usage.
+    """
     provider = _normalize_llm_provider(config.get("provider") or "gemini")
     model = (config.get("model") or "").strip()
     api_key = (config.get("api_key") or "").strip()
@@ -599,12 +677,17 @@ def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_pro
     if not api_key or not model:
         return None
     try:
-        return call_structured_llm_by_provider(
+        resp = _scl_guarded(
             provider,
             api_key,
             model,
             prompt,
             output_type,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "ai_backtest_engine.call_structured_llm",
+            },
             system_prompt=system_prompt,
             max_output_tokens=max_output_tokens,
             retries=2,
@@ -613,8 +696,16 @@ def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_pro
             provider_config=provider_config,
         )
     except Exception as e:
+        # Defensive: should never reach here for codex (the structured
+        # helper catches CodexCliQuotaExceededError), but if some other
+        # adapter raises a similarly-shaped error we still want to abort.
+        if "quota" in str(e).lower() or "insufficient_quota" in str(e).lower():
+            _signal_quota_exhausted_and_abort(provider, model, str(e))
         _log(f"Structured LLM call failed: {e}", "red")
         return None
+    if resp is None:
+        _check_for_quota_exhaustion_and_abort()
+    return resp
 
 
 def _parse_json_object_string(raw: Any) -> dict:

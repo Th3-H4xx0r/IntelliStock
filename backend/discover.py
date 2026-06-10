@@ -11,6 +11,7 @@ try:
     from dotenv import load_dotenv
     from rethinkdb import RethinkDB
     from robinhood_engine import get_price_history
+    from robinhood_data_policy import robinhood_data_fallback_allowed
     from intellistock_logger import intellistock_logger
     from tqdm import tqdm
     from stock_metrics import add_all_metrics, StockMetrics
@@ -156,7 +157,10 @@ try:
             except Exception:
                 pass
 
-        df = get_price_history(ticker, interval="day", span="year")
+        if robinhood_data_fallback_allowed("robinhood"):
+            df = get_price_history(ticker, interval="day", span="year")
+        else:
+            df = pd.DataFrame()
         if df.empty:
             df = _yahoo_fallback(ticker, start_date, end_date)
         if not df.empty:
@@ -297,8 +301,11 @@ try:
         intellistock_logger.log("=" * 60, "cyan", service="Discover")
 
         # Index Returns (Robinhood may not have index symbols; fall back to Yahoo)
-        intellistock_logger.log(f"Fetching {readable_index_name} historical data from Robinhood", "cyan", service="Discover")
-        index_df = get_price_history(index_name, interval="day", span="year")
+        if robinhood_data_fallback_allowed("robinhood"):
+            intellistock_logger.log(f"Fetching {readable_index_name} historical data from Robinhood", "cyan", service="Discover")
+            index_df = get_price_history(index_name, interval="day", span="year")
+        else:
+            index_df = pd.DataFrame()
         if index_df.empty:
             intellistock_logger.log(f"Robinhood data unavailable for {index_name}, using Yahoo Finance fallback", "yellow", service="Discover")
             index_df = _yahoo_fallback(index_name, start_date, end_date)

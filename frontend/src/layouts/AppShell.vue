@@ -66,6 +66,7 @@ const navItems = [
   { label: 'Nexus Graph', icon: 'hub',             to: '/nexus'       },
   { label: 'Strategies',  icon: 'schema',          to: '/strategies'  },
   { label: 'Models',      icon: 'psychology',       to: '/models'      },
+  { label: 'Token Usage', icon: 'payments',         to: '/token-usage' },
 ]
 
 watch(
@@ -164,7 +165,6 @@ onBeforeUnmount(() => {
               </div>
               <div class="min-w-0">
                 <p class="text-sm font-medium text-slate-300 truncate leading-none">{{ user?.username }}</p>
-                <p v-if="user?.role === 'admin'" class="text-[10px] text-primary mt-0.5 font-bold uppercase tracking-widest">Admin</p>
               </div>
             </div>
             <button

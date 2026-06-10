@@ -94,6 +94,29 @@ def _resolve_model(conn, model_id: Optional[str]) -> Dict[str, Any]:
     doc = _fetch_model_doc(conn, model_id)
     if not doc:
         raise ValueError(f"Model {model_id} not found. Open the chatbot settings to pick another.")
+    provider = (doc.get("provider") or "gemini").strip().lower()
+    if provider == "claude-cli":
+        # claude-cli uses the locally-installed `claude` binary; there's no
+        # API key to resolve, just a cli_path + optional extra_args.
+        from chatbot.claude_cli_provider import validate_extra_args
+        try:
+            extra_args = validate_extra_args(doc.get("extra_args") or "")
+        except ValueError as e:
+            raise ValueError(
+                f"Model has invalid extra_args: {e}. Edit it on the Models page."
+            ) from e
+        return {
+            "provider": "claude-cli",
+            "model": doc.get("model") or "",
+            "model_name": doc.get("name") or "",
+            "api_key": "",  # not used
+            "cli_path": (doc.get("cli_path") or "claude").strip() or "claude",
+            "extra_args": extra_args,
+            "base_url": None,
+            "azure_endpoint": None,
+            "azure_api_version": None,
+            "reasoning_effort": doc.get("reasoning_effort"),
+        }
     api_key = doc.get("api_key") or ""
     if not api_key:
         # Fallback to env vars via resolver pattern; we keep this simple here
@@ -103,7 +126,7 @@ def _resolve_model(conn, model_id: Optional[str]) -> Dict[str, Any]:
     if not api_key:
         raise ValueError("This model has no API key configured. Edit it on the Models page.")
     return {
-        "provider": (doc.get("provider") or "gemini").strip().lower(),
+        "provider": provider,
         "model": doc.get("model") or "",
         "model_name": doc.get("name") or "",
         "api_key": api_key,
@@ -264,7 +287,60 @@ def _llm_messages_for_call(history: List[Dict[str, Any]], system: str) -> List[D
     return out
 
 
-def _call_llm(model_cfg: Dict[str, Any], history: List[Dict[str, Any]], system: str, with_tools: bool = True) -> Dict[str, Any]:
+_CLAUDE_CLI_MCP_HINT = (
+    "\n\n=== Tool calling via Claude Code (MCP bridge) ===\n"
+    "IntelliStock's chatbot tools are exposed to you through an MCP "
+    "server. Their names appear in your tool list prefixed with "
+    "``mcp__intellistock__`` (e.g. ``mcp__intellistock__fetch_quote``). "
+    "Call them like any other tool when the user's request needs live "
+    "data, charts, navigation, or backend state.\n\n"
+    "Read-only and render tools (fetch_quote, render_price_chart, "
+    "list_*, get_*) execute immediately and the result returns "
+    "synchronously. Action tools (write, destructive — placing trades, "
+    "starting instances, deleting backtests, etc.) may be queued for "
+    "user confirmation. You can tell the difference by reading the "
+    "tool error message:\n"
+    "  * **ONLY** if the error contains the exact phrase \"queued for "
+    "user confirmation\", reply by acknowledging that you've requested "
+    "the action and the user needs to approve or decline it in the UI. "
+    "Do NOT retry in the same turn.\n"
+    "  * For ANY OTHER tool error (\"unknown tool\", \"user not "
+    "found\", connection refused, etc.), the tool simply failed. "
+    "Report the error to the user honestly — do NOT pretend the action "
+    "was queued or that the user needs to approve anything.\n"
+)
+
+
+def _call_llm(
+    model_cfg: Dict[str, Any],
+    history: List[Dict[str, Any]],
+    system: str,
+    with_tools: bool = True,
+    *,
+    conversation_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    provider = (model_cfg.get("provider") or "").strip().lower()
+    if provider == "claude-cli":
+        # claude-cli runs as a persistent subprocess per conversation
+        # with the IntelliStock MCP server attached, so CC can call our
+        # tools via ``mcp__intellistock__*`` and get IntelliStock to
+        # dispatch them. We append a short hint to the system prompt
+        # describing the queue-on-confirm semantics — without it, the
+        # model retries non-safe tools in a loop on every "tool was
+        # queued" error.
+        from chatbot.claude_cli_provider import call_claude_cli_chat
+        return call_claude_cli_chat(
+            conversation_id=conversation_id or "",
+            messages=_llm_messages_for_call(history, system),
+            system_prompt=(system or "") + _CLAUDE_CLI_MCP_HINT,
+            model=model_cfg["model"],
+            user_id=user_id or "",
+            cli_path=model_cfg.get("cli_path") or "claude",
+            extra_args=model_cfg.get("extra_args") or [],
+            reasoning_effort=model_cfg.get("reasoning_effort"),
+            timeout_sec=LLM_TIMEOUT_SEC,
+        )
     return call_chat_with_tools(
         provider=model_cfg["provider"],
         api_key=model_cfg["api_key"],
@@ -292,12 +368,22 @@ def _run_loop(
     model_cfg: Dict[str, Any],
     system: str,
     auto_confirm_safe: bool,
+    *,
+    conv_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Drive the LLM↔tool loop. Mutates ``history`` and ``appended`` in place
     and returns ``appended``. Used by both run_turn and resume-after-tool."""
+    # The claude-cli provider needs the conversation_id to route turns to
+    # the right persistent subprocess. Fall back to the doc id if the
+    # caller didn't pass it explicitly.
+    conv_id_eff = conv_id or convo.get("id") or ""
+    user_id_eff = str(user.get("id") or "")
     for _ in range(MAX_TOOL_ROUNDS):
         try:
-            result = _call_llm(model_cfg, history, system, with_tools=True)
+            result = _call_llm(
+                model_cfg, history, system, with_tools=True,
+                conversation_id=conv_id_eff, user_id=user_id_eff,
+            )
         except Exception as e:
             _log.warning("chatbot LLM call failed: %s", e, exc_info=False)
             err_msg = conv_store.new_message(
@@ -311,6 +397,12 @@ def _run_loop(
         tool_calls = result.get("tool_calls") or []
         text = (result.get("content") or "").strip()
         finish_reason = (result.get("finish_reason") or "").strip().lower()
+        # Render blocks (charts, tables, navigate, ...) populated by the
+        # claude-cli MCP path. The OpenAI-style provider returns no blocks
+        # here (tools get a dedicated round of orchestration); for CC,
+        # MCP tool execution happens inside the provider's persistent
+        # subprocess, so the blocks come back attached to the final result.
+        provider_blocks = list(result.get("blocks") or [])
 
         if not tool_calls:
             # Empty content + no tool calls is almost always a token-budget
@@ -330,6 +422,8 @@ def _run_loop(
                 )
             else:
                 asst = conv_store.new_message("assistant", content=text)
+            if provider_blocks:
+                asst["blocks"] = provider_blocks
             appended.append(asst)
             history.append(asst)
             break
@@ -424,7 +518,7 @@ def run_turn(
     history = list(convo.get("messages") or []) + [user_msg]
     auto_confirm_safe = bool(((convo.get("settings") or {}).get("auto_confirm_safe_tools", True)))
 
-    _run_loop(conn, user, convo, history, appended, model_cfg, system, auto_confirm_safe)
+    _run_loop(conn, user, convo, history, appended, model_cfg, system, auto_confirm_safe, conv_id=conv_id)
 
     conv_store.append_messages(conn, user_id, conv_id, appended)
     # Auto-title brand-new conversations.
@@ -542,7 +636,7 @@ def _resume_after_tool_results(
     auto_confirm_safe = bool(((convo.get("settings") or {}).get("auto_confirm_safe_tools", True)))
 
     new_appends = list(appended_so_far)
-    _run_loop(conn, user, convo, history, new_appends, model_cfg, system, auto_confirm_safe)
+    _run_loop(conn, user, convo, history, new_appends, model_cfg, system, auto_confirm_safe, conv_id=conv_id)
     # Persist the full new_appends — confirm_pending_tool only persisted the
     # pending→complete promotion via replace_message, so the tool result
     # message it passed in `appended_so_far` is NOT yet in the DB. Saving

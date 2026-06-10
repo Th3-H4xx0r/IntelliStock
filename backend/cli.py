@@ -533,7 +533,7 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
     conditions: optional dict to also fill with strategy-level conditions. Earnings uses config for alpaca_key/alpaca_secret."""
     def _normalize_llm_provider(provider):
         name = (provider or 'gemini').strip().lower()
-        return name if name in ('gemini', 'deepseek', 'openai', 'azure', 'nvidia') else 'gemini'
+        return name if name in ('gemini', 'deepseek', 'openai', 'azure', 'nvidia', 'claude-cli', 'anthropic') else 'gemini'
 
     def _default_llm_model(provider, gemini_model='gemini-3-flash-preview', deepseek_model='deepseek-chat'):
         provider = _normalize_llm_provider(provider)
@@ -545,6 +545,8 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             return os.environ.get('AZURE_OPENAI_DEPLOYMENT', '').strip() or os.environ.get('AZURE_OPENAI_MODEL', '').strip() or 'gpt-4.1-mini'
         if provider == 'nvidia':
             return 'nvidia/nemotron-3-super-120b-a12b'
+        if provider in ('claude-cli', 'anthropic'):
+            return 'claude-sonnet-4-6'
         return gemini_model
 
     def _provider_key_env(provider):
@@ -557,6 +559,13 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             return 'AZURE_OPENAI_API_KEY'
         if provider == 'nvidia':
             return 'NVIDIA_API_KEY'
+        if provider == 'anthropic':
+            return 'ANTHROPIC_API_KEY'
+        if provider == 'claude-cli':
+            # claude-cli authenticates via the local binary, not an env-var
+            # API key. Return a placeholder name to keep the function's
+            # type consistent; callers should never actually read this.
+            return ''
         return 'GEMINI_API_KEY'
 
     def _prompt_llm_provider_settings(
@@ -1019,11 +1028,11 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             'sell_threshold': ('Sell threshold (raw score, default -0.15)', -0.15),
             'nexus_portfolio_pct': ('Max portfolio % for nexus stock buys (0-1, default 0.80)', 0.80),
             'etf_portfolio_pct': ('Max portfolio % for nexus ETF buys (0-1, default 0.10)', 0.10),
-            'pool_a_base': ('Pool A base slots for direct/high-priority stock buys (default 8)', 8),
+            'pool_a_base': ('Pool A base slots for direct/high-priority stock buys (default 10)', 10),
             'pool_b_base': ('Pool B base slots for propagation stock buys (default 4)', 4),
             'pool_a_min': ('Pool A minimum guaranteed slots (default 3)', 3),
             'pool_b_min': ('Pool B minimum guaranteed slots (default 2)', 2),
-            'max_stock_buys_per_day': ('Max stock buys per day after pool merge (default 10)', 10),
+            'max_stock_buys_per_day': ('Max stock buys per day after pool merge (default 8)', 8),
             'cash_reserve_floor_pct': ('Cash reserve floor % of starting capital (default 0.10)', 0.10),
             'cash_reserve_hard_min_positions': ('Min open positions before reserve can relax (default 5)', 5),
             'cash_reserve_release_min_score': ('Min raw score to release reserve after position threshold (default 0.50)', 0.50),
@@ -1061,7 +1070,7 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             'macro_risk_scale_min': ('Macro risk minimum buy-budget scale (default 0.60)', 0.60),
             'trend_max_age_days': ('Trend max age in days (default 21)', 21),
             'max_hold_days': ('Max days to hold a position before auto-sell (default 45)', 45),
-            'max_discovered_stocks': ('Max discovered stocks in active list (default 50)', 50),
+            'max_discovered_stocks': ('Max discovered stocks in active list (default 90)', 90),
             'max_sector_peer_discoveries_per_day': ('Max sector-peer discoveries per day (default 3)', 3),
             'max_competitor_discoveries_per_day': ('Max competitor discoveries per day (default 3)', 3),
             'sector_fill_max_per_sector': ('Max discovered names per sector fill pass (default 6)', 6),
@@ -1089,7 +1098,7 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             'propagation_expansion_reserved_slots': ('Reserved executable slots for propagation expansion buys (default 4)', 4),
             'propagation_expansion_min_raw_score': ('Min raw score for propagation expansion tranche (default 0.50)', 0.50),
             'priority_min_position_size': ('Reduced minimum position size for priority watchlist/propagation buys (default 100)', 100),
-            'allocation_max_new_stock_buys': ('Max executable new stock buys in the balanced allocation slate (default 4)', 4),
+            'allocation_max_new_stock_buys': ('Max executable new stock buys in the balanced allocation slate (default 6)', 6),
             'allocation_execute_min_raw_score': ('Min raw score for immediate executable slate funding (default 0.35)', 0.35),
             'allocation_top2_min_raw_score': ('Min raw score for top-2 balanced allocation preference (default 0.50)', 0.50),
             'winner_add_min_hold_days': ('Winner add-on minimum hold days (default 5)', 5),
@@ -1099,15 +1108,18 @@ def _prompt_strategy_type_and_config(strategy_type, config, defaults_config, con
             'winner_add_fraction_of_initial': ('Winner add-on size as a fraction of initial entry notional (default 0.50)', 0.50),
             'winner_add_max_count': ('Maximum winner add-on count per live position (default 1)', 1),
             'max_propagated_scoring_slots': ('Max ephemeral propagation scoring expansion slots (default 15)', 15),
+            'propagation_max_per_seed': ('Max 1-hop propagation edges per source seed; caps news-item fan-out (0=off, default 8)', 8),
             'overlay_price_lookback_days': ('Price history lookback for LLM overlay (default 30)', 30),
-            'llm_overlay_max_stock_candidates': ('Max stock candidates for LLM trade overlay (default 24)', 24),
+            'llm_overlay_max_stock_candidates': ('Max stock candidates for LLM trade overlay (default 30)', 30),
             'llm_overlay_max_etf_candidates': ('Max ETF candidates for LLM trade overlay (default 6)', 6),
             'etf_min_trend_strength': ('Min trend strength to allocate ETF (0-1, default 0.4)', 0.4),
             'max_trend_etfs': ('Max ETFs per trend keyword match (default 6)', 6),
             'max_etf_buys_per_day': ('Max ETF buys per day to avoid dilution (default 3)', 3),
-            'momentum_discovery_min_20d_return': ('Min 20-day return %% for momentum discovery (default 20)', 20.0),
-            'momentum_discovery_min_60d_return': ('Min 60-day return %% for momentum discovery (default 50)', 50.0),
-            'momentum_discovery_max_per_day': ('Max momentum discoveries per day (default 3)', 3),
+            'momentum_discovery_min_20d_return': ('Min 20-day return %% for momentum discovery (default 15)', 15.0),
+            'momentum_discovery_min_60d_return': ('Min 60-day return %% for momentum discovery (default 40)', 40.0),
+            'momentum_discovery_max_per_day': ('Max momentum discoveries per day (default 6)', 6),
+            'momentum_discovery_exclude_leveraged_etfs': ('Exclude leveraged/inverse/commodity ETFs from momentum equity discovery (default True)', True),
+            'momentum_discovery_protect_days': ('Days a momentum-discovered stock is shielded from eviction (default 10)', 10),
             'ml_signal_weight': ('ML model signal weight (0-1, default 0.50)', 0.50),
             'price_trend_bull_20d': ('Price trend bullish 20d return threshold %% (default 8)', 8.0),
             'price_trend_bull_60d': ('Price trend bullish 60d return threshold %% (default 12)', 12.0),

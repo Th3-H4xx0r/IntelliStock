@@ -284,7 +284,8 @@ def test_enhanced_sentiment_retry_shrinks_prompt_for_gpt_oss():
 
     with patch.object(gna, "_log", side_effect=lambda msg, *_args, **_kwargs: logs.append(str(msg))), \
          patch.object(gna, "_build_trends_context", return_value="\nACTIVE TRENDS:\n- Example trend"), \
-         patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call):
+         patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call), \
+         patch.object(gna, "_scl_guarded", side_effect=_fake_call):
         result, future, cancellations, trend_updates = gna._enhanced_sentiment_from_llm(
             articles,
             "azure",
@@ -363,6 +364,7 @@ def test_active_event_maintenance_retry_shrinks_prompt_context_for_gpt_oss():
          patch.object(gna, "_ensure_nexus_history_table"), \
          patch.object(gna, "_r", None), \
          patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call), \
+         patch.object(gna, "_scl_guarded", side_effect=_fake_call), \
          patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "azure", "effective_model": "gpt-oss-120b", "ok": False, "usage": {}}):
         gna._maintain_active_events(
             object(),
@@ -566,8 +568,15 @@ def test_rotation_candidate_requires_stronger_delta_for_profitable_hold():
 
 
 def test_rotation_winner_lock_blocks_healthy_profitable_winner():
+    # Phase γ.4 (BT232179 follow-up, 2026-05-18): the γ.4 bypass admits
+    # raw>=1.8 candidates against winner_lock'd holds with pnl<10% (so the
+    # original 4.3% held_pnl no longer triggers winner_lock blocking under
+    # the new behavior — it returns gamma_winner_lock_bypass instead). To
+    # preserve this test's intent ("true profitable winners ARE protected
+    # by winner_lock"), bump the held_pnl to 12% (above γ.4's 10% cap).
+    # The γ.4 bypass test with held_pnl=4.3 lives in test_phase_alpha_variance.
     allow, delta, reason = _rotation_candidate_allowed(
-        held_pnl_pct=4.3,
+        held_pnl_pct=12.0,
         held_rotation_score=0.444,
         held_days=6,
         held_raw_score=0.31,
@@ -613,6 +622,10 @@ def test_rotation_winner_lock_helper_flags_healthy_winner():
 
 
 def test_executable_stock_slate_balances_top_candidates():
+    # Tier-3 B2 (2026-05-17): default per-cycle cap now scales with account
+    # size (small=6, mid=8, large=12). Pass an explicit cap to preserve the
+    # original 4-slot balance assertion. Also disable Tier-3 B4 momentum
+    # reserved slots so the 4-slot cap isn't expanded by momentum candidates.
     funded, queued, meta = _plan_executable_stock_buy_slate(
         [
             {"ticker": "MU", "raw_net_score": 2.4},
@@ -624,7 +637,10 @@ def test_executable_stock_slate_balances_top_candidates():
         ],
         1000.0,
         min_position_size=100.0,
-        config={},
+        config={
+            "allocation_max_new_stock_buys": 4,
+            "momentum_execution_reserved_slots": 0,
+        },
     )
     assert [item["ticker"] for item in funded] == ["MU", "SNDK", "LITE", "NVDA"]
     assert [item["buy_cash"] for item in funded] == [400.0, 250.0, 200.0, 150.0]
@@ -955,9 +971,11 @@ def test_nexus_buy_guard_does_not_block_buy_when_other_strategy_also_votes_buy()
 
 def test_effective_config_reports_v9_defaults():
     cfg = _get_effective_nexus_config({})
-    assert cfg["pool_a_base"] == 8
+    # Discovery-expansion fix (2026-05-26): concentrate the buy funnel — pool_a 12→10,
+    # pool_b 6→4, buys/day 12→8 — so fixed capital isn't diluted into tiny tickets.
+    assert cfg["pool_a_base"] == 10
     assert cfg["pool_b_base"] == 4
-    assert cfg["max_stock_buys_per_day"] == 10
+    assert cfg["max_stock_buys_per_day"] == 8
     assert cfg["portfolio_drawdown_halt_pct"] == 15.0
     assert cfg["portfolio_drawdown_resume_up_days"] == 2
     # 2026-05-07: default flipped from "warn" → "block" (fail-closed). Empty
@@ -966,21 +984,25 @@ def test_effective_config_reports_v9_defaults():
     # 2026-05-07: derived label flips with the underlying policy.
     # `quality_market_cap_mode` = "warn-only" if policy=="warn" else policy.
     assert cfg["quality_market_cap_mode"] == "block"
-    assert cfg["backfill_queue_grace_bars"] == 3
+    # Tier-3 Phase 2a (2026-05-17): backfill queue grace 3→7, max_size 30→50.
+    assert cfg["backfill_queue_grace_bars"] == 7
     assert cfg["backfill_queue_priority_grace_bars"] == 8
     assert cfg["backfill_queue_reserved_priority_slots"] == 10
-    assert cfg["backfill_queue_max_size"] == 30
+    assert cfg["backfill_queue_max_size"] == 50
     assert cfg["rotation_min_hold_days"] == 10
-    assert cfg["rotation_profitable_min_delta"] == 1.5
+    # Tier-3 Phase 1 B3: rotation profitable_min_delta 1.5→1.0.
+    assert cfg["rotation_profitable_min_delta"] == 1.0
     assert cfg["rotation_profitable_full_exit_min_hold_days"] == 20
     assert cfg["rotation_profitable_min_incoming_raw_score"] == 2.0
     assert cfg["rotation_winner_lock_enabled"] is True
-    assert cfg["rotation_winner_lock_min_hold_days"] == 5
-    assert cfg["rotation_winner_lock_min_pnl_pct"] == 3.0
+    # Tier-3 Phase 1 B3: winner_lock hold_days 5→3, pnl 3.0→2.0.
+    assert cfg["rotation_winner_lock_min_hold_days"] == 3
+    assert cfg["rotation_winner_lock_min_pnl_pct"] == 2.0
     assert cfg["rotation_winner_lock_min_raw_score"] == -0.10
     assert cfg["rotation_winner_lock_max_peak_drawdown_pct"] == 8.0
     assert cfg["rotation_break_glass_raw_score"] == 2.75
-    assert cfg["rotation_break_glass_delta"] == 2.25
+    # Tier-3 Phase 1 B3: break_glass_delta 2.25→1.5.
+    assert cfg["rotation_break_glass_delta"] == 1.5
     assert cfg["rotation_break_glass_sell_fraction"] == 0.50
     assert cfg["propagation_floor_requires_min_paths"] is True
     assert cfg["sector_watchlist_reserved_slots"] == 0
@@ -992,7 +1014,8 @@ def test_effective_config_reports_v9_defaults():
     assert cfg["priority_min_position_size"] == 100.0
     assert cfg["priority_budget_can_bypass_regular_min"] is True
     assert cfg["allocation_profile"] == "balanced"
-    assert cfg["allocation_max_new_stock_buys"] == 4
+    # Discovery expansion (2026-05-25): 4→6 executable new buys/cycle.
+    assert cfg["allocation_max_new_stock_buys"] == 6
     assert cfg["allocation_execute_min_raw_score"] == 0.35
     assert cfg["allocation_top2_min_raw_score"] == 0.50
     assert cfg["winner_add_enabled"] is True
@@ -1004,7 +1027,8 @@ def test_effective_config_reports_v9_defaults():
     assert cfg["winner_add_max_count"] == 1
     assert cfg["max_sector_peer_discoveries_per_day"] == 3
     assert cfg["max_competitor_discoveries_per_day"] == 3
-    assert cfg["momentum_discovery_max_per_day"] == 3
+    # Discovery expansion (2026-05-25): 3→6 momentum promotions/day.
+    assert cfg["momentum_discovery_max_per_day"] == 6
     assert cfg["sector_fill_max_per_sector"] == 6
     assert cfg["max_propagated_scoring_slots"] == 15
     assert cfg["sector_watchlist_keys"] == []

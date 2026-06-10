@@ -19,11 +19,20 @@ import hashlib
 import json
 import re
 import dotenv
+from contextlib import contextmanager
 from typing import Any, Optional
 from portfolio_emulator import PortfolioEmulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason
+from robinhood_data_policy import robinhood_data_fallback_allowed
+
+try:
+    from llm_telemetry import llm_call_context as telemetry_llm_call_context
+except Exception:
+    @contextmanager
+    def telemetry_llm_call_context(**_kwargs):
+        yield
 
 # Live-mode modules (imported lazily inside functions where sensible to keep
 # backtest cold-start light, but we expose the names at module scope for clarity).
@@ -335,7 +344,8 @@ def _bounded_adapter_call(name: str, fn, timeout: float = 12.0):
             pass
         global _snap_last_diagnostic_epoch
         _now = time.time()
-        if _now - _snap_last_diagnostic_epoch > _RH_DIAGNOSTIC_INTERVAL_SEC:
+        if (_now - _snap_last_diagnostic_epoch > _RH_DIAGNOSTIC_INTERVAL_SEC
+                and robinhood_data_fallback_allowed(live_broker_type)):
             try:
                 _diagnose_rh_network()
             except Exception:
@@ -1321,7 +1331,7 @@ def fetch_alpaca_historical_bars(
                     # R13.1: strategy-config opt-in for backtest RH fallback
                     # via allow_backtest_rh_fallback kwarg. When the strategy
                     # doesn't pass it (default False), backtest stays pure.
-                    _should_fallback = (mode != MODE_BACKTEST) or bool(locals().get("allow_backtest_rh_fallback", False))
+                    _should_fallback = (mode != MODE_BACKTEST and robinhood_data_fallback_allowed(live_broker_type)) or bool(locals().get("allow_backtest_rh_fallback", False))
                     if _should_fallback:
                         _status_code = None
                         try:
@@ -1711,6 +1721,101 @@ except Exception:
     def should_keep_alive():
         return True
 
+
+def _init_llm_telemetry() -> None:
+    """Best-effort telemetry setup for broker/backtest worker processes."""
+    if r is None:
+        return
+    try:
+        import llm_telemetry
+
+        _override_pm_cache: dict = {}  # (provider, model) -> (ts, override|None)
+
+        def _models_override_lookup(model_id, provider=None, model=None):
+            keys = (
+                "input_cost_per_1m",
+                "output_cost_per_1m",
+                "cache_creation_cost_per_1m",
+                "cache_read_cost_per_1m",
+            )
+
+            def _extract(row):
+                if not row:
+                    return None
+                out = {key: row.get(key) for key in keys if row.get(key) is not None}
+                return out or None
+
+            conn = None
+            try:
+                conn = get_conn()
+                if model_id:
+                    res = _extract(r.db(DB_NAME).table("Models").get(model_id).run(conn))
+                    if res is not None:
+                        return res
+                # Fall back to a (provider, model) match so per-model price
+                # overrides apply even when the call site didn't thread the
+                # Models-row id (model_id is None on the plain / raw-json
+                # structured paths). Cached briefly — Models is tiny but this
+                # runs per recorded call.
+                if provider and model:
+                    ck = (str(provider), str(model))
+                    hit = _override_pm_cache.get(ck)
+                    if hit and (time.time() - hit[0]) < 60.0:
+                        return hit[1]
+                    matches = list(
+                        r.db(DB_NAME).table("Models")
+                        .filter({"provider": provider, "model": model}).run(conn)
+                    )
+                    chosen = next((m for m in matches if _extract(m) is not None), None)
+                    res = _extract(chosen)
+                    _override_pm_cache[ck] = (time.time(), res)
+                    return res
+                return None
+            except Exception:
+                return None
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        pricing_path = os.path.join(os.path.dirname(__file__), "llm_pricing.yaml")
+        llm_telemetry.configure(
+            db_conn_factory=get_conn,
+            enabled=True,
+            flush_interval_s=2.0,
+            max_buffer=50,
+            pricing_yaml_path=pricing_path,
+            r_module=r,
+            db_name=DB_NAME,
+            models_override_lookup=_models_override_lookup,
+        )
+        try:
+            from llm_telemetry import ensure_llm_usage_tables
+            setup_conn = get_conn()
+            try:
+                ensure_llm_usage_tables(conn=setup_conn, r=r, db_name=DB_NAME)
+            finally:
+                try:
+                    setup_conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            _live_atexit.register(llm_telemetry.flush)
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            print(f"[BROKER] llm telemetry init failed: {exc}", flush=True)
+        except Exception:
+            pass
+
+
+_init_llm_telemetry()
+
 # ---------------------------------------------------------------------------
 # Strategies: load from DB, run from backend/strategies/<name>.py by execution_position
 # ---------------------------------------------------------------------------
@@ -2099,6 +2204,11 @@ def _fetch_price_for_symbol(symbol: str, current_time, key=None, secret=None, fe
                     return _yp
             except Exception:
                 pass
+            # Robinhood data fallback is gated: only when Robinhood is the trading
+            # broker (a non-RH instance, e.g. Alpaca, must NEVER call Robinhood from
+            # the server IP). yfinance above still runs for every caller.
+            if not robinhood_data_fallback_allowed(live_broker_type):
+                return None
             try:
                 from robinhood_engine import get_price_history as _rh_ph
                 import datetime as _dt2
@@ -2186,7 +2296,11 @@ def _fetch_price_with_fallback(symbol: str, current_time, key: str = "", secret:
         if log_fn:
             log_fn("[Pending] Fetched price %s=%.2f via yfinance fallback" % (symbol, price), "cyan")
         return price
-    # yfinance also failed — try Robinhood public API (no auth needed)
+    # yfinance also failed — try Robinhood public API (no auth needed) — but only
+    # when Robinhood is the trading broker (a non-RH instance must not call
+    # Robinhood from the server IP).
+    if not robinhood_data_fallback_allowed(live_broker_type):
+        return None
     try:
         import datetime as _dt
         import math as _math
@@ -2346,8 +2460,14 @@ def watch_backtest_run_command():
     """Separate thread: watch this backtest's row in BacktestInstances.
     When run=false (stop requested): set BacktestResults status to stopped, remove row from
     BacktestInstances, and exit immediately via os._exit(0) so the process does not wait for
-    the main loop. When paused=true/false only update _backtest_paused."""
+    the main loop. When paused=true/false only update _backtest_paused.
+
+    2026-05-22: On `paused: True -> False` transition (operator resumed), reset
+    llm_critical_guard + backtest_critical_abort module state and flip
+    BacktestResults.status back to 'running' if it was 'paused_llm_critical'.
+    This complements the broker outer-except pause flow."""
     global _backtest_result_id, _backtest_paused
+    _prev_paused = False
     if not backtest_row_id or r is None:
         return
     try:
@@ -2388,7 +2508,47 @@ def watch_backtest_run_command():
                 except Exception as e:
                     _log(f"Error updating DB on row delete: {e}", "red")
                 os._exit(0)
-            _backtest_paused = bool(new_val.get('paused', False))
+            new_paused = bool(new_val.get('paused', False))
+            # 2026-05-22 — Resume transition (paused: True -> False).
+            # Operator clicked Resume after an LLM-critical pause: reset the
+            # critical-guard module state on both modules so the next failure
+            # can re-fire cleanly, and flip BacktestResults.status back to
+            # 'running' (gated on it being 'paused_llm_critical' so manual
+            # operator pauses don't get stomped). Defensive try/except on every
+            # step — the changefeed thread must never die.
+            if _prev_paused and not new_paused:
+                try:
+                    from llm_critical_guard import reset_state as _cg_reset
+                    _cg_reset()
+                except Exception:
+                    pass
+                try:
+                    from backtest_critical_abort import reset_state as _bca_reset
+                    _bca_reset()
+                except Exception:
+                    pass
+                try:
+                    if _backtest_result_id is not None:
+                        # Clear the stale pause_* metadata handle() wrote, so a run
+                        # that finishes after resuming doesn't carry misleading
+                        # pause fields. Only when transitioning out of the critical
+                        # pause (gated on status), so manual pauses aren't stomped.
+                        from backtest_critical_abort import cleared_pause_fields as _bca_cleared_pause
+                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
+                            lambda row: r.branch(
+                                row["status"].default("").eq("paused_llm_critical"),
+                                {"status": "running", "resumed_at": r.now(), **_bca_cleared_pause()},
+                                {}
+                            )
+                        ).run(conn)
+                except Exception:
+                    pass
+                try:
+                    _log("Resume detected; critical-guard state reset", "cyan")
+                except Exception:
+                    pass
+            _prev_paused = new_paused
+            _backtest_paused = new_paused
             if new_val.get('run') is False:
                 _log("Backtest stop requested (run=false); setting status, removing from queue, exiting.", "yellow")
                 try:
@@ -2504,6 +2664,36 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
     """
     if not specs:  # V7.3: removed `or not symbols` -- Nexus can discover from scratch
         return []
+    # Re-resolve *_llm_model_id references on every invocation so changes
+    # made via the Models UI (PUT /models/{id} or a fresh POST + strategy
+    # re-pointing) propagate to the running broker without a restart.
+    # Without this, credentials baked into spec["config"] at startup stay
+    # stale forever — the symptom was repeated NVIDIA 401 errors after a
+    # successful "Test & Save" in the UI. The model_resolver keeps a 5-min
+    # TTL doc cache so the steady-state cost is one dict update per spec.
+    # invalidate_model_cache() is called from action_edit_model, so the
+    # next call after a UI update fetches the fresh row from the DB.
+    try:
+        _needs_resolve = [
+            s for s in specs
+            if isinstance(s.get("config"), dict)
+            and any(k.endswith("llm_model_id") for k in s["config"])
+        ]
+        if _needs_resolve:
+            _resolve_conn = get_conn()
+            try:
+                for _s in _needs_resolve:
+                    _s["config"] = resolve_model_refs_in_config(_resolve_conn, _s["config"])
+            finally:
+                try:
+                    _resolve_conn.close()
+                except Exception:
+                    pass
+    except Exception as _resolve_e:
+        # Resolution failure (DB connectivity, malformed model row) is
+        # non-fatal — fall through to the baked-in credentials from the
+        # last successful resolution. Log so operators can spot it.
+        _log(f"Model re-resolution warning: {_resolve_e}", "yellow")
     results = []
     cache_store = strategy_caches if isinstance(strategy_caches, dict) else _strategy_cache
     for spec in specs:
@@ -2574,12 +2764,27 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
         strategy_cache = cache_store.setdefault(name, {})
         try:
             instance = cls()
-            raw = instance.run_once(
-                list(symbols), prices, current_time, config, conditions,
-                data=data, portfolio_emulator=portfolio_emulator,
-                strategy_cache=strategy_cache, time_increment=time_increment,
-                mode=mode,
-            )
+            broker_backtest_id = str(backtest_row_id).strip() if backtest_row_id is not None else None
+            broker_instance_id = str(instance_id).strip() if instance_id is not None else None
+            # 2026-05-21: telemetry context uses threading.local(), so the broker's
+            # outer llm_call_context frame does NOT reach worker threads spawned by
+            # strategies (e.g., active_event_maintenance's ThreadPoolExecutor).
+            # Propagate the IDs via the config dict — strategies push them into
+            # their per-call inner llm_call_context, which works on any thread.
+            config["_telemetry_backtest_id"] = broker_backtest_id or None
+            config["_telemetry_instance_id"] = broker_instance_id or None
+            conditions["_telemetry_backtest_id"] = broker_backtest_id or None
+            conditions["_telemetry_instance_id"] = broker_instance_id or None
+            with telemetry_llm_call_context(
+                backtest_id=broker_backtest_id or None,
+                instance_id=broker_instance_id or None,
+            ):
+                raw = instance.run_once(
+                    list(symbols), prices, current_time, config, conditions,
+                    data=data, portfolio_emulator=portfolio_emulator,
+                    strategy_cache=strategy_cache, time_increment=time_increment,
+                    mode=mode,
+                )
             if isinstance(raw, dict):
                 out_scores = {}
                 out_reasons = {}
@@ -2792,57 +2997,37 @@ def _log_historic_lookback_banner(*, start=True, spec_name="", start_date=None, 
 
 
 def _load_nexus_processed_trade_context_dates(instance_id_value, date_keys):
-    if not date_keys or not instance_id_value:
-        return set()
-    try:
-        conn = get_conn()
-    except Exception:
-        return set()
-    try:
-        tables = set(r.db(DB_NAME).table_list().run(conn))
-        if "GraphNexusTradeContexts" not in tables:
-            return set()
-        rows = list(
-            r.db(DB_NAME)
-            .table("GraphNexusTradeContexts")
-            .filter(
-                lambda doc: (doc["instance_id"] == instance_id_value)
-                & r.expr(date_keys).contains(doc["date_key"])
-            )
-            .pluck("date_key")
-            .run(conn)
-        )
-        return {str(row.get("date_key") or "").strip() for row in rows if row.get("date_key")}
-    except Exception:
-        return set()
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    """Thin shim — delegates to ``nexus_lookback_db`` (extracted so the
+    helpers are importable from tests; broker.py argparses at module
+    load so it can't be imported standalone)."""
+    from nexus_lookback_db import load_nexus_processed_trade_context_dates
+    return load_nexus_processed_trade_context_dates(instance_id_value, date_keys)
 
 
 def _historic_lookback_resume_dates(instance_id_value, lookback_opens):
-    if not lookback_opens:
-        return []
-    ordered = list(lookback_opens)
-    date_keys = [dt.strftime("%Y-%m-%d") for dt in ordered]
-    processed = _load_nexus_processed_trade_context_dates(instance_id_value, date_keys)
-    if not processed:
-        return ordered
-    first_missing_idx = None
-    for idx, dt in enumerate(ordered):
-        if dt.strftime("%Y-%m-%d") not in processed:
-            first_missing_idx = idx
-            break
-    if first_missing_idx is None:
-        return []
-    return ordered[first_missing_idx:]
+    """Thin shim — delegates to ``nexus_lookback_db`` so the resume-date
+    logic has a single home (the legacy duplicate here was diverging
+    from the extracted module after the index refactor)."""
+    from nexus_lookback_db import historic_lookback_resume_dates
+    return historic_lookback_resume_dates(instance_id_value, lookback_opens)
 
 
 def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, portfolio_emulator, time_increment, alpaca_key, alpaca_secret):
+    # 2026-05-22 — extend critical-guard pause/retry coverage to the lookback
+    # prepass. The main while-loop's outer except catches LLMCriticalFailure
+    # and pauses (commit d92c435), but the lookback runs BEFORE that loop and
+    # was OUTSIDE the catch — an Azure 403 storm on lookback day 1 (bt437583)
+    # caused container exit 1 instead of pause. The per-iteration wrap below
+    # routes lookback critical failures through backtest_critical_abort.handle
+    # and idles on _backtest_paused until the operator resumes via the UI.
+    global _backtest_paused
     if mode != MODE_BACKTEST or not run_once_specs or start_dt is None:
         return
+    # Diagnostic: this prep block was running silently for 60-90s
+    # before the first "Historic Lookback Start" log appeared. Surface
+    # each major step so operators can see where time is being spent.
+    _lb_prep_t0 = time.time()
+    _log("Historic lookback prep: scanning run-once specs for graph_nexus_analysis...", "cyan")
     eligible_specs = []
     for spec in (run_once_specs or []):
         name = str((spec or {}).get("strategy") or "").strip()
@@ -2856,24 +3041,63 @@ def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, por
             continue
         eligible_specs.append((spec, lookback_days))
     if not eligible_specs:
+        _log("Historic lookback prep: no eligible strategies — skipping.", "yellow")
         return
+    _log(
+        f"Historic lookback prep: {len(eligible_specs)} eligible strategy(ies) found in {time.time() - _lb_prep_t0:.2f}s.",
+        "cyan",
+    )
 
     base_symbols = list(symbols or [])
     for spec, lookback_days in eligible_specs:
         spec_name = str((spec or {}).get("strategy") or "").strip() or "run_once"
         spec_settings = _merged_strategy_settings(spec)
         base_runtime_instance_id = str(spec_settings.get("base_instance_id") or spec_settings.get("instance_id") or instance_id or "").strip() or "default"
+        _id_t0 = time.time()
+        _log(
+            f"Historic lookback prep: resolving runtime identity for {spec_name} "
+            f"(base={base_runtime_instance_id}, lookback_days={lookback_days})...",
+            "cyan",
+        )
         _base_instance_id, history_scope_id, scoped_runtime_instance_id, _history_model_stamp = _resolve_nexus_runtime_identity(
             base_runtime_instance_id,
             spec_settings,
         )
+        _log(
+            f"Historic lookback prep: runtime identity resolved in {time.time() - _id_t0:.2f}s "
+            f"| scope={history_scope_id[:12]}...",
+            "cyan",
+        )
         lookback_start_dt = start_dt - datetime.timedelta(days=lookback_days)
         lookback_end_dt = start_dt - datetime.timedelta(days=1)
+        _cal_t0 = time.time()
+        _log(
+            f"Historic lookback prep: enumerating trading sessions "
+            f"{lookback_start_dt.strftime('%Y-%m-%d')} → {lookback_end_dt.strftime('%Y-%m-%d')} "
+            "(exchange-calendars NYSE)...",
+            "cyan",
+        )
         lookback_opens = _iter_backtest_trading_session_opens(lookback_start_dt, lookback_end_dt)
+        _log(
+            f"Historic lookback prep: enumerated {len(lookback_opens)} trading session(s) "
+            f"in {time.time() - _cal_t0:.2f}s.",
+            "cyan",
+        )
         if not lookback_opens:
             _log(f"Historic lookback skipped for {spec_name}: no prior trading sessions in window.", "yellow")
             continue
+        _resume_t0 = time.time()
+        _log(
+            f"Historic lookback prep: querying GraphNexusTradeContexts for resume dates "
+            f"(scope={history_scope_id[:12]}..., {len(lookback_opens)} candidate days)...",
+            "cyan",
+        )
         resume_opens = _historic_lookback_resume_dates(scoped_runtime_instance_id, lookback_opens)
+        _log(
+            f"Historic lookback prep: resume-date query done in {time.time() - _resume_t0:.2f}s "
+            f"({len(resume_opens)}/{len(lookback_opens)} days still need processing).",
+            "cyan",
+        )
         existing_days = max(0, len(lookback_opens) - len(resume_opens))
         if not resume_opens:
             _log(
@@ -2921,18 +3145,106 @@ def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, por
                 )
             lookback_prices = _get_prices_at_time(data, base_symbols, lookback_time) if isinstance(data, dict) else {}
             lookback_history = get_price_history_up_to_current(data, base_symbols, lookback_time) if isinstance(data, dict) else {}
-            run_run_once_strategies(
-                [prepass_spec],
-                base_symbols,
-                lookback_prices,
-                lookback_time,
-                data=lookback_history,
-                portfolio_emulator=portfolio_emulator,
-                time_increment=time_increment,
-                alpaca_key=alpaca_key,
-                alpaca_secret=alpaca_secret,
-                strategy_caches=temp_strategy_caches,
-            )
+
+            # 2026-05-22 — per-iteration snapshot capture so an LLMCriticalFailure
+            # during lookback can restore the last-good-bar state before retry.
+            # Mirrors the main-loop snapshot capture at ~line 7397.
+            try:
+                from backtest_bar_snapshot import capture as _bs_capture
+                _bs_capture(
+                    strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
+                    portfolio_emulator=portfolio_emulator,
+                    current_time=lookback_time,
+                )
+            except Exception as _capture_err:
+                try:
+                    _log(f"lookback bar snapshot capture failed (non-fatal): {_capture_err}", "yellow")
+                except Exception:
+                    pass
+
+            # Retry-on-critical loop wrapping the strategy invocation. Same pattern
+            # as the main loop's outer-except at ~line 9253: route LLMCriticalFailure
+            # through backtest_critical_abort.handle (which restores snapshot, marks
+            # paused in the DB, pages Discord), then idle until the operator resumes
+            # via the UI. On resume, reset the guards and retry the SAME idx.
+            while not shutdown_requested:
+                try:
+                    run_run_once_strategies(
+                        [prepass_spec],
+                        base_symbols,
+                        lookback_prices,
+                        lookback_time,
+                        data=lookback_history,
+                        portfolio_emulator=portfolio_emulator,
+                        time_increment=time_increment,
+                        alpaca_key=alpaca_key,
+                        alpaca_secret=alpaca_secret,
+                        strategy_caches=temp_strategy_caches,
+                    )
+                    break  # success → advance to next idx
+                except BaseException as _lb_err:
+                    # except BaseException because LLMCriticalFailure inherits
+                    # BaseException (see llm_critical_guard.py:146, commit 468d4ca)
+                    # and would otherwise escape any plain `except Exception`.
+                    try:
+                        from llm_critical_guard import LLMCriticalFailure
+                        _is_llm_critical = isinstance(_lb_err, LLMCriticalFailure)
+                    except Exception:
+                        _is_llm_critical = False
+
+                    if not _is_llm_critical:
+                        raise  # not our concern — let the top-level error path take over
+
+                    # Critical LLM failure during lookback. Route through the same
+                    # pause flow as the main loop.
+                    try:
+                        if _backtest_result_id is not None:
+                            from backtest_critical_abort import handle as _bt_handle
+                            _bt_handle(
+                                backtest_id=str(_backtest_result_id),
+                                instance_id=str(instance_id),
+                                failure=_lb_err,
+                            )
+                    except Exception as _bt_handle_err:
+                        try:
+                            _log(f"backtest_critical_abort handler raised during lookback: {_bt_handle_err}", "red")
+                        except Exception:
+                            pass
+
+                    # Synchronously set local pause flag — same fix as commit d92c435
+                    # for the main loop. `global _backtest_paused` is declared at the
+                    # top of this function so this assignment hits the module global.
+                    _backtest_paused = True
+
+                    # Wait for operator to resume via UI.
+                    try:
+                        _log(f"Lookback paused at idx={idx}/{_lb_total} (LLM critical); awaiting resume...", "yellow")
+                    except Exception:
+                        pass
+                    while _backtest_paused and not shutdown_requested:
+                        time.sleep(1)
+
+                    if shutdown_requested:
+                        import sys as _sys
+                        _sys.exit(0)
+
+                    # Resume: reset critical-guard state and retry the same idx.
+                    try:
+                        from llm_critical_guard import reset_state as _cg_reset
+                        _cg_reset()
+                    except Exception:
+                        pass
+                    try:
+                        from backtest_critical_abort import reset_state as _bca_reset
+                        _bca_reset()
+                    except Exception:
+                        pass
+                    try:
+                        _log(f"Resumed lookback at idx={idx}/{_lb_total}; retrying...", "cyan")
+                    except Exception:
+                        pass
+                    # Loop back to retry this same idx (while not shutdown_requested).
+
             _nexus_lookback_update_db(idx, _lb_total, lookback_time.strftime('%Y-%m-%d'), _lb_start_str, _lb_end_str)
         _nexus_lookback_clear_db()
         _log_historic_lookback_banner(
@@ -2987,7 +3299,7 @@ def _fetch_daily_close_prices(symbols, start_date, end_date, alpaca_key, alpaca_
         # Mirrors the fetch_alpaca_historical_bars RH fallback policy so live
         # lookback's daily-close prefetch covers SIP-only / delisted / IEX-
         # restricted tickers without operator intervention.
-        if _alpaca_auth_failed and not collected:
+        if _alpaca_auth_failed and not collected and robinhood_data_fallback_allowed(live_broker_type):
             try:
                 from robinhood_engine import get_price_history as _rh_ph
                 df = _rh_ph(sym, interval="day", span="year")
@@ -3019,7 +3331,14 @@ def _fetch_daily_close_prices(symbols, start_date, end_date, alpaca_key, alpaca_
     return prices_by_date
 
 
-def _run_live_historic_lookback(run_once_specs, symbols, alpaca_key, alpaca_secret):
+def _run_live_historic_lookback(
+    run_once_specs,
+    symbols,
+    alpaca_key,
+    alpaca_secret,
+    *,
+    restrict_to_dates=None,
+):
     """Run Nexus historic lookback on live startup.
 
     Contract (Phase B-full, 2026-04-21 revamp):
@@ -3134,6 +3453,28 @@ def _run_live_historic_lookback(run_once_specs, symbols, alpaca_key, alpaca_secr
                 "cyan",
             )
             continue
+
+        # Phase 1 (2026-05-20): if the caller passed a snapshot gap-day list,
+        # AFTER the resume-marker skip applies, FURTHER restrict to just those
+        # explicit dates. The snapshot already covers everything up through
+        # its end_date; we only need to fill in the gap from snapshot+1 to
+        # today. The resume-marker filter above guards against re-running any
+        # gap day that nexus_processed_trade_contexts already recorded.
+        if restrict_to_dates is not None:
+            _restrict_set = set(restrict_to_dates)
+            _before = len(resume_opens)
+            resume_opens = [d for d in resume_opens if d.strftime("%Y-%m-%d") in _restrict_set]
+            _log(
+                f"[lookback] restricted to {len(resume_opens)} gap day(s) (from {_before}): "
+                f"{[d.strftime('%Y-%m-%d') for d in resume_opens]}",
+                "cyan",
+            )
+            if not resume_opens:
+                _log(
+                    f"Live lookback: snapshot gap empty for {spec_name}; skipping prepass.",
+                    "cyan",
+                )
+                continue
 
         # Only pre-fetch Alpaca daily closes when the caller provided seed
         # symbols. For discovery instances (base_symbols=[]) Nexus will
@@ -3259,7 +3600,55 @@ def _run_live_historic_lookback(run_once_specs, symbols, alpaca_key, alpaca_secr
                         alpaca_secret=alpaca_secret,
                         strategy_caches=temp_strategy_caches,
                     )
-                except Exception as _e:
+                except BaseException as _e:
+                    # 2026-05-22 — was `except Exception`, but LLMCriticalFailure
+                    # inherits BaseException (see llm_critical_guard.py:146,
+                    # commit 468d4ca) so an Azure-403/5xx storm during live
+                    # lookback was escaping uncaught → container exit 1, no
+                    # operator alert. Route critical failures through the
+                    # dedicated live abort handler (mirrors main-loop live
+                    # path at ~line 9321); preserve previous log-and-continue
+                    # behaviour for everything else.
+                    try:
+                        from llm_critical_guard import LLMCriticalFailure
+                        _is_llm_critical = isinstance(_e, LLMCriticalFailure)
+                    except Exception:
+                        _is_llm_critical = False
+
+                    if _is_llm_critical:
+                        try:
+                            _log(
+                                f"  Live lookback {date_str} LLM-CRITICAL: {type(_e).__name__}: {_e}",
+                                "red",
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            from live_critical_abort import handle as _lv_handle
+                            _lv_handle(instance_id=str(instance_id), failure=_e)
+                        except Exception as _lv_handle_err:
+                            try:
+                                _log(
+                                    f"live_critical_abort handler raised during lookback: {_lv_handle_err}",
+                                    "red",
+                                )
+                            except Exception:
+                                pass
+                        # Live can't pause (no snapshot model). Exit code 7
+                        # matches main-loop live path so the supervisor knows
+                        # this was an operator-actionable LLM failure, not a
+                        # generic crash. The outer try/finally still runs and
+                        # clears the UI lookback banner.
+                        import sys as _sys
+                        _sys.exit(7)
+
+                    # Not LLM-critical. Re-raise non-Exception BaseException
+                    # cases (KeyboardInterrupt, SystemExit) so they propagate
+                    # to Python's default handler / outer try/finally; log
+                    # and continue for ordinary Exceptions (preserves prior
+                    # log-and-skip-day behaviour).
+                    if not isinstance(_e, Exception):
+                        raise
                     _log(f"  Live lookback {date_str} FAILED: {_e}", "yellow")
                 # Mirror the backtest path by writing per-day progress to the DB
                 # so the UI progress strip populates during a 120-day warmup.
@@ -4605,6 +4994,17 @@ WARMUP_CYCLES = 700
 
 if mode == MODE_BACKTEST:
     _log("Running in backtest mode", "green")
+    # CRITICAL-GUARD: reset per-process module state at the top of every backtest
+    # entry so a fresh run isn't contaminated by leftover state from a prior run
+    # inside the same Python process (defense-in-depth — backtests usually run as
+    # separate docker containers, but tests and dev runs may reuse the process).
+    try:
+        from llm_critical_guard import reset_state as _cg_reset
+        from backtest_critical_abort import reset_state as _bca_reset
+        _cg_reset()
+        _bca_reset()
+    except Exception:
+        pass
     _log("Start date: " + str(start_date), "green")
     _log("End date: " + str(end_date), "green")
     _log("Time increment: " + str(time_increment), "green")
@@ -4647,14 +5047,18 @@ if mode == MODE_BACKTEST:
     _cached_strategies, _strategy_row_id, _backtest_strategy_schema = load_strategies_from_db()
     if _cached_strategies:
         _log(f"Loaded {len(_cached_strategies)} strategy(ies) from DB", "green")
-        # Resolve all model_id references once at startup
+        # Resolve all model_id references at startup. force_refresh drops
+        # the model_resolver's 5-min TTL cache so a freshly-edited Models
+        # row (via UI Test & Save) is picked up immediately — every
+        # backtest spawn reads the latest credentials from the Models
+        # table, no broker restart required.
         try:
             _resolve_conn = get_conn()
             for _spec in _cached_strategies:
                 cfg = _spec.get("config") or {}
-                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg)
+                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg, force_refresh=True)
             _resolve_conn.close()
-            _log("Resolved model_id references in strategy configs", "green")
+            _log("Resolved model_id references in strategy configs (force_refresh=True)", "green")
         except Exception as _e:
             _log(f"Model resolution warning: {_e}", "yellow")
         _cached_strategies = sorted(_cached_strategies, key=lambda s: int(s.get('execution_position', 0)))
@@ -4735,6 +5139,26 @@ if mode == MODE_BACKTEST:
                 break
     except Exception:
         _dc_bt_sim = False
+    # The dual-cadence harness only makes sense at sub-hourly cadence —
+    # the gate it's simulating fires per intraday tick and is decoupled
+    # from daily-bar persistence. At daily granularity (e.g. 86400s) the
+    # gate would never activate, so the harness adds no signal and the
+    # preflight unconditionally rejects. Gracefully degrade to a plain
+    # backtest with a one-line warning rather than failing the whole run.
+    if _dc_bt_sim:
+        try:
+            _ti_check = int(time_increment)
+        except (TypeError, ValueError):
+            _ti_check = -1
+        if _ti_check < 30 or _ti_check > 3600:
+            _log(
+                f"nexus_dual_cadence_backtest_simulation=True but granularity_sec={_ti_check} "
+                f"is outside the harness's supported [30, 3600] range — running as a plain "
+                f"single-cadence backtest. Use 30s-1h granularity to actually exercise the "
+                f"dual-cadence gate.",
+                "yellow",
+            )
+            _dc_bt_sim = False
     if _dc_bt_sim:
         from dual_cadence_preflight import (
             dual_cadence_backtest_preflight as _dc_preflight,
@@ -4842,6 +5266,181 @@ elif mode == MODE_LIVE:
                     "Set RH_DRY_RUN=false to enable real-money trading.",
                     "yellow",
                 )
+
+        # ----- Clean-room mode resolution (2026-05-28) ---------------------
+        # Sources of truth, in precedence order:
+        #   1. env LIVE_CLEAN_ROOM_MODE (per-host force)
+        #   2. Instances.<id>.clean_room_mode (per-instance DB field)
+        #   3. default False (backward-compatible legacy behavior)
+        _instance_row_for_clean_room = {}
+        try:
+            _cr_conn = get_conn_retry(max_attempts=3, delay=1)
+            if _cr_conn is not None:
+                try:
+                    _instance_row_for_clean_room = (
+                        r.db("IntelliStock").table("Instances").get(str(instance_id)).run(_cr_conn)
+                        or {}
+                    )
+                finally:
+                    try:
+                        _cr_conn.close()
+                    except Exception:
+                        pass
+        except Exception as _e_inst_cr:
+            _log(f"[live_boot] could not read Instances row for clean_room resolution: {_e_inst_cr}", "yellow")
+
+        _env_cr = (os.environ.get("LIVE_CLEAN_ROOM_MODE", "") or "").strip().lower()
+        if _env_cr in ("1", "true", "yes", "on"):
+            _clean_room_mode = True
+        elif _env_cr in ("0", "false", "no", "off"):
+            _clean_room_mode = False
+        else:
+            _clean_room_mode = bool(_instance_row_for_clean_room.get("clean_room_mode", False))
+
+        # initial_value resolution: env > Instances row > None (let the
+        # adapter raise BrokerError under clean_room_mode if absent).
+        # Track which source set the value for the LiveBootAudit row.
+        _env_iv = (os.environ.get("LIVE_INITIAL_VALUE", "") or "").strip()
+        _initial_value = None
+        _initial_value_source = "none"
+        if _env_iv:
+            try:
+                _initial_value = float(_env_iv)
+                _initial_value_source = "env"
+            except ValueError:
+                _initial_value = None
+        if _initial_value is None:
+            _iv_field = _instance_row_for_clean_room.get("initial_value")
+            if _iv_field is not None:
+                try:
+                    _initial_value = float(_iv_field)
+                    _initial_value_source = "instance_row"
+                except (TypeError, ValueError):
+                    _initial_value = None
+        # Bug-sweep 2026-05-28: reject NaN/inf which would slip past the
+        # adapter's <= 0 guard and propagate through portfolio math.
+        if _initial_value is not None and (
+            _initial_value != _initial_value  # NaN check
+            or _initial_value == float("inf") or _initial_value == float("-inf")
+        ):
+            _log(f"[live_boot] LIVE_INITIAL_VALUE / instance_row.initial_value is "
+                 f"non-finite ({_initial_value!r}); ignoring.", "yellow")
+            _initial_value = None
+            _initial_value_source = "none"
+
+        # WAL retention window (days) used by the classifier.
+        try:
+            _clean_room_retention_days = int(
+                os.environ.get("LIVE_CLEAN_ROOM_WAL_RETENTION_DAYS", "180") or 180
+            )
+        except ValueError:
+            _clean_room_retention_days = 180
+
+        # cid prefix per broker_adapters/_client_order_id.py::_safe(instance, 8)
+        try:
+            from broker_adapters._classifier import derive_cid_prefix as _derive_cid_prefix
+            _cid_prefix = _derive_cid_prefix(str(instance_id))
+        except Exception:
+            _cid_prefix = None
+
+        # Scope D (A1/A2/A3): whether THIS boot is the genuine first clean-room
+        # boot. Captured in the cleanup block below and reused to gate the 2-B
+        # drawdown re-baseline + 2-E momentum strip so they never reset
+        # live-accumulated state on a restart. Default False = conservative.
+        _clean_room_first_boot = False
+        if _clean_room_mode:
+            _log(
+                f"[live_boot] CLEAN_ROOM_MODE=true instance={instance_id} "
+                f"initial_value={_initial_value} retention_days={_clean_room_retention_days} "
+                f"cid_prefix={_cid_prefix!r}",
+                "yellow",
+            )
+            # ----- First-clean-room-boot auto-cleanup (2026-05-28) -----
+            # When the operator opts into clean_room_mode via the Instances row,
+            # we want the daemon to do the same per-instance state wipe the
+            # operator would otherwise run via
+            # scripts/clear_main_instance_lookback_state.py --apply, but only
+            # once: detect "first clean-room boot" by checking LiveBootAudit
+            # row count for this instance. Idempotent — subsequent boots see
+            # >=1 audit row and skip the cleanup so legitimate live-accumulated
+            # operational state is preserved across normal restarts.
+            try:
+                from live_boot_setup import (
+                    is_first_clean_room_boot as _is_first_cr_boot,
+                    run_first_clean_room_boot_cleanup as _run_cr_cleanup,
+                    write_clean_room_cleanup_marker as _write_cr_marker,
+                )
+                _setup_conn = get_conn_retry(max_attempts=3, delay=2)
+                if _setup_conn is not None:
+                    try:
+                        _clean_room_first_boot = bool(
+                            _is_first_cr_boot(r, _setup_conn, str(instance_id))
+                        )
+                        if _clean_room_first_boot:
+                            _log(
+                                f"[live_boot] FIRST clean_room boot for {instance_id} "
+                                "— running auto-cleanup of per-instance operational state "
+                                "(preserves backtest snapshots)",
+                                "yellow",
+                            )
+                            _cleanup_result = _run_cr_cleanup(r, _setup_conn, str(instance_id))
+                            if _cleanup_result.get("error"):
+                                _log(
+                                    f"[live_boot] auto-cleanup error (non-fatal, continuing): "
+                                    f"{_cleanup_result.get('error')}",
+                                    "red",
+                                )
+                            else:
+                                _log(
+                                    f"[live_boot] auto-cleanup complete: "
+                                    f"{_cleanup_result.get('total_deleted', 0)} rows deleted across "
+                                    f"{len(_cleanup_result.get('tables') or [])} tables",
+                                    "green",
+                                )
+                            # Scope D A3: write the cleanup-done sentinel NOW, on
+                            # this same connection, BEFORE _build_adapter — but ONLY
+                            # when the cleanup actually SUCCEEDED. Scope C relied on
+                            # the forensic LiveBootAudit row (written after
+                            # _build_adapter), so an adapter-build sys.exit left no
+                            # marker and the next boot re-ran the wipe. The sentinel
+                            # makes cleanup idempotent independent of the rest of
+                            # boot succeeding. Writing it on a FAILED/partial cleanup
+                            # would mark cleanup "done" and permanently suppress the
+                            # retry (is_first_clean_room_boot counts any clean_room
+                            # row) — leaving backtest-era state live. On error, leave
+                            # no marker so the next boot re-runs the idempotent wipe.
+                            if not _cleanup_result.get("error"):
+                                if _write_cr_marker(r, _setup_conn, str(instance_id)):
+                                    _log(
+                                        "[live_boot] cleanup-done sentinel written "
+                                        "(first-boot cleanup will not re-run).",
+                                        "green",
+                                    )
+                                else:
+                                    _log(
+                                        "[live_boot] WARNING: cleanup-done sentinel write "
+                                        "FAILED — if adapter build now fails, the next boot "
+                                        "could re-run the destructive cleanup.",
+                                        "red",
+                                    )
+                            else:
+                                _log(
+                                    "[live_boot] cleanup-done sentinel NOT written "
+                                    "(cleanup errored) — next boot will retry the wipe.",
+                                    "yellow",
+                                )
+                    finally:
+                        try:
+                            _setup_conn.close()
+                        except Exception:
+                            pass
+            except Exception as _e_cr_setup:
+                _log(
+                    f"[live_boot] clean_room auto-setup module load failed "
+                    f"(non-fatal): {_e_cr_setup}",
+                    "yellow",
+                )
+
         try:
             live_adapter = _build_adapter(
                 broker_type=live_broker_type,
@@ -4860,6 +5459,14 @@ elif mode == MODE_LIVE:
                 rh_expires_in=_rh_expires_in,
                 rh_account_url=_rh_account_url,
                 rh_brokerage_id=live_brokerage_id,
+                # 2026-05-28 — clean-room mode threading. Backward-compatible:
+                # clean_room_mode defaults False; when False the adapter
+                # uses the legacy "adopt broker state at boot" behavior.
+                initial_value=_initial_value,
+                clean_room_mode=_clean_room_mode,
+                cid_prefix=_cid_prefix,
+                clean_room_retention_days=_clean_room_retention_days,
+                seed_trades_from_broker=(not _clean_room_mode),
             )
             live_adapter.start_trade_updates()
         except _BrokerError as _be:
@@ -4893,6 +5500,72 @@ elif mode == MODE_LIVE:
         except Exception as _e:
             _log(f"refresh_orders_today warning: {_e}", "yellow")
 
+        # ----- LiveBootAudit row (2026-05-28) ------------------------------
+        # One row per broker boot: forensic record of what the adapter
+        # adopted as strategy-owned vs quarantined as external. Non-fatal
+        # on failure (the live broker keeps running).
+        try:
+            from live_boot_audit import build_audit_row as _build_audit, persist_audit_row as _persist_audit
+            _ext_at_boot = dict(getattr(live_adapter, "_external_positions", {}) or {})
+            _audit_row = _build_audit(
+                instance_id=str(instance_id),
+                broker_type=str(live_broker_type or "unknown"),
+                mode=("clean_room" if _clean_room_mode else "legacy"),
+                broker_cash_at_boot=float(getattr(live_adapter, "_cash", 0.0) or 0.0),
+                broker_positions_total=(
+                    len(getattr(live_adapter, "_positions", {}) or {}) + len(_ext_at_boot)
+                ),
+                strategy_owned=dict(getattr(live_adapter, "_positions", {}) or {}),
+                external=_ext_at_boot,
+                initial_value=float(getattr(live_adapter, "_initial_value", 0.0) or 0.0),
+                initial_value_source=(
+                    _initial_value_source if _initial_value is not None
+                    else "broker_equity"
+                ),
+                snapshot_loaded=False,  # set true once F1 snapshot hydrate completes (see below)
+                snapshot_keys=0,
+                trades_seeded=len(getattr(live_adapter, "_trades", []) or []),
+                trades_seeded_source=("wal" if _clean_room_mode else "broker_history"),
+                notes=[],
+            )
+            _audit_conn = get_conn_retry(max_attempts=3, delay=2)
+            if _audit_conn is not None:
+                try:
+                    _persist_audit(r=r, conn=_audit_conn, row=_audit_row)
+                except Exception as _e:
+                    _log(f"[live_boot] audit write failed (non-fatal): {_e}", "yellow")
+                finally:
+                    try:
+                        _audit_conn.close()
+                    except Exception:
+                        pass
+        except Exception as _e:
+            _log(f"[live_boot] audit module load failed (non-fatal): {_e}", "yellow")
+
+        # ----- External-positions alert (2026-05-28) -----------------------
+        _ext_now = dict(getattr(live_adapter, "_external_positions", {}) or {})
+        if _ext_now:
+            _ext_summary = ", ".join(
+                f"{t}={(v or {}).get('qty', 0):.4f}sh" for t, v in sorted(_ext_now.items())
+            )
+            _log(
+                f"[live_boot] EXTERNAL positions quarantined (NOT managed by strategy): {_ext_summary}",
+                "yellow",
+            )
+            try:
+                _alert_strategy_error(
+                    instance_id=str(instance_id),
+                    tag="external_positions_detected",
+                    message=(
+                        f"External (non-strategy) positions found at boot: {_ext_summary}. "
+                        "Strategy will NOT sell these. Run "
+                        "scripts/inspect_broker_state.py for details, or "
+                        "scripts/migrate_external_position.py to adopt one."
+                    ),
+                )
+            except Exception:
+                pass
+
         # 2026-04-23 F1 + F1b: strategy_cache boot sequence.
         #   F1 loads the persisted `_deployment_bar_index` /
         #       `_portfolio_drawdown_state` / `_v28_*` / `_sold_cooldown` /
@@ -4906,9 +5579,23 @@ elif mode == MODE_LIVE:
         #       portfolio MTM grows past 50% → `buys=0` pathology.
         # Both run ONCE at boot; the tick-loop's load-gate prevents re-run.
         try:
+            # Phase 1 (2026-05-20): snapshot-aware boot load. Try the new
+            # 5-segment (config_hash|origin|end_date) snapshot row first
+            # via load_with_fallback. If that returns no row, fall back to
+            # the legacy 2-segment per-instance row so existing live
+            # deployments keep working.
+            from broker_snapshot_helpers import (
+                _invoke_load_snapshot_with_gap,
+                _collect_prompt_versions,
+                _collect_llm_stages,
+                _collect_history_scope_inputs,
+                _resolve_nexus_module_path,
+            )
             from strategy_cache_persistence import (
                 load_strategy_cache_from_db as _scp_load_boot,
                 merge_loaded_cache_into as _scp_merge_boot,
+                _compute_config_hash,
+                _compute_module_hash,
             )
             _boot_conn = get_conn_retry(max_attempts=3, delay=2)
             # Seed F1 for the known live strategy name `graph_nexus_analysis`.
@@ -4916,30 +5603,138 @@ elif mode == MODE_LIVE:
             # load path (gated on `_strategy_cache_loaded_from_db`).
             _nexus_name = "graph_nexus_analysis"
             _nexus_cache = _strategy_cache.setdefault(_nexus_name, {})
+            # Scope D (A1/A2): origin of the hydrated snapshot ("backtest" /
+            # "live" / ""), used to gate the 2-B re-baseline + 2-E strip.
+            _snap_origin = None
             if _boot_conn is not None:
                 try:
-                    _loaded_boot = _scp_load_boot(
-                        _boot_conn, r, str(instance_id), _nexus_name,
+                    # Build config_hash + module_hash for the snapshot lookup
+                    # (must match what backtest writes in
+                    # _invoke_persist_backtest_snapshot — same canonical fields).
+                    _nexus_spec_for_load = next(
+                        (s for s in (_run_once_specs or [])
+                         if str((s or {}).get("strategy") or "").strip() == _nexus_name),
+                        None,
                     )
-                    if _loaded_boot:
-                        _scp_merge_boot(_nexus_cache, _loaded_boot)
+                    # Scope E (2026-05-29): on a LIVE boot this snapshot-load block
+                    # runs BEFORE the live strategy specs are loaded (~line 6034),
+                    # so `_run_once_specs` is still the empty default here and the
+                    # config_hash would be computed from {} — which never matches a
+                    # stored snapshot (reason=no_match), forcing a full re-lookback
+                    # on EVERY boot. Load the nexus config inline via the SAME
+                    # pipeline the live save-writer uses (DB load -> resolve model
+                    # refs -> apply live overrides) so the config_hash matches and
+                    # the snapshot/gap-fill path can hit. module_hash stays strict,
+                    # so a snapshot built on different code is still rejected.
+                    if _nexus_spec_for_load is None and mode != MODE_BACKTEST:
+                        try:
+                            _ehp_strats, _, _ = load_strategies_from_db()
+                            for _ehp_s in (_ehp_strats or []):
+                                if str(_ehp_s.get("strategy") or "").strip().lower() == _nexus_name:
+                                    _ehp_cfg = _ehp_s.get("config") or {}
+                                    try:
+                                        _ehp_conn = get_conn()
+                                        _ehp_cfg = resolve_model_refs_in_config(_ehp_conn, _ehp_cfg, force_refresh=True)
+                                        _ehp_conn.close()
+                                    except Exception:
+                                        pass
+                                    if mode == MODE_LIVE:
+                                        _ehp_cfg = _apply_live_overrides(_ehp_cfg)
+                                    _nexus_spec_for_load = {"strategy": _nexus_name, "config": _ehp_cfg}
+                                    break
+                        except Exception as _ehp_e:
+                            _log(f"[snapshot] config-hash spec preload failed (non-fatal): {_ehp_e}", "yellow")
+                    _bt_cfg_load = (_nexus_spec_for_load or {}).get("config") or {}
+                    _current_config_hash = _compute_config_hash({
+                        "strategy_name": _nexus_name,
+                        "prompt_versions": _collect_prompt_versions(_bt_cfg_load),
+                        "llm_stages": _collect_llm_stages(_bt_cfg_load),
+                        "history_scope_id_inputs": _collect_history_scope_inputs(_bt_cfg_load),
+                        "lookback_learning_days": int(_bt_cfg_load.get("lookback_learning_days", 120) or 120),
+                    })
+                    _nexus_module_path = _resolve_nexus_module_path() or ""
+                    _current_module_hash = _compute_module_hash(_nexus_module_path) if _nexus_module_path else "missing"
+                    _snap_cache, _snap_reason, _gap_dates, _snap_origin = _invoke_load_snapshot_with_gap(
+                        conn=_boot_conn,
+                        r=r,
+                        instance_id=str(instance_id),
+                        strategy_name=_nexus_name,
+                        current_config_hash=_current_config_hash,
+                        current_module_hash=_current_module_hash,
+                    )
+                    _log(
+                        f"[snapshot] decision: reason={_snap_reason} "
+                        f"gap_days={None if _gap_dates is None else len(_gap_dates)}",
+                        "cyan",
+                    )
+                    if _snap_cache is not None:
+                        _scp_merge_boot(_nexus_cache, _snap_cache)
                         _log(
-                            f"strategy_cache restored at boot for {_nexus_name}: {len(_loaded_boot)} key(s) "
+                            f"[snapshot] hydrated {len(_snap_cache)} keys into _strategy_cache[{_nexus_name!r}] "
                             f"(bar_index={_nexus_cache.get('_deployment_bar_index')}, "
                             f"halt_active={(_nexus_cache.get('_portfolio_drawdown_state') or {}).get('halt_active')})",
-                            "cyan",
+                            "green",
                         )
+                        # Store gap_dates so the lookback caller (line ~6019) can
+                        # narrow the prepass to only the missing days.
+                        globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = _gap_dates
+                        # Mark legacy F1 load as already-satisfied so the
+                        # tick-loop fallback at ~6815 doesn't re-run the load.
+                        globals()["_strategy_cache_loaded_from_db"] = True
                     else:
-                        _log(
-                            f"strategy_cache: no persisted row for {instance_id}|{_nexus_name} "
-                            "(first deploy or cleared); starting fresh",
-                            "cyan",
+                        # Snapshot not usable -> fall back to legacy per-instance
+                        # row load (preserves current behavior for ongoing
+                        # deployments that haven't yet produced a 5-segment row).
+                        _loaded_boot = _scp_load_boot(
+                            _boot_conn, r, str(instance_id), _nexus_name,
                         )
+                        if _loaded_boot:
+                            _scp_merge_boot(_nexus_cache, _loaded_boot)
+                            _log(
+                                f"[snapshot] legacy row loaded: {len(_loaded_boot)} key(s) "
+                                f"(bar_index={_nexus_cache.get('_deployment_bar_index')}, "
+                                f"halt_active={(_nexus_cache.get('_portfolio_drawdown_state') or {}).get('halt_active')})",
+                                "cyan",
+                            )
+                        else:
+                            _log(
+                                f"strategy_cache: no persisted row for {instance_id}|{_nexus_name} "
+                                "(first deploy or cleared); starting fresh",
+                                "cyan",
+                            )
+                        # None signals "run full lookback" to the caller below.
+                        globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = None
+                    # 2-E (Scope D A2): strip stale backtest first_seen_price from
+                    # the hydrated momentum watchlist so the runup baseline
+                    # re-establishes from live bars (the consumer re-seeds it on the
+                    # next score). Runs after EITHER load path. Gated like 2-B: ONLY
+                    # on a backtest-origin / first-boot hydrate — NEVER strip a
+                    # live-origin snapshot (Scope C re-stripped live baselines on
+                    # every restart, permanently disabling the runup ceiling).
+                    try:
+                        from live_boot_setup import (
+                            strip_stale_momentum_baseline as _strip_mom,
+                            should_reset_backtest_state_on_boot as _should_reset_bt2,
+                        )
+                        if _should_reset_bt2(_snap_origin, _clean_room_first_boot):
+                            _stripped = _strip_mom(_nexus_cache)
+                            if _stripped:
+                                _log(
+                                    f"[snapshot] stripped stale first_seen_price from "
+                                    f"{_stripped} momentum entries "
+                                    f"(origin={_snap_origin!r} first_boot={_clean_room_first_boot})",
+                                    "cyan",
+                                )
+                    except Exception as _mom_e:
+                        _log(f"[snapshot] momentum-baseline strip failed (non-fatal): {_mom_e}", "yellow")
                 finally:
                     try:
                         _boot_conn.close()
                     except Exception:
                         pass
+            else:
+                # No DB connection at all -> conservative: run full lookback.
+                globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = None
             # F1b: ramp bypass on warm cold boot.
             try:
                 _bar_now = int(_nexus_cache.get("_deployment_bar_index", 0) or 0)
@@ -5070,10 +5865,21 @@ elif mode == MODE_LIVE:
                         )
                     except Exception:
                         pass
-                    _auto_reset = (
-                        os.environ.get("LIVE_AUTO_RESET_ON_MIGRATION", "")
-                        or ""
-                    ).strip().lower() in ("1", "true", "yes")
+                    # 2026-05-28: clean_room_mode implies operator intent
+                    # to start fresh, so the migration detector auto-resets
+                    # by default. Explicit LIVE_AUTO_RESET_ON_MIGRATION=false
+                    # still overrides (operator override always wins).
+                    try:
+                        from live_boot_setup import should_auto_reset_on_migration as _should_auto_reset
+                        _auto_reset = _should_auto_reset(
+                            os.environ.get("LIVE_AUTO_RESET_ON_MIGRATION"),
+                            _clean_room_mode,
+                        )
+                    except Exception:
+                        _auto_reset = (
+                            os.environ.get("LIVE_AUTO_RESET_ON_MIGRATION", "")
+                            or ""
+                        ).strip().lower() in ("1", "true", "yes")
                     # Keys to reset on migration. Conservative — peak/halt
                     # are the must-clear; the rest are belt-and-suspenders so
                     # cooldowns / queues from the prior account don't bleed
@@ -5092,6 +5898,35 @@ elif mode == MODE_LIVE:
                         "_deployment_last_bar_key",
                         "_backfill_queue",
                         "_strategy_start_alert_date",
+                        # Tier-3 Phase 3 (2026-05-17): observation-only telemetry
+                        # buffer; safe to clear on account migration so the new
+                        # account starts with a clean rolling window.
+                        "_nexus_conviction_telemetry",
+                        "_nexus_conviction_telemetry_capped_logged",
+                        # Tier-3 Phase 2b (2026-05-17): momentum post-sell tracker.
+                        # Stale entries reference symbols held in the prior
+                        # account; clear so the new account doesn't lift cooldowns
+                        # on prior tickers' breakouts.
+                        "_post_sell_breakout_history",
+                        "_post_sell_breakout_reentry_cooldown",
+                        # BT136708 P1.7 (2026-05-18): A4 in-memory post_sell_watch
+                        # mirror for backtest exercise + the mcap pre-seed flag.
+                        # Both reference state from the prior account; clear so
+                        # the new account starts fresh.
+                        # Phase γ.1 (2026-05-18, BT232179 follow-up): the bool flag
+                        # `_yf_market_cap_cache_preseeded` is replaced by a set[str]
+                        # `_yf_market_cap_cache_preseeded_tickers`. Reset both
+                        # forms during migration so stale seeded-state from the
+                        # prior account doesn't carry across.
+                        "_post_sell_watch_inmem",
+                        "_yf_market_cap_cache_preseeded",
+                        "_yf_market_cap_cache_preseeded_tickers",
+                        # Phase α.2 (BT109429 follow-up, 2026-05-18): Neo4j
+                        # query snapshot cache + its hit/miss telemetry.
+                        # Per-backtest-run constructs; carrying them across
+                        # an account migration would surface stale results.
+                        "_neo4j_snapshot",
+                        "_neo4j_snapshot_stats",
                     )
                     if _auto_reset:
                         for _k in _migration_reset_keys:
@@ -5118,6 +5953,44 @@ elif mode == MODE_LIVE:
                     f"{type(_mig_e).__name__}: {_mig_e}",
                     "yellow",
                 )
+
+            # 2-B (bug-sweep 2026-05-28): in clean_room_mode the hydrated snapshot
+            # is the origin="backtest" row, so its _portfolio_drawdown_state carries
+            # the BACKTEST peak/halt. The migration detector above only re-baselines
+            # when cached peak > 1.40x equity AND 0 positions; in the 1.0-1.40x band
+            # (or with any position) a stale peak silently demotes or halts day-1
+            # buys. Re-baseline the drawdown state to live equity unconditionally on
+            # a clean-room boot so the new account starts measuring drawdown from its
+            # own equity, not a historical backtest high-water mark.
+            if _clean_room_mode:
+                try:
+                    from live_boot_setup import (
+                        rebaseline_clean_room_drawdown as _rebaseline_dd,
+                        should_reset_backtest_state_on_boot as _should_reset_bt,
+                    )
+                    # Scope D A1: only re-baseline when the hydrated snapshot is
+                    # backtest-origin (or the genuine first clean-room boot).
+                    # NEVER reset a live-origin snapshot — Scope C fired this on
+                    # EVERY restart, silently clearing the live drawdown halt and
+                    # high-water mark on a real-money account.
+                    if _should_reset_bt(_snap_origin, _clean_room_first_boot):
+                        _cur_eq = float(getattr(live_adapter, "_initial_value", 0.0) or 0.0)
+                        if _rebaseline_dd(_nexus_cache, _cur_eq) is not None:
+                            _log(
+                                f"[live_boot] clean-room drawdown re-baselined to live "
+                                f"equity ${_cur_eq:,.2f} (cleared backtest-origin peak/halt; "
+                                f"origin={_snap_origin!r} first_boot={_clean_room_first_boot}).",
+                                "cyan",
+                            )
+                    else:
+                        _log(
+                            f"[live_boot] drawdown re-baseline SKIPPED — preserving "
+                            f"live-accumulated peak/halt (origin={_snap_origin!r} "
+                            f"first_boot={_clean_room_first_boot}).",
+                            "cyan",
+                        )
+                except Exception as _dd_e:
+                    _log(f"[live_boot] drawdown re-baseline failed (non-fatal): {_dd_e}", "yellow")
             globals()["_strategy_cache_loaded_from_db"] = True
         except Exception as _scp_be:
             try:
@@ -5129,6 +6002,8 @@ elif mode == MODE_LIVE:
             except Exception:
                 pass
             globals()["_strategy_cache_loaded_from_db"] = True
+            # Boot exception path -> conservative: run full lookback.
+            globals()["_NEXUS_SNAPSHOT_GAP_DATES"] = None
 
         # portfolio_emulator points at the adapter so strategies read through transparently.
         portfolio_emulator = live_adapter
@@ -5199,14 +6074,18 @@ if mode != MODE_BACKTEST:
     _cached_strategies, _strategy_row_id, _ = load_strategies_from_db()
     if _cached_strategies:
         _log(f"Loaded {len(_cached_strategies)} strategy(ies) from DB", "green")
-        # Resolve all model_id references once at startup
+        # Resolve all model_id references at startup. force_refresh drops
+        # the resolver's 5-min TTL cache so the live broker always boots
+        # with the latest credentials from the Models table — a key
+        # edit via the UI propagates on the next live-broker (re)start
+        # AND on every bar via run_run_once_strategies' per-call refresh.
         try:
             _resolve_conn = get_conn()
             for _spec in _cached_strategies:
                 cfg = _spec.get("config") or {}
-                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg)
+                _spec["config"] = resolve_model_refs_in_config(_resolve_conn, cfg, force_refresh=True)
             _resolve_conn.close()
-            _log("Resolved model_id references in strategy configs", "green")
+            _log("Resolved model_id references in strategy configs (force_refresh=True)", "green")
         except Exception as _e:
             _log(f"Model resolution warning: {_e}", "yellow")
         # LIVE MODE: apply in-memory overrides on top of the user's DB-tuned configs.
@@ -5495,15 +6374,6 @@ if mode == MODE_BACKTEST:
     import random
     import numpy as _np_backtest
     backtest_start_time = time.time()
-    # Optional seed for reproducible backtests (e.g. BACKTEST_SEED=42 in .env)
-    _backtest_seed = os.environ.get("BACKTEST_SEED")
-    if _backtest_seed:
-        try:
-            _s = int(_backtest_seed)
-            random.seed(_s)
-            _np_backtest.random.seed(_s)
-        except (TypeError, ValueError):
-            pass
     # Engine creates BacktestResults row with status running; we update it with full stub
     backtest_id_raw = backtest_row_id
     _backtest_result_id = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else backtest_id_raw
@@ -5524,6 +6394,53 @@ if mode == MODE_BACKTEST:
             pass
     except Exception:
         _backtest_log_buffer = []
+    # Phase γ.2 (2026-05-18, BT232179 follow-up): the α.3 seed-log block
+    # below MUST emit AFTER the log buffer + file sink are wired so the
+    # `RNG seed: ...` and PYTHONHASHSEED confirmation lines land in the
+    # operator-pulled audit log (not just stdout). Buffer and file are
+    # independent — `intellistock_logger.log` fans out to whichever
+    # contexts are currently attached, so the seed block writes to
+    # whatever wiring succeeded above (buffer + file, just file, or
+    # neither, in which case the lines still hit stdout).
+    # Phase α.3 (2026-05-18, BT109429 follow-up): always seed the process-
+    # global RNGs in backtest mode for paired re-run determinism. The
+    # variance/robustness agent attributed ~5% of the 4.8x same-code spread
+    # to RNG drift across paired runs (LLM-jitter timing, set ordering when
+    # combined with dict insertion variance). Explicit BACKTEST_SEED env
+    # var still wins for back-compat. Derivation extracted to
+    # _phase_alpha_helpers.derive_backtest_seed for unit testability. Bare
+    # import (not `backend.`) because prod Docker layout is flat at /app/.
+    from _phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
+    _seed_int, _seed_source = _derive_backtest_seed(
+        backtest_row_id,
+        symbols,
+        env_seed=os.environ.get("BACKTEST_SEED"),
+    )
+    _log(f"RNG seed: {_seed_int} ({_seed_source})", "cyan")
+    try:
+        random.seed(_seed_int)
+        # numpy seed must fit uint32; safe to mask. 31-bit derived seeds
+        # are already within range, so this is a no-op for them and a
+        # narrowing for raw BACKTEST_SEED env values >= 2**32.
+        _np_backtest.random.seed(_seed_int & 0xFFFFFFFF)
+    except Exception as _seed_apply_exc:
+        _log(f"RNG seed apply failed: {_seed_apply_exc!r}", "yellow")
+    # Set-iteration variance reminder: Python's set ordering depends on
+    # PYTHONHASHSEED, which must be exported BEFORE the interpreter starts —
+    # setting it inside this process is too late (Python has already cached
+    # the hash randomization for the duration of the run).
+    _ph_seed = os.environ.get("PYTHONHASHSEED")
+    if _ph_seed in (None, "", "random"):
+        _log(
+            "RNG seed: PYTHONHASHSEED is unset or 'random' — set "
+            "PYTHONHASHSEED=0 in the BACKTEST ENGINE's launch env "
+            "(Docker `environment:` block or .env, BEFORE the broker "
+            "subprocess starts) for full set-ordering determinism "
+            "across paired re-runs (Phase alpha.3).",
+            "yellow",
+        )
+    else:
+        _log(f"RNG seed: PYTHONHASHSEED={_ph_seed} (confirmed)", "cyan")
     try:
         conn = get_conn_retry(max_attempts=5, delay=2)
         if conn is None:
@@ -5796,12 +6713,32 @@ if mode == MODE_BACKTEST:
 
 if mode == MODE_LIVE:
     try:
-        _lb_caches = _run_live_historic_lookback(
-            _run_once_specs,
-            symbols,
-            key or os.environ.get("KEY", ""),
-            secret or os.environ.get("SECRET", ""),
-        ) or {}
+        # Phase 1 (2026-05-20): snapshot-aware lookback narrowing.
+        # The F1 boot block above set _NEXUS_SNAPSHOT_GAP_DATES based on
+        # whether a usable backtest snapshot was found:
+        #   None  -> no snapshot or boot failed; run the FULL 120-day lookback.
+        #   []    -> snapshot end_date covers today; SKIP lookback entirely.
+        #   [...] -> snapshot is partial; restrict to the missing trading days.
+        _gap_for_lookback = globals().get("_NEXUS_SNAPSHOT_GAP_DATES")
+        if _gap_for_lookback == []:
+            _log("[snapshot] gap_dates empty; skipping lookback", "green")
+            _lb_caches = {}
+        else:
+            _lb_caches = _run_live_historic_lookback(
+                _run_once_specs,
+                symbols,
+                # Scope E (2026-05-29): the LIVE historic lookback must fetch
+                # bars/news with the DATA-source brokerage creds (data_key/
+                # data_secret), NOT the trading creds (key/secret) — which for a
+                # Robinhood-trading instance are not valid Alpaca data creds AND
+                # are wiped to "" after the adapter build (~line 6007). Passing
+                # empty/trading creds let the stale doc-179 alpaca_key win and
+                # 401'd every data.alpaca.markets bars call (then fell back to RH).
+                # Mirrors the per-tick path's _strat_data_key (data_key or key).
+                data_key or key or os.environ.get("KEY", ""),
+                data_secret or secret or os.environ.get("SECRET", ""),
+                restrict_to_dates=_gap_for_lookback if _gap_for_lookback is not None else None,
+            ) or {}
         # Seed the module-level _strategy_cache with whatever the prepass
         # accumulated (peak watermarks, fast-loser blacklist, V32 convert
         # cooldowns, momentum watchlist). Without this merge the state
@@ -5820,6 +6757,52 @@ if mode == MODE_LIVE:
             )
     except Exception as e:
         _log(f"Live historic lookback failed (non-fatal): {e}", "yellow")
+
+    # Phase 1 BLOCKER boot-time log lines (2026-05-20).
+    # Emit AFTER the lookback completes and AFTER the cache merge, so the
+    # warm-position count + bar_index + drawdown halt state reflect both
+    # the snapshot hydrate and any lookback fills. Each block is wrapped
+    # so an attribute miss in one doesn't suppress the others.
+    _nexus_name_for_blocker_logs = "graph_nexus_analysis"
+    # BLOCKER #2 — F1b ramp bypass with 0 warm positions
+    try:
+        _warm_pos_count = 0
+        try:
+            for _p in (getattr(live_adapter, "_positions", {}) or {}).values():
+                try:
+                    if float(getattr(_p, "qty", 0.0) or 0.0) > 0:
+                        _warm_pos_count += 1
+                except Exception:
+                    continue
+        except Exception:
+            _warm_pos_count = len(getattr(live_adapter, "_positions", {}) or {})
+        _bar_idx = _strategy_cache.get(_nexus_name_for_blocker_logs, {}).get("_deployment_bar_index", 0)
+        _log(
+            f"[live_boot] warm_positions={_warm_pos_count}, "
+            f"F1b_bypass={'enabled' if _warm_pos_count > 0 else 'disabled'}, "
+            f"ramp_starting_bar_index={_bar_idx}",
+            "cyan",
+        )
+    except Exception:
+        pass
+
+    # BLOCKER #3 — _nexus_full_cycle_completed_date communication
+    try:
+        _fcd = _strategy_cache.get(_nexus_name_for_blocker_logs, {}).get(
+            "_nexus_full_cycle_completed_date", ""
+        )
+        _log(
+            f"[live_boot] _nexus_full_cycle_completed_date={_fcd or '<unset>'}; "
+            f"next FULL cycle expected ~06:30 AM PT",
+            "cyan",
+        )
+    except Exception:
+        pass
+
+    # Phase 1 BLOCKER #1 — settlement reminder (manual operator verification)
+    # A robust adapter-agnostic settlement check is deferred; for now we just log
+    # a reminder. Operator verifies via the launch checklist before starting.
+    _log("[live_boot] BLOCKER #1 settlement: operator confirmed via launch checklist (no programmatic check)", "cyan")
 
 
 while not shutdown_requested:
@@ -6157,6 +7140,67 @@ while not shutdown_requested:
                             else:
                                 r.db(DB_NAME).table('BacktestResults').insert(backtest_result).run(conn)
                                 _log(f"Saved backtest results to database (instance_id={instance_id_for_db}, strategy_id={strategy_row_id})", "green")
+                            # Phase 1 snapshot: persist final _strategy_cache for live-boot reuse.
+                            # Helpers live in broker_snapshot_helpers.py so they're testable without
+                            # broker.py's module-level argparse + DB bootstrap (extraction pattern
+                            # mirrors broker_session.py / strategy_tick_state.py).
+                            try:
+                                from broker_snapshot_helpers import (
+                                    _invoke_persist_backtest_snapshot as _scp_invoke,
+                                    _collect_prompt_versions as _scp_collect_prompts,
+                                    _collect_llm_stages as _scp_collect_stages,
+                                    _collect_history_scope_inputs as _scp_collect_history,
+                                )
+                                _nexus_spec_for_snapshot = next(
+                                    (s for s in (_run_once_specs or [])
+                                     if str((s or {}).get("strategy") or "").strip() == "graph_nexus_analysis"),
+                                    None,
+                                )
+                                if _nexus_spec_for_snapshot is not None:
+                                    _bt_cfg = _nexus_spec_for_snapshot.get("config") or {}
+                                    # Phase 1 bug-sweep (2026-05-21): the snapshot row's instance_id field
+                                    # is the LIVE-mode namespace key — live boot reads
+                                    # `r.row["instance_id"] == "main"`. Backtests use a numeric
+                                    # `instance_id_for_db` distinct from that namespace, so writing the
+                                    # snapshot with the backtest id meant live boot never found it.
+                                    # Prefer the explicit `base_instance_id` from the spec config
+                                    # (populated by run_run_once_strategies for graph_nexus_analysis).
+                                    _bt_base_id = str(
+                                        _bt_cfg.get("base_instance_id")
+                                        or instance_id_for_db
+                                        or instance_id
+                                        or ""
+                                    )
+                                    if not _bt_cfg.get("base_instance_id"):
+                                        try:
+                                            _log(
+                                                f"[snapshot] WARN: base_instance_id missing from spec config; "
+                                                f"falling back to instance_id_for_db={instance_id_for_db!r}",
+                                                "yellow",
+                                            )
+                                        except NameError:
+                                            pass
+                                    _scp_invoke(
+                                        conn=conn,
+                                        r=r,
+                                        base_instance_id=_bt_base_id,
+                                        strategy_name="graph_nexus_analysis",
+                                        strategy_cache=_strategy_cache.get("graph_nexus_analysis", {}) or {},
+                                        config_dict={
+                                            "strategy_name": "graph_nexus_analysis",
+                                            "prompt_versions": _scp_collect_prompts(_bt_cfg),
+                                            "llm_stages": _scp_collect_stages(_bt_cfg),
+                                            "history_scope_id_inputs": _scp_collect_history(_bt_cfg),
+                                            "lookback_learning_days": int(_bt_cfg.get("lookback_learning_days", 120) or 120),
+                                        },
+                                        start_date=str(backtest_start_date) if backtest_start_date else "",
+                                        end_date=str(backtest_end_date) if backtest_end_date else "",
+                                    )
+                            except Exception as _snap_e:
+                                try:
+                                    _log(f"[snapshot] wrap-up failed (suppressed): {_snap_e}", "yellow")
+                                except NameError:
+                                    pass
                             # Edit #backtests Discord message to Finished (same message that was Queued/Running)
                             try:
                                 from interactive_utils import action_enqueue_discord_edit
@@ -6349,7 +7393,12 @@ while not shutdown_requested:
                 prices = _get_prices_at_time(data, symbols, current_time)
                 price_history = get_price_history_up_to_current(data, symbols_for_data, current_time)
         else:
-            prices = get_live_prices(symbols)
+            # get_live_prices() hits Robinhood's batch-quotes endpoint. Only call it
+            # when Robinhood is the trading broker — a non-RH (e.g. Alpaca) instance
+            # must NOT call Robinhood from the server IP. Held-position prices are
+            # backfilled by _ensure_prices_include_positions (Alpaca/yfinance) and the
+            # per-symbol fetchers + pre-submit quote refresh cover the rest.
+            prices = get_live_prices(symbols) if robinhood_data_fallback_allowed(live_broker_type) else {}
             price_history = None
 
         # Backtest: every bar, execute any pending future trades for TODAY before running strategies.
@@ -6889,6 +7938,24 @@ while not shutdown_requested:
                                         pass
                         else:
                             # BACKTEST: synchronous, no watchdog.
+                            # Per-bar snapshot capture for LLM-critical rewind support.
+                            # Captures the last-good-bar state immediately BEFORE the
+                            # strategy fires; if LLMCriticalFailure raises mid-bar the
+                            # outer-except handler restores from this snapshot and the
+                            # bar replays on resume. See backtest_bar_snapshot.py.
+                            if mode == MODE_BACKTEST:
+                                try:
+                                    from backtest_bar_snapshot import capture as _bs_capture
+                                    _bs_capture(
+                                        strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
+                                        portfolio_emulator=portfolio_emulator if 'portfolio_emulator' in dir() else None,
+                                        current_time=current_time,
+                                    )
+                                except Exception as _capture_err:
+                                    try:
+                                        _log(f"bar snapshot capture failed (non-fatal): {_capture_err}", "yellow")
+                                    except Exception:
+                                        pass
                             run_once_results = run_run_once_strategies(
                                 _run_once_specs, list(symbols or []), prices, current_time,
                                 price_history if mode == MODE_BACKTEST else None,
@@ -7008,8 +8075,11 @@ while not shutdown_requested:
                     def _scp_persist_blocking():
                         _conn = None
                         try:
-                            from strategy_cache_persistence import (
-                                save_strategy_cache_to_db as _scp_save,
+                            from broker_snapshot_helpers import (
+                                _invoke_save_strategy_cache,
+                                _collect_prompt_versions,
+                                _collect_llm_stages,
+                                _collect_history_scope_inputs,
                             )
                             _conn = get_conn_retry(max_attempts=3, delay=2)
                             if _conn is None:
@@ -7020,7 +8090,29 @@ while not shutdown_requested:
                                     continue
                                 _payload = _strategy_cache.get(_nm)
                                 if isinstance(_payload, dict) and _payload:
-                                    _ok = bool(_scp_save(_conn, r, str(instance_id), _nm, _payload))
+                                    # Only wrap with new-schema kwargs for graph_nexus_analysis (the only
+                                    # strategy that produces snapshots). Other strategies continue with
+                                    # legacy 2-segment PK via save_strategy_cache_to_db's back-compat.
+                                    if _nm == "graph_nexus_analysis":
+                                        _bt_cfg_save = (_spec_sc or {}).get("config") or {}
+                                        _ok = _invoke_save_strategy_cache(
+                                            conn=_conn,
+                                            r=r,
+                                            instance_id=str(instance_id),
+                                            strategy_name=_nm,
+                                            cache=_payload,
+                                            config_dict={
+                                                "strategy_name": _nm,
+                                                "prompt_versions": _collect_prompt_versions(_bt_cfg_save),
+                                                "llm_stages": _collect_llm_stages(_bt_cfg_save),
+                                                "history_scope_id_inputs": _collect_history_scope_inputs(_bt_cfg_save),
+                                                "lookback_learning_days": int(_bt_cfg_save.get("lookback_learning_days", 120) or 120),
+                                            },
+                                        )
+                                    else:
+                                        # Legacy path for non-nexus strategies — preserves prior behavior.
+                                        from strategy_cache_persistence import save_strategy_cache_to_db as _scp_save_legacy
+                                        _ok = bool(_scp_save_legacy(_conn, r, str(instance_id), _nm, _payload))
                                     if not _ok:
                                         return (True, f"save_strategy_cache_to_db returned False for {_nm}")
                             return (False, None)
@@ -8262,6 +9354,42 @@ while not shutdown_requested:
                             # but short-circuiting here avoids the round-trip
                             # and gives operators a clear log trail.
                             _side_word = "buy" if decision == 1 else "sell"
+
+                            # Z2.1 phase 1 (log-only): observe ghost-sells in
+                            # BOTH live and backtest modes. Action is "sell"
+                            # but no legitimate sell intent in the strategy
+                            # summary. The whitelist matches _VALID_ACTION_INTENTS
+                            # sell-side enum values in
+                            # backend/strategies/graph_nexus_analysis.py:554.
+                            # Phase 1 only logs; phase 2 will enforce.
+                            if _side_word == "sell":
+                                try:
+                                    _z21_intents = {
+                                        str(_s.get("action_intent", "")).strip().lower()
+                                        for _s in (strategy_summary or [])
+                                        if _s.get("decision") == decision
+                                    }
+                                except Exception:
+                                    _z21_intents = set()
+                                _Z21_SELL_WHITELIST = {
+                                    "sell", "sell_override",
+                                    "rotation_sell", "trend_reversal_sell",
+                                    "fast_loser_cut", "trailing_stop_sell",
+                                    "circuit_breaker_sell", "hold_limit_sell",
+                                    "deep_loser_protect", "forced_exit",
+                                    "downtrend_protection_sell",
+                                    "consecutive_neutral_pruning",
+                                    "panel_sell", "etf_sell",
+                                }
+                                if not (_z21_intents & _Z21_SELL_WHITELIST):
+                                    _z21_pre = (pre_override_action if 'pre_override_action' in locals() else None)
+                                    _log(
+                                        f"[ghost_sell_observation] symbol={symbol} "
+                                        f"intents={sorted(_z21_intents)!r} pre_action={_z21_pre!r} "
+                                        f"would_block_in_phase2=True",
+                                        "yellow",
+                                    )
+
                             try:
                                 _already = (
                                     mode == MODE_LIVE
@@ -8341,6 +9469,7 @@ while not shutdown_requested:
                         primary_strategy = primary_entry.get("strategy")
                         primary_action_intent = primary_entry.get("action_intent")
                         final_reason = str(primary_entry.get("reason") or "").strip()[:1500]
+
                     _backtest_decisions.append({
                         "timestamp": current_time.isoformat() if hasattr(current_time, "isoformat") else str(current_time),
                         "symbol": symbol,
@@ -8671,7 +9800,117 @@ while not shutdown_requested:
             current_time = datetime.datetime.now(datetime.timezone.utc)
 
         #time.sleep(0.1)
-    except Exception as loop_err:
+    except BaseException as _outer_err:
+        # CRITICAL-GUARD route: route LLMCriticalFailure to the dedicated abort handler
+        # BEFORE the generic crash path. The dedicated handler updates BacktestResults
+        # with status='aborted_llm_failure' (not the generic crash status), sets
+        # _skip_snapshot_persist, and pages Discord with full diagnostics.
+        #
+        # NOTE: outer except is `BaseException` (not `Exception`) because
+        # LLMCriticalFailure inherits from BaseException — this guarantees it
+        # is never accidentally swallowed by an intermediate `except Exception`.
+        # The trade-off is we also catch KeyboardInterrupt/SystemExit here, so
+        # we explicitly re-raise non-Exception cases below.
+        try:
+            from llm_critical_guard import LLMCriticalFailure
+            _is_llm_critical = isinstance(_outer_err, LLMCriticalFailure)
+        except Exception:
+            _is_llm_critical = False
+
+        if _is_llm_critical:
+            try:
+                if mode == MODE_BACKTEST and _backtest_result_id is not None:
+                    # PAUSE flow (2026-05-22): backtest no longer exits on
+                    # LLM-critical. backtest_critical_abort.handle() restores
+                    # the last-good-bar snapshot, sets BacktestInstances.paused=True
+                    # and writes BacktestResults.status='paused_llm_critical'.
+                    # The main loop's wait block (~line 9118) then idles the
+                    # worker until the operator resumes via the UI.
+                    try:
+                        from backtest_critical_abort import handle as _bt_handle
+                    except Exception as _imp_err:
+                        try:
+                            _log(f"backtest_critical_abort import failed: {_imp_err}", "red")
+                        except Exception:
+                            pass
+                        _bt_handle = None
+                    if _bt_handle is not None:
+                        _bt_handle(
+                            backtest_id=str(_backtest_result_id),
+                            instance_id=str(instance_id),
+                            failure=_outer_err,
+                        )
+                    # CRITICAL (bug fix 2026-05-22): synchronously flip the
+                    # LOCAL pause flag. _backtest_paused is normally driven by
+                    # the watch_backtest_run_command changefeed thread (see
+                    # ~line 2510), which observes the DB write made above by
+                    # handle() and propagates it into this module global. But
+                    # that's a cross-thread DB roundtrip — the local `continue`
+                    # below is much faster and would otherwise run an ENTIRE
+                    # next bar iteration before the wait block at ~line 9177
+                    # ever sees paused=True. During that wasted iteration:
+                    #   - llm_critical_guard._already_raised is still True,
+                    #     so every LLM call short-circuits to empty text
+                    #   - strategies run with garbage LLM responses against
+                    #     the freshly-restored portfolio, possibly producing
+                    #     bogus trades
+                    # Flipping the local global here closes that race.
+                    #
+                    # Note: no `global _backtest_paused` declaration here.
+                    # This entire outer-except is at MODULE scope (the main
+                    # backtest/live loop at line 6263 is a top-level `while`,
+                    # NOT inside a def), so a bare assignment already binds
+                    # the module attribute. Adding `global` at module top-
+                    # level is a SyntaxError when the name has already been
+                    # read earlier (e.g. the wait block at line 9177 reads
+                    # _backtest_paused before this point).
+                    _backtest_paused = True
+                    # DO NOT sys.exit — handle() restored snapshot and set paused=True;
+                    # the main loop will hit the existing wait block and idle until resume.
+                    continue  # re-enter the while loop; the wait block holds the worker
+                elif mode == MODE_LIVE:
+                    try:
+                        from live_critical_abort import handle as _lv_handle
+                    except Exception as _imp_err:
+                        try:
+                            _log(f"live_critical_abort import failed: {_imp_err}", "red")
+                        except Exception:
+                            pass
+                        _lv_handle = None
+                    if _lv_handle is not None:
+                        _lv_handle(instance_id=str(instance_id), failure=_outer_err)
+                    # Live still exits — live mode can't pause (no snapshot model).
+                    # Distinct exit code so engine knows this was an operator-actionable
+                    # LLM failure, not a generic crash. Exit code 7 chosen to avoid
+                    # collision with argparse pre-check failure (exit 2) and existing
+                    # exit codes 0,1,2,3,4,5,6 used elsewhere in broker.py.
+                    import sys as _sys
+                    _sys.exit(7)
+                else:
+                    # Defensive: backtest mode but no result_id — log loudly so operator notices.
+                    try:
+                        _log(
+                            "LLM critical fired but _backtest_result_id is None; "
+                            "no BacktestResults update possible",
+                            "red",
+                        )
+                    except Exception:
+                        pass
+            except Exception as _abort_err:
+                try:
+                    _log(f"critical-guard handler crashed: {_abort_err}", "red")
+                except Exception:
+                    pass
+
+        # Not LLM critical — we caught BaseException, so KeyboardInterrupt/
+        # SystemExit also land here. Re-raise non-Exception cases so they
+        # propagate to Python's default handler (preserves Ctrl-C semantics
+        # and explicit sys.exit() codes from downstream code).
+        if not isinstance(_outer_err, Exception):
+            raise
+
+        # Existing generic crash path for normal Exceptions.
+        loop_err = _outer_err
         if mode == MODE_BACKTEST and _backtest_result_id is not None:
             progress_pct_crash = None
             try:

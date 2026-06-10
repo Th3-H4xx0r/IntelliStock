@@ -21,6 +21,14 @@ services:
     environment:
       # nginx proxy fallback: if JS uses /api (VITE_API_URL not set), nginx routes here
       - API_URL=${API_URL:-http://intellistock-api:${API_PORT:-8011}}
+      # Extra origins added to the CSP ``connect-src`` directive. REQUIRED
+      # when the frontend bundle was built with ``VITE_API_URL=https://api.example.com``
+      # so the page can actually fetch from that host — otherwise iOS Safari
+      # (and any standards-compliant browser) blocks every API call as a
+      # CSP violation and surfaces it as ``Load failed``. Space-separated
+      # list of origins, e.g.
+      # CSP_CONNECT_SRC_EXTRA="https://api.example.com wss://api.example.com"
+      - CSP_CONNECT_SRC_EXTRA=${CSP_CONNECT_SRC_EXTRA:-}
     restart: unless-stopped
     depends_on:
       - api
@@ -29,6 +37,15 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        # Build the claude CLI into the image by default. Set to 0 to skip
+        # (smaller image; only relevant if you'll never use the "claude-cli"
+        # LLM provider).
+        - INSTALL_CLAUDE_CLI=${INSTALL_CLAUDE_CLI:-1}
+        # Build the codex CLI into the image by default. Set to 0 to skip
+        # (smaller image; only relevant if you'll never use the "codex-cli"
+        # LLM provider). Device-code OAuth login happens from the web UI.
+        - INSTALL_CODEX_CLI=${INSTALL_CODEX_CLI:-1}
     image: intellistock-backend
     container_name: intellistock-backend
     command: ["python", "server.py"]
@@ -41,6 +58,24 @@ services:
       - backtest_logs:/app/backtest_logs
       - nexus_graph_logs:/app/nexus_graph_logs
       - live_trading_logs:/app/live_trading_logs
+      # Mount the host's ~/.claude so the in-container claude CLI shares
+      # the operator's login. Override CLAUDE_HOST_HOME in .env if your
+      # auth state lives elsewhere. If the path doesn't exist on the host
+      # Docker creates an empty dir; claude will report "Not logged in"
+      # via the /models/{id}/test-cli endpoint until you log in on the host.
+      - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
+      # CC also reads ``~/.claude.json`` (the sibling config file — distinct
+      # from the .claude/ directory). In MCP mode CC treats this as a hard
+      # auth requirement: missing it ⇒ "Claude Code is not logged in" even
+      # though credentials in .claude/ are intact. Bind-mounting it makes
+      # the container see the same auth state as the host. Override
+      # CLAUDE_HOST_CONFIG if your config lives elsewhere.
+      - ${CLAUDE_HOST_CONFIG:-~/.claude.json}:/root/.claude.json:ro
+      # codex-cli OAuth tokens live in /root/.codex/auth.json. Mount a
+      # named volume (RW) so the device-code login the operator runs
+      # from the Models UI persists across container restarts AND is
+      # shared with the api service that owns the /codex/login endpoints.
+      - codex_auth:/root/.codex
     restart: unless-stopped
     depends_on:
       - rethinkdb
@@ -77,6 +112,20 @@ services:
       - USASPENDING_DEGRADED_BREAK_EVERY=${USASPENDING_DEGRADED_BREAK_EVERY:-1000}
       - USASPENDING_DEGRADED_BREAK_SECONDS=${USASPENDING_DEGRADED_BREAK_SECONDS:-15}
       - USASPENDING_DEGRADED_MODE_SECONDS=${USASPENDING_DEGRADED_MODE_SECONDS:-600}
+      # HOST-side path to ~/.claude — forwarded into spawned containers
+      # (instance brokers, AI agent, daily digest, discover engine, graph
+      # nexus). See server.py::_claude_home_mount.
+      - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
+      # HOST-side path to ~/.claude.json — sibling of .claude/, required
+      # by CC's MCP mode. Forwarded alongside CLAUDE_HOST_HOME into
+      # spawned containers.
+      - CLAUDE_HOST_CONFIG=${CLAUDE_HOST_CONFIG:-}
+      # Drop privileges to this user when spawning ``claude``. CC refuses
+      # to bypass permissions when running as root, and our Python server
+      # process runs as root. Defaults to the ``claudeuser`` (UID 1000)
+      # the Dockerfile creates. Set to empty to disable (then operator
+      # is expected to run the whole service as non-root).
+      - CLAUDE_CLI_RUNTIME_USER=${CLAUDE_CLI_RUNTIME_USER:-claudeuser}
 
   api:
     image: intellistock-backend
@@ -89,6 +138,15 @@ services:
       - backtest_logs:/app/backtest_logs
       - nexus_graph_logs:/app/nexus_graph_logs
       - live_trading_logs:/app/live_trading_logs
+      # Share the host's claude login (used by the chatbot when a user
+      # picks a "claude-cli" model). See backend service notes above.
+      - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
+      - ${CLAUDE_HOST_CONFIG:-~/.claude.json}:/root/.claude.json:ro
+      # codex-cli OAuth tokens. The /codex/login endpoints live on the
+      # api service, so this volume MUST be mounted RW here. The backend
+      # service mounts the same named volume so strategies see the same
+      # auth state without a re-login.
+      - codex_auth:/root/.codex
     env_file:
       - .env
     environment:
@@ -129,6 +187,15 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - backtest_logs:/app/backtest_logs
+      # Share the host's claude login so strategies (graph_nexus, earnings,
+      # ml_news, ai_trading_decision) that select a claude-cli model can
+      # reach the operator's Pro/Max subscription. See backend notes above.
+      - ${CLAUDE_HOST_HOME:-~/.claude}:/root/.claude:ro
+      - ${CLAUDE_HOST_CONFIG:-~/.claude.json}:/root/.claude.json:ro
+      # codex-cli OAuth state — same named volume the api+backend use so
+      # backtests run with whatever credentials the operator established
+      # via the Models UI device-code login.
+      - codex_auth:/root/.codex
     # R19 (2026-04-25): backtest-engine spawns ephemeral broker containers and
     # must forward INTELLISTOCK_CRED_KEY into them so the broker can decrypt
     # Fernet-encrypted BrokerageAccounts rows. Without env_file the engine's
@@ -147,11 +214,28 @@ services:
       - INSTANCE_DOCKER_NETWORK=intellistockv4_default
       - BACKTEST_LOG_VOLUME=backtest_logs
       - BACKTEST_LOG_DIR=/app/backtest_logs
+      # Determinism: the spawned broker relies on PYTHONHASHSEED for stable set
+      # iteration during stock discovery (the engine forwards it; it must be set
+      # before the interpreter starts). Default 0 for reproducible backtests.
+      - PYTHONHASHSEED=${PYTHONHASHSEED:-0}
       # R19: explicit passthrough as belt-and-suspenders against env_file
       # not being populated by the orchestrator (e.g. Dockploy may render
       # service env separately from the project .env file).
       - INTELLISTOCK_CRED_KEY=${INTELLISTOCK_CRED_KEY:-}
       - ALLOW_LEGACY_ENV_CREDS=${ALLOW_LEGACY_ENV_CREDS:-}
+      # HOST-side path to ~/.claude — forwarded into spawned ephemeral
+      # broker containers (see backtest_engine.py) so claude-cli strategy
+      # calls can reach the operator's logged-in subscription.
+      - CLAUDE_HOST_HOME=${CLAUDE_HOST_HOME:-}
+      # HOST-side path to ~/.claude.json — sibling config file CC needs
+      # in MCP mode. Forwarded alongside CLAUDE_HOST_HOME.
+      - CLAUDE_HOST_CONFIG=${CLAUDE_HOST_CONFIG:-}
+      # Drop privileges to this user when spawning ``claude``. CC refuses
+      # to bypass permissions when running as root, and our Python server
+      # process runs as root. Defaults to the ``claudeuser`` (UID 1000)
+      # the Dockerfile creates. Set to empty to disable (then operator
+      # is expected to run the whole service as non-root).
+      - CLAUDE_CLI_RUNTIME_USER=${CLAUDE_CLI_RUNTIME_USER:-claudeuser}
 
   # AI backtesting agent is NOT started here. The backend (server.py) starts and stops it via the Docker API
   # when AgentControl.running is set to true/false (e.g. via API or CLI "agent start" / "agent stop").
@@ -277,3 +361,5 @@ volumes:
     name: nexus_graph_logs  # Must match NEXUS_GRAPH_LOG_VOLUME; plain name for Docker SDK
   live_trading_logs: # Per-instance broker log files; mounted on backend + api + per-instance broker containers
     name: live_trading_logs  # Must match LIVE_TRADING_LOG_VOLUME; plain name for Docker SDK
+  codex_auth: # OpenAI Codex CLI OAuth state (~/.codex/auth.json) — RW shared by api/backend/backtest-engine
+    name: codex_auth  # Plain name so spawned broker containers can mount it directly via Docker SDK

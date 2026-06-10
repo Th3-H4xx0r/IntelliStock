@@ -24,6 +24,47 @@ const editId     = ref(null)
 const submitting = ref(false)
 const submitMsg  = ref('')
 const submitOk   = ref(false)
+// True only after submitModel actually saves a row. Test only success
+// flips submitOk but NOT saved — so the Test only / Test & Save buttons
+// stay visible and the operator can re-test or save without reopening
+// the modal.
+const saved      = ref(false)
+// Full LLM test response so operators can verify the test is real
+// (not a canned 200 OK from an upstream proxy). Populated by submitModel
+// after /llm/test succeeds; cleared by closeModal / openModal reset paths.
+const testResult = ref(null)
+
+function _prettyJson(value) {
+  if (value == null) return ''
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch (e) {
+    return String(value)
+  }
+}
+
+// Render the "Reasoning" cell in the Models table. For Ollama rows we
+// show the ollama_think value (Off/On/Low/Medium/High) because that's
+// what controls reasoning on Ollama models — reasoning_effort is the
+// Azure/OpenAI/NVIDIA field and is not used for Ollama.
+function _reasoningCell(m) {
+  if (m.provider === 'claude-cli' || m.provider === 'codex-cli') return '—'
+  if (m.provider === 'ollama') {
+    const think = String(m.ollama_think || '').trim().toLowerCase()
+    if (!think) return 'Default'
+    if (think === 'true' || think === 'on') return 'On'
+    if (think === 'false' || think === 'off') return 'Off'
+    return think.charAt(0).toUpperCase() + think.slice(1)
+  }
+  if (m.provider === 'bedrock') {
+    const r = String(m.bedrock_reasoning || '').trim().toLowerCase()
+    if (!r || r === 'off') return 'Off'
+    return r.charAt(0).toUpperCase() + r.slice(1)
+  }
+  const eff = String(m.reasoning_effort || '').trim()
+  if (!eff) return 'Default'
+  return eff.charAt(0).toUpperCase() + eff.slice(1)
+}
 
 const formDraft = ref({
   name: '',
@@ -35,9 +76,37 @@ const formDraft = ref({
   azureEndpoint: '',
   azureApiVersion: '2024-10-21',
   reasoningEffort: '',
+  cliPath: '',
+  extraArgs: '',
+  // Ollama provider config — only used when provider === 'ollama'.
+  ollamaBaseUrl: 'http://localhost:11434',
+  ollamaKeepAlive: '',
+  ollamaThink: '',
+  // Bedrock provider config — only used when provider === 'bedrock'.
+  bedrockRegion: 'us-east-1',
+  bedrockReasoning: 'off',
+  // Cache-grouping tag — share LLM cache across same-model-different-name rows.
+  modelCacheFamily: '',
+  // Optional per-model pricing override ($/1M tokens). null = use
+  // backend llm_pricing.yaml defaults.
+  inputCostPer1m: null,
+  outputCostPer1m: null,
+  cacheCreationCostPer1m: null,
+  cacheReadCostPer1m: null,
 })
 
+const testCliStates = ref({})
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+function _normalizeError(data, status) {
+  const d = data?.detail
+  if (Array.isArray(d)) return d.map(x => (x && (x.msg || x.message)) || JSON.stringify(x)).join('; ')
+  if (typeof d === 'string') return d
+  if (d && typeof d === 'object') return d.msg || d.message || JSON.stringify(d)
+  if (data?.error) return data.error
+  return `HTTP ${status}`
+}
+
 function authHeaders() {
   const token = getToken()
   return token
@@ -80,10 +149,19 @@ function openCreateModal() {
     azureEndpoint: '',
     azureApiVersion: '2024-10-21',
     reasoningEffort: '',
+    cliPath: '',
+    extraArgs: '',
+    modelCacheFamily: '',
+    inputCostPer1m: null,
+    outputCostPer1m: null,
+    cacheCreationCostPer1m: null,
+    cacheReadCostPer1m: null,
   }
   submitting.value = false
   submitMsg.value = ''
   submitOk.value = false
+  saved.value = false
+  testResult.value = null
   showModal.value = true
 }
 
@@ -100,10 +178,28 @@ function openEditModal(m) {
     azureEndpoint: m.azure_openai_endpoint || '',
     azureApiVersion: m.azure_openai_api_version || '2024-10-21',
     reasoningEffort: m.reasoning_effort || '',
+    cliPath: m.cli_path || '',
+    extraArgs: m.extra_args || '',
+    // Ollama: hydrate base_url + keep_alive + think; default base_url when
+    // blank so editing a stored ollama row never lands on an empty picker.
+    ollamaBaseUrl: m.ollama_base_url || 'http://localhost:11434',
+    ollamaKeepAlive: m.ollama_keep_alive || '',
+    ollamaThink: m.ollama_think || '',
+    // Bedrock: hydrate region + reasoning; default region when blank.
+    bedrockRegion: m.bedrock_region || 'us-east-1',
+    bedrockReasoning: m.bedrock_reasoning || 'off',
+    modelCacheFamily: m.model_cache_family || '',
+    // Pricing override: row stores snake_case; null/undefined → blank input.
+    inputCostPer1m: (m.input_cost_per_1m ?? null),
+    outputCostPer1m: (m.output_cost_per_1m ?? null),
+    cacheCreationCostPer1m: (m.cache_creation_cost_per_1m ?? null),
+    cacheReadCostPer1m: (m.cache_read_cost_per_1m ?? null),
   }
   submitting.value = false
   submitMsg.value = ''
   submitOk.value = false
+  saved.value = false
+  testResult.value = null
   showModal.value = true
 }
 
@@ -113,6 +209,45 @@ function closeModal(force = false) {
   editId.value = null
   submitMsg.value = ''
   submitOk.value = false
+  saved.value = false
+  testResult.value = null
+}
+
+// Run the /llm/test smoke against the current draft. Used by both
+// ``submitModel`` (Test & Save) and ``testOnly`` (the dry-run button).
+// Returns true on success, false on failure — caller sets submitting +
+// any follow-up state. Sets ``testResult`` directly so the response
+// panel below the form populates immediately.
+async function _runLlmTest(d) {
+  const testPayload = buildStrategyLlmTestPayload(d)
+  const testRes = await fetch(`${API_BASE}/llm/test`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(testPayload),
+  })
+  const testBody = await testRes.json().catch(() => ({}))
+  if (!testRes.ok) throw new Error(_normalizeError(testBody, testRes.status))
+  // Capture the actual LLM response so the user can verify the test
+  // is real (e.g. a proxy returning canned 200s would fail the
+  // structured-parse step or surface a suspicious payload). Backend
+  // also runs a real free-form generation smoke (smoke_* fields) using
+  // the same call_llm_by_provider path the strategy uses.
+  testResult.value = {
+    provider: testBody.provider,
+    model: testBody.model,
+    effective_model: testBody.effective_model,
+    result: testBody.result,
+    latency_ms: testBody.latency_ms,
+    provider_meta: testBody.provider_meta,
+    smoke_prompt: testBody.smoke_prompt,
+    smoke_response: testBody.smoke_response,
+    smoke_thinking: testBody.smoke_thinking,
+    smoke_content_chars: testBody.smoke_content_chars,
+    smoke_thinking_chars: testBody.smoke_thinking_chars,
+    smoke_latency_ms: testBody.smoke_latency_ms,
+    smoke_error: testBody.smoke_error,
+    message: testBody.message,
+  }
 }
 
 async function submitModel() {
@@ -121,21 +256,32 @@ async function submitModel() {
   if (!d.model.trim()) { submitMsg.value = 'Model is required'; submitOk.value = false; return }
 
   submitting.value = true
-  submitMsg.value = 'Testing LLM configuration...'
   submitOk.value = false
+  testResult.value = null
+  // claude-cli's local-binary auth has nothing the /llm/test endpoint
+  // can probe without a separate ``codex login``-style flow, so we
+  // skip the test for that provider. codex-cli DOES go through
+  // /llm/test — the codex provider's structured + smoke calls verify
+  // both that the local binary is authenticated AND that the operator-
+  // configured model name actually resolves on OpenAI's side (catches
+  // misconfigurations like ``gpt-5.4-mini`` which is an Azure
+  // deployment name, not a codex model).
+  const skipTest = d.provider === 'claude-cli'
+  submitMsg.value = skipTest ? (editMode.value ? 'Updating model...' : 'Saving model...') : 'Testing LLM configuration...'
 
-  // Test the LLM config first (skip test if editing without changing key)
+  // For non-CLI providers, also skip the test on edit when no api_key
+  // is in the draft (user didn't intend to re-test creds they didn't
+  // change). For codex-cli, run the test unconditionally — there is
+  // no api_key gate. For ollama, run the test unconditionally too
+  // (local Ollama legitimately has no api_key and we still want
+  // "Test & Save" to actually probe the host).
   const hasKey = !!d.apiKey.trim()
-  if (!editMode.value || hasKey) {
+  const shouldTest = !skipTest && (
+    d.provider === 'codex-cli' || d.provider === 'ollama' || hasKey
+  )
+  if (shouldTest) {
     try {
-      const testPayload = buildStrategyLlmTestPayload(d)
-      const testRes = await fetch(`${API_BASE}/llm/test`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify(testPayload),
-      })
-      const testBody = await testRes.json().catch(() => ({}))
-      if (!testRes.ok) throw new Error(testBody.detail || `HTTP ${testRes.status}`)
+      await _runLlmTest(d)
     } catch (e) {
       submitOk.value = false
       submitMsg.value = `LLM test failed: ${e.message}`
@@ -144,6 +290,10 @@ async function submitModel() {
     }
   }
 
+  // isCli is still used below for the save payload shape (cli_path /
+  // extra_args go in for both claude-cli and codex-cli).
+  const isCli = d.provider === 'claude-cli' || d.provider === 'codex-cli'
+
   // Create or update
   submitMsg.value = editMode.value ? 'Updating model...' : 'Saving model...'
   try {
@@ -151,16 +301,52 @@ async function submitModel() {
       name: d.name.trim(),
       provider: d.provider,
       model: d.model.trim(),
-      openai_base_url: d.openaiBaseUrl.trim(),
-      nvidia_base_url: d.nvidiaBaseUrl.trim(),
-      azure_openai_endpoint: d.azureEndpoint.trim(),
-      azure_openai_api_version: d.azureApiVersion.trim() || '2024-10-21',
-      reasoning_effort: d.reasoningEffort.trim(),
     }
-    // Only include api_key if it was provided (don't overwrite with empty on edit)
-    if (d.apiKey.trim()) {
-      payload.api_key = d.apiKey.trim()
+    // Reasoning effort applies to every provider whose form exposes the
+    // dropdown (openai/azure/nvidia + claude-cli/codex-cli where it
+    // maps to a CLI flag). Send for both branches so saving 'High' on
+    // a CLI model actually persists — the previous CLI branch dropped
+    // it silently, so the row kept the prior value.
+    payload.reasoning_effort = (d.reasoningEffort || '').trim() || undefined
+    if (isCli) {
+      payload.cli_path = d.cliPath.trim() || undefined
+      payload.extra_args = d.extraArgs.trim() || undefined
+    } else {
+      payload.openai_base_url = d.openaiBaseUrl.trim() || undefined
+      payload.nvidia_base_url = d.nvidiaBaseUrl.trim() || undefined
+      payload.azure_openai_endpoint = d.azureEndpoint.trim() || undefined
+      payload.azure_openai_api_version = d.azureApiVersion.trim() || undefined
+      // Clear any leftover CLI fields when switching to a non-CLI provider
+      payload.cli_path = undefined
+      payload.extra_args = undefined
+      // Only include api_key if it was provided (don't overwrite with empty on edit)
+      if (d.apiKey.trim()) {
+        payload.api_key = d.apiKey.trim()
+      }
     }
+    // Ollama fields — always sent when ollama provider is selected so a
+    // fresh row gets the base_url stored even if it equals the default.
+    if (d.provider === 'ollama') {
+      payload.ollama_base_url = (d.ollamaBaseUrl || '').trim() || 'http://localhost:11434'
+      payload.ollama_keep_alive = (d.ollamaKeepAlive || '').trim() || undefined
+      payload.ollama_think = (d.ollamaThink || '').trim() || undefined
+    }
+    // Bedrock fields — region is required; reasoning defaults to off.
+    if (d.provider === 'bedrock') {
+      payload.bedrock_region = (d.bedrockRegion || '').trim() || undefined
+      payload.bedrock_reasoning = (d.bedrockReasoning || '').trim().toLowerCase() || undefined
+    }
+    // Cache-grouping tag applies to every provider.
+    payload.model_cache_family = (d.modelCacheFamily || '').trim().toLowerCase() || undefined
+
+    // Pricing override ($/1M tokens). Convert camelCase → snake_case and
+    // send only when a finite number was entered (empty/null = "no
+    // override; fall back to llm_pricing.yaml" on the backend).
+    const _costOrUndef = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+    payload.input_cost_per_1m = _costOrUndef(d.inputCostPer1m)
+    payload.output_cost_per_1m = _costOrUndef(d.outputCostPer1m)
+    payload.cache_creation_cost_per_1m = _costOrUndef(d.cacheCreationCostPer1m)
+    payload.cache_read_cost_per_1m = _costOrUndef(d.cacheReadCostPer1m)
 
     const url = editMode.value ? `${API_BASE}/models/${editId.value}` : `${API_BASE}/models`
     const method = editMode.value ? 'PUT' : 'POST'
@@ -170,17 +356,92 @@ async function submitModel() {
       body: JSON.stringify(payload),
     })
     const body = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`)
+    if (!res.ok) throw new Error(_normalizeError(body, res.status))
 
     submitOk.value = true
-    submitMsg.value = editMode.value ? 'Model updated.' : 'Model saved.'
+    saved.value = true
+    submitMsg.value = editMode.value
+      ? 'LLM test passed. Model updated.'
+      : 'LLM test passed. Model saved.'
     submitting.value = false
-    closeModal(true)
+    // No auto-close — the user explicitly asked to inspect the LLM
+    // test output before dismissing the modal. They close it via the
+    // Close button (Cancel re-labels itself after success). Refresh
+    // the list in the background so it's ready when they do close.
     await fetchModels()
   } catch (e) {
     submitOk.value = false
     submitMsg.value = e.message || 'Failed to save model.'
     submitting.value = false
+  }
+}
+
+async function testOnly() {
+  // Dry-run: hit /llm/test against the current draft WITHOUT saving.
+  // Useful for verifying a config — auth, model name resolution, smoke
+  // generation — before committing the change to the Models table.
+  const d = formDraft.value
+  if (!d.model.trim()) { submitMsg.value = 'Model is required'; submitOk.value = false; return }
+  if (d.provider === 'claude-cli') {
+    submitMsg.value = 'Use the cable icon on the saved row to test a claude-cli model.'
+    submitOk.value = false
+    return
+  }
+  submitting.value = true
+  submitOk.value = false
+  testResult.value = null
+  submitMsg.value = 'Testing LLM configuration...'
+  try {
+    await _runLlmTest(d)
+    submitMsg.value = 'LLM test passed (not saved).'
+    submitOk.value = true
+  } catch (e) {
+    submitMsg.value = `LLM test failed: ${e.message}`
+    submitOk.value = false
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function testCliConnection(id) {
+  testCliStates.value = { ...testCliStates.value, [id]: { loading: true, ok: null, message: 'Testing...' } }
+  try {
+    const res = await fetch(`${API_BASE}/models/${id}/test-cli`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.status === 404) {
+      testCliStates.value = {
+        ...testCliStates.value,
+        [id]: { loading: false, ok: false, message: 'Model no longer exists. Refreshed.' },
+      }
+      await fetchModels()
+      return
+    }
+    if (!res.ok) throw new Error(_normalizeError(data, res.status))
+    if (data.ok) {
+      const loggedIn = data.logged_in ? 'logged in' : 'not logged in'
+      const responseSegment = data.model_response ? `, response: ${data.model_response}` : ''
+      testCliStates.value = {
+        ...testCliStates.value,
+        [id]: {
+          loading: false,
+          ok: true,
+          message: `✓ v${data.version || '?'}, ${loggedIn}${responseSegment}`,
+        },
+      }
+    } else {
+      testCliStates.value = {
+        ...testCliStates.value,
+        [id]: { loading: false, ok: false, message: data.error || 'Unknown error' },
+      }
+    }
+  } catch (e) {
+    testCliStates.value = {
+      ...testCliStates.value,
+      [id]: { loading: false, ok: false, message: e.message || 'Test failed' },
+    }
   }
 }
 
@@ -259,24 +520,54 @@ onMounted(fetchModels)
               <td class="px-5 py-3.5 font-medium text-slate-200">{{ m.name }}</td>
               <td class="px-5 py-3.5 text-slate-400">{{ getLlmProviderLabel(m.provider) }}</td>
               <td class="px-5 py-3.5 text-slate-400 font-mono text-xs">{{ m.model }}</td>
-              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ m.reasoning_effort ? m.reasoning_effort.charAt(0).toUpperCase() + m.reasoning_effort.slice(1) : 'Default' }}</td>
-              <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">{{ m.api_key || '—' }}</td>
+              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ _reasoningCell(m) }}</td>
+              <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">
+                <template v-if="m.provider === 'claude-cli'">{{ m.cli_path || 'claude' }}</template>
+                <template v-else-if="m.provider === 'codex-cli'">{{ m.cli_path || 'codex' }}</template>
+                <template v-else>{{ m.api_key || '—' }}</template>
+              </td>
               <td class="px-5 py-3.5 text-slate-500 text-xs">{{ fmtDate(m.created_at) }}</td>
-              <td class="px-5 py-3.5 text-right">
-                <button
-                  @click="openEditModal(m)"
-                  class="text-slate-500 hover:text-primary transition-colors mr-2"
-                  title="Edit"
-                >
-                  <span class="material-symbols-outlined text-base">edit</span>
-                </button>
-                <button
-                  @click="deleteModel(m.id, m.name)"
-                  class="text-slate-500 hover:text-red-400 transition-colors"
-                  title="Delete"
-                >
-                  <span class="material-symbols-outlined text-base">delete</span>
-                </button>
+              <td class="px-5 py-3.5 text-right align-top">
+                <div class="flex flex-col items-end gap-2">
+                  <div class="flex items-center justify-end whitespace-nowrap">
+                    <button
+                      v-if="m.provider === 'claude-cli'"
+                      @click="testCliConnection(m.id)"
+                      :disabled="testCliStates[m.id]?.loading"
+                      class="text-slate-500 hover:text-primary transition-colors mr-2 disabled:opacity-40"
+                      title="Test connection"
+                    >
+                      <span class="material-symbols-outlined text-base" :class="{ 'animate-spin': testCliStates[m.id]?.loading }">
+                        {{ testCliStates[m.id]?.loading ? 'progress_activity' : 'cable' }}
+                      </span>
+                    </button>
+                    <button
+                      @click="openEditModal(m)"
+                      class="text-slate-500 hover:text-primary transition-colors mr-2"
+                      title="Edit"
+                    >
+                      <span class="material-symbols-outlined text-base">edit</span>
+                    </button>
+                    <button
+                      @click="deleteModel(m.id, m.name)"
+                      class="text-slate-500 hover:text-red-400 transition-colors"
+                      title="Delete"
+                    >
+                      <span class="material-symbols-outlined text-base">delete</span>
+                    </button>
+                  </div>
+                  <Transition name="fade">
+                    <div
+                      v-if="testCliStates[m.id]?.message && !testCliStates[m.id]?.loading"
+                      class="max-w-[240px] text-left whitespace-normal break-words rounded-md px-2 py-1.5 text-[11px] leading-relaxed border"
+                      :class="testCliStates[m.id]?.ok
+                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
+                        : 'border-red-500/20 bg-red-500/10 text-red-300'"
+                    >
+                      {{ testCliStates[m.id].message }}
+                    </div>
+                  </Transition>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -324,6 +615,70 @@ onMounted(fetchModels)
               :disabled="submitting"
             />
 
+            <!-- Pricing override (optional). When any of these are set,
+                 telemetry's cost computation will use them instead of
+                 backend/llm_pricing.yaml. Leaving them blank keeps the
+                 YAML defaults. -->
+            <details class="border border-border-subtle rounded-lg bg-surface px-3 py-2">
+              <summary class="cursor-pointer text-xs font-medium text-slate-300">
+                Pricing override (optional)
+              </summary>
+              <p class="text-[11px] text-slate-500 mt-2 mb-3 leading-relaxed">
+                Leave blank to use the backend <span class="font-mono">llm_pricing.yaml</span> defaults.
+                Values are dollars per 1M tokens.
+              </p>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Input cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.inputCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 3.00"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Output cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.outputCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 15.00"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Cache creation cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.cacheCreationCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 3.75"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Cache read cost ($/1M tokens)</label>
+                  <input
+                    v-model.number="formDraft.cacheReadCostPer1m"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    :disabled="submitting"
+                    placeholder="e.g. 0.30"
+                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+                  />
+                </div>
+              </div>
+            </details>
+
             <!-- Status message -->
             <div
               v-if="submitMsg"
@@ -333,6 +688,77 @@ onMounted(fetchModels)
                 : 'border-red-500/20 bg-red-500/10 text-red-300'"
             >
               {{ submitMsg }}
+            </div>
+
+            <!-- LLM test response (so operators can verify the test
+                 isn't lying — e.g. an upstream proxy returning canned
+                 200s would fail structured parse or surface odd values).
+                 Shows the parsed Pydantic payload + latency + effective
+                 model + any provider_meta the backend returned. -->
+            <div
+              v-if="testResult"
+              class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-3 text-[11px] leading-relaxed text-emerald-200/90 space-y-1.5"
+            >
+              <div class="font-semibold text-emerald-200">LLM connectivity test response</div>
+              <div class="flex flex-wrap gap-x-4 gap-y-1 text-emerald-300/80">
+                <span>provider: <span class="font-mono text-emerald-200">{{ testResult.provider }}</span></span>
+                <span>model: <span class="font-mono text-emerald-200">{{ testResult.model }}</span></span>
+                <span v-if="testResult.effective_model && testResult.effective_model !== testResult.model">
+                  effective: <span class="font-mono text-emerald-200">{{ testResult.effective_model }}</span>
+                </span>
+                <span v-if="testResult.latency_ms != null">latency: <span class="font-mono text-emerald-200">{{ testResult.latency_ms }}ms</span></span>
+              </div>
+              <div v-if="testResult.result" class="mt-1">
+                <div class="text-emerald-300/70 mb-0.5">structured connectivity probe (parsed response):</div>
+                <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.result) }}</pre>
+              </div>
+              <div v-if="testResult.smoke_prompt || testResult.smoke_response || testResult.smoke_thinking || testResult.smoke_error" class="mt-1">
+                <div class="text-emerald-300/70 mb-0.5">
+                  real-generation smoke
+                  <span v-if="testResult.smoke_latency_ms != null" class="text-emerald-300/60">({{ testResult.smoke_latency_ms }}ms)</span>
+                  <span v-if="testResult.smoke_content_chars != null || testResult.smoke_thinking_chars != null" class="text-emerald-300/60">
+                    · content {{ testResult.smoke_content_chars ?? 0 }} chars
+                    · reasoning {{ testResult.smoke_thinking_chars ?? 0 }} chars
+                  </span>
+                </div>
+                <div v-if="testResult.smoke_prompt" class="text-emerald-300/60 text-[10px] mb-0.5">
+                  prompt: <span class="text-emerald-200/90">{{ testResult.smoke_prompt }}</span>
+                </div>
+
+                <!-- Visible answer (content) — prefer this when populated. -->
+                <template v-if="testResult.smoke_response && (testResult.smoke_content_chars == null || testResult.smoke_content_chars > 0)">
+                  <div class="text-emerald-300/60 text-[10px] mb-0.5">content (visible answer):</div>
+                  <pre class="font-mono text-[11px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">{{ testResult.smoke_response }}</pre>
+                </template>
+
+                <!-- Reasoning / thinking — for Ollama reasoning models. -->
+                <details v-if="testResult.smoke_thinking" class="mt-1">
+                  <summary class="cursor-pointer text-emerald-300/60 text-[10px]">reasoning ({{ testResult.smoke_thinking_chars ?? testResult.smoke_thinking.length }} chars) — click to expand</summary>
+                  <pre class="font-mono text-[11px] text-emerald-200/70 bg-black/40 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words mt-1">{{ testResult.smoke_thinking }}</pre>
+                </details>
+
+                <!-- Empty-content fallback: only thinking was returned. -->
+                <div
+                  v-if="!testResult.smoke_response && !testResult.smoke_thinking && testResult.smoke_error"
+                  class="font-mono text-[10px] text-red-300 bg-red-900/20 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">
+                  smoke generation failed: {{ testResult.smoke_error }}
+                </div>
+                <div
+                  v-else-if="!testResult.smoke_response && !testResult.smoke_thinking"
+                  class="font-mono text-[10px] text-amber-300 bg-amber-900/20 rounded px-2 py-1">
+                  smoke generation returned empty — structured check passed but the
+                  model did not produce free-form text. Strategy use may still fail.
+                </div>
+                <div
+                  v-else-if="testResult.smoke_content_chars === 0 && testResult.smoke_thinking_chars > 0"
+                  class="font-mono text-[10px] text-amber-300 bg-amber-900/20 rounded px-2 py-1 mt-1">
+                  Model produced only reasoning tokens — no visible answer. Try the Thinking/Effort dropdown to set "Off" or "Low", or raise the smoke max_output_tokens budget.
+                </div>
+              </div>
+              <div v-if="testResult.provider_meta && Object.keys(testResult.provider_meta).length" class="mt-1">
+                <div class="text-emerald-300/70 mb-0.5">provider meta:</div>
+                <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.provider_meta) }}</pre>
+              </div>
             </div>
 
             <div
@@ -346,13 +772,36 @@ onMounted(fetchModels)
           <div class="px-6 pb-6 pt-4 border-t border-border-subtle flex gap-3 shrink-0">
             <button @click="closeModal"
               :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors">
-              Cancel
+              :class="saved
+                ? 'flex-1 py-2.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/30 transition-colors'
+                : 'flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors'">
+              {{ saved ? 'Close' : 'Cancel' }}
             </button>
-            <button @click="submitModel"
+            <!-- Test-only button: hits /llm/test against the current
+                 draft without touching the Models table. Useful when
+                 the operator is iterating on a config and wants to
+                 verify auth + model resolution + smoke generation
+                 before committing. Hidden for claude-cli (which has a
+                 separate per-row cable-icon test). Stays visible after
+                 a successful Test only run so the operator can re-test
+                 or jump straight to Save without reopening the modal. -->
+            <button v-if="!saved && formDraft.provider !== 'claude-cli'"
+              @click="testOnly"
+              :disabled="submitting"
+              class="flex-1 py-2.5 rounded-lg border border-primary/40 text-sm font-semibold text-primary hover:bg-primary/10 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+              <template v-if="submitting">Testing...</template>
+              <template v-else>Test only</template>
+            </button>
+            <button v-if="!saved"
+              @click="submitModel"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
-              {{ submitting ? 'Testing...' : (editMode ? 'Test & Update' : 'Test & Save') }}
+              <template v-if="submitting">
+                {{ formDraft.provider === 'claude-cli' ? (editMode ? 'Updating...' : 'Saving...') : 'Testing...' }}
+              </template>
+              <template v-else>
+                {{ editMode ? 'Test & Update' : 'Test & Save' }}
+              </template>
             </button>
           </div>
         </div>

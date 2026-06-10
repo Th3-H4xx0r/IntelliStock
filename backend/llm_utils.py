@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import sys
 import time
 import threading
 from collections import deque
@@ -36,6 +37,11 @@ except Exception:
     _rethink = None
 
 try:
+    import bedrock_client
+except Exception:
+    bedrock_client = None
+
+try:
     from pydantic_ai import Agent
     from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
     from pydantic_ai.models.openai import OpenAIChatModel
@@ -45,6 +51,8 @@ try:
     from pydantic_ai.providers.google import GoogleProvider
     from pydantic_ai.providers.openai import OpenAIProvider
     from pydantic_ai.settings import ModelSettings
+    from pydantic_ai.models.bedrock import BedrockConverseModel, BedrockModelSettings
+    from pydantic_ai.providers.bedrock import BedrockProvider
     _PYDANTIC_AI_AVAILABLE = True
 except Exception:
     Agent = None
@@ -57,7 +65,105 @@ except Exception:
     GoogleProvider = None
     OpenAIProvider = None
     ModelSettings = None
+    BedrockConverseModel = None
+    BedrockModelSettings = None
+    BedrockProvider = None
     _PYDANTIC_AI_AVAILABLE = False
+
+# Telemetry — defensive import so a missing/broken module never blocks LLM calls.
+try:
+    from llm_telemetry import record_llm_call as _telemetry_record
+except Exception:
+    def _telemetry_record(**_kwargs):
+        return None
+
+
+def _safe_record(**kwargs) -> None:
+    """Best-effort telemetry. Never raises out."""
+    try:
+        _telemetry_record(**kwargs)
+    except Exception:
+        pass
+
+
+# Patterns for responses that MUST NOT be retried.
+#
+# Retrying these patterns triggers Azure's abuse monitor (interprets a repeat
+# of a blocked prompt as a deliberate bypass attempt) and gets the entire
+# resource temp-blocked for 24-48h. Two real backtests have already died
+# this way (bt357345 with 1008 of these errors, bt437583 exited mid-lookback).
+#
+# These are matched against the response body / exception text in the
+# inner HTTP retry loops AND in the outer raw-JSON retry loop so the
+# abuse monitor sees ONE attempt per blocked prompt and moves on.
+_RX_CONTENT_FILTER = re.compile(r"content_filter|content filter", re.I)
+_RX_AZURE_TEMP_BLOCK = re.compile(r"temporarily blocked|unusual behavior", re.I)
+
+
+def _is_non_retryable_filter_response(
+    *,
+    status: int | None = None,
+    body: str | None = None,
+    exc: BaseException | None = None,
+) -> tuple[bool, str]:
+    """Return ``(is_non_retryable, reason_tag)`` for responses that MUST NOT
+    be retried at the inner HTTP / raw-JSON layer.
+
+    Retrying these patterns is exactly what triggers Azure's abuse-monitor
+    temp-block. The outer ``_call_structured_llm_with_critical_guard``
+    wrapper still classifies the response (``azure_403_blocked`` /
+    ``content_filter``) and handles pause/abort — this guard is only
+    here to make sure inner loops don't re-fire the same blocked prompt.
+
+    Args:
+        status: HTTP status code (if known). Pass ``None`` if only an
+            exception is available.
+        body: Response body text / error message (if available).
+        exc: Exception to inspect when ``status`` / ``body`` are missing
+            (e.g. ``requests.HTTPError`` carrying a ``response`` attr).
+
+    Returns:
+        ``(True, tag)`` if the caller MUST stop retrying.
+        ``(False, "")`` otherwise (safe to retry under normal backoff rules).
+    """
+    if status is None and exc is not None:
+        # Try to pull status + body off the exception (requests pattern).
+        _resp = getattr(exc, "response", None)
+        if _resp is not None:
+            try:
+                status = getattr(_resp, "status_code", None)
+            except Exception:
+                status = None
+            if body is None:
+                try:
+                    body = getattr(_resp, "text", "") or ""
+                except Exception:
+                    body = ""
+        if body is None:
+            body = str(exc)
+
+    body_l = (body or "").lower() if body else ""
+
+    # 1. Content filter — HTTP 400 with "content_filter" in body. Azure's
+    #    content filter and OpenAI's both surface this signature. Even if
+    #    the status is missing or wrong (sometimes wrapped inside a
+    #    RuntimeError(f"HTTP 400: ...") string), match on body alone.
+    if status == 400 and _RX_CONTENT_FILTER.search(body_l):
+        return True, "content_filter"
+    if _RX_CONTENT_FILTER.search(body_l):
+        return True, "content_filter"
+
+    # 2. Azure abuse-monitor temp-block — HTTP 403 with "temporarily blocked"
+    #    or "unusual behavior" in body. The resource is already temp-blocked;
+    #    retrying just extends the block window. Same fall-through logic for
+    #    status: prefer status+body, fall back to body-only.
+    if status == 403 and _RX_AZURE_TEMP_BLOCK.search(body_l):
+        return True, "azure_temp_blocked"
+    if _RX_AZURE_TEMP_BLOCK.search(body_l):
+        return True, "azure_temp_blocked"
+
+    return False, ""
+
 
 # Gemini REST
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -70,8 +176,41 @@ _TERMINAL_LLM_FAILURES: dict[str, str] = {}
 _TERMINAL_LLM_FAILURES_LOCK = threading.Lock()
 
 
+# Models known to return empty `{}` (2-token "skeleton" response) when
+# constrained by `response_format={"type": "json_object"}`. We've seen
+# this with gpt-oss, gpt-5*, and NVIDIA NIM kimi-k2.x — all of which
+# include their own prompt-driven JSON output and reject the constraint.
+# Used by every chat-completion call path to decide whether to set the
+# response_format field. Keeping the list in one place so adding a new
+# quirky model only touches one site.
+_JSON_OBJECT_FORMAT_QUIRKY_MARKERS = (
+    "gpt-oss",
+    "gpt_oss",
+    "gpt oss",
+    "gpt-5",
+    "gpt_5",
+    "moonshotai/kimi",
+    "kimi-k2",
+    "kimi_k2",
+)
+
+
+def _model_skips_json_object_format(model_name: str) -> bool:
+    """Return True for chat-completion models that return empty `{}` when
+    constrained by response_format=json_object. Caller should omit the
+    response_format field and rely on the prompt for JSON shape."""
+    lowered = str(model_name or "").strip().lower()
+    return any(marker in lowered for marker in _JSON_OBJECT_FORMAT_QUIRKY_MARKERS)
+
+
 def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = None) -> str:
-    """Resolve provider API key from explicit value first, then provider-specific env vars."""
+    """Resolve provider API key from explicit value first, then provider-specific env vars.
+
+    For local-CLI providers (claude-cli, codex-cli) that authenticate via
+    the operator's subscription (no API key needed), return a sentinel
+    non-empty string so the ``if not api_key`` short-circuit in callers
+    doesn't skip the pipeline.
+    """
     explicit = str(explicit_api_key or "").strip()
     if explicit:
         return explicit
@@ -84,6 +223,17 @@ def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = N
         return str(os.environ.get("DEEPSEEK_API_KEY") or "").strip()
     if p == "nvidia":
         return str(os.environ.get("NVIDIA_API_KEY") or "").strip()
+    if p == "claude-cli":
+        return "claude-cli-no-api-key"
+    if p == "codex-cli":
+        return "codex-cli-no-api-key"
+    if p == "ollama":
+        # Empty string is valid for local Ollama (no auth) — only Ollama
+        # Cloud requires a Bearer token. Caller decides whether to enforce
+        # non-empty (e.g., when the host suffix is ``ollama.com``).
+        return str(os.environ.get("OLLAMA_API_KEY") or "").strip()
+    if p == "bedrock":
+        return str(os.environ.get("BEDROCK_API_KEY") or "").strip()
     return str(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
 
 
@@ -206,6 +356,183 @@ def _get_model_rate_limiter(model: str) -> _TokenRateLimiter | None:
     return _MODEL_RATE_LIMITERS.get((model or "").strip().lower())
 
 
+class _RequestRateLimiter:
+    """Sliding-window REQUEST-per-minute rate limiter with a minimum
+    inter-request gap AND a circuit breaker. Thread-safe.
+
+    Three complementary guards:
+      * Sliding 60s window caps total RPM (`requests_per_minute`).
+      * `min_interval_sec` enforces a gap between consecutive requests
+        so bursts don't blow past providers' sub-minute hidden limits.
+      * Circuit breaker: after N consecutive 429s (observed via the
+        external `note_rate_limited()` hook) the limiter blocks all
+        requests for `breaker_cooldown_sec`. This protects against
+        providers whose rate-limit state persists across our process
+        lifetime — once we've been put in NVIDIA's penalty box we
+        stop hammering, wait, and let the window clear.
+    """
+
+    def __init__(
+        self,
+        requests_per_minute: int,
+        min_interval_sec: float | None = None,
+        *,
+        breaker_threshold: int = 3,
+        breaker_cooldown_sec: float = 120.0,
+    ):
+        self._limit = int(requests_per_minute)
+        # Default: spread requests evenly across the window.
+        if min_interval_sec is None and self._limit > 0:
+            min_interval_sec = 60.0 / float(self._limit)
+        self._min_interval = float(min_interval_sec or 0.0)
+        self._window: deque = deque()  # monotonic timestamps
+        self._lock = threading.Lock()
+        # Circuit breaker state.
+        self._breaker_threshold = max(1, int(breaker_threshold))
+        self._breaker_cooldown = float(breaker_cooldown_sec)
+        self._consecutive_429s = 0
+        self._breaker_open_until = 0.0  # monotonic; >now means tripped
+
+    def note_success(self) -> None:
+        """Tell the limiter the most recent request succeeded. Resets
+        the consecutive-429 counter; does NOT touch the cooldown timer
+        (a tripped breaker still waits out its full cooldown)."""
+        with self._lock:
+            self._consecutive_429s = 0
+
+    def note_rate_limited(self) -> None:
+        """Tell the limiter the most recent request 429'd. After
+        breaker_threshold consecutive 429s, open the breaker for
+        breaker_cooldown_sec — subsequent acquire() calls will block
+        until the cooldown elapses."""
+        with self._lock:
+            self._consecutive_429s += 1
+            if self._consecutive_429s >= self._breaker_threshold:
+                self._breaker_open_until = time.monotonic() + self._breaker_cooldown
+                import sys
+                print(
+                    f"[llm_utils] RPM limiter: circuit breaker OPEN — "
+                    f"{self._consecutive_429s} consecutive 429s, pausing "
+                    f"requests for {self._breaker_cooldown:.0f}s",
+                    file=sys.stderr, flush=True,
+                )
+
+    def acquire(self) -> float:
+        """Block until there is request budget AND the min-gap has
+        elapsed AND the circuit breaker (if any) is closed, then
+        reserve one slot. Returns total seconds waited."""
+        waited = 0.0
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                # Circuit-breaker check FIRST. When tripped, every
+                # acquire waits out the full cooldown before any
+                # other budget logic runs.
+                breaker_wait = 0.0
+                if self._breaker_open_until > now:
+                    breaker_wait = self._breaker_open_until - now
+                cutoff = now - 60.0
+                while self._window and self._window[0] <= cutoff:
+                    self._window.popleft()
+                used = len(self._window)
+                # Enforce inter-request gap based on the most-recent slot.
+                gap_wait = 0.0
+                if self._window and self._min_interval > 0:
+                    elapsed = now - self._window[-1]
+                    if elapsed < self._min_interval:
+                        gap_wait = self._min_interval - elapsed
+                if breaker_wait <= 0 and used < self._limit and gap_wait <= 0:
+                    self._window.append(now)
+                    return waited
+                if breaker_wait > 0:
+                    sleep_sec = max(0.5, breaker_wait + 0.1)
+                elif used >= self._limit:
+                    sleep_sec = (
+                        max(0.5, 60.0 - (now - self._window[0]) + 0.5)
+                        if self._window else 1.0
+                    )
+                else:
+                    sleep_sec = max(0.5, gap_wait + 0.05)
+            import sys
+            print(
+                f"[llm_utils] RPM limiter: {used}/{self._limit} req in last 60s — "
+                f"waiting {sleep_sec:.1f}s...",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(sleep_sec)
+            waited += sleep_sec
+
+
+# Per-(provider, model) REQUEST-per-minute caps. Keyed by provider so a
+# kimi-k2 model name through a non-NVIDIA proxy (Azure, OpenAI gateway,
+# etc.) doesn't get throttled — only NVIDIA NIM has the rate-limit
+# pathology that motivated this limiter.
+#
+# NVIDIA NIM kimi-k2.6 PUBLISHES 40 RPM but in production 429s appear
+# at ~10 RPM, and rate-limit state carries across the published 60s
+# window (bursts hours earlier still trigger 429 on the very first
+# request of a new backtest). Capping at 5 RPM with a min 12s
+# inter-request gap spreads calls evenly so we never trigger NIM's
+# hidden sub-minute burst limit.
+_PROVIDER_MODEL_REQUEST_RATE_LIMITERS: dict[tuple[str, str], _RequestRateLimiter] = {
+    ("nvidia", "moonshotai/kimi-k2.6"): _RequestRateLimiter(5, min_interval_sec=12.0),
+    ("nvidia", "moonshotai/kimi-k2.5"): _RequestRateLimiter(5, min_interval_sec=12.0),
+    ("nvidia", "moonshotai/kimi-k2"): _RequestRateLimiter(5, min_interval_sec=12.0),
+}
+
+
+def _get_model_request_rate_limiter(model: str, provider: str = "nvidia") -> _RequestRateLimiter | None:
+    """Return the RPM limiter for a (provider, model) pair, or None if
+    no cap is configured. Defaults to provider='nvidia' so existing
+    call sites inside _call_nvidia (which is NVIDIA-only) keep working
+    without a signature change."""
+    p = (provider or "").strip().lower()
+    if not p:
+        return None
+    key = (p, (model or "").strip().lower())
+    if key in _PROVIDER_MODEL_REQUEST_RATE_LIMITERS:
+        return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS[key]
+    # Best-effort prefix match for `moonshotai/kimi-*` variants we
+    # haven't enumerated explicitly (e.g. moonshotai/kimi-k2.7), but
+    # only when the provider matches. Other providers exposing a
+    # kimi-shaped model name go unthrottled.
+    if p == "nvidia" and key[1].startswith("moonshotai/kimi"):
+        return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS.get(("nvidia", "moonshotai/kimi-k2"))
+    return None
+
+
+def _normalize_tools_to_openai_shape(tools) -> list[dict]:
+    """Convert either Gemini- or OpenAI-shaped tool dicts into OpenAI shape.
+
+    Gemini shape (used by ``call_gemini_with_tools``):
+        ``[{"function_declarations": [{"name": ..., "parameters": ...}, ...]}]``
+    OpenAI shape (used by Ollama, OpenAI, NVIDIA):
+        ``[{"type": "function", "function": {"name": ..., "parameters": ...}}]``
+
+    Returns a list copy in OpenAI shape. Empty/None input → ``[]``.
+    Raises ``ValueError`` for any shape we don't recognise so we surface
+    the mismatch loudly instead of silently sending an empty tool list.
+    """
+    if not tools:
+        return []
+    first = tools[0]
+    if isinstance(first, dict) and first.get("type") == "function":
+        # Already OpenAI shape — shallow-copy so callers can't mutate ours.
+        return [dict(t) for t in tools]
+    if isinstance(first, dict) and "function_declarations" in first:
+        flattened: list[dict] = []
+        for entry in tools:
+            for fn in entry.get("function_declarations", []) or []:
+                flattened.append({"type": "function", "function": dict(fn)})
+        return flattened
+    raise ValueError(
+        "Unsupported tools shape: expected OpenAI-style "
+        "[{type:function,...}] or Gemini-style "
+        "[{function_declarations:[...]}]"
+    )
+
+
 def _omit_temperature(model: str) -> bool:
     """Return True for models that reject custom temperature and only accept the default."""
     lowered = (model or "").strip().lower()
@@ -220,7 +547,10 @@ def _omit_temperature(model: str) -> bool:
 
 
 def _http_retry_backoff_seconds(error_text: str, attempt: int) -> float:
-    """Backoff for transient HTTP retries. Uses 30s base for 429/rate-limit errors, normal otherwise."""
+    """Backoff for transient HTTP retries. Uses 60s base for 429/
+    rate-limit errors (some providers — notably NVIDIA NIM — keep
+    rate-limit state for multiple minutes, so a 30s wait is too short
+    and just earns another 429), normal exponential otherwise."""
     lowered = str(error_text or "").lower()
     is_rate_limit = (
         "status_code: 429" in lowered
@@ -229,9 +559,9 @@ def _http_retry_backoff_seconds(error_text: str, attempt: int) -> float:
         or "rate limit" in lowered
     )
     if is_rate_limit:
-        base = 30.0
-        exp = min(120.0, base * (2 ** max(0, attempt)))
-        return exp + random.uniform(0, min(5.0, exp * 0.1))
+        base = 60.0
+        exp = min(300.0, base * (2 ** max(0, attempt)))
+        return exp + random.uniform(0, min(15.0, exp * 0.1))
     return _backoff_sleep_seconds(attempt)
 
 
@@ -255,6 +585,30 @@ def _normalize_azure_endpoint(endpoint: str) -> str:
     return raw.rstrip("/")
 
 
+def _cache_effort_key(provider: str, provider_config: dict[str, Any] | None) -> str:
+    """Build the per-provider 'effort' fragment of the prompt-cache key.
+
+    For most providers the key is ``reasoning_effort`` (low/medium/high).
+    For Ollama the equivalent knob is ``ollama_think`` (true/false/low/
+    medium/high), so we use that instead. Without this, two Ollama
+    calls with think=medium vs think=off would hash to the SAME cache
+    key and could return each other's responses on a hit. Returns a
+    lowercased string; empty string means "no effort set".
+    """
+    pc = provider_config or {}
+    if (provider or "").strip().lower() == "ollama":
+        # Prefix with "think:" so an Ollama row with think=high never
+        # accidentally collides with a future provider's effort=high.
+        v = str(pc.get("ollama_think", "") or "").strip().lower()
+        return f"think:{v}" if v else ""
+    if (provider or "").strip().lower() == "bedrock":
+        # Prefix with "reason:" so bedrock reasoning=high never collides with
+        # another provider's effort=high in the prompt-cache key.
+        v = str(pc.get("bedrock_reasoning", "") or "").strip().lower()
+        return f"reason:{v}" if v and v != "off" else ""
+    return str(pc.get("reasoning_effort", "") or "").strip().lower()
+
+
 def normalize_reasoning_effort(value: Any) -> str:
     effort = str(value or "").strip().lower()
     return effort if effort in {"low", "medium", "high"} else ""
@@ -266,6 +620,70 @@ def llm_model_reference(model: str, reasoning_effort: Any = None) -> str:
     if not model_name or not effort:
         return model_name
     return f"{model_name}-{effort.upper()}"
+
+
+_CANON_VENDOR_PREFIXES = (
+    "openai.", "anthropic.", "meta.", "amazon.", "mistral.", "cohere.", "ai21.", "deepseek.", "qwen.",
+)
+_CANON_REGION_PREFIXES = ("us.", "eu.", "apac.")
+_CANON_VERSION_SUFFIX_RE = re.compile(r"(?:-v?\d+)?:\d+$")
+
+
+def _auto_normalize_model(model: str) -> str:
+    """Normalize a provider/model string to a provider-agnostic token.
+
+    Strips a leading cross-region inference-profile prefix (us./eu./apac.), a
+    vendor prefix (openai./anthropic./…), and a trailing version/profile suffix
+    (:0, -1:0, -v2:0); lowercases. So ``openai.gpt-oss-120b-1:0`` and a bare
+    azure deployment named ``gpt-oss-120b`` both become ``gpt-oss-120b``.
+    """
+    s = str(model or "").strip().lower()
+    for p in _CANON_REGION_PREFIXES:
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    for p in _CANON_VENDOR_PREFIXES:
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    s = _CANON_VERSION_SUFFIX_RE.sub("", s)
+    return s.strip()
+
+
+def _unified_reasoning_effort(provider_config: dict[str, Any] | None) -> str:
+    """Collapse the per-provider effort field to a common token.
+
+    Reads ``reasoning_effort`` (azure/openai/nvidia/cli) OR ``bedrock_reasoning``
+    (bedrock) OR ``ollama_think`` (ollama). low/medium/high pass through;
+    true/on → 'on'; off/false/empty/unknown → ''.
+    """
+    pc = provider_config or {}
+    raw = (
+        str(pc.get("reasoning_effort") or "").strip().lower()
+        or str(pc.get("bedrock_reasoning") or "").strip().lower()
+        or str(pc.get("ollama_think") or "").strip().lower()
+    )
+    if raw in ("low", "medium", "high"):
+        return raw
+    if raw in ("true", "on", "yes", "1"):
+        return "on"
+    return ""
+
+
+def canonical_model_cache_key(model: str, provider_config: dict[str, Any] | None = None) -> str:
+    """Provider-agnostic cache identity ``<base>@<effort>`` (or ``<base>``).
+
+    base = ``provider_config['model_cache_family']`` (operator override) if set,
+    else the auto-normalized model. effort = the unified reasoning effort. Two
+    configs that mean the same model + effort produce the same key regardless of
+    provider or naming convention (azure ``gpt-oss-120b`` ≡ bedrock
+    ``openai.gpt-oss-120b-1:0``), so they share cache instead of invalidating.
+    """
+    pc = provider_config or {}
+    family = str(pc.get("model_cache_family") or "").strip().lower()
+    base = family or _auto_normalize_model(model)
+    effort = _unified_reasoning_effort(pc)
+    return f"{base}@{effort}" if effort else base
 
 
 def _resolve_provider_config(provider: str, provider_config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -317,6 +735,47 @@ def _resolve_provider_config(provider: str, provider_config: dict[str, Any] | No
             resolved["reasoning_effort"] = reasoning_effort
         else:
             resolved.pop("reasoning_effort", None)
+    elif p == "ollama":
+        base = str(
+            resolved.get("ollama_base_url")
+            or os.environ.get("OLLAMA_BASE_URL")
+            or "http://localhost:11434"
+        ).strip().rstrip("/")
+        resolved["ollama_base_url"] = base
+        keep_alive_raw = resolved.get("ollama_keep_alive")
+        keep_alive = str(keep_alive_raw or "").strip()
+        if keep_alive:
+            resolved["ollama_keep_alive"] = keep_alive
+        else:
+            resolved.pop("ollama_keep_alive", None)
+        think_raw = resolved.get("ollama_think")
+        think_norm = str(think_raw or "").strip().lower()
+        if think_norm:
+            resolved["ollama_think"] = think_norm
+        else:
+            resolved.pop("ollama_think", None)
+        # Reasoning-effort is model-specific for Ollama (set via the
+        # Modelfile, not a standard generation option), so we never
+        # propagate the standard field — strip it if a strategy left it
+        # on. ``ollama_think`` is the Ollama-specific equivalent above.
+        resolved.pop("reasoning_effort", None)
+    elif p == "bedrock":
+        region = str(
+            resolved.get("bedrock_region")
+            or os.environ.get("BEDROCK_REGION")
+            or os.environ.get("AWS_REGION")
+            or ""
+        ).strip()
+        if region:
+            resolved["bedrock_region"] = region
+        reasoning = str(resolved.get("bedrock_reasoning") or "").strip().lower()
+        if reasoning and reasoning != "off":
+            resolved["bedrock_reasoning"] = reasoning
+        else:
+            resolved.pop("bedrock_reasoning", None)
+        # Reasoning is bedrock-specific (Converse additionalModelRequestFields),
+        # not the standard reasoning_effort knob — strip the latter if present.
+        resolved.pop("reasoning_effort", None)
     return resolved
 
 
@@ -348,20 +807,36 @@ def _safe_provider_meta(provider: str, provider_config: dict[str, Any] | None = 
         if reasoning_effort:
             meta["reasoning_effort"] = reasoning_effort
         return meta
+    if p == "bedrock":
+        meta = {"bedrock_region": str(config.get("bedrock_region") or "")}
+        reasoning = str(config.get("bedrock_reasoning") or "").strip().lower()
+        if reasoning and reasoning != "off":
+            meta["bedrock_reasoning"] = reasoning
+        return meta
     return {}
 
 
 def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_config: dict[str, Any] | None = None):
-    """Build a PydanticAI model instance for Gemini, DeepSeek, OpenAI, or Azure OpenAI."""
-    if not _PYDANTIC_AI_AVAILABLE or not api_key or not model:
+    """Build a PydanticAI model instance for Gemini, DeepSeek, OpenAI, Azure OpenAI, or Ollama."""
+    if not _PYDANTIC_AI_AVAILABLE or not model:
         return None
     p = (provider or "gemini").strip().lower()
+    # Local Ollama legitimately has no API key (only Ollama Cloud needs one).
+    # Every other provider still requires a key here.
+    if not api_key and p != "ollama":
+        return None
     resolved = _resolve_provider_config(provider, provider_config)
 
     def _prefers_prompted_structured_output(provider_name: str, model_name: str) -> bool:
+        # NVIDIA NIM kimi-k2.x has the same shape-collapse pathology as
+        # Azure gpt-oss / gpt-5 — empty `{}` (2 tokens) on the first call
+        # when the structured-output schema is forced. Use prompted-JSON
+        # mode for those models so PydanticAI re-prompts on the wire
+        # without triggering the broken schema constraint.
         lowered_model = str(model_name or "").strip().lower()
-        return provider_name in {"azure", "openai"} and any(
-            marker in lowered_model for marker in ("gpt-oss", "gpt_oss", "gpt oss", "gpt-5", "gpt_5")
+        return (
+            provider_name in {"azure", "openai", "nvidia"}
+            and _model_skips_json_object_format(lowered_model)
         )
 
     def _prompted_json_profile() -> ModelProfile | None:
@@ -443,6 +918,48 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
             ),
             profile=profile,
         )
+    if p == "bedrock":
+        if BedrockConverseModel is None or BedrockProvider is None or bedrock_client is None:
+            return None
+        region = str(
+            resolved.get("bedrock_region")
+            or os.environ.get("BEDROCK_REGION")
+            or os.environ.get("AWS_REGION")
+            or ""
+        ).strip()
+        if not region:
+            return None
+        client = bedrock_client.build_runtime_client(api_key, region)
+        # Extended-thinking (bedrock_reasoning) is intentionally NOT applied on
+        # the structured path: Converse requires budget_tokens < maxTokens, but
+        # structured calls use small max_output_tokens (often 256) where a
+        # >=1024 thinking budget would be invalid and fail the request.
+        # Reasoning applies to the plain + tool-calling paths (which reconcile
+        # maxTokens); structured output runs without an explicit thinking budget.
+        return BedrockConverseModel(
+            model,
+            provider=BedrockProvider(bedrock_client=client),
+        )
+    if p == "ollama":
+        base = str(resolved.get("ollama_base_url")
+                   or "http://localhost:11434").rstrip("/")
+        # Ollama exposes JSON-schema structured output through its
+        # OpenAI-compatible /v1 endpoint — the most reliable path for
+        # PydanticAI as of Ollama v0.5+. Append /v1 if the operator
+        # didn't already include it.
+        if not base.endswith("/v1"):
+            base = base + "/v1"
+        # The OpenAI SDK requires a non-empty api_key string even when
+        # the upstream endpoint ignores it. ``"ollama"`` is the
+        # well-known sentinel for the OpenAI-compatible path.
+        effective_key = api_key or "ollama"
+        return OpenAIChatModel(
+            model,
+            provider=OpenAIProvider(
+                base_url=base,
+                api_key=effective_key,
+            ),
+        )
     return GoogleModel(
         model,
         provider=GoogleProvider(api_key=api_key),
@@ -478,31 +995,110 @@ def _is_transient_http_error(error_text: str) -> bool:
 
 
 def _is_terminal_provider_not_found(provider: str, exc: Exception) -> bool:
-    p = (provider or "").strip().lower()
-    if p != "azure":
-        return False
+    """Return True if the exception means the model genuinely doesn't exist
+    on this provider (a wrong-model-name configuration error), as opposed
+    to a transient outage. Terminal errors should NOT be retried, and
+    callers that batch-and-split prompts should NOT split on this — every
+    sub-batch would fail with the identical error.
+
+    Covered patterns:
+      * Azure: 404, resource-not-found, deployment-not-found
+      * Gemini: 404 NOT_FOUND with "models/X is not found" or
+        "is not supported for generateContent"
+      * OpenAI: 404 with "model_not_found" / "does not exist"
+      * Anthropic: 404 with "not_found_error"
+    """
     text = str(exc or "")
     lowered = text.lower()
+    p = (provider or "").strip().lower()
+    if p == "azure":
+        return (
+            "status_code: 404" in lowered
+            or "resource not found" in lowered
+            or "deploymentnotfound" in lowered
+            or "model not found" in lowered
+        )
+    if p in ("gemini", "google", "google-gemini"):
+        return (
+            "404 not_found" in lowered
+            or ("404" in lowered and "is not found" in lowered)
+            or ("404" in lowered and "is not supported for generatecontent" in lowered)
+            or "models/" in lowered and "is not found" in lowered
+        )
+    if p in ("openai", "nvidia"):
+        return (
+            "model_not_found" in lowered
+            or ("404" in lowered and "does not exist" in lowered)
+            or ("404" in lowered and "the model" in lowered)
+        )
+    if p in ("anthropic", "claude"):
+        return (
+            "not_found_error" in lowered
+            # Require a specific "model doesn't exist" phrase, not just
+            # any 404 that mentions "model" (which could be a URL path).
+            or ("404" in lowered and ("not_found_error" in lowered or "model:" in lowered and "does not exist" in lowered))
+        )
+    # Generic fallback: require a specific "model doesn't exist" phrase.
+    # We INTENTIONALLY don't match on the bare substring "model" — many
+    # transient 404s from CDNs/gateways include the request path
+    # (e.g. "/v1/models/foo") and would otherwise be cached as
+    # permanently terminal, suppressing all future calls.
     return (
-        "status_code: 404" in lowered
-        or "resource not found" in lowered
-        or "deploymentnotfound" in lowered
-        or "model not found" in lowered
+        "404" in lowered
+        and (
+            "model_not_found" in lowered
+            or "is not found for" in lowered
+            or "is not supported for generatecontent" in lowered
+            or "deploymentnotfound" in lowered
+            or "deployment not found" in lowered
+            or "the model" in lowered and "does not exist" in lowered
+        )
     )
 
 
 def _terminal_provider_not_found_hint(provider: str, model: str, provider_config: dict[str, Any] | None = None) -> str:
-    if (provider or "").strip().lower() != "azure":
-        return ""
-    resolved = _resolve_provider_config(provider, provider_config)
-    endpoint = str(resolved.get("azure_endpoint") or "")
-    return (
-        "Azure 404 usually means the Azure endpoint root or deployment name is wrong. "
-        "For this backend, set azure_openai_endpoint to the resource root like "
-        "'https://<resource>.services.ai.azure.com' or 'https://<resource>.openai.azure.com', "
-        f"not a full '/models/chat/completions' or '/openai/v1/' URL. Use the deployment name as llm_model "
-        f"(current: {model!r}). Resolved endpoint: {endpoint!r}."
-    )
+    p = (provider or "").strip().lower()
+    if p == "azure":
+        resolved = _resolve_provider_config(provider, provider_config)
+        endpoint = str(resolved.get("azure_endpoint") or "")
+        return (
+            "Azure 404 usually means the Azure endpoint root or deployment name is wrong. "
+            "For this backend, set azure_openai_endpoint to the resource root like "
+            "'https://<resource>.services.ai.azure.com' or 'https://<resource>.openai.azure.com', "
+            f"not a full '/models/chat/completions' or '/openai/v1/' URL. Use the deployment name as llm_model "
+            f"(current: {model!r}). Resolved endpoint: {endpoint!r}."
+        )
+    name = (model or "").strip()
+    # Detect obvious provider-model mismatches so the operator sees the
+    # likely root cause rather than digging through retry logs.
+    lower_model = name.lower()
+    cross_provider_hint = ""
+    if p in ("gemini", "google", "google-gemini") and (
+        lower_model.startswith("claude") or lower_model.startswith("gpt") or lower_model.startswith("o1") or lower_model.startswith("o3")
+    ):
+        cross_provider_hint = (
+            f" The model name {name!r} doesn't belong to Gemini — it looks like a "
+            "Claude/OpenAI model. Edit the Model record so provider matches: "
+            "use 'anthropic' or 'claude-cli' for Claude, 'openai' for GPT/o-series."
+        )
+    elif p in ("openai", "nvidia") and lower_model.startswith("claude"):
+        cross_provider_hint = (
+            f" The model name {name!r} looks like a Claude model but the provider "
+            "is OpenAI. Change provider to 'anthropic' or 'claude-cli'."
+        )
+    elif p in ("openai", "nvidia") and lower_model.startswith("gemini"):
+        cross_provider_hint = (
+            f" The model name {name!r} looks like a Gemini model but the provider "
+            "is OpenAI. Change provider to 'gemini'."
+        )
+    elif p in ("anthropic", "claude") and (lower_model.startswith("gpt") or lower_model.startswith("gemini")):
+        cross_provider_hint = (
+            f" The model name {name!r} doesn't belong to Anthropic — change "
+            "provider to match (openai or gemini)."
+        )
+    if cross_provider_hint:
+        return cross_provider_hint.strip()
+    return f"Provider {provider!r} returned 404 for model {name!r}. Check the model name spelling and the provider's available models."
 
 
 def _structured_model_name(provider: str, model: str) -> str:
@@ -962,6 +1558,913 @@ def _try_raw_structured_json_once(
     return result
 
 
+def _call_claude_cli_plain(
+    *,
+    model: str,
+    prompt: str,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 0,
+) -> str:
+    """Plain-text claude-cli call. Returns the assistant's reply text, or
+    empty string on failure. Mirrors the existing call_llm_by_provider
+    contract (best-effort, never raises into the strategy)."""
+    if not model:
+        return ""
+    cfg = provider_config or {}
+    cli_path = (cfg.get("cli_path") or "claude") or "claude"
+    raw_extra = cfg.get("extra_args")
+    extra_args: list[str]
+    # Validate cli_path + extra_args BEFORE spawning. Both go through the
+    # same allowlist gates as the chatbot path so an authenticated user
+    # can't pivot the strategy config into RCE.
+    try:
+        from chatbot.claude_cli_provider import (
+            validate_extra_args, _resolve_cli_path, _classify_error_text,
+            ClaudeCliNotInstalledError, ClaudeCliError,
+        )
+    except Exception as e:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = f"claude_cli_provider import failed: {e}"
+        except Exception:
+            pass
+        return ""
+    if isinstance(raw_extra, str):
+        try:
+            extra_args = validate_extra_args(raw_extra)
+        except Exception as e:
+            try:
+                _LAST_PLAIN_LLM_CALL_ERROR.error = f"invalid extra_args: {e}"
+            except Exception:
+                pass
+            return ""
+    elif isinstance(raw_extra, (list, tuple)):
+        extra_args = [str(x) for x in raw_extra]
+    else:
+        extra_args = []
+    try:
+        resolved_cli = _resolve_cli_path(cli_path)
+    except (ClaudeCliNotInstalledError, ClaudeCliError) as e:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = str(e)
+        except Exception:
+            pass
+        return ""
+
+    # Map reasoning_effort → --effort. Empty/invalid values produce no
+    # flag so CC runs with its default.
+    effort = str(cfg.get("reasoning_effort") or "").strip().lower()
+    if effort not in ("low", "medium", "high", "xhigh", "max"):
+        effort = ""
+    effort_args = ["--effort", effort] if effort else []
+    # If extra_args already contains --effort, the user-typed value wins.
+    if any(tok == "--effort" for tok in extra_args):
+        effort_args = []
+
+    import subprocess as _subprocess
+    timeout = _coerce_timeout_sec(timeout_sec)
+    last_err = ""
+    for attempt in range(max(1, int(retries or 0) + 1)):
+        argv = [
+            resolved_cli, "-p",
+            "--output-format", "json",
+            "--model", model,
+            "--tools", "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+            *effort_args,
+            *extra_args,
+        ]
+        try:
+            kwargs: dict[str, Any] = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = getattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            proc = _subprocess.run(
+                argv,
+                input=prompt or "",
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+                **kwargs,
+            )
+        except FileNotFoundError:
+            last_err = (
+                f"claude binary not found at {resolved_cli!r}; "
+                "install with `npm i -g @anthropic-ai/claude-code`."
+            )
+            break
+        except _subprocess.TimeoutExpired:
+            last_err = f"claude -p timed out after {timeout}s"
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        stdout = (proc.stdout or "").strip()
+        if not stdout:
+            last_err = (proc.stderr or "").strip()[:300] or "no stdout from claude"
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        try:
+            envelope = json.loads(stdout)
+        except Exception:
+            last_err = f"claude returned non-JSON: {stdout[:200]!r}"
+            if attempt < retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        if envelope.get("is_error"):
+            # Classify so operators get an actionable error (e.g.
+            # "log in on the server") instead of a generic empty string.
+            classified = _classify_error_text(str(envelope.get("result") or "claude error"))
+            last_err = str(classified)
+            # Don't retry on hard failures.
+            break
+        result_text = envelope.get("result") or ""
+        # Persist to prompt cache if enabled.
+        try:
+            _effort_key = _cache_effort_key("claude-cli", provider_config)
+            _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", str(result_text))
+        except Exception:
+            pass
+        # T10 critical-guard capture — CLI providers map signals to synthetic status
+        try:
+            _stash_last_http(status=200, body=None, exc=None)
+        except Exception:
+            pass
+        return str(result_text)
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = last_err or "claude-cli plain call failed"
+    except Exception:
+        pass
+    # T10 critical-guard capture — synthesize status from last_err for CLI providers
+    try:
+        _body_l = (last_err or "").lower()
+        if "usage_limit_reached" in _body_l or "quota" in _body_l:
+            _stash_last_http(status=429, body=(last_err or "")[:1000], exc=None)
+        else:
+            _stash_last_http(status=500, body=(last_err or "claude-cli plain call failed")[:1000], exc=None)
+    except Exception:
+        pass
+    return ""
+
+
+def _call_codex_cli_plain(
+    *,
+    model: str,
+    prompt: str,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 0,
+) -> str:
+    """Plain-text codex-cli call. Returns the assistant's reply text or
+    empty string on failure. The heavy lifting (subprocess management,
+    allowlist validation, auth probe, retries) lives in
+    ``backend/chatbot/codex_cli_provider.py``; this is a thin shim that
+    matches the ``call_llm_by_provider`` contract and updates the
+    shared ``_LAST_PLAIN_LLM_CALL_ERROR`` thread-local on failure."""
+    # Clear the per-thread error state at the start of every call so a
+    # stale message from a previous failed call doesn't leak into the
+    # caller's diagnostics on success.
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = ""
+    except Exception:
+        pass
+    if not model:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = "codex-cli: model is required"
+        except Exception:
+            pass
+        return ""
+    try:
+        from chatbot.codex_cli_provider import (
+            call_codex_cli_plain as _impl,
+            _get_last_error as _impl_last_err,
+            _get_last_usage as _impl_last_usage,
+        )
+    except Exception as e:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = f"codex_cli_provider import failed: {e}"
+        except Exception:
+            pass
+        return ""
+    _t0 = time.monotonic()
+    text = _impl(
+        model=model,
+        prompt=prompt,
+        provider_config=provider_config,
+        timeout_sec=timeout_sec,
+        retries=retries,
+    )
+    # Surface token usage in telemetry even for plain (non-structured)
+    # calls — otherwise the strategy's macro/sentiment LLM rows show
+    # 0/0/$0.00 even though the upstream did real work.
+    try:
+        _codex_usage_plain = _impl_last_usage() or {}
+    except Exception:
+        _codex_usage_plain = {}
+    if not text:
+        try:
+            _LAST_PLAIN_LLM_CALL_ERROR.error = _impl_last_err() or "codex-cli plain call failed"
+        except Exception:
+            pass
+        # T10 critical-guard capture — CLI providers map stderr signals to
+        # synthetic status: usage_limit_reached / quota → 429, else 500.
+        try:
+            _err_body = _impl_last_err() or "codex-cli plain call failed"
+            _body_l = (_err_body or "").lower()
+            if "usage_limit_reached" in _body_l or "quota" in _body_l:
+                _stash_last_http(status=429, body=(_err_body or "")[:1000], exc=None)
+            else:
+                _stash_last_http(status=500, body=(_err_body or "")[:1000], exc=None)
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="codex-cli", model=model, usage=_codex_usage_plain,
+                ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=int(retries or 0),
+                error=(_impl_last_err() or "codex-cli plain call failed")[:200],
+                model_id=None,
+            )
+        except Exception:
+            pass
+        return text
+    # T10 critical-guard capture — success
+    try:
+        _stash_last_http(status=200, body=None, exc=None)
+    except Exception:
+        pass
+    try:
+        _safe_record(
+            provider="codex-cli", model=model, usage=_codex_usage_plain, ok=True,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error=None,
+            model_id=None,
+        )
+    except Exception:
+        pass
+    return text
+
+
+def _call_codex_cli_structured_from_strategy(
+    *,
+    model: str,
+    prompt: str,
+    output_type: Any,
+    system_prompt: str | Sequence[str] | None = None,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 1,
+    output_retries: int | None = None,
+    use_prompt_cache: bool = False,
+) -> Any:
+    """Codex-cli structured-output adapter. Mirrors the
+    ``_call_claude_cli_structured_from_strategy`` contract: spawns a
+    codex app-server, sends the prompt with a JSON-schema instruction,
+    parses + validates the model's text response against ``output_type``.
+    Retries on invalid JSON up to ``output_retries`` (default 2).
+    """
+    _t0 = time.monotonic()
+    if not model or output_type is None:
+        return None
+    if isinstance(system_prompt, (list, tuple)):
+        sys_str = "\n\n".join([s for s in system_prompt if s])
+    else:
+        sys_str = system_prompt or ""
+    cfg = provider_config or {}
+    cli_path = (cfg.get("cli_path") or "codex") or "codex"
+
+    # Scoped prompt cache (mirror the claude-cli adapter)
+    cache_effort = ""
+    if use_prompt_cache:
+        cache_effort = _cache_effort_key("codex-cli", provider_config)
+        try:
+            _cached_raw = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", force_cache=True)
+        except Exception:
+            _cached_raw = None
+        if _cached_raw:
+            try:
+                _cached_obj = _validate_structured_output_from_raw_text(output_type, _cached_raw)
+            except Exception:
+                _cached_obj = None
+            if _cached_obj is not None:
+                _LAST_STRUCTURED_LLM_CALL.data = {
+                    "provider": "codex-cli",
+                    "requested_model": model,
+                    "model_candidates": [model],
+                    "attempted_models": [],
+                    "provider_meta": {"cli_path": cli_path},
+                    "effective_model": model,
+                    "fallback_used": False,
+                    "raw_json_fallback_used": False,
+                    "ok": True,
+                    "error": "",
+                    "usage": {},
+                    "suppressed": False,
+                    "prompt_cache_hit": True,
+                }
+                _safe_record(
+                    provider="codex-cli", model=model, usage={}, ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=0, error=None,
+                    model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+                )
+                return _cached_obj
+
+    try:
+        from chatbot.codex_cli_provider import (
+            call_codex_cli_structured as _impl,
+            _get_last_error as _impl_last_err,
+            _get_last_usage as _impl_last_usage,
+            CodexCliError, CodexCliNotInstalledError, CodexCliNotAuthenticatedError,
+            CodexCliValidationError, CodexCliQuotaExceededError,
+        )
+    except Exception as e:
+        _LAST_STRUCTURED_LLM_CALL.data = {
+            "provider": "codex-cli",
+            "requested_model": model,
+            "model_candidates": [model],
+            "attempted_models": [],
+            "provider_meta": {"cli_path": cli_path},
+            "effective_model": "",
+            "fallback_used": False,
+            "raw_json_fallback_used": False,
+            "ok": False,
+            "error": f"codex_cli_provider import failed: {e}",
+            "usage": {},
+            "suppressed": False,
+        }
+        return None
+
+    # Without this collapse, the retry budget multiplies:
+    # ``call_codex_cli_structured``'s outer loop (output_retries+1) calls
+    # ``call_codex_cli_plain``'s inner loop (retries+1) → 6 spawns/call at
+    # the default (retries=1, output_retries=2), or ~18s of startup
+    # overhead. Mirror the claude-cli adapter's contract: use ONE budget
+    # equal to ``max(retries, output_retries)`` and pass it as
+    # output_retries, with the impl's inner retries=0.
+    _codex_budget = max(int(retries or 0), int(output_retries or 0) if output_retries is not None else 0)
+    try:
+        result = _impl(
+            model=model, prompt=prompt, output_type=output_type,
+            system_prompt=sys_str or None,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=0,
+            output_retries=_codex_budget,
+        )
+    except CodexCliNotInstalledError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"codex-cli not installed: {e}",
+            terminal=True, attempted=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliNotAuthenticatedError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"codex-cli not authenticated: {e}", terminal=True,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliQuotaExceededError as e:
+        # Codex usage exhausted — terminal. Mark the meta with a
+        # discriminator so callers (notably the AI backtest engine) can
+        # tell quota exhaustion apart from other terminal failures and
+        # take the appropriate action (Discord notify + abort job)
+        # instead of just skipping the next strategy.
+        _meta = _codex_failure_meta(
+            model, cli_path, f"codex-cli quota exhausted: {e}", terminal=True,
+        )
+        _meta["error_kind"] = "quota_exhausted"
+        _LAST_STRUCTURED_LLM_CALL.data = _meta
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=f"quota_exhausted: {str(e)[:180]}",
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliValidationError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"codex-cli invalid extra_args: {e}",
+            terminal=True, attempted=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except CodexCliError as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, str(e), terminal=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+    except Exception as e:
+        _LAST_STRUCTURED_LLM_CALL.data = _codex_failure_meta(
+            model, cli_path, f"unexpected error: {e}", terminal=False,
+        )
+        _safe_record(
+            provider="codex-cli", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error=str(e)[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+
+    if result is None:
+        # Pull the underlying reason from the provider's per-thread error
+        # state — without this the operator sees only the generic "no
+        # validated payload" string and has no way to diagnose whether
+        # the failure was an HTTP 4xx from the Responses API, a JSON
+        # validation miss, or an empty response.
+        try:
+            _impl_err = _impl_last_err() or ""
+        except Exception:
+            _impl_err = ""
+        # Even failed validation rounds consumed tokens — include them
+        # in the telemetry so the cost dashboard shows the real spend,
+        # not a misleading $0.00 row.
+        try:
+            _codex_usage_fail = _impl_last_usage() or {}
+        except Exception:
+            _codex_usage_fail = {}
+        _err_msg = (
+            f"codex-cli returned no validated payload ({_impl_err})"
+            if _impl_err else "codex-cli returned no validated payload"
+        )
+        _meta_fail = _codex_failure_meta(
+            model, cli_path, _err_msg, terminal=False,
+        )
+        _meta_fail["usage"] = _codex_usage_fail
+        _LAST_STRUCTURED_LLM_CALL.data = _meta_fail
+        _safe_record(
+            provider="codex-cli", model=model, usage=_codex_usage_fail, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=int(retries or 0), error=_err_msg[:200],
+            model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+        )
+        return None
+
+    # Pull the per-thread token usage the provider accumulated across
+    # all Responses API calls in this structured turn (incl. output
+    # retries). Empty dict if extraction failed — degrades gracefully
+    # to the old "0 tokens" behaviour rather than breaking the call.
+    try:
+        _codex_usage = _impl_last_usage() or {}
+    except Exception:
+        _codex_usage = {}
+    _LAST_STRUCTURED_LLM_CALL.data = {
+        "provider": "codex-cli",
+        "requested_model": model,
+        "model_candidates": [model],
+        "attempted_models": [model],
+        "provider_meta": {"cli_path": cli_path},
+        "effective_model": model,
+        "fallback_used": False,
+        # Codex's app-server has no native --json-schema flag, so we
+        # always wrap the prompt with schema instructions and parse the
+        # text response. That is the normal mode, not a fallback — keep
+        # this False so dashboards joining on it don't mis-bucket every
+        # codex row as "raw_json fallback used".
+        "raw_json_fallback_used": False,
+        "ok": True,
+        "error": "",
+        "usage": _codex_usage,
+        "suppressed": False,
+    }
+    if use_prompt_cache and result is not None:
+        try:
+            if hasattr(result, "model_dump_json"):
+                _raw_json = result.model_dump_json()
+            elif hasattr(result, "dict"):
+                _raw_json = json.dumps(result.dict())
+            else:
+                _raw_json = json.dumps(result)
+            _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", _raw_json, force_cache=True)
+        except Exception:
+            pass
+    _safe_record(
+        provider="codex-cli", model=model, usage=_codex_usage, ok=True,
+        duration_ms=int((time.monotonic() - _t0) * 1000),
+        retry_count=0, error=None,
+        model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+    )
+    return result
+
+
+def _codex_failure_meta(
+    model: str,
+    cli_path: str,
+    error: str,
+    *,
+    terminal: bool,
+    attempted: bool = True,
+) -> dict[str, Any]:
+    """Shared structured-call failure metadata for the codex-cli path.
+
+    ``attempted=False`` for pre-spawn rejections (NotInstalled, ValidationError,
+    NotAuthenticated cache lookup) so dashboards don't falsely report an
+    attempt that never reached the subprocess.
+    """
+    return {
+        "provider": "codex-cli",
+        "requested_model": model,
+        "model_candidates": [model],
+        "attempted_models": [model] if attempted else [],
+        "provider_meta": {"cli_path": cli_path},
+        "effective_model": "",
+        "fallback_used": False,
+        "raw_json_fallback_used": False,
+        "ok": False,
+        "error": error,
+        "usage": {},
+        "suppressed": bool(terminal),
+        "is_terminal": bool(terminal),
+    }
+
+
+def _call_claude_cli_structured_from_strategy(
+    *,
+    model: str,
+    prompt: str,
+    output_type: Any,
+    system_prompt: str | Sequence[str] | None = None,
+    provider_config: dict[str, Any] | None = None,
+    timeout_sec: int | None = None,
+    retries: int = 1,
+    output_retries: int | None = None,
+    use_prompt_cache: bool = False,
+) -> Any:
+    """Adapter that lets the strategies' ``call_structured_llm_by_provider``
+    contract run through the locally-installed ``claude`` CLI. Bypasses
+    PydanticAI entirely — CC enforces structure via its native
+    ``--json-schema`` flag and we re-validate with Pydantic on receipt.
+    """
+    _t0 = time.monotonic()
+    if not model or output_type is None:
+        return None
+
+    # Normalise the system prompt to a single string (call_structured_llm_by_provider
+    # historically accepts both a string and a sequence-of-strings shape).
+    if isinstance(system_prompt, (list, tuple)):
+        sys_str = "\n\n".join([s for s in system_prompt if s])
+    else:
+        sys_str = system_prompt or ""
+
+    cfg = provider_config or {}
+    cli_path = (cfg.get("cli_path") or "claude") or "claude"
+    raw_extra = cfg.get("extra_args")
+    if isinstance(raw_extra, str):
+        try:
+            from chatbot.claude_cli_provider import validate_extra_args
+            extra_args = validate_extra_args(raw_extra)
+        except Exception as e:
+            _LAST_STRUCTURED_LLM_CALL.data = {
+                "provider": "claude-cli",
+                "requested_model": model,
+                "model_candidates": [model],
+                "attempted_models": [model],
+                "provider_meta": {"cli_path": cli_path},
+                "effective_model": "",
+                "fallback_used": False,
+                "raw_json_fallback_used": False,
+                "ok": False,
+                "error": f"invalid extra_args: {e}",
+                "usage": {},
+                "suppressed": False,
+            }
+            _safe_record(
+                provider="claude-cli",
+                model=model,
+                usage={},
+                ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=0,
+                error=f"invalid extra_args: {str(e)[:200]}",
+                model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+            )
+            return None
+    elif isinstance(raw_extra, (list, tuple)):
+        extra_args = [str(x) for x in raw_extra]
+    else:
+        extra_args = []
+
+    # ── Scoped prompt-cache lookup (mirror the main function's logic) ──
+    cache_effort = ""
+    if use_prompt_cache:
+        cache_effort = _cache_effort_key("claude-cli", provider_config)
+        try:
+            _cached_raw = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", force_cache=True)
+        except Exception:
+            _cached_raw = None
+        if _cached_raw:
+            try:
+                _cached_obj = _validate_structured_output_from_raw_text(output_type, _cached_raw)
+            except Exception:
+                _cached_obj = None
+            if _cached_obj is not None:
+                _LAST_STRUCTURED_LLM_CALL.data = {
+                    "provider": "claude-cli",
+                    "requested_model": model,
+                    "model_candidates": [model],
+                    "attempted_models": [],
+                    "provider_meta": {"cli_path": cli_path},
+                    "effective_model": model,
+                    "fallback_used": False,
+                    "raw_json_fallback_used": False,
+                    "ok": True,
+                    "error": "",
+                    "usage": {},
+                    "suppressed": False,
+                    "prompt_cache_hit": True,
+                }
+                _safe_record(
+                    provider="claude-cli",
+                    model=model,
+                    usage={},
+                    ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=0,
+                    error=None,
+                    model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+                )
+                return _cached_obj
+
+    from chatbot.claude_cli_provider import (
+        call_claude_cli_structured,
+        call_claude_cli_chat_structured,
+        daemon_for_structured_enabled,
+        _clear_structured_history,
+        ClaudeCliError,
+        ClaudeCliRateLimitError,
+        ClaudeCliNotLoggedInError,
+        ClaudeCliValidationError,
+    )
+
+    # Opt-in: when CLAUDE_CLI_DAEMON_FOR_STRUCTURED=1, route through the
+    # long-lived chatbot subprocess. Each thread + (model, sys_hash) gets a
+    # stable conversation_id so concurrent batch workers don't interleave on
+    # one daemon and within-thread calls reuse the warm process. Default OFF
+    # — the spawn-per-call path remains the production default until this
+    # path is benchmarked.
+    _use_daemon_path = daemon_for_structured_enabled()
+    _conversation_id = ""
+    if _use_daemon_path:
+        _sys_hash = hashlib.sha256(
+            (sys_str or "").encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+        # Bug #2 fix: include a schema fingerprint so two different output
+        # schemas (e.g., company-classification vs macro-classification)
+        # never collide on conversation_id. Without this, the daemon
+        # subprocess keeps the first schema's system suffix forever
+        # because _get_or_spawn deliberately ignores subsequent
+        # system_prompt values when reusing a session.
+        try:
+            _schema_json = json.dumps(
+                output_type.model_json_schema(), sort_keys=True
+            )
+        except Exception:
+            _schema_json = f"{output_type.__module__}.{output_type.__qualname__}"
+        _schema_hash = hashlib.sha256(
+            _schema_json.encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+        _tid = threading.get_ident()
+        _conversation_id = (
+            f"nexus-structured-{model}-{_sys_hash}-schema{_schema_hash}-tid{_tid}"
+        )
+
+    last_err: Exception | None = None
+    _attempted: list[str] = []
+    # Honour the same retry contract as the rest of the function. The
+    # dispatcher's ``output_retries`` is conceptually retries on Pydantic-
+    # validation failure (vs ``retries`` on HTTP/connection failure). For
+    # claude-cli the same retry loop covers BOTH classes, so use the max
+    # of the two budgets — otherwise strategies that pass output_retries=2
+    # silently get only 1 retry, masking validation failures behind too
+    # few attempts (#632192 root cause).
+    _retry_budget = max(int(retries or 1), int(output_retries or 0))
+    for attempt in range(max(1, _retry_budget + 1)):
+        _attempted.append(model)
+        try:
+            if _use_daemon_path:
+                result = call_claude_cli_chat_structured(
+                    conversation_id=_conversation_id,
+                    model=model,
+                    system_prompt=sys_str,
+                    user_prompt=prompt or "",
+                    output_schema=output_type,
+                    cli_path=cli_path,
+                    extra_args=extra_args,
+                    reasoning_effort=cfg.get("reasoning_effort"),
+                    timeout_sec=timeout_sec,
+                )
+            else:
+                result = call_claude_cli_structured(
+                    model=model,
+                    system_prompt=sys_str,
+                    user_prompt=prompt or "",
+                    output_schema=output_type,
+                    cli_path=cli_path,
+                    extra_args=extra_args,
+                    reasoning_effort=cfg.get("reasoning_effort"),
+                    timeout_sec=timeout_sec,
+                )
+            # Pull the envelope's real usage block out of the claude-cli
+            # provider's thread-local capture. Without this, every successful
+            # structured call here would record an empty usage dict, and the
+            # token-usage dashboard would always show zero for the project's
+            # primary provider. The capture is set on success paths only;
+            # falling back to {} for the rare race / shim case is safe.
+            try:
+                from chatbot.claude_cli_provider import get_last_struct_envelope_usage
+                _envelope_usage = get_last_struct_envelope_usage()
+            except Exception:
+                _envelope_usage = {}
+            _LAST_STRUCTURED_LLM_CALL.data = {
+                "provider": "claude-cli",
+                "requested_model": model,
+                "model_candidates": [model],
+                "attempted_models": _attempted,
+                "provider_meta": {"cli_path": cli_path},
+                "effective_model": model,
+                "fallback_used": False,
+                "raw_json_fallback_used": False,
+                "ok": True,
+                "error": "",
+                "usage": _envelope_usage,
+                "suppressed": False,
+            }
+            # Store in prompt cache if requested.
+            if use_prompt_cache and result is not None:
+                try:
+                    if hasattr(result, "model_dump_json"):
+                        raw_json = result.model_dump_json()
+                    elif hasattr(result, "dict"):
+                        raw_json = json.dumps(result.dict())
+                    else:
+                        raw_json = json.dumps(result)
+                    _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", raw_json, force_cache=True)
+                except Exception:
+                    pass
+            try:
+                _cc_usage = (
+                    getattr(_LAST_STRUCTURED_LLM_CALL, "data", {}) or {}
+                ).get("usage", {}) or {}
+            except Exception:
+                _cc_usage = {}
+            _safe_record(
+                provider="claude-cli",
+                model=model,
+                usage=_cc_usage,
+                ok=True,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=max(0, len(_attempted) - 1),
+                error=None,
+                model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+            )
+            return result
+        except ClaudeCliNotLoggedInError as e:
+            # Terminal — retrying won't help.
+            last_err = e
+            break
+        except ClaudeCliRateLimitError as e:
+            # Terminal for this attempt window. CC's subscription quota
+            # resets at a fixed wall-clock time (often hours away), so
+            # retrying immediately just burns more 429s. The Discord alert
+            # was already emitted at the provider layer.
+            last_err = e
+            break
+        except ClaudeCliValidationError as e:
+            last_err = e
+            if attempt < _retry_budget:
+                _backoff = _backoff_sleep_seconds(attempt, base=2.0, cap=60.0)
+                # Surface the retry in the log — without this, a successful
+                # retry rolls up as ok=True and hides the wasted spawn time
+                # from the per-day breakdown. Spawn #21 in backtest 419346
+                # was the canonical case: 20s of failed spawn invisible.
+                print(
+                    f"[llm_utils] claude-cli retry {attempt + 1}/{_retry_budget} after "
+                    f"validation error in {round(_backoff, 1)}s: {str(e)[:120]}",
+                    file=sys.stderr, flush=True,
+                )
+                # Daemon subprocess may have died or returned garbage —
+                # clear our cached history for this conversation_id so the
+                # retry starts from a clean slate. The session manager
+                # will respawn if needed.
+                if _use_daemon_path and _conversation_id:
+                    try:
+                        _clear_structured_history(_conversation_id)
+                    except Exception as _cleanup_err:
+                        print(
+                            f"[llm_utils] history cleanup failed (continuing retry): "
+                            f"{_cleanup_err}",
+                            file=sys.stderr, flush=True,
+                        )
+                time.sleep(_backoff)
+                continue
+            break
+        except ClaudeCliError as e:
+            last_err = e
+            if attempt < _retry_budget:
+                _backoff = _backoff_sleep_seconds(attempt)
+                print(
+                    f"[llm_utils] claude-cli retry {attempt + 1}/{_retry_budget} after "
+                    f"transient error in {round(_backoff, 1)}s: {str(e)[:120]}",
+                    file=sys.stderr, flush=True,
+                )
+                # Daemon subprocess may have died or returned garbage —
+                # clear our cached history for this conversation_id so the
+                # retry starts from a clean slate. The session manager
+                # will respawn if needed.
+                if _use_daemon_path and _conversation_id:
+                    try:
+                        _clear_structured_history(_conversation_id)
+                    except Exception as _cleanup_err:
+                        print(
+                            f"[llm_utils] history cleanup failed (continuing retry): "
+                            f"{_cleanup_err}",
+                            file=sys.stderr, flush=True,
+                        )
+                time.sleep(_backoff)
+                continue
+            break
+        except Exception as e:
+            last_err = e
+            break
+
+    # ``ClaudeCliNotLoggedInError`` is permanent until the operator runs
+    # ``claude`` on the host — surface it as terminal so callers that batch-
+    # and-split prompts don't thrash through 14 sub-calls per article batch.
+    # ``ClaudeCliValidationError`` after retry-budget exhaustion is also
+    # terminal-for-this-shape: Pydantic validation is deterministic on the
+    # prompt+schema combination, so splitting the batch into halves just
+    # re-runs the same shape failure against sub-prompts. Marking it
+    # terminal collapses worst-case chunk-split amplification (4 workers
+    # × 4 leaves = 16 concurrent spawns) back to 1.
+    # ``ClaudeCliRateLimitError`` is terminal-until-reset: CC's Pro/Max
+    # subscription quota resets at a fixed wall-clock time, so chunk
+    # splitting just creates more 429s. The provider layer already emits
+    # a Discord notification once per reset window.
+    _is_terminal_cc = isinstance(
+        last_err,
+        (
+            ClaudeCliNotLoggedInError,
+            ClaudeCliValidationError,
+            ClaudeCliRateLimitError,
+        ),
+    )
+    _LAST_STRUCTURED_LLM_CALL.data = {
+        "provider": "claude-cli",
+        "requested_model": model,
+        "model_candidates": [model],
+        "attempted_models": _attempted,
+        "provider_meta": {"cli_path": cli_path},
+        "effective_model": "",
+        "fallback_used": False,
+        "raw_json_fallback_used": False,
+        "ok": False,
+        "error": str(last_err or "claude-cli structured call failed"),
+        "usage": {},
+        "suppressed": False,
+        "is_terminal": _is_terminal_cc,
+    }
+    _safe_record(
+        provider="claude-cli",
+        model=model,
+        usage={},
+        ok=False,
+        duration_ms=int((time.monotonic() - _t0) * 1000),
+        retry_count=max(0, len(_attempted) - 1),
+        error=(str(last_err)[:200] if last_err else "claude-cli structured call failed"),
+        model_id=cfg.get("id") if isinstance(cfg, dict) else None,
+    )
+    return None
+
+
 def call_structured_llm_by_provider(
     provider: str,
     api_key: str,
@@ -993,14 +2496,45 @@ def call_structured_llm_by_provider(
     and output_type schema are intentionally excluded — they are stable for
     a given role/model combination in the analyst-panel use case).
     """
-    if not _PYDANTIC_AI_AVAILABLE or not api_key or not model or output_type is None:
+    # ── claude-cli: bypass PydanticAI entirely (CC has no PydanticAI backend)
+    # and use the locally-installed `claude` binary with --json-schema. No
+    # api_key is required for this provider.
+    if (provider or "").strip().lower() == "claude-cli":
+        return _call_claude_cli_structured_from_strategy(
+            model=model,
+            prompt=prompt,
+            output_type=output_type,
+            system_prompt=system_prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            output_retries=output_retries,
+            use_prompt_cache=use_prompt_cache,
+        )
+    if (provider or "").strip().lower() == "codex-cli":
+        return _call_codex_cli_structured_from_strategy(
+            model=model,
+            prompt=prompt,
+            output_type=output_type,
+            system_prompt=system_prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            output_retries=output_retries,
+            use_prompt_cache=use_prompt_cache,
+        )
+    if not _PYDANTIC_AI_AVAILABLE or not model or output_type is None:
+        return None
+    # Local Ollama legitimately has no api_key (only Ollama Cloud needs one);
+    # every other provider still requires a key.
+    if not api_key and (provider or "").strip().lower() != "ollama":
         return None
     # ── Scoped prompt-cache lookup ──
     _structured_cache_effort = ""
     if use_prompt_cache:
-        _structured_cache_effort = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
+        _structured_cache_effort = _cache_effort_key(provider, provider_config)
         try:
-            _cached_raw = _check_prompt_cache(prompt, model, _structured_cache_effort, force_cache=True)
+            _cached_raw = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", force_cache=True)
         except Exception:
             _cached_raw = None
         if _cached_raw:
@@ -1037,7 +2571,7 @@ def call_structured_llm_by_provider(
             else:
                 _raw_json = json.dumps(structured_obj)
             _stores_before = int(_prompt_cache_stats.get("stores", 0) or 0)
-            _store_prompt_cache(prompt, model, _structured_cache_effort, _raw_json, force_cache=True)
+            _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", _raw_json, force_cache=True)
             _stores_after = int(_prompt_cache_stats.get("stores", 0) or 0)
             if _stores_after > _stores_before:
                 _LAST_STRUCTURED_LLM_CALL.data["prompt_cache_stored"] = True
@@ -1066,6 +2600,9 @@ def call_structured_llm_by_provider(
             "error": cached_failure,
             "usage": {},
             "suppressed": True,
+            # A cached failure is by definition a previously-classified
+            # terminal error. Surface it on the same flag callers check.
+            "is_terminal": True,
         }
         return None
     timeout = float(_coerce_timeout_sec(timeout_sec))
@@ -1095,8 +2632,8 @@ def call_structured_llm_by_provider(
                 if http_attempt == 0:
                     _LAST_STRUCTURED_LLM_CALL.data["attempted_models"].append(structured_model)
                 _model_forces_raw = (
-                    (provider or "").strip().lower() in {"azure", "openai"}
-                    and any(marker in str(structured_model or "").strip().lower() for marker in ("gpt-oss", "gpt_oss", "gpt oss", "gpt-5", "gpt_5"))
+                    (provider or "").strip().lower() in {"azure", "openai", "nvidia"}
+                    and _model_skips_json_object_format(structured_model)
                 )
                 force_raw_json = prefer_raw_json or _model_forces_raw
                 if force_raw_json:
@@ -1137,6 +2674,17 @@ def call_structured_llm_by_provider(
                                 return repaired
                         except Exception as raw_pref_exc:
                             _raw_last_exc = raw_pref_exc
+                            # Non-retryable filter / temp-block check FIRST — retrying
+                            # these patterns is exactly what triggers Azure's
+                            # abuse-monitor temp-block (see _is_non_retryable_filter_response).
+                            _nr_filter, _nr_tag = _is_non_retryable_filter_response(exc=raw_pref_exc)
+                            if _nr_filter:
+                                import sys
+                                print(
+                                    f"[llm_utils] Raw JSON: non-retryable response ({_nr_tag}) for provider={provider!r}, model={structured_model!r}; skipping further retries to avoid Azure abuse-monitor cascade.",
+                                    file=sys.stderr, flush=True,
+                                )
+                                break
                             # Terminal errors that won't resolve with retries — stop immediately
                             _exc_str = str(raw_pref_exc)
                             _is_terminal = any(kw in _exc_str for kw in [
@@ -1190,6 +2738,21 @@ def call_structured_llm_by_provider(
                             file=sys.stderr,
                             flush=True,
                         )
+                # Proactive RPM throttle for providers with a hard
+                # requests-per-minute cap (NVIDIA NIM kimi-k2.x).
+                # Pass provider so the limiter only fires for the
+                # exact (provider, model) pair — Azure/OpenAI/etc.
+                # paths bypass it even if a model name collides.
+                _rpm_limiter = _get_model_request_rate_limiter(structured_model, provider)
+                if _rpm_limiter is not None:
+                    _rpm_waited = _rpm_limiter.acquire()
+                    if _rpm_waited > 0:
+                        import sys
+                        print(
+                            f"[llm_utils] RPM throttle: waited {_rpm_waited:.1f}s before structured call to {provider}/{structured_model!r}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 if provider_lock is not None:
                     with provider_lock:
                         result = agent.run_sync(prompt, infer_name=False)
@@ -1230,6 +2793,11 @@ def call_structured_llm_by_provider(
                         "ok": False,
                         "error": error_text,
                         "usage": {},
+                        # Surface the terminal-error signal so batched
+                        # callers (chunk-fallback, retry loops) can stop
+                        # splitting/retrying on a permanent 404 instead
+                        # of hammering the API hundreds of times per cycle.
+                        "is_terminal": True,
                     })
                     break
                 if _is_transient_http_error(error_text) and http_attempt < http_retries:
@@ -1311,10 +2879,58 @@ def call_structured_llm_by_provider(
     return None
 
 
+def invalidate_terminal_failure_cache(provider: str | None = None, model: str | None = None) -> int:
+    """Drop entries from the per-process terminal-failure cache.
+
+    The cache (``_TERMINAL_LLM_FAILURES``) remembers provider+model combos
+    that returned a permanent error (404 model-not-found, etc.) so we
+    don't re-call them. WITHOUT explicit invalidation, the cache outlives
+    a user fixing the offending Model row in the UI — every call would
+    stay suppressed until the worker process restarts.
+
+    Call this whenever a Model row is edited or deleted. Without args,
+    drops everything. With args, drops entries whose key starts with the
+    matching provider/model prefix (failure keys include other metadata,
+    so we match on prefix rather than equality).
+
+    Returns the number of entries removed.
+    """
+    with _TERMINAL_LLM_FAILURES_LOCK:
+        if not provider and not model:
+            count = len(_TERMINAL_LLM_FAILURES)
+            _TERMINAL_LLM_FAILURES.clear()
+            return count
+        provider_norm = (provider or "").strip().lower()
+        model_norm = (model or "").strip()
+        to_drop = []
+        for key in _TERMINAL_LLM_FAILURES:
+            # Failure keys are produced by ``_terminal_llm_failure_cache_key``
+            # which embeds provider + model + provider_config. Match on
+            # substring presence rather than parsing the format so this
+            # stays robust to key-format changes.
+            if provider_norm and provider_norm not in key.lower():
+                continue
+            if model_norm and model_norm.lower() not in key.lower():
+                continue
+            to_drop.append(key)
+        for key in to_drop:
+            _TERMINAL_LLM_FAILURES.pop(key, None)
+        return len(to_drop)
+
+
 def get_last_structured_llm_call_metadata() -> dict[str, Any]:
     """Return metadata for the most recent structured LLM call on this thread."""
     data = getattr(_LAST_STRUCTURED_LLM_CALL, "data", None)
     return dict(data or {})
+
+
+def get_last_plain_llm_call_error() -> str:
+    """Return the per-thread error string from the most recent
+    ``call_llm_by_provider`` invocation that returned empty text. Useful
+    for surfacing the underlying provider reason ("Responses API HTTP
+    400", "rate limited", etc.) in callers that only see an empty
+    string back."""
+    return getattr(_LAST_PLAIN_LLM_CALL_ERROR, "error", "") or ""
 
 
 def _extract_chat_message_text(message: dict[str, Any]) -> str:
@@ -1445,6 +3061,7 @@ def _call_gemini(
     response_mime_type: str | None = None,
 ) -> str:
     """Call Gemini generateContent REST API. Returns response text or empty string."""
+    _t0 = time.monotonic()
     if not api_key:
         return ""
     url = f"{GEMINI_BASE}/models/{model}:generateContent"
@@ -1479,7 +3096,7 @@ def _call_gemini(
                     json=body,
                     timeout=(connect_timeout, attempt_timeout),
                 )
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
@@ -1489,11 +3106,37 @@ def _call_gemini(
                     f"Set LLM_REQUEST_TIMEOUT to increase.",
                     file=sys.stderr, flush=True,
                 )
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt,
+                    error=f"timeout after {attempt_timeout}s", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             status = getattr(r, "status_code", None)
@@ -1506,7 +3149,20 @@ def _call_gemini(
                     err_msg = getattr(r, "text", "") or ""
                 err_msg = _truncate(err_msg.strip(), 300)
 
-                if status in retriable_status and attempt < max_retries:
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                # Gemini's safety filter shape is different (no "content_filter"
+                # string; uses "BLOCKED_REASON_SAFETY"), so this primarily defends
+                # against pathological wrapped errors. Cheap to leave in place.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=status, body=(getattr(r, "text", "") or err_msg or ""),
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] Gemini {model!r}: non-retryable response ({_nr_tag}) at status {status}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                elif status in retriable_status and attempt < max_retries:
                     wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {status}", attempt)
                     import sys
                     print(
@@ -1524,14 +3180,36 @@ def _call_gemini(
                         f"[llm_utils] Gemini HTTP {status} (model={model!r}): {err_msg}",
                         file=sys.stderr, flush=True,
                     )
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(
+                        status=status,
+                        body=(getattr(r, "text", "") or err_msg or "")[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt,
+                    error=(f"HTTP {status}: {err_msg}"[:200] if err_msg else f"HTTP {status}"),
+                    model_id=None,
+                )
                 return ""
 
             try:
                 data = r.json()
-            except Exception:
+            except Exception as _json_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=f"json parse: {str(_json_e)[:180]}",
+                    model_id=None,
+                )
                 return ""
 
             _log_token_usage("gemini", model, data)
@@ -1540,6 +3218,11 @@ def _call_gemini(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no candidates", model_id=None,
+                )
                 return ""
 
             parts = (candidates[0].get("content") or {}).get("parts") or []
@@ -1547,21 +3230,73 @@ def _call_gemini(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no parts", model_id=None,
+                )
                 return ""
 
             text_parts = [(p.get("text") or "") for p in parts if isinstance(p, dict)]
             out = (" ".join(t for t in text_parts if t)).strip()
             if out:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
+                _gem_usage = data.get("usageMetadata") if isinstance(data, dict) else None
+                _u = {}
+                if isinstance(_gem_usage, dict):
+                    _u = {
+                        "input_tokens": int(_gem_usage.get("promptTokenCount", 0) or 0),
+                        "output_tokens": int(_gem_usage.get("candidatesTokenCount", 0) or 0),
+                        "reasoning_tokens": int(_gem_usage.get("thoughtsTokenCount", 0) or 0),
+                    }
+                _safe_record(
+                    provider="gemini",
+                    model=model,
+                    usage=_u,
+                    ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt,
+                    error=None,
+                    model_id=None,
+                )
                 return out
 
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="gemini", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty response", model_id=None,
+            )
             return ""
 
+        _safe_record(
+            provider="gemini", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
     except Exception as _e:
         import sys
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_e, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_e))[:1000],
+                    exc=_e,
+                )
+        except Exception:
+            pass
         # Timeouts are common for long prompts; make them visible for easier debugging.
         try:
             import requests  # type: ignore
@@ -1569,6 +3304,11 @@ def _call_gemini(
             if isinstance(_e, requests.exceptions.Timeout):
                 timeout = _coerce_timeout_sec(timeout_sec)
                 print(f"[llm_utils] Gemini timeout after {timeout}s (model={model!r}). Set LLM_REQUEST_TIMEOUT to increase.", file=sys.stderr, flush=True)
+                _safe_record(
+                    provider="gemini", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=0, error=f"timeout after {timeout}s", model_id=None,
+                )
                 return ""
         except Exception:
             pass
@@ -1581,6 +3321,11 @@ def _call_gemini(
                 f"[llm_utils] Gemini HTTP {_e.response.status_code} (model={model!r}): {err_msg}",
                 file=sys.stderr, flush=True,
             )
+        _safe_record(
+            provider="gemini", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_e)[:200], model_id=None,
+        )
         return ""
 
 
@@ -1594,8 +3339,25 @@ def _call_deepseek(
 ) -> str:
     """Call DeepSeek chat/completions API. Returns response text or empty string.
     For deepseek-reasoner: uses message.content (final answer); if empty, falls back to reasoning_content."""
+    _t0 = time.monotonic()
     if not api_key:
         return ""
+
+    def _ds_usage_from_data(data: dict) -> dict:
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return {}
+        details = u.get("completion_tokens_details") or {}
+        prompt_details = u.get("prompt_tokens_details") or {}
+        return {
+            "input_tokens": int(u.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(u.get("completion_tokens", 0) or 0),
+            "reasoning_tokens": int((details or {}).get("reasoning_tokens", 0) or 0),
+            "cache_read_input_tokens": int(
+                (prompt_details or {}).get("cached_tokens", 0) or 0
+            ),
+        }
+
     try:
         import requests
         url = "https://api.deepseek.com/v1/chat/completions"
@@ -1616,27 +3378,73 @@ def _call_deepseek(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="deepseek", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="timeout", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="deepseek", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] DeepSeek {model!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
                 try:
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
+                # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("deepseek", model, data)
@@ -1645,21 +3453,79 @@ def _call_deepseek(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="deepseek", model=model,
+                    usage=_ds_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no choices", model_id=None,
+                )
                 return ""
             message = choices[0].get("message") or {}
             content = (message.get("content") or "").strip()
             if content:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="deepseek", model=model,
+                    usage=_ds_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return content
             reasoning = (message.get("reasoning_content") or "").strip()
             if reasoning:
+                # T10 critical-guard capture (success — reasoning fallback)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="deepseek", model=model,
+                    usage=_ds_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return reasoning
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="deepseek", model=model,
+                usage=_ds_usage_from_data(data), ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty content", model_id=None,
+            )
             return ""
 
+        _safe_record(
+            provider="deepseek", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
-    except Exception:
+    except Exception as _e:
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_e, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_e))[:1000],
+                    exc=_e,
+                )
+        except Exception:
+            pass
+        _safe_record(
+            provider="deepseek", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_e)[:200], model_id=None,
+        )
         return ""
 
 
@@ -1674,8 +3540,25 @@ def _call_openai(
     response_mime_type: str | None = None,
     reasoning_effort: str = "",
 ) -> str:
+    _t0 = time.monotonic()
     if not api_key:
         return ""
+
+    def _oa_usage_from_data(data: dict) -> dict:
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return {}
+        details = u.get("completion_tokens_details") or {}
+        prompt_details = u.get("prompt_tokens_details") or {}
+        return {
+            "input_tokens": int(u.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(u.get("completion_tokens", 0) or 0),
+            "reasoning_tokens": int((details or {}).get("reasoning_tokens", 0) or 0),
+            "cache_read_input_tokens": int(
+                (prompt_details or {}).get("cached_tokens", 0) or 0
+            ),
+        }
+
     try:
         import requests
         url = (base_url or "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
@@ -1694,7 +3577,13 @@ def _call_openai(
         else:
             if max_output_tokens and max_output_tokens > 0:
                 body["max_tokens"] = max_output_tokens
-        if str(response_mime_type or "").strip().lower() == "application/json":
+        # Skip response_format for quirky models that return empty `{}`
+        # when constrained by json_object mode. Same workaround as the
+        # NVIDIA + Azure paths.
+        if (
+            str(response_mime_type or "").strip().lower() == "application/json"
+            and not _model_skips_json_object_format(model)
+        ):
             body["response_format"] = {"type": "json_object"}
         timeout = _coerce_timeout_sec(timeout_sec)
         max_retries = max(0, int(retries or 0))
@@ -1705,27 +3594,73 @@ def _call_openai(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="openai", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="timeout", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="openai", model=model, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] OpenAI {model!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
                 try:
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
+                # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("openai", model, data)
@@ -1734,19 +3669,590 @@ def _call_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="openai", model=model,
+                    usage=_oa_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no choices", model_id=None,
+                )
                 return ""
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="openai", model=model,
+                    usage=_oa_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return text
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="openai", model=model,
+                usage=_oa_usage_from_data(data), ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty text", model_id=None,
+            )
             return ""
+        _safe_record(
+            provider="openai", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_exc, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_exc))[:1000],
+                    exc=_exc,
+                )
+        except Exception:
+            pass
+        _safe_record(
+            provider="openai", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_exc)[:200], model_id=None,
+        )
         return ""
+
+
+# ────────────────────────────── Ollama provider ────────────────────────────
+#
+# Inline branch sibling of ``_call_openai`` / ``_call_nvidia``. Matches the
+# existing return-empty-on-failure convention: never raises out, always
+# stashes for the critical-guard via ``_stash_last_http`` and records
+# telemetry via ``_safe_record``. The discovery surface (list_models,
+# show_model, health_check) lives in ``backend/ollama_client.py``.
+
+# Tracks ``(base_url, model)`` pairs that have responded at least once
+# since process boot. A "warm" pair has the model loaded in memory, so
+# we can use a shorter read timeout; a cold pair may sit in a load step
+# for tens of seconds. Module-level so ThreadPoolExecutor workers share
+# state (consistent with how ``_consecutive_5xx`` is scoped in
+# llm_critical_guard.py). Guarded by an explicit lock so concurrent
+# .add()/.in checks from worker threads can't observe a torn set.
+_ollama_warm_pairs: set[tuple[str, str]] = set()
+_ollama_warm_pairs_lock = threading.Lock()
+
+# Thread-local stash for the most recent Ollama call's thinking/reasoning
+# segment. Reasoning models (qwen3, deepseek-r1, gpt-oss) split their
+# output into ``message.content`` (visible answer) and ``message.thinking``
+# (internal reasoning). _call_ollama returns ``content`` and stashes the
+# raw thinking + a character-count split here so the smoke endpoint and
+# any other caller can render them separately without changing the
+# str-returning API of _call_ollama.
+_LAST_OLLAMA_REASONING = threading.local()
+
+
+def _stash_ollama_reasoning(*, content: str, thinking: str) -> None:
+    """Record the per-thread content/thinking split for the most recent
+    Ollama call. Always overwrites — there's only one "most recent" per
+    thread. Callers use ``get_last_ollama_reasoning()`` to read."""
+    _LAST_OLLAMA_REASONING.data = {
+        "content_chars": len(content or ""),
+        "thinking_chars": len(thinking or ""),
+        "thinking": str(thinking or ""),
+    }
+
+
+def get_last_ollama_reasoning() -> dict:
+    """Return the most-recent thread-local content/thinking split, or
+    ``{}`` if no Ollama call has stashed on this thread yet. Does NOT
+    clear; callers can read more than once. The data is overwritten by
+    the next Ollama call on the same thread, so read it before any other
+    LLM call fires."""
+    return dict(getattr(_LAST_OLLAMA_REASONING, "data", None) or {})
+
+
+def _ollama_pair_is_warm(base_url: str, model: str) -> bool:
+    with _ollama_warm_pairs_lock:
+        return (base_url, model) in _ollama_warm_pairs
+
+
+def _mark_ollama_pair_warm(base_url: str, model: str) -> None:
+    with _ollama_warm_pairs_lock:
+        _ollama_warm_pairs.add((base_url, model))
+
+
+def _make_ollama_sync_client(base_url: str, api_key: str | None, timeout: float):
+    """Thin wrapper around ``ollama.Client`` so tests can patch construction.
+
+    Always returns a synchronous client — the dispatcher path is sync.
+    The async client lives in ``ollama_client.py`` for discovery calls.
+    """
+    from ollama import Client
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    return Client(host=base_url, headers=headers, timeout=timeout)
+
+
+def _normalize_ollama_think(value):
+    """Coerce an ``ollama_think`` field value to what Ollama actually accepts.
+
+    Ollama's ``think`` parameter on /api/chat accepts either:
+      * bool ``true``/``false`` — binary thinking on/off (qwen3, deepseek-r1)
+      * string ``"low"``/``"medium"``/``"high"`` — effort levels (gpt-oss)
+
+    The Models table stores a single string so the operator can configure
+    either flavour from one dropdown. Normalisation:
+      * ``"true"``  / ``"on"``  / ``"yes"`` (any case) → ``True``
+      * ``"false"`` / ``"off"`` / ``"no"``             → ``False``
+      * ``"low"``   / ``"medium"`` / ``"high"``        → pass through
+      * empty / unknown                                → ``None`` (omit field)
+    """
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in ("true", "on", "yes", "1"):
+        return True
+    if s in ("false", "off", "no", "0"):
+        return False
+    if s in ("low", "medium", "high"):
+        return s
+    return None  # silently ignore unknown — better than 400 from Ollama
+
+
+def _normalize_ollama_keep_alive(value):
+    """Coerce a ``keep_alive`` value to the shape Ollama actually accepts.
+
+    Ollama's HTTP API documents two valid shapes:
+      * Go duration string with a unit: ``5m``, ``1h``, ``300s``
+      * JSON number (seconds): ``0`` (unload immediately), ``-1`` (forever)
+
+    Their Go-side parser uses ``time.ParseDuration`` for strings, which
+    rejects bare integer strings like ``"-1"`` with
+    ``time: missing unit in duration``. So when an operator types ``-1``
+    or ``300`` in the form, we must send an int, not a string.
+
+    Returns ``None`` to mean "omit the field" (let Ollama use its default).
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        pass
+    return s  # duration string with unit — pass through verbatim
+
+
+_BEDROCK_REASONING_BUDGETS = {"low": 1024, "medium": 4096, "high": 16384}
+
+
+def _normalize_bedrock_reasoning(value, model) -> dict | None:
+    """Map a bedrock_reasoning effort to Converse additionalModelRequestFields.
+
+    Reasoning shape is model-family-specific:
+      * Anthropic Claude (3.7+, Sonnet/Opus 4): ``reasoning_config`` with a
+        ``budget_tokens`` thinking budget. Sending it to non-supporting models
+        (or older Claude) yields a ValidationException, so we gate on the id.
+      * OpenAI gpt-oss (gpt-oss-20b / gpt-oss-120b): the OpenAI Chat-Completion
+        field ``reasoning_effort`` (low/medium/high). Verified honored on
+        Bedrock Converse (high produces ~7x the reasoning of low).
+    Everything else (Llama, Nova, Mistral, …) — and ``off``/empty — returns
+    None so we don't send an unsupported field.
+    """
+    effort = str(value or "").strip().lower()
+    if effort not in _BEDROCK_REASONING_BUDGETS:  # low / medium / high
+        return None
+    m = str(model or "").strip().lower()
+    if "anthropic" in m or "claude" in m:
+        return {"reasoning_config": {"type": "enabled", "budget_tokens": _BEDROCK_REASONING_BUDGETS[effort]}}
+    if "gpt-oss" in m or "gpt_oss" in m:
+        return {"reasoning_effort": effort}
+    return None
+
+
+def _resolve_ollama_timeout(base_url: str, model: str, explicit_timeout) -> float:
+    """120s on cold pair (first call since boot), 30s once warm.
+
+    Cold-load can legitimately take 10-60s on CPU as Ollama maps the
+    model into memory; using the standard 30s timeout there would
+    misclassify routine cold starts as outages and trip the
+    persistent-5xx counter.
+    """
+    if explicit_timeout is not None:
+        try:
+            return float(explicit_timeout)
+        except (TypeError, ValueError):
+            pass
+    if _ollama_pair_is_warm(base_url, model):
+        return 30.0
+    return 120.0
+
+
+def _call_ollama(
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    max_output_tokens: int = 256,
+    timeout_sec=None,
+    retries: int = 0,
+    base_url: str = "http://localhost:11434",
+    response_mime_type=None,
+    reasoning_effort: str = "",   # accepted, ignored (model-specific)
+    keep_alive: str | None = None,
+    think: str | None = None,
+) -> str:
+    """Plain-text chat against an Ollama host.
+
+    Mirrors ``_call_openai`` semantics:
+      * Returns ``""`` on every failure (no raise).
+      * Stashes the response HTTP shape via ``_stash_last_http`` so the
+        critical-guard can classify auth_failure / persistent_5xx.
+      * Records telemetry via ``_safe_record(provider="ollama", ...)``.
+
+    Differences from OpenAI:
+      * 404 = model-not-installed → user-config problem, never retried.
+      * 401 = Ollama Cloud auth failure → never retried (critical-guard fires).
+      * ``reasoning_effort`` accepted but ignored (Ollama uses Modelfile-side
+        settings; there's no standard generation knob).
+      * First call to a ``(base_url, model)`` pair gets a 120s timeout
+        for cold loads; subsequent calls get 30s.
+    """
+    _t0 = time.monotonic()
+    from ollama import ResponseError
+    import httpx
+
+    options: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        options["num_predict"] = int(max_output_tokens)
+
+    chat_kwargs: dict[str, object] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "options": options,
+    }
+    if response_mime_type and "json" in str(response_mime_type).lower():
+        chat_kwargs["format"] = "json"
+    normalised_keep_alive = _normalize_ollama_keep_alive(keep_alive)
+    if normalised_keep_alive is not None:
+        chat_kwargs["keep_alive"] = normalised_keep_alive
+    normalised_think = _normalize_ollama_think(think)
+    if normalised_think is not None:
+        chat_kwargs["think"] = normalised_think
+
+    max_retries = max(0, int(retries or 0))
+    # Reuse the same network-error tuple as ollama_client.py so we
+    # classify identically.
+    _net_excs = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+        httpx.NetworkError,
+        ConnectionError,
+        TimeoutError,
+    )
+
+    last_status: int | None = None
+    last_body: str | None = None
+    last_exc: BaseException | None = None
+
+    for attempt in range(max_retries + 1):
+        timeout = _resolve_ollama_timeout(base_url, model, timeout_sec)
+        try:
+            client = _make_ollama_sync_client(base_url, api_key, timeout)
+            resp = client.chat(**chat_kwargs)
+        except ResponseError as e:
+            status = e.status_code or 0
+            last_status = status
+            last_body = str(e)[:1000]
+            last_exc = e
+            # 401 and 404 are NOT retried — both are configuration-class
+            # failures where retrying just wastes time (and for 401 against
+            # Ollama Cloud, may rate-limit the operator).
+            if status == 401 or status == 404:
+                break
+            if status == 429 or (500 <= status < 600):
+                if attempt < max_retries:
+                    time.sleep(_backoff_sleep_seconds(attempt))
+                    continue
+                break
+            # Any other 4xx — surface and stop.
+            break
+        except _net_excs as e:
+            last_status = None
+            last_body = str(e)[:1000]
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        except Exception as e:
+            # Defensive: SDK can raise un-typed errors (e.g. dict-parse
+            # issues). Treat as non-retryable to avoid retry storms.
+            last_status = None
+            last_body = str(e)[:1000]
+            last_exc = e
+            break
+
+        # Success branch — pull text and return.
+        msg = ((resp or {}).get("message") if isinstance(resp, dict)
+               else getattr(resp, "message", {}) or {})
+        if not isinstance(msg, dict):
+            try:
+                msg = dict(msg) if msg is not None else {}
+            except Exception:
+                # Pydantic message object from the SDK — flatten via model_dump.
+                if hasattr(msg, "model_dump"):
+                    msg = msg.model_dump()
+                else:
+                    msg = {}
+        content = msg.get("content") or ""
+        thinking = msg.get("thinking") or ""
+        # Always stash both so the smoke endpoint can render them
+        # separately, regardless of which one ends up populated.
+        _stash_ollama_reasoning(content=content, thinking=thinking)
+
+        # Per-call diagnostic: input vs output tokens AND content vs
+        # thinking chars. Without this the broker log only shows
+        # ``CACHE STORE: prompt_len=X resp_len=Y`` (char counts of the
+        # cached payload), which hides Ollama's actual eval_count —
+        # the bulk of which is reasoning tokens on gpt-oss / qwen3 /
+        # deepseek-r1. Operators were misreading the cache log as
+        # "tiny output" when the model had in fact burned thousands
+        # of reasoning tokens to produce a small visible answer.
+        if isinstance(resp, dict):
+            _in_tok = int(resp.get("prompt_eval_count") or 0)
+            _out_tok = int(resp.get("eval_count") or 0)
+            try:
+                import sys as _sys
+                print(
+                    f"[llm_utils] OLLAMA TOKENS: model={model!r} "
+                    f"in_tokens={_in_tok} out_tokens={_out_tok} "
+                    f"content_chars={len(content)} thinking_chars={len(thinking)}",
+                    file=_sys.stderr, flush=True,
+                )
+            except Exception:
+                pass
+
+        text = content
+        # Reasoning models (qwen3, deepseek-r1, gpt-oss, etc.) split their
+        # output into ``thinking`` and ``content`` fields. If num_predict
+        # gets consumed by reasoning tokens before the visible answer is
+        # produced, ``content`` is empty while ``thinking`` has the model's
+        # actual response. Surfacing thinking is strictly better than
+        # returning empty — the operator sees the model did respond.
+        if not text and thinking:
+            text = thinking
+        elapsed_ms = int((time.monotonic() - _t0) * 1000)
+        try:
+            _stash_last_http(status=200, body=None, exc=None)
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="ollama", model=model,
+                usage={
+                    "input_tokens": int(
+                        (resp or {}).get("prompt_eval_count", 0) or 0
+                    ) if isinstance(resp, dict) else 0,
+                    "output_tokens": int(
+                        (resp or {}).get("eval_count", 0) or 0
+                    ) if isinstance(resp, dict) else 0,
+                },
+                ok=True, duration_ms=elapsed_ms, retry_count=attempt,
+                error=None, model_id=None,
+            )
+        except Exception:
+            pass
+        _mark_ollama_pair_warm(base_url, model)
+        return text
+
+    # Failure exit — stash last-seen HTTP shape + record telemetry.
+    try:
+        _stash_last_http(status=last_status, body=last_body, exc=last_exc)
+    except Exception:
+        pass
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = str(last_exc) if last_exc else (
+            last_body or "")
+    except Exception:
+        pass
+    try:
+        _safe_record(
+            provider="ollama", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries,
+            error=(str(last_exc)[:200] if last_exc else
+                   (last_body[:200] if last_body else "unknown")),
+            model_id=None,
+        )
+    except Exception:
+        pass
+    return ""
+
+
+def call_ollama_with_tools(
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    tools: list[dict],
+    *,
+    base_url: str = "http://localhost:11434",
+    timeout_sec=None,
+    max_output_tokens: int = 1024,
+    keep_alive: str | None = None,
+    think: str | None = None,
+) -> dict:
+    """Single-shot tool-using chat against an Ollama host.
+
+    Accepts OpenAI-shape OR Gemini-shape tool dicts; the input is
+    normalised via ``_normalize_tools_to_openai_shape`` before dispatch.
+
+    Returns ``{"text": str, "tool_calls": [{"name": str, "arguments": dict}, ...]}``.
+
+    Important: this is single-shot — it does NOT execute tool calls or
+    loop. Callers that need a multi-turn tool loop (like
+    ``call_gemini_with_tools``) should wrap this themselves. The choice
+    keeps the API simple; the multi-turn behaviour wasn't actually
+    needed by the existing strategy roles that wired up tools.
+
+    On any provider failure (404 model-not-found, 401, 5xx, connection
+    error) returns ``{"text": "", "tool_calls": []}`` — mirrors the
+    return-empty convention of ``_call_ollama``.
+    """
+    _t0 = time.monotonic()
+    from ollama import ResponseError
+    import httpx
+    import json as _json
+
+    normalised = _normalize_tools_to_openai_shape(tools or [])
+    options: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        options["num_predict"] = int(max_output_tokens)
+
+    chat_kwargs: dict[str, object] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": normalised,
+        "options": options,
+    }
+    normalised_keep_alive = _normalize_ollama_keep_alive(keep_alive)
+    if normalised_keep_alive is not None:
+        chat_kwargs["keep_alive"] = normalised_keep_alive
+    normalised_think = _normalize_ollama_think(think)
+    if normalised_think is not None:
+        chat_kwargs["think"] = normalised_think
+
+    _net_excs = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+        httpx.NetworkError,
+        ConnectionError,
+        TimeoutError,
+    )
+
+    timeout = _resolve_ollama_timeout(base_url, model, timeout_sec)
+    try:
+        client = _make_ollama_sync_client(base_url, api_key, timeout)
+        resp = client.chat(**chat_kwargs)
+    except ResponseError as e:
+        try:
+            _stash_last_http(
+                status=e.status_code or 0,
+                body=str(e)[:1000],
+                exc=e,
+            )
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="ollama", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=0, error=str(e)[:200], model_id=None,
+            )
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+    except _net_excs as e:
+        try:
+            _stash_last_http(status=None, body=str(e)[:1000], exc=e)
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="ollama", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=0, error=str(e)[:200], model_id=None,
+            )
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+
+    msg = ((resp or {}).get("message") if isinstance(resp, dict)
+           else getattr(resp, "message", {}) or {})
+    if not isinstance(msg, dict):
+        try:
+            msg = dict(msg)
+        except Exception:
+            if hasattr(msg, "model_dump"):
+                msg = msg.model_dump()
+            else:
+                msg = {}
+
+    content = msg.get("content") or ""
+    thinking = msg.get("thinking") or ""
+    _stash_ollama_reasoning(content=content, thinking=thinking)
+    text = content if content else thinking
+    raw_calls = msg.get("tool_calls") or []
+    tool_calls: list[dict] = []
+    for tc in raw_calls:
+        fn = (tc or {}).get("function") or {}
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            # Ollama may stringify args depending on the model — normalise.
+            try:
+                args = _json.loads(args)
+            except Exception:
+                args = {"_raw": args}
+        tool_calls.append({"name": fn.get("name", ""), "arguments": args or {}})
+
+    try:
+        _stash_last_http(status=200, body=None, exc=None)
+    except Exception:
+        pass
+    try:
+        _safe_record(
+            provider="ollama", model=model,
+            usage={
+                "input_tokens": int(
+                    (resp or {}).get("prompt_eval_count", 0) or 0
+                ) if isinstance(resp, dict) else 0,
+                "output_tokens": int(
+                    (resp or {}).get("eval_count", 0) or 0
+                ) if isinstance(resp, dict) else 0,
+            },
+            ok=True,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=None, model_id=None,
+        )
+    except Exception:
+        pass
+    _mark_ollama_pair_warm(base_url, model)
+
+    return {"text": text, "tool_calls": tool_calls}
 
 
 def _nvidia_reasoning_extra_body(reasoning_effort: str) -> dict[str, Any]:
@@ -1782,6 +4288,19 @@ def _call_nvidia(
     """Call NVIDIA NIM API (OpenAI-compatible with extra_body for reasoning)."""
     if not api_key:
         return ""
+    # Proactive RPM throttle for NVIDIA NIM kimi-k2.x (40 req/min cap).
+    # Without this the strategy's parallel event_maintenance batches
+    # burst past the cap and burn 429s; backoff still recovers but each
+    # 429 costs 30s+ of wall-clock time. Acquire BEFORE the request.
+    _rpm_limiter = _get_model_request_rate_limiter(model)
+    if _rpm_limiter is not None:
+        _rpm_waited = _rpm_limiter.acquire()
+        if _rpm_waited > 0:
+            import sys
+            print(
+                f"[llm_utils] NVIDIA RPM throttle: waited {_rpm_waited:.1f}s before call to {model}",
+                file=sys.stderr, flush=True,
+            )
     try:
         import requests as _requests
         url = (base_url or "https://integrate.api.nvidia.com/v1").rstrip("/") + "/chat/completions"
@@ -1797,7 +4316,14 @@ def _call_nvidia(
             body["max_tokens"] = max_output_tokens
         extra = _nvidia_reasoning_extra_body(reasoning_effort)
         body.update(extra)
-        if str(response_mime_type or "").strip().lower() == "application/json":
+        # Skip response_format for quirky NIM models that return empty
+        # `{}` when constrained by json_object mode (moonshotai/kimi-*
+        # has the same shape-collapse pathology as Azure gpt-oss).
+        # The prompt itself already asks for JSON.
+        if (
+            str(response_mime_type or "").strip().lower() == "application/json"
+            and not _model_skips_json_object_format(model)
+        ):
             body["response_format"] = {"type": "json_object"}
         timeout = _coerce_timeout_sec(timeout_sec)
         max_retries = max(0, int(retries or 0))
@@ -1808,27 +4334,71 @@ def _call_nvidia(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = _requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except _requests.exceptions.Timeout:
+            except _requests.exceptions.Timeout as _to_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
                 return ""
-            except _requests.exceptions.RequestException:
+            except _requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Non-retryable filter check — see _is_non_retryable_filter_response.
+                # NVIDIA NIM is unlikely to surface Azure-style temp-blocks, but
+                # content_filter responses can appear; same retry-cascade hazard.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] NVIDIA {model!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    # Tell the limiter about 429s so the circuit breaker
+                    # can trip after sustained throttling and pause us
+                    # globally instead of hammering NVIDIA's penalty box.
+                    if r.status_code == 429 and _rpm_limiter is not None:
+                        _rpm_limiter.note_rate_limited()
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
+                if r.status_code == 429 and _rpm_limiter is not None:
+                    _rpm_limiter.note_rate_limited()
                 try:
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("nvidia", model, data)
@@ -1841,6 +4411,13 @@ def _call_nvidia(
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
+                if _rpm_limiter is not None:
+                    _rpm_limiter.note_success()
                 return text
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
@@ -1849,6 +4426,20 @@ def _call_nvidia(
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        # T10 critical-guard capture — only stash if no inner handler did.
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_exc, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_exc))[:1000],
+                    exc=_exc,
+                )
+        except Exception:
+            pass
         return ""
 
 
@@ -1865,8 +4456,25 @@ def _call_azure_openai(
     response_mime_type: str | None = None,
     reasoning_effort: str = "",
 ) -> str:
+    _t0 = time.monotonic()
     if not api_key or not deployment_name or not azure_endpoint:
         return ""
+
+    def _az_usage_from_data(data: dict) -> dict:
+        u = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(u, dict):
+            return {}
+        details = u.get("completion_tokens_details") or {}
+        prompt_details = u.get("prompt_tokens_details") or {}
+        return {
+            "input_tokens": int(u.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(u.get("completion_tokens", 0) or 0),
+            "reasoning_tokens": int((details or {}).get("reasoning_tokens", 0) or 0),
+            "cache_read_input_tokens": int(
+                (prompt_details or {}).get("cached_tokens", 0) or 0
+            ),
+        }
+
     try:
         import requests
         endpoint = azure_endpoint.rstrip("/")
@@ -1883,10 +4491,14 @@ def _call_azure_openai(
             body["reasoning_effort"] = reasoning_effort
         if max_output_tokens and max_output_tokens > 0:
             body["max_completion_tokens"] = max_output_tokens
-        # Skip response_format for gpt-oss models — they return empty {} (2 tokens) when
-        # constrained by json_object mode.  The prompt already requests JSON output.
-        _is_oss = any(m in (deployment_name or "").lower() for m in ("gpt-oss", "gpt_oss", "gpt oss"))
-        if not _is_oss and str(response_mime_type or "").strip().lower() == "application/json":
+        # Skip response_format for quirky models (gpt-oss, gpt-5*,
+        # NIM-side kimi-k2 when exposed through Azure routing) — all
+        # return empty `{}` when constrained by json_object mode. The
+        # prompt already requests JSON output.
+        if (
+            str(response_mime_type or "").strip().lower() == "application/json"
+            and not _model_skips_json_object_format(deployment_name)
+        ):
             body["response_format"] = {"type": "json_object"}
         timeout = _coerce_timeout_sec(timeout_sec)
         max_retries = max(0, int(retries or 0))
@@ -1900,29 +4512,81 @@ def _call_azure_openai(
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as _to_e:
                 import sys
                 print(f"[llm_utils] Azure {deployment_name!r} timed out after {attempt_timeout:.0f}s (attempt {attempt+1})", file=sys.stderr, flush=True)
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="azure", model=deployment_name, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="timeout", model_id=None,
+                )
                 return ""
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # T10 critical-guard capture
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="azure", model=deployment_name, usage={}, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=str(_req_e)[:200], model_id=None,
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
-                wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
-                time.sleep(wait)
-                continue
+                # Defensive: even though 400/403 aren't in retriable_status,
+                # if Azure ever wraps a content_filter / temp-block under a
+                # 5xx (or our retriable set grows later), don't retry these.
+                # See _is_non_retryable_filter_response for the why.
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] Azure {deployment_name!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                    # Fall through to the >=400 branch so we stash + raise
+                    # exactly once with the original error body.
+                else:
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
 
             if r.status_code >= 400:
                 try:
                     _err_body = r.json()
                 except Exception:
                     _err_body = r.text[:500]
+                # T10 critical-guard capture (stash BEFORE raising so the
+                # outer except can rely on it without re-parsing the message)
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
+                # Will be recorded by the outer except handler below.
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("azure", deployment_name, data)
@@ -1931,12 +4595,24 @@ def _call_azure_openai(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no choices", model_id=None,
+                )
                 return ""
             # Check finish_reason — content_filter means retrying is pointless
             _finish_reason = str((choices[0].get("finish_reason") or "")).strip().lower()
             if _finish_reason == "content_filter":
                 import sys
                 print(f"[llm_utils] Content filter triggered for {deployment_name!r} — skipping retries, returning empty.", file=sys.stderr, flush=True)
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="content_filter", model_id=None,
+                )
                 return ""
             # Detect empty responses by completion token count
             _completion_tokens = int((data.get("usage") or {}).get("completion_tokens", 999))
@@ -1950,18 +4626,66 @@ def _call_azure_openai(
                     continue
                 # Exhausted low-token retries — brief cooldown, return empty to trigger split fallback
                 time.sleep(3.0)
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="low-token exhausted", model_id=None,
+                )
                 return ""
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
             if text:
+                # T10 critical-guard capture (success)
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="azure", model=deployment_name,
+                    usage=_az_usage_from_data(data), ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None, model_id=None,
+                )
                 return text
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            _safe_record(
+                provider="azure", model=deployment_name,
+                usage=_az_usage_from_data(data), ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty text", model_id=None,
+            )
             return ""
+        _safe_record(
+            provider="azure", model=deployment_name, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=max_retries, error="retries exhausted", model_id=None,
+        )
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        # T10 critical-guard capture — only stash if an inner handler hasn't
+        # already done so (the >=400 branch above stashes the raw response).
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_exc, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_exc))[:1000],
+                    exc=_exc,
+                )
+        except Exception:
+            pass
+        _safe_record(
+            provider="azure", model=deployment_name, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=str(_exc)[:200], model_id=None,
+        )
         return ""
 
 
@@ -2204,6 +4928,512 @@ def _fire_llm_output_log(provider: str, model: str, prompt: str, raw_output: str
     threading.Thread(target=_post, daemon=True).start()
 
 
+# ── Critical-guard HTTP capture (Wave 1, T10) ─────────────────────────────
+#
+# Each provider stashes the last (status, body, exc) it observed before
+# returning to the caller. The retry wrapper (_call_llm_with_critical_guard)
+# pops this value and feeds it to llm_critical_guard.classify(). Keyed by
+# thread-ident so concurrent workers don't collide.
+
+_LAST_HTTP_PER_THREAD: dict[int, dict[str, Any]] = {}
+_LAST_HTTP_LOCK = threading.Lock()
+
+
+def _stash_last_http(*, status: int | None, body: str | None, exc: BaseException | None) -> None:
+    """Provider call sites invoke this just before returning so the retry
+    wrapper can classify the response. Overwrites any prior stash for the
+    current thread."""
+    tid = threading.get_ident()
+    with _LAST_HTTP_LOCK:
+        _LAST_HTTP_PER_THREAD[tid] = {"status": status, "body": body, "exc": exc}
+
+
+def _pop_last_http() -> dict[str, Any] | None:
+    """Retry wrapper invokes this after each call_llm_by_provider() return.
+    Returns None if the provider didn't stash anything (counts as 'no info' —
+    classifier returns 'none')."""
+    tid = threading.get_ident()
+    with _LAST_HTTP_LOCK:
+        return _LAST_HTTP_PER_THREAD.pop(tid, None)
+
+
+def _call_with_capture(provider, api_key, model, prompt, **kw):
+    """Wrap call_llm_by_provider so the caller gets (text, status, body, exc)
+    instead of just text. status/body/exc come from _pop_last_http(); if the
+    provider didn't stash, status=200/body=None/exc=None (treat as success
+    when text was returned, or generic error when text is empty)."""
+    # Clear any stale stash from a previous call on this thread.
+    _pop_last_http()
+    text = ""
+    captured_exc = None
+    try:
+        text = call_llm_by_provider(provider, api_key, model, prompt, **kw)
+    except Exception as e:
+        captured_exc = e
+    captured = _pop_last_http() or {}
+    status = captured.get("status")
+    body = captured.get("body")
+    exc = captured.get("exc") or captured_exc
+    # Heuristic: if no stash AND no exception AND non-empty text, treat as 200.
+    if status is None and exc is None and text:
+        status = 200
+    return text, status, body, exc
+
+
+def _call_llm_with_critical_guard(
+    provider: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    *,
+    attribution_keys: dict[str, Any] | None = None,
+    **kw,
+) -> str:
+    """Wraps _call_with_capture with critical-class detection + retry escalation.
+
+    Behavior:
+      - Calls _call_with_capture, classifies the response.
+      - If class is critical AND we've already raised once in this process,
+        return the empty text from the underlying call (don't re-raise; live
+        traffic shouldn't be blocked after abort triggers).
+      - If class is critical and we haven't raised, retry up to 3x with
+        exponential backoff (1s, 2s, 4s). If the 4th attempt is still
+        critical, mark_raised() and raise LLMCriticalFailure.
+      - If class is 'none' (normal), return text immediately.
+    """
+    import time as _time
+    # Use the bare module name so that this resolves to the SAME module object
+    # that broker.py imports via `from llm_critical_guard import ...`. If we
+    # use `from backend import llm_critical_guard`, Python will instantiate
+    # two distinct module objects (one under each path) with separate
+    # _already_raised flags / counters / LLMCriticalFailure class identity —
+    # breaking isinstance() in the broker outer-loop catch.
+    try:
+        import llm_critical_guard
+    except ImportError:
+        # Fallback for environments where `backend/` isn't on sys.path
+        # (e.g. some test invocations from repo root).
+        from backend import llm_critical_guard
+
+    if llm_critical_guard.was_already_raised():
+        # A different worker already triggered abort. Pass through one call
+        # so the caller's normal error path runs; do not retry, do not raise.
+        text, status, body, exc = _call_with_capture(provider, api_key, model, prompt, **kw)
+        return text
+
+    attempts: list[dict[str, Any]] = []
+    text = ""  # ensure defined for the mid-retry short-circuit return below
+    for attempt_idx in range(4):  # 1 original + 3 retries
+        # Mid-retry short-circuit: if a sibling worker tripped the guard while
+        # we were sleeping between attempts, don't compound the raise. Return
+        # the last empty/error text from the previous attempt and let the
+        # caller's normal None/empty handling fire. Only the FIRST worker's
+        # LLMCriticalFailure propagates to broker.py — losing workers would
+        # otherwise raise into a ThreadPoolExecutor Future that nobody awaits,
+        # silently swallowing the failure.
+        if attempt_idx > 0 and llm_critical_guard.was_already_raised():
+            return text
+
+        text, status, body, exc = _call_with_capture(provider, api_key, model, prompt, **kw)
+
+        # Update 5xx-consecutive counter before classifying (counter feeds classify).
+        llm_critical_guard.update_consecutive_state(
+            tag="pending", status=status, provider=provider, model=model,
+        )
+        class_tag, is_critical = llm_critical_guard.classify(
+            status=status, body=body, exc=exc, provider=provider, model=model,
+        )
+
+        if not is_critical:
+            return text
+
+        attempts.append({
+            "attempt": attempt_idx + 1,
+            "class_tag": class_tag,
+            "http_status": status,
+            "body_sample": (body or "")[:300],
+            "ts": _time.time(),
+        })
+
+        if attempt_idx < 3:
+            _time.sleep(2 ** attempt_idx)  # 1, 2, 4
+            continue
+
+        # 4th attempt also critical → escalate
+        llm_critical_guard.mark_raised()
+        raise llm_critical_guard.LLMCriticalFailure(
+            class_tag=class_tag,
+            provider=provider,
+            model=model,
+            attribution=dict(attribution_keys or {}),
+            attempts=attempts,
+        )
+
+    return text  # unreachable, but mypy-friendly
+
+
+def _parse_structured_error(error_str: str) -> tuple[int | None, str]:
+    """Parse the _LAST_STRUCTURED_LLM_CALL error string into (status, body).
+
+    Sample formats:
+      'raw_json_preferred=HTTP 403: {...body...}'
+      'raw_json_preferred=HTTP 401: {...}'
+      'raw_json_preferred=Skeleton output: model=...'   (no status)
+      'some other error string'  (no status)
+
+    Returns (status_or_None, body_string).
+    """
+    import re as _re
+    if not error_str:
+        return None, ""
+    m = _re.search(r"HTTP\s+(\d{3})", error_str)
+    status = int(m.group(1)) if m else None
+    return status, error_str
+
+
+def _call_structured_llm_with_critical_guard(
+    provider: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    output_type: Any,
+    *,
+    attribution_keys: dict[str, Any] | None = None,
+    **kw,
+):
+    """Mirror of _call_llm_with_critical_guard for the structured-JSON path.
+
+    After each call_structured_llm_by_provider invocation, reads
+    _LAST_STRUCTURED_LLM_CALL.data to classify the response. If the response
+    is critical (Azure 403 blocked / auth fail / codex quota / persistent 5xx),
+    retries up to 3 times with exponential backoff. On the 4th critical
+    attempt, raises LLMCriticalFailure so backtests can abort cleanly.
+
+    Non-critical failures (None return with no recognised critical signal)
+    pass straight through — the caller's existing None-handling fires.
+    """
+    import time as _time
+    # Use the bare module name so this resolves to the SAME llm_critical_guard
+    # module object that broker.py imports — see _call_llm_with_critical_guard
+    # above for the full rationale.
+    try:
+        import llm_critical_guard
+    except ImportError:
+        from backend import llm_critical_guard
+
+    if llm_critical_guard.was_already_raised():
+        # Another worker already triggered abort. Pass the call through once so
+        # the caller's normal error path runs; do not retry, do not re-raise.
+        return call_structured_llm_by_provider(provider, api_key, model, prompt, output_type, **kw)
+
+    attempts: list[dict[str, Any]] = []
+    result = None
+    for attempt_idx in range(4):  # 1 original + 3 retries
+        # Mid-retry short-circuit: see _call_llm_with_critical_guard for the
+        # full rationale. If a sibling worker tripped the guard while we slept
+        # between attempts, return the last result (None / non-ok) instead of
+        # compounding the raise into a stranded ThreadPoolExecutor Future.
+        if attempt_idx > 0 and llm_critical_guard.was_already_raised():
+            return result
+
+        result = call_structured_llm_by_provider(provider, api_key, model, prompt, output_type, **kw)
+        # Inspect _LAST_STRUCTURED_LLM_CALL to classify the response. The
+        # structured helper always stashes (provider, error, ok, ...) just
+        # before returning, but tolerate missing thread-local data defensively.
+        try:
+            data = _LAST_STRUCTURED_LLM_CALL.data or {}
+        except Exception:
+            data = {}
+        ok = bool(data.get("ok"))
+        if ok:
+            return result
+        error_str = str(data.get("error") or "")
+        status, body = _parse_structured_error(error_str)
+
+        # Update 5xx-consecutive counter before classifying (counter feeds classify).
+        llm_critical_guard.update_consecutive_state(
+            tag="pending", status=status, provider=provider, model=model,
+        )
+        class_tag, is_critical = llm_critical_guard.classify(
+            status=status, body=body, exc=None, provider=provider, model=model,
+        )
+
+        if not is_critical:
+            # Non-critical failure (skeleton output, transient parse error, etc.) —
+            # let the caller's existing None-handling fire. Don't retry here.
+            return result
+
+        attempts.append({
+            "attempt": attempt_idx + 1,
+            "class_tag": class_tag,
+            "http_status": status,
+            "body_sample": body[:300],
+            "ts": _time.time(),
+        })
+
+        if attempt_idx < 3:
+            _time.sleep(2 ** attempt_idx)  # 1, 2, 4
+            continue
+
+        # 4th attempt also critical → escalate
+        llm_critical_guard.mark_raised()
+        raise llm_critical_guard.LLMCriticalFailure(
+            class_tag=class_tag,
+            provider=provider,
+            model=model,
+            attribution=dict(attribution_keys or {}),
+            attempts=attempts,
+        )
+
+    return result  # unreachable, but mypy-friendly
+
+
+def _call_bedrock(
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_output_tokens: int = 256,
+    timeout_sec: int | None = None,
+    retries: int = 0,
+    region: str = "",
+    response_mime_type: str | None = None,
+    reasoning: str = "",
+) -> str:
+    """Plain-text chat against Amazon Bedrock via the Converse API.
+
+    Mirrors ``_call_ollama`` semantics: returns ``""`` on every failure (no
+    raise), stashes the HTTP shape via ``_stash_last_http`` so the
+    critical-guard can classify, and records telemetry. boto3 is synchronous;
+    the per-call client carries the bearer token + region.
+    """
+    _t0 = time.monotonic()
+    if bedrock_client is None or not model or not api_key or not str(region or "").strip():
+        try:
+            _stash_last_http(status=None, body="bedrock not configured (region/key/model)", exc=None)
+        except Exception:
+            pass
+        return ""
+    from botocore.exceptions import ClientError
+
+    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    inference_config: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        inference_config["maxTokens"] = int(max_output_tokens)
+    amrf = _normalize_bedrock_reasoning(reasoning, model)
+    if amrf:
+        _budget = int((amrf.get("reasoning_config") or {}).get("budget_tokens") or 0)
+        _cur = int(inference_config.get("maxTokens") or 0)
+        if _budget:
+            # Claude extended thinking: Converse requires maxTokens > budget_tokens
+            # (maxTokens caps thinking + the visible answer). Bump so a small
+            # default max can't invalidate a reasoning request.
+            inference_config["maxTokens"] = max(_cur, _budget + 1024)
+        elif amrf.get("reasoning_effort") and _cur:
+            # gpt-oss reasoning consumes output tokens; if a small cap is set,
+            # raise it to a floor so reasoning doesn't starve the answer.
+            # Uncapped calls (no maxTokens) are left uncapped on purpose.
+            inference_config["maxTokens"] = max(_cur, 4096)
+    converse_kwargs: dict[str, object] = {"modelId": model, "messages": messages}
+    if inference_config:
+        converse_kwargs["inferenceConfig"] = inference_config
+    if amrf:
+        converse_kwargs["additionalModelRequestFields"] = amrf
+    if response_mime_type and "json" in str(response_mime_type).lower():
+        converse_kwargs["system"] = [
+            {"text": "Respond with ONLY a single valid JSON value. No prose, no markdown fences."}
+        ]
+
+    timeout = float(_coerce_timeout_sec(timeout_sec))
+    max_retries = max(0, int(retries or 0))
+    last_status: int | None = None
+    last_body: str | None = None
+    last_exc: BaseException | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            client = bedrock_client.build_runtime_client(api_key, region, timeout_sec=timeout)
+            resp = client.converse(**converse_kwargs)
+        except ClientError as e:
+            code = (e.response or {}).get("Error", {}).get("Code", "")
+            last_status = (e.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
+            last_body = f"{code}: {(e.response or {}).get('Error', {}).get('Message', str(e))}"[:1000]
+            last_exc = e
+            transient = code in (
+                "ThrottlingException", "TooManyRequestsException",
+                "ServiceUnavailableException", "InternalServerException",
+                "ModelNotReadyException",
+            ) or (isinstance(last_status, int) and 500 <= last_status < 600)
+            if transient and attempt < max_retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            break
+        except Exception as e:
+            last_status = None
+            last_body = str(e)[:1000]
+            last_exc = e
+            break
+
+        content = (((resp or {}).get("output") or {}).get("message") or {}).get("content") or []
+        text = "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
+        if not text:  # reasoning-only output → fall back to reasoning text blocks
+            text = "".join(
+                ((b.get("reasoningContent", {}) or {}).get("reasoningText", {}) or {}).get("text", "")
+                for b in content if isinstance(b, dict) and "reasoningContent" in b
+            )
+        usage = (resp or {}).get("usage") or {}
+        _in_tok = int(usage.get("inputTokens") or 0)
+        _out_tok = int(usage.get("outputTokens") or 0)
+        try:
+            import sys as _sys
+            print(
+                f"[llm_utils] BEDROCK TOKENS: model={model!r} in_tokens={_in_tok} "
+                f"out_tokens={_out_tok} content_chars={len(text)}",
+                file=_sys.stderr, flush=True,
+            )
+        except Exception:
+            pass
+        try:
+            _stash_last_http(status=200, body=None, exc=None)
+        except Exception:
+            pass
+        try:
+            _safe_record(
+                provider="bedrock", model=model,
+                usage={"input_tokens": _in_tok, "output_tokens": _out_tok},
+                ok=True, duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error=None, model_id=None,
+            )
+        except Exception:
+            pass
+        return text
+
+    try:
+        _stash_last_http(status=last_status, body=last_body, exc=last_exc)
+    except Exception:
+        pass
+    try:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = str(last_exc) if last_exc else (last_body or "")
+    except Exception:
+        pass
+    try:
+        _safe_record(
+            provider="bedrock", model=model, usage={}, ok=False,
+            duration_ms=int((time.monotonic() - _t0) * 1000), retry_count=max_retries,
+            error=(str(last_exc)[:200] if last_exc else (last_body[:200] if last_body else "unknown")),
+            model_id=None,
+        )
+    except Exception:
+        pass
+    return ""
+
+
+def _tools_to_bedrock_toolspec(tools: list[dict]) -> list[dict]:
+    """Convert OpenAI/Gemini-shape tool dicts to Converse toolSpec entries."""
+    normalised = _normalize_tools_to_openai_shape(tools or [])
+    specs = []
+    for t in normalised:
+        fn = (t or {}).get("function") or {}
+        name = fn.get("name")
+        if not name:
+            continue
+        specs.append({"toolSpec": {
+            "name": name,
+            "description": fn.get("description", "") or name,
+            "inputSchema": {"json": fn.get("parameters") or {"type": "object", "properties": {}}},
+        }})
+    return specs
+
+
+def call_bedrock_with_tools(
+    api_key: str | None,
+    model: str,
+    prompt: str,
+    tools: list[dict],
+    *,
+    region: str = "",
+    timeout_sec=None,
+    max_output_tokens: int = 1024,
+    reasoning: str = "",
+) -> dict:
+    """Single-shot tool-using Converse call. Returns
+    ``{"text": str, "tool_calls": [{"name", "arguments"}, ...]}``; does NOT
+    execute tools or loop (mirrors ``call_ollama_with_tools``). Returns
+    ``{"text": "", "tool_calls": []}`` on any failure."""
+    _t0 = time.monotonic()
+    if bedrock_client is None or not model or not api_key or not str(region or "").strip():
+        return {"text": "", "tool_calls": []}
+    from botocore.exceptions import ClientError
+
+    inference_config: dict[str, object] = {}
+    if max_output_tokens and int(max_output_tokens) > 0:
+        inference_config["maxTokens"] = int(max_output_tokens)
+    amrf = _normalize_bedrock_reasoning(reasoning, model)
+    if amrf:
+        # See _call_bedrock for the maxTokens reconciliation rationale.
+        _budget = int((amrf.get("reasoning_config") or {}).get("budget_tokens") or 0)
+        _cur = int(inference_config.get("maxTokens") or 0)
+        if _budget:
+            inference_config["maxTokens"] = max(_cur, _budget + 1024)
+        elif amrf.get("reasoning_effort") and _cur:
+            inference_config["maxTokens"] = max(_cur, 4096)
+    converse_kwargs: dict[str, object] = {
+        "modelId": model,
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+    }
+    if inference_config:
+        converse_kwargs["inferenceConfig"] = inference_config
+    specs = _tools_to_bedrock_toolspec(tools or [])
+    if specs:
+        converse_kwargs["toolConfig"] = {"tools": specs}
+    if amrf:
+        converse_kwargs["additionalModelRequestFields"] = amrf
+
+    timeout = float(_coerce_timeout_sec(timeout_sec))
+    try:
+        client = bedrock_client.build_runtime_client(api_key, region, timeout_sec=timeout)
+        resp = client.converse(**converse_kwargs)
+    except ClientError as e:
+        try:
+            _stash_last_http(
+                status=(e.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode"),
+                body=str(e)[:1000], exc=e,
+            )
+            _safe_record(
+                provider="bedrock", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000), retry_count=0,
+                error=str(e)[:200], model_id=None,
+            )
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+    except Exception as e:
+        try:
+            _stash_last_http(status=None, body=str(e)[:1000], exc=e)
+        except Exception:
+            pass
+        return {"text": "", "tool_calls": []}
+
+    content = (((resp or {}).get("output") or {}).get("message") or {}).get("content") or []
+    text = "".join(b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
+    tool_calls = [
+        {"name": b["toolUse"].get("name", ""), "arguments": b["toolUse"].get("input") or {}}
+        for b in content if isinstance(b, dict) and "toolUse" in b
+    ]
+    usage = (resp or {}).get("usage") or {}
+    try:
+        _stash_last_http(status=200, body=None, exc=None)
+        _safe_record(
+            provider="bedrock", model=model,
+            usage={"input_tokens": int(usage.get("inputTokens") or 0),
+                   "output_tokens": int(usage.get("outputTokens") or 0)},
+            ok=True, duration_ms=int((time.monotonic() - _t0) * 1000),
+            retry_count=0, error=None, model_id=None,
+        )
+    except Exception:
+        pass
+    return {"text": text, "tool_calls": tool_calls}
+
+
 def call_llm_by_provider(
     provider: str,
     api_key: str,
@@ -2216,18 +5446,41 @@ def call_llm_by_provider(
     provider_config: dict[str, Any] | None = None,
 ) -> str:
     """
-    Call LLM by provider. Supports 'gemini', 'deepseek', 'openai', and 'azure'.
+    Call LLM by provider. Supports 'gemini', 'deepseek', 'openai', 'azure',
+    and 'claude-cli' (uses the locally-installed ``claude`` binary).
     Returns response text or empty string.
 
     timeout_sec: Optional override for LLM_REQUEST_TIMEOUT (seconds).
     retries: Number of retries on retriable failures (e.g. 503/429/timeouts).
     response_mime_type: Gemini-only response MIME type (e.g. application/json).
     """
-    if not api_key or not model:
+    if (provider or "").strip().lower() == "claude-cli":
+        return _call_claude_cli_plain(
+            model=model,
+            prompt=prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+        )
+    if (provider or "").strip().lower() == "codex-cli":
+        return _call_codex_cli_plain(
+            model=model,
+            prompt=prompt,
+            provider_config=provider_config,
+            timeout_sec=timeout_sec,
+            retries=retries,
+        )
+    # Local Ollama legitimately has no API key, so the api_key short-circuit
+    # must not block it. Cloud Ollama (api_key provided) still flows through
+    # the standard machinery.
+    if not model:
+        return ""
+    _provider_lower = (provider or "").strip().lower()
+    if not api_key and _provider_lower != "ollama":
         return ""
     # ── Prompt cache check ──
-    _effort_key = str((provider_config or {}).get("reasoning_effort", "")).strip().lower()
-    _cached = _check_prompt_cache(prompt, model, _effort_key)
+    _effort_key = _cache_effort_key(provider, provider_config)
+    _cached = _check_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "")
     if _cached is not None:
         return _cached
     _rl = _get_model_rate_limiter(model)
@@ -2282,6 +5535,31 @@ def call_llm_by_provider(
         )
     elif p == "deepseek":
         _result = _call_deepseek(api_key, model, prompt, max_output_tokens, timeout_sec=timeout_sec, retries=retries)
+    elif p == "ollama":
+        _result = _call_ollama(
+            api_key,
+            model,
+            prompt,
+            max_output_tokens=max_output_tokens,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            base_url=str(resolved.get("ollama_base_url") or "http://localhost:11434"),
+            response_mime_type=response_mime_type,
+            keep_alive=resolved.get("ollama_keep_alive"),
+            think=resolved.get("ollama_think"),
+        )
+    elif p == "bedrock":
+        _result = _call_bedrock(
+            api_key,
+            model,
+            prompt,
+            max_output_tokens=max_output_tokens,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            region=str(resolved.get("bedrock_region") or ""),
+            response_mime_type=response_mime_type,
+            reasoning=str(resolved.get("bedrock_reasoning") or ""),
+        )
     else:
         _result = _call_gemini(
             api_key,
@@ -2294,7 +5572,7 @@ def call_llm_by_provider(
         )
     if _result:
         _fire_llm_output_log(provider, model, prompt, _result)
-        _store_prompt_cache(prompt, model, _effort_key, _result)
+        _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", _result)
     return _result
 
 
