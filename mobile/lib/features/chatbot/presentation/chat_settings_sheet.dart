@@ -4,40 +4,200 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/common_widgets.dart';
-import '../../../core/widgets/confirm_dialog.dart';
 import '../application/chatbot_controller.dart';
 import '../data/models/chat.dart';
 
-/// Opens the chat settings sheet. Mirrors the web `ChatSettings.vue`:
-/// model selection, the auto-run-safe-tools toggle, conversation actions
-/// (new / delete), and an informational list of the tools the assistant can
-/// use, grouped by safety.
-Future<void> showChatSettings(BuildContext context) {
-  return showModalBottomSheet<void>(
-    context: context,
-    // ChatbotDock is mounted in the MaterialApp.router `builder`, above
-    // go_router's Navigator — so there is no *nearest* Navigator to host the
-    // sheet. Use the root navigator (same as showConfirmDialog) or the sheet
-    // silently never opens.
-    useRootNavigator: true,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
-    builder: (_) => const _ChatSettingsSheet(),
-  );
+// ── In-tree confirm overlay ───────────────────────────────────────────────────
+//
+// ChatbotDock is mounted in MaterialApp.router's `builder`, ABOVE go_router's
+// Navigator, so it has no Navigator ancestor — showDialog / showModalBottomSheet
+// silently do nothing. Everything modal therefore renders in-tree inside the
+// dock's own Stack (just like the chat panel itself).
+
+/// A pending confirmation, rendered by [ChatConfirmOverlay].
+class ChatConfirmRequest {
+  const ChatConfirmRequest({
+    required this.title,
+    required this.body,
+    required this.confirmLabel,
+    required this.confirmColor,
+    required this.icon,
+    required this.onConfirm,
+  });
+
+  final String title;
+  final String body;
+  final String confirmLabel;
+  final Color confirmColor;
+  final IconData icon;
+  final VoidCallback onConfirm;
 }
 
-class _ChatSettingsSheet extends ConsumerStatefulWidget {
-  const _ChatSettingsSheet();
+/// Scrim + centered confirm card. Returns a [Positioned.fill] — mount it as a
+/// direct child of the dock's Stack.
+class ChatConfirmOverlay extends StatelessWidget {
+  const ChatConfirmOverlay({
+    super.key,
+    required this.request,
+    required this.onDismiss,
+  });
+
+  final ChatConfirmRequest request;
+  final VoidCallback onDismiss;
 
   @override
-  ConsumerState<_ChatSettingsSheet> createState() => _ChatSettingsSheetState();
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: Material(
+        color: Colors.black.withValues(alpha: 0.6),
+        child: GestureDetector(
+          onTap: onDismiss,
+          child: Center(
+            child: GestureDetector(
+              onTap: () {}, // swallow taps on the card
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: Container(
+                  margin: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0a0716),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            top: BorderSide(color: request.confirmColor, width: 2),
+                            bottom: const BorderSide(color: AppColors.border),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(request.icon,
+                                color: request.confirmColor, size: 20),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                request.title,
+                                style: AppTextStyles.bodyHi
+                                    .copyWith(color: AppColors.textHi),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(18),
+                        child: Text(
+                          request.body,
+                          style:
+                              AppTextStyles.body.copyWith(color: AppColors.textMd),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: _ConfirmBtn(
+                                label: 'Cancel',
+                                color: AppColors.textMuted,
+                                filled: false,
+                                onTap: onDismiss,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: _ConfirmBtn(
+                                label: request.confirmLabel,
+                                color: request.confirmColor,
+                                filled: true,
+                                onTap: () {
+                                  request.onConfirm();
+                                  onDismiss();
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
-class _ChatSettingsSheetState extends ConsumerState<_ChatSettingsSheet> {
+class _ConfirmBtn extends StatelessWidget {
+  const _ConfirmBtn({
+    required this.label,
+    required this.color,
+    required this.filled,
+    required this.onTap,
+  });
+
+  final String label;
+  final Color color;
+  final bool filled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 11),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: filled ? color.withValues(alpha: 0.15) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: filled ? color.withValues(alpha: 0.5) : AppColors.border,
+          ),
+        ),
+        child: Text(
+          label,
+          style: AppTextStyles.micro
+              .copyWith(color: color, fontWeight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Settings sheet (in-tree) ──────────────────────────────────────────────────
+
+/// In-tree settings sheet: scrim + bottom panel. Mirrors the web `ChatSettings`
+/// — model selection, auto-run-safe-tools toggle, conversation actions, and an
+/// informational tool catalog. Mount as a direct child of the dock's Stack.
+class ChatSettingsSheet extends ConsumerStatefulWidget {
+  const ChatSettingsSheet({
+    super.key,
+    required this.onClose,
+    required this.onConfirm,
+  });
+
+  final VoidCallback onClose;
+  final void Function(ChatConfirmRequest) onConfirm;
+
+  @override
+  ConsumerState<ChatSettingsSheet> createState() => _ChatSettingsSheetState();
+}
+
+class _ChatSettingsSheetState extends ConsumerState<ChatSettingsSheet> {
   @override
   void initState() {
     super.initState();
-    // Load the model list (no-op if already loaded).
     Future.microtask(() => ref.read(chatbotProvider.notifier).loadModels());
   }
 
@@ -48,70 +208,100 @@ class _ChatSettingsSheetState extends ConsumerState<_ChatSettingsSheet> {
     final convo = st.activeConversation;
     final mq = MediaQuery.of(context);
 
-    return Container(
-      constraints: BoxConstraints(maxHeight: mq.size.height * 0.85),
-      decoration: const BoxDecoration(
-        color: Color(0xFF0a0716),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        border: Border(
-          top: BorderSide(color: AppColors.border),
-          left: BorderSide(color: AppColors.border),
-          right: BorderSide(color: AppColors.border),
-        ),
-      ),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Grab handle.
-            Container(
-              width: 36,
-              height: 4,
-              margin: const EdgeInsets.only(top: 10, bottom: 6),
-              decoration: BoxDecoration(
-                color: AppColors.border,
-                borderRadius: BorderRadius.circular(2),
-              ),
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          // Scrim
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onClose,
+              child: ColoredBox(color: Colors.black.withValues(alpha: 0.55)),
             ),
-            // Title row.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 8, 8),
-              child: Row(
-                children: [
-                  Icon(Icons.settings, size: 18, color: AppColors.primary),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Chat settings',
-                    style:
-                        AppTextStyles.bodyHi.copyWith(color: AppColors.textHi),
+          ),
+          // Bottom sheet
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: GestureDetector(
+              onTap: () {}, // swallow taps so they don't hit the scrim
+              child: Container(
+                constraints: BoxConstraints(maxHeight: mq.size.height * 0.85),
+                decoration: const BoxDecoration(
+                  color: Color(0xFF0a0716),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                  border: Border(
+                    top: BorderSide(color: AppColors.border),
+                    left: BorderSide(color: AppColors.border),
+                    right: BorderSide(color: AppColors.border),
                   ),
-                  const Spacer(),
-                  IconButton(
-                    icon: Icon(Icons.close, size: 20, color: AppColors.textMuted),
-                    onPressed: () => Navigator.of(context).pop(),
-                    tooltip: 'Close',
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 36,
+                        height: 4,
+                        margin: const EdgeInsets.only(top: 10, bottom: 6),
+                        decoration: BoxDecoration(
+                          color: AppColors.border,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 8, 8),
+                        child: Row(
+                          children: [
+                            Icon(Icons.settings,
+                                size: 18, color: AppColors.primary),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Chat settings',
+                              style: AppTextStyles.bodyHi
+                                  .copyWith(color: AppColors.textHi),
+                            ),
+                            const Spacer(),
+                            IconButton(
+                              icon: Icon(Icons.close,
+                                  size: 20, color: AppColors.textMuted),
+                              onPressed: widget.onClose,
+                              tooltip: 'Close',
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1, color: AppColors.border),
+                      Flexible(
+                        child: ListView(
+                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+                          children: [
+                            _ModelSection(
+                                st: st, convo: convo, notifier: notifier),
+                            const SizedBox(height: 20),
+                            _AutoConfirmSection(
+                                convo: convo, notifier: notifier),
+                            const SizedBox(height: 20),
+                            _ConversationSection(
+                              convo: convo,
+                              notifier: notifier,
+                              onClose: widget.onClose,
+                              onConfirm: widget.onConfirm,
+                            ),
+                            const SizedBox(height: 20),
+                            _ToolsSection(toolCatalog: st.toolCatalog),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
-            const Divider(height: 1, color: AppColors.border),
-            Flexible(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-                children: [
-                  _ModelSection(st: st, convo: convo, notifier: notifier),
-                  const SizedBox(height: 20),
-                  _AutoConfirmSection(convo: convo, notifier: notifier),
-                  const SizedBox(height: 20),
-                  _ConversationSection(convo: convo, notifier: notifier),
-                  const SizedBox(height: 20),
-                  _ToolsSection(toolCatalog: st.toolCatalog),
-                ],
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -310,10 +500,17 @@ class _AutoConfirmSection extends StatelessWidget {
 // ── Conversation actions ──────────────────────────────────────────────────────
 
 class _ConversationSection extends StatelessWidget {
-  const _ConversationSection({required this.convo, required this.notifier});
+  const _ConversationSection({
+    required this.convo,
+    required this.notifier,
+    required this.onClose,
+    required this.onConfirm,
+  });
 
   final Conversation? convo;
   final ChatbotNotifier notifier;
+  final VoidCallback onClose;
+  final void Function(ChatConfirmRequest) onConfirm;
 
   @override
   Widget build(BuildContext context) {
@@ -326,15 +523,38 @@ class _ConversationSection extends StatelessWidget {
             Expanded(
               child: _ActionButton(
                 icon: Icons.add,
-                label: 'New conversation',
+                label: 'New',
                 color: AppColors.primary,
-                onTap: () async {
-                  await notifier.startNewConversation();
-                  if (context.mounted) Navigator.of(context).pop();
+                onTap: () {
+                  notifier.startNewConversation();
+                  onClose();
                 },
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _ActionButton(
+                icon: Icons.delete_sweep,
+                label: 'Clear',
+                color: AppColors.warning,
+                onTap: convo == null
+                    ? null
+                    : () {
+                        onConfirm(ChatConfirmRequest(
+                          title: 'Clear conversation',
+                          body:
+                              'This deletes all messages in this conversation. '
+                              'This cannot be undone.',
+                          confirmLabel: 'Clear',
+                          confirmColor: AppColors.warning,
+                          icon: Icons.delete_sweep,
+                          onConfirm: notifier.clearConversation,
+                        ));
+                        onClose();
+                      },
+              ),
+            ),
+            const SizedBox(width: 8),
             Expanded(
               child: _ActionButton(
                 icon: Icons.delete_outline,
@@ -342,9 +562,8 @@ class _ConversationSection extends StatelessWidget {
                 color: AppColors.danger,
                 onTap: convo == null
                     ? null
-                    : () async {
-                        final ok = await showConfirmDialog(
-                          context,
+                    : () {
+                        onConfirm(ChatConfirmRequest(
                           title: 'Delete conversation',
                           body:
                               'This permanently deletes this conversation. '
@@ -352,10 +571,9 @@ class _ConversationSection extends StatelessWidget {
                           confirmLabel: 'Delete',
                           confirmColor: AppColors.danger,
                           icon: Icons.delete_outline,
-                        );
-                        if (!ok) return;
-                        await notifier.deleteConversation();
-                        if (context.mounted) Navigator.of(context).pop();
+                          onConfirm: notifier.deleteConversation,
+                        ));
+                        onClose();
                       },
               ),
             ),
@@ -395,12 +613,15 @@ class _ActionButton extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 16, color: c),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: AppTextStyles.micro
-                  .copyWith(color: c, fontWeight: FontWeight.w600),
+            Icon(icon, size: 15, color: c),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.micro
+                    .copyWith(color: c, fontWeight: FontWeight.w600),
+              ),
             ),
           ],
         ),
