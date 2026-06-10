@@ -466,7 +466,10 @@ class _KpiGrid extends StatelessWidget {
 
     return Column(children: [
       // Row 1: Period cost + Period calls
-      Row(children: [
+      IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
         Expanded(child: GlassCard(padding: const EdgeInsets.all(16), child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -477,10 +480,16 @@ class _KpiGrid extends StatelessWidget {
             Text('${fmtTokens(totalTokens)} tokens · $totalCalls calls',
                 style: AppTextStyles.meta.copyWith(color: AppColors.textMuted)),
             const SizedBox(height: 8),
-            Wrap(spacing: 4, runSpacing: 4, children: topThree.isNotEmpty
-              ? topThree.map((p) => _providerPill(p)).toList()
-              : [Text('No provider spend', style: AppTextStyles.nano.copyWith(color: AppColors.textFaint))],
-            ),
+            // One pill per line (intrinsic-safe — Wrap throws under IntrinsicHeight).
+            if (topThree.isEmpty)
+              Text('No provider spend',
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textFaint))
+            else
+              for (final p in topThree)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: _providerPill(p),
+                ),
           ],
         ))),
         const SizedBox(width: 12),
@@ -497,10 +506,15 @@ class _KpiGrid extends StatelessWidget {
             ]),
           ],
         ))),
-      ]),
+          ],
+        ),
+      ),
       const SizedBox(height: 12),
       // Row 2: Max plan estimate + Telemetry health
-      Row(children: [
+      IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
         Expanded(child: GlassCard(padding: const EdgeInsets.all(16), child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -536,7 +550,9 @@ class _KpiGrid extends StatelessWidget {
             ]),
           ],
         ))),
-      ]),
+          ],
+        ),
+      ),
     ]);
   }
 
