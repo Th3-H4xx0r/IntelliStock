@@ -256,7 +256,10 @@ def test_neutralize_api_key_config_removes_all_sources(tmp_path):
     (home / ".claude" / "settings.json").write_text(
         _json.dumps({
             "apiKeyHelper": "/path/helper.sh",
-            "env": {"ANTHROPIC_API_KEY": "sk", "ANTHROPIC_AUTH_TOKEN": "t", "FOO": "bar"},
+            "env": {
+                "ANTHROPIC_API_KEY": "sk", "ANTHROPIC_AUTH_TOKEN": "t",
+                "ANTHROPIC_BETAS": "context-1m-2025-08-07", "FOO": "bar",
+            },
             "theme": "dark",
         })
     )
@@ -270,6 +273,7 @@ def test_neutralize_api_key_config_removes_all_sources(tmp_path):
     assert "apiKeyHelper" not in s
     assert "ANTHROPIC_API_KEY" not in s.get("env", {})
     assert "ANTHROPIC_AUTH_TOKEN" not in s.get("env", {})
+    assert "ANTHROPIC_BETAS" not in s.get("env", {})  # 1M-context beta removed
     assert s["env"]["FOO"] == "bar"   # unrelated env vars preserved
     assert s["theme"] == "dark"       # unrelated settings preserved
 
@@ -303,6 +307,9 @@ def test_force_subscription_settings_blanks_anthropic_keys():
     d = _json.loads(provider._FORCE_SUBSCRIPTION_SETTINGS)
     assert d["env"]["ANTHROPIC_API_KEY"] == ""
     assert d["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+    # ANTHROPIC_BETAS blanked too — a leftover context-1m beta otherwise
+    # forces the 1M context window and 429s every call.
+    assert d["env"]["ANTHROPIC_BETAS"] == ""
 
 
 def test_structured_argv_injects_settings_override():

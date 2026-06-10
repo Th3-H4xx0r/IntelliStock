@@ -353,19 +353,26 @@ _SAFETY_FLAGS = [
 ]
 
 
-# Env vars that make ``claude`` authenticate as something OTHER than the
-# operator's Claude subscription (OAuth). Claude Code's auth precedence is
-# ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` BEFORE the subscription
-# OAuth, so a deployment that sets either (e.g. for a different provider)
-# silently hijacks every claude-cli call: the request goes out with the
-# API key and the server returns ``401 Invalid authentication credentials``
-# even though ``claude auth status`` reports the subscription as logged in.
-# We run claude-cli strictly in subscription mode, so we scrub these from
-# every spawned child env. (We inherit the parent env with ``os.environ
-# .copy()`` to keep PATH / HOME / locale, then strip just the auth keys.)
+# Env vars that derail claude-cli's subscription (OAuth) mode. We run claude
+# strictly on the operator's Claude subscription, so we scrub these from every
+# spawned child env (and from copied settings ``env`` blocks). We inherit the
+# parent env with ``os.environ.copy()`` to keep PATH / HOME / locale, then
+# strip just these:
+#
+#   * ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN — Claude Code's auth precedence
+#     puts these BEFORE the subscription OAuth, so a leftover key hijacks every
+#     call and 401s ("Invalid authentication credentials") even though
+#     ``claude auth status`` reports the subscription as logged in.
+#   * ANTHROPIC_BETAS — a leftover ``context-1m-2025-08-07`` here forces the 1M
+#     context window on EVERY call, which fails with HTTP 429 "Usage credits
+#     required for 1M context" regardless of the model alias the user picks
+#     (reproduced: this env var alone turns a plain ``claude-sonnet-4-6`` call
+#     into the 1M error). 1M is opt-in via the ``...[1m]`` model variant, never
+#     a global env var, so subscription mode always clears it.
 _SUBSCRIPTION_CONFLICTING_ENV = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BETAS",
 )
 
 
@@ -397,7 +404,7 @@ def _strip_api_key_env(env: Dict[str, str]) -> Dict[str, str]:
 # don't need it. ``--settings`` is in ``_HARD_REJECTED_FLAGS`` so a user's
 # extra_args can never add a second, conflicting one.
 _FORCE_SUBSCRIPTION_SETTINGS = json.dumps(
-    {"env": {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}}
+    {"env": {k: "" for k in _SUBSCRIPTION_CONFLICTING_ENV}}
 )
 _FORCE_SUBSCRIPTION_ARGS = ["--settings", _FORCE_SUBSCRIPTION_SETTINGS]
 
