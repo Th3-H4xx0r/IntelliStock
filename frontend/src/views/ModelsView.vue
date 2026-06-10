@@ -258,13 +258,14 @@ async function submitModel() {
   submitting.value = true
   submitOk.value = false
   testResult.value = null
-  // claude-cli's local-binary auth has nothing the /llm/test endpoint
-  // can probe without a separate ``codex login``-style flow, so we
-  // skip the test for that provider. codex-cli DOES go through
-  // /llm/test — the codex provider's structured + smoke calls verify
-  // both that the local binary is authenticated AND that the operator-
-  // configured model name actually resolves on OpenAI's side (catches
-  // misconfigurations like ``gpt-5.4-mini`` which is an Azure
+  // claude-cli is not run through the /llm/test endpoint here — instead
+  // it gets the REAL /models/{id}/test-cli probe AFTER the row is saved
+  // (see the claude-cli branch below), so we never claim "LLM test
+  // passed" without an honest connection check. codex-cli DOES go
+  // through /llm/test — the codex provider's structured + smoke calls
+  // verify both that the local binary is authenticated AND that the
+  // operator-configured model name actually resolves on OpenAI's side
+  // (catches misconfigurations like ``gpt-5.4-mini`` which is an Azure
   // deployment name, not a codex model).
   const skipTest = d.provider === 'claude-cli'
   submitMsg.value = skipTest ? (editMode.value ? 'Updating model...' : 'Saving model...') : 'Testing LLM configuration...'
@@ -358,8 +359,53 @@ async function submitModel() {
     const body = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(_normalizeError(body, res.status))
 
-    submitOk.value = true
+    // The row is saved at this point — claude-cli's honesty check runs
+    // AFTER and never un-saves it.
     saved.value = true
+
+    if (d.provider === 'claude-cli') {
+      // claude-cli never went through /llm/test (skipTest above), so we
+      // must NOT claim "LLM test passed". Instead run the REAL connection
+      // test (POST /models/{id}/test-cli — the same probe the per-row
+      // cable icon uses) against the just-saved row and surface its
+      // actual result. The save already succeeded; the test result only
+      // affects the message, never whether the model persists. For a new
+      // model the id comes back in the create response (body.model.id).
+      const savedId = editMode.value ? editId.value : body?.model?.id
+      const savedLabel = editMode.value ? 'Model updated.' : 'Model saved.'
+      submitOk.value = true
+      submitMsg.value = `${savedLabel} Testing Claude CLI connection...`
+      submitting.value = false
+      if (!savedId) {
+        // No id to test against — be honest that we couldn't probe.
+        submitMsg.value = `${savedLabel} Could not run the Claude CLI test (missing model id) — use the cable icon on the row to test.`
+        await fetchModels()
+        return
+      }
+      try {
+        const testRes = await fetch(`${API_BASE}/models/${savedId}/test-cli`, {
+          method: 'POST',
+          headers: authHeaders(),
+        })
+        const testBody = await testRes.json().catch(() => ({}))
+        if (!testRes.ok) throw new Error(_normalizeError(testBody, testRes.status))
+        if (testBody.ok) {
+          const loggedIn = testBody.logged_in ? 'logged in' : 'not logged in'
+          submitOk.value = true
+          submitMsg.value = `${savedLabel} Claude CLI connection OK (${loggedIn}).`
+        } else {
+          submitOk.value = false
+          submitMsg.value = `${savedLabel} But the Claude CLI test failed: ${testBody.error || 'unknown error'}`
+        }
+      } catch (e) {
+        submitOk.value = false
+        submitMsg.value = `${savedLabel} But the Claude CLI test failed: ${e.message || e}`
+      }
+      await fetchModels()
+      return
+    }
+
+    submitOk.value = true
     submitMsg.value = editMode.value
       ? 'LLM test passed. Model updated.'
       : 'LLM test passed. Model saved.'

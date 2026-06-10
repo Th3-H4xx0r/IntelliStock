@@ -19,6 +19,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+# The Flutter mobile app keeps its Dart source under mobile/lib — the Python
+# `lib/` ignore above would otherwise hide the entire app.
+!mobile/lib/
+!mobile/lib/**
 parts/
 sdist/
 var/
@@ -254,3 +258,6 @@ ehthumbs.db
 # Vite cache
 frontend/.vite/
 .sessions/
+
+# Superpowers brainstorm scratch
+.superpowers/
