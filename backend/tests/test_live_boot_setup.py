@@ -101,18 +101,18 @@ def test_rebaseline_clean_room_drawdown_resets_stale_backtest_peak():
     from live_boot_setup import rebaseline_clean_room_drawdown
     cache = {"_portfolio_drawdown_state": {"peak_value": 19977.60, "last_value": 18000.0,
                                            "halt_active": True, "up_days": 0}}
-    new = rebaseline_clean_room_drawdown(cache, live_equity=0.00)
-    assert new["peak_value"] == 0.00
-    assert new["last_value"] == 0.00
+    new = rebaseline_clean_room_drawdown(cache, live_equity=5000.0)
+    assert new["peak_value"] == 5000.0
+    assert new["last_value"] == 5000.0
     assert new["halt_active"] is False
-    assert cache["_portfolio_drawdown_state"]["peak_value"] == 0.00
+    assert cache["_portfolio_drawdown_state"]["peak_value"] == 5000.0
 
 
 def test_rebaseline_clean_room_drawdown_noop_when_absent():
     """No drawdown state -> nothing to reset (returns None)."""
     from live_boot_setup import rebaseline_clean_room_drawdown
-    assert rebaseline_clean_room_drawdown({}, live_equity=0.00) is None
-    assert rebaseline_clean_room_drawdown({"_portfolio_drawdown_state": {}}, 0.00) is None
+    assert rebaseline_clean_room_drawdown({}, live_equity=5000.0) is None
+    assert rebaseline_clean_room_drawdown({"_portfolio_drawdown_state": {}}, 5000.0) is None
 
 
 def test_strip_stale_momentum_baseline_removes_first_seen_price():

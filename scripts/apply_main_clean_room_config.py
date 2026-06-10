@@ -30,9 +30,9 @@ So the FULL launch sequence after this script applies is just:
   INTELLISTOCK_CRED_KEY=<key> RH_DRY_RUN=true RETHINKDB_HOST=... \\
       python3 backend/broker.py --instance main
 
-Read-only by default. Pass ``--apply`` to write. Pass ``--initial-value N``
-to override the default ($6,434.48 = the actual Robinhood cash balance per
-inspect_broker_state.py 2026-05-28).
+Read-only by default. Pass ``--apply`` to write. ``--initial-value N`` is
+REQUIRED (the instance's starting cash in USD) — read it from your own
+``inspect_broker_state.py`` run; nothing operator-specific is baked in here.
 
 Usage:
   python3 scripts/apply_main_clean_room_config.py
@@ -63,7 +63,7 @@ except ImportError:
 
 DB_NAME = "IntelliStock"
 DEFAULT_INSTANCE_ID = "main"
-DEFAULT_INITIAL_VALUE = 0.00  # matches inspector reading on 2026-05-28
+DEFAULT_INITIAL_VALUE = None  # operator must pass --initial-value; nothing baked in
 
 
 # key -> (expected_current, target). expected_current is advisory: a mismatch
@@ -137,6 +137,13 @@ def main(instance_id: str, apply: bool, initial_value: float, rollback: bool) ->
             }
             verb = "ROLLBACK"
         else:
+            if initial_value is None:
+                print(
+                    "ERROR: --initial-value is required (nothing is baked in). Read the "
+                    "instance's starting cash from scripts/inspect_broker_state.py.",
+                    file=sys.stderr,
+                )
+                return 6
             changes = dict(DEFAULT_CHANGES)
             changes["initial_value"] = ("<ABSENT>", float(initial_value))
             verb = "APPLY"
@@ -204,8 +211,8 @@ def _parse_args():
         description="Apply clean_room_mode + initial_value to the Instances.main row (merge-only)."
     )
     p.add_argument("--instance", default=DEFAULT_INSTANCE_ID, help=f"Instances row id (default: {DEFAULT_INSTANCE_ID})")
-    p.add_argument("--initial-value", type=float, default=DEFAULT_INITIAL_VALUE,
-                   help=f"Initial value in USD (default: {DEFAULT_INITIAL_VALUE})")
+    p.add_argument("--initial-value", type=float, default=None,
+                   help="Initial value in USD (REQUIRED with --apply; the instance's starting cash).")
     p.add_argument("--rollback", action="store_true",
                    help="Set clean_room_mode=False instead of applying. Leaves initial_value field alone.")
     p.add_argument("--apply", action="store_true",

@@ -112,8 +112,8 @@ def _available_cash_for_sizing(settled_cash: float, buying_power: float) -> floa
     """Spendable cash for position sizing AND portfolio valuation.
 
     1-A (bug-sweep 2026-05-28): Robinhood's ``buying_power`` on a margin /
-    Instant / Gold account EXCEEDS settled cash (e.g. main acct REDACTED-ACCT:
-    bp $6,967.67 vs settled $6,434.48). The strategy is a cash-deployment
+    Instant / Gold account EXCEEDS settled cash (buying_power can sit a few
+    hundred dollars above settled cash). The strategy is a cash-deployment
     system (cash_reserve_floor etc.) and must NOT silently deploy instant /
     margin credit. We cap at settled cash so deployment never exceeds what the
     operator actually has, and use the LOWER of the two so a hold that pushes

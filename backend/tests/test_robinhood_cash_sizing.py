@@ -2,9 +2,9 @@
 cash, not buying_power, so a margin/Instant/Gold account never deploys
 non-settled credit on day 1.
 
-Verified live: instance main acct REDACTED-ACCT is type=margin with
-buying_power $6,967.67 > settled cash $6,434.48 (Δ $533). Before this fix
-get_cash() returned buying_power and the strategy would size/value against it.
+A margin/Instant/Gold account can report buying_power above settled cash;
+before this fix get_cash() returned buying_power and the strategy would
+size/value against it.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 def test_available_cash_caps_at_settled_on_margin_account():
     """Margin account: buying_power > settled -> spendable == settled cash."""
     from broker_adapters.robinhood import _available_cash_for_sizing
-    assert _available_cash_for_sizing(0.00, 0.00) == 0.00
+    assert _available_cash_for_sizing(5000.0, 5500.0) == 5000.0
 
 
 def test_available_cash_noop_on_cash_account():

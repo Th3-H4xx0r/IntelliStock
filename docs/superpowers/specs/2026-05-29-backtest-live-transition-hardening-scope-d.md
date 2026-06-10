@@ -7,7 +7,7 @@
 > **GitNexus:** connected this session. `gitnexus_impact` is run before each symbol edit and `gitnexus_detect_changes` before commits, per CLAUDE.md.
 
 ## Context (instance `main`, 2026-05-29)
-- `main` is now the ONLY live instance (nexus-live / nexus-testing deleted). Robinhood, REAL MONEY, acct `REDACTED-ACCT`, MARGIN.
+- `main` is now the ONLY live instance (nexus-live / nexus-testing deleted). Robinhood, REAL MONEY, MARGIN.
 - Scope C (commit `5520a79`) is deployed. **Day-1 first clean-room boot is safe.** Scope D fixes the latent bugs that bite on the first daemon RESTART after `main` has traded, plus several real-money execution/abort gaps.
 - `0-A` (WAL dry-filter) and `1-A` (`get_cash` settled-cash cap) were re-verified SOUND and are out of scope.
 

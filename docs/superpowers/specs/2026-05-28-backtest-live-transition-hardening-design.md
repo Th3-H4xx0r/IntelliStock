@@ -7,7 +7,7 @@
 > **Note on GitNexus:** CLAUDE.md mandates `gitnexus_impact` before edits, but the GitNexus MCP is not connected this session. Impact analysis is done manually (reading callers/tests) instead.
 
 ## Verified launch context (instance `main`, 2026-05-28)
-- Account `REDACTED-ACCT` is **type=margin**: `buying_power $6,967.67` > settled `cash $6,434.48` (Δ $533). `leverage_enabled:false`, PDT False.
+- The live `main` account is **type=margin**: `buying_power` > settled `cash` (a few hundred dollars of Instant/margin headroom). `leverage_enabled:false`, PDT False.
 - **0 open positions, 0 open orders** (real RH read).
 - `LiveOrderWAL`: 21 *real* filled `main-` rows (May 1–12); **0** dry-run synthetic. WAL is not purged by clean-room cleanup → these replay into `_trades`.
 - `LiveBootAudit` table absent (0 rows) → first-clean-room cleanup will run.

@@ -44,8 +44,8 @@ def test_robinhood_cancel_path_invokes_cancel_for_each_open_order(monkeypatch):
         "robinhood_access_token": "<encrypted access>",
         "robinhood_refresh_token": "<encrypted refresh>",
         "robinhood_device_token": "<encrypted device>",
-        "robinhood_account_number": "REDACTED-ACCT",
-        "robinhood_account_url": "https://api.robinhood.com/accounts/REDACTED-ACCT/",
+        "robinhood_account_number": "123456789",
+        "robinhood_account_url": "https://api.robinhood.com/accounts/123456789/",
         "robinhood_obtained_at_epoch": 1779000000,
         "robinhood_expires_in": 2400000,
     }
@@ -113,8 +113,8 @@ def test_robinhood_cancel_refreshes_on_stale_token_401(monkeypatch):
         "robinhood_access_token": "<stale access>",
         "robinhood_refresh_token": "<refresh>",
         "robinhood_device_token": "<device>",
-        "robinhood_account_number": "REDACTED-ACCT",
-        "robinhood_account_url": "https://api.robinhood.com/accounts/REDACTED-ACCT/",
+        "robinhood_account_number": "123456789",
+        "robinhood_account_url": "https://api.robinhood.com/accounts/123456789/",
         "robinhood_obtained_at_epoch": 1779000000,
         "robinhood_expires_in": 2400000,
     }
@@ -176,8 +176,8 @@ def test_robinhood_cancel_refreshes_on_stale_token_401_during_cancel(monkeypatch
     rh_brokerage = {
         "id": "rh-1", "brokerage_type": "robinhood",
         "robinhood_access_token": "<stale>", "robinhood_refresh_token": "<refresh>",
-        "robinhood_device_token": "<device>", "robinhood_account_number": "REDACTED-ACCT",
-        "robinhood_account_url": "https://api.robinhood.com/accounts/REDACTED-ACCT/",
+        "robinhood_device_token": "<device>", "robinhood_account_number": "123456789",
+        "robinhood_account_url": "https://api.robinhood.com/accounts/123456789/",
         "robinhood_obtained_at_epoch": 1779000000, "robinhood_expires_in": 2400000,
     }
     fake_r, fake_conn = _fake_r_with_brokerages([rh_brokerage])
@@ -316,7 +316,7 @@ def test_scoped_halt_only_touches_linked_brokerage(monkeypatch):
     'main' brokerage."""
     import live_kill_switch as lks
 
-    rh_main = _rh("rh-main", "REDACTED-ACCT")   # real money — MUST be untouched
+    rh_main = _rh("rh-main", "123456789")   # real money — MUST be untouched
     rh_paper = _rh("rh-paper", "999999999")  # the failing (paper) instance's brokerage
     inst_doc = {"id": "nexus-live", "brokerage_id": "rh-paper"}
 
@@ -341,7 +341,7 @@ def test_scoped_halt_with_no_linked_brokerage_cancels_nothing(monkeypatch):
     falls back to touching every account)."""
     import live_kill_switch as lks
 
-    rh_main = _rh("rh-main", "REDACTED-ACCT")
+    rh_main = _rh("rh-main", "123456789")
     inst_doc = {"id": "ghost", "brokerage_id": None}
     fake_r, fake_conn, _ = _fake_r_scoped([rh_main], inst_doc)
     monkeypatch.setattr(lks, "_get_conn", lambda: (fake_r, fake_conn))
