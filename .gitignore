@@ -223,7 +223,8 @@ __marimo__/
 # Backtest logs
 backtest_logs/
 # Logs pulled locally via scripts/pull_backtest_logs.py
-backtests/
+# Anchored to repo root so it does NOT swallow mobile/lib/features/backtests/
+/backtests/
 
 # Local dev tooling state — Claude Code, MCP, Codex, hive-mind, RuFlo
 .gitnexus
