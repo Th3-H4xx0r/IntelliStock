@@ -24,7 +24,7 @@ end
 runner.copy_files_build_phases.select { |p| p.name == 'Embed Foundation Extensions' }.each(&:remove_from_project)
 
 # ── Create the app-extension target ───────────────────────────────────────────
-ext = project.new_target(:app_extension, EXT_NAME, :ios, '14.0', nil, :swift)
+ext = project.new_target(:app_extension, EXT_NAME, :ios, '17.0', nil, :swift)
 
 # Source group + files
 group = project.main_group.find_subpath(EXT_NAME, true)
@@ -45,7 +45,7 @@ ext.build_configurations.each do |cfg|
   s['CODE_SIGN_ENTITLEMENTS'] = "#{EXT_NAME}/#{EXT_NAME}.entitlements"
   s['CODE_SIGN_STYLE'] = 'Automatic'
   s['DEVELOPMENT_TEAM'] = TEAM
-  s['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
+  s['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
   s['SWIFT_VERSION'] = '5.0'
   s['TARGETED_DEVICE_FAMILY'] = '1,2'
   s['GENERATE_INFOPLIST_FILE'] = 'NO'

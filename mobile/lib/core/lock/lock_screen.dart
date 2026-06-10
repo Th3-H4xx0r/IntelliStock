@@ -11,14 +11,12 @@ import 'biometric_service.dart';
 
 /// Full-screen lock gate shown when [AppLockState.locked] is true.
 ///
-/// The router gates the entire navigation tree behind this screen:
-///   if (ref.watch(appLockControllerProvider).locked) return LockScreen();
-///
-/// Shows:
-///  • branded dark background with logo + lock icon
-///  • "Unlock with Face ID / Biometrics" primary button
-///  • retry message on failure
-///  • "Log out" text link after repeated failures (clears session)
+/// Behaviour:
+///  • Auto-prompts Face ID/biometrics the moment it appears, and again whenever
+///    the app returns to the foreground — so the user never has to tap to unlock
+///    on a normal relaunch.
+///  • If biometrics fail or are cancelled, it reveals fallback options:
+///    "Unlock with Face ID" (retry), "Log in with password", and "Log out".
 class LockScreen extends ConsumerStatefulWidget {
   const LockScreen({super.key});
 
@@ -26,52 +24,63 @@ class LockScreen extends ConsumerStatefulWidget {
   ConsumerState<LockScreen> createState() => _LockScreenState();
 }
 
-class _LockScreenState extends ConsumerState<LockScreen> {
+class _LockScreenState extends ConsumerState<LockScreen>
+    with WidgetsBindingObserver {
   bool _busy = false;
   bool _failed = false;
-  int _failCount = 0;
+  AppLifecycleState _prevLifecycle = AppLifecycleState.resumed;
 
-  /// Threshold after which "Log out" appears.
-  static const _failThreshold = 2;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Auto-prompt as soon as the lock screen is shown.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _attempt());
+  }
 
-  Future<void> _unlock() async {
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Re-prompt automatically only when returning from a genuine background
+    // (paused/hidden) — NOT from `inactive`, which the Face ID sheet itself
+    // triggers (that would cause a prompt loop after a cancel).
+    if (state == AppLifecycleState.resumed &&
+        (_prevLifecycle == AppLifecycleState.paused ||
+            _prevLifecycle == AppLifecycleState.hidden ||
+            _prevLifecycle == AppLifecycleState.detached)) {
+      if (ref.read(appLockControllerProvider).locked && !_busy) {
+        _attempt();
+      }
+    }
+    _prevLifecycle = state;
+  }
+
+  Future<void> _attempt() async {
     if (_busy) return;
     setState(() {
       _busy = true;
       _failed = false;
     });
-    final ok =
-        await ref.read(appLockControllerProvider.notifier).unlock();
-    if (mounted) {
-      setState(() {
-        _busy = false;
-        if (!ok) {
-          _failed = true;
-          _failCount++;
-        }
-      });
-    }
+    final ok = await ref.read(appLockControllerProvider.notifier).unlock();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _failed = !ok; // on success the screen is torn down by the lock gate
+    });
   }
 
-  Future<void> _logout() async {
-    // Capture the lock notifier BEFORE the first await — session.clear()
-    // triggers a router redirect that may dispose this screen, making
-    // ref.read unsafe after the await.
+  /// Leave the locked session via the username/password login (keeps the
+  /// biometric-lock SETTING enabled for next launch).
+  Future<void> _exitToLogin() async {
     final lockCtrl = ref.read(appLockControllerProvider.notifier);
-    await ref.read(sessionProvider).clear();
-    // The router's redirect logic will navigate to /login once session is
-    // cleared; AppLockController.build() will disable lock on next app start.
-    await lockCtrl.disable();
-  }
-
-  String _unlockLabel(List<dynamic> types) {
-    // types is List<BiometricType> from local_auth
-    final hasFace = types.any((t) => t.toString().contains('face'));
-    if (hasFace) return 'Unlock with Face ID';
-    final hasFingerprint =
-        types.any((t) => t.toString().contains('fingerprint'));
-    if (hasFingerprint) return 'Unlock with Touch ID';
-    return 'Unlock with Biometrics';
+    final session = ref.read(sessionProvider);
+    lockCtrl.releaseLock(); // open the gate so the router can show /login
+    await session.clear(); // → router redirects to /login
   }
 
   @override
@@ -86,77 +95,56 @@ class _LockScreenState extends ConsumerState<LockScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // ── Logo ────────────────────────────────────────────────
                   _LogoMark(),
                   const SizedBox(height: 32),
-
-                  // ── Lock icon ────────────────────────────────────────────
                   Container(
                     width: 72,
                     height: 72,
                     decoration: BoxDecoration(
                       color: AppColors.fill(AppColors.primary),
                       shape: BoxShape.circle,
-                      border:
-                          Border.all(color: AppColors.stroke(AppColors.primary)),
+                      border: Border.all(
+                          color: AppColors.stroke(AppColors.primary)),
                     ),
-                    child: Icon(
-                      symbol('lock'),
-                      size: 34,
-                      color: AppColors.primary,
-                    ),
+                    child: Icon(symbol('lock'),
+                        size: 34, color: AppColors.primary),
                   ),
                   const SizedBox(height: 24),
-
-                  // ── Title + subtitle ─────────────────────────────────────
                   Text(
                     'IntelliStock Locked',
-                    style: AppTextStyles.h2
-                        .copyWith(color: AppColors.textHi),
+                    style: AppTextStyles.h2.copyWith(color: AppColors.textHi),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Verify your identity to continue.',
-                    style:
-                        AppTextStyles.body.copyWith(color: AppColors.textDim),
+                    _busy
+                        ? 'Authenticating…'
+                        : (_failed
+                            ? 'Authentication failed. Choose an option below.'
+                            : 'Verify your identity to continue.'),
+                    style: AppTextStyles.body.copyWith(
+                        color: _failed ? AppColors.danger : AppColors.textDim),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 32),
 
-                  // ── Failure message ──────────────────────────────────────
+                  // Primary: (auto-runs) Unlock with Face ID — also a retry.
+                  _BiometricUnlockButton(busy: _busy, onUnlock: _attempt),
+
+                  // Fallback options once biometrics fail / are cancelled.
                   if (_failed) ...[
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: AppColors.fill(AppColors.danger),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                            color: AppColors.stroke(AppColors.danger)),
-                      ),
-                      child: Text(
-                        'Authentication failed. Please try again.',
-                        style: AppTextStyles.meta
-                            .copyWith(color: AppColors.danger),
-                        textAlign: TextAlign.center,
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: AppButton.ghost(
+                        label: 'Log in with password',
+                        icon: symbol('person'),
+                        onPressed: _busy ? null : _exitToLogin,
                       ),
                     ),
-                    const SizedBox(height: 20),
-                  ],
-
-                  // ── Unlock button ────────────────────────────────────────
-                  _BiometricUnlockButton(
-                    busy: _busy,
-                    onUnlock: _unlock,
-                    labelBuilder: _unlockLabel,
-                  ),
-
-                  // ── Log out (after repeated failures) ────────────────────
-                  if (_failCount >= _failThreshold) ...[
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 16),
                     TextButton(
-                      onPressed: _logout,
+                      onPressed: _busy ? null : _exitToLogin,
                       child: Text(
                         'Log out',
                         style: AppTextStyles.body
@@ -194,53 +182,51 @@ class _LogoMark extends StatelessWidget {
             borderRadius: BorderRadius.circular(8),
           ),
           child: const Center(
-            child: Text(
-              'I',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
+            child: Text('I',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800)),
           ),
         ),
         const SizedBox(width: 10),
         Text(
           'IntelliStock',
-          style: AppTextStyles.h2.copyWith(
-            color: AppColors.textHi,
-            letterSpacing: -0.3,
-          ),
+          style: AppTextStyles.h2
+              .copyWith(color: AppColors.textHi, letterSpacing: -0.3),
         ),
       ],
     );
   }
 }
 
-// ── Biometric unlock button (reads available types) ───────────────────────────
+// ── Biometric unlock button (reads available types for the label) ─────────────
 
 class _BiometricUnlockButton extends ConsumerWidget {
-  const _BiometricUnlockButton({
-    required this.busy,
-    required this.onUnlock,
-    required this.labelBuilder,
-  });
+  const _BiometricUnlockButton({required this.busy, required this.onUnlock});
 
   final bool busy;
   final VoidCallback onUnlock;
-  final String Function(List<dynamic>) labelBuilder;
+
+  String _label(List<dynamic> types) {
+    if (types.any((t) => t.toString().contains('face'))) {
+      return 'Unlock with Face ID';
+    }
+    if (types.any((t) => t.toString().contains('fingerprint'))) {
+      return 'Unlock with Touch ID';
+    }
+    return 'Unlock';
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // FutureBuilder to get available biometric types for the label.
     return FutureBuilder<List<dynamic>>(
       future: ref.read(biometricServiceProvider).availableTypes(),
       builder: (_, snap) {
-        final label = labelBuilder(snap.data ?? []);
         return SizedBox(
           width: double.infinity,
           child: AppButton.primary(
-            label: label,
+            label: _label(snap.data ?? const []),
             icon: symbol('lock'),
             busy: busy,
             onPressed: busy ? null : onUnlock,

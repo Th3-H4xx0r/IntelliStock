@@ -9,6 +9,7 @@ import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/network/session.dart';
 import '../../../core/formatters/formatters.dart';
+import '../../../widgets_bridge/widget_sync_service.dart';
 import '../application/dashboard_controller.dart';
 import '../data/dashboard_repository.dart';
 import 'portfolio_chart.dart';
@@ -26,6 +27,9 @@ class DashboardScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(sessionProvider);
     final username = session.username;
+
+    // Refresh the home-screen widget (live instance equity) on dashboard entry.
+    ref.watch(widgetSyncProvider);
 
     return CustomScrollView(
       slivers: [
@@ -175,12 +179,9 @@ class _PortfolioSection extends ConsumerWidget {
             }
             return Column(
               children: accounts
-                  .asMap()
-                  .entries
-                  .map((e) => Padding(
+                  .map((acct) => Padding(
                         padding: const EdgeInsets.only(bottom: 16),
-                        child: PortfolioChart(
-                            account: e.value, primary: e.key == 0),
+                        child: PortfolioChart(account: acct),
                       ))
                   .toList(),
             );

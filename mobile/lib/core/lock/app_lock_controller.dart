@@ -173,6 +173,15 @@ class AppLockController extends Notifier<AppLockState>
     state = state.copyWith(enabled: false, locked: false);
   }
 
+  /// Opens the gate WITHOUT changing the user's lock setting — used when the
+  /// user chooses "log in with password" / "log out" from the lock screen, so
+  /// the router can show /login while biometric lock stays enabled for next
+  /// launch.
+  void releaseLock() {
+    state = state.copyWith(locked: false);
+    pausedAt = null;
+  }
+
   /// Change the auto-lock timeout and persist.
   Future<void> setTimeout(LockTimeout timeout) async {
     await _storage.write(

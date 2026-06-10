@@ -61,6 +61,43 @@ class WidgetPortfolio {
       );
 }
 
+/// One selectable portfolio (brokerage account) for the configurable widget.
+class WidgetAccount {
+  const WidgetAccount({
+    required this.id,
+    required this.label,
+    required this.accountValue,
+    required this.dayPnlAbs,
+    required this.dayPnlPct,
+    this.intradayPoints = const [],
+  });
+
+  final String id;
+  final String label;
+  final double accountValue;
+  final double dayPnlAbs;
+  final double dayPnlPct;
+  final List<IntradayPoint> intradayPoints;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'label': label,
+        'accountValue': accountValue,
+        'dayPnlAbs': dayPnlAbs,
+        'dayPnlPct': dayPnlPct,
+        'intradayPoints': intradayPoints.map((p) => p.toJson()).toList(),
+      };
+
+  /// The primary-portfolio shape (for the non-configurable fallback widget).
+  Map<String, dynamic> toPortfolioJson() => {
+        'accountValue': accountValue,
+        'dayPnlAbs': dayPnlAbs,
+        'dayPnlPct': dayPnlPct,
+        'intradayPoints': intradayPoints.map((p) => p.toJson()).toList(),
+        'asOf': '',
+      };
+}
+
 class WidgetPosition {
   const WidgetPosition({
     required this.symbol,
