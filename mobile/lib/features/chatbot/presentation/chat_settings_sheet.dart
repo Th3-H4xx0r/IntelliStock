@@ -15,6 +15,11 @@ import '../data/models/chat.dart';
 Future<void> showChatSettings(BuildContext context) {
   return showModalBottomSheet<void>(
     context: context,
+    // ChatbotDock is mounted in the MaterialApp.router `builder`, above
+    // go_router's Navigator — so there is no *nearest* Navigator to host the
+    // sheet. Use the root navigator (same as showConfirmDialog) or the sheet
+    // silently never opens.
+    useRootNavigator: true,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
     builder: (_) => const _ChatSettingsSheet(),
