@@ -11,6 +11,7 @@ import '../data/models/chat.dart';
 import 'chat_composer.dart';
 import 'chat_message.dart';
 import 'chat_model_picker.dart';
+import 'chat_settings_sheet.dart';
 import 'chat_tool_call.dart';
 
 /// Global chatbot overlay widget.
@@ -267,6 +268,7 @@ class _ExpandedPanel extends ConsumerWidget {
                   _ChatHeader(
                     title: st.activeConversation?.title ?? 'Assistant',
                     modelName: st.activeConversation?.modelName ?? '',
+                    onSettings: () => showChatSettings(context),
                     onClear: () async {
                       final ok = await showConfirmDialog(
                         context,
@@ -322,12 +324,14 @@ class _ChatHeader extends StatelessWidget {
   const _ChatHeader({
     required this.title,
     required this.modelName,
+    required this.onSettings,
     required this.onClear,
     required this.onMinimise,
   });
 
   final String title;
   final String modelName;
+  final VoidCallback onSettings;
   final VoidCallback onClear;
   final VoidCallback onMinimise;
 
@@ -378,6 +382,13 @@ class _ChatHeader extends StatelessWidget {
                   ),
               ],
             ),
+          ),
+
+          // Settings
+          _HeaderBtn(
+            icon: Icons.settings,
+            tooltip: 'Settings',
+            onTap: onSettings,
           ),
 
           // Clear
