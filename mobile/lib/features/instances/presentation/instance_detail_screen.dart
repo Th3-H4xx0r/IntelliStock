@@ -39,8 +39,6 @@ String _fmtUptime(int secs) {
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Pushed route; requires [instanceId] path param wired via go_router.
-/// The orchestrator should wrap this in a ProviderScope override for
-/// [selectedInstanceIdProvider].
 class InstanceDetailScreen extends ConsumerWidget {
   const InstanceDetailScreen({super.key, required this.instanceId});
 
@@ -48,22 +46,18 @@ class InstanceDetailScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Override the id provider for this screen's subtree.
-    return ProviderScope(
-      overrides: [
-        selectedInstanceIdProvider.overrideWithValue(instanceId),
-      ],
-      child: const _InstanceDetailBody(),
-    );
+    return _InstanceDetailBody(instanceId: instanceId);
   }
 }
 
 class _InstanceDetailBody extends ConsumerWidget {
-  const _InstanceDetailBody();
+  const _InstanceDetailBody({required this.instanceId});
+
+  final String instanceId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(instanceDetailControllerProvider);
+    final async = ref.watch(instanceDetailControllerProvider(instanceId));
 
     return Scaffold(
       backgroundColor: AppColors.canvas,
@@ -77,13 +71,13 @@ class _InstanceDetailBody extends ConsumerWidget {
                 child: ErrorBanner(
                   message: e.toString(),
                   onRetry: () =>
-                      ref.invalidate(instanceDetailControllerProvider),
+                      ref.invalidate(instanceDetailControllerProvider(instanceId)),
                 ),
               ),
             ),
             data: (state) => state.instance == null
                 ? const Center(child: ErrorBanner(message: 'Instance not found'))
-                : _DetailContent(state: state),
+                : _DetailContent(instanceId: instanceId, state: state),
           ),
         ),
       ),
@@ -94,14 +88,15 @@ class _InstanceDetailBody extends ConsumerWidget {
 // ── Main content ─────────────────────────────────────────────────────────────
 
 class _DetailContent extends ConsumerWidget {
-  const _DetailContent({required this.state});
+  const _DetailContent({required this.instanceId, required this.state});
 
+  final String instanceId;
   final InstanceDetailState state;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final inst = state.instance!;
-    final ctrl = ref.read(instanceDetailControllerProvider.notifier);
+    final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
 
     return RefreshIndicator(
       onRefresh: () async {
@@ -119,23 +114,23 @@ class _DetailContent extends ConsumerWidget {
                   _Breadcrumb(instanceName: inst.name.isNotEmpty ? inst.name : inst.id),
                   const SizedBox(height: 16),
                   // Page header
-                  _PageHeader(inst: inst, state: state),
+                  _PageHeader(instanceId: instanceId, inst: inst, state: state),
                   const SizedBox(height: 20),
                   // Info cards
-                  _InstanceInfoCard(inst: inst, state: state),
+                  _InstanceInfoCard(instanceId: instanceId, inst: inst, state: state),
                   const SizedBox(height: 12),
-                  _BrokerageCard(inst: inst),
+                  _BrokerageCard(instanceId: instanceId, inst: inst),
                   const SizedBox(height: 12),
-                  _StrategyCard(inst: inst),
+                  _StrategyCard(instanceId: instanceId, inst: inst),
                   const SizedBox(height: 12),
                   // Stocks
-                  _StocksCard(inst: inst),
+                  _StocksCard(instanceId: instanceId, inst: inst),
                   const SizedBox(height: 12),
                   // Live logs
                   LiveLogsPanel(instanceId: inst.id),
                   const SizedBox(height: 12),
                   // Backtests
-                  _BacktestsSection(state: state),
+                  _BacktestsSection(instanceId: instanceId, state: state),
                   const SizedBox(height: 80),
                 ],
               ),
@@ -186,13 +181,14 @@ class _Breadcrumb extends StatelessWidget {
 // ── Page header ───────────────────────────────────────────────────────────────
 
 class _PageHeader extends ConsumerWidget {
-  const _PageHeader({required this.inst, required this.state});
+  const _PageHeader({required this.instanceId, required this.inst, required this.state});
+  final String instanceId;
   final Instance inst;
   final InstanceDetailState state;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final ctrl = ref.read(instanceDetailControllerProvider.notifier);
+    final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
     final isRunning = inst.runCommand;
     final isAi = inst.createdBy == 'ai';
 
@@ -274,7 +270,8 @@ class _PageHeader extends ConsumerWidget {
 // ── Instance info card ────────────────────────────────────────────────────────
 
 class _InstanceInfoCard extends ConsumerWidget {
-  const _InstanceInfoCard({required this.inst, required this.state});
+  const _InstanceInfoCard({required this.instanceId, required this.inst, required this.state});
+  final String instanceId;
   final Instance inst;
   final InstanceDetailState state;
 
@@ -332,9 +329,7 @@ class _InstanceInfoCard extends ConsumerWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _ClearStateSheet(instanceId: inst.id),
-      ),
+      builder: (_) => _ClearStateSheet(instanceId: instanceId),
     );
   }
 }
@@ -342,12 +337,13 @@ class _InstanceInfoCard extends ConsumerWidget {
 // ── Brokerage card ────────────────────────────────────────────────────────────
 
 class _BrokerageCard extends ConsumerWidget {
-  const _BrokerageCard({required this.inst});
+  const _BrokerageCard({required this.instanceId, required this.inst});
+  final String instanceId;
   final Instance inst;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final ctrl = ref.read(instanceDetailControllerProvider.notifier);
+    final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
 
     String brokerageName = '—';
     String brokerageType = '';
@@ -421,9 +417,7 @@ class _BrokerageCard extends ConsumerWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _LinkBrokerageSheet(currentId: inst.brokerageId),
-      ),
+      builder: (_) => _LinkBrokerageSheet(instanceId: instanceId, currentId: inst.brokerageId),
     );
   }
 }
@@ -431,12 +425,13 @@ class _BrokerageCard extends ConsumerWidget {
 // ── Strategy card ─────────────────────────────────────────────────────────────
 
 class _StrategyCard extends ConsumerWidget {
-  const _StrategyCard({required this.inst});
+  const _StrategyCard({required this.instanceId, required this.inst});
+  final String instanceId;
   final Instance inst;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final ctrl = ref.read(instanceDetailControllerProvider.notifier);
+    final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
     final stratName = (inst.strategy?['name'] ?? inst.strategyId ?? '—').toString();
     final subStrategies = (inst.strategy?['strategies'] is List)
         ? inst.strategy!['strategies'] as List
@@ -529,9 +524,7 @@ class _StrategyCard extends ConsumerWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _LinkStrategyDetailSheet(instanceId: inst.id),
-      ),
+      builder: (_) => _LinkStrategyDetailSheet(instanceId: instanceId),
     );
   }
 }
@@ -539,12 +532,13 @@ class _StrategyCard extends ConsumerWidget {
 // ── Stocks card ───────────────────────────────────────────────────────────────
 
 class _StocksCard extends ConsumerWidget {
-  const _StocksCard({required this.inst});
+  const _StocksCard({required this.instanceId, required this.inst});
+  final String instanceId;
   final Instance inst;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final ctrl = ref.read(instanceDetailControllerProvider.notifier);
+    final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
 
     return GlassCard(
       child: Column(
@@ -590,9 +584,7 @@ class _StocksCard extends ConsumerWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _AddStockDetailSheet(instanceId: inst.id),
-      ),
+      builder: (_) => _AddStockDetailSheet(instanceId: instanceId),
     );
   }
 }
@@ -631,12 +623,13 @@ class _StockChip extends StatelessWidget {
 // ── Backtests section ─────────────────────────────────────────────────────────
 
 class _BacktestsSection extends ConsumerWidget {
-  const _BacktestsSection({required this.state});
+  const _BacktestsSection({required this.instanceId, required this.state});
+  final String instanceId;
   final InstanceDetailState state;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final ctrl = ref.read(instanceDetailControllerProvider.notifier);
+    final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -716,9 +709,7 @@ class _BacktestsSection extends ConsumerWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: const _CreateBacktestDetailSheet(),
-      ),
+      builder: (_) => _CreateBacktestDetailSheet(instanceId: instanceId),
     );
   }
 }
@@ -946,7 +937,7 @@ class _ClearStateSheetState extends ConsumerState<_ClearStateSheet> {
     });
     try {
       final result = await ref
-          .read(instanceDetailControllerProvider.notifier)
+          .read(instanceDetailControllerProvider(widget.instanceId).notifier)
           .previewClearState(_scope);
       setState(() {
         _preview = result;
@@ -969,7 +960,7 @@ class _ClearStateSheetState extends ConsumerState<_ClearStateSheet> {
     });
     try {
       final result = await ref
-          .read(instanceDetailControllerProvider.notifier)
+          .read(instanceDetailControllerProvider(widget.instanceId).notifier)
           .applyClearState(_scope);
       final deleted = result['total_deleted'] ?? 0;
       final tables = (result['tables'] is List) ? (result['tables'] as List).length : 0;
@@ -1204,7 +1195,7 @@ class _AddStockDetailSheetState extends ConsumerState<_AddStockDetailSheet> {
       _error = null;
     });
     try {
-      await ref.read(instanceDetailControllerProvider.notifier).addStock(sym);
+      await ref.read(instanceDetailControllerProvider(widget.instanceId).notifier).addStock(sym);
       if (mounted) Navigator.pop(context);
     } catch (e) {
       setState(() {
@@ -1241,7 +1232,8 @@ class _AddStockDetailSheetState extends ConsumerState<_AddStockDetailSheet> {
 }
 
 class _LinkBrokerageSheet extends ConsumerStatefulWidget {
-  const _LinkBrokerageSheet({this.currentId});
+  const _LinkBrokerageSheet({required this.instanceId, this.currentId});
+  final String instanceId;
   final String? currentId;
 
   @override
@@ -1271,7 +1263,7 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet> {
     });
     try {
       await ref
-          .read(instanceDetailControllerProvider.notifier)
+          .read(instanceDetailControllerProvider(widget.instanceId).notifier)
           .linkBrokerage(_brokerageId);
       if (mounted) Navigator.pop(context);
     } catch (e) {
@@ -1349,7 +1341,7 @@ class _LinkStrategyDetailSheetState
     });
     try {
       await ref
-          .read(instanceDetailControllerProvider.notifier)
+          .read(instanceDetailControllerProvider(widget.instanceId).notifier)
           .linkStrategy(_strategyId);
       if (mounted) Navigator.pop(context);
     } catch (e) {
@@ -1402,7 +1394,8 @@ class _LinkStrategyDetailSheetState
 }
 
 class _CreateBacktestDetailSheet extends ConsumerStatefulWidget {
-  const _CreateBacktestDetailSheet();
+  const _CreateBacktestDetailSheet({required this.instanceId});
+  final String instanceId;
 
   @override
   ConsumerState<_CreateBacktestDetailSheet> createState() =>
@@ -1451,7 +1444,7 @@ class _CreateBacktestDetailSheetState
         .where((s) => s.isNotEmpty)
         .toList();
     try {
-      await ref.read(instanceDetailControllerProvider.notifier).createBacktest(
+      await ref.read(instanceDetailControllerProvider(widget.instanceId).notifier).createBacktest(
             stocks: stocks,
             startDate: _startCtrl.text,
             endDate: _endCtrl.text,

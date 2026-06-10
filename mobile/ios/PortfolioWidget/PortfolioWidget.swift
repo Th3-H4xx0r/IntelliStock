@@ -1,20 +1,31 @@
 // PortfolioWidget — IntelliStock iOS home-screen widgets.
 //
-// SCAFFOLD: this Swift source exists so the WidgetKit extension can be added.
-// To activate, in Xcode: File → New → Target → Widget Extension named
-// "PortfolioWidget", add it to the App Group `group.dev.pkrishna.intellistock`
-// (same group on the Runner target), and point the target at this file.
-// See mobile/docs/NATIVE_SETUP.md §2–§3 for the full checklist.
-//
-// The Flutter app's WidgetSyncService writes these App-Group UserDefaults keys:
+// Reads App-Group UserDefaults keys written by the Flutter WidgetSyncService:
 //   "portfolio_data"  → WidgetPortfolio JSON
 //   "positions_data"  → [WidgetPosition] JSON
 //   "instances_data"  → [WidgetInstance] JSON
+// See mobile/docs/NATIVE_SETUP.md.
 
 import WidgetKit
 import SwiftUI
 
 private let kAppGroup = "group.dev.pkrishna.intellistock"
+
+// Apply a widget container background on iOS 17+, fall back to a plain
+// background on iOS 14–16 (containerBackground is iOS 17+).
+extension View {
+    @ViewBuilder
+    func widgetContainerBackground(_ color: Color) -> some View {
+        if #available(iOS 17.0, *) {
+            self.containerBackground(color, for: .widget)
+        } else {
+            self.background(color)
+        }
+    }
+}
+
+private let kBg = Color(red: 0.02, green: 0.02, blue: 0.05)
+private let kViolet = Color(red: 0.655, green: 0.545, blue: 0.980)
 
 // MARK: - Portfolio widget
 
@@ -23,12 +34,11 @@ struct PortfolioEntry: TimelineEntry {
     let accountValue: Double
     let dayPnlAbs: Double
     let dayPnlPct: Double
-    let asOf: String
 }
 
 struct PortfolioProvider: TimelineProvider {
     func placeholder(in context: Context) -> PortfolioEntry {
-        PortfolioEntry(date: .now, accountValue: 0, dayPnlAbs: 0, dayPnlPct: 0, asOf: "")
+        PortfolioEntry(date: Date(), accountValue: 0, dayPnlAbs: 0, dayPnlPct: 0)
     }
     func getSnapshot(in context: Context, completion: @escaping (PortfolioEntry) -> Void) {
         completion(entry())
@@ -43,11 +53,10 @@ struct PortfolioProvider: TimelineProvider {
         let json = (try? JSONSerialization.jsonObject(
             with: raw.data(using: .utf8) ?? Data())) as? [String: Any] ?? [:]
         return PortfolioEntry(
-            date: .now,
+            date: Date(),
             accountValue: json["accountValue"] as? Double ?? 0,
             dayPnlAbs: json["dayPnlAbs"] as? Double ?? 0,
-            dayPnlPct: json["dayPnlPct"] as? Double ?? 0,
-            asOf: json["asOf"] as? String ?? ""
+            dayPnlPct: json["dayPnlPct"] as? Double ?? 0
         )
     }
 }
@@ -57,15 +66,17 @@ struct PortfolioWidgetView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("IntelliStock").font(.caption2).foregroundColor(.secondary)
-            Text(String(format: "$%.2f", entry.accountValue)).font(.headline)
+            Text(String(format: "$%.2f", entry.accountValue))
+                .font(.headline).foregroundColor(.white)
             Text(entry.dayPnlAbs >= 0
                  ? String(format: "▲ +$%.2f (+%.2f%%)", entry.dayPnlAbs, entry.dayPnlPct)
                  : String(format: "▼ -$%.2f (%.2f%%)", abs(entry.dayPnlAbs), entry.dayPnlPct))
                 .font(.subheadline)
                 .foregroundColor(entry.dayPnlAbs >= 0 ? .green : .red)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding()
-        .containerBackground(.fill.tertiary, for: .widget)
+        .widgetContainerBackground(kBg)
     }
 }
 
@@ -88,7 +99,7 @@ struct InstanceEntry: TimelineEntry {
 }
 
 struct InstanceProvider: TimelineProvider {
-    func placeholder(in context: Context) -> InstanceEntry { InstanceEntry(date: .now, instances: []) }
+    func placeholder(in context: Context) -> InstanceEntry { InstanceEntry(date: Date(), instances: []) }
     func getSnapshot(in context: Context, completion: @escaping (InstanceEntry) -> Void) { completion(entry()) }
     func getTimeline(in context: Context, completion: @escaping (Timeline<InstanceEntry>) -> Void) {
         completion(Timeline(entries: [entry()], policy: .after(Date().addingTimeInterval(900))))
@@ -98,14 +109,14 @@ struct InstanceProvider: TimelineProvider {
         let raw = defaults?.string(forKey: "instances_data") ?? "[]"
         let arr = (try? JSONSerialization.jsonObject(
             with: raw.data(using: .utf8) ?? Data())) as? [[String: Any]] ?? []
-        return InstanceEntry(date: .now, instances: arr)
+        return InstanceEntry(date: Date(), instances: arr)
     }
 }
 
 struct InstanceStatusWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "InstanceWidget", provider: InstanceProvider()) { entry in
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text("Instances").font(.caption2).foregroundColor(.secondary)
                 ForEach(Array(entry.instances.prefix(3).enumerated()), id: \.offset) { _, inst in
                     if let name = inst["name"] as? String {
@@ -113,13 +124,17 @@ struct InstanceStatusWidget: Widget {
                             Circle()
                                 .fill((inst["running"] as? Bool ?? false) ? Color.green : Color.gray)
                                 .frame(width: 6, height: 6)
-                            Text(name).font(.caption2)
+                            Text(name).font(.caption2).foregroundColor(.white)
                         }
                     }
                 }
+                if entry.instances.isEmpty {
+                    Text("No instances").font(.caption2).foregroundColor(.secondary)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding()
-            .containerBackground(.fill.tertiary, for: .widget)
+            .widgetContainerBackground(kBg)
         }
         .configurationDisplayName("Instance Status")
         .description("Running/stopped status of your IntelliStock instances.")

@@ -132,18 +132,25 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
       _scrollToBottom();
     }
 
+    // Sit above the bottom nav bar + home-indicator safe area.
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+
     return Stack(
       children: [
-        // Collapsed FAB
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 200),
-          child: st.isOpen
-              ? const SizedBox.shrink()
-              : _CollapsedFab(
-                  glowOpacity: _glowOpacity,
-                  onTap: () =>
-                      ref.read(chatbotProvider.notifier).open(),
-                ),
+        // Collapsed FAB — anchored bottom-right as a DIRECT Stack child so the
+        // offsets are relative to the screen (not the AnimatedSwitcher's box).
+        Positioned(
+          right: 16,
+          bottom: bottomInset + 80,
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            child: st.isOpen
+                ? const SizedBox.shrink()
+                : _CollapsedFab(
+                    glowOpacity: _glowOpacity,
+                    onTap: () => ref.read(chatbotProvider.notifier).open(),
+                  ),
+          ),
         ),
 
         // Expanded panel
@@ -166,10 +173,7 @@ class _CollapsedFab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Positioned(
-      right: 16,
-      bottom: 16,
-      child: AnimatedBuilder(
+    return AnimatedBuilder(
         animation: glowOpacity,
         builder: (context, child) => GestureDetector(
           onTap: onTap,
@@ -200,8 +204,7 @@ class _CollapsedFab extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
+      );
   }
 }
 

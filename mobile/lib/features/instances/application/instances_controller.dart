@@ -254,17 +254,16 @@ class InstanceDetailState {
 // ── Detail controller ─────────────────────────────────────────────────────────
 
 class InstanceDetailController
-    extends AutoDisposeAsyncNotifier<InstanceDetailState> {
+    extends AutoDisposeFamilyAsyncNotifier<InstanceDetailState, String> {
 
   Timer? _uptimeTicker;
   Timer? _btPollTimer;
-  String? _instanceId;
+  late String _instanceId;
   bool _disposed = false;
 
   @override
-  Future<InstanceDetailState> build() async {
-    _instanceId = ref.watch(selectedInstanceIdProvider);
-    if (_instanceId == null) return const InstanceDetailState();
+  Future<InstanceDetailState> build(String arg) async {
+    _instanceId = arg;
 
     ref.onDispose(() {
       _disposed = true;
@@ -273,8 +272,8 @@ class InstanceDetailController
     });
 
     final repo = ref.read(instanceRepositoryProvider);
-    final inst = await repo.getInstance(_instanceId!);
-    final btData = await repo.listBacktests(_instanceId!);
+    final inst = await repo.getInstance(_instanceId);
+    final btData = await repo.listBacktests(_instanceId);
     final rows = _parseBacktests(btData);
 
     final st = InstanceDetailState(
@@ -374,10 +373,9 @@ class InstanceDetailController
   }
 
   Future<void> refreshInstance() async {
-    if (_instanceId == null) return;
     final repo = ref.read(instanceRepositoryProvider);
     try {
-      final inst = await repo.getInstance(_instanceId!);
+      final inst = await repo.getInstance(_instanceId);
       if (state case AsyncData(:final value)) {
         _uptimeTicker?.cancel();
         _startUptimeTicker(inst);
@@ -415,13 +413,12 @@ class InstanceDetailController
   }
 
   Future<void> _refreshBacktests() async {
-    if (_instanceId == null) return;
     if (state case AsyncData(:final value)) {
       state = AsyncData(value.copyWith(btLoading: true));
       try {
         final repo = ref.read(instanceRepositoryProvider);
         final data = await repo.listBacktests(
-          _instanceId!,
+          _instanceId,
           page: value.btPage,
           sortBy: value.btSortBy,
           sortOrder: value.btSortOrder,
@@ -561,10 +558,7 @@ class InstanceDetailController
   }
 }
 
-/// Scoped parameter for which instance the detail controller is for.
-final selectedInstanceIdProvider = Provider.autoDispose<String?>((ref) => null);
-
-final instanceDetailControllerProvider = AutoDisposeAsyncNotifierProvider<
-    InstanceDetailController, InstanceDetailState>(
+final instanceDetailControllerProvider = AutoDisposeAsyncNotifierProvider
+    .family<InstanceDetailController, InstanceDetailState, String>(
   InstanceDetailController.new,
 );

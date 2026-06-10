@@ -175,9 +175,12 @@ class _PortfolioSection extends ConsumerWidget {
             }
             return Column(
               children: accounts
-                  .map((acct) => Padding(
+                  .asMap()
+                  .entries
+                  .map((e) => Padding(
                         padding: const EdgeInsets.only(bottom: 16),
-                        child: PortfolioChart(account: acct),
+                        child: PortfolioChart(
+                            account: e.value, primary: e.key == 0),
                       ))
                   .toList(),
             );

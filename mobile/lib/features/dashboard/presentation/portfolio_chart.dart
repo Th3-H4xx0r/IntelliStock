@@ -7,6 +7,8 @@ import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/models/portfolio_history.dart';
+import '../../../widgets_bridge/widget_payload.dart';
+import '../../../widgets_bridge/widget_sync_service.dart';
 import '../data/dashboard_repository.dart';
 
 // ── Range constants ───────────────────────────────────────────────────────────
@@ -116,10 +118,14 @@ int nearestIndex(List<DateTime> timestamps, double fraction) {
 // ── Main widget ───────────────────────────────────────────────────────────────
 
 class PortfolioChart extends ConsumerStatefulWidget {
-  const PortfolioChart({super.key, required this.account});
+  const PortfolioChart({super.key, required this.account, this.primary = false});
 
   /// A [BrokerageAccount] from the dashboard brokerages list.
   final dynamic account; // BrokerageAccount from dashboard_repository.dart
+
+  /// When true, this account's data is mirrored to the iOS/Android home-screen
+  /// widget via [WidgetSyncService].
+  final bool primary;
 
   @override
   ConsumerState<PortfolioChart> createState() => _PortfolioChartState();
@@ -157,8 +163,40 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart> {
     setState(() => _scrub = _ScrubState.empty);
   }
 
+  /// Mirror the primary account's loaded history to the home-screen widget.
+  void _syncWidget(PortfolioHistory h) {
+    if (!widget.primary || h.values.isEmpty) return;
+    final n = h.timestamps.length < h.values.length
+        ? h.timestamps.length
+        : h.values.length;
+    final points = <IntradayPoint>[
+      for (var i = 0; i < n; i++)
+        IntradayPoint(
+          t: h.timestamps[i].millisecondsSinceEpoch ~/ 1000,
+          v: h.values[i],
+        ),
+    ];
+    final payload = WidgetPayload(
+      portfolio: WidgetPortfolio(
+        accountValue: h.currentValue ?? h.values.last,
+        dayPnlAbs: h.changeAbs ?? 0,
+        dayPnlPct: h.changePct ?? 0,
+        intradayPoints: points,
+        asOf: DateTime.now().toUtc().toIso8601String(),
+      ),
+      positions: const [],
+      instances: const [],
+    );
+    ref.read(widgetSyncServiceProvider).sync(payload);
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Push primary-account data to the home-screen widget when it loads/changes.
+    ref.listen(_historyProvider(_args), (_, next) {
+      final h = next.valueOrNull;
+      if (h != null) _syncWidget(h);
+    });
     final histAsync = ref.watch(_historyProvider(_args));
     return GlassCard(
       padding: EdgeInsets.zero,
