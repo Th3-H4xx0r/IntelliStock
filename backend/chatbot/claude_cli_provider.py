@@ -353,6 +353,31 @@ _SAFETY_FLAGS = [
 ]
 
 
+# Env vars that make ``claude`` authenticate as something OTHER than the
+# operator's Claude subscription (OAuth). Claude Code's auth precedence is
+# ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` BEFORE the subscription
+# OAuth, so a deployment that sets either (e.g. for a different provider)
+# silently hijacks every claude-cli call: the request goes out with the
+# API key and the server returns ``401 Invalid authentication credentials``
+# even though ``claude auth status`` reports the subscription as logged in.
+# We run claude-cli strictly in subscription mode, so we scrub these from
+# every spawned child env. (We inherit the parent env with ``os.environ
+# .copy()`` to keep PATH / HOME / locale, then strip just the auth keys.)
+_SUBSCRIPTION_CONFLICTING_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+
+
+def _strip_api_key_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Remove API-key/token env vars so ``claude`` uses the subscription
+    OAuth, not an inherited key. Mutates and returns *env* for chaining:
+    ``child_env = _strip_api_key_env(os.environ.copy())``."""
+    for key in _SUBSCRIPTION_CONFLICTING_ENV:
+        env.pop(key, None)
+    return env
+
+
 # Argv that opens up the IntelliStock MCP server (and ONLY the
 # IntelliStock MCP server — CC's built-in Bash / Read / Edit / etc. stay
 # disabled). The session populates ``--mcp-config`` with the per-session
@@ -1520,7 +1545,7 @@ class ClaudeCliSessionManager:
         # Build the env for the child. We override HOME so CC reads the
         # chowned copy of ~/.claude that the runtime user can access, and
         # we keep PATH so claude / node / python still resolve.
-        child_env = os.environ.copy()
+        child_env = _strip_api_key_env(os.environ.copy())
         if sess.runtime_home:
             child_env["HOME"] = sess.runtime_home
         # Diagnostic: log the actual argv head + runtime config so it's
@@ -2266,7 +2291,7 @@ def call_claude_cli_structured(
     _init_claude_state_once()
     runtime_home = _get_structured_runtime_home()
     argv = _wrap_argv_for_runtime_user(argv)
-    child_env = os.environ.copy()
+    child_env = _strip_api_key_env(os.environ.copy())
     if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
         child_env["HOME"] = runtime_home
 
@@ -2824,7 +2849,7 @@ def test_claude_cli(
         *_SAFETY_FLAGS,
     ]
     argv = _wrap_argv_for_runtime_user(argv)
-    child_env = os.environ.copy()
+    child_env = _strip_api_key_env(os.environ.copy())
     if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
         child_env["HOME"] = runtime_home
     try:
@@ -2872,12 +2897,30 @@ def test_claude_cli(
 
     if envelope.get("is_error"):
         result_text = str(envelope.get("result") or "")
+        api_status = envelope.get("api_error_status")
+        low = result_text.lower()
         if any(n in result_text for n in _NOT_LOGGED_IN_NEEDLES):
             return {
                 "ok": False, "version": version, "logged_in": False, "model_response": None,
                 "error": (
-                    "Claude Code is not logged in on this server. SSH in and "
-                    "run `claude` to log in."
+                    "Claude Code is not logged in on this server. Use the "
+                    "“Re-authenticate Claude” button to sign in."
+                ),
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        # 401 + an "invalid API key" message means a stale ANTHROPIC_API_KEY
+        # (or ANTHROPIC_AUTH_TOKEN) is overriding the subscription OAuth.
+        # We scrub those from the spawn env (_strip_api_key_env), so if this
+        # still fires the key is being injected some other way — surface an
+        # actionable hint rather than a bare "Invalid API key".
+        if api_status == 401 or "invalid api key" in low or "invalid authentication" in low:
+            return {
+                "ok": False, "version": version, "logged_in": False, "model_response": None,
+                "error": (
+                    "Claude returned 401. An ANTHROPIC_API_KEY / "
+                    "ANTHROPIC_AUTH_TOKEN in the server environment is "
+                    "overriding the Claude subscription. Unset it so claude-cli "
+                    "uses the subscription OAuth."
                 ),
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
@@ -2967,7 +3010,7 @@ def claude_auth_status(cli_path: str = "claude") -> Dict[str, Any]:
     except (subprocess.TimeoutExpired, OSError):
         pass
 
-    env = os.environ.copy()
+    env = _strip_api_key_env(os.environ.copy())
     env["HOME"] = _operator_home()
     try:
         res = subprocess.run(
@@ -3006,7 +3049,7 @@ def claude_logout(cli_path: str = "claude") -> tuple[bool, str]:
         resolved = _resolve_cli_path(cli_path or "claude")
     except ClaudeCliError as e:
         return False, str(e)
-    env = os.environ.copy()
+    env = _strip_api_key_env(os.environ.copy())
     env["HOME"] = _operator_home()
     try:
         res = subprocess.run(
@@ -3108,7 +3151,7 @@ class ClaudeCliLogin:
                 fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 1000, 0, 0))
             except Exception:
                 pass
-            env = os.environ.copy()
+            env = _strip_api_key_env(os.environ.copy())
             env["HOME"] = _operator_home()
             env["TERM"] = "xterm-256color"
             # Discourage the CLI from trying to auto-launch a browser the

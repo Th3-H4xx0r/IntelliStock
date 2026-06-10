@@ -219,6 +219,56 @@ def test_submit_code_dead_proc_fails_cleanly():
             ClaudeCliLogin._jobs.pop("j2", None)
 
 
+# ── API-key env scrub (the subscription-vs-API-key 401 root cause) ──────────
+
+
+def test_strip_api_key_env_removes_conflicting_vars():
+    env = {
+        "PATH": "/usr/bin",
+        "HOME": "/root",
+        "ANTHROPIC_API_KEY": "sk-ant-stale",
+        "ANTHROPIC_AUTH_TOKEN": "tok-stale",
+        "LANG": "C.UTF-8",
+    }
+    out = provider._strip_api_key_env(env)
+    assert "ANTHROPIC_API_KEY" not in out
+    assert "ANTHROPIC_AUTH_TOKEN" not in out
+    # Everything else is preserved so PATH/HOME/locale still reach claude.
+    assert out["PATH"] == "/usr/bin"
+    assert out["HOME"] == "/root"
+    assert out["LANG"] == "C.UTF-8"
+    # Mutates-and-returns the same dict (used as copy().pipe pattern).
+    assert out is env
+
+
+def test_strip_api_key_env_noop_when_absent():
+    env = {"PATH": "/usr/bin"}
+    assert provider._strip_api_key_env(env) == {"PATH": "/usr/bin"}
+
+
+def test_test_cli_maps_invalid_api_key_401_to_actionable_hint(monkeypatch):
+    monkeypatch.setattr(provider, "_resolve_cli_path", lambda p: "/usr/bin/claude")
+    monkeypatch.setattr(provider, "_init_claude_state_once", lambda: None)
+    monkeypatch.setattr(provider, "_prepare_runtime_home_for_id", lambda h: "/root")
+    monkeypatch.setattr(provider, "_cleanup_runtime_home", lambda p: None)
+    monkeypatch.setattr(provider, "_wrap_argv_for_runtime_user", lambda argv: argv)
+
+    def _runner(argv, **kw):
+        if "--version" in argv:
+            return SimpleNamespace(stdout="2.1.170 (Claude Code)\n", stderr="", returncode=0)
+        envelope = (
+            '{"type":"result","is_error":true,"api_error_status":401,'
+            '"result":"Invalid API key · Fix external API key"}'
+        )
+        return SimpleNamespace(stdout=envelope, stderr="", returncode=0)
+
+    monkeypatch.setattr(provider.subprocess, "run", _runner)
+    out = provider.test_claude_cli(cli_path="claude", model="claude-sonnet-4-6")
+    assert out["ok"] is False
+    assert "ANTHROPIC_API_KEY" in out["error"]
+    assert "subscription" in out["error"].lower()
+
+
 def test_reader_parses_url_from_pty_output(monkeypatch):
     # Drive _reader with a fake fd that yields colorized output then EOF.
     chunks = [
