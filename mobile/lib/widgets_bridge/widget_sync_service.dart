@@ -132,6 +132,29 @@ class WidgetDataSyncer {
           final n = h.timestamps.length < h.values.length
               ? h.timestamps.length
               : h.values.length;
+
+          // Positions come from live-state (same source as the Live Trading
+          // terminal). Best-effort — an idle instance just has none.
+          var positions = const <WidgetPosition>[];
+          try {
+            final live = await client
+                .get<Map<String, dynamic>>('/instances/$id/live-state');
+            positions = (live['positions'] as List? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map((p) => WidgetPosition(
+                      symbol: (p['symbol'] ?? '').toString(),
+                      qty: (p['qty'] as num?)?.toDouble() ?? 0,
+                      marketValue: (p['market_value'] as num?)?.toDouble() ?? 0,
+                      unrealizedPnlAbs:
+                          (p['unrealized_pnl'] as num?)?.toDouble() ?? 0,
+                      unrealizedPnlPct:
+                          (p['unrealized_pnl_pct'] as num?)?.toDouble() ?? 0,
+                    ))
+                .toList();
+          } catch (_) {
+            // No live session → no positions; the widget still shows value.
+          }
+
           accounts.add(WidgetAccount(
             id: id,
             label: name.isNotEmpty ? name : id,
@@ -146,6 +169,7 @@ class WidgetDataSyncer {
                   v: h.values[i],
                 ),
             ],
+            positions: positions,
           ));
         } catch (_) {
           // Instance not running / no history → skip it.

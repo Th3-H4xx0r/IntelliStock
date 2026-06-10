@@ -70,6 +70,7 @@ class WidgetAccount {
     required this.dayPnlAbs,
     required this.dayPnlPct,
     this.intradayPoints = const [],
+    this.positions = const [],
   });
 
   final String id;
@@ -78,6 +79,7 @@ class WidgetAccount {
   final double dayPnlAbs;
   final double dayPnlPct;
   final List<IntradayPoint> intradayPoints;
+  final List<WidgetPosition> positions;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -86,6 +88,7 @@ class WidgetAccount {
         'dayPnlAbs': dayPnlAbs,
         'dayPnlPct': dayPnlPct,
         'intradayPoints': intradayPoints.map((p) => p.toJson()).toList(),
+        'positions': positions.map((p) => p.toJson()).toList(),
       };
 
   /// The primary-portfolio shape (for the non-configurable fallback widget).

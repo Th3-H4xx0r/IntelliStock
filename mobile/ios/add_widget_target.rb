@@ -34,7 +34,7 @@ swift_ref = group.files.find { |f| f.path&.end_with?('PortfolioWidget.swift') } 
 ext.add_file_references([swift_ref])
 
 # System frameworks the SwiftUI/WidgetKit code needs
-ext.add_system_framework(%w[WidgetKit SwiftUI])
+ext.add_system_framework(%w[WidgetKit SwiftUI Charts])
 
 # Build settings for the extension
 ext.build_configurations.each do |cfg|
