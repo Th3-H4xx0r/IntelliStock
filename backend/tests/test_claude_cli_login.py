@@ -246,6 +246,38 @@ def test_strip_api_key_env_noop_when_absent():
     assert provider._strip_api_key_env(env) == {"PATH": "/usr/bin"}
 
 
+def test_force_subscription_settings_blanks_anthropic_keys():
+    import json as _json
+    d = _json.loads(provider._FORCE_SUBSCRIPTION_SETTINGS)
+    assert d["env"]["ANTHROPIC_API_KEY"] == ""
+    assert d["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+
+
+def test_structured_argv_injects_settings_override():
+    argv = provider._build_structured_argv(
+        cli_path="claude",
+        model="claude-sonnet-4-6",
+        system_prompt="hi",
+        json_schema="{}",
+        extra_args=[],
+    )
+    assert "--settings" in argv
+    i = argv.index("--settings")
+    assert argv[i + 1] == provider._FORCE_SUBSCRIPTION_SETTINGS
+
+
+def test_chat_argv_injects_settings_override():
+    argv = provider._build_chat_argv(
+        cli_path="claude",
+        model="claude-sonnet-4-6",
+        system_prompt="hi",
+        extra_args=[],
+    )
+    assert "--settings" in argv
+    i = argv.index("--settings")
+    assert argv[i + 1] == provider._FORCE_SUBSCRIPTION_SETTINGS
+
+
 def test_test_cli_maps_invalid_api_key_401_to_actionable_hint(monkeypatch):
     monkeypatch.setattr(provider, "_resolve_cli_path", lambda p: "/usr/bin/claude")
     monkeypatch.setattr(provider, "_init_claude_state_once", lambda: None)

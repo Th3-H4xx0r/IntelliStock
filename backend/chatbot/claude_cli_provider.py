@@ -378,6 +378,30 @@ def _strip_api_key_env(env: Dict[str, str]) -> Dict[str, str]:
     return env
 
 
+# Stripping the *process* env (above) is not enough on its own: Claude Code
+# also loads an ``env`` block out of ``settings.json`` (user/project/managed)
+# and injects it into the session. A deployment with
+# ``{"env": {"ANTHROPIC_API_KEY": "…"}}`` in its claude settings therefore
+# still hijacks every call — the request goes out with that key and the
+# server returns 401, even though ``claude auth status`` reports the
+# subscription as logged in and even right after a fresh re-auth.
+#
+# A ``--settings`` CLI flag deep-merges with the HIGHEST precedence over
+# user/project settings, so blanking the keys here makes claude ignore the
+# settings-file values and fall back to the subscription OAuth. This works
+# regardless of where the key is configured or whether we run in a copied
+# runtime HOME. Verified empirically: the healthy subscription path is
+# unaffected (still succeeds), while a stale settings ``env`` key that
+# otherwise 401s is neutralized. We inject this on every *model* invocation
+# (chat / structured / test-cli); the ``claude auth …`` management commands
+# don't need it. ``--settings`` is in ``_HARD_REJECTED_FLAGS`` so a user's
+# extra_args can never add a second, conflicting one.
+_FORCE_SUBSCRIPTION_SETTINGS = json.dumps(
+    {"env": {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}}
+)
+_FORCE_SUBSCRIPTION_ARGS = ["--settings", _FORCE_SUBSCRIPTION_SETTINGS]
+
+
 # Argv that opens up the IntelliStock MCP server (and ONLY the
 # IntelliStock MCP server — CC's built-in Bash / Read / Edit / etc. stay
 # disabled). The session populates ``--mcp-config`` with the per-session
@@ -989,6 +1013,7 @@ def _build_chat_argv(
         "--output-format", "stream-json",
         "--model", model,
         "--system-prompt", system_prompt,
+        *_FORCE_SUBSCRIPTION_ARGS,
         *safety,
         *effective_extra,
     ]
@@ -1030,6 +1055,7 @@ def _build_structured_argv(
         "--model", model,
         "--system-prompt", augmented_system_prompt,
         "--json-schema", json_schema,
+        *_FORCE_SUBSCRIPTION_ARGS,
         *_SAFETY_FLAGS,
         *effective_extra,
     ]
@@ -2846,6 +2872,7 @@ def test_claude_cli(
         resolved_cli, "-p",
         "--output-format", "json",
         "--model", model,
+        *_FORCE_SUBSCRIPTION_ARGS,
         *_SAFETY_FLAGS,
     ]
     argv = _wrap_argv_for_runtime_user(argv)
@@ -2908,19 +2935,21 @@ def test_claude_cli(
                 ),
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
-        # 401 + an "invalid API key" message means a stale ANTHROPIC_API_KEY
-        # (or ANTHROPIC_AUTH_TOKEN) is overriding the subscription OAuth.
-        # We scrub those from the spawn env (_strip_api_key_env), so if this
-        # still fires the key is being injected some other way — surface an
-        # actionable hint rather than a bare "Invalid API key".
+        # 401 + an "invalid API key" message means a stale API key is
+        # overriding the subscription OAuth. We neutralize the known sources
+        # (process env via _strip_api_key_env, settings ``env`` block via
+        # _FORCE_SUBSCRIPTION_ARGS); if this still fires the key is coming
+        # from some other source (e.g. ``apiKeyHelper`` or a stored
+        # ``primaryApiKey`` in ``.claude.json``) — surface an actionable hint.
         if api_status == 401 or "invalid api key" in low or "invalid authentication" in low:
             return {
                 "ok": False, "version": version, "logged_in": False, "model_response": None,
                 "error": (
-                    "Claude returned 401. An ANTHROPIC_API_KEY / "
-                    "ANTHROPIC_AUTH_TOKEN in the server environment is "
-                    "overriding the Claude subscription. Unset it so claude-cli "
-                    "uses the subscription OAuth."
+                    "Claude returned 401: an API key is overriding the "
+                    "subscription. Check for an apiKeyHelper or a stored "
+                    "primaryApiKey in the server's ~/.claude config (an "
+                    "ANTHROPIC_API_KEY env var and a settings.json env block "
+                    "are already neutralized)."
                 ),
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
