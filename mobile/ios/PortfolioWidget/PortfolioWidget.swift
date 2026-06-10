@@ -36,7 +36,27 @@ private func money(_ v: Double) -> String {
     return f.string(from: NSNumber(value: v)) ?? String(format: "$%.2f", v)
 }
 
+// Regular US market session, in ET.
+private let kSessionOpenMin = 9 * 60 + 30   // 09:30
+private let kSessionLenMin = 390.0          // 6.5h → 16:00
+
+/// Minutes since the 09:30 ET open, clamped to the 0…390 session window, so the
+/// curve can be drawn relative to market hours (line stops at "now").
+private func sessionMinute(_ epoch: Double) -> Double {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+    let c = cal.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: epoch))
+    let mins = Double((c.hour ?? 0) * 60 + (c.minute ?? 0) - kSessionOpenMin)
+    return min(max(mins, 0), kSessionLenMin)
+}
+
 // MARK: - Data
+
+struct ChartPt: Identifiable {
+    let id = UUID()
+    let minute: Double
+    let value: Double
+}
 
 struct PositionData: Identifiable {
     let id = UUID()
@@ -50,7 +70,7 @@ struct AccountData {
     let value: Double
     let pnlAbs: Double
     let pnlPct: Double
-    let points: [Double]
+    let points: [ChartPt]
     let positions: [PositionData]
 }
 
@@ -61,7 +81,8 @@ private func readAccounts() -> [AccountData] {
           let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
     else { return [] }
     return arr.map { j in
-        let pts = (j["intradayPoints"] as? [[String: Any]] ?? []).map { dbl($0["v"]) }
+        let pts = (j["intradayPoints"] as? [[String: Any]] ?? [])
+            .map { ChartPt(minute: sessionMinute(dbl($0["t"])), value: dbl($0["v"])) }
         let pos = (j["positions"] as? [[String: Any]] ?? []).map {
             PositionData(symbol: $0["symbol"] as? String ?? "",
                          pnlPct: dbl($0["unrealizedPnlPct"]))
@@ -91,7 +112,7 @@ struct PortfolioEntry: TimelineEntry {
     let value: Double
     let pnlAbs: Double
     let pnlPct: Double
-    let points: [Double]
+    let points: [ChartPt]
     let positions: [PositionData]
     let hasData: Bool
 }
@@ -175,7 +196,7 @@ struct PortfolioWidgetView: View {
                 Spacer(minLength: 6)
                 curve(height: 30)
             }
-            positionsColumn(limit: 3, fontSize: 12)
+            positionsColumn(limit: 4, fontSize: 12)
                 .frame(maxWidth: .infinity)
         }
         .padding(15)
@@ -198,7 +219,7 @@ struct PortfolioWidgetView: View {
 
             Divider().overlay(Color.white.opacity(0.10))
 
-            positionsColumn(limit: 4, fontSize: 13)
+            positionsColumn(limit: 6, fontSize: 13)
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
@@ -228,26 +249,40 @@ struct PortfolioWidgetView: View {
         }
     }
 
-    // ── Curve (Swift Charts area + line, trend-colored) ──
+    // ── Curve — market-hours x-axis, area faded to the bottom, dashed
+    //    open/baseline. Line stops at "now" so the right side stays empty until
+    //    the session fills in (Robinhood-style). ──
     @ViewBuilder
     private func curve(height: CGFloat) -> some View {
         if entry.points.count >= 2 {
-            let lo = entry.points.min() ?? 0
-            let hi = entry.points.max() ?? 1
+            let open = entry.value - entry.pnlAbs               // day open / prev close
+            let vals = entry.points.map(\.value) + [open]
+            let lo = vals.min() ?? 0
+            let hi = vals.max() ?? 1
+            let range = max(hi - lo, 1)
+            // Extend the domain below the data so the area fill has room to fade
+            // out toward the bottom of the tile.
+            let domLo = lo - range * 0.55
+            let domHi = hi + range * 0.12
             Chart {
-                ForEach(Array(entry.points.enumerated()), id: \.offset) { i, v in
-                    AreaMark(x: .value("i", i), y: .value("v", v))
+                // Open / previous-close reference line — dashed, full width.
+                RuleMark(y: .value("open", open))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                    .foregroundStyle(Color.white.opacity(0.18))
+                ForEach(entry.points) { p in
+                    AreaMark(x: .value("m", p.minute), y: .value("v", p.value))
                         .interpolationMethod(.catmullRom)
                         .foregroundStyle(LinearGradient(
-                            colors: [trend.opacity(0.28), trend.opacity(0.0)],
+                            colors: [trend.opacity(0.40), trend.opacity(0.0)],
                             startPoint: .top, endPoint: .bottom))
-                    LineMark(x: .value("i", i), y: .value("v", v))
+                    LineMark(x: .value("m", p.minute), y: .value("v", p.value))
                         .interpolationMethod(.catmullRom)
                         .foregroundStyle(trend)
                         .lineStyle(StrokeStyle(lineWidth: 2, lineJoin: .round))
                 }
             }
-            .chartYScale(domain: lo...(hi == lo ? lo + 1 : hi))
+            .chartXScale(domain: 0...kSessionLenMin)   // full session; line stops at now
+            .chartYScale(domain: domLo...domHi)
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .frame(height: height)
