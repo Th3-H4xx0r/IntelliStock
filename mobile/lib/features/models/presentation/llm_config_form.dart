@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../data/model_repository.dart';
+import 'claude_setup_panel.dart';
 import 'codex_setup_panel.dart';
 
 // ── Value object ───────────────────────────────────────────────────────────────
@@ -368,10 +369,13 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
           const SizedBox(height: 12),
           if (d.provider == 'codex-cli')
             CodexCliSetupPanel(cliPath: d.cliPath.isNotEmpty ? d.cliPath : 'codex'),
-          if (d.provider == 'claude-cli')
-            _infoBox('Uses the locally-installed claude binary on the server. '
-                'SSH to the server and run claude to log in before using. '
-                'Tools are disabled — CC is used as a text-only LLM.', AppColors.info),
+          if (d.provider == 'claude-cli') ...[
+            _infoBox('Uses the locally-installed claude binary on the server '
+                '(subscription auth). Tools are disabled — CC is used as a '
+                'text-only LLM. Use the panel below to re-authenticate when the '
+                'token expires; no SSH required.', AppColors.info),
+            ClaudeCliSetupPanel(cliPath: d.cliPath.isNotEmpty ? d.cliPath : 'claude'),
+          ],
           const SizedBox(height: 4),
         ],
 

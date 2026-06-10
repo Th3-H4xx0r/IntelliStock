@@ -2374,6 +2374,159 @@ def api_codex_logout(current_user: dict = Depends(get_current_user)):
     return {"ok": True, "message": msg}
 
 
+# ── Claude Code CLI: subscription re-auth from the web/mobile UI ───────────
+# Mirrors the codex flow but Claude's OAuth needs the authorization code
+# pasted BACK into the CLI, so it's a two-step flow: start (returns the
+# claude.ai login URL) → submit (the operator pastes the code). The
+# heavy-lifting lives in chatbot/claude_cli_provider.py.
+
+_CLAUDE_OP_LAST_CALL: Dict[str, float] = {}
+_CLAUDE_OP_LAST_CALL_LOCK = threading.Lock()
+_CLAUDE_OP_MIN_INTERVAL_SEC = float(os.environ.get("CLAUDE_CLI_OP_MIN_INTERVAL_SEC", "2"))
+
+
+def _claude_op_rate_limit(uid: str, op: str) -> None:
+    now_mono = time.monotonic()
+    key = f"{uid}:{op}"
+    with _CLAUDE_OP_LAST_CALL_LOCK:
+        prev = _CLAUDE_OP_LAST_CALL.get(key, 0.0)
+        if now_mono - prev < _CLAUDE_OP_MIN_INTERVAL_SEC:
+            remaining = int(_CLAUDE_OP_MIN_INTERVAL_SEC - (now_mono - prev)) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Claude {op} endpoint is rate-limited; retry in ~{remaining}s.",
+            )
+        _CLAUDE_OP_LAST_CALL[key] = now_mono
+
+
+class ClaudeLoginStartBody(BaseModel):
+    cli_path: Optional[str] = Field(default=None, max_length=256)
+
+
+class ClaudeLoginSubmitBody(BaseModel):
+    code: str = Field(min_length=6, max_length=1024)
+
+
+@app.get("/claude/auth/status", response_class=JSONResponse)
+def api_claude_auth_status(
+    cli_path: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Report whether the Claude Code CLI is installed and the deployment's
+    Claude subscription is authenticated. Cheap read-only probe. Open to any
+    authenticated user — claude-cli auth is shared deployment-wide, so any
+    user picking claude-cli in /models needs visibility to drive re-auth."""
+    try:
+        from chatbot.claude_cli_provider import claude_auth_status
+    except Exception as e:
+        return {
+            "installed": False, "version": None, "authenticated": False,
+            "account": None, "auth_message": f"claude provider unavailable: {e}",
+        }
+    return claude_auth_status((cli_path or "claude").strip() or "claude")
+
+
+@app.post("/claude/login/start", response_class=JSONResponse)
+async def api_claude_login_start(
+    body: ClaudeLoginStartBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Spawn ``claude auth login --claudeai`` under a PTY, capture the
+    claude.ai authorization URL, and return it so the UI can display it.
+    The operator opens the URL, signs in, copies the code, then calls
+    ``/claude/login/{job_id}/submit``.
+
+    Open to any authenticated user — claude-cli auth lives in the shared
+    operator HOME. A hard cap on live login jobs + per-user rate limit
+    keeps this from being a DoS vector."""
+    uid = str(current_user.get("id") or "?")
+    _claude_op_rate_limit(uid, "login")
+    try:
+        from chatbot.claude_cli_provider import ClaudeCliLogin, ClaudeCliError
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"claude provider unavailable: {e}") from e
+    cli_path = (body.cli_path or "claude").strip() or "claude"
+    try:
+        job = await asyncio.to_thread(ClaudeCliLogin.start, cli_path=cli_path)
+    except ClaudeCliError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "job_id": job.job_id,
+        "state": job.state,
+        "login_url": job.login_url,
+        "error": job.error,
+    }
+
+
+@app.post("/claude/login/{job_id}/submit", response_class=JSONResponse)
+async def api_claude_login_submit(
+    job_id: str,
+    body: ClaudeLoginSubmitBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Deliver the operator-pasted authorization code to the waiting
+    ``claude auth login`` process and wait for it to exchange the code +
+    persist credentials. Returns the final job state."""
+    uid = str(current_user.get("id") or "?")
+    _claude_op_rate_limit(uid, "submit")
+    try:
+        from chatbot.claude_cli_provider import ClaudeCliLogin
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"claude provider unavailable: {e}") from e
+    snap = await asyncio.to_thread(ClaudeCliLogin.submit_code, job_id, body.code)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"Login job {job_id} not found")
+    return snap
+
+
+@app.get("/claude/login/{job_id}/status", response_class=JSONResponse)
+def api_claude_login_status(
+    job_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Poll the login job. State transitions:
+    pending → parsed → awaiting_code → success | failed | expired | cancelled."""
+    try:
+        from chatbot.claude_cli_provider import ClaudeCliLogin
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"claude provider unavailable: {e}") from e
+    snap = ClaudeCliLogin.status(job_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=f"Login job {job_id} not found")
+    return snap
+
+
+@app.post("/claude/login/{job_id}/cancel", response_class=JSONResponse)
+def api_claude_login_cancel(
+    job_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Cancel an in-flight login. Kills the subprocess if still alive.
+    Idempotent for already-finished jobs."""
+    try:
+        from chatbot.claude_cli_provider import ClaudeCliLogin
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"claude provider unavailable: {e}") from e
+    ok = ClaudeCliLogin.cancel(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Login job {job_id} not found")
+    return {"ok": True}
+
+
+@app.post("/claude/logout", response_class=JSONResponse)
+async def api_claude_logout(current_user: dict = Depends(get_current_user)):
+    """Run ``claude auth logout`` to drop the deployment's Claude
+    subscription credentials. Affects shared deployment-wide auth."""
+    try:
+        from chatbot.claude_cli_provider import claude_logout as _claude_logout
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"claude provider unavailable: {e}") from e
+    ok, msg = await asyncio.to_thread(_claude_logout, "claude")
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "message": msg}
+
+
 @app.delete("/models/{model_id}", response_class=JSONResponse)
 def api_delete_model(model_id: str, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(action_delete_model, conn, model_id, force=force)

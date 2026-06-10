@@ -602,18 +602,52 @@ class _AddEditSheetState extends ConsumerState<_AddEditSheet> {
     try {
       final payload = _buildPayload();
       final repo = ref.read(modelRepositoryProvider);
+      final LlmModel savedModel;
       if (widget.existing != null) {
-        await repo.update(widget.existing!.id, payload);
+        savedModel = await repo.update(widget.existing!.id, payload);
       } else {
-        await repo.create(payload);
+        savedModel = await repo.create(payload);
       }
-      setState(() {
-        _statusOk = true;
-        _saved = true;
-        _statusMsg = widget.existing != null
-            ? 'LLM test passed. Model updated.'
-            : 'LLM test passed. Model saved.';
-      });
+
+      // claude-cli skips the synthetic /llm/test above. Instead of falsely
+      // claiming "LLM test passed", run the REAL CLI connectivity test against
+      // the now-saved model so an expired subscription token (401) surfaces.
+      if (_draft.provider == 'claude-cli') {
+        setState(() {
+          _saved = true;
+          _statusMsg = 'Testing Claude CLI connection…';
+        });
+        try {
+          final data = await repo.testCli(savedModel.id);
+          final ok = data['ok'] as bool? ?? false;
+          if (ok) {
+            setState(() {
+              _statusOk = true;
+              _statusMsg = 'Model saved. Claude CLI connection OK (logged in).';
+            });
+          } else {
+            final err = data['error'] as String? ?? 'unknown error';
+            setState(() {
+              _statusOk = false;
+              _statusMsg = 'Model saved, but Claude CLI test failed: $err';
+            });
+          }
+        } catch (e) {
+          // The model is already saved — don't fail the save itself.
+          setState(() {
+            _statusOk = false;
+            _statusMsg = 'Model saved, but Claude CLI test failed: $e';
+          });
+        }
+      } else {
+        setState(() {
+          _statusOk = true;
+          _saved = true;
+          _statusMsg = widget.existing != null
+              ? 'LLM test passed. Model updated.'
+              : 'LLM test passed. Model saved.';
+        });
+      }
     } catch (e) {
       setState(() { _statusMsg = e.toString(); _statusOk = false; });
     } finally {

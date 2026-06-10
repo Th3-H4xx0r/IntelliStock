@@ -12,6 +12,7 @@ import {
 import { loadOllamaModels } from '../composables/useOllamaModels.js'
 import { loadBedrockModels } from '../composables/useBedrockModels.js'
 import CodexCliSetupPanel from './CodexCliSetupPanel.vue'
+import ClaudeCliSetupPanel from './ClaudeCliSetupPanel.vue'
 
 const props = defineProps({
   draft: { type: Object, required: true },
@@ -284,8 +285,12 @@ function onProviderChange(value) {
         </p>
       </div>
       <div v-if="draft.provider === 'claude-cli'" class="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-3 text-[11px] leading-relaxed text-slate-400">
-        Uses the locally-installed <span class="font-mono">claude</span> binary on the server. SSH to the server and run <span class="font-mono">claude</span> to log in before using. Tools are disabled — CC is used as a text-only LLM.
+        Uses the locally-installed <span class="font-mono">claude</span> binary on the server. Re-authenticate the Claude subscription from the panel below — no SSH needed. Tools are disabled — CC is used as a text-only LLM.
       </div>
+      <ClaudeCliSetupPanel
+        v-if="draft.provider === 'claude-cli'"
+        :cli-path="draft.cliPath || 'claude'"
+      />
       <CodexCliSetupPanel
         v-if="draft.provider === 'codex-cli'"
         :cli-path="draft.cliPath || 'codex'"

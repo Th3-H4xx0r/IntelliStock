@@ -2898,6 +2898,426 @@ def test_claude_cli(
     }
 
 
+# ── Subscription re-auth from the web/mobile UI ─────────────────────────────
+# Drives ``claude auth login --claudeai`` (the normal /login flow) so an
+# operator can refresh the deployment's Claude subscription credentials
+# without SSHing into the box. Unlike codex's device-code flow (the CLI
+# self-polls OpenAI), Claude's OAuth needs the authorization code pasted
+# BACK into the CLI, so this is a two-step flow: start (capture URL) →
+# submit_code (feed the pasted code). Runs under a PTY because the CLI
+# refuses the interactive login without a TTY, and as the *operator* (no
+# privilege drop) so fresh creds land in ``$HOME/.claude`` where every
+# per-call runtime HOME is seeded from.
+
+
+class ClaudeCliLoginError(ClaudeCliError):
+    """Raised when the interactive login flow can't be started."""
+
+
+def _operator_home() -> str:
+    return os.environ.get("HOME") or "/root"
+
+
+def invalidate_runtime_home_cache() -> None:
+    """Drop the process-wide cached structured runtime HOME and the
+    resolved ``.claude.json`` source so the *next* CLI call re-copies the
+    operator's freshly-written credentials. Called after a successful
+    login / logout — without it, strategies would keep using the stale
+    runtime HOME (and its expired token) until the process restarts."""
+    global _STRUCTURED_RUNTIME_HOME, _CLAUDE_JSON_SOURCE
+    with _STRUCTURED_RUNTIME_HOME_LOCK:
+        old = _STRUCTURED_RUNTIME_HOME
+        _STRUCTURED_RUNTIME_HOME = ""
+    if old:
+        try:
+            _cleanup_runtime_home(old)
+        except Exception:
+            pass
+    with _CLAUDE_STATE_INIT_LOCK:
+        _CLAUDE_JSON_SOURCE = ""
+    # Persistent chatbot sessions cache their own per-conversation runtime
+    # HOME; tear them down so the next turn re-spawns with fresh creds.
+    try:
+        shutdown_session_manager()
+    except Exception:
+        pass
+
+
+def claude_auth_status(cli_path: str = "claude") -> Dict[str, Any]:
+    """Read-only probe of the deployment's Claude subscription auth.
+    Runs ``claude auth status`` under the operator HOME. Returns
+    {installed, version, authenticated, account, auth_message}."""
+    try:
+        resolved = _resolve_cli_path(cli_path or "claude")
+    except ClaudeCliNotInstalledError as e:
+        return {"installed": False, "version": None, "authenticated": False,
+                "account": None, "auth_message": str(e)}
+    except ClaudeCliError as e:
+        return {"installed": False, "version": None, "authenticated": False,
+                "account": None, "auth_message": str(e)}
+
+    version = None
+    try:
+        ver = subprocess.run(
+            [resolved, "--version"], capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace", **_platform_popen_kwargs(),
+        )
+        if ver.stdout:
+            version = ver.stdout.strip().splitlines()[0]
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    env = os.environ.copy()
+    env["HOME"] = _operator_home()
+    try:
+        res = subprocess.run(
+            [resolved, "auth", "status"], capture_output=True, text=True,
+            timeout=15, encoding="utf-8", errors="replace", env=env,
+            **_platform_popen_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return {"installed": True, "version": version, "authenticated": False,
+                "account": None, "auth_message": "claude auth status timed out"}
+    except OSError as e:
+        return {"installed": True, "version": version, "authenticated": False,
+                "account": None, "auth_message": str(e)}
+
+    blob = _ANSI_ESCAPE_RE_CC.sub("", f"{res.stdout or ''}\n{res.stderr or ''}").strip()
+    low = blob.lower()
+    not_logged = any(n.lower() in low for n in _NOT_LOGGED_IN_NEEDLES) or "not logged in" in low
+    authed = (res.returncode == 0) and not not_logged
+    account = None
+    m = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", blob)
+    if m:
+        account = m.group(0)
+    return {
+        "installed": True,
+        "version": version,
+        "authenticated": bool(authed),
+        "account": account,
+        "auth_message": (blob[:300] or ("authenticated" if authed else "not logged in")),
+    }
+
+
+def claude_logout(cli_path: str = "claude") -> tuple[bool, str]:
+    """Run ``claude auth logout`` under the operator HOME and invalidate
+    the runtime-home cache. Returns (ok, message)."""
+    try:
+        resolved = _resolve_cli_path(cli_path or "claude")
+    except ClaudeCliError as e:
+        return False, str(e)
+    env = os.environ.copy()
+    env["HOME"] = _operator_home()
+    try:
+        res = subprocess.run(
+            [resolved, "auth", "logout"], capture_output=True, text=True,
+            timeout=15, encoding="utf-8", errors="replace", env=env,
+            **_platform_popen_kwargs(),
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, str(e)
+    invalidate_runtime_home_cache()
+    if res.returncode == 0:
+        return True, "ok"
+    return False, ((res.stderr or res.stdout or "").strip() or f"claude auth logout exit {res.returncode}")
+
+
+# ANSI/VT100 escape stripper for PTY output (URL/prompt parsing).
+_ANSI_ESCAPE_RE_CC = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[=>]")
+# Anthropic OAuth URL — captured from the login flow's stdout. The host
+# allowlist below is the real gate; this just narrows the candidate space.
+_CC_OAUTH_URL_RE = re.compile(r"https?://[^\s'\"<>\x1b]+")
+# Authorization code the operator pastes back. Claude's OAuth code is a
+# token, sometimes ``<code>#<state>``. Bounded + charset-restricted; this
+# is written to the CLI's PTY stdin (not a shell), so it's not a shell
+# injection vector, but we constrain it anyway.
+_CC_AUTH_CODE_RE = re.compile(r"^[A-Za-z0-9._~+/=#:%-]{6,1024}$")
+_CC_OAUTH_HOSTS = {
+    "claude.ai", "www.claude.ai", "claude.com", "www.claude.com",
+    "console.anthropic.com", "auth.anthropic.com", "anthropic.com",
+}
+
+
+def _is_safe_claude_oauth_url(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    if "@" in (parsed.netloc or ""):
+        return False
+    return (parsed.hostname or "").lower() in _CC_OAUTH_HOSTS
+
+
+@dataclass
+class _CcLoginJob:
+    job_id: str
+    state: str = "pending"  # pending | parsed | awaiting_code | success | failed | expired | cancelled
+    login_url: Optional[str] = None
+    error: Optional[str] = None
+    started_at: float = field(default_factory=time.monotonic)
+    proc: Optional[subprocess.Popen] = None
+    master_fd: Optional[int] = None
+    out_buf: List[str] = field(default_factory=list)
+
+
+class ClaudeCliLogin:
+    """Drives ``claude auth login --claudeai`` for the web/mobile UI.
+
+    Two-step OAuth: ``start`` spawns the CLI under a PTY and captures the
+    printed claude.ai authorization URL; ``submit_code`` writes the
+    operator-pasted code into the PTY and waits for the CLI to exchange it
+    and persist credentials. On success the runtime-home cache is dropped
+    so subsequent strategy/chatbot calls pick up the new token.
+    """
+
+    _jobs: Dict[str, _CcLoginJob] = {}
+    _jobs_lock = threading.Lock()
+    _JOB_TTL_SEC = 1800
+    _BUF_MAX = 300
+    _MAX_LIVE_JOBS = int(os.environ.get("CLAUDE_CLI_MAX_LIVE_LOGIN_JOBS", "3"))
+    _URL_PARSE_TIMEOUT_SEC = float(os.environ.get("CLAUDE_CLI_LOGIN_URL_TIMEOUT_SEC", "25"))
+    _CODE_EXCHANGE_TIMEOUT_SEC = float(os.environ.get("CLAUDE_CLI_LOGIN_CODE_TIMEOUT_SEC", "45"))
+
+    @classmethod
+    def start(cls, *, cli_path: str = "claude") -> _CcLoginJob:
+        if sys.platform == "win32":
+            raise ClaudeCliLoginError("interactive claude login is not supported on Windows servers")
+        resolved = _resolve_cli_path(cli_path or "claude")
+        cls._reap_old_jobs()
+        with cls._jobs_lock:
+            live = sum(1 for j in cls._jobs.values() if j.state in ("pending", "parsed", "awaiting_code"))
+        if live >= cls._MAX_LIVE_JOBS:
+            raise ClaudeCliLoginError(
+                f"too many concurrent claude login jobs ({live}); cancel one or wait"
+            )
+        job_id = str(uuid.uuid4())
+        job = _CcLoginJob(job_id=job_id)
+        try:
+            import pty
+            master_fd, slave_fd = pty.openpty()
+            # Wide terminal so the long OAuth URL prints on one line.
+            try:
+                import fcntl
+                import struct
+                import termios
+                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 1000, 0, 0))
+            except Exception:
+                pass
+            env = os.environ.copy()
+            env["HOME"] = _operator_home()
+            env["TERM"] = "xterm-256color"
+            # Discourage the CLI from trying to auto-launch a browser the
+            # headless server can't reach; force the paste-code path.
+            env["BROWSER"] = env.get("BROWSER", "true")
+            env["NO_BROWSER"] = "1"
+            proc = subprocess.Popen(
+                [resolved, "auth", "login", "--claudeai"],
+                stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                env=env, cwd=_operator_home(), close_fds=True,
+                start_new_session=True,
+            )
+            os.close(slave_fd)
+            job.proc = proc
+            job.master_fd = master_fd
+        except ClaudeCliError:
+            raise
+        except Exception as e:
+            raise ClaudeCliLoginError(f"failed to spawn claude login: {e}") from e
+        with cls._jobs_lock:
+            cls._jobs[job_id] = job
+        threading.Thread(
+            target=cls._reader, args=(job,), daemon=True,
+            name=f"cc-login-{job_id[:8]}",
+        ).start()
+        # Block until the URL is parsed (or the flow dies / times out).
+        deadline = time.monotonic() + cls._URL_PARSE_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            with cls._jobs_lock:
+                snap = cls._jobs.get(job_id)
+                if snap is None:
+                    break
+                if snap.login_url:
+                    if snap.state == "pending":
+                        snap.state = "parsed"
+                    return snap
+                if snap.state in ("failed", "expired", "cancelled", "success"):
+                    return snap
+            time.sleep(0.2)
+        with cls._jobs_lock:
+            snap = cls._jobs.get(job_id) or job
+            if not snap.login_url and snap.state == "pending":
+                snap.state = "failed"
+                snap.error = snap.error or (
+                    "claude login did not print an authorization URL in time. "
+                    + ("".join(snap.out_buf)[-300:] if snap.out_buf else "")
+                )
+            return snap
+
+    @classmethod
+    def submit_code(cls, job_id: str, code: str) -> Optional[Dict[str, Any]]:
+        with cls._jobs_lock:
+            job = cls._jobs.get(job_id)
+        if job is None:
+            return None
+        code = (code or "").strip()
+        if not _CC_AUTH_CODE_RE.match(code):
+            job.error = "authorization code has an unexpected format"
+            return cls.status(job_id)
+        proc = job.proc
+        fd = job.master_fd
+        if proc is None or fd is None or proc.poll() is not None:
+            job.state = "failed"
+            job.error = job.error or "login process is no longer running; restart the flow"
+            return cls.status(job_id)
+        try:
+            os.write(fd, (code + "\r").encode("utf-8"))
+        except OSError as e:
+            job.state = "failed"
+            job.error = f"failed to deliver code to claude: {e}"
+            return cls.status(job_id)
+        with cls._jobs_lock:
+            if job.state in ("pending", "parsed"):
+                job.state = "awaiting_code"
+        # Wait for the CLI to exchange the code + persist credentials.
+        deadline = time.monotonic() + cls._CODE_EXCHANGE_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.3)
+        rc = proc.poll()
+        # Confirm via a status probe — the most reliable success signal.
+        authed = False
+        try:
+            authed = bool(claude_auth_status(_resolve_cli_path_safe(job)).get("authenticated"))
+        except Exception:
+            authed = False
+        tail = "".join(job.out_buf)[-400:]
+        if authed or rc == 0:
+            with cls._jobs_lock:
+                job.state = "success"
+                job.error = None
+            invalidate_runtime_home_cache()
+        else:
+            with cls._jobs_lock:
+                if job.state not in ("cancelled", "expired"):
+                    job.state = "failed"
+                    job.error = _classify_login_failure(tail) or (tail or f"claude login exited {rc}")
+        cls._terminate(job)
+        return cls.status(job_id)
+
+    @classmethod
+    def status(cls, job_id: str) -> Optional[Dict[str, Any]]:
+        with cls._jobs_lock:
+            job = cls._jobs.get(job_id)
+        if job is None:
+            return None
+        return {
+            "job_id": job.job_id,
+            "state": job.state,
+            "login_url": job.login_url,
+            "error": job.error,
+            "output_tail": "".join(job.out_buf)[-400:],
+        }
+
+    @classmethod
+    def cancel(cls, job_id: str) -> bool:
+        with cls._jobs_lock:
+            job = cls._jobs.get(job_id)
+        if job is None:
+            return False
+        with cls._jobs_lock:
+            if job.state in ("pending", "parsed", "awaiting_code"):
+                job.state = "cancelled"
+        cls._terminate(job)
+        return True
+
+    @classmethod
+    def _terminate(cls, job: _CcLoginJob) -> None:
+        proc = job.proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        fd = job.master_fd
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            job.master_fd = None
+
+    @classmethod
+    def _reader(cls, job: _CcLoginJob) -> None:
+        fd = job.master_fd
+        if fd is None:
+            return
+        buf = ""
+        try:
+            while True:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    break  # PTY closed (process exited)
+                if not data:
+                    break
+                text = _ANSI_ESCAPE_RE_CC.sub("", data.decode("utf-8", "replace"))
+                buf += text
+                with cls._jobs_lock:
+                    job.out_buf.append(text)
+                    if len(job.out_buf) > cls._BUF_MAX:
+                        job.out_buf[:] = job.out_buf[-cls._BUF_MAX:]
+                    if not job.login_url:
+                        for m in _CC_OAUTH_URL_RE.finditer(buf):
+                            cand = m.group(0).rstrip(".,)]}'\"")
+                            if _is_safe_claude_oauth_url(cand):
+                                job.login_url = cand
+                                if job.state == "pending":
+                                    job.state = "parsed"
+                                break
+        except Exception:
+            pass
+
+    @classmethod
+    def _reap_old_jobs(cls) -> None:
+        now = time.monotonic()
+        with cls._jobs_lock:
+            stale = [jid for jid, j in cls._jobs.items() if (now - j.started_at) > cls._JOB_TTL_SEC]
+        for jid in stale:
+            with cls._jobs_lock:
+                j = cls._jobs.pop(jid, None)
+            if j is not None:
+                cls._terminate(j)
+
+
+def _resolve_cli_path_safe(job: _CcLoginJob) -> str:
+    """Best-effort cli_path for the post-submit status probe; the login
+    job doesn't retain the original arg, so fall back to the PATH lookup."""
+    return "claude"
+
+
+def _classify_login_failure(text: str) -> Optional[str]:
+    low = (text or "").lower()
+    if not low.strip():
+        return None
+    if "invalid" in low and "code" in low:
+        return "The authorization code was rejected. Copy it again and retry."
+    if "expired" in low:
+        return "The authorization code expired. Start the login flow again."
+    if any(n.lower() in low for n in _NOT_LOGGED_IN_NEEDLES):
+        return "Login did not complete — Claude still reports not logged in."
+    return None
+
+
 __all__ = [
     "ClaudeCliError",
     "ClaudeCliNotInstalledError",
@@ -2913,4 +3333,9 @@ __all__ = [
     "get_session_manager",
     "shutdown_session_manager",
     "ClaudeCliSessionManager",
+    "ClaudeCliLogin",
+    "ClaudeCliLoginError",
+    "claude_auth_status",
+    "claude_logout",
+    "invalidate_runtime_home_cache",
 ]

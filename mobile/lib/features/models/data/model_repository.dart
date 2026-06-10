@@ -199,15 +199,28 @@ class ModelRepository {
   }
 
   /// POST /models
+  ///
+  /// The backend wraps the created doc as `{"created": true, "model": {…}}`,
+  /// so unwrap `model` before parsing (fall back to the bare body for
+  /// forward-compat). Without this the returned [LlmModel.id] is empty.
   Future<LlmModel> create(Map<String, dynamic> body) async {
     final data = await _client.post<Map<String, dynamic>>('/models', body: body);
-    return LlmModel.fromJson(data);
+    return LlmModel.fromJson(_unwrapModel(data));
   }
 
   /// PUT /models/:id
+  ///
+  /// Returns `{"updated": true, "model": {…}}` — unwrap as in [create].
   Future<LlmModel> update(String id, Map<String, dynamic> body) async {
     final data = await _client.put<Map<String, dynamic>>('/models/$id', body: body);
-    return LlmModel.fromJson(data);
+    return LlmModel.fromJson(_unwrapModel(data));
+  }
+
+  /// Pull the inner `model` doc out of a `{created/updated, model}` envelope.
+  static Map<String, dynamic> _unwrapModel(Map<String, dynamic> data) {
+    final inner = data['model'];
+    if (inner is Map) return inner.cast<String, dynamic>();
+    return data;
   }
 
   /// DELETE /models/:id?force=true
@@ -277,6 +290,32 @@ class ModelRepository {
   /// POST /codex/logout
   Future<void> codexLogout() =>
       _client.post<dynamic>('/codex/logout');
+
+  // ── Claude ───────────────────────────────────────────────────────────────────
+
+  /// GET /claude/auth/status
+  Future<Map<String, dynamic>> claudeAuthStatus() =>
+      _client.get<Map<String, dynamic>>('/claude/auth/status');
+
+  /// POST /claude/login/start
+  Future<Map<String, dynamic>> claudeLoginStart(Map<String, dynamic> body) =>
+      _client.post<Map<String, dynamic>>('/claude/login/start', body: body);
+
+  /// POST /claude/login/:jobId/submit
+  Future<Map<String, dynamic>> claudeLoginSubmit(String jobId, String code) =>
+      _client.post<Map<String, dynamic>>('/claude/login/$jobId/submit', body: {'code': code});
+
+  /// GET /claude/login/:jobId/status
+  Future<Map<String, dynamic>> claudeLoginStatus(String jobId) =>
+      _client.get<Map<String, dynamic>>('/claude/login/$jobId/status');
+
+  /// POST /claude/login/:jobId/cancel
+  Future<void> claudeLoginCancel(String jobId) =>
+      _client.post<dynamic>('/claude/login/$jobId/cancel');
+
+  /// POST /claude/logout
+  Future<void> claudeLogout() =>
+      _client.post<dynamic>('/claude/logout');
 }
 
 final modelRepositoryProvider = Provider<ModelRepository>(
