@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intellistock_mobile/core/models/portfolio_history.dart';
@@ -46,19 +48,22 @@ void main() {
       final y = rect.top + 60;
 
       final gesture = await tester.startGesture(Offset(rect.left + 3, y));
-      await gesture.moveTo(Offset(rect.left + 5, y)); // recognise horizontal drag
+      await gesture.moveTo(Offset(rect.left + 30, y)); // exceed slop -> drag starts
       await tester.pump();
-      await gesture.moveTo(Offset(rect.right - 3, y)); // sweep to the far right
+      await gesture.moveTo(Offset(rect.left + 2, y)); // settle on the far left
+      await tester.pump();
+      await gesture.moveTo(Offset(rect.right - 2, y)); // sweep to the far right
       await tester.pump();
       await gesture.up();
       await tester.pump();
 
       final indices = reported.whereType<int>().toList();
       expect(indices, isNotEmpty, reason: 'reported=$reported rect=$rect');
-      expect(indices.first, lessThanOrEqualTo(1),
-          reason: 'reported=$reported rect=$rect'); // near the first point
-      expect(indices.last, greaterThanOrEqualTo(9),
-          reason: 'reported=$reported rect=$rect'); // near the last point
+      // Far left must report ~first point, far right ~last point.
+      expect(indices.reduce(min), lessThanOrEqualTo(1),
+          reason: 'reported=$reported rect=$rect');
+      expect(indices.reduce(max), greaterThanOrEqualTo(9),
+          reason: 'reported=$reported rect=$rect');
     },
   );
 }

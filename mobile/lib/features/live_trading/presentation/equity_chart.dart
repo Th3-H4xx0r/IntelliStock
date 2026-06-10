@@ -127,8 +127,6 @@ class _EquityChartState extends State<EquityChart> {
                 final width = constraints.maxWidth;
                 return GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTapDown: (d) => _handleScrub(d.localPosition.dx, width, n),
-                  onTapUp: (_) => _endScrub(),
                   onHorizontalDragStart: (d) =>
                       _handleScrub(d.localPosition.dx, width, n),
                   onHorizontalDragUpdate: (d) =>
