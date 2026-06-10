@@ -38,7 +38,7 @@
 > is **not** a vetted trading system. Algorithmic trading carries real
 > risk — including total loss of capital.
 >
-> - **Always start in paper mode.** Both Alpaca and Robinhood support
+> - **Always start in paper mode.** Only Alpaca supports
 >   paper-trading credentials. Run any strategy you intend to deploy
 >   in paper for at least a full market cycle before pointing it at
 >   real money.
