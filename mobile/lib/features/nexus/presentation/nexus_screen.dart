@@ -1353,7 +1353,7 @@ class _StartModalState extends State<_StartModal> {
                           title: Text(opt.label,
                               style: AppTextStyles.meta
                                   .copyWith(color: AppColors.textMd)),
-                          activeThumbColor: AppColors.success,
+                          activeColor: AppColors.success,
                           checkColor: AppColors.onPrimary,
                           dense: true,
                           contentPadding: EdgeInsets.zero,
@@ -1402,7 +1402,7 @@ class _StartModalState extends State<_StartModal> {
                                 value: _historicalMode,
                                 onChanged: (v) =>
                                     setState(() => _historicalMode = v),
-                                activeThumbColor: AppColors.success,
+                                activeColor: AppColors.success,
                               ),
                             ],
                           ),
@@ -1438,7 +1438,7 @@ class _StartModalState extends State<_StartModal> {
                                 value: _forceBootstrapRebuild,
                                 onChanged: (v) =>
                                     setState(() => _forceBootstrapRebuild = v),
-                                activeThumbColor: AppColors.success,
+                                activeColor: AppColors.success,
                               ),
                             ],
                           ),
@@ -1591,7 +1591,7 @@ class _AutoUpdateModalState extends State<_AutoUpdateModal> {
                 Switch(
                   value: _enabled,
                   onChanged: (v) => setState(() => _enabled = v),
-                  activeThumbColor: AppColors.info,
+                  activeColor: AppColors.info,
                 ),
               ],
             ),
@@ -1850,7 +1850,7 @@ class _RebuildModalState extends State<_RebuildModal> {
                           value: _forceBootstrap,
                           onChanged: (v) =>
                               setState(() => _forceBootstrap = v),
-                          activeThumbColor: AppColors.danger,
+                          activeColor: AppColors.danger,
                         ),
                       ],
                     ),
@@ -1916,7 +1916,7 @@ class _RebuildModalState extends State<_RebuildModal> {
                                     ? AppColors.warning
                                     : AppColors.info,
                                 size: 18),
-                            activeThumbColor: AppColors.danger,
+                            activeColor: AppColors.danger,
                             dense: true,
                             contentPadding: EdgeInsets.zero,
                           )),
@@ -2006,7 +2006,7 @@ class _ModeCard extends StatelessWidget {
               value: true,
               groupValue: selected,
               onChanged: (_) => onTap(),
-              activeThumbColor: color,
+              activeColor: color,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -2210,7 +2210,7 @@ class _DeletePhaseSelection extends StatelessWidget {
               onChanged: (v) => onToggle(p.value, v == true),
               title: Text(p.label,
                   style: AppTextStyles.meta.copyWith(color: AppColors.textMd)),
-              activeThumbColor: AppColors.warning,
+              activeColor: AppColors.warning,
               dense: true,
               contentPadding: EdgeInsets.zero,
             )),

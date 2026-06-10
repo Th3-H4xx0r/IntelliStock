@@ -66,5 +66,18 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>IntelliStock uses Face ID to lock the app and protect your portfolio.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>dev.pkrishna.intellistock</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>intellistock</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

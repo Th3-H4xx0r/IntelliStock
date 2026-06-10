@@ -423,7 +423,7 @@ class _ManualOrderSheetState extends State<_ManualOrderSheet> {
                                               () => _form = _form.copyWith(extendedHours: v),
                                             )
                                         : null,
-                                    activeThumbColor: AppColors.info,
+                                    activeColor: AppColors.info,
                                     side: BorderSide(color: AppColors.border),
                                   ),
                                 ),

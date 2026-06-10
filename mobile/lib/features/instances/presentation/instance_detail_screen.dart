@@ -1054,7 +1054,7 @@ class _ClearStateSheetState extends ConsumerState<_ClearStateSheet> {
                                   ? null
                                   : (v) =>
                                       setState(() => _scope = v ?? opt.value),
-                              activeThumbColor: AppColors.primary,
+                              activeColor: AppColors.primary,
                             ),
                             Expanded(
                               child: Padding(
