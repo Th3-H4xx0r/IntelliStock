@@ -263,8 +263,9 @@ class PositionCard extends StatelessWidget {
       ),
       series: <CartesianSeries>[
         if (!isLine)
-          AreaSeries<_SparkPoint, num>(
+          SplineAreaSeries<_SparkPoint, num>(
             dataSource: sparkPts,
+            splineType: SplineType.monotonic,
             xValueMapper: (d, _) => d.x,
             yValueMapper: (d, _) => d.value,
             color: color.withValues(alpha: 0.20),
@@ -280,8 +281,9 @@ class PositionCard extends StatelessWidget {
             ),
           )
         else
-          LineSeries<_SparkPoint, num>(
+          SplineSeries<_SparkPoint, num>(
             dataSource: sparkPts,
+            splineType: SplineType.monotonic,
             xValueMapper: (d, _) => d.x,
             yValueMapper: (d, _) => d.value,
             color: color,

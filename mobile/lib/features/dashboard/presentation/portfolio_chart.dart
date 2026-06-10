@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
+import '../../../core/charts/chart_decorations.dart';
+import '../../../core/charts/chart_geometry.dart';
+import '../../../core/charts/scrub_controller.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/glass_card.dart';
@@ -40,26 +43,6 @@ class _HistoryNotifier
   @override
   Future<PortfolioHistory> build(_HistoryArgs arg) =>
       ref.read(dashboardRepositoryProvider).portfolioHistory(arg.id, arg.range);
-}
-
-// ── Scrubber state ────────────────────────────────────────────────────────────
-
-/// Holds the pan-gesture scrubber state for one chart.
-class _ScrubState {
-  const _ScrubState({this.index, this.linePercent});
-
-  final int? index;
-
-  /// 0..100, the % x-position of the vertical hairline.
-  final double? linePercent;
-
-  _ScrubState copyWith({int? index, double? linePercent, bool clearIndex = false}) =>
-      _ScrubState(
-        index: clearIndex ? null : (index ?? this.index),
-        linePercent: linePercent ?? this.linePercent,
-      );
-
-  static const empty = _ScrubState();
 }
 
 // ── Change % helper (pure, also tested) ──────────────────────────────────────
@@ -129,7 +112,11 @@ class PortfolioChart extends ConsumerStatefulWidget {
 class _PortfolioChartState extends ConsumerState<PortfolioChart>
     with AutomaticKeepAliveClientMixin {
   String _range = '1M';
-  _ScrubState _scrub = _ScrubState.empty;
+
+  // Scrub state lives in a ValueNotifier so dragging repaints only the hairline
+  // + header value, never the (expensive) Syncfusion chart — that's what made
+  // the old setState-per-frame scrubber jank.
+  final ScrubController _scrub = ScrubController();
 
   // Animate the chart only on first reveal — not every time it scrolls back
   // into view or polls.
@@ -140,32 +127,18 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
   @override
   bool get wantKeepAlive => true;
 
-  // chart render key so we can get its RenderBox during scrub
-  final _chartKey = GlobalKey();
+  @override
+  void dispose() {
+    _scrub.dispose();
+    super.dispose();
+  }
 
   _HistoryArgs get _args => _HistoryArgs(widget.account.id as String, _range);
 
   void _setRange(String r) {
     if (r == _range) return;
-    setState(() {
-      _range = r;
-      _scrub = _ScrubState.empty;
-    });
-  }
-
-  void _onPanUpdate(DragUpdateDetails d, PortfolioHistory history) {
-    final box = _chartKey.currentContext?.findRenderObject() as RenderBox?;
-    if (box == null || history.isEmpty) return;
-    final local = box.globalToLocal(d.globalPosition);
-    final frac = (local.dx / box.size.width).clamp(0.0, 1.0);
-    final idx = nearestIndex(history.timestamps, frac);
-    setState(() {
-      _scrub = _ScrubState(index: idx, linePercent: frac * 100);
-    });
-  }
-
-  void _onPanEnd(PortfolioHistory history) {
-    setState(() => _scrub = _ScrubState.empty);
+    _scrub.clear();
+    setState(() => _range = r);
   }
 
   @override
@@ -191,9 +164,12 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
                     style:
                         AppTextStyles.micro.copyWith(color: AppColors.danger),
                   ),
-                  data: (h) => _ValueRow(
-                    history: h,
-                    scrubIndex: _scrub.index,
+                  data: (h) => ValueListenableBuilder<ScrubSample?>(
+                    valueListenable: _scrub,
+                    builder: (_, sample, _) => _ValueRow(
+                      history: h,
+                      scrubIndex: sample?.index,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -219,12 +195,10 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
                 );
               }
               return _ChartArea(
-                chartKey: _chartKey,
                 history: history,
                 scrub: _scrub,
+                range: _range,
                 animate: shouldAnimate,
-                onPanUpdate: (d) => _onPanUpdate(d, history),
-                onPanEnd: () => _onPanEnd(history),
               );
             },
           ),
@@ -429,25 +403,32 @@ class _ChartEmpty extends StatelessWidget {
 
 class _ChartArea extends StatelessWidget {
   const _ChartArea({
-    required this.chartKey,
     required this.history,
     required this.scrub,
+    required this.range,
     required this.animate,
-    required this.onPanUpdate,
-    required this.onPanEnd,
   });
 
-  final GlobalKey chartKey;
   final PortfolioHistory history;
-  final _ScrubState scrub;
+  final ScrubController scrub;
+  final String range;
 
   /// Whether the area series should play its entrance animation. Only true on
   /// the chart's first build; suppressed afterwards so scrolling away and back
   /// doesn't re-animate.
   final bool animate;
 
-  final void Function(DragUpdateDetails) onPanUpdate;
-  final VoidCallback onPanEnd;
+  static const double _plotHeight = 172;
+
+  void _onDrag(double localDx, double width) {
+    if (history.values.isEmpty || width <= 0) return;
+    final n = history.values.length;
+    final frac = (localDx / width).clamp(0.0, 1.0);
+    final idx = fractionToIndex(frac, n);
+    // Draw the hairline + dot at the data point's own fraction so they sit
+    // exactly on the curve and match the value the header reports.
+    scrub.update(idx, indexToFraction(idx, n));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -455,101 +436,111 @@ class _ChartArea extends StatelessWidget {
     final positive = (changeAbs ?? 0) >= 0;
     final lineColor = positive ? AppColors.success : AppColors.danger;
 
-    // Build Syncfusion chart data points
-    final dataSource = List<_ChartPoint>.generate(history.values.length, (i) {
-      return _ChartPoint(
-        x: history.timestamps[i].millisecondsSinceEpoch.toDouble(),
-        y: history.values[i],
-      );
-    });
+    final n = history.values.length;
+    final bounds = paddedBounds(history.values);
 
-    return SizedBox(
-      height: 192,
-      child: Stack(
+    // Index-based points (gapless across weekends/closed sessions).
+    final dataSource = List<_ChartPoint>.generate(
+      n,
+      (i) => _ChartPoint(x: i.toDouble(), y: history.values[i]),
+    );
+
+    final labels = [
+      for (final i in evenlySpacedLabelIndices(n, 4))
+        formatChartDate(history.timestamps[i], range),
+    ];
+
+    final chart = SfCartesianChart(
+      plotAreaBorderWidth: 0,
+      margin: EdgeInsets.zero,
+      primaryXAxis: edgeToEdgeIndexAxis(n),
+      primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
+      tooltipBehavior: TooltipBehavior(enable: false),
+      series: <CartesianSeries<_ChartPoint, double>>[
+        SplineAreaSeries<_ChartPoint, double>(
+          dataSource: dataSource,
+          splineType: SplineType.monotonic,
+          animationDuration: animate ? 900 : 0,
+          xValueMapper: (pt, _) => pt.x,
+          yValueMapper: (pt, _) => pt.y,
+          color: lineColor.withValues(alpha: 0.12),
+          borderColor: lineColor,
+          borderWidth: 2,
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              lineColor.withValues(alpha: 0.35),
+              lineColor.withValues(alpha: 0.0),
+            ],
+          ),
+        ),
+      ],
+    );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Positioned.fill(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
-              child: SfCartesianChart(
-                key: chartKey,
-                plotAreaBorderWidth: 0,
-                margin: EdgeInsets.zero,
-                primaryXAxis: NumericAxis(
-                  isVisible: true,
-                  majorGridLines: const MajorGridLines(width: 0),
-                  minorGridLines: const MinorGridLines(width: 0),
-                  axisLine: const AxisLine(width: 0),
-                  majorTickLines: const MajorTickLines(size: 0),
-                  labelStyle: TextStyle(
-                    color: AppColors.chartAxis,
-                    fontSize: 10,
-                  ),
-                  numberFormat: null,
-                  labelFormat: '',
-                ),
-                primaryYAxis: NumericAxis(
-                  isVisible: true,
-                  axisLine: const AxisLine(width: 0),
-                  majorTickLines: const MajorTickLines(size: 0),
-                  majorGridLines: MajorGridLines(
-                    color: AppColors.chartGrid,
-                    dashArray: const [4, 4],
-                  ),
-                  labelStyle: TextStyle(
-                    color: AppColors.chartAxis,
-                    fontSize: 10,
-                  ),
-                  desiredIntervals: 4,
-                  numberFormat: null,
-                  labelFormat: '\${value}',
-                ),
-                tooltipBehavior: TooltipBehavior(enable: false),
-                series: <CartesianSeries<_ChartPoint, double>>[
-                  AreaSeries<_ChartPoint, double>(
-                    dataSource: dataSource,
-                    animationDuration: animate ? 900 : 0,
-                    xValueMapper: (pt, _) => pt.x,
-                    yValueMapper: (pt, _) => pt.y,
-                    color: lineColor.withValues(alpha: 0.12),
-                    borderColor: lineColor,
-                    borderWidth: 2,
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        lineColor.withValues(alpha: 0.35),
-                        lineColor.withValues(alpha: 0.0),
-                      ],
+          SizedBox(
+            height: _plotHeight,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                return Stack(
+                  children: [
+                    // The chart never repaints during a scrub: it isn't wrapped
+                    // in the ValueListenableBuilder below, so notifier ticks
+                    // don't reach it.
+                    Positioned.fill(child: RepaintBoundary(child: chart)),
+                    // Hairline + dot — repaints only on scrub.
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: ValueListenableBuilder<ScrubSample?>(
+                          valueListenable: scrub,
+                          builder: (_, sample, _) {
+                            if (sample == null ||
+                                sample.index < 0 ||
+                                sample.index >= n) {
+                              return const SizedBox.shrink();
+                            }
+                            final dotY = valueToY(
+                              history.values[sample.index],
+                              bounds.min,
+                              bounds.max,
+                              _plotHeight,
+                            );
+                            return CustomPaint(
+                              painter: ScrubPainter(
+                                fraction: sample.fraction,
+                                dotY: dotY,
+                                color: lineColor,
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                     ),
-                  ),
-                ],
-              ),
+                    // Gesture overlay.
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onHorizontalDragStart: (d) =>
+                            _onDrag(d.localPosition.dx, width),
+                        onHorizontalDragUpdate: (d) =>
+                            _onDrag(d.localPosition.dx, width),
+                        onHorizontalDragEnd: (_) => scrub.clear(),
+                        onHorizontalDragCancel: scrub.clear,
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
-          // Scrubber hairline
-          if (scrub.linePercent != null)
-            Positioned(
-              top: 0,
-              bottom: 12,
-              left: (scrub.linePercent! / 100) *
-                  (MediaQuery.of(context).size.width - 8),
-              width: 1,
-              child: IgnorePointer(
-                child: Container(
-                  color: AppColors.primary.withValues(alpha: 0.5),
-                ),
-              ),
-            ),
-          // Gesture overlay
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onHorizontalDragUpdate: onPanUpdate,
-              onHorizontalDragEnd: (_) => onPanEnd(),
-              onHorizontalDragCancel: onPanEnd,
-              child: const SizedBox.expand(),
-            ),
-          ),
+          ChartDateLabels(labels: labels),
+          const SizedBox(height: 8),
         ],
       ),
     );
