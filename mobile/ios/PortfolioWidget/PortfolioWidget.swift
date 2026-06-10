@@ -162,6 +162,17 @@ struct PortfolioWidgetView: View {
     }
 
     var body: some View {
+        switch family {
+        case .accessoryRectangular:
+            rectangularLock.containerBackground(.clear, for: .widget)
+        case .accessoryInline:
+            inlineLock
+        default:
+            systemBody
+        }
+    }
+
+    private var systemBody: some View {
         Group {
             if !entry.hasData {
                 empty
@@ -182,6 +193,43 @@ struct PortfolioWidgetView: View {
             }
         }
         .containerBackground(widgetBG, for: .widget)
+    }
+
+    // ── Lock-screen accessory widgets (rendered monochrome by iOS) ──
+    @ViewBuilder
+    private var rectangularLock: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            if entry.hasData {
+                HStack(spacing: 3) {
+                    Image(systemName: entry.pnlAbs >= 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+                        .font(.system(size: 9))
+                    Text("$\(String(format: "%.2f", abs(entry.pnlAbs))) · \(String(format: "%.2f%%", abs(entry.pnlPct)))")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                Text(money(entry.value)).font(.system(size: 17, weight: .bold))
+                if !relativeAgo(entry.syncedAt).isEmpty {
+                    Text(relativeAgo(entry.syncedAt))
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("IntelliStock").font(.system(size: 12, weight: .semibold))
+                Text("Open app to sync").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var inlineLock: some View {
+        if entry.hasData {
+            Label {
+                Text("\(money(entry.value)) · \(pctText)")
+            } icon: {
+                Image(systemName: entry.pnlAbs >= 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+            }
+        } else {
+            Text("IntelliStock — open app")
+        }
     }
 
     // ── Empty state ──
@@ -419,7 +467,10 @@ struct PortfolioWidget: Widget {
         }
         .configurationDisplayName("Portfolio")
         .description("Live portfolio value, day P&L & positions. Long-press → Edit to pick a portfolio and refresh rate.")
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .supportedFamilies([
+            .systemSmall, .systemMedium, .systemLarge,
+            .accessoryRectangular, .accessoryInline,
+        ])
     }
 }
 
