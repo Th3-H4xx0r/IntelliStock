@@ -86,6 +86,11 @@ class WidgetSyncService {
           jsonEncode(accounts.first.toPortfolioJson()),
         );
       }
+      // "Last updated" timestamp (epoch seconds) for the widget footer.
+      await HomeWidget.saveWidgetData<int>(
+        'synced_at',
+        DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      );
       await HomeWidget.updateWidget(
         iOSName: 'PortfolioWidget',
         androidName: 'PortfolioWidgetProvider',

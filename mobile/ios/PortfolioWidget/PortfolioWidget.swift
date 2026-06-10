@@ -116,17 +116,35 @@ struct PortfolioEntry: TimelineEntry {
     let pnlPct: Double
     let points: [ChartPt]
     let positions: [PositionData]
+    let syncedAt: Double
     let hasData: Bool
 }
 
+private func lastSyncedAt() -> Double {
+    UserDefaults(suiteName: kAppGroup)?.double(forKey: "synced_at") ?? 0
+}
+
+/// "30s ago" / "1m ago" / "2h ago" — relative time since the app last synced.
+private func relativeAgo(_ epoch: Double) -> String {
+    guard epoch > 0 else { return "" }
+    let diff = max(0, Date().timeIntervalSince1970 - epoch)
+    if diff < 5 { return "Just now" }
+    if diff < 60 { return "\(Int(diff))s ago" }
+    if diff < 3600 { return "\(Int(diff / 60))m ago" }
+    if diff < 86400 { return "\(Int(diff / 3600))h ago" }
+    return "\(Int(diff / 86400))d ago"
+}
+
 private func portfolioEntry(for id: String?, date: Date = Date()) -> PortfolioEntry {
+    let synced = lastSyncedAt()
     if let a = resolveAccount(id) {
         return PortfolioEntry(date: date, label: a.label, value: a.value,
                               pnlAbs: a.pnlAbs, pnlPct: a.pnlPct,
-                              points: a.points, positions: a.positions, hasData: true)
+                              points: a.points, positions: a.positions,
+                              syncedAt: synced, hasData: true)
     }
     return PortfolioEntry(date: date, label: "Portfolio", value: 0, pnlAbs: 0,
-                          pnlPct: 0, points: [], positions: [], hasData: false)
+                          pnlPct: 0, points: [], positions: [], syncedAt: synced, hasData: false)
 }
 
 // MARK: - View (V5 Premium Editorial, per family)
@@ -156,6 +174,13 @@ struct PortfolioWidgetView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .bottomTrailing) {
+            if entry.hasData, !relativeAgo(entry.syncedAt).isEmpty {
+                Text(relativeAgo(entry.syncedAt))
+                    .font(.system(size: 9)).foregroundColor(cFaint)
+                    .padding(.trailing, 10).padding(.bottom, 7)
+            }
+        }
         .containerBackground(widgetBG, for: .widget)
     }
 
@@ -167,7 +192,7 @@ struct PortfolioWidgetView: View {
             Text("Open the app to sync your portfolio").font(.system(size: 12)).foregroundColor(cDim)
             Spacer()
         }
-        .padding(16)
+        .padding(12)
     }
 
     // ── 1×1 ──
@@ -183,7 +208,7 @@ struct PortfolioWidgetView: View {
             Spacer(minLength: 4)
             curve(height: 40)
         }
-        .padding(15)
+        .padding(12)
     }
 
     // ── 1×2 ──
@@ -201,7 +226,7 @@ struct PortfolioWidgetView: View {
             positionsGrid(limit: 6, columns: 2, fontSize: 11)
                 .frame(maxWidth: .infinity)
         }
-        .padding(15)
+        .padding(12)
     }
 
     // ── 2×2 : curve top, positions bottom ──
@@ -225,7 +250,7 @@ struct PortfolioWidgetView: View {
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(18)
+        .padding(14)
     }
 
     // ── Positions — condensed: no dot, P&L right next to the ticker, packed
@@ -441,7 +466,7 @@ struct InstanceStatusWidget: Widget {
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(15)
+            .padding(12)
             .containerBackground(widgetBG, for: .widget)
         }
         .configurationDisplayName("Instance Status")
