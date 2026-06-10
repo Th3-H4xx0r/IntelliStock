@@ -5,6 +5,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/models/portfolio_history.dart';
 import '../data/dashboard_repository.dart';
@@ -125,9 +126,19 @@ class PortfolioChart extends ConsumerStatefulWidget {
   ConsumerState<PortfolioChart> createState() => _PortfolioChartState();
 }
 
-class _PortfolioChartState extends ConsumerState<PortfolioChart> {
+class _PortfolioChartState extends ConsumerState<PortfolioChart>
+    with AutomaticKeepAliveClientMixin {
   String _range = '1M';
   _ScrubState _scrub = _ScrubState.empty;
+
+  // Animate the chart only on first reveal — not every time it scrolls back
+  // into view or polls.
+  bool _animatedOnce = false;
+
+  // Keep the chart alive while scrolled off-screen so it isn't recreated
+  // (which would re-fetch and re-run the entry animation).
+  @override
+  bool get wantKeepAlive => true;
 
   // chart render key so we can get its RenderBox during scrub
   final _chartKey = GlobalKey();
@@ -159,6 +170,7 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // for AutomaticKeepAliveClientMixin
     final histAsync = ref.watch(_historyProvider(_args));
     return GlassCard(
       padding: EdgeInsets.zero,
@@ -197,10 +209,20 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart> {
               if (history.isEmpty) {
                 return const _ChartEmpty(message: 'No data for this range');
               }
+              // Play the entrance animation only the first time the chart
+              // renders with data; flip the flag afterwards so scrolling away
+              // and back (state kept alive) doesn't re-animate.
+              final shouldAnimate = !_animatedOnce;
+              if (shouldAnimate) {
+                WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => _animatedOnce = true,
+                );
+              }
               return _ChartArea(
                 chartKey: _chartKey,
                 history: history,
                 scrub: _scrub,
+                animate: shouldAnimate,
                 onPanUpdate: (d) => _onPanUpdate(d, history),
                 onPanEnd: () => _onPanEnd(history),
               );
@@ -323,23 +345,9 @@ class _ValueSkeleton extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          height: 24,
-          width: 120,
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(6),
-          ),
-        ),
+        Skeleton(width: 120, height: 24, radius: 6),
         const SizedBox(height: 6),
-        Container(
-          height: 14,
-          width: 80,
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(4),
-          ),
-        ),
+        Skeleton(width: 80, height: 13, radius: 5),
       ],
     );
   }
@@ -387,13 +395,9 @@ class _ChartSkeleton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 180,
-      margin: const EdgeInsets.fromLTRB(4, 0, 4, 12),
-      decoration: BoxDecoration(
-        color: AppColors.surface.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(8),
-      ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
+      child: Skeleton(height: 180, radius: 8),
     );
   }
 }
@@ -428,6 +432,7 @@ class _ChartArea extends StatelessWidget {
     required this.chartKey,
     required this.history,
     required this.scrub,
+    required this.animate,
     required this.onPanUpdate,
     required this.onPanEnd,
   });
@@ -435,6 +440,12 @@ class _ChartArea extends StatelessWidget {
   final GlobalKey chartKey;
   final PortfolioHistory history;
   final _ScrubState scrub;
+
+  /// Whether the area series should play its entrance animation. Only true on
+  /// the chart's first build; suppressed afterwards so scrolling away and back
+  /// doesn't re-animate.
+  final bool animate;
+
   final void Function(DragUpdateDetails) onPanUpdate;
   final VoidCallback onPanEnd;
 
@@ -496,6 +507,7 @@ class _ChartArea extends StatelessWidget {
                 series: <CartesianSeries<_ChartPoint, double>>[
                   AreaSeries<_ChartPoint, double>(
                     dataSource: dataSource,
+                    animationDuration: animate ? 900 : 0,
                     xValueMapper: (pt, _) => pt.x,
                     yValueMapper: (pt, _) => pt.y,
                     color: lineColor.withValues(alpha: 0.12),

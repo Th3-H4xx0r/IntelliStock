@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/network/session.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_text_styles.dart';
+import '../../../../core/widgets/app_logo.dart';
 import '../../../../core/widgets/common_widgets.dart';
 import '../../../../core/widgets/glass_card.dart';
 import '../../../../core/widgets/material_symbols.dart';
@@ -59,11 +60,7 @@ class _StepWelcomeState extends ConsumerState<StepWelcome>
                   ),
                 ),
               ),
-              IconTile(
-                icon: symbol('auto_awesome'),
-                color: AppColors.primary,
-                size: 72,
-              ),
+              const AppLogo(size: 72),
             ],
           ),
           const SizedBox(height: 24),

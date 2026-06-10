@@ -52,6 +52,14 @@ dev_dependencies:
   riverpod_generator: ^2.6.3
   freezed: ^2.5.7
   json_serializable: ^6.9.0
+  flutter_launcher_icons: ^0.14.1
+
+flutter_launcher_icons:
+  image_path: "assets/app_logo.png"
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  background_color_ios: "#04040C"
 
 flutter:
   uses-material-design: true

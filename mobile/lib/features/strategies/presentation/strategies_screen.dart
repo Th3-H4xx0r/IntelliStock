@@ -8,6 +8,7 @@ import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/formatters/formatters.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../application/strategies_controller.dart';
 import '../data/models/strategy.dart';
 
@@ -152,13 +153,25 @@ class StrategiesScreen extends ConsumerWidget {
                 SliverPadding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   sliver: SliverList(
-                    delegate: SliverChildBuilderDelegate(
-                      (_, i) => Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: _SkeletonCard(height: i == 0 ? 200 : 80),
+                    delegate: SliverChildListDelegate([
+                      // Top-5 rank card skeletons (3 large)
+                      ...List.generate(
+                        3,
+                        (_) => const Padding(
+                          padding: EdgeInsets.only(bottom: 10),
+                          child: _Top5CardSkeleton(),
+                        ),
                       ),
-                      childCount: 5,
-                    ),
+                      const SizedBox(height: 6),
+                      // Strategy row skeletons (5 compact)
+                      ...List.generate(
+                        5,
+                        (_) => const Padding(
+                          padding: EdgeInsets.only(bottom: 10),
+                          child: _StrategyRowSkeleton(),
+                        ),
+                      ),
+                    ]),
                   ),
                 )
               else ...[
@@ -927,21 +940,132 @@ class _PageBtn extends StatelessWidget {
   }
 }
 
-// ── Skeleton card ─────────────────────────────────────────────────────────────
+// ── Skeleton widgets ──────────────────────────────────────────────────────────
 
-class _SkeletonCard extends StatelessWidget {
-  const _SkeletonCard({required this.height});
-
-  final double height;
+class _Top5CardSkeleton extends StatelessWidget {
+  const _Top5CardSkeleton();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: height,
-      decoration: BoxDecoration(
-        color: AppColors.surface.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border),
+    return GlassCard(
+      padding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Top accent line placeholder
+          Skeleton(height: 2, radius: 0),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Rank icon + name
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Skeleton(width: 38, height: 38, radius: 10),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Skeleton.line(width: 160, height: 14),
+                          const SizedBox(height: 4),
+                          Skeleton.line(width: 90, height: 10),
+                        ],
+                      ),
+                    ),
+                    Skeleton(width: 52, height: 20, radius: 4),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                // P&L stats
+                Row(
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Skeleton.line(width: 50, height: 9),
+                        const SizedBox(height: 4),
+                        Skeleton(width: 80, height: 18, radius: 4),
+                      ],
+                    ),
+                    const SizedBox(width: 20),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Skeleton.line(width: 60, height: 9),
+                        const SizedBox(height: 4),
+                        Skeleton(width: 70, height: 18, radius: 4),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                // Sub-strategy pills
+                Row(
+                  children: [
+                    Skeleton(width: 60, height: 18, radius: 4),
+                    const SizedBox(width: 4),
+                    Skeleton(width: 72, height: 18, radius: 4),
+                    const SizedBox(width: 4),
+                    Skeleton(width: 54, height: 18, radius: 4),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                // Action buttons
+                Row(
+                  children: [
+                    Skeleton(width: 100, height: 28, radius: 8),
+                    const SizedBox(width: 8),
+                    Skeleton(width: 80, height: 28, radius: 8),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StrategyRowSkeleton extends StatelessWidget {
+  const _StrategyRowSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        children: [
+          // Icon/rank tile
+          Skeleton(width: 34, height: 34, radius: 8),
+          const SizedBox(width: 10),
+          // Name + meta
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Skeleton.line(width: 130, height: 13),
+                const SizedBox(height: 5),
+                Skeleton.line(width: 90, height: 10),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          // P&L
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Skeleton(width: 60, height: 13, radius: 4),
+              const SizedBox(height: 4),
+              Skeleton(width: 48, height: 11, radius: 4),
+            ],
+          ),
+          const SizedBox(width: 8),
+          Skeleton(width: 26, height: 26, radius: 6),
+        ],
       ),
     );
   }

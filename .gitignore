@@ -258,3 +258,6 @@ ehthumbs.db
 # Vite cache
 frontend/.vite/
 .sessions/
+
+# Superpowers brainstorm scratch
+.superpowers/

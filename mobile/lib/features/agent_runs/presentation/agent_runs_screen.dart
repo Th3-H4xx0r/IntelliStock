@@ -9,6 +9,7 @@ import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../../../core/widgets/status_pill.dart';
 import '../application/agent_runs_controller.dart';
 import '../data/agent_repository.dart';
@@ -94,7 +95,7 @@ class AgentRunsScreen extends ConsumerWidget {
       body: AppBackground(
         child: SafeArea(
           child: asyncState.when(
-            loading: () => const Center(child: LoadingState(label: 'Loading runs…')),
+            loading: () => const _AgentRunsSkeleton(),
             error: (e, _) => Center(
               child: ErrorBanner(
                 message: e.toString(),
@@ -154,13 +155,7 @@ class _Body extends ConsumerWidget {
                 (_, _) => Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  child: GlassCard(
-                    child: SizedBox(
-                        height: 120,
-                        child: Center(
-                            child: const CircularProgressIndicator(
-                                strokeWidth: 1.5))),
-                  ),
+                  child: _RunCardSkeleton(),
                 ),
                 childCount: 3,
               ),
@@ -1032,6 +1027,118 @@ class _PageBtn extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ── Loading skeletons ─────────────────────────────────────────────────────────
+
+/// Full-screen skeleton shown on the initial load before any data arrives.
+class _AgentRunsSkeleton extends StatelessWidget {
+  const _AgentRunsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomScrollView(
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // Header
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Skeleton(width: 180, height: 22),
+                    const SizedBox(height: 6),
+                    Skeleton(width: 260, height: 11),
+                  ]),
+                ),
+                const SizedBox(width: 12),
+                Skeleton(width: 70, height: 24, radius: 12),
+              ]),
+              const SizedBox(height: 12),
+              // Controls row skeleton
+              Row(children: [
+                Skeleton(width: 72, height: 32, radius: 8),
+                const SizedBox(width: 8),
+                Skeleton(width: 60, height: 32, radius: 8),
+                const SizedBox(width: 8),
+                Skeleton(width: 80, height: 32, radius: 8),
+              ]),
+              const SizedBox(height: 20),
+            ]),
+          ),
+        ),
+        // 2 cycle-group skeletons, 2 run cards each
+        for (int g = 0; g < 2; g++) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(children: [
+                const Expanded(child: Divider(color: Color(0xFF2A2142), height: 1)),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Skeleton(width: 100, height: 9),
+                ),
+                const Expanded(child: Divider(color: Color(0xFF2A2142), height: 1)),
+              ]),
+            ),
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 12)),
+          SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (_, _) => Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                child: _RunCardSkeleton(),
+              ),
+              childCount: 2,
+            ),
+          ),
+        ],
+        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+      ],
+    );
+  }
+}
+
+class _RunCardSkeleton extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Card header: icon + name + badge
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Skeleton.circle(36),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Skeleton(width: 160, height: 13),
+              const SizedBox(height: 4),
+              Skeleton(width: 90, height: 9),
+            ]),
+          ),
+          Skeleton(width: 56, height: 18, radius: 9),
+        ]),
+        const SizedBox(height: 12),
+        // Stage rows skeleton (3 rows)
+        for (int i = 0; i < 3; i++) ...[
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Skeleton.circle(28),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Skeleton(width: double.infinity, height: 11),
+                  const SizedBox(height: 4),
+                  Skeleton(width: 120, height: 9),
+                ]),
+              ),
+            ),
+          ]),
+        ],
+      ]),
     );
   }
 }

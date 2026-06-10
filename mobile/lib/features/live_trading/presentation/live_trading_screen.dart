@@ -8,6 +8,7 @@ import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../../../core/widgets/status_pill.dart';
 import '../../../core/widgets/typed_confirm_field.dart';
 import '../application/live_state_notifier.dart';
@@ -59,7 +60,7 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
             children: [
               // Main scrollable content
               asyncState.when(
-                loading: () => const Center(child: LoadingState(label: 'Loading live state…')),
+                loading: () => _LiveTradingSkeleton(instanceId: widget.instanceId),
                 error: (e, _) => Center(
                   child: ErrorBanner(
                     message: e.toString(),
@@ -113,7 +114,7 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
                 'This instance has no active broker session. Start the instance to begin live trading.',
           )
         else if (s.liveState == null)
-          const Center(child: LoadingState(label: 'Loading live state…'))
+          _LiveTradingBodySkeleton(instanceId: widget.instanceId)
         else ...[
           _buildHeroEquityCard(context, s),
           const SizedBox(height: 12),
@@ -1094,6 +1095,204 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ── Skeleton helpers ──────────────────────────────────────────────────────────
+
+/// Full-screen skeleton shown when the provider first loads (no data yet).
+class _LiveTradingSkeleton extends StatelessWidget {
+  const _LiveTradingSkeleton({required this.instanceId});
+  final String instanceId;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        // Breadcrumb
+        Row(
+          children: [
+            Skeleton(width: 40, height: 12, radius: 5),
+            const SizedBox(width: 6),
+            Skeleton(width: 4, height: 12, radius: 5),
+            const SizedBox(width: 6),
+            Skeleton(width: 160, height: 12, radius: 5),
+          ],
+        ),
+        const SizedBox(height: 16),
+        // Header: icon + title + subtitle + status chips row
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Skeleton.circle(44),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Skeleton(height: 22, radius: 7),
+                  const SizedBox(height: 6),
+                  Skeleton(width: 200, height: 12, radius: 5),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Skeleton(width: 80, height: 26, radius: 13),
+            const SizedBox(width: 8),
+            Skeleton(width: 60, height: 30, radius: 8),
+            const SizedBox(width: 8),
+            Skeleton(width: 110, height: 30, radius: 8),
+          ],
+        ),
+        const SizedBox(height: 12),
+        // Hero equity card skeleton
+        const _HeroCardSkeleton(),
+        const SizedBox(height: 12),
+        // 2 position card skeletons
+        const _PositionCardSkeleton(),
+        const SizedBox(height: 10),
+        const _PositionCardSkeleton(),
+      ],
+    );
+  }
+}
+
+/// Skeleton shown when the outer provider has data but liveState is still null.
+class _LiveTradingBodySkeleton extends StatelessWidget {
+  const _LiveTradingBodySkeleton({required this.instanceId});
+  final String instanceId;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 12),
+        const _HeroCardSkeleton(),
+        const SizedBox(height: 12),
+        const _PositionCardSkeleton(),
+        const SizedBox(height: 10),
+        const _PositionCardSkeleton(),
+      ],
+    );
+  }
+}
+
+class _HeroCardSkeleton extends StatelessWidget {
+  const _HeroCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // PORTFOLIO EQUITY label + big value + change line
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Skeleton(width: 140, height: 10, radius: 5),
+                    const SizedBox(height: 8),
+                    Skeleton(width: 200, height: 36, radius: 8),
+                    const SizedBox(height: 8),
+                    Skeleton(width: 160, height: 12, radius: 6),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Skeleton(width: 50, height: 10, radius: 5),
+                  const SizedBox(height: 4),
+                  Skeleton(width: 70, height: 16, radius: 6),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Chart block
+          Skeleton(height: 240, radius: 8),
+          const SizedBox(height: 10),
+          // Range tabs row
+          Row(
+            children: List.generate(
+              7,
+              (_) => Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: Skeleton(width: 32, height: 24, radius: 6),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // 4 mini-stat blocks
+          Row(
+            children: List.generate(
+              4,
+              (_) => Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Skeleton(height: 10, radius: 5),
+                      const SizedBox(height: 4),
+                      Skeleton(height: 14, radius: 6),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PositionCardSkeleton extends StatelessWidget {
+  const _PositionCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Skeleton(width: 60, height: 16, radius: 6),
+              const Spacer(),
+              Skeleton(width: 80, height: 12, radius: 5),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Skeleton(height: 60, radius: 6),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(child: Skeleton(height: 10, radius: 5)),
+              const SizedBox(width: 8),
+              Expanded(child: Skeleton(height: 10, radius: 5)),
+              const SizedBox(width: 8),
+              Expanded(child: Skeleton(height: 10, radius: 5)),
+            ],
+          ),
+        ],
       ),
     );
   }

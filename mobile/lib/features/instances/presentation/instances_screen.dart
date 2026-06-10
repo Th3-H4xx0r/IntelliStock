@@ -9,6 +9,7 @@ import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/confirm_dialog.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../../../core/widgets/status_pill.dart';
 import '../application/instances_controller.dart';
 import '../data/models/instance.dart';
@@ -39,10 +40,7 @@ class InstancesScreen extends ConsumerWidget {
     final async = ref.watch(instancesControllerProvider);
 
     return async.when(
-      loading: () => const Padding(
-        padding: EdgeInsets.all(24),
-        child: LoadingState(label: 'Loading instances…'),
-      ),
+      loading: () => const _InstancesScreenSkeleton(),
       error: (e, _) => Padding(
         padding: const EdgeInsets.all(24),
         child: ErrorBanner(
@@ -52,6 +50,119 @@ class InstancesScreen extends ConsumerWidget {
         ),
       ),
       data: (state) => _InstancesBody(state: state),
+    );
+  }
+}
+
+// ── Skeleton ──────────────────────────────────────────────────────────────────
+
+class _InstancesScreenSkeleton extends StatelessWidget {
+  const _InstancesScreenSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        // Header skeleton: eyebrow + title + subtitle
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Skeleton(width: 80, height: 10, radius: 5),
+            const SizedBox(height: 8),
+            Skeleton(width: 160, height: 28, radius: 8),
+            const SizedBox(height: 8),
+            Skeleton(height: 12, radius: 6),
+          ],
+        ),
+        const SizedBox(height: 16),
+        // Filter pills skeleton
+        Row(
+          children: [
+            Skeleton(width: 60, height: 28, radius: 8),
+            const SizedBox(width: 6),
+            Skeleton(width: 100, height: 28, radius: 8),
+            const SizedBox(width: 6),
+            Skeleton(width: 84, height: 28, radius: 8),
+          ],
+        ),
+        const SizedBox(height: 16),
+        // 4 instance card skeletons
+        for (var i = 0; i < 4; i++) ...[
+          const _InstanceCardSkeleton(),
+          const SizedBox(height: 12),
+        ],
+      ],
+    );
+  }
+}
+
+class _InstanceCardSkeleton extends StatelessWidget {
+  const _InstanceCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header: icon circle + name/id lines + badge + pill
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton.circle(40),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Skeleton(width: 140, height: 14, radius: 6),
+                    const SizedBox(height: 6),
+                    Skeleton(width: 100, height: 10, radius: 5),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Skeleton(width: 36, height: 18, radius: 9),
+                  const SizedBox(height: 6),
+                  Skeleton(width: 56, height: 18, radius: 9),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Meta lines
+          Skeleton(height: 12, radius: 6),
+          const SizedBox(height: 6),
+          Skeleton(width: 220, height: 12, radius: 6),
+          const SizedBox(height: 12),
+          // Chip blocks row
+          Row(
+            children: [
+              Skeleton(width: 50, height: 22, radius: 6),
+              const SizedBox(width: 6),
+              Skeleton(width: 50, height: 22, radius: 6),
+              const SizedBox(width: 6),
+              Skeleton(width: 50, height: 22, radius: 6),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Action buttons row
+          Row(
+            children: [
+              Skeleton(width: 60, height: 28, radius: 8),
+              const SizedBox(width: 6),
+              Skeleton(width: 80, height: 28, radius: 8),
+              const SizedBox(width: 6),
+              Skeleton(width: 64, height: 28, radius: 8),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

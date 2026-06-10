@@ -8,6 +8,7 @@ import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../../../core/widgets/status_pill.dart';
 import '../../../core/widgets/typed_confirm_field.dart';
 import '../application/nexus_controller.dart';
@@ -86,8 +87,7 @@ class NexusScreen extends ConsumerWidget {
       body: AppBackground(
         child: SafeArea(
           child: asyncState.when(
-            loading: () =>
-                const Center(child: LoadingState(label: 'Loading Nexus…')),
+            loading: () => const _NexusSkeleton(),
             error: (e, _) => _CannotLoad(
               onRetry: () =>
                   ref.read(nexusControllerProvider.notifier).refreshNow(),
@@ -96,6 +96,155 @@ class NexusScreen extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ── Loading skeleton ──────────────────────────────────────────────────────────
+
+class _NexusSkeleton extends StatelessWidget {
+  const _NexusSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomScrollView(
+      slivers: [
+        // Header skeleton
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Skeleton(width: 160, height: 22),
+                    const SizedBox(height: 6),
+                    Skeleton(width: 280, height: 11),
+                  ]),
+                ),
+                const SizedBox(width: 12),
+                Skeleton(width: 56, height: 22, radius: 11),
+              ]),
+              const SizedBox(height: 12),
+              Row(children: [
+                Skeleton(width: 72, height: 32, radius: 8),
+                const SizedBox(width: 8),
+                Skeleton(width: 60, height: 32, radius: 8),
+                const SizedBox(width: 8),
+                Skeleton(width: 90, height: 32, radius: 8),
+              ]),
+            ]),
+          ),
+        ),
+        // Auto-update card skeleton
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: GlassCard(
+              child: Row(children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Skeleton(width: 80, height: 10),
+                    const SizedBox(height: 6),
+                    Skeleton(width: 130, height: 16),
+                    const SizedBox(height: 4),
+                    Skeleton(width: 200, height: 10),
+                    const SizedBox(height: 4),
+                    Skeleton(width: 180, height: 9),
+                  ]),
+                ),
+                const SizedBox(width: 12),
+                Skeleton(width: 90, height: 32, radius: 8),
+              ]),
+            ),
+          ),
+        ),
+        // Bootstrap card skeleton
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: GlassCard(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Skeleton.circle(20),
+                  const SizedBox(width: 8),
+                  Expanded(child: Skeleton(width: 160, height: 14)),
+                  Skeleton(width: 80, height: 18, radius: 9),
+                ]),
+                const SizedBox(height: 8),
+                Skeleton(width: 180, height: 10),
+              ]),
+            ),
+          ),
+        ),
+        // Graph counts tile skeletons
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: GlassCard(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Skeleton(width: 100, height: 12),
+                    const SizedBox(height: 4),
+                    Skeleton(width: 160, height: 9),
+                  ])),
+                  Skeleton(width: 50, height: 28),
+                  const SizedBox(width: 16),
+                  Skeleton(width: 50, height: 28),
+                ]),
+                const SizedBox(height: 12),
+                for (int i = 0; i < 3; i++) ...[
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF18112B),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(children: [
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Skeleton(width: 140, height: 11),
+                        const SizedBox(height: 4),
+                        Skeleton(width: 100, height: 9),
+                      ])),
+                      Skeleton(width: 50, height: 20),
+                    ]),
+                  ),
+                ],
+              ]),
+            ),
+          ),
+        ),
+        // Stage stepper skeleton (build stages card)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: GlassCard(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Skeleton(width: 90, height: 12),
+                const SizedBox(height: 16),
+                for (int i = 0; i < 5; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Skeleton.circle(32),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Skeleton(width: double.infinity, height: 12),
+                          const SizedBox(height: 4),
+                          Skeleton(width: 60, height: 9),
+                        ]),
+                      ),
+                    ]),
+                  ),
+              ]),
+            ),
+          ),
+        ),
+        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+      ],
     );
   }
 }

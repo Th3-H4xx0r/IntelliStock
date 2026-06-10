@@ -47,8 +47,7 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
       vsync: this,
       duration: const Duration(milliseconds: 2400),
     )..repeat(reverse: true);
-    _glowOpacity =
-        Tween<double>(begin: 0.0, end: 1.0).animate(_glowAnim);
+    _glowOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(_glowAnim);
   }
 
   @override
@@ -58,15 +57,29 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
     super.dispose();
   }
 
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
+  bool _wasOpen = false;
+  double _lastKbInset = 0;
+
+  void _scrollToBottom({bool animate = true}) {
+    void run() {
+      if (!_scrollCtrl.hasClients) return;
+      final max = _scrollCtrl.position.maxScrollExtent;
+      if (animate) {
         _scrollCtrl.animateTo(
-          _scrollCtrl.position.maxScrollExtent,
+          max,
           duration: const Duration(milliseconds: 250),
           curve: Curves.easeOut,
         );
+      } else {
+        _scrollCtrl.jumpTo(max);
       }
+    }
+
+    // Two passes: the first after this frame, the second after late layout
+    // (rich blocks / keyboard inset settling) so we truly land at the bottom.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      run();
+      WidgetsBinding.instance.addPostFrameCallback((_) => run());
     });
   }
 
@@ -127,10 +140,18 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
     // Handle navigate directives whenever messages change.
     _handleNavigates(st.messages);
 
-    // Auto-scroll when messages grow.
-    if (st.isOpen && st.messages.isNotEmpty) {
-      _scrollToBottom();
+    // Scroll behaviour: jump to the bottom on open, and re-pin to the bottom
+    // when the keyboard appears or new messages arrive.
+    final kbInset = MediaQuery.of(context).viewInsets.bottom;
+    if (st.isOpen) {
+      if (!_wasOpen) {
+        _scrollToBottom(animate: false); // opened → snap to latest
+      } else if (kbInset != _lastKbInset || st.messages.isNotEmpty) {
+        _scrollToBottom(); // keyboard toggled / new message → keep in view
+      }
     }
+    _wasOpen = st.isOpen;
+    _lastKbInset = kbInset;
 
     // Sit above the bottom nav bar + home-indicator safe area.
     final bottomInset = MediaQuery.of(context).padding.bottom;
@@ -163,10 +184,7 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
 // ── Collapsed FAB ─────────────────────────────────────────────────────────────
 
 class _CollapsedFab extends StatelessWidget {
-  const _CollapsedFab({
-    required this.glowOpacity,
-    required this.onTap,
-  });
+  const _CollapsedFab({required this.glowOpacity, required this.onTap});
 
   final Animation<double> glowOpacity;
   final VoidCallback onTap;
@@ -174,37 +192,34 @@ class _CollapsedFab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-        animation: glowOpacity,
-        builder: (context, child) => GestureDetector(
-          onTap: onTap,
-          child: Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(
-              color: AppColors.primary,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.4),
-                  blurRadius: 16,
-                  offset: const Offset(0, 6),
+      animation: glowOpacity,
+      builder: (context, child) => GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            color: AppColors.primary,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.4),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+              BoxShadow(
+                color: AppColors.primary.withValues(
+                  alpha: 0.55 * glowOpacity.value,
                 ),
-                BoxShadow(
-                  color: AppColors.primary.withValues(
-                      alpha: 0.55 * glowOpacity.value),
-                  blurRadius: 24,
-                  spreadRadius: 0,
-                ),
-              ],
-            ),
-            child: Icon(
-              Icons.smart_toy,
-              color: AppColors.onPrimary,
-              size: 26,
-            ),
+                blurRadius: 24,
+                spreadRadius: 0,
+              ),
+            ],
           ),
+          child: Icon(Icons.smart_toy, color: AppColors.onPrimary, size: 26),
         ),
-      );
+      ),
+    );
   }
 }
 
@@ -223,72 +238,76 @@ class _ExpandedPanel extends ConsumerWidget {
       left: 0,
       right: 0,
       top: MediaQuery.of(context).padding.top + 8,
-      bottom: 0,
+      // Rise above the keyboard so the composer stays visible while typing.
+      bottom: MediaQuery.of(context).viewInsets.bottom,
       child: Material(
         color: Colors.transparent,
-        child: Container(
-          margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-          decoration: BoxDecoration(
-            color: const Color(0xFF0a0716).withValues(alpha: 0.97),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: AppColors.border),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.5),
-                blurRadius: 40,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(20),
-            child: Column(
-              children: [
-                // Header
-                _ChatHeader(
-                  title: st.activeConversation?.title ?? 'Assistant',
-                  modelName:
-                      st.activeConversation?.modelName ?? '',
-                  onClear: () async {
-                    final ok = await showConfirmDialog(
-                      context,
-                      title: 'Clear conversation',
-                      body:
-                          'This will delete all messages. This cannot be undone.',
-                      confirmLabel: 'Clear',
-                      confirmColor: AppColors.danger,
-                      icon: Icons.delete_sweep,
-                    );
-                    if (ok) notifier.clearConversation();
-                  },
-                  onMinimise: () => notifier.minimise(),
-                ),
-
-                // Conversation switcher (shown when >1 conversation)
-                if (st.conversations.length > 1)
-                  _ConversationBar(st: st, notifier: notifier),
-
-                // Body (flex fills remaining space)
-                Expanded(
-                  child: _Body(
-                    st: st,
-                    notifier: notifier,
-                    scrollCtrl: scrollCtrl,
-                  ),
-                ),
-
-                // Composer
-                ChatComposer(
-                  busy: st.busy,
-                  disabled: st.needsModel,
-                  placeholder: st.needsModel
-                      ? 'Pick a model first…'
-                      : 'Ask me anything…',
-                  onSend: (text) async {
-                    await notifier.send(text);
-                  },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => FocusScope.of(context).unfocus(),
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0a0716).withValues(alpha: 0.97),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: AppColors.border),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 40,
+                  offset: const Offset(0, 8),
                 ),
               ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: Column(
+                children: [
+                  // Header
+                  _ChatHeader(
+                    title: st.activeConversation?.title ?? 'Assistant',
+                    modelName: st.activeConversation?.modelName ?? '',
+                    onClear: () async {
+                      final ok = await showConfirmDialog(
+                        context,
+                        title: 'Clear conversation',
+                        body:
+                            'This will delete all messages. This cannot be undone.',
+                        confirmLabel: 'Clear',
+                        confirmColor: AppColors.danger,
+                        icon: Icons.delete_sweep,
+                      );
+                      if (ok) notifier.clearConversation();
+                    },
+                    onMinimise: () => notifier.minimise(),
+                  ),
+
+                  // Conversation switcher (shown when >1 conversation)
+                  if (st.conversations.length > 1)
+                    _ConversationBar(st: st, notifier: notifier),
+
+                  // Body (flex fills remaining space)
+                  Expanded(
+                    child: _Body(
+                      st: st,
+                      notifier: notifier,
+                      scrollCtrl: scrollCtrl,
+                    ),
+                  ),
+
+                  // Composer
+                  ChatComposer(
+                    busy: st.busy,
+                    disabled: st.needsModel,
+                    placeholder: st.needsModel
+                        ? 'Pick a model first…'
+                        : 'Ask me anything…',
+                    onSend: (text) async {
+                      await notifier.send(text);
+                    },
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -330,10 +349,10 @@ class _ChatHeader extends StatelessWidget {
               color: AppColors.primary.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
-                  color: AppColors.primary.withValues(alpha: 0.3)),
+                color: AppColors.primary.withValues(alpha: 0.3),
+              ),
             ),
-            child: Icon(Icons.smart_toy,
-                color: AppColors.primary, size: 16),
+            child: Icon(Icons.smart_toy, color: AppColors.primary, size: 16),
           ),
           const SizedBox(width: 8),
 
@@ -344,8 +363,7 @@ class _ChatHeader extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: AppTextStyles.bodyHi
-                      .copyWith(color: AppColors.textHi),
+                  style: AppTextStyles.bodyHi.copyWith(color: AppColors.textHi),
                   overflow: TextOverflow.ellipsis,
                 ),
                 if (modelName.isNotEmpty)
@@ -423,11 +441,9 @@ class _ConversationBar extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
-            border: Border(
-                bottom: BorderSide(color: AppColors.border)),
+            border: Border(bottom: BorderSide(color: AppColors.border)),
           ),
           child: Row(
             children: [
@@ -446,8 +462,9 @@ class _ConversationBar extends ConsumerWidget {
                     const SizedBox(width: 4),
                     Text(
                       '${st.conversations.length} conversations',
-                      style: AppTextStyles.micro
-                          .copyWith(color: AppColors.textDim),
+                      style: AppTextStyles.micro.copyWith(
+                        color: AppColors.textDim,
+                      ),
                     ),
                   ],
                 ),
@@ -462,8 +479,9 @@ class _ConversationBar extends ConsumerWidget {
                     const SizedBox(width: 2),
                     Text(
                       'New',
-                      style: AppTextStyles.micro
-                          .copyWith(color: AppColors.primary),
+                      style: AppTextStyles.micro.copyWith(
+                        color: AppColors.primary,
+                      ),
                     ),
                   ],
                 ),
@@ -476,8 +494,7 @@ class _ConversationBar extends ConsumerWidget {
             constraints: const BoxConstraints(maxHeight: 160),
             child: ListView.builder(
               shrinkWrap: true,
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               itemCount: st.conversations.length,
               itemBuilder: (context, i) {
                 final c = st.conversations[i];
@@ -520,28 +537,24 @@ class _ConvTile extends StatelessWidget {
             : null,
         child: Row(
           children: [
-            Icon(Icons.chat_bubble_outline,
-                size: 14,
-                color:
-                    active ? AppColors.primary : AppColors.textDim),
+            Icon(
+              Icons.chat_bubble_outline,
+              size: 14,
+              color: active ? AppColors.primary : AppColors.textDim,
+            ),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                (conv.title?.isNotEmpty == true)
-                    ? conv.title!
-                    : 'Untitled',
+                (conv.title?.isNotEmpty == true) ? conv.title! : 'Untitled',
                 style: AppTextStyles.micro.copyWith(
-                  color: active
-                      ? AppColors.primary
-                      : AppColors.textMd,
+                  color: active ? AppColors.primary : AppColors.textMd,
                 ),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
             Text(
               '${conv.messageCount} msg',
-              style: AppTextStyles.nano
-                  .copyWith(color: AppColors.textFaint),
+              style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
             ),
           ],
         ),
@@ -576,17 +589,15 @@ class _Body extends ConsumerWidget {
 
     // Empty state with suggestion pills
     if (st.messages.isEmpty) {
-      return _EmptyBody(onSuggestion: (s) async {
-        await notifier.send(s);
-      });
+      return _EmptyBody(
+        onSuggestion: (s) async {
+          await notifier.send(s);
+        },
+      );
     }
 
     // Message list
-    return _MessageList(
-      st: st,
-      notifier: notifier,
-      scrollCtrl: scrollCtrl,
-    );
+    return _MessageList(st: st, notifier: notifier, scrollCtrl: scrollCtrl);
   }
 }
 
@@ -615,10 +626,10 @@ class _EmptyBody extends StatelessWidget {
                 color: AppColors.primary.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(
-                    color: AppColors.primary.withValues(alpha: 0.3)),
+                  color: AppColors.primary.withValues(alpha: 0.3),
+                ),
               ),
-              child:
-                  Icon(Icons.smart_toy, color: AppColors.primary, size: 24),
+              child: Icon(Icons.smart_toy, color: AppColors.primary, size: 24),
             ),
             const SizedBox(height: 12),
             Text(
@@ -660,8 +671,7 @@ class _SuggestionPill extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(999),
           border: Border.all(color: AppColors.border),
@@ -690,10 +700,10 @@ class _MessageList extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return ListView.builder(
       controller: scrollCtrl,
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-      itemCount: st.messages.length +
-          (st.busy ? 1 : 0) +
-          (st.error != null ? 1 : 0),
+      itemCount:
+          st.messages.length + (st.busy ? 1 : 0) + (st.error != null ? 1 : 0),
       itemBuilder: (context, index) {
         // Thinking indicator
         if (index == st.messages.length && st.busy) {
@@ -720,10 +730,8 @@ class _MessageList extends ConsumerWidget {
             child: ChatToolCallCard(
               message: msg,
               busy: st.busy,
-              onApprove: () =>
-                  notifier.confirmTool(msg.id, approved: true),
-              onDecline: () =>
-                  notifier.confirmTool(msg.id, approved: false),
+              onApprove: () => notifier.confirmTool(msg.id, approved: true),
+              onDecline: () => notifier.confirmTool(msg.id, approved: false),
             ),
           );
         }

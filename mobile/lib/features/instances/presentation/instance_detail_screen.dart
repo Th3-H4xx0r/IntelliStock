@@ -10,6 +10,7 @@ import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/confirm_dialog.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../../../core/widgets/status_pill.dart';
 import '../../../core/widgets/typed_confirm_field.dart';
 import '../application/instances_controller.dart';
@@ -64,7 +65,7 @@ class _InstanceDetailBody extends ConsumerWidget {
       body: AppBackground(
         child: SafeArea(
           child: async.when(
-            loading: () => const Center(child: LoadingState()),
+            loading: () => const _InstanceDetailSkeleton(),
             error: (e, _) => Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
@@ -138,6 +139,188 @@ class _DetailContent extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Skeleton helpers ──────────────────────────────────────────────────────────
+
+class _InstanceDetailSkeleton extends StatelessWidget {
+  const _InstanceDetailSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 80),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Breadcrumb line
+          Row(
+            children: [
+              Skeleton(width: 60, height: 12, radius: 5),
+              const SizedBox(width: 6),
+              Skeleton(width: 4, height: 12, radius: 5),
+              const SizedBox(width: 6),
+              Skeleton(width: 120, height: 12, radius: 5),
+            ],
+          ),
+          const SizedBox(height: 16),
+          // Page header: icon circle + title line + badge + pill
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton.circle(44),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(child: Skeleton(height: 22, radius: 7)),
+                        const SizedBox(width: 8),
+                        Skeleton(width: 36, height: 18, radius: 9),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Skeleton(width: 120, height: 10, radius: 5),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          // Status + action row
+          Row(
+            children: [
+              Skeleton(width: 70, height: 26, radius: 13),
+              const SizedBox(width: 8),
+              Skeleton(width: 70, height: 32, radius: 8),
+              const SizedBox(width: 8),
+              Skeleton(width: 100, height: 32, radius: 8),
+            ],
+          ),
+          const SizedBox(height: 20),
+          // 3 info-card skeletons
+          for (var i = 0; i < 3; i++) ...[
+            const _InfoCardSkeleton(),
+            const SizedBox(height: 12),
+          ],
+          // Stocks block
+          const _StocksCardSkeleton(),
+          const SizedBox(height: 12),
+          // Backtests heading + 2 skeleton rows
+          Row(
+            children: [
+              Skeleton(width: 100, height: 18, radius: 6),
+              const Spacer(),
+              Skeleton(width: 100, height: 24, radius: 8),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const _BacktestsSkeleton(),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoCardSkeleton extends StatelessWidget {
+  const _InfoCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Skeleton(width: 100, height: 14, radius: 6),
+              const Spacer(),
+              Skeleton(width: 60, height: 20, radius: 6),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Skeleton(height: 12, radius: 6),
+          const SizedBox(height: 8),
+          Skeleton(width: 200, height: 12, radius: 6),
+        ],
+      ),
+    );
+  }
+}
+
+class _StocksCardSkeleton extends StatelessWidget {
+  const _StocksCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Skeleton(width: 80, height: 14, radius: 6),
+              const Spacer(),
+              Skeleton(width: 40, height: 20, radius: 6),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Skeleton(width: 48, height: 24, radius: 6),
+              const SizedBox(width: 6),
+              Skeleton(width: 48, height: 24, radius: 6),
+              const SizedBox(width: 6),
+              Skeleton(width: 48, height: 24, radius: 6),
+              const SizedBox(width: 6),
+              Skeleton(width: 48, height: 24, radius: 6),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BacktestsSkeleton extends StatelessWidget {
+  const _BacktestsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        for (var i = 0; i < 3; i++) ...[
+          GlassCard(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: Skeleton(height: 12, radius: 6)),
+                    const SizedBox(width: 8),
+                    Skeleton(width: 60, height: 20, radius: 10),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(child: Skeleton(height: 10, radius: 5)),
+                    const SizedBox(width: 8),
+                    Skeleton(width: 60, height: 10, radius: 5),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+      ],
     );
   }
 }
@@ -649,10 +832,7 @@ class _BacktestsSection extends ConsumerWidget {
         const SizedBox(height: 6),
 
         if (state.btLoading && state.backtests.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: LoadingState(label: 'Loading backtests…'),
-          )
+          const _BacktestsSkeleton()
         else if (state.backtests.isEmpty)
           GlassCard(
             padding: const EdgeInsets.all(24),

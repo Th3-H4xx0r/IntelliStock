@@ -9,6 +9,7 @@ import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../application/models_controller.dart';
 import '../data/model_repository.dart';
 import 'llm_config_form.dart';
@@ -102,7 +103,7 @@ class ModelsScreen extends ConsumerWidget {
                       ),
                       const SizedBox(height: 24),
                       state.when(
-                        loading: () => const LoadingState(label: 'Loading models…'),
+                        loading: () => const _ModelsSkeleton(),
                         error: (e, _) => ErrorBanner(
                           message: e.toString(),
                           onRetry: () =>
@@ -187,6 +188,74 @@ class ModelsScreen extends ConsumerWidget {
         ));
       }
     }
+  }
+}
+
+// ── Loading skeleton ────────────────────────────────────────────────────────────
+
+class _ModelsSkeleton extends StatelessWidget {
+  const _ModelsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header skeleton
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Skeleton(width: 60, height: 10),
+              const SizedBox(height: 6),
+              Skeleton(width: 130, height: 20),
+              const SizedBox(height: 6),
+              Skeleton(width: double.infinity, height: 11),
+              const SizedBox(height: 4),
+              Skeleton(width: 220, height: 11),
+            ]),
+          ),
+          const SizedBox(width: 12),
+          Skeleton(width: 100, height: 36, radius: 10),
+        ]),
+        const SizedBox(height: 24),
+        // 4 model-row/card skeletons
+        for (int i = 0; i < 4; i++) ...[
+          _ModelCardSkeleton(),
+          const SizedBox(height: 16),
+        ],
+      ],
+    );
+  }
+}
+
+class _ModelCardSkeleton extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Skeleton(width: 160, height: 14),
+              const SizedBox(height: 6),
+              Skeleton(width: 110, height: 11),
+            ]),
+          ),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Skeleton.circle(30),
+            const SizedBox(width: 6),
+            Skeleton.circle(30),
+          ]),
+        ]),
+        const SizedBox(height: 10),
+        Wrap(spacing: 8, runSpacing: 4, children: [
+          Skeleton(width: 90, height: 11),
+          Skeleton(width: 70, height: 11),
+          Skeleton(width: 110, height: 11),
+        ]),
+      ]),
+    );
   }
 }
 

@@ -1,5 +1,16 @@
+import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/api_client.dart';
+
+/// Tolerant string coercion — the LLM-test endpoint sometimes returns object
+/// values (e.g. structured `smoke_response`/`message`) where a string is
+/// expected; stringify instead of crashing on an `as String?` cast.
+String? _asStr(dynamic v) {
+  if (v == null) return null;
+  if (v is String) return v;
+  if (v is Map || v is List) return jsonEncode(v);
+  return v.toString();
+}
 
 // ── Data model ─────────────────────────────────────────────────────────────────
 
@@ -56,29 +67,29 @@ class LlmModel {
 
   factory LlmModel.fromJson(Map<String, dynamic> j) {
     return LlmModel(
-      id: (j['id'] as String?) ?? '',
-      name: (j['name'] as String?) ?? '',
-      provider: (j['provider'] as String?) ?? '',
-      model: (j['model'] as String?) ?? '',
-      reasoningEffort: j['reasoning_effort'] as String?,
-      apiKey: j['api_key'] as String?,
-      cliPath: j['cli_path'] as String?,
-      extraArgs: j['extra_args'] as String?,
-      openaiBaseUrl: j['openai_base_url'] as String?,
-      nvidiaBaseUrl: j['nvidia_base_url'] as String?,
-      azureOpenaiEndpoint: j['azure_openai_endpoint'] as String?,
-      azureOpenaiApiVersion: j['azure_openai_api_version'] as String?,
-      ollamaBaseUrl: j['ollama_base_url'] as String?,
-      ollamaKeepAlive: j['ollama_keep_alive'] as String?,
-      ollamaThink: j['ollama_think'] as String?,
-      bedrockRegion: j['bedrock_region'] as String?,
-      bedrockReasoning: j['bedrock_reasoning'] as String?,
-      modelCacheFamily: j['model_cache_family'] as String?,
+      id: _asStr(j['id']) ?? '',
+      name: _asStr(j['name']) ?? '',
+      provider: _asStr(j['provider']) ?? '',
+      model: _asStr(j['model']) ?? '',
+      reasoningEffort: _asStr(j['reasoning_effort']),
+      apiKey: _asStr(j['api_key']),
+      cliPath: _asStr(j['cli_path']),
+      extraArgs: _asStr(j['extra_args']),
+      openaiBaseUrl: _asStr(j['openai_base_url']),
+      nvidiaBaseUrl: _asStr(j['nvidia_base_url']),
+      azureOpenaiEndpoint: _asStr(j['azure_openai_endpoint']),
+      azureOpenaiApiVersion: _asStr(j['azure_openai_api_version']),
+      ollamaBaseUrl: _asStr(j['ollama_base_url']),
+      ollamaKeepAlive: _asStr(j['ollama_keep_alive']),
+      ollamaThink: _asStr(j['ollama_think']),
+      bedrockRegion: _asStr(j['bedrock_region']),
+      bedrockReasoning: _asStr(j['bedrock_reasoning']),
+      modelCacheFamily: _asStr(j['model_cache_family']),
       inputCostPer1m: (j['input_cost_per_1m'] as num?)?.toDouble(),
       outputCostPer1m: (j['output_cost_per_1m'] as num?)?.toDouble(),
       cacheCreationCostPer1m: (j['cache_creation_cost_per_1m'] as num?)?.toDouble(),
       cacheReadCostPer1m: (j['cache_read_cost_per_1m'] as num?)?.toDouble(),
-      createdAt: j['created_at'] as String?,
+      createdAt: _asStr(j['created_at']),
     );
   }
 }
@@ -118,20 +129,20 @@ class LlmTestResult {
 
   factory LlmTestResult.fromJson(Map<String, dynamic> j) {
     return LlmTestResult(
-      provider: j['provider'] as String?,
-      model: j['model'] as String?,
-      effectiveModel: j['effective_model'] as String?,
+      provider: _asStr(j['provider']),
+      model: _asStr(j['model']),
+      effectiveModel: _asStr(j['effective_model']),
       latencyMs: (j['latency_ms'] as num?)?.toInt(),
       result: j['result'],
       providerMeta: j['provider_meta'],
-      smokePrompt: j['smoke_prompt'] as String?,
-      smokeResponse: j['smoke_response'] as String?,
-      smokeThinking: j['smoke_thinking'] as String?,
+      smokePrompt: _asStr(j['smoke_prompt']),
+      smokeResponse: _asStr(j['smoke_response']),
+      smokeThinking: _asStr(j['smoke_thinking']),
       smokeContentChars: (j['smoke_content_chars'] as num?)?.toInt(),
       smokeThinkingChars: (j['smoke_thinking_chars'] as num?)?.toInt(),
       smokeLatencyMs: (j['smoke_latency_ms'] as num?)?.toInt(),
-      smokeError: j['smoke_error'] as String?,
-      message: j['message'] as String?,
+      smokeError: _asStr(j['smoke_error']),
+      message: _asStr(j['message']),
     );
   }
 }
@@ -154,10 +165,10 @@ class CodexStatus {
   factory CodexStatus.fromJson(Map<String, dynamic> j) {
     return CodexStatus(
       installed: (j['installed'] as bool?) ?? false,
-      version: j['version'] as String?,
+      version: _asStr(j['version']),
       authenticated: (j['authenticated'] as bool?) ?? false,
-      authMessage: j['auth_message'] as String?,
-      installMethod: (j['install_method'] as String?) ?? 'unknown',
+      authMessage: _asStr(j['auth_message']),
+      installMethod: _asStr(j['install_method']) ?? 'unknown',
     );
   }
 }

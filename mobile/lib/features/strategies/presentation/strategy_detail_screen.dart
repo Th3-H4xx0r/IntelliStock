@@ -9,6 +9,7 @@ import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/app_background.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/formatters/formatters.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../application/strategies_controller.dart';
 import '../data/models/strategy.dart';
 import '../data/strategy_repository.dart' as strategy_repo;
@@ -706,20 +707,154 @@ class _LoadingSkeletons extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [96, 200, 180].map((h) {
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: Container(
-            height: h.toDouble(),
-            decoration: BoxDecoration(
-              color: AppColors.surface.withValues(alpha: 0.5),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: AppColors.border),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+      children: [
+        // Header card skeleton
+        GlassCard(
+          padding: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Skeleton(width: 48, height: 48, radius: 14),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Skeleton.line(width: 180, height: 20),
+                          const SizedBox(height: 6),
+                          Skeleton.line(width: 220, height: 11),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Skeleton.line(width: 55, height: 9),
+                        const SizedBox(height: 4),
+                        Skeleton(width: 90, height: 20, radius: 4),
+                      ],
+                    ),
+                    const SizedBox(width: 20),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Skeleton.line(width: 65, height: 9),
+                        const SizedBox(height: 4),
+                        Skeleton(width: 80, height: 20, radius: 4),
+                      ],
+                    ),
+                    const Spacer(),
+                    Skeleton(width: 100, height: 30, radius: 8),
+                  ],
+                ),
+              ],
             ),
           ),
-        );
-      }).toList(),
+        ),
+        const SizedBox(height: 20),
+
+        // Sub-strategies header
+        Skeleton.line(width: 160, height: 12),
+        const SizedBox(height: 12),
+
+        // Sub-strategy card skeletons (3)
+        ...List.generate(
+          3,
+          (_) => Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: GlassCard(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Skeleton.line(width: 140, height: 13),
+                            const SizedBox(height: 4),
+                            Skeleton.line(width: 80, height: 10),
+                          ],
+                        ),
+                      ),
+                      Skeleton(width: 50, height: 22, radius: 6),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Skeleton(width: 60, height: 30, radius: 6),
+                      const SizedBox(width: 12),
+                      Skeleton(width: 80, height: 30, radius: 6),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Skeleton.line(height: 10),
+                  const SizedBox(height: 5),
+                  Skeleton.line(height: 10),
+                  const SizedBox(height: 5),
+                  Skeleton.line(width: 200, height: 10),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+
+        // Backtests header
+        Skeleton.line(width: 130, height: 12),
+        const SizedBox(height: 12),
+
+        // Backtest row skeletons (4)
+        ...List.generate(
+          4,
+          (_) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: GlassCard(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Skeleton.line(width: 110, height: 12),
+                        const SizedBox(height: 5),
+                        Skeleton.line(width: 160, height: 10),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Skeleton(width: 65, height: 13, radius: 4),
+                      const SizedBox(height: 4),
+                      Skeleton(width: 50, height: 12, radius: 4),
+                    ],
+                  ),
+                  const SizedBox(width: 8),
+                  Skeleton(width: 14, height: 14, radius: 4),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

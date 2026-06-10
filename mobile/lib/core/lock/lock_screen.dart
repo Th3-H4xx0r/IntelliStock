@@ -5,6 +5,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 import '../widgets/app_background.dart';
 import '../widgets/app_button.dart';
+import '../widgets/app_logo.dart';
 import '../widgets/material_symbols.dart';
 import 'app_lock_controller.dart';
 import 'biometric_service.dart';
@@ -95,7 +96,7 @@ class _LockScreenState extends ConsumerState<LockScreen>
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _LogoMark(),
+                  const AppWordmark(),
                   const SizedBox(height: 32),
                   Container(
                     width: 72,
@@ -162,43 +163,6 @@ class _LockScreenState extends ConsumerState<LockScreen>
   }
 }
 
-// ── Logo mark ─────────────────────────────────────────────────────────────────
-
-class _LogoMark extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF7C3AED), Color(0xFFA78BFA)],
-            ),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: const Center(
-            child: Text('I',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800)),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Text(
-          'IntelliStock',
-          style: AppTextStyles.h2
-              .copyWith(color: AppColors.textHi, letterSpacing: -0.3),
-        ),
-      ],
-    );
-  }
-}
 
 // ── Biometric unlock button (reads available types for the label) ─────────────
 

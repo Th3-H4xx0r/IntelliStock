@@ -7,6 +7,7 @@ import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../../../core/network/session.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../widgets_bridge/widget_sync_service.dart';
@@ -148,21 +149,7 @@ class _PortfolioSection extends ConsumerWidget {
 
         // Content
         bkAsync.when(
-          loading: () => Column(
-            children: List.generate(
-              2,
-              (_) => Padding(
-                padding: const EdgeInsets.only(bottom: 16),
-                child: Container(
-                  height: 320,
-                  decoration: BoxDecoration(
-                    color: AppColors.surface.withValues(alpha: 0.5),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                ),
-              ),
-            ),
-          ),
+          loading: () => const _PortfolioSkeleton(),
           error: (e, _) => ErrorBanner(
             message: e.toString(),
             onRetry: () => ref.invalidate(brokeragesProvider),
@@ -237,21 +224,7 @@ class _ServicesSection extends ConsumerWidget {
         const SizedBox(height: 16),
 
         svcAsync.when(
-          loading: () => Column(
-            children: List.generate(
-              5,
-              (_) => Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: Container(
-                  height: 140,
-                  decoration: BoxDecoration(
-                    color: AppColors.surface.withValues(alpha: 0.5),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                ),
-              ),
-            ),
-          ),
+          loading: () => const _ServicesSkeleton(),
           error: (e, _) => ErrorBanner(
             message: e.toString(),
             onRetry: () =>
@@ -714,6 +687,129 @@ class _NexusCard extends StatelessWidget {
                   ),
         ),
       ],
+    );
+  }
+}
+
+// ── Skeleton helpers ──────────────────────────────────────────────────────────
+
+/// Skeleton for the portfolio section: 2 portfolio-card shaped blocks.
+class _PortfolioSkeleton extends StatelessWidget {
+  const _PortfolioSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: List.generate(2, (i) => _PortfolioCardSkeleton(bottomPad: i < 1 ? 16 : 0)),
+    );
+  }
+}
+
+class _PortfolioCardSkeleton extends StatelessWidget {
+  const _PortfolioCardSkeleton({this.bottomPad = 0});
+  final double bottomPad;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottomPad),
+      child: GlassCard(
+        padding: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Brokerage header line
+              Row(
+                children: [
+                  Skeleton(width: 120, height: 12, radius: 6),
+                  const Spacer(),
+                  Skeleton(width: 48, height: 10, radius: 5),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // Big value
+              Skeleton(width: 160, height: 28, radius: 8),
+              const SizedBox(height: 8),
+              // Change line
+              Skeleton(width: 100, height: 12, radius: 6),
+              const SizedBox(height: 14),
+              // Range pills row
+              Row(
+                children: List.generate(
+                  7,
+                  (_) => Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: Skeleton(width: 30, height: 22, radius: 6),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              // Chart block
+              Skeleton(height: 140, radius: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Skeleton for the services section: 5 service-card shaped blocks.
+class _ServicesSkeleton extends StatelessWidget {
+  const _ServicesSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: List.generate(5, (i) => _ServiceCardSkeleton(bottomPad: i < 4 ? 12 : 0)),
+    );
+  }
+}
+
+class _ServiceCardSkeleton extends StatelessWidget {
+  const _ServiceCardSkeleton({this.bottomPad = 0});
+  final double bottomPad;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottomPad),
+      child: GlassCard(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header row: icon tile + title/subtitle + pill
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Skeleton(width: 40, height: 40, radius: 10),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Skeleton(width: 140, height: 14, radius: 6),
+                      const SizedBox(height: 6),
+                      Skeleton(width: 100, height: 10, radius: 5),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Skeleton(width: 60, height: 22, radius: 11),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // Stat cell
+            Skeleton(height: 44, radius: 8),
+            const SizedBox(height: 16),
+            // Button
+            Skeleton(height: 36, radius: 8),
+          ],
+        ),
+      ),
     );
   }
 }

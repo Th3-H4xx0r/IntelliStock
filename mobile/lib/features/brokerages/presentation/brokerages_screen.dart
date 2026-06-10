@@ -9,6 +9,7 @@ import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/confirm_dialog.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../application/brokerages_controller.dart';
 import '../data/brokerage_repository.dart';
 import '../data/models/brokerage.dart';
@@ -68,8 +69,7 @@ class BrokeragesScreen extends ConsumerWidget {
                       ),
                       const SizedBox(height: 24),
                       state.when(
-                        loading: () =>
-                            const LoadingState(label: 'Loading accounts…'),
+                        loading: () => const _BrokeragesSkeleton(),
                         error: (e, _) => ErrorBanner(
                           message: e.toString(),
                           onRetry: () => ref
@@ -350,6 +350,75 @@ class _AccountCard extends ConsumerWidget {
     final dt = parseDateTime(raw);
     if (dt == null) return raw;
     return fmtDateTime(dt);
+  }
+}
+
+// ── Loading skeleton ───────────────────────────────────────────────────────────
+
+class _BrokeragesSkeleton extends StatelessWidget {
+  const _BrokeragesSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header skeleton
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Skeleton(width: 90, height: 10),
+              const SizedBox(height: 6),
+              Skeleton(width: 180, height: 20),
+              const SizedBox(height: 6),
+              Skeleton(width: double.infinity, height: 11),
+            ]),
+          ),
+          const SizedBox(width: 12),
+          Skeleton(width: 120, height: 36, radius: 10),
+        ]),
+        const SizedBox(height: 24),
+        // 3 account-card skeletons
+        for (int i = 0; i < 3; i++) ...[
+          _AccountCardSkeleton(),
+          const SizedBox(height: 16),
+        ],
+      ],
+    );
+  }
+}
+
+class _AccountCardSkeleton extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      padding: const EdgeInsets.all(18),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Skeleton.circle(40),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Skeleton(width: 140, height: 14),
+              const SizedBox(height: 6),
+              Skeleton(width: 80, height: 11),
+            ]),
+          ),
+          const SizedBox(width: 8),
+          Skeleton(width: 60, height: 11),
+        ]),
+        const SizedBox(height: 12),
+        Skeleton(width: 200, height: 10),
+        const SizedBox(height: 4),
+        Skeleton(width: 160, height: 10),
+        const SizedBox(height: 12),
+        Row(children: [
+          Skeleton(width: 70, height: 28, radius: 8),
+          const SizedBox(width: 8),
+          Skeleton(width: 60, height: 28, radius: 8),
+        ]),
+      ]),
+    );
   }
 }
 

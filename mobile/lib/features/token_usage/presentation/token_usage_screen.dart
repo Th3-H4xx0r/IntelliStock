@@ -10,6 +10,7 @@ import '../../../core/widgets/app_background.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/widgets/skeleton.dart';
 import '../application/token_usage_controller.dart';
 import '../data/token_usage_repository.dart';
 
@@ -70,7 +71,7 @@ class TokenUsageScreen extends ConsumerWidget {
                 ),
                 const Spacer(),
                 state.when(
-                  loading: () => const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)),
+                  loading: () => Skeleton(width: 22, height: 22, radius: 11),
                   error: (_, _) => const SizedBox.shrink(),
                   data: (_) => const SizedBox.shrink(),
                 ),
@@ -88,7 +89,7 @@ class TokenUsageScreen extends ConsumerWidget {
                 backgroundColor: AppColors.surface,
                 onRefresh: () => controller.refreshNow(),
                 child: state.when(
-                  loading: () => const Center(child: LoadingState(label: 'Loading telemetry…')),
+                  loading: () => const _TokenUsageSkeleton(),
                   error: (e, _) => ListView(
                     padding: const EdgeInsets.all(20),
                     children: [
@@ -102,6 +103,177 @@ class TokenUsageScreen extends ConsumerWidget {
           ]),
         ),
       ),
+    );
+  }
+}
+
+// ── Loading skeleton ───────────────────────────────────────────────────────────
+
+class _TokenUsageSkeleton extends StatelessWidget {
+  const _TokenUsageSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      children: [
+        const SizedBox(height: 4),
+        // Header row skeleton
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Skeleton.circle(40),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Skeleton(width: 120, height: 20),
+                const SizedBox(width: 8),
+                Skeleton(width: 70, height: 18, radius: 9),
+              ]),
+              const SizedBox(height: 6),
+              Skeleton(width: double.infinity, height: 11),
+            ]),
+          ),
+        ]),
+        const SizedBox(height: 12),
+        // Range toggle skeleton
+        Row(children: [
+          Skeleton(width: 48, height: 32, radius: 10),
+          const SizedBox(width: 6),
+          Skeleton(width: 42, height: 32, radius: 10),
+          const SizedBox(width: 6),
+          Skeleton(width: 48, height: 32, radius: 10),
+        ]),
+        const SizedBox(height: 20),
+        // KPI grid — 2×2
+        Row(children: [
+          Expanded(child: GlassCard(padding: const EdgeInsets.all(16), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton(width: 80, height: 10),
+              const SizedBox(height: 8),
+              Skeleton(width: 100, height: 22),
+              const SizedBox(height: 6),
+              Skeleton(width: double.infinity, height: 10),
+              const SizedBox(height: 8),
+              Row(children: [
+                Skeleton(width: 50, height: 18, radius: 4),
+                const SizedBox(width: 4),
+                Skeleton(width: 50, height: 18, radius: 4),
+              ]),
+            ],
+          ))),
+          const SizedBox(width: 12),
+          Expanded(child: GlassCard(padding: const EdgeInsets.all(16), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton(width: 80, height: 10),
+              const SizedBox(height: 8),
+              Skeleton(width: 60, height: 22),
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(child: Skeleton(height: 30)),
+                const SizedBox(width: 6),
+                Expanded(child: Skeleton(height: 30)),
+              ]),
+            ],
+          ))),
+        ]),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(child: GlassCard(padding: const EdgeInsets.all(16), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton(width: 110, height: 10),
+              const SizedBox(height: 8),
+              Skeleton(width: 80, height: 22),
+              const SizedBox(height: 8),
+              Skeleton(width: double.infinity, height: 6, radius: 3),
+              const SizedBox(height: 4),
+              Skeleton(width: 150, height: 10),
+            ],
+          ))),
+          const SizedBox(width: 12),
+          Expanded(child: GlassCard(padding: const EdgeInsets.all(16), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton(width: 120, height: 10),
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(child: Skeleton(height: 30)),
+                const SizedBox(width: 4),
+                Expanded(child: Skeleton(height: 30)),
+                const SizedBox(width: 4),
+                Expanded(child: Skeleton(height: 30)),
+              ]),
+            ],
+          ))),
+        ]),
+        const SizedBox(height: 20),
+        // Spend trend chart block skeleton
+        GlassCard(
+          padding: const EdgeInsets.all(16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Skeleton(width: 90, height: 10),
+                const SizedBox(height: 4),
+                Skeleton(width: 110, height: 16),
+              ])),
+              Skeleton(width: 110, height: 10),
+            ]),
+            const SizedBox(height: 16),
+            Skeleton(width: double.infinity, height: 200, radius: 12),
+          ]),
+        ),
+        const SizedBox(height: 20),
+        // Ranking rows section header + 3 rows
+        Skeleton(width: 180, height: 16),
+        const SizedBox(height: 8),
+        GlassCard(
+          padding: EdgeInsets.zero,
+          child: Column(children: [
+            for (int i = 0; i < 3; i++) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(children: [
+                  Expanded(child: Skeleton(height: 12)),
+                  const SizedBox(width: 12),
+                  Skeleton(width: 40, height: 12),
+                  const SizedBox(width: 12),
+                  Skeleton(width: 60, height: 12),
+                  const SizedBox(width: 12),
+                  Skeleton(width: 50, height: 12),
+                ]),
+              ),
+              if (i < 2) Divider(height: 1, color: AppColors.border),
+            ],
+          ]),
+        ),
+        const SizedBox(height: 20),
+        Skeleton(width: 200, height: 16),
+        const SizedBox(height: 8),
+        GlassCard(
+          padding: EdgeInsets.zero,
+          child: Column(children: [
+            for (int i = 0; i < 3; i++) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(children: [
+                  Expanded(child: Skeleton(height: 12)),
+                  const SizedBox(width: 12),
+                  Skeleton(width: 40, height: 12),
+                  const SizedBox(width: 12),
+                  Skeleton(width: 60, height: 12),
+                  const SizedBox(width: 12),
+                  Skeleton(width: 50, height: 12),
+                ]),
+              ),
+              if (i < 2) Divider(height: 1, color: AppColors.border),
+            ],
+          ]),
+        ),
+        const SizedBox(height: 40),
+      ],
     );
   }
 }
@@ -286,7 +458,6 @@ class _KpiGrid extends StatelessWidget {
     final avgCost = totalCalls > 0 ? totalCost / totalCalls : 0.0;
     final maxPlanUsd = s?.maxPlanEstimateUsd ?? 0.0;
     final maxPlanPct = _kMaxPlanBudget > 0 ? (maxPlanUsd / _kMaxPlanBudget).clamp(0.0, 1.0) : 0.0;
-    final ts = _telemetryStateFor(s?.telemetryHealth);
     final health = s?.telemetryHealth;
 
     final topProviders = [...(s?.byProvider ?? [])]
@@ -355,11 +526,8 @@ class _KpiGrid extends StatelessWidget {
         Expanded(child: GlassCard(padding: const EdgeInsets.all(16), child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Text('TELEMETRY HEALTH', style: AppTextStyles.eyebrow),
-              const Spacer(),
-              _TelemetryPill(state: ts),
-            ]),
+            Text('TELEMETRY HEALTH', style: AppTextStyles.eyebrow,
+                maxLines: 1, overflow: TextOverflow.ellipsis),
             const SizedBox(height: 8),
             Row(children: [
               Expanded(child: _mini('Buffer', '${health?.bufferDepth ?? '—'}')),
