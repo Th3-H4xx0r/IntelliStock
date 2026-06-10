@@ -10,7 +10,6 @@
 import WidgetKit
 import SwiftUI
 import AppIntents
-import Charts
 
 private let kAppGroup = "group.dev.pkrishna.intellistock"
 
@@ -62,6 +61,7 @@ struct PositionData: Identifiable {
     let id = UUID()
     let symbol: String
     let pnlPct: Double
+    let marketValue: Double
 }
 
 struct AccountData {
@@ -85,8 +85,10 @@ private func readAccounts() -> [AccountData] {
             .map { ChartPt(minute: sessionMinute(dbl($0["t"])), value: dbl($0["v"])) }
         let pos = (j["positions"] as? [[String: Any]] ?? []).map {
             PositionData(symbol: $0["symbol"] as? String ?? "",
-                         pnlPct: dbl($0["unrealizedPnlPct"]))
+                         pnlPct: dbl($0["unrealizedPnlPct"]),
+                         marketValue: dbl($0["marketValue"]))
         }
+        .sorted { $0.marketValue > $1.marketValue }  // biggest holdings first
         return AccountData(
             id: j["id"] as? String ?? "",
             label: j["label"] as? String ?? "Portfolio",
@@ -196,7 +198,7 @@ struct PortfolioWidgetView: View {
                 Spacer(minLength: 6)
                 curve(height: 30)
             }
-            positionsColumn(limit: 4, fontSize: 12)
+            positionsGrid(limit: 6, columns: 2, fontSize: 11)
                 .frame(maxWidth: .infinity)
         }
         .padding(15)
@@ -212,36 +214,48 @@ struct PortfolioWidgetView: View {
                     .foregroundColor(cHi).minimumScaleFactor(0.6).lineLimit(1)
                 Text("\(absText) · \(pctText)").font(.system(size: 12)).foregroundColor(trend).monospacedDigit()
                 Spacer(minLength: 8)
-                curve(height: 58)
+                curve(height: 50)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 10)
 
             Divider().overlay(Color.white.opacity(0.10))
 
-            positionsColumn(limit: 6, fontSize: 13)
+            positionsGrid(limit: 8, columns: 2, fontSize: 12.5)
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
         .padding(18)
     }
 
-    // ── Positions list (V5: status dot + ticker, right-aligned %) ──
-    private func positionsColumn(limit: Int, fontSize: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: fontSize * 0.85) {
-            if entry.positions.isEmpty {
+    // ── Positions — condensed: no dot, P&L right next to the ticker, packed
+    //    into `columns` so two fit side by side and more holdings show. ──
+    private func positionsGrid(limit: Int, columns: Int, fontSize: CGFloat) -> some View {
+        let items = Array(entry.positions.prefix(limit))
+        let rows = stride(from: 0, to: items.count, by: columns).map {
+            Array(items[$0..<min($0 + columns, items.count)])
+        }
+        return VStack(alignment: .leading, spacing: fontSize * 0.7) {
+            if items.isEmpty {
                 Text("No open positions").font(.system(size: fontSize)).foregroundColor(cFaint)
             } else {
-                ForEach(entry.positions.prefix(limit)) { p in
-                    HStack(spacing: 8) {
-                        Circle().fill(p.pnlPct >= 0 ? cGreen : cRed).frame(width: 7, height: 7)
-                        Text(p.symbol)
-                            .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
-                            .foregroundColor(cHi)
-                        Spacer(minLength: 6)
-                        Text("\(p.pnlPct >= 0 ? "+" : "−")\(String(format: "%.2f%%", abs(p.pnlPct)))")
-                            .font(.system(size: fontSize)).monospacedDigit()
-                            .foregroundColor(p.pnlPct >= 0 ? cGreen : cRed)
+                ForEach(rows.indices, id: \.self) { ri in
+                    HStack(spacing: 12) {
+                        ForEach(rows[ri]) { p in
+                            HStack(spacing: 5) {
+                                Text(p.symbol)
+                                    .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(cHi)
+                                Text("\(p.pnlPct >= 0 ? "+" : "−")\(String(format: "%.2f%%", abs(p.pnlPct)))")
+                                    .font(.system(size: fontSize)).monospacedDigit()
+                                    .foregroundColor(p.pnlPct >= 0 ? cGreen : cRed)
+                            }
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if rows[ri].count < columns {
+                            Color.clear.frame(maxWidth: .infinity)
+                        }
                     }
                 }
             }
@@ -249,42 +263,55 @@ struct PortfolioWidgetView: View {
         }
     }
 
-    // ── Curve — market-hours x-axis, area faded to the bottom, dashed
-    //    open/baseline. Line stops at "now" so the right side stays empty until
-    //    the session fills in (Robinhood-style). ──
+    // ── Curve — Canvas-drawn so the area reliably fades to transparent at the
+    //    bottom of the tile. X-axis is the 09:30–16:00 ET session, so the line
+    //    stops at "now" (empty space on the right until the session fills in).
+    //    Dashed open / previous-close baseline runs full width. ──
     @ViewBuilder
     private func curve(height: CGFloat) -> some View {
-        if entry.points.count >= 2 {
-            let open = entry.value - entry.pnlAbs               // day open / prev close
-            let vals = entry.points.map(\.value) + [open]
+        let pts = entry.points.sorted { $0.minute < $1.minute }
+        if pts.count >= 2 {
+            let open = entry.value - entry.pnlAbs
+            let vals = pts.map(\.value) + [open]
             let lo = vals.min() ?? 0
             let hi = vals.max() ?? 1
-            let range = max(hi - lo, 1)
-            // Extend the domain below the data so the area fill has room to fade
-            // out toward the bottom of the tile.
-            let domLo = lo - range * 0.55
-            let domHi = hi + range * 0.12
-            Chart {
-                // Open / previous-close reference line — dashed, full width.
-                RuleMark(y: .value("open", open))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
-                    .foregroundStyle(Color.white.opacity(0.18))
-                ForEach(entry.points) { p in
-                    AreaMark(x: .value("m", p.minute), y: .value("v", p.value))
-                        .interpolationMethod(.catmullRom)
-                        .foregroundStyle(LinearGradient(
-                            colors: [trend.opacity(0.40), trend.opacity(0.0)],
-                            startPoint: .top, endPoint: .bottom))
-                    LineMark(x: .value("m", p.minute), y: .value("v", p.value))
-                        .interpolationMethod(.catmullRom)
-                        .foregroundStyle(trend)
-                        .lineStyle(StrokeStyle(lineWidth: 2, lineJoin: .round))
+            let range = max(hi - lo, 0.0001)
+            Canvas { ctx, size in
+                let w = size.width, h = size.height
+                let padTop = h * 0.16, padBot = h * 0.06
+                let plotH = max(h - padTop - padBot, 1)
+                func px(_ m: Double) -> CGFloat { CGFloat(m / kSessionLenMin) * w }
+                func py(_ v: Double) -> CGFloat {
+                    padTop + (1 - CGFloat((v - lo) / range)) * plotH
                 }
+
+                // Area under the line → bottom edge, faded to transparent.
+                var area = Path()
+                area.move(to: CGPoint(x: px(pts[0].minute), y: h))
+                for p in pts { area.addLine(to: CGPoint(x: px(p.minute), y: py(p.value))) }
+                area.addLine(to: CGPoint(x: px(pts.last!.minute), y: h))
+                area.closeSubpath()
+                ctx.fill(area, with: .linearGradient(
+                    Gradient(colors: [trend.opacity(0.45), trend.opacity(0.0)]),
+                    startPoint: CGPoint(x: 0, y: padTop),
+                    endPoint: CGPoint(x: 0, y: h)))
+
+                // Line (stops at the latest point).
+                var line = Path()
+                line.move(to: CGPoint(x: px(pts[0].minute), y: py(pts[0].value)))
+                for p in pts.dropFirst() {
+                    line.addLine(to: CGPoint(x: px(p.minute), y: py(p.value)))
+                }
+                ctx.stroke(line, with: .color(trend),
+                           style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+
+                // Dashed open / previous-close baseline, full width.
+                var base = Path()
+                base.move(to: CGPoint(x: 0, y: py(open)))
+                base.addLine(to: CGPoint(x: w, y: py(open)))
+                ctx.stroke(base, with: .color(.white.opacity(0.18)),
+                           style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
             }
-            .chartXScale(domain: 0...kSessionLenMin)   // full session; line stops at now
-            .chartYScale(domain: domLo...domHi)
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
             .frame(height: height)
         } else {
             Color.clear.frame(height: height)
