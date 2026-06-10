@@ -3163,6 +3163,57 @@ def claude_logout(cli_path: str = "claude") -> tuple[bool, str]:
     return False, ((res.stderr or res.stdout or "").strip() or f"claude auth logout exit {res.returncode}")
 
 
+# Curated base set of Claude Code subscription model aliases. The CLI has no
+# "list models" command, so we ship a sensible base and merge the account-
+# specific extras the CLI caches in ~/.claude.json (additionalModelOptionsCache)
+# — that part IS dynamic per subscription. ``[1m]`` variants use the 1M context
+# window, which requires turning on usage credits at claude.ai/settings/usage
+# ON TOP of the subscription; the plain aliases use the standard 200K context.
+_BASE_CLAUDE_MODELS = [
+    {"value": "claude-haiku-4-5", "label": "Haiku 4.5",
+     "description": "Fastest, cheapest · standard 200K context"},
+    {"value": "claude-sonnet-4-6", "label": "Sonnet 4.6",
+     "description": "Balanced · standard 200K context"},
+    {"value": "claude-sonnet-4-6[1m]", "label": "Sonnet 4.6 (1M context)",
+     "description": "1M context · requires usage credits"},
+    {"value": "claude-opus-4-8", "label": "Opus 4.8",
+     "description": "Most capable · standard 200K context"},
+    {"value": "claude-opus-4-8[1m]", "label": "Opus 4.8 (1M context)",
+     "description": "1M context · requires usage credits"},
+]
+
+
+def list_available_models(cli_path: str = "claude") -> Dict[str, Any]:
+    """Return the Claude subscription models selectable for a claude-cli
+    model, for the /models UI dropdown. Merges the curated base set with the
+    account-specific options the CLI caches in ``~/.claude.json``. Each entry
+    carries ``requires_credits`` (true for ``[1m]`` 1M-context variants, which
+    need usage credits enabled and otherwise fail with a 1M-context error)."""
+    models = [dict(m) for m in _BASE_CLAUDE_MODELS]
+    seen = {m["value"] for m in models}
+    try:
+        cj = os.path.join(_operator_home(), ".claude.json")
+        if os.path.isfile(cj):
+            with open(cj, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+            for opt in (doc.get("additionalModelOptionsCache") or []):
+                if not isinstance(opt, dict):
+                    continue
+                val = str(opt.get("value") or "").strip()
+                if val and val not in seen:
+                    seen.add(val)
+                    models.append({
+                        "value": val,
+                        "label": str(opt.get("label") or val),
+                        "description": str(opt.get("description") or ""),
+                    })
+    except Exception:
+        pass
+    for m in models:
+        m["requires_credits"] = "[1m]" in m["value"]
+    return {"models": models}
+
+
 # ANSI/VT100 escape stripper for PTY output (URL/prompt parsing).
 _ANSI_ESCAPE_RE_CC = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b[=>]")
 # Anthropic OAuth URL — captured from the login flow's stdout. The host
@@ -3479,4 +3530,5 @@ __all__ = [
     "claude_auth_status",
     "claude_logout",
     "invalidate_runtime_home_cache",
+    "list_available_models",
 ]

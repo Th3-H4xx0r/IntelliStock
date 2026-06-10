@@ -2513,6 +2513,22 @@ def api_claude_login_cancel(
     return {"ok": True}
 
 
+@app.get("/claude/models", response_class=JSONResponse)
+def api_claude_models(
+    cli_path: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """List the Claude subscription models selectable for a claude-cli model
+    (the /models form dropdown). Merges a curated base set with the account-
+    specific options the CLI caches in ~/.claude.json. Each entry flags
+    ``requires_credits`` for the 1M-context ``[1m]`` variants."""
+    try:
+        from chatbot.claude_cli_provider import list_available_models
+    except Exception as e:
+        return {"models": [], "error": f"claude provider unavailable: {e}"}
+    return list_available_models((cli_path or "claude").strip() or "claude")
+
+
 @app.post("/claude/logout", response_class=JSONResponse)
 async def api_claude_logout(current_user: dict = Depends(get_current_user)):
     """Run ``claude auth logout`` to drop the deployment's Claude

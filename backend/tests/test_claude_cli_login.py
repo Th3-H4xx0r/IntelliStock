@@ -353,6 +353,37 @@ def test_test_cli_maps_invalid_api_key_401_to_actionable_hint(monkeypatch):
     assert "subscription" in out["error"].lower()
 
 
+def test_list_available_models_merges_cache_and_flags_1m(tmp_path, monkeypatch):
+    import json as _json
+    (tmp_path / ".claude.json").write_text(_json.dumps({
+        "additionalModelOptionsCache": [
+            {"value": "claude-custom-x", "label": "Custom X", "description": "d"},
+            {"value": "claude-sonnet-4-6", "label": "dup"},  # collides with base
+        ]
+    }))
+    monkeypatch.setattr(provider, "_operator_home", lambda: str(tmp_path))
+    out = provider.list_available_models("claude")
+    by = {m["value"]: m for m in out["models"]}
+    vals = [m["value"] for m in out["models"]]
+    # Base set present
+    assert "claude-sonnet-4-6" in by and "claude-haiku-4-5" in by
+    # Account-specific extra merged in
+    assert "claude-custom-x" in by
+    # Collision with base is deduped (base entry wins, appears once)
+    assert vals.count("claude-sonnet-4-6") == 1
+    assert by["claude-sonnet-4-6"]["label"] == "Sonnet 4.6"  # not "dup"
+    # 1M variants flagged; standard ones not
+    assert by["claude-sonnet-4-6[1m]"]["requires_credits"] is True
+    assert by["claude-sonnet-4-6"]["requires_credits"] is False
+    assert by["claude-custom-x"]["requires_credits"] is False
+
+
+def test_list_available_models_tolerates_missing_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(provider, "_operator_home", lambda: str(tmp_path))
+    out = provider.list_available_models("claude")
+    assert len(out["models"]) >= 5  # base set always present
+
+
 def test_reader_parses_url_from_pty_output(monkeypatch):
     # Drive _reader with a fake fd that yields colorized output then EOF.
     chunks = [

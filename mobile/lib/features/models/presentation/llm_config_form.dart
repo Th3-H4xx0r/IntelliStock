@@ -218,6 +218,17 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
   bool _bedrockLoading = false;
   String _bedrockError = '';
 
+  // Claude CLI model picker
+  List<ClaudeModelOption> _claudeModels = [];
+  bool _claudeLoading = false;
+  String _claudeError = '';
+  // True once the user explicitly picks "Custom…" (or the saved model isn't in
+  // the fetched list), so the free-text field stays revealed.
+  bool _claudeCustom = false;
+
+  // Sentinel value for the "Custom…" dropdown entry.
+  static const _kClaudeCustom = '__custom__';
+
   ModelRepository get _repo =>
       widget.repo ?? ref.read(modelRepositoryProvider);
 
@@ -226,6 +237,7 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
     super.initState();
     if (widget.draft.provider == 'ollama') _fetchOllama();
     if (widget.draft.provider == 'bedrock') _fetchBedrock();
+    if (widget.draft.provider == 'claude-cli') _fetchClaudeModels();
   }
 
   @override
@@ -241,6 +253,10 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
         widget.draft.bedrockRegion != old.draft.bedrockRegion ||
         widget.draft.apiKey != old.draft.apiKey)) {
       _fetchBedrock();
+    }
+    if (p == 'claude-cli' && (op != 'claude-cli' ||
+        widget.draft.cliPath != old.draft.cliPath)) {
+      _fetchClaudeModels();
     }
   }
 
@@ -274,6 +290,42 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
       if (mounted) setState(() { _bedrockModels = models; _bedrockLoading = false; });
     } catch (e) {
       if (mounted) setState(() { _bedrockError = e.toString(); _bedrockLoading = false; });
+    }
+  }
+
+  Future<void> _fetchClaudeModels({bool force = false}) async {
+    setState(() { _claudeLoading = true; _claudeError = ''; });
+    try {
+      final data = await _repo.claudeModels(cliPath: widget.draft.cliPath);
+      final err = data['error'];
+      final rawList = data['models'];
+      final models = rawList is List
+          ? rawList
+              .whereType<Map<String, dynamic>>()
+              .map(ClaudeModelOption.fromJson)
+              .where((m) => m.value.isNotEmpty)
+              .toList()
+          : <ClaudeModelOption>[];
+      if (!mounted) return;
+      setState(() {
+        _claudeModels = models;
+        _claudeError = (err is String && err.isNotEmpty)
+            ? err
+            : (models.isEmpty ? 'No models returned' : '');
+        // Reveal the free-text field when the saved model isn't a known option,
+        // so an existing alias is never lost.
+        final current = widget.draft.model;
+        _claudeCustom = current.isNotEmpty &&
+            !models.any((m) => m.value == current);
+        _claudeLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _claudeError = e.toString();
+        _claudeModels = [];
+        _claudeLoading = false;
+      });
     }
   }
 
@@ -326,13 +378,16 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
 
         // Model
         _label(d.provider == 'azure' ? 'Deployment / Model Name' : 'Model'),
-        _textField(
-          value: d.model,
-          placeholder: _modelPlaceholder(d.provider),
-          mono: true,
-          disabled: disabled,
-          onChanged: (v) => _update(d.copyWith(model: v)),
-        ),
+        if (d.provider == 'claude-cli')
+          ..._claudeModelField(d, disabled)
+        else
+          _textField(
+            value: d.model,
+            placeholder: _modelPlaceholder(d.provider),
+            mono: true,
+            disabled: disabled,
+            onChanged: (v) => _update(d.copyWith(model: v)),
+          ),
         const SizedBox(height: 16),
 
         // Cache Family
@@ -586,6 +641,74 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
       default: return 'e.g. gemini-3-flash-preview';
     }
   }
+
+  /// Model selector for the `claude-cli` provider: a dropdown of the dynamic
+  /// model list (with a "Custom…" escape hatch) plus the usage-credits hint.
+  /// Falls back to the plain free-text field while loading or on error so the
+  /// form always works.
+  List<Widget> _claudeModelField(LlmConfigDraft d, bool disabled) {
+    final freeText = _textField(
+      value: d.model,
+      placeholder: _modelPlaceholder('claude-cli'),
+      mono: true,
+      disabled: disabled,
+      onChanged: (v) => _update(d.copyWith(model: v)),
+    );
+
+    // No usable list (loading / fetch failed / empty / error field) → free text.
+    if (_claudeModels.isEmpty) {
+      return [
+        _pickerLabel('Available models',
+            onRefresh: () => _fetchClaudeModels(force: true), loading: _claudeLoading),
+        if (_claudeError.isNotEmpty)
+          _infoBox("Couldn't list Claude models: $_claudeError\n"
+              'Enter the model name manually above (e.g. claude-sonnet-4-6).',
+              AppColors.warning),
+        freeText,
+        _claudeCreditsHint(),
+      ];
+    }
+
+    final known = _claudeModels.any((m) => m.value == d.model);
+    final useCustom = _claudeCustom || (d.model.isNotEmpty && !known);
+    final dropdownValue = useCustom ? _kClaudeCustom : (known ? d.model : null);
+
+    return [
+      _pickerLabel('Available models',
+          onRefresh: () => _fetchClaudeModels(force: true), loading: _claudeLoading),
+      _dropdown(
+        value: dropdownValue,
+        hint: 'Select a model',
+        items: [
+          ..._claudeModels.map((m) {
+            final label = m.requiresCredits ? '${m.label} — needs credits' : m.label;
+            return DropdownMenuItem(value: m.value, child: Text(label));
+          }),
+          const DropdownMenuItem(value: _kClaudeCustom, child: Text('Custom…')),
+        ],
+        onChanged: disabled
+            ? null
+            : (v) {
+                if (v == _kClaudeCustom) {
+                  setState(() => _claudeCustom = true);
+                } else if (v != null) {
+                  setState(() => _claudeCustom = false);
+                  _update(d.copyWith(model: v));
+                }
+              },
+      ),
+      if (useCustom) ...[
+        const SizedBox(height: 8),
+        freeText,
+      ],
+      _claudeCreditsHint(),
+    ];
+  }
+
+  Widget _claudeCreditsHint() => _hint(
+        '1M-context models need usage credits (claude.ai/settings/usage); '
+        'standard models don\'t.',
+      );
 
   Widget _label(String text) {
     return Padding(
