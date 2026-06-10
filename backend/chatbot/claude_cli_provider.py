@@ -683,6 +683,70 @@ def _init_claude_state_once() -> None:
             _log(f"failed to restore .claude.json from backup: {e}", "yellow")
 
 
+def _scrub_json_file(path: str, mutate) -> bool:
+    """Load the JSON object at *path*, apply ``mutate(dict)`` in place, and
+    rewrite the file only if it actually changed. Returns True on a write.
+    Silent no-op for missing / unreadable / non-object files."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    before = json.dumps(data, sort_keys=True)
+    try:
+        mutate(data)
+    except Exception:
+        return False
+    if json.dumps(data, sort_keys=True) == before:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return True
+    except Exception:
+        return False
+
+
+def _scrub_settings_dict(d: Dict[str, Any]) -> None:
+    # apiKeyHelper runs a command whose stdout becomes the API key; an env
+    # block can pin ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN. Both override the
+    # subscription OAuth and 401 if stale.
+    d.pop("apiKeyHelper", None)
+    env = d.get("env")
+    if isinstance(env, dict):
+        for k in _SUBSCRIPTION_CONFLICTING_ENV:
+            env.pop(k, None)
+        if not env:
+            d.pop("env", None)
+
+
+def _neutralize_api_key_config(runtime_home: str) -> None:
+    """Strip every non-subscription auth source from a COPIED runtime HOME so
+    claude-cli authenticates with the operator's subscription OAuth, never a
+    stale API key. Claude Code's auth precedence puts an API key (env var,
+    settings ``env`` block, ``apiKeyHelper``, or a stored ``primaryApiKey``
+    in ``.claude.json``) BEFORE the subscription, so any one of these — left
+    over from an earlier API-key setup — silently 401s every claude-cli call
+    even though ``claude auth status`` reports the subscription as logged in.
+
+    We scrub the per-call COPY only; the operator's real ``~/.claude`` files
+    are never touched. Combined with ``_strip_api_key_env`` (process env) and
+    ``_FORCE_SUBSCRIPTION_ARGS`` (the ``--settings`` env override), this
+    covers all four sources.
+    """
+    _scrub_json_file(
+        os.path.join(runtime_home, ".claude.json"),
+        lambda d: d.pop("primaryApiKey", None),
+    )
+    sdir = os.path.join(runtime_home, ".claude")
+    for name in ("settings.json", "settings.local.json"):
+        _scrub_json_file(os.path.join(sdir, name), _scrub_settings_dict)
+
+
 def _get_structured_runtime_home() -> str:
     """Process-wide shared runtime HOME for the spawn-per-call structured
     path. Created once on first use, reused by every subsequent call.
@@ -772,6 +836,11 @@ def _prepare_runtime_home(sess: "_Session") -> str:
         # naturally rather than restoring a stale backup per call.
         if _CLAUDE_JSON_SOURCE:
             shutil.copy2(_CLAUDE_JSON_SOURCE, os.path.join(runtime_dir, ".claude.json"))
+        # Scrub any non-subscription auth source from the COPY (a stored
+        # primaryApiKey / apiKeyHelper / env API key would otherwise override
+        # the subscription OAuth and 401 every call). Done before the chown
+        # walk so the rewritten files get the runtime-user ownership too.
+        _neutralize_api_key_config(runtime_dir)
         # Recursively chown to the runtime user so the dropped
         # subprocess can read everything. mode is left as-is from the
         # source.

@@ -246,6 +246,58 @@ def test_strip_api_key_env_noop_when_absent():
     assert provider._strip_api_key_env(env) == {"PATH": "/usr/bin"}
 
 
+def test_neutralize_api_key_config_removes_all_sources(tmp_path):
+    import json as _json
+    home = tmp_path
+    (home / ".claude").mkdir()
+    (home / ".claude.json").write_text(
+        _json.dumps({"primaryApiKey": "sk-bogus", "oauthAccount": {"email": "x@y.z"}})
+    )
+    (home / ".claude" / "settings.json").write_text(
+        _json.dumps({
+            "apiKeyHelper": "/path/helper.sh",
+            "env": {"ANTHROPIC_API_KEY": "sk", "ANTHROPIC_AUTH_TOKEN": "t", "FOO": "bar"},
+            "theme": "dark",
+        })
+    )
+    provider._neutralize_api_key_config(str(home))
+
+    cj = _json.loads((home / ".claude.json").read_text())
+    assert "primaryApiKey" not in cj
+    assert cj["oauthAccount"] == {"email": "x@y.z"}  # subscription state preserved
+
+    s = _json.loads((home / ".claude" / "settings.json").read_text())
+    assert "apiKeyHelper" not in s
+    assert "ANTHROPIC_API_KEY" not in s.get("env", {})
+    assert "ANTHROPIC_AUTH_TOKEN" not in s.get("env", {})
+    assert s["env"]["FOO"] == "bar"   # unrelated env vars preserved
+    assert s["theme"] == "dark"       # unrelated settings preserved
+
+
+def test_neutralize_api_key_config_drops_empty_env_block(tmp_path):
+    import json as _json
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        _json.dumps({"env": {"ANTHROPIC_API_KEY": "sk"}})
+    )
+    provider._neutralize_api_key_config(str(tmp_path))
+    s = _json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    assert "env" not in s  # emptied env block removed entirely
+
+
+def test_neutralize_api_key_config_noop_when_files_absent(tmp_path):
+    # Must not raise when .claude.json / settings.json don't exist.
+    provider._neutralize_api_key_config(str(tmp_path))
+
+
+def test_scrub_json_file_leaves_clean_file_untouched(tmp_path):
+    import json as _json
+    p = tmp_path / "x.json"
+    p.write_text(_json.dumps({"a": 1}))
+    changed = provider._scrub_json_file(str(p), lambda d: d.pop("nope", None))
+    assert changed is False
+
+
 def test_force_subscription_settings_blanks_anthropic_keys():
     import json as _json
     d = _json.loads(provider._FORCE_SUBSCRIPTION_SETTINGS)
