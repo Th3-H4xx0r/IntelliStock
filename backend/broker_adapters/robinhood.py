@@ -38,6 +38,7 @@ import random
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -432,6 +433,13 @@ class RobinhoodAdapter(BrokerAdapter):
                 f"{type(_imp_e).__name__}: {_imp_e}",
                 "red",
             )
+
+        # 2026-06-10 fill-alert hardening: idempotency ledger keyed by
+        # broker_order_id (fallback cid). A fill alert fires EXACTLY ONCE per
+        # order across both the polling path and the reconciliation catch-up
+        # path, so neither double-pages an order both observe. Bounded LRU.
+        self._alerted_fills: "OrderedDict[str, float]" = OrderedDict()
+        self._ALERTED_FILLS_CAP = 2048
 
         # Polling thread state (substitute for AlpacaAdapter's WebSocket)
         # 2026-05-07 deadlock defense-in-depth: was threading.Lock() — the
@@ -2995,6 +3003,17 @@ class RobinhoodAdapter(BrokerAdapter):
     ) -> None:
         if self._alert_fill is None:
             return
+        # Idempotency: page each order's fill at most once (polling path +
+        # reconciliation catch-up can both observe the same terminal fill).
+        key = str(broker_order_id or cid or f"{symbol}:{side}")
+        ledger = getattr(self, "_alerted_fills", None)
+        if ledger is not None:
+            if key in ledger:
+                return
+            ledger[key] = filled_qty
+            cap = getattr(self, "_ALERTED_FILLS_CAP", 2048)
+            while len(ledger) > cap:
+                ledger.popitem(last=False)
         try:
             self._alert_fill(
                 instance_id=self._instance_id,
