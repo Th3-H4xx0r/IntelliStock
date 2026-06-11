@@ -634,6 +634,21 @@ def _validate_notification_categories(categories):
     return cats
 
 
+def _validate_provided_categories(categories):
+    """Return cleaned routes for ONLY the provided keys; raise on unknown.
+
+    Unlike _validate_notification_categories this does NOT fill omitted
+    categories with defaults — callers overlay it onto the stored matrix so an
+    omitted category keeps its stored value (a save from a client that doesn't
+    know about a future category can't silently reset it)."""
+    out = {}
+    for c, v in (categories or {}).items():
+        if c not in NOTIFICATION_CATEGORIES:
+            raise ValueError(f"unknown notification category: {c}")
+        out[c] = _coerce_route(v)
+    return out
+
+
 def ensure_notification_preferences_table(conn):
     dbs = list(r.db_list().run(conn))
     if DB_NAME not in dbs:
@@ -653,23 +668,31 @@ def action_get_notification_preferences(conn, user_id):
 
 
 def action_set_notification_preferences(conn, user_id, categories):
-    """Validate + persist the full matrix. Raises ValueError on unknown category."""
+    """Validate + persist preferences. Provided categories are OVERLAID onto the
+    stored matrix (omitted categories keep their stored value), so a save from a
+    client that doesn't know a future category can't silently reset it. Raises
+    ValueError on an unknown category."""
     from datetime import datetime, timezone
     ensure_notification_preferences_table(conn)
-    clean = _validate_notification_categories(categories)
+    provided = _validate_provided_categories(categories)  # raises on unknown
+    existing_doc = r.db(DB_NAME).table("NotificationPreferences").get(str(user_id)).run(conn)
+    stored = existing_doc.get("categories") if isinstance(existing_doc, dict) else None
+    merged = _merge_notification_categories(stored)  # full 9, stored values kept
+    merged.update(provided)
     doc = {
         "id": str(user_id),
         "user_id": str(user_id),
-        "categories": clean,
+        "categories": merged,
         "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
     }
     r.db(DB_NAME).table("NotificationPreferences").insert(doc, conflict="replace").run(conn)
-    return {"user_id": str(user_id), "categories": clean}
+    return {"user_id": str(user_id), "categories": merged}
 
 
 # ----------------------------------------------------------------------------
-# iOS push device registry (APNs device tokens). One row per device token so
-# register is idempotent (re-register just refreshes last_seen).
+# iOS push device registry (APNs device tokens). One row per device token
+# (id == token) so register is idempotent — re-register rewrites the row
+# (refreshing last_seen + app_version).
 # ----------------------------------------------------------------------------
 
 def _push_device_doc(user_id, token, platform="ios", env="prod", app_version=None, now_iso=None):
@@ -713,10 +736,19 @@ def action_list_push_devices(conn, user_id, env=None):
     return list(sel.run(conn))
 
 
-def action_delete_push_device(conn, token):
-    """Remove a device token (logout / APNs 410 prune)."""
+def action_delete_push_device(conn, token, user_id=None):
+    """Remove a device token (logout / APNs 410 prune).
+
+    When ``user_id`` is provided the delete is scoped to that owner (a user
+    can't delete another user's token). The internal 410-prune path calls
+    without a user_id since it has no user context."""
     ensure_push_devices_table(conn)
-    r.db(DB_NAME).table("PushDevices").get(str(token)).delete().run(conn)
+    row = r.db(DB_NAME).table("PushDevices").get(str(token))
+    if user_id is not None:
+        doc = row.run(conn)
+        if doc and doc.get("user_id") != str(user_id):
+            return {"deleted": None, "reason": "not_owner"}
+    row.delete().run(conn)
     return {"deleted": str(token)}
 
 

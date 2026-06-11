@@ -1726,7 +1726,8 @@ def api_register_push_device(body: PushDeviceBody, conn=Depends(conn_dependency)
 
 @app.delete("/push/devices/{token}", response_class=JSONResponse)
 def api_delete_push_device(token: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    return _run(action_delete_push_device, conn, token)
+    # Scope the delete to the caller so one user can't unregister another's token.
+    return _run(action_delete_push_device, conn, token, current_user["id"])
 
 
 # --- Send-test-notification (verify each delivery option) ---

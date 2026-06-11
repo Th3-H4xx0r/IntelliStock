@@ -47,6 +47,15 @@ def _push_sink(user_id: str, *, title: str, body: str, category: str, data: dict
         from apns_sender import send_to_user
     except Exception:
         return  # APNs module/deps absent → push simply doesn't deliver
+    # Push title/body are plaintext on Apple's servers + the lock screen — run
+    # them through the same redact filter the Discord path uses so an error
+    # message / reason text can never leak a key or token.
+    try:
+        from intellistock_logger import _redact
+        title = _redact(title) if isinstance(title, str) else title
+        body = _redact(body) if isinstance(body, str) else body
+    except Exception:
+        pass
     send_to_user(user_id, title=title, body=body, category=category, data=data)
 
 

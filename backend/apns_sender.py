@@ -106,11 +106,14 @@ def _build_payload(title: str, body: str, category: str, data: Optional[dict]) -
 # --- I/O seams (monkeypatched in tests) --------------------------------------
 
 def _list_devices(user_id: str) -> list:
+    # List ALL of the user's devices regardless of env; the APNs host is chosen
+    # PER DEVICE from each device's stored env (a single server must serve both
+    # sandbox debug-build tokens and prod release-build tokens, otherwise the
+    # other env's devices are silently dropped).
     from interactive_utils import get_conn, action_list_push_devices
-    env = os.environ.get("APNS_ENV", "prod").strip() or "prod"
     conn = get_conn()
     try:
-        return action_list_push_devices(conn, user_id, env=env)
+        return action_list_push_devices(conn, user_id)
     finally:
         try:
             conn.close()
@@ -158,7 +161,6 @@ def send_to_user(user_id: str, *, title: str, body: str, category: str, data: di
     creds = _load_creds()
     if not creds:
         return {"sent": 0, "skipped": "no_creds"}
-    host = _apns_host(creds["env"])
     payload = _build_payload(title, body, category, data)
     sent = 0
     pruned = 0
@@ -171,6 +173,8 @@ def send_to_user(user_id: str, *, title: str, body: str, category: str, data: di
         token = (d or {}).get("device_token") or (d or {}).get("id")
         if not token:
             continue
+        # Pick the host from THIS device's env (falls back to creds env).
+        host = _apns_host((d or {}).get("env") or creds.get("env") or "prod")
         try:
             status = _send_one(token, payload, creds, host)
         except Exception as e:
@@ -185,6 +189,11 @@ def send_to_user(user_id: str, *, title: str, body: str, category: str, data: di
                 pruned += 1
             except Exception:
                 pass
-        # other statuses (400/403/429/5xx) are logged by _send_one; left in
-        # place so a transient failure can succeed on the next notification.
+        elif status == 403:
+            # Provider token rejected (expired/invalid — e.g. key rotated
+            # mid-cache-window). Reset the cache so the next send re-signs
+            # instead of dying silently for the rest of the ~50min TTL.
+            _reset_jwt_cache()
+        # other statuses (400/429/5xx) are logged by _send_one; left in place
+        # so a transient failure can succeed on the next notification.
     return {"sent": sent, "pruned": pruned, "devices": len(devices or [])}

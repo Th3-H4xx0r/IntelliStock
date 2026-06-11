@@ -31,9 +31,10 @@ def test_delete_push_device(monkeypatch):
     from api import main
     deleted = {}
     monkeypatch.setattr(main, "action_delete_push_device",
-                        lambda conn, token: deleted.update(token=token) or {"deleted": token})
+                        lambda conn, token, user_id: deleted.update(token=token, user_id=user_id) or {"deleted": token})
     res = main.api_delete_push_device(token="TOK1", conn=None, current_user={"id": "u1"})
     assert deleted["token"] == "TOK1"
+    assert deleted["user_id"] == "u1"  # delete scoped to caller
     assert res["deleted"] == "TOK1"
 
 

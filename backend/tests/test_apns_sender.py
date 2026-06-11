@@ -86,6 +86,24 @@ def test_send_to_user_delivers_and_counts(monkeypatch):
     assert posted["topic"] == "dev.pkrishna.intellistockMobile"
 
 
+def test_send_to_user_picks_host_per_device_env(monkeypatch):
+    """A single server must serve BOTH sandbox (debug) and prod (release)
+    tokens — each routed to its own APNs host — instead of dropping one env."""
+    import apns_sender
+    monkeypatch.setattr(apns_sender, "_load_creds", _creds)
+    monkeypatch.setattr(apns_sender, "_list_devices", lambda uid: [
+        {"device_token": "PROD_TOK", "env": "prod"},
+        {"device_token": "SBOX_TOK", "env": "sandbox"},
+    ])
+    hosts = {}
+    monkeypatch.setattr(apns_sender, "_send_one",
+                        lambda token, payload, creds, host: hosts.__setitem__(token, host) or 200)
+    res = apns_sender.send_to_user("u1", title="t", body="b", category="order_fill", data={})
+    assert res["sent"] == 2
+    assert hosts["PROD_TOK"] == "api.push.apple.com"
+    assert hosts["SBOX_TOK"] == "api.sandbox.push.apple.com"
+
+
 def test_send_to_user_prunes_410(monkeypatch):
     import apns_sender
     monkeypatch.setattr(apns_sender, "_load_creds", _creds)
