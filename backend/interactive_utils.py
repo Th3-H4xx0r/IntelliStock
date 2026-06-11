@@ -497,18 +497,71 @@ def action_get_discord_message_id(conn, channel, message_key):
     return {"message_id": doc.get("message_id"), "guild_id": doc.get("guild_id")}
 
 
+# 2026-06-10 outbox hardening: retry transient send failures with backoff
+# instead of dropping a message on its first failure (a silent way fill
+# notifications went missing). Pure decision so it's unit-testable.
+RETRY_MAX_ATTEMPTS = 5
+
+
+def discord_retry_decision(attempts, now_ts):
+    """Given the current attempt count, decide whether to requeue (with a
+    backoff timestamp) or give up.
+
+    Returns ``(status, next_retry_at, new_attempts)``:
+      - status == "pending" and next_retry_at is a future epoch-seconds float
+        while attempts < RETRY_MAX_ATTEMPTS,
+      - status == "failed" and next_retry_at is None at/after the cap.
+    """
+    attempts = int(attempts or 0)
+    if attempts >= RETRY_MAX_ATTEMPTS:
+        return ("failed", None, attempts)
+    backoff = min(300, 5 * (2 ** attempts))  # 5,10,20,40,80 … capped at 300s
+    return ("pending", float(now_ts) + backoff, attempts + 1)
+
+
 def action_get_pending_discord_messages(conn, limit=50):
-    """Get pending messages from DiscordOutbox for the bot to send."""
+    """Get sendable pending messages from DiscordOutbox for the bot.
+
+    Skips rows whose ``next_retry_at`` is still in the future so a backed-off
+    message isn't retried before its window.
+    """
     ensure_discord_outbox_table(conn)
+    now_epoch = r.now().to_epoch_time()
     cursor = (
         r.db(DB_NAME)
         .table("DiscordOutbox")
-        .filter({"status": "pending"})
+        .filter(
+            lambda d: (d["status"] == "pending")
+            & ((~d.has_fields("next_retry_at")) | (d["next_retry_at"].le(now_epoch)))
+        )
         .order_by("created_at")
         .limit(limit)
         .run(conn)
     )
     return list(cursor)
+
+
+def action_requeue_or_fail_discord_message(conn, msg_id, error):
+    """On send failure, requeue with backoff (or mark failed at the cap).
+
+    Reads the current ``attempts``, applies ``discord_retry_decision`` and
+    writes ``status``/``attempts``/``next_retry_at``/``error``.
+    """
+    ensure_discord_outbox_table(conn)
+    import time as _time
+    from datetime import datetime, timezone
+    doc = r.db(DB_NAME).table("DiscordOutbox").get(msg_id).run(conn)
+    attempts = int((doc or {}).get("attempts", 0) or 0)
+    status, next_at, new_attempts = discord_retry_decision(attempts, _time.time())
+    update = {
+        "status": status,
+        "attempts": new_attempts,
+        "error": str(error)[:500],
+        "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
+        "next_retry_at": next_at,  # float epoch seconds, or None when failed
+    }
+    r.db(DB_NAME).table("DiscordOutbox").get(msg_id).update(update).run(conn)
+    return {"status": status, "attempts": new_attempts}
 
 
 def action_mark_discord_message_sent(conn, msg_id):

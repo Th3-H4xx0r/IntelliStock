@@ -55,6 +55,7 @@ from interactive_utils import (
     action_get_pending_discord_messages,
     action_mark_discord_message_sent,
     action_mark_discord_message_failed,
+    action_requeue_or_fail_discord_message,
     action_store_discord_message_id,
     action_get_discord_message_id,
     action_status,
@@ -1437,11 +1438,14 @@ async def _outbox_poller():
                             if message_key and sent:
                                 await run_sync(action_store_discord_message_id, conn, channel, message_key, sent.id, guild_id)
                         else:
-                            await run_sync(action_mark_discord_message_failed, conn, msg_id, "channel not found or send failed")
+                            # Transient send failure: requeue with backoff
+                            # (gives up only after RETRY_MAX_ATTEMPTS) so a
+                            # message isn't silently dropped on first failure.
+                            await run_sync(action_requeue_or_fail_discord_message, conn, msg_id, "channel not found or send failed")
                 except Exception as e:
                     log.exception("outbox_poller: send/edit failed for id=%s: %s", msg_id, e)
                     try:
-                        await run_sync(action_mark_discord_message_failed, conn, msg_id, str(e))
+                        await run_sync(action_requeue_or_fail_discord_message, conn, msg_id, str(e))
                     except Exception:
                         pass
             if conn:
