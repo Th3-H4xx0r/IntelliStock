@@ -32,7 +32,9 @@ class LiveTradingScreen extends ConsumerStatefulWidget {
 
 class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
   ChartStyle _chartStyle = ChartStyle.area;
-  int? _scrubIndex;
+  // Scrub index lives in a notifier so dragging the chart repaints only the
+  // equity value text below — not the whole screen.
+  final ValueNotifier<int?> _scrubIndex = ValueNotifier(null);
   bool _haltModalOpen = false;
   bool _haltConfirmed = false;
   final _haltReasonCtrl = TextEditingController(text: 'risk breach');
@@ -42,6 +44,7 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
   @override
   void dispose() {
     _haltReasonCtrl.dispose();
+    _scrubIndex.dispose();
     super.dispose();
   }
 
@@ -358,13 +361,6 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
     final range = s.currentRange;
     final stats = RangeStats.from(history);
 
-    // Scrub overlay: show the scrubbed value or live equity.
-    double displayEquity = ls.equity;
-    if (_scrubIndex != null && history != null && history.values.isNotEmpty) {
-      final idx = _scrubIndex!.clamp(0, history.values.length - 1);
-      displayEquity = history.values[idx];
-    }
-
     final changeColor = stats.isUp ? AppColors.chartUp : AppColors.chartDown;
 
     return GlassCard(
@@ -389,9 +385,24 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
                       ),
                     ),
                     const SizedBox(height: 4),
-                    Text(
-                      fmtMoney(displayEquity),
-                      style: AppTextStyles.valueXl,
+                    ValueListenableBuilder<int?>(
+                      valueListenable: _scrubIndex,
+                      builder: (_, scrubIdx, _) {
+                        // Show the scrubbed value or, when not scrubbing, the
+                        // live equity.
+                        var displayEquity = ls.equity;
+                        if (scrubIdx != null &&
+                            history != null &&
+                            history.values.isNotEmpty) {
+                          final idx =
+                              scrubIdx.clamp(0, history.values.length - 1);
+                          displayEquity = history.values[idx];
+                        }
+                        return Text(
+                          fmtMoney(displayEquity),
+                          style: AppTextStyles.valueXl,
+                        );
+                      },
                     ),
                     const SizedBox(height: 6),
                     Row(
@@ -458,8 +469,8 @@ class _LiveTradingScreenState extends ConsumerState<LiveTradingScreen> {
               style: _chartStyle,
               range: range,
               height: 240,
-              onScrub: (idx) => setState(() => _scrubIndex = idx),
-              onScrubEnd: () => setState(() => _scrubIndex = null),
+              onScrub: (idx) => _scrubIndex.value = idx,
+              onScrubEnd: () => _scrubIndex.value = null,
             )
           else
             SizedBox(

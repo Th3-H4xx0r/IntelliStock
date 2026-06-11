@@ -5,12 +5,12 @@ import '../../../core/network/session.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/common_widgets.dart';
-import '../../../core/widgets/confirm_dialog.dart';
 import '../application/chatbot_controller.dart';
 import '../data/models/chat.dart';
 import 'chat_composer.dart';
 import 'chat_message.dart';
 import 'chat_model_picker.dart';
+import 'chat_settings_sheet.dart';
 import 'chat_tool_call.dart';
 
 /// Global chatbot overlay widget.
@@ -59,6 +59,16 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
 
   bool _wasOpen = false;
   double _lastKbInset = 0;
+
+  // In-tree overlays: the dock is mounted in MaterialApp.builder, ABOVE
+  // go_router's Navigator, so it has no Navigator ancestor — modal routes
+  // (showDialog / showModalBottomSheet) silently fail. Settings and confirms
+  // therefore render inside this widget's own Stack, like the chat panel.
+  bool _settingsOpen = false;
+  ChatConfirmRequest? _confirm;
+
+  void _requestConfirm(ChatConfirmRequest r) =>
+      setState(() => _confirm = r);
 
   void _scrollToBottom({bool animate = true}) {
     void run() {
@@ -175,7 +185,26 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
         ),
 
         // Expanded panel
-        if (st.isOpen) _ExpandedPanel(scrollCtrl: _scrollCtrl),
+        if (st.isOpen)
+          _ExpandedPanel(
+            scrollCtrl: _scrollCtrl,
+            onOpenSettings: () => setState(() => _settingsOpen = true),
+            onConfirm: _requestConfirm,
+          ),
+
+        // Settings sheet (in-tree overlay, above the panel)
+        if (st.isOpen && _settingsOpen)
+          ChatSettingsSheet(
+            onClose: () => setState(() => _settingsOpen = false),
+            onConfirm: _requestConfirm,
+          ),
+
+        // Confirm overlay (above everything)
+        if (_confirm != null)
+          ChatConfirmOverlay(
+            request: _confirm!,
+            onDismiss: () => setState(() => _confirm = null),
+          ),
       ],
     );
   }
@@ -226,8 +255,14 @@ class _CollapsedFab extends StatelessWidget {
 // ── Expanded panel ────────────────────────────────────────────────────────────
 
 class _ExpandedPanel extends ConsumerWidget {
-  const _ExpandedPanel({required this.scrollCtrl});
+  const _ExpandedPanel({
+    required this.scrollCtrl,
+    required this.onOpenSettings,
+    required this.onConfirm,
+  });
   final ScrollController scrollCtrl;
+  final VoidCallback onOpenSettings;
+  final void Function(ChatConfirmRequest) onConfirm;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -267,18 +302,16 @@ class _ExpandedPanel extends ConsumerWidget {
                   _ChatHeader(
                     title: st.activeConversation?.title ?? 'Assistant',
                     modelName: st.activeConversation?.modelName ?? '',
-                    onClear: () async {
-                      final ok = await showConfirmDialog(
-                        context,
-                        title: 'Clear conversation',
-                        body:
-                            'This will delete all messages. This cannot be undone.',
-                        confirmLabel: 'Clear',
-                        confirmColor: AppColors.danger,
-                        icon: Icons.delete_sweep,
-                      );
-                      if (ok) notifier.clearConversation();
-                    },
+                    onSettings: onOpenSettings,
+                    onClear: () => onConfirm(ChatConfirmRequest(
+                      title: 'Clear conversation',
+                      body:
+                          'This will delete all messages. This cannot be undone.',
+                      confirmLabel: 'Clear',
+                      confirmColor: AppColors.danger,
+                      icon: Icons.delete_sweep,
+                      onConfirm: notifier.clearConversation,
+                    )),
                     onMinimise: () => notifier.minimise(),
                   ),
 
@@ -322,12 +355,14 @@ class _ChatHeader extends StatelessWidget {
   const _ChatHeader({
     required this.title,
     required this.modelName,
+    required this.onSettings,
     required this.onClear,
     required this.onMinimise,
   });
 
   final String title;
   final String modelName;
+  final VoidCallback onSettings;
   final VoidCallback onClear;
   final VoidCallback onMinimise;
 
@@ -378,6 +413,13 @@ class _ChatHeader extends StatelessWidget {
                   ),
               ],
             ),
+          ),
+
+          // Settings
+          _HeaderBtn(
+            icon: Icons.settings,
+            tooltip: 'Settings',
+            onTap: onSettings,
           ),
 
           // Clear

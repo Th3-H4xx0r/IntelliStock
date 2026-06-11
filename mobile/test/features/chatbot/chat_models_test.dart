@@ -131,6 +131,23 @@ void main() {
       expect(conv.autoConfirmSafeTools, isFalse);
     });
 
+    test('reads auto_confirm_safe_tools nested under settings (backend shape)',
+        () {
+      // The backend stores/returns the flag at settings.auto_confirm_safe_tools,
+      // NOT at the top level — parsing the wrong place made the toggle revert.
+      final on = Conversation.fromJson({
+        'id': 'c',
+        'settings': {'auto_confirm_safe_tools': true},
+      });
+      expect(on.autoConfirmSafeTools, isTrue);
+
+      final off = Conversation.fromJson({
+        'id': 'c',
+        'settings': {'auto_confirm_safe_tools': false},
+      });
+      expect(off.autoConfirmSafeTools, isFalse);
+    });
+
     test('copyWith preserves unchanged fields', () {
       const original = Conversation(id: 'x', title: 'Old', modelId: 'mod');
       final updated = original.copyWith(title: 'New');

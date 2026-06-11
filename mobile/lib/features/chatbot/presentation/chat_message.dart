@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../data/models/chat.dart';
@@ -170,8 +171,9 @@ class _Bubble extends StatelessWidget {
   }
 }
 
-/// For assistant messages, prefer rendering markdown if there are markdown
-/// blocks in message.blocks; otherwise render as plain text.
+/// Renders assistant message text as markdown (bold, italics, lists, headings,
+/// inline code / code blocks, links, blockquotes). Mirrors the styleSheet used
+/// for `markdown` rich blocks so inline prose and blocks look consistent.
 class _RichText extends StatelessWidget {
   const _RichText({required this.content, required this.textColor});
   final String content;
@@ -179,9 +181,36 @@ class _RichText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      content,
-      style: AppTextStyles.body.copyWith(color: textColor),
+    return MarkdownBody(
+      data: content,
+      selectable: false,
+      styleSheet: MarkdownStyleSheet(
+        p: AppTextStyles.body.copyWith(color: textColor),
+        pPadding: EdgeInsets.zero,
+        strong: AppTextStyles.body
+            .copyWith(color: textColor, fontWeight: FontWeight.w700),
+        em: AppTextStyles.body
+            .copyWith(color: textColor, fontStyle: FontStyle.italic),
+        listBullet: AppTextStyles.body.copyWith(color: textColor),
+        code: AppTextStyles.mono(12, color: const Color(0xFFD8B4FE)),
+        codeblockPadding: const EdgeInsets.all(10),
+        codeblockDecoration: BoxDecoration(
+          color: AppColors.canvas.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.border),
+        ),
+        blockquote: AppTextStyles.body.copyWith(color: AppColors.textDim),
+        blockquoteDecoration: const BoxDecoration(
+          border: Border(left: BorderSide(color: AppColors.border, width: 2)),
+        ),
+        h1: AppTextStyles.h3.copyWith(color: AppColors.textHi),
+        h2: AppTextStyles.cardTitle.copyWith(color: AppColors.textHi),
+        h3: AppTextStyles.bodyHi.copyWith(color: AppColors.textHi),
+        a: AppTextStyles.body.copyWith(
+          color: AppColors.primary,
+          decoration: TextDecoration.underline,
+        ),
+      ),
     );
   }
 }

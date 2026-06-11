@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
+import '../../../core/charts/chart_decorations.dart';
+import '../../../core/charts/chart_geometry.dart';
+import '../../../core/charts/scrub_controller.dart';
 import '../../../core/models/portfolio_history.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
@@ -32,7 +35,23 @@ class EquityChart extends StatefulWidget {
 }
 
 class _EquityChartState extends State<EquityChart> {
-  int? _scrubIndex;
+  final ScrubController _scrub = ScrubController();
+
+  // Cached Syncfusion chart so a parent rebuild (e.g. the header showing the
+  // scrubbed value) doesn't rebuild the expensive chart — only the thin overlay
+  // repaints while scrubbing.
+  Widget? _cachedChart;
+  PortfolioHistory? _cacheHistory;
+  ChartStyle? _cacheStyle;
+  String? _cacheRange;
+
+  static const double _labelRowHeight = 20;
+
+  @override
+  void dispose() {
+    _scrub.dispose();
+    super.dispose();
+  }
 
   List<_ChartPoint> get _points {
     final ts = widget.history.timestamps;
@@ -68,30 +87,6 @@ class _EquityChartState extends State<EquityChart> {
 
   Color get _lineColor => _isUp ? AppColors.chartUp : AppColors.chartDown;
 
-  String _formatLabel(DateTime ts) {
-    switch (widget.range) {
-      case '1D':
-        return '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
-      case '1W':
-        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-        return days[(ts.weekday - 1).clamp(0, 6)];
-      case '1M':
-      case '3M':
-      case 'YTD':
-        const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        return '${m[ts.month - 1]} ${ts.day}';
-      default:
-        const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        return "${m[ts.month - 1]} '${ts.year.toString().substring(2)}";
-    }
-  }
-
-  String _formatMoney(double v) {
-    if (v.abs() >= 1000000) return '\$${(v / 1000000).toStringAsFixed(1)}M';
-    if (v.abs() >= 1000) return '\$${(v / 1000).toStringAsFixed(1)}k';
-    return '\$${v.toStringAsFixed(0)}';
-  }
-
   @override
   Widget build(BuildContext context) {
     final pts = _points;
@@ -108,46 +103,115 @@ class _EquityChartState extends State<EquityChart> {
     }
 
     final color = _lineColor;
+    final n = pts.length;
+    final plotHeight =
+        (widget.height - _labelRowHeight).clamp(40.0, widget.height);
+    final bounds = paddedBounds([for (final p in pts) p.value]);
 
-    Widget chartWidget;
+    final chart = _chartFor(pts, color, bounds);
+
+    final labels = [
+      for (final i in evenlySpacedLabelIndices(n, 4))
+        formatChartDate(pts[i].ts, widget.range),
+    ];
+
+    return SizedBox(
+      height: widget.height,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: plotHeight,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onHorizontalDragStart: (d) =>
+                      _handleScrub(d.localPosition.dx, width, n),
+                  onHorizontalDragUpdate: (d) =>
+                      _handleScrub(d.localPosition.dx, width, n),
+                  onHorizontalDragEnd: (_) => _endScrub(),
+                  onHorizontalDragCancel: _endScrub,
+                  child: Stack(
+                    children: [
+                      // The chart is cached and wrapped in a RepaintBoundary, so
+                      // a scrub never repaints it.
+                      Positioned.fill(child: RepaintBoundary(child: chart)),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: ValueListenableBuilder<ScrubSample?>(
+                            valueListenable: _scrub,
+                            builder: (_, sample, _) {
+                              if (sample == null ||
+                                  sample.index < 0 ||
+                                  sample.index >= n) {
+                                return const SizedBox.shrink();
+                              }
+                              final dotY = widget.style == ChartStyle.candle
+                                  ? null
+                                  : valueToY(
+                                      pts[sample.index].value,
+                                      bounds.min,
+                                      bounds.max,
+                                      plotHeight,
+                                    );
+                              return CustomPaint(
+                                painter: ScrubPainter(
+                                  fraction: sample.fraction,
+                                  dotY: dotY,
+                                  color: color,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          ChartDateLabels(labels: labels),
+        ],
+      ),
+    );
+  }
+
+  /// Returns the cached Syncfusion chart, rebuilding only when the data, style,
+  /// or range changes.
+  Widget _chartFor(
+    List<_ChartPoint> pts,
+    Color color,
+    ({double min, double max}) bounds,
+  ) {
+    if (_cachedChart != null &&
+        identical(_cacheHistory, widget.history) &&
+        _cacheStyle == widget.style &&
+        _cacheRange == widget.range) {
+      return _cachedChart!;
+    }
+    _cacheHistory = widget.history;
+    _cacheStyle = widget.style;
+    _cacheRange = widget.range;
+    return _cachedChart = _buildSyncfusionChart(pts, color, bounds);
+  }
+
+  Widget _buildSyncfusionChart(
+    List<_ChartPoint> pts,
+    Color color,
+    ({double min, double max}) bounds,
+  ) {
     if (widget.style == ChartStyle.candle) {
       final candles = _bucketCandles(pts);
-      if (candles.isEmpty) {
-        return SizedBox(height: widget.height);
-      }
-      chartWidget = SfCartesianChart(
+      if (candles.isEmpty) return const SizedBox.shrink();
+      return SfCartesianChart(
         backgroundColor: Colors.transparent,
         plotAreaBorderWidth: 0,
         margin: EdgeInsets.zero,
-        primaryXAxis: NumericAxis(
-          isVisible: true,
-          majorGridLines: const MajorGridLines(width: 0),
-          axisLine: const AxisLine(width: 0),
-          labelStyle: TextStyle(color: AppColors.chartAxis, fontSize: 9),
-          desiredIntervals: 5,
-          axisLabelFormatter: (AxisLabelRenderDetails args) {
-            final idx = args.value.toInt().clamp(0, candles.length - 1);
-            return ChartAxisLabel(
-              _formatLabel(candles[idx].ts),
-              TextStyle(color: AppColors.chartAxis, fontSize: 9),
-            );
-          },
-        ),
-        primaryYAxis: NumericAxis(
-          isVisible: true,
-          majorGridLines: MajorGridLines(
-            color: AppColors.chartGrid,
-            dashArray: const <double>[3, 3],
-          ),
-          axisLine: const AxisLine(width: 0),
-          labelStyle: TextStyle(color: AppColors.chartAxis, fontSize: 9),
-          axisLabelFormatter: (AxisLabelRenderDetails args) {
-            return ChartAxisLabel(
-              _formatMoney(args.value.toDouble()),
-              TextStyle(color: AppColors.chartAxis, fontSize: 9),
-            );
-          },
-        ),
+        primaryXAxis: edgeToEdgeIndexAxis(candles.length),
+        primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
         series: <CartesianSeries>[
           CandleSeries<_CandlePoint, num>(
             dataSource: candles,
@@ -162,138 +226,64 @@ class _EquityChartState extends State<EquityChart> {
           ),
         ],
       );
-    } else {
-      final isLine = widget.style == ChartStyle.line;
-      chartWidget = SfCartesianChart(
-        backgroundColor: Colors.transparent,
-        plotAreaBorderWidth: 0,
-        margin: EdgeInsets.zero,
-        primaryXAxis: NumericAxis(
-          isVisible: true,
-          majorGridLines: const MajorGridLines(width: 0),
-          axisLine: const AxisLine(width: 0),
-          labelStyle: TextStyle(color: AppColors.chartAxis, fontSize: 9),
-          desiredIntervals: 5,
-          axisLabelFormatter: (AxisLabelRenderDetails args) {
-            final idx = args.value.toInt().clamp(0, pts.length - 1);
-            return ChartAxisLabel(
-              _formatLabel(pts[idx].ts),
-              TextStyle(color: AppColors.chartAxis, fontSize: 9),
-            );
-          },
-        ),
-        primaryYAxis: NumericAxis(
-          isVisible: true,
-          majorGridLines: MajorGridLines(
-            color: AppColors.chartGrid,
-            dashArray: const <double>[3, 3],
-          ),
-          axisLine: const AxisLine(width: 0),
-          labelStyle: TextStyle(color: AppColors.chartAxis, fontSize: 9),
-          axisLabelFormatter: (AxisLabelRenderDetails args) {
-            return ChartAxisLabel(
-              _formatMoney(args.value.toDouble()),
-              TextStyle(color: AppColors.chartAxis, fontSize: 9),
-            );
-          },
-        ),
-        series: <CartesianSeries>[
-          if (!isLine)
-            AreaSeries<_ChartPoint, num>(
-              dataSource: pts,
-              xValueMapper: (d, _) => d.x,
-              yValueMapper: (d, _) => d.value,
-              color: color.withValues(alpha: 0.28),
-              borderColor: color,
-              borderWidth: 2,
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  color.withValues(alpha: 0.35),
-                  color.withValues(alpha: 0.02),
-                ],
-              ),
-            )
-          else
-            LineSeries<_ChartPoint, num>(
-              dataSource: pts,
-              xValueMapper: (d, _) => d.x,
-              yValueMapper: (d, _) => d.value,
-              color: color,
-              width: 1.75,
-            ),
-        ],
-      );
     }
 
-    // Scrubber overlay
-    return SizedBox(
-      height: widget.height,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onHorizontalDragUpdate: (details) =>
-            _handleScrub(details.localPosition.dx, context),
-        onHorizontalDragEnd: (_) {
-          setState(() => _scrubIndex = null);
-          widget.onScrub?.call(null);
-          widget.onScrubEnd?.call();
-        },
-        onHorizontalDragCancel: () {
-          setState(() => _scrubIndex = null);
-          widget.onScrub?.call(null);
-        },
-        onTapDown: (d) => _handleScrub(d.localPosition.dx, context),
-        child: Stack(
-          children: [
-            chartWidget,
-            if (_scrubIndex != null)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: CustomPaint(
-                    painter: _ScrubLinePainter(
-                      fraction: _scrubIndex! / (_points.length - 1).clamp(1, 99999),
-                      color: _lineColor,
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
+    final isLine = widget.style == ChartStyle.line;
+    return SfCartesianChart(
+      backgroundColor: Colors.transparent,
+      plotAreaBorderWidth: 0,
+      margin: EdgeInsets.zero,
+      primaryXAxis: edgeToEdgeIndexAxis(pts.length),
+      primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
+      series: <CartesianSeries>[
+        if (!isLine)
+          SplineAreaSeries<_ChartPoint, num>(
+            dataSource: pts,
+            splineType: SplineType.monotonic,
+            xValueMapper: (d, _) => d.x,
+            yValueMapper: (d, _) => d.value,
+            color: color.withValues(alpha: 0.28),
+            borderColor: color,
+            borderWidth: 2,
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                color.withValues(alpha: 0.35),
+                color.withValues(alpha: 0.02),
+              ],
+            ),
+          )
+        else
+          SplineSeries<_ChartPoint, num>(
+            dataSource: pts,
+            splineType: SplineType.monotonic,
+            xValueMapper: (d, _) => d.x,
+            yValueMapper: (d, _) => d.value,
+            color: color,
+            width: 1.75,
+          ),
+      ],
     );
   }
 
-  void _handleScrub(double dx, BuildContext context) {
-    final pts = _points;
-    if (pts.isEmpty) return;
-    final w = context.size?.width ?? 300;
-    final frac = (dx / w).clamp(0.0, 1.0);
-    final idx = (frac * (pts.length - 1)).round().clamp(0, pts.length - 1);
-    if (idx != _scrubIndex) {
-      setState(() => _scrubIndex = idx);
-      widget.onScrub?.call(idx);
-    }
-  }
-}
-
-class _ScrubLinePainter extends CustomPainter {
-  _ScrubLinePainter({required this.fraction, required this.color});
-  final double fraction;
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final x = size.width * fraction;
-    final paint = Paint()
-      ..color = color.withValues(alpha: 0.6)
-      ..strokeWidth = 1.2
-      ..style = PaintingStyle.stroke;
-    canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+  void _handleScrub(double dx, double width, int n) {
+    if (n == 0 || width <= 0) return;
+    final frac = (dx / width).clamp(0.0, 1.0);
+    final idx = fractionToIndex(frac, n);
+    final prev = _scrub.value?.index;
+    // Draw hairline + dot at the data point's own fraction so they land on the
+    // curve and match the value the header reports.
+    _scrub.update(idx, indexToFraction(idx, n));
+    if (idx != prev) widget.onScrub?.call(idx);
   }
 
-  @override
-  bool shouldRepaint(_ScrubLinePainter old) => old.fraction != fraction;
+  void _endScrub() {
+    if (_scrub.value == null) return;
+    _scrub.clear();
+    widget.onScrub?.call(null);
+    widget.onScrubEnd?.call();
+  }
 }
 
 // ── Range stats ───────────────────────────────────────────────────────────────
