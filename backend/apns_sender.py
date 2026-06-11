@@ -149,9 +149,30 @@ def _delete_device(token: str) -> None:
             pass
 
 
-def _send_one(token: str, payload: dict, creds: dict, host: str) -> int:
-    """POST one notification over HTTP/2. Returns the APNs status code (or 0 on
-    a transport error). Never raises."""
+def _update_device_env(token: str, env: str) -> None:
+    from interactive_utils import get_conn, action_set_push_device_env
+    conn = get_conn()
+    try:
+        action_set_push_device_env(conn, token, env)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _other_host(host: str) -> str:
+    return "api.sandbox.push.apple.com" if host == "api.push.apple.com" else "api.push.apple.com"
+
+
+def _env_for_host(host: str) -> str:
+    return "sandbox" if "sandbox" in host else "prod"
+
+
+def _send_one(token: str, payload: dict, creds: dict, host: str):
+    """POST one notification over HTTP/2. Returns ``(status_code, reason)``:
+    status 0 on transport error; reason is APNs' failure reason
+    (e.g. ``BadDeviceToken``) or ``""`` on success. Never raises."""
     import time
     import httpx
     jwt_token = _build_jwt(creds, time.time())
@@ -165,21 +186,36 @@ def _send_one(token: str, payload: dict, creds: dict, host: str) -> int:
     try:
         with httpx.Client(http2=True, timeout=10.0) as client:
             resp = client.post(url, headers=headers, json=payload)
-            return resp.status_code
+            if resp.status_code == 200:
+                return 200, ""
+            reason = ""
+            try:
+                reason = (resp.json() or {}).get("reason", "") or ""
+            except Exception:
+                reason = (resp.text or "")[:160]
+            return resp.status_code, reason
     except Exception as e:
         _log(f"APNs POST failed for token …{token[-6:]}: {type(e).__name__}: {e}")
-        return 0
+        return 0, f"{type(e).__name__}: {e}"
+
+
+# APNs failure reasons that mean "right token, wrong environment" — retry the
+# other host (a sandbox token on the prod host, or vice-versa).
+_ENV_MISMATCH_REASONS = {"BadDeviceToken", "DeviceTokenNotForTopic"}
 
 
 def send_to_user(user_id: str, *, title: str, body: str, category: str, data: dict) -> dict:
     """Deliver a push to all of a user's registered iOS devices. Best-effort:
-    never raises. Prunes tokens APNs reports as gone (410)."""
+    never raises. Prunes 410 tokens; on an env mismatch (BadDeviceToken) retries
+    the other APNs host and remembers the corrected env. Returns per-device
+    ``errors`` (status + reason) so failures are diagnosable."""
     creds = _load_creds()
     if not creds:
         return {"sent": 0, "skipped": "no_creds"}
     payload = _build_payload(title, body, category, data)
     sent = 0
     pruned = 0
+    errors = []
     try:
         devices = _list_devices(user_id)
     except Exception as e:
@@ -191,25 +227,40 @@ def send_to_user(user_id: str, *, title: str, body: str, category: str, data: di
             continue
         # Pick the host from THIS device's env (falls back to creds env).
         host = _apns_host((d or {}).get("env") or creds.get("env") or "prod")
-        try:
-            status = _send_one(token, payload, creds, host)
-        except Exception as e:
-            _log(f"APNs send error: {type(e).__name__}: {e}")
-            continue
+        status, reason = _send_one(token, payload, creds, host)
+
+        # Env mismatch -> retry the other host; if it works, persist the fix.
+        if status != 200 and (status == 400 or reason in _ENV_MISMATCH_REASONS):
+            alt = _other_host(host)
+            s2, r2 = _send_one(token, payload, creds, alt)
+            if s2 == 200:
+                status, reason = 200, ""
+                try:
+                    _update_device_env(token, _env_for_host(alt))
+                except Exception:
+                    pass
+            else:
+                status, reason = (s2 or status), (r2 or reason)
+
         if status == 200:
             sent += 1
         elif status == 410:
-            # Token no longer valid — prune it.
             try:
                 _delete_device(token)
                 pruned += 1
             except Exception:
                 pass
-        elif status == 403:
-            # Provider token rejected (expired/invalid — e.g. key rotated
-            # mid-cache-window). Reset the cache so the next send re-signs
-            # instead of dying silently for the rest of the ~50min TTL.
-            _reset_jwt_cache()
-        # other statuses (400/429/5xx) are logged by _send_one; left in place
-        # so a transient failure can succeed on the next notification.
+            errors.append({"token": f"…{token[-8:]}", "status": 410, "reason": "Unregistered"})
+        else:
+            if status == 403:
+                # Provider token rejected (bad key/team/bundle, or rotated
+                # mid-cache) — reset so the next send re-signs.
+                _reset_jwt_cache()
+            errors.append({"token": f"…{token[-8:]}", "status": status, "reason": reason or "unknown"})
+            _log(f"APNs send failed token …{token[-6:]} status={status} reason={reason}")
+
+    result = {"sent": sent, "pruned": pruned, "devices": len(devices or [])}
+    if errors:
+        result["errors"] = errors
+    return result
     return {"sent": sent, "pruned": pruned, "devices": len(devices or [])}

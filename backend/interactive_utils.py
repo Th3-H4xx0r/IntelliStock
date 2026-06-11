@@ -736,6 +736,14 @@ def action_list_push_devices(conn, user_id, env=None):
     return list(sel.run(conn))
 
 
+def action_set_push_device_env(conn, token, env):
+    """Correct a device's stored APNs env (e.g. after a fallback-host send
+    succeeds), so future sends hit the right host first."""
+    ensure_push_devices_table(conn)
+    r.db(DB_NAME).table("PushDevices").get(str(token)).update({"env": str(env)}).run(conn)
+    return {"token": str(token), "env": str(env)}
+
+
 def action_delete_push_device(conn, token, user_id=None):
     """Remove a device token (logout / APNs 410 prune).
 

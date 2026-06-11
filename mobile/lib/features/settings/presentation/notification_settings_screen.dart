@@ -76,11 +76,25 @@ class NotificationSettingsScreen extends ConsumerWidget {
       final ok = res['ok'] == true;
       if (channel == NotifChannel.push && !ok) {
         final devices = res['devices'] ?? 0;
-        _snack(context, devices == 0
-            ? 'No iOS device registered yet — tap "Enable push on this device".'
-            : 'Push not delivered — check APNs setup.', ok: false);
+        String msg;
+        if (devices == 0) {
+          msg = 'No iOS device registered yet — tap "Enable push on this device".';
+        } else {
+          final errors = res['errors'] as List?;
+          final reason = (errors != null && errors.isNotEmpty)
+              ? (errors.first['reason'] ?? '').toString()
+              : '';
+          msg = reason.isNotEmpty
+              ? 'Push failed: $reason'
+              : 'Push not delivered — check APNs setup.';
+        }
+        _snack(context, msg, ok: false);
       } else {
         _snack(context, ok ? '$label test sent ✓' : '$label test could not be sent', ok: ok);
+      }
+      // The send may have auto-corrected a device's env; refresh the list.
+      if (channel == NotifChannel.push) {
+        ref.read(pushDevicesProvider.notifier).refresh();
       }
     } catch (e) {
       if (context.mounted) _snack(context, '$label test failed: $e', ok: false);

@@ -61,7 +61,7 @@ def test_send_to_user_noop_without_creds(monkeypatch):
     import apns_sender
     monkeypatch.setattr(apns_sender, "_load_creds", lambda: None)
     sent_flag = {"called": False}
-    monkeypatch.setattr(apns_sender, "_send_one", lambda *a, **k: sent_flag.__setitem__("called", True) or 200)
+    monkeypatch.setattr(apns_sender, "_send_one", lambda *a, **k: (sent_flag.__setitem__("called", True), (200, ""))[1])
     res = apns_sender.send_to_user("u1", title="t", body="b", category="order_fill", data={})
     assert res["sent"] == 0
     assert sent_flag["called"] is False
@@ -77,7 +77,7 @@ def test_send_to_user_delivers_and_counts(monkeypatch):
         posted["token"] = token
         posted["host"] = host
         posted["topic"] = creds["bundle_id"]
-        return 200
+        return 200, ""
     monkeypatch.setattr(apns_sender, "_send_one", _fake_send_one)
     res = apns_sender.send_to_user("u1", title="t", body="b", category="order_fill", data={})
     assert res["sent"] == 1
@@ -96,12 +96,53 @@ def test_send_to_user_picks_host_per_device_env(monkeypatch):
         {"device_token": "SBOX_TOK", "env": "sandbox"},
     ])
     hosts = {}
-    monkeypatch.setattr(apns_sender, "_send_one",
-                        lambda token, payload, creds, host: hosts.__setitem__(token, host) or 200)
+    def _fake(token, payload, creds, host):
+        hosts[token] = host
+        return 200, ""
+    monkeypatch.setattr(apns_sender, "_send_one", _fake)
     res = apns_sender.send_to_user("u1", title="t", body="b", category="order_fill", data={})
     assert res["sent"] == 2
     assert hosts["PROD_TOK"] == "api.push.apple.com"
     assert hosts["SBOX_TOK"] == "api.sandbox.push.apple.com"
+
+
+def test_send_to_user_retries_other_host_on_bad_token(monkeypatch):
+    """A token registered as 'prod' but actually a sandbox token (the
+    aps-environment=development + release-build mismatch) returns 400
+    BadDeviceToken on the prod host; we retry the sandbox host, succeed, and
+    persist the corrected env."""
+    import apns_sender
+    monkeypatch.setattr(apns_sender, "_load_creds", _creds)
+    monkeypatch.setattr(apns_sender, "_list_devices",
+                        lambda uid: [{"device_token": "TOK", "env": "prod"}])
+    seen = []
+    def _fake(token, payload, creds, host):
+        seen.append(host)
+        if host == "api.push.apple.com":
+            return 400, "BadDeviceToken"
+        return 200, ""
+    monkeypatch.setattr(apns_sender, "_send_one", _fake)
+    corrected = {}
+    monkeypatch.setattr(apns_sender, "_update_device_env",
+                        lambda tok, env: corrected.update(token=tok, env=env))
+    res = apns_sender.send_to_user("u1", title="t", body="b", category="order_fill", data={})
+    assert res["sent"] == 1
+    assert seen == ["api.push.apple.com", "api.sandbox.push.apple.com"]
+    assert corrected == {"token": "TOK", "env": "sandbox"}
+    assert "errors" not in res
+
+
+def test_send_to_user_surfaces_reason_when_both_hosts_fail(monkeypatch):
+    import apns_sender
+    monkeypatch.setattr(apns_sender, "_load_creds", _creds)
+    monkeypatch.setattr(apns_sender, "_list_devices",
+                        lambda uid: [{"device_token": "TOK", "env": "prod"}])
+    monkeypatch.setattr(apns_sender, "_send_one", lambda *a, **k: (400, "BadDeviceToken"))
+    monkeypatch.setattr(apns_sender, "_update_device_env", lambda tok, env: None)
+    res = apns_sender.send_to_user("u1", title="t", body="b", category="order_fill", data={})
+    assert res["sent"] == 0
+    assert res["errors"][0]["reason"] == "BadDeviceToken"
+    assert res["errors"][0]["status"] == 400
 
 
 def test_send_to_user_prunes_410(monkeypatch):
@@ -109,7 +150,7 @@ def test_send_to_user_prunes_410(monkeypatch):
     monkeypatch.setattr(apns_sender, "_load_creds", _creds)
     monkeypatch.setattr(apns_sender, "_list_devices",
                         lambda uid: [{"device_token": "DEADTOK", "env": "prod"}])
-    monkeypatch.setattr(apns_sender, "_send_one", lambda *a, **k: 410)
+    monkeypatch.setattr(apns_sender, "_send_one", lambda *a, **k: (410, "Unregistered"))
     pruned = []
     monkeypatch.setattr(apns_sender, "_delete_device", lambda tok: pruned.append(tok))
     res = apns_sender.send_to_user("u1", title="t", body="b", category="order_fill", data={})

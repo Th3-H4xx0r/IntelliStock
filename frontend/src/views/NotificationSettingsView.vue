@@ -125,10 +125,15 @@ async function sendTest(channel) {
       testMsg.value = `${name} test sent ✓`
     } else {
       testOk.value = false
-      testMsg.value = channel === 'push' && (data.devices ?? 0) === 0
-        ? 'No iOS device registered for push yet.'
-        : `${name} test could not be delivered.`
+      if (channel === 'push' && (data.devices ?? 0) === 0) {
+        testMsg.value = 'No iOS device registered for push yet.'
+      } else if (channel === 'push' && data.errors && data.errors.length) {
+        testMsg.value = `Push failed: ${data.errors[0].reason} (status ${data.errors[0].status})`
+      } else {
+        testMsg.value = `${name} test could not be delivered.`
+      }
     }
+    if (channel === 'push') fetchDevices()  // env may have been auto-corrected
   } catch (e) {
     testOk.value = false
     testMsg.value = `Test failed: ${e.message}`
