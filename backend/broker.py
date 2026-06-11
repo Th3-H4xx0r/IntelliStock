@@ -4267,6 +4267,17 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     except Exception:
         portfolio_history = []
 
+    # 2026-06-11 fix: the snapshot list only grows on live (non-IDLE) ticks, so
+    # it freezes at RTH close while Alpaca equity keeps moving overnight (24/5).
+    # Append the fresh account equity as the latest served point so the chart
+    # never goes stale. Ephemeral — recomputed from fresh equity each 3s tick.
+    try:
+        from live_state import append_current_equity_point as _append_eq
+        _now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        portfolio_history = _append_eq(portfolio_history, equity, _now_iso, _MAX_PH)
+    except Exception:
+        pass
+
     total_pnl = equity - initial_value
     total_pnl_pct = ((equity / initial_value) - 1.0) * 100.0 if initial_value > 0 else 0.0
     # Day PnL mirrors Alpaca's "Daily Change" exactly: equity − last_equity

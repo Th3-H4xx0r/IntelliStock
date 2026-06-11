@@ -39,6 +39,38 @@ VALID_COMMAND_TYPES = frozenset({"halt", "close_position", "submit_order"})
 TERMINAL_COMMAND_STATUSES = frozenset({"completed", "failed"})
 
 
+def append_current_equity_point(portfolio_history, equity, now_iso, max_ph=MAX_PORTFOLIO_HISTORY):
+    """Append the current live equity as the latest equity-curve point.
+
+    The in-memory ``_portfolio_snapshots`` list only grows on live (non-IDLE)
+    ticks, so it freezes at RTH close while Alpaca equity keeps moving overnight
+    (24/5). Appending the fresh account equity here keeps the served curve
+    current at any hour. Ephemeral — apply to the SERVED history each snapshot;
+    do not persist (the next 3s tick recomputes it from fresh equity).
+
+    Skips when ``equity`` is non-positive or the series already ends at that
+    value (avoids a duplicate point). Returns a NEW list, truncated to max_ph.
+    """
+    try:
+        eq = float(equity)
+    except (TypeError, ValueError):
+        return portfolio_history
+    if eq <= 0:
+        return portfolio_history
+    out = list(portfolio_history or [])
+    last_val = None
+    if out:
+        try:
+            last_val = float(out[-1].get("value"))
+        except (TypeError, ValueError, AttributeError):
+            last_val = None
+    if last_val is None or abs(last_val - eq) > 1e-6:
+        out.append({"ts": now_iso, "value": eq})
+    if len(out) > max_ph:
+        out = out[-max_ph:]
+    return out
+
+
 # ── Table bootstrap ─────────────────────────────────────────────────────────
 
 def ensure_tables(r, conn) -> None:

@@ -7719,8 +7719,13 @@ def _fetch_alpaca_portfolio_history(key, secret, base_url, range_str):
         "ALL": {"period": "all", "timeframe": "1W"},
     }
     params = dict(range_map.get(range_str, range_map["1M"]))
-    params["intraday_reporting"] = "market_hours"
-    params["extended_hours"] = "false"
+    # 2026-06-11 fix: was "market_hours"/extended_hours=false, so Alpaca returned
+    # ONLY 9:30-16:00 ET points — the portfolio value (and the iOS widget that
+    # reads current_value = values[-1]) froze at RTH close even though Alpaca
+    # marks equity 24/5. "continuous" includes the pre/post-market + overnight
+    # session so the series + current_value stay live at any hour.
+    params["intraday_reporting"] = "continuous"
+    params["extended_hours"] = "true"
 
     try:
         resp = _req.get(
