@@ -7,7 +7,6 @@ import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/status_pill.dart';
-import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/confirm_dialog.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
@@ -347,224 +346,267 @@ class _BacktestCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final pnlC = pnlColor(bt.pnl);
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: GlassCard(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ── Top row: ID + status ────────────────────────────────────────
-            Row(
+        padding: EdgeInsets.zero,
+        // Tap anywhere on the card to open it (replaces the bulky View button).
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onView,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Text(
-                    bt.id,
-                    style: AppTextStyles.mono(12,
-                        color: AppColors.textMuted),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                StatusPill(
-                  label: _status.toUpperCase(),
-                  color: StatusPill.colorForStatus(_status),
-                  pulsing: _isActive,
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-
-            // ── Instance link ───────────────────────────────────────────────
-            if (bt.instanceId != null)
-              GestureDetector(
-                onTap: onInstanceTap,
-                child: Text(
-                  bt.instanceId!,
-                  style: AppTextStyles.meta.copyWith(
-                    color: AppColors.primary,
-                    decoration: TextDecoration.underline,
-                    decorationColor: AppColors.primary,
-                  ),
-                ),
-              ),
-
-            // ── Stock chips ─────────────────────────────────────────────────
-            if (bt.stocks.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: [
-                  ...bt.stocks.take(4).map((s) => Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: AppColors.surface,
-                          borderRadius: BorderRadius.circular(4),
-                          border: Border.all(color: AppColors.border),
-                        ),
-                        child: Text(
-                          s,
-                          style: AppTextStyles.mono(11,
-                              color: AppColors.textMd),
-                        ),
-                      )),
-                  if (bt.stocks.length > 4)
-                    Text(
-                      '+${bt.stocks.length - 4}',
-                      style: AppTextStyles.meta
-                          .copyWith(color: AppColors.textFaint),
-                    ),
-                ],
-              ),
-            ],
-            const SizedBox(height: 8),
-
-            // ── Period ──────────────────────────────────────────────────────
-            Text(
-              '${bt.startDate ?? '?'} → ${bt.endDate ?? '?'}',
-              style: AppTextStyles.meta
-                  .copyWith(color: AppColors.textDim),
-            ),
-
-            // ── Completed at ────────────────────────────────────────────────
-            if (bt.completedAt != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Text(
-                  fmtDateTime(bt.completedAt),
-                  style: AppTextStyles.mono(11,
-                      color: AppColors.textMuted),
-                ),
-              ),
-            const SizedBox(height: 8),
-
-            // ── Progress bar (running) ──────────────────────────────────────
-            if (_isActive && _progress != null) ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value:
-                            (_progress!.toDouble() / 100).clamp(0, 1),
-                        backgroundColor: AppColors.surface,
-                        valueColor: const AlwaysStoppedAnimation(
-                            AppColors.info),
-                        minHeight: 6,
+                // ── Header: instance / id + status ──────────────────────────
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (bt.instanceId != null)
+                            GestureDetector(
+                              onTap: onInstanceTap,
+                              child: Text(
+                                bt.instanceId!,
+                                style: AppTextStyles.bodyHi
+                                    .copyWith(color: AppColors.primary),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            )
+                          else
+                            Text('Backtest',
+                                style: AppTextStyles.bodyHi
+                                    .copyWith(color: AppColors.textHi)),
+                          const SizedBox(height: 2),
+                          Text(
+                            '#${bt.id}',
+                            style: AppTextStyles.mono(11,
+                                color: AppColors.textFaint),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '${_progress!.round()}%',
-                    style: AppTextStyles.mono(10,
-                        color: AppColors.textDim),
+                    const SizedBox(width: 8),
+                    StatusPill(
+                      label: _status.toUpperCase(),
+                      color: StatusPill.colorForStatus(_status),
+                      pulsing: _isActive,
+                    ),
+                  ],
+                ),
+
+                // ── Stock chips ─────────────────────────────────────────────
+                if (bt.stocks.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      ...bt.stocks.take(4).map((s) => Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 7, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppColors.surface,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: AppColors.border),
+                            ),
+                            child: Text(
+                              s,
+                              style: AppTextStyles.mono(11,
+                                  color: AppColors.textMd),
+                            ),
+                          )),
+                      if (bt.stocks.length > 4)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 7, vertical: 3),
+                          child: Text(
+                            '+${bt.stocks.length - 4}',
+                            style: AppTextStyles.meta
+                                .copyWith(color: AppColors.textFaint),
+                          ),
+                        ),
+                    ],
                   ),
                 ],
-              ),
-              const SizedBox(height: 6),
-            ],
 
-            // ── Nexus lookback bar ──────────────────────────────────────────
-            if (_lookback != null) ...[
-              Row(
-                children: [
-                  Icon(symbol('hub'),
-                      color: AppColors.primary, size: 12),
-                  const SizedBox(width: 4),
-                  Text('Lookback',
-                      style: AppTextStyles.nano.copyWith(
+                const SizedBox(height: 14),
+
+                // ── P&L (emphasised, left) + open hint ──────────────────────
+                Row(
+                  children: [
+                    Expanded(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              bt.pnl != null ? fmtPnl(bt.pnl) : '—',
+                              style: AppTextStyles.valueLg.copyWith(color: pnlC),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (bt.pnlPercent != null) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              fmtPct(bt.pnlPercent),
+                              style: AppTextStyles.meta.copyWith(
+                                  color: pnlC, fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: AppColors.fill(AppColors.primary),
+                        borderRadius: BorderRadius.circular(8),
+                        border:
+                            Border.all(color: AppColors.stroke(AppColors.primary)),
+                      ),
+                      child: Icon(symbol('arrow_forward'),
+                          size: 16, color: AppColors.primary),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 10),
+                const Divider(color: AppColors.border, height: 1),
+                const SizedBox(height: 10),
+
+                // ── Meta line: period + elapsed ─────────────────────────────
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${bt.startDate ?? '?'} → ${bt.endDate ?? '?'}',
+                        style: AppTextStyles.meta
+                            .copyWith(color: AppColors.textDim),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(symbol('timer'),
+                        color: AppColors.textFaint, size: 13),
+                    const SizedBox(width: 4),
+                    Text(
+                      fmtElapsed(_elapsed),
+                      style: AppTextStyles.mono(11, color: AppColors.textMuted),
+                    ),
+                  ],
+                ),
+                if (bt.completedAt != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Completed ${fmtDateTime(bt.completedAt)}',
+                    style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+                  ),
+                ],
+
+                // ── Progress bar (running) ──────────────────────────────────
+                if (_isActive && _progress != null) ...[
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            value: (_progress!.toDouble() / 100).clamp(0, 1),
+                            backgroundColor: AppColors.surface,
+                            valueColor:
+                                const AlwaysStoppedAnimation(AppColors.info),
+                            minHeight: 6,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${_progress!.round()}%',
+                        style: AppTextStyles.mono(10, color: AppColors.textDim),
+                      ),
+                    ],
+                  ),
+                ],
+
+                // ── Nexus lookback bar ──────────────────────────────────────
+                if (_lookback != null) ...[
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Icon(symbol('hub'), color: AppColors.primary, size: 12),
+                      const SizedBox(width: 4),
+                      Text('Lookback',
+                          style: AppTextStyles.nano.copyWith(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.w600)),
+                      const Spacer(),
+                      Text(
+                        '${_lookback!.current}/${_lookback!.total}d',
+                        style: AppTextStyles.mono(10, color: AppColors.textDim),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _lookback!.fraction.clamp(0, 1),
+                      backgroundColor: AppColors.surface,
+                      valueColor: AlwaysStoppedAnimation(
+                          AppColors.primary.withValues(alpha: 0.7)),
+                      minHeight: 6,
+                    ),
+                  ),
+                ],
+
+                // ── Lifecycle controls (only when running / paused) ─────────
+                if (_canStop) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      if (_isActive)
+                        _ActionBtn(
+                          icon: symbol('pause_circle'),
                           color: AppColors.primary,
-                          fontWeight: FontWeight.w600)),
-                  const Spacer(),
-                  Text(
-                    '${_lookback!.current}/${_lookback!.total}d',
-                    style: AppTextStyles.mono(10,
-                        color: AppColors.textDim),
+                          tooltip: 'Pause',
+                          onTap: () => onAction('pause'),
+                        ),
+                      if (_isPaused)
+                        _ActionBtn(
+                          icon: symbol('play_circle'),
+                          color: AppColors.info,
+                          tooltip: 'Resume',
+                          onTap: () => onAction('resume'),
+                        ),
+                      if (_canStop)
+                        _ActionBtn(
+                          icon: symbol('stop_circle'),
+                          color: AppColors.danger,
+                          tooltip: 'Stop',
+                          onTap: () => onAction('stop'),
+                        ),
+                    ],
                   ),
                 ],
-              ),
-              const SizedBox(height: 4),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: _lookback!.fraction.clamp(0, 1),
-                  backgroundColor: AppColors.surface,
-                  valueColor: AlwaysStoppedAnimation(
-                      AppColors.primary.withValues(alpha: 0.7)),
-                  minHeight: 6,
-                ),
-              ),
-              const SizedBox(height: 6),
-            ],
-
-            // ── Elapsed + P&L row ───────────────────────────────────────────
-            Row(
-              children: [
-                Icon(symbol('timer'),
-                    color: AppColors.textFaint, size: 14),
-                const SizedBox(width: 4),
-                Text(
-                  fmtElapsed(_elapsed),
-                  style: AppTextStyles.mono(12,
-                      color: AppColors.textMuted),
-                ),
-                const Spacer(),
-                Text(
-                  fmtPnl(bt.pnl),
-                  style: AppTextStyles.mono(13,
-                      color: pnlColor(bt.pnl),
-                      weight: FontWeight.w700),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  bt.pnlPercent != null
-                      ? fmtPct(bt.pnlPercent)
-                      : '—',
-                  style: AppTextStyles.mono(11,
-                      color: pnlColor(bt.pnlPercent)),
-                ),
               ],
             ),
-            const SizedBox(height: 12),
-
-            // ── Action buttons ──────────────────────────────────────────────
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                if (_isActive)
-                  _ActionBtn(
-                    icon: symbol('pause_circle'),
-                    color: AppColors.primary,
-                    tooltip: 'Pause',
-                    onTap: () => onAction('pause'),
-                  ),
-                if (_isPaused)
-                  _ActionBtn(
-                    icon: symbol('play_circle'),
-                    color: AppColors.info,
-                    tooltip: 'Resume',
-                    onTap: () => onAction('resume'),
-                  ),
-                if (_canStop)
-                  _ActionBtn(
-                    icon: symbol('stop_circle'),
-                    color: AppColors.danger,
-                    tooltip: 'Stop',
-                    onTap: () => onAction('stop'),
-                  ),
-                const SizedBox(width: 4),
-                AppButton.primary(
-                  label: 'View',
-                  icon: symbol('open_in_new'),
-                  onPressed: onView,
-                ),
-              ],
-            ),
-          ],
+          ),
         ),
       ),
     );

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
+import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
@@ -894,30 +895,43 @@ class _LlmCostCard extends StatelessWidget {
               ),
             )
           else ...[
-            // Headline totals
+            // Headline totals — 2x2 grid so labels/values aren't cramped.
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Row(
+              child: Column(
                 children: [
-                  Expanded(
-                      child: _CostTile(
-                          label: 'Total cost',
-                          value: fmtUsdCost(llmCost!.totalCostUsd))),
-                  Expanded(
-                      child: _CostTile(
-                          label: 'Calls',
-                          value: '${llmCost!.totalCalls ?? 0}',
-                          sub:
-                              '${llmCost!.okCalls ?? 0} ok · ${llmCost!.failedCalls ?? 0} failed')),
-                  Expanded(
-                      child: _CostTile(
-                          label: 'Input tokens',
-                          value: fmtTokens(llmCost!.totalInputTokens))),
-                  Expanded(
-                      child: _CostTile(
-                          label: 'Output tokens',
-                          value: fmtTokens(
-                              llmCost!.totalOutputTokens))),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                          child: _CostTile(
+                              label: 'Total cost',
+                              value: fmtUsdCost(llmCost!.totalCostUsd))),
+                      const SizedBox(width: 12),
+                      Expanded(
+                          child: _CostTile(
+                              label: 'Calls',
+                              value: '${llmCost!.totalCalls ?? 0}',
+                              sub:
+                                  '${llmCost!.okCalls ?? 0} ok · ${llmCost!.failedCalls ?? 0} failed')),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                          child: _CostTile(
+                              label: 'Input tokens',
+                              value: fmtTokens(llmCost!.totalInputTokens))),
+                      const SizedBox(width: 12),
+                      Expanded(
+                          child: _CostTile(
+                              label: 'Output tokens',
+                              value:
+                                  fmtTokens(llmCost!.totalOutputTokens))),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -1402,109 +1416,87 @@ class _PortfolioChart extends StatefulWidget {
 }
 
 class _PortfolioChartState extends State<_PortfolioChart> {
-  double? _hoveredValue;
-  DateTime? _hoveredDate;
+  // Scrub index drives only the header value (via this notifier), so scrubbing
+  // never rebuilds the chart.
+  final ValueNotifier<int?> _scrubIdx = ValueNotifier(null);
+
+  @override
+  void dispose() {
+    _scrubIdx.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final displayValue =
-        _hoveredValue ?? widget.history.last.value.toDouble();
-    final startVal = widget.startValue?.toDouble() ?? 0;
-    final pnl = displayValue - startVal;
+    final history = widget.history;
+    final timestamps = [for (final p in history) p.timestamp];
+    final values = [for (final p in history) p.value.toDouble()];
+    final startVal = widget.startValue?.toDouble() ??
+        (values.isNotEmpty ? values.first : 0.0);
+    final isUp = values.isNotEmpty && values.last >= startVal;
+    final lineColor = isUp ? AppColors.success : AppColors.danger;
 
     return GlassCard(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Portfolio Value Over Time',
-              style: AppTextStyles.eyebrow),
+          Text('Portfolio Value Over Time', style: AppTextStyles.eyebrow),
           const SizedBox(height: 4),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                fmtMoney(displayValue),
-                style: AppTextStyles.valueXl
-                    .copyWith(color: AppColors.textHi),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                fmtPnl(pnl),
-                style: AppTextStyles.value
-                    .copyWith(color: pnlColor(pnl)),
-              ),
-              const SizedBox(width: 4),
-              Text('vs start',
-                  style: AppTextStyles.meta
-                      .copyWith(color: AppColors.textDim)),
-            ],
-          ),
-          if (_hoveredDate != null)
-            Text(
-              fmtDateTime(_hoveredDate),
-              style: AppTextStyles.meta
-                  .copyWith(color: AppColors.textDim),
-            ),
-          const SizedBox(height: 12),
-          SfCartesianChart(
-            plotAreaBorderWidth: 0,
-            backgroundColor: Colors.transparent,
-            primaryXAxis: DateTimeAxis(
-              majorGridLines: const MajorGridLines(
-                  color: AppColors.chartGrid, width: 1),
-              axisLine: const AxisLine(width: 0),
-              labelStyle: const TextStyle(
-                  color: AppColors.chartAxis, fontSize: 10),
-            ),
-            primaryYAxis: NumericAxis(
-              isVisible: false,
-              majorGridLines: const MajorGridLines(width: 0),
-              axisLine: const AxisLine(width: 0),
-            ),
-            tooltipBehavior: TooltipBehavior(enable: false),
-            trackballBehavior: TrackballBehavior(
-              enable: true,
-              activationMode: ActivationMode.singleTap,
-              tooltipSettings: const InteractiveTooltip(enable: false),
-            ),
-            onTrackballPositionChanging: (args) {
-              final pt = args.chartPointInfo;
-              if (pt.chartPoint != null) {
-                setState(() {
-                  _hoveredValue =
-                      (pt.chartPoint!.y)?.toDouble();
-                  _hoveredDate = pt.chartPoint!.x as DateTime?;
-                });
-              }
-            },
-            annotations: widget.startValue != null
-                ? <CartesianChartAnnotation>[
-                    CartesianChartAnnotation(
-                      widget: Container(
-                        width: double.infinity,
-                        height: 1,
-                        color:
-                            AppColors.textFaint.withValues(alpha: 0.5),
+          ValueListenableBuilder<int?>(
+            valueListenable: _scrubIdx,
+            builder: (_, idx, _) {
+              final i = (idx != null && idx >= 0 && idx < values.length)
+                  ? idx
+                  : null;
+              final displayValue = i != null
+                  ? values[i]
+                  : (values.isNotEmpty ? values.last : 0.0);
+              final pnl = displayValue - startVal;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text(
+                        fmtMoney(displayValue),
+                        style: AppTextStyles.valueXl
+                            .copyWith(color: AppColors.textHi),
                       ),
-                      coordinateUnit: CoordinateUnit.point,
-                      x: widget.history.first.timestamp,
-                      y: widget.startValue!.toDouble(),
-                    ),
-                  ]
-                : null,
-            series: <CartesianSeries>[
-              SplineAreaSeries<PortfolioValuePoint, DateTime>(
-                dataSource: widget.history,
-                splineType: SplineType.monotonic,
-                xValueMapper: (d, _) => d.timestamp,
-                yValueMapper: (d, _) => d.value,
-                color: AppColors.chartLine.withValues(alpha: 0.3),
-                borderColor: AppColors.chartLine,
-                borderWidth: 2.5,
-              ),
-            ],
+                      const SizedBox(width: 8),
+                      Text(
+                        fmtPnl(pnl),
+                        style: AppTextStyles.value
+                            .copyWith(color: pnlColor(pnl)),
+                      ),
+                      const SizedBox(width: 4),
+                      Text('vs start',
+                          style: AppTextStyles.meta
+                              .copyWith(color: AppColors.textDim)),
+                    ],
+                  ),
+                  SizedBox(
+                    height: 16,
+                    child: i != null
+                        ? Text(fmtDateTime(timestamps[i]),
+                            style: AppTextStyles.meta
+                                .copyWith(color: AppColors.textDim))
+                        : null,
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 8),
+          ScrubbableAreaChart(
+            timestamps: timestamps,
+            values: values,
+            lineColor: lineColor,
+            height: 240,
+            baseline: widget.startValue?.toDouble(),
+            onScrub: (i) => _scrubIdx.value = i,
           ),
         ],
       ),
@@ -1713,60 +1705,36 @@ class _StockChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
+    if (prices.isEmpty) return const SizedBox(height: 220);
+    final timestamps = [for (final p in prices) p.timestamp];
+    final values = [for (final p in prices) p.value.toDouble()];
+
+    return ScrubbableAreaChart(
+      timestamps: timestamps,
+      values: values,
+      // Distinct line colour so it doesn't read as a buy/sell marker.
+      lineColor: AppColors.chartLineAlt,
       height: 220,
-      child: SfCartesianChart(
-        plotAreaBorderWidth: 0,
-        backgroundColor: Colors.transparent,
-        primaryXAxis: DateTimeAxis(
-          majorGridLines: const MajorGridLines(
-              color: AppColors.chartGrid, width: 1),
-          axisLine: const AxisLine(width: 0),
-          labelStyle: const TextStyle(
-              color: AppColors.chartAxis, fontSize: 10),
+      markerSeries: () => <CartesianSeries>[
+        ScatterSeries<BacktestTrade, DateTime>(
+          name: 'Buy',
+          dataSource: buys,
+          xValueMapper: (t, _) => t.timestamp ?? DateTime.now(),
+          yValueMapper: (t, _) => t.price?.toDouble() ?? 0,
+          color: AppColors.success,
+          markerSettings:
+              const MarkerSettings(isVisible: true, height: 8, width: 8),
         ),
-        primaryYAxis: NumericAxis(
-          isVisible: false,
-          majorGridLines: const MajorGridLines(width: 0),
-          axisLine: const AxisLine(width: 0),
+        ScatterSeries<BacktestTrade, DateTime>(
+          name: 'Sell',
+          dataSource: sells,
+          xValueMapper: (t, _) => t.timestamp ?? DateTime.now(),
+          yValueMapper: (t, _) => t.price?.toDouble() ?? 0,
+          color: AppColors.danger,
+          markerSettings:
+              const MarkerSettings(isVisible: true, height: 8, width: 8),
         ),
-        tooltipBehavior: TooltipBehavior(
-          enable: true,
-          color: AppColors.panel,
-          textStyle:
-              const TextStyle(color: AppColors.textMd, fontSize: 10),
-        ),
-        series: <CartesianSeries>[
-          SplineAreaSeries<PortfolioValuePoint, DateTime>(
-            name: sym,
-            dataSource: prices,
-            splineType: SplineType.monotonic,
-            xValueMapper: (d, _) => d.timestamp,
-            yValueMapper: (d, _) => d.value,
-            color: AppColors.chartLineAlt.withValues(alpha: 0.18),
-            borderColor: AppColors.chartLineAlt,
-            borderWidth: 2,
-          ),
-          ScatterSeries<BacktestTrade, DateTime>(
-            name: 'Buy',
-            dataSource: buys,
-            xValueMapper: (t, _) => t.timestamp ?? DateTime.now(),
-            yValueMapper: (t, _) => t.price?.toDouble() ?? 0,
-            color: AppColors.success,
-            markerSettings:
-                const MarkerSettings(isVisible: true, height: 8, width: 8),
-          ),
-          ScatterSeries<BacktestTrade, DateTime>(
-            name: 'Sell',
-            dataSource: sells,
-            xValueMapper: (t, _) => t.timestamp ?? DateTime.now(),
-            yValueMapper: (t, _) => t.price?.toDouble() ?? 0,
-            color: AppColors.danger,
-            markerSettings:
-                const MarkerSettings(isVisible: true, height: 8, width: 8),
-          ),
-        ],
-      ),
+      ],
     );
   }
 }

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:syncfusion_flutter_charts/charts.dart';
+import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
@@ -368,40 +368,15 @@ class _PortfolioPanel extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          SizedBox(
-            height: 150,
-            child: SfCartesianChart(
-              plotAreaBorderWidth: 0,
-              backgroundColor: Colors.transparent,
-              margin: EdgeInsets.zero,
-              primaryXAxis: DateTimeAxis(
-                minimum: range.min,
-                maximum: range.max,
-                majorGridLines: const MajorGridLines(
-                    color: AppColors.chartGrid, width: 1),
-                axisLine: const AxisLine(width: 0),
-                labelStyle: const TextStyle(
-                    color: AppColors.chartAxis, fontSize: 9),
-              ),
-              primaryYAxis: NumericAxis(
-                isVisible: false,
-                majorGridLines: const MajorGridLines(width: 0),
-                axisLine: const AxisLine(width: 0),
-              ),
-              tooltipBehavior: TooltipBehavior(enable: false),
-              series: <CartesianSeries>[
-                SplineAreaSeries<({DateTime time, double value}), DateTime>(
-                  dataSource: points,
-                  splineType: SplineType.monotonic,
-                  xValueMapper: (d, _) => d.time,
-                  yValueMapper: (d, _) => d.value,
-                  color: AppColors.chartLine.withValues(alpha: 0.25),
-                  borderColor: AppColors.chartLine,
-                  borderWidth: 2,
-                  animationDuration: 500,
-                ),
-              ],
-            ),
+          ScrubbableAreaChart(
+            timestamps: [for (final p in points) p.time],
+            values: [for (final p in points) p.value],
+            lineColor: AppColors.chartLine,
+            height: 170,
+            baseline: state.metadata.initialCash?.toDouble(),
+            // Live playback updates every tick — don't replay the entry
+            // animation on each frame.
+            animate: false,
           ),
         ],
       ),
