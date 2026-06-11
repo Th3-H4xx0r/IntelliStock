@@ -35,25 +35,11 @@ private func money(_ v: Double) -> String {
     return f.string(from: NSNumber(value: v)) ?? String(format: "$%.2f", v)
 }
 
-// Regular US market session, in ET.
-private let kSessionOpenMin = 9 * 60 + 30   // 09:30
-private let kSessionLenMin = 390.0          // 6.5h → 16:00
-
-/// Minutes since the 09:30 ET open, clamped to the 0…390 session window, so the
-/// curve can be drawn relative to market hours (line stops at "now").
-private func sessionMinute(_ epoch: Double) -> Double {
-    var cal = Calendar(identifier: .gregorian)
-    cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
-    let c = cal.dateComponents([.hour, .minute], from: Date(timeIntervalSince1970: epoch))
-    let mins = Double((c.hour ?? 0) * 60 + (c.minute ?? 0) - kSessionOpenMin)
-    return min(max(mins, 0), kSessionLenMin)
-}
-
 // MARK: - Data
 
 struct ChartPt: Identifiable {
     let id = UUID()
-    let minute: Double
+    let t: Double      // epoch seconds (x-axis is mapped over the data's own range)
     let value: Double
 }
 
@@ -82,7 +68,7 @@ private func readAccounts() -> [AccountData] {
     else { return [] }
     return arr.map { j in
         let pts = (j["intradayPoints"] as? [[String: Any]] ?? [])
-            .map { ChartPt(minute: sessionMinute(dbl($0["t"])), value: dbl($0["v"])) }
+            .map { ChartPt(t: dbl($0["t"]), value: dbl($0["v"])) }
         let pos = (j["positions"] as? [[String: Any]] ?? []).map {
             PositionData(symbol: $0["symbol"] as? String ?? "",
                          pnlPct: dbl($0["unrealizedPnlPct"]),
@@ -376,38 +362,42 @@ struct PortfolioWidgetView: View {
     //    Dashed open / previous-close baseline runs full width. ──
     @ViewBuilder
     private func curve(height: CGFloat) -> some View {
-        let pts = entry.points.sorted { $0.minute < $1.minute }
+        let pts = entry.points.sorted { $0.t < $1.t }
         if pts.count >= 2 {
             let open = entry.value - entry.pnlAbs
             let vals = pts.map(\.value) + [open]
             let lo = vals.min() ?? 0
             let hi = vals.max() ?? 1
             let range = max(hi - lo, 0.0001)
+            // X-axis spans the data's own time range (works for RTH or the 24/5
+            // continuous/overnight session), so the line fills the tile width.
+            let tMin = pts.first!.t
+            let tSpan = max(pts.last!.t - tMin, 1)
             Canvas { ctx, size in
                 let w = size.width, h = size.height
                 let padTop = h * 0.16, padBot = h * 0.06
                 let plotH = max(h - padTop - padBot, 1)
-                func px(_ m: Double) -> CGFloat { CGFloat(m / kSessionLenMin) * w }
+                func px(_ t: Double) -> CGFloat { CGFloat((t - tMin) / tSpan) * w }
                 func py(_ v: Double) -> CGFloat {
                     padTop + (1 - CGFloat((v - lo) / range)) * plotH
                 }
 
                 // Area under the line → bottom edge, faded to transparent.
                 var area = Path()
-                area.move(to: CGPoint(x: px(pts[0].minute), y: h))
-                for p in pts { area.addLine(to: CGPoint(x: px(p.minute), y: py(p.value))) }
-                area.addLine(to: CGPoint(x: px(pts.last!.minute), y: h))
+                area.move(to: CGPoint(x: px(pts[0].t), y: h))
+                for p in pts { area.addLine(to: CGPoint(x: px(p.t), y: py(p.value))) }
+                area.addLine(to: CGPoint(x: px(pts.last!.t), y: h))
                 area.closeSubpath()
                 ctx.fill(area, with: .linearGradient(
                     Gradient(colors: [trend.opacity(0.45), trend.opacity(0.0)]),
                     startPoint: CGPoint(x: 0, y: padTop),
                     endPoint: CGPoint(x: 0, y: h)))
 
-                // Line (stops at the latest point).
+                // Line.
                 var line = Path()
-                line.move(to: CGPoint(x: px(pts[0].minute), y: py(pts[0].value)))
+                line.move(to: CGPoint(x: px(pts[0].t), y: py(pts[0].value)))
                 for p in pts.dropFirst() {
-                    line.addLine(to: CGPoint(x: px(p.minute), y: py(p.value)))
+                    line.addLine(to: CGPoint(x: px(p.t), y: py(p.value)))
                 }
                 ctx.stroke(line, with: .color(trend),
                            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))

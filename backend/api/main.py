@@ -2859,25 +2859,47 @@ def _widget_iso_to_epoch(ts):
         return None
 
 
-def _widget_account_from_live_state(inst, ls):
-    pts = []
-    for p in (ls.get("portfolio_history") or []):
-        e = _widget_iso_to_epoch((p or {}).get("ts"))
-        if e is not None:
-            pts.append({"t": e, "v": float((p or {}).get("value") or 0.0)})
-    positions = []
+def _widget_brokerage_id(inst):
+    return (((inst or {}).get("brokerage", {}) or {}).get("brokerage_id")
+            or (inst or {}).get("brokerage_id")
+            or ((inst or {}).get("brokerage", {}) or {}).get("id"))
+
+
+def _widget_positions_from_live_state(ls):
+    out = []
+    if not isinstance(ls, dict):
+        return out
     for p in (ls.get("positions") or []):
-        positions.append({
+        out.append({
             "symbol": (p or {}).get("symbol") or "",
             "unrealizedPnlPct": float((p or {}).get("unrealized_pnl_pct") or 0.0),
             "marketValue": float((p or {}).get("market_value") or 0.0),
         })
+    return out
+
+
+def _widget_account(inst, hist, positions):
+    """Assemble one widget account from the (dense, persistent) Alpaca portfolio
+    history + live-state positions. The history is the chart source so the curve
+    survives broker restarts and includes the overnight session."""
+    ts = (hist or {}).get("timestamps") or []
+    vals = (hist or {}).get("values") or []
+    n = min(len(ts), len(vals))
+    pts = []
+    for i in range(n):
+        try:
+            pts.append({"t": int(ts[i]) // 1000, "v": float(vals[i])})  # ms -> epoch s
+        except Exception:
+            continue
+    current = (hist or {}).get("current_value")
+    if current is None:
+        current = vals[-1] if vals else 0.0
     return {
         "id": str((inst or {}).get("id") or ""),
         "label": (inst or {}).get("name") or str((inst or {}).get("id") or ""),
-        "accountValue": float(ls.get("equity") or 0.0),
-        "dayPnlAbs": float(ls.get("day_pnl") or 0.0),
-        "dayPnlPct": float(ls.get("day_pnl_pct") or 0.0),
+        "accountValue": float(current or 0.0),
+        "dayPnlAbs": float((hist or {}).get("change_abs") or 0.0),
+        "dayPnlPct": float((hist or {}).get("change_pct") or 0.0),
         "intradayPoints": pts,
         "positions": positions,
     }
@@ -2885,10 +2907,11 @@ def _widget_account_from_live_state(inst, ls):
 
 @app.get("/widget/accounts", response_class=JSONResponse)
 def api_widget_accounts(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    """Full widget payload (live equity + day P&L + intraday curve + positions)
-    for each running instance, in ONE authenticated call — so the iOS widget can
-    fetch fresh data on its own timeline reloads instead of going stale whenever
-    the app isn't open."""
+    """Full widget payload (value + day P&L + intraday curve + positions) for
+    each instance, in ONE authenticated call — so the iOS widget can fetch fresh
+    data on its own timeline reloads instead of going stale when the app's shut.
+    Curve/value come from the broker's portfolio history (dense + persistent +
+    continuous overnight); positions from live-state."""
     import time as _time
     out = []
     try:
@@ -2900,14 +2923,28 @@ def api_widget_accounts(conn=Depends(conn_dependency), current_user: dict = Depe
         iid = str((inst or {}).get("id") or "")
         if not iid:
             continue
+        # Resolve the brokerage (need the full instance shape for the linkage).
+        full = inst
         try:
-            ls = action_get_live_state(conn, iid)
+            full = action_get_instance(conn, iid) or inst
         except Exception:
-            ls = None
-        if not isinstance(ls, dict) or not ls:
+            pass
+        bid = _widget_brokerage_id(full)
+        hist = None
+        if bid:
+            try:
+                hist = action_get_portfolio_history(conn, bid, "1D")
+            except Exception:
+                hist = None
+        if not isinstance(hist, dict):
             continue
+        positions = []
         try:
-            acct = _widget_account_from_live_state(inst, ls)
+            positions = _widget_positions_from_live_state(action_get_live_state(conn, iid))
+        except Exception:
+            positions = []
+        try:
+            acct = _widget_account(inst, hist, positions)
             if acct["accountValue"] > 0 or acct["intradayPoints"]:
                 out.append(acct)
         except Exception:
