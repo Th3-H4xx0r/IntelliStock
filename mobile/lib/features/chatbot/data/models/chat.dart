@@ -169,13 +169,21 @@ class Conversation {
             .toList()
         : const [];
 
+    // The backend stores this under `settings.auto_confirm_safe_tools`; some
+    // responses may also carry it at the top level. Check both.
+    final settings = j['settings'];
+    final autoConfirm = j['auto_confirm_safe_tools'] is bool
+        ? j['auto_confirm_safe_tools'] as bool
+        : (settings is Map && settings['auto_confirm_safe_tools'] is bool
+            ? settings['auto_confirm_safe_tools'] as bool
+            : false);
+
     return Conversation(
       id: (j['id'] ?? '').toString(),
       title: j['title']?.toString(),
       modelId: j['model_id']?.toString(),
       modelName: j['model_name']?.toString(),
-      autoConfirmSafeTools:
-          j['auto_confirm_safe_tools'] == true,
+      autoConfirmSafeTools: autoConfirm,
       messages: messages,
       messageCount: (j['message_count'] as num?)?.toInt() ?? messages.length,
     );
