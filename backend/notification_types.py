@@ -106,6 +106,15 @@ def default_routing():
             for t in NOTIFICATION_TYPES}
 
 
+def public_types():
+    """Ordered taxonomy metadata for the settings UIs (key/group/label/desc),
+    excluding the hidden ``other`` fallback. Order = display order."""
+    return [
+        {"key": t["key"], "group": t["group"], "label": t["label"], "desc": t["desc"]}
+        for t in NOTIFICATION_TYPES if t["key"] != "other"
+    ]
+
+
 def groups_in_order():
     """Group names in first-appearance order (UI section order), excluding the
     hidden ``Other`` fallback."""

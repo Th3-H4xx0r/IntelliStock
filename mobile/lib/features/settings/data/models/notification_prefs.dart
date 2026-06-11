@@ -21,10 +21,34 @@ class CategoryRoute {
       );
 }
 
+/// Taxonomy metadata for one notification type (from the API `types` array).
+class NotificationType {
+  const NotificationType({
+    required this.key,
+    required this.group,
+    required this.label,
+    required this.desc,
+  });
+  final String key;
+  final String group;
+  final String label;
+  final String desc;
+
+  factory NotificationType.fromJson(Map j) => NotificationType(
+        key: (j['key'] ?? '').toString(),
+        group: (j['group'] ?? 'Other').toString(),
+        label: (j['label'] ?? j['key'] ?? '').toString(),
+        desc: (j['desc'] ?? '').toString(),
+      );
+}
+
 class NotificationPrefs {
-  const NotificationPrefs({required this.categories});
+  const NotificationPrefs({required this.categories, this.types = const []});
 
   final Map<String, CategoryRoute> categories;
+
+  /// Ordered taxonomy (key/group/label/desc) for grouped rendering.
+  final List<NotificationType> types;
 
   factory NotificationPrefs.fromJson(Map j) {
     final raw = j['categories'];
@@ -34,7 +58,14 @@ class NotificationPrefs {
         if (v is Map) cats[k.toString()] = CategoryRoute.fromJson(v);
       });
     }
-    return NotificationPrefs(categories: cats);
+    final rawTypes = j['types'];
+    final types = <NotificationType>[];
+    if (rawTypes is List) {
+      for (final t in rawTypes) {
+        if (t is Map) types.add(NotificationType.fromJson(t));
+      }
+    }
+    return NotificationPrefs(categories: cats, types: types);
   }
 
   Map<String, dynamic> toJson() => {
@@ -43,11 +74,23 @@ class NotificationPrefs {
         },
       };
 
+  /// Group names in first-appearance (display) order.
+  List<String> get groupsInOrder {
+    final seen = <String>[];
+    for (final t in types) {
+      if (!seen.contains(t.group)) seen.add(t.group);
+    }
+    return seen;
+  }
+
+  List<NotificationType> typesInGroup(String group) =>
+      types.where((t) => t.group == group).toList();
+
   /// Return a copy with [category]'s route replaced (immutable update).
   NotificationPrefs withRoute(String category, CategoryRoute route) {
     final next = Map<String, CategoryRoute>.from(categories);
     next[category] = route;
-    return NotificationPrefs(categories: next);
+    return NotificationPrefs(categories: next, types: types);
   }
 
   /// Route for a category, defaulting to Discord-only if absent.

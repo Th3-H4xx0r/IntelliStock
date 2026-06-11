@@ -77,6 +77,26 @@ void main() {
     expect(repo.saveCount, greaterThanOrEqualTo(1));
   });
 
+  testWidgets('renders grouped sections with headers from API types', (tester) async {
+    tester.view.physicalSize = const Size(1200, 4000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const prefs = NotificationPrefs(
+      categories: {'order_fill': CategoryRoute(discord: true, push: false)},
+      types: [
+        NotificationType(key: 'order_fill', group: 'Trading', label: 'Order filled', desc: 'An order filled'),
+        NotificationType(key: 'halt', group: 'Risk & Halts', label: 'Halt', desc: 'Trading halted'),
+      ],
+    );
+    await tester.pumpWidget(_app(_FakeRepo(prefs)));
+    await tester.pumpAndSettle();
+    expect(find.text('TRADING'), findsOneWidget); // group header (uppercased)
+    expect(find.text('RISK & HALTS'), findsOneWidget); // group header
+    expect(find.text('Order filled'), findsOneWidget);
+    expect(find.text('Halt'), findsOneWidget);
+  });
+
   testWidgets('empty devices shows instructions + enable button', (tester) async {
     await tester.pumpWidget(_app(_FakeRepo(_seed())));
     await tester.pumpAndSettle();

@@ -101,6 +101,49 @@ class NotificationSettingsScreen extends ConsumerWidget {
     }
   }
 
+  /// Grouped per-type routing: a header per group, then a card of rows with
+  /// independent Discord + iOS-push switches. Uses the API taxonomy; falls back
+  /// to the built-in categories if the server didn't send `types`.
+  List<Widget> _buildGroupedRouting(BuildContext context, WidgetRef ref, NotificationPrefs prefs) {
+    final types = prefs.types.isNotEmpty
+        ? prefs.types
+        : kNotificationCategories
+            .map((m) => NotificationType(
+                key: m.key, group: 'Notifications', label: m.label, desc: m.description))
+            .toList();
+    final groups = <String>[];
+    for (final t in types) {
+      if (!groups.contains(t.group)) groups.add(t.group);
+    }
+    final widgets = <Widget>[];
+    for (final group in groups) {
+      final groupTypes = types.where((t) => t.group == group).toList();
+      widgets.add(_SectionLabel(label: group));
+      widgets.add(const SizedBox(height: 8));
+      widgets.add(GlassCard(
+        padding: EdgeInsets.zero,
+        child: Column(
+          children: [
+            for (var i = 0; i < groupTypes.length; i++) ...[
+              if (i > 0) const _Divider(),
+              _CategoryRow(
+                label: groupTypes[i].label,
+                description: groupTypes[i].desc,
+                route: prefs.routeFor(groupTypes[i].key),
+                onDiscord: (v) =>
+                    _onToggle(context, ref, groupTypes[i].key, NotifChannel.discord, v),
+                onPush: (v) =>
+                    _onToggle(context, ref, groupTypes[i].key, NotifChannel.push, v),
+              ),
+            ],
+          ],
+        ),
+      ));
+      widgets.add(const SizedBox(height: 24));
+    }
+    return widgets;
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final prefsAsync = ref.watch(notificationPrefsControllerProvider);
@@ -232,26 +275,7 @@ class NotificationSettingsScreen extends ConsumerWidget {
                         ),
                       ),
                       const SizedBox(height: 24),
-                      _SectionLabel(label: 'Per-category routing'),
-                      const SizedBox(height: 8),
-                      GlassCard(
-                        padding: EdgeInsets.zero,
-                        child: Column(
-                          children: [
-                            for (var i = 0; i < kNotificationCategories.length; i++) ...[
-                              if (i > 0) const _Divider(),
-                              _CategoryRow(
-                                meta: kNotificationCategories[i],
-                                route: prefs.routeFor(kNotificationCategories[i].key),
-                                onDiscord: (v) => _onToggle(context, ref,
-                                    kNotificationCategories[i].key, NotifChannel.discord, v),
-                                onPush: (v) => _onToggle(context, ref,
-                                    kNotificationCategories[i].key, NotifChannel.push, v),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
+                      ..._buildGroupedRouting(context, ref, prefs),
                     ]),
                   ),
                 ),
@@ -266,13 +290,15 @@ class NotificationSettingsScreen extends ConsumerWidget {
 
 class _CategoryRow extends StatelessWidget {
   const _CategoryRow({
-    required this.meta,
+    required this.label,
+    required this.description,
     required this.route,
     required this.onDiscord,
     required this.onPush,
   });
 
-  final NotificationCategoryMeta meta;
+  final String label;
+  final String description;
   final CategoryRoute route;
   final ValueChanged<bool> onDiscord;
   final ValueChanged<bool> onPush;
@@ -284,9 +310,9 @@ class _CategoryRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(meta.label, style: AppTextStyles.bodyHi),
+          Text(label, style: AppTextStyles.bodyHi),
           const SizedBox(height: 2),
-          Text(meta.description,
+          Text(description,
               style: AppTextStyles.micro.copyWith(color: AppColors.textDim)),
           const SizedBox(height: 10),
           Row(

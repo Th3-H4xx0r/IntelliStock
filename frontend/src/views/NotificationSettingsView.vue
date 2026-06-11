@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import { authHeaders } from '../utils/auth.js'
 
@@ -7,18 +7,26 @@ const API_BASE = import.meta.env.DEV
   ? '/api'
   : (import.meta.env.VITE_API_URL || '/api')
 
-// The 9 categories (1:1 with the backend), in display order.
-const CATEGORIES = [
-  { key: 'order_submit',   label: 'Order submitted', desc: 'An order was sent to the broker' },
-  { key: 'order_fill',     label: 'Order filled',    desc: 'An order was filled' },
-  { key: 'order_reject',   label: 'Order rejected',  desc: 'The broker rejected an order' },
-  { key: 'order_retry',    label: 'Order retried',   desc: 'An order is being retried after a recoverable reject' },
-  { key: 'strategy_start', label: 'Strategy start',  desc: 'A strategy fired its first run of the session' },
-  { key: 'strategy_error', label: 'Strategy error',  desc: 'An unrecoverable strategy error occurred' },
-  { key: 'halt',           label: 'Halt',            desc: 'Live trading was halted' },
-  { key: 'drawdown_halt',  label: 'Drawdown halt',   desc: 'A drawdown risk-off guard tripped' },
-  { key: 'crash_loop',     label: 'Crash loop',      desc: 'The broker subprocess entered a crash loop' },
+// Fallback taxonomy if the API doesn't send `types` (older backend).
+const FALLBACK_TYPES = [
+  { key: 'order_fill',     group: 'Notifications', label: 'Order filled',    desc: 'An order was filled' },
+  { key: 'order_reject',   group: 'Notifications', label: 'Order rejected',  desc: 'The broker rejected an order' },
+  { key: 'halt',           group: 'Notifications', label: 'Halt',            desc: 'Live trading was halted' },
+  { key: 'crash_loop',     group: 'Notifications', label: 'Crash loop',      desc: 'The broker subprocess entered a crash loop' },
 ]
+
+// The taxonomy (key/group/label/desc) supplied by the backend.
+const types = ref([])
+
+// Ordered group names, then the types in each group.
+const groups = computed(() => {
+  const seen = []
+  for (const t of types.value) if (!seen.includes(t.group)) seen.push(t.group)
+  return seen
+})
+function typesInGroup(g) {
+  return types.value.filter((t) => t.group === g)
+}
 
 const categories = ref({})   // { key: { discord, push } }
 const loading = ref(true)
@@ -78,6 +86,7 @@ async function fetchPrefs() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     categories.value = data.categories || {}
+    types.value = (data.types && data.types.length) ? data.types : FALLBACK_TYPES
   } catch (e) {
     loadError.value = `Failed to load preferences: ${e.message}`
   } finally {
@@ -206,38 +215,43 @@ onMounted(() => { fetchPrefs(); fetchDevices() })
       <div v-if="loading" class="text-slate-400 text-sm py-10 text-center">Loading…</div>
       <div v-else-if="loadError" class="text-red-400 text-sm py-10 text-center">{{ loadError }}</div>
 
-      <!-- Matrix -->
-      <div v-else class="rounded-xl border border-slate-800 overflow-hidden">
-        <div class="hidden sm:flex items-center px-4 py-2 bg-slate-900/60 text-[11px] uppercase tracking-wider text-slate-500">
-          <div class="flex-1">Category</div>
-          <div class="w-24 text-center">Discord</div>
-          <div class="w-24 text-center">iOS push</div>
-        </div>
-        <div v-for="(c, i) in CATEGORIES" :key="c.key"
-          class="flex flex-col sm:flex-row sm:items-center px-4 py-3 gap-3"
-          :class="i > 0 ? 'border-t border-slate-800' : ''">
-          <div class="flex-1">
-            <p class="text-sm font-medium text-slate-200">{{ c.label }}</p>
-            <p class="text-xs text-slate-500">{{ c.desc }}</p>
-          </div>
-          <div class="flex gap-6 sm:gap-0">
-            <div class="w-24 flex sm:justify-center items-center gap-2">
-              <span class="sm:hidden text-xs text-slate-500 w-16">Discord</span>
-              <button type="button" @click="toggle(c.key, 'discord')"
-                class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                :class="routeFor(c.key).discord ? 'bg-primary border-primary' : 'bg-slate-800 border-slate-700'">
-                <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
-                  :class="routeFor(c.key).discord ? 'translate-x-4' : 'translate-x-0.5'"></span>
-              </button>
+      <!-- Grouped routing: a section per category group -->
+      <div v-else>
+        <div v-for="group in groups" :key="group" class="mb-6">
+          <p class="text-primary text-xs font-bold uppercase tracking-widest mb-2">{{ group }}</p>
+          <div class="rounded-xl border border-slate-800 overflow-hidden">
+            <div class="hidden sm:flex items-center px-4 py-2 bg-slate-900/60 text-[11px] uppercase tracking-wider text-slate-500">
+              <div class="flex-1">Type</div>
+              <div class="w-24 text-center">Discord</div>
+              <div class="w-24 text-center">iOS push</div>
             </div>
-            <div class="w-24 flex sm:justify-center items-center gap-2">
-              <span class="sm:hidden text-xs text-slate-500 w-16">iOS push</span>
-              <button type="button" @click="toggle(c.key, 'push')"
-                class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                :class="routeFor(c.key).push ? 'bg-primary border-primary' : 'bg-slate-800 border-slate-700'">
-                <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
-                  :class="routeFor(c.key).push ? 'translate-x-4' : 'translate-x-0.5'"></span>
-              </button>
+            <div v-for="(c, i) in typesInGroup(group)" :key="c.key"
+              class="flex flex-col sm:flex-row sm:items-center px-4 py-3 gap-3"
+              :class="i > 0 ? 'border-t border-slate-800' : ''">
+              <div class="flex-1">
+                <p class="text-sm font-medium text-slate-200">{{ c.label }}</p>
+                <p class="text-xs text-slate-500">{{ c.desc }}</p>
+              </div>
+              <div class="flex gap-6 sm:gap-0">
+                <div class="w-24 flex sm:justify-center items-center gap-2">
+                  <span class="sm:hidden text-xs text-slate-500 w-16">Discord</span>
+                  <button type="button" @click="toggle(c.key, 'discord')"
+                    class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
+                    :class="routeFor(c.key).discord ? 'bg-primary border-primary' : 'bg-slate-800 border-slate-700'">
+                    <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
+                      :class="routeFor(c.key).discord ? 'translate-x-4' : 'translate-x-0.5'"></span>
+                  </button>
+                </div>
+                <div class="w-24 flex sm:justify-center items-center gap-2">
+                  <span class="sm:hidden text-xs text-slate-500 w-16">iOS push</span>
+                  <button type="button" @click="toggle(c.key, 'push')"
+                    class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
+                    :class="routeFor(c.key).push ? 'bg-primary border-primary' : 'bg-slate-800 border-slate-700'">
+                    <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
+                      :class="routeFor(c.key).push ? 'translate-x-4' : 'translate-x-0.5'"></span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

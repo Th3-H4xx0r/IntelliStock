@@ -1696,7 +1696,15 @@ class NotificationPrefsBody(BaseModel):
 
 @app.get("/notification-preferences", response_class=JSONResponse)
 def api_get_notification_prefs(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    return _run(action_get_notification_preferences, conn, current_user["id"])
+    res = _run(action_get_notification_preferences, conn, current_user["id"])
+    # Include the ordered taxonomy metadata so the clients render grouped
+    # sections (headers + labels) without hardcoding the type list.
+    try:
+        from notification_types import public_types
+        res["types"] = public_types()
+    except Exception:
+        res["types"] = []
+    return res
 
 
 @app.put("/notification-preferences", response_class=JSONResponse)
