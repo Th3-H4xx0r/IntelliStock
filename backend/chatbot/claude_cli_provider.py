@@ -353,6 +353,62 @@ _SAFETY_FLAGS = [
 ]
 
 
+# Env vars that derail claude-cli's subscription (OAuth) mode. We run claude
+# strictly on the operator's Claude subscription, so we scrub these from every
+# spawned child env (and from copied settings ``env`` blocks). We inherit the
+# parent env with ``os.environ.copy()`` to keep PATH / HOME / locale, then
+# strip just these:
+#
+#   * ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN — Claude Code's auth precedence
+#     puts these BEFORE the subscription OAuth, so a leftover key hijacks every
+#     call and 401s ("Invalid authentication credentials") even though
+#     ``claude auth status`` reports the subscription as logged in.
+#   * ANTHROPIC_BETAS — a leftover ``context-1m-2025-08-07`` here forces the 1M
+#     context window on EVERY call, which fails with HTTP 429 "Usage credits
+#     required for 1M context" regardless of the model alias the user picks
+#     (reproduced: this env var alone turns a plain ``claude-sonnet-4-6`` call
+#     into the 1M error). 1M is opt-in via the ``...[1m]`` model variant, never
+#     a global env var, so subscription mode always clears it.
+_SUBSCRIPTION_CONFLICTING_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BETAS",
+)
+
+
+def _strip_api_key_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Remove API-key/token env vars so ``claude`` uses the subscription
+    OAuth, not an inherited key. Mutates and returns *env* for chaining:
+    ``child_env = _strip_api_key_env(os.environ.copy())``."""
+    for key in _SUBSCRIPTION_CONFLICTING_ENV:
+        env.pop(key, None)
+    return env
+
+
+# Stripping the *process* env (above) is not enough on its own: Claude Code
+# also loads an ``env`` block out of ``settings.json`` (user/project/managed)
+# and injects it into the session. A deployment with
+# ``{"env": {"ANTHROPIC_API_KEY": "…"}}`` in its claude settings therefore
+# still hijacks every call — the request goes out with that key and the
+# server returns 401, even though ``claude auth status`` reports the
+# subscription as logged in and even right after a fresh re-auth.
+#
+# A ``--settings`` CLI flag deep-merges with the HIGHEST precedence over
+# user/project settings, so blanking the keys here makes claude ignore the
+# settings-file values and fall back to the subscription OAuth. This works
+# regardless of where the key is configured or whether we run in a copied
+# runtime HOME. Verified empirically: the healthy subscription path is
+# unaffected (still succeeds), while a stale settings ``env`` key that
+# otherwise 401s is neutralized. We inject this on every *model* invocation
+# (chat / structured / test-cli); the ``claude auth …`` management commands
+# don't need it. ``--settings`` is in ``_HARD_REJECTED_FLAGS`` so a user's
+# extra_args can never add a second, conflicting one.
+_FORCE_SUBSCRIPTION_SETTINGS = json.dumps(
+    {"env": {k: "" for k in _SUBSCRIPTION_CONFLICTING_ENV}}
+)
+_FORCE_SUBSCRIPTION_ARGS = ["--settings", _FORCE_SUBSCRIPTION_SETTINGS]
+
+
 # Argv that opens up the IntelliStock MCP server (and ONLY the
 # IntelliStock MCP server — CC's built-in Bash / Read / Edit / etc. stay
 # disabled). The session populates ``--mcp-config`` with the per-session
@@ -634,6 +690,70 @@ def _init_claude_state_once() -> None:
             _log(f"failed to restore .claude.json from backup: {e}", "yellow")
 
 
+def _scrub_json_file(path: str, mutate) -> bool:
+    """Load the JSON object at *path*, apply ``mutate(dict)`` in place, and
+    rewrite the file only if it actually changed. Returns True on a write.
+    Silent no-op for missing / unreadable / non-object files."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    before = json.dumps(data, sort_keys=True)
+    try:
+        mutate(data)
+    except Exception:
+        return False
+    if json.dumps(data, sort_keys=True) == before:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return True
+    except Exception:
+        return False
+
+
+def _scrub_settings_dict(d: Dict[str, Any]) -> None:
+    # apiKeyHelper runs a command whose stdout becomes the API key; an env
+    # block can pin ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN. Both override the
+    # subscription OAuth and 401 if stale.
+    d.pop("apiKeyHelper", None)
+    env = d.get("env")
+    if isinstance(env, dict):
+        for k in _SUBSCRIPTION_CONFLICTING_ENV:
+            env.pop(k, None)
+        if not env:
+            d.pop("env", None)
+
+
+def _neutralize_api_key_config(runtime_home: str) -> None:
+    """Strip every non-subscription auth source from a COPIED runtime HOME so
+    claude-cli authenticates with the operator's subscription OAuth, never a
+    stale API key. Claude Code's auth precedence puts an API key (env var,
+    settings ``env`` block, ``apiKeyHelper``, or a stored ``primaryApiKey``
+    in ``.claude.json``) BEFORE the subscription, so any one of these — left
+    over from an earlier API-key setup — silently 401s every claude-cli call
+    even though ``claude auth status`` reports the subscription as logged in.
+
+    We scrub the per-call COPY only; the operator's real ``~/.claude`` files
+    are never touched. Combined with ``_strip_api_key_env`` (process env) and
+    ``_FORCE_SUBSCRIPTION_ARGS`` (the ``--settings`` env override), this
+    covers all four sources.
+    """
+    _scrub_json_file(
+        os.path.join(runtime_home, ".claude.json"),
+        lambda d: d.pop("primaryApiKey", None),
+    )
+    sdir = os.path.join(runtime_home, ".claude")
+    for name in ("settings.json", "settings.local.json"):
+        _scrub_json_file(os.path.join(sdir, name), _scrub_settings_dict)
+
+
 def _get_structured_runtime_home() -> str:
     """Process-wide shared runtime HOME for the spawn-per-call structured
     path. Created once on first use, reused by every subsequent call.
@@ -723,6 +843,11 @@ def _prepare_runtime_home(sess: "_Session") -> str:
         # naturally rather than restoring a stale backup per call.
         if _CLAUDE_JSON_SOURCE:
             shutil.copy2(_CLAUDE_JSON_SOURCE, os.path.join(runtime_dir, ".claude.json"))
+        # Scrub any non-subscription auth source from the COPY (a stored
+        # primaryApiKey / apiKeyHelper / env API key would otherwise override
+        # the subscription OAuth and 401 every call). Done before the chown
+        # walk so the rewritten files get the runtime-user ownership too.
+        _neutralize_api_key_config(runtime_dir)
         # Recursively chown to the runtime user so the dropped
         # subprocess can read everything. mode is left as-is from the
         # source.
@@ -964,6 +1089,7 @@ def _build_chat_argv(
         "--output-format", "stream-json",
         "--model", model,
         "--system-prompt", system_prompt,
+        *_FORCE_SUBSCRIPTION_ARGS,
         *safety,
         *effective_extra,
     ]
@@ -1005,6 +1131,7 @@ def _build_structured_argv(
         "--model", model,
         "--system-prompt", augmented_system_prompt,
         "--json-schema", json_schema,
+        *_FORCE_SUBSCRIPTION_ARGS,
         *_SAFETY_FLAGS,
         *effective_extra,
     ]
@@ -1520,7 +1647,7 @@ class ClaudeCliSessionManager:
         # Build the env for the child. We override HOME so CC reads the
         # chowned copy of ~/.claude that the runtime user can access, and
         # we keep PATH so claude / node / python still resolve.
-        child_env = os.environ.copy()
+        child_env = _strip_api_key_env(os.environ.copy())
         if sess.runtime_home:
             child_env["HOME"] = sess.runtime_home
         # Diagnostic: log the actual argv head + runtime config so it's
@@ -2266,7 +2393,7 @@ def call_claude_cli_structured(
     _init_claude_state_once()
     runtime_home = _get_structured_runtime_home()
     argv = _wrap_argv_for_runtime_user(argv)
-    child_env = os.environ.copy()
+    child_env = _strip_api_key_env(os.environ.copy())
     if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
         child_env["HOME"] = runtime_home
 
@@ -2821,10 +2948,11 @@ def test_claude_cli(
         resolved_cli, "-p",
         "--output-format", "json",
         "--model", model,
+        *_FORCE_SUBSCRIPTION_ARGS,
         *_SAFETY_FLAGS,
     ]
     argv = _wrap_argv_for_runtime_user(argv)
-    child_env = os.environ.copy()
+    child_env = _strip_api_key_env(os.environ.copy())
     if runtime_home and runtime_home != (os.environ.get("HOME") or "/root"):
         child_env["HOME"] = runtime_home
     try:
@@ -2872,12 +3000,32 @@ def test_claude_cli(
 
     if envelope.get("is_error"):
         result_text = str(envelope.get("result") or "")
+        api_status = envelope.get("api_error_status")
+        low = result_text.lower()
         if any(n in result_text for n in _NOT_LOGGED_IN_NEEDLES):
             return {
                 "ok": False, "version": version, "logged_in": False, "model_response": None,
                 "error": (
-                    "Claude Code is not logged in on this server. SSH in and "
-                    "run `claude` to log in."
+                    "Claude Code is not logged in on this server. Use the "
+                    "“Re-authenticate Claude” button to sign in."
+                ),
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        # 401 + an "invalid API key" message means a stale API key is
+        # overriding the subscription OAuth. We neutralize the known sources
+        # (process env via _strip_api_key_env, settings ``env`` block via
+        # _FORCE_SUBSCRIPTION_ARGS); if this still fires the key is coming
+        # from some other source (e.g. ``apiKeyHelper`` or a stored
+        # ``primaryApiKey`` in ``.claude.json``) — surface an actionable hint.
+        if api_status == 401 or "invalid api key" in low or "invalid authentication" in low:
+            return {
+                "ok": False, "version": version, "logged_in": False, "model_response": None,
+                "error": (
+                    "Claude returned 401: an API key is overriding the "
+                    "subscription. Check for an apiKeyHelper or a stored "
+                    "primaryApiKey in the server's ~/.claude config (an "
+                    "ANTHROPIC_API_KEY env var and a settings.json env block "
+                    "are already neutralized)."
                 ),
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
@@ -2967,7 +3115,7 @@ def claude_auth_status(cli_path: str = "claude") -> Dict[str, Any]:
     except (subprocess.TimeoutExpired, OSError):
         pass
 
-    env = os.environ.copy()
+    env = _strip_api_key_env(os.environ.copy())
     env["HOME"] = _operator_home()
     try:
         res = subprocess.run(
@@ -3006,7 +3154,7 @@ def claude_logout(cli_path: str = "claude") -> tuple[bool, str]:
         resolved = _resolve_cli_path(cli_path or "claude")
     except ClaudeCliError as e:
         return False, str(e)
-    env = os.environ.copy()
+    env = _strip_api_key_env(os.environ.copy())
     env["HOME"] = _operator_home()
     try:
         res = subprocess.run(
@@ -3020,6 +3168,57 @@ def claude_logout(cli_path: str = "claude") -> tuple[bool, str]:
     if res.returncode == 0:
         return True, "ok"
     return False, ((res.stderr or res.stdout or "").strip() or f"claude auth logout exit {res.returncode}")
+
+
+# Curated base set of Claude Code subscription model aliases. The CLI has no
+# "list models" command, so we ship a sensible base and merge the account-
+# specific extras the CLI caches in ~/.claude.json (additionalModelOptionsCache)
+# — that part IS dynamic per subscription. ``[1m]`` variants use the 1M context
+# window, which requires turning on usage credits at claude.ai/settings/usage
+# ON TOP of the subscription; the plain aliases use the standard 200K context.
+_BASE_CLAUDE_MODELS = [
+    {"value": "claude-haiku-4-5", "label": "Haiku 4.5",
+     "description": "Fastest, cheapest · standard 200K context"},
+    {"value": "claude-sonnet-4-6", "label": "Sonnet 4.6",
+     "description": "Balanced · standard 200K context"},
+    {"value": "claude-sonnet-4-6[1m]", "label": "Sonnet 4.6 (1M context)",
+     "description": "1M context · requires usage credits"},
+    {"value": "claude-opus-4-8", "label": "Opus 4.8",
+     "description": "Most capable · standard 200K context"},
+    {"value": "claude-opus-4-8[1m]", "label": "Opus 4.8 (1M context)",
+     "description": "1M context · requires usage credits"},
+]
+
+
+def list_available_models(cli_path: str = "claude") -> Dict[str, Any]:
+    """Return the Claude subscription models selectable for a claude-cli
+    model, for the /models UI dropdown. Merges the curated base set with the
+    account-specific options the CLI caches in ``~/.claude.json``. Each entry
+    carries ``requires_credits`` (true for ``[1m]`` 1M-context variants, which
+    need usage credits enabled and otherwise fail with a 1M-context error)."""
+    models = [dict(m) for m in _BASE_CLAUDE_MODELS]
+    seen = {m["value"] for m in models}
+    try:
+        cj = os.path.join(_operator_home(), ".claude.json")
+        if os.path.isfile(cj):
+            with open(cj, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+            for opt in (doc.get("additionalModelOptionsCache") or []):
+                if not isinstance(opt, dict):
+                    continue
+                val = str(opt.get("value") or "").strip()
+                if val and val not in seen:
+                    seen.add(val)
+                    models.append({
+                        "value": val,
+                        "label": str(opt.get("label") or val),
+                        "description": str(opt.get("description") or ""),
+                    })
+    except Exception:
+        pass
+    for m in models:
+        m["requires_credits"] = "[1m]" in m["value"]
+    return {"models": models}
 
 
 # ANSI/VT100 escape stripper for PTY output (URL/prompt parsing).
@@ -3108,7 +3307,7 @@ class ClaudeCliLogin:
                 fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 1000, 0, 0))
             except Exception:
                 pass
-            env = os.environ.copy()
+            env = _strip_api_key_env(os.environ.copy())
             env["HOME"] = _operator_home()
             env["TERM"] = "xterm-256color"
             # Discourage the CLI from trying to auto-launch a browser the
@@ -3338,4 +3537,5 @@ __all__ = [
     "claude_auth_status",
     "claude_logout",
     "invalidate_runtime_home_cache",
+    "list_available_models",
 ]

@@ -94,6 +94,34 @@ class LlmModel {
   }
 }
 
+/// One entry from `GET /claude/models`. The `requires_credits` flag marks
+/// variants (e.g. the `[1m]` context models) that fail unless the Claude
+/// subscription has usage credits enabled.
+class ClaudeModelOption {
+  const ClaudeModelOption({
+    required this.value,
+    required this.label,
+    this.description,
+    this.requiresCredits = false,
+  });
+
+  final String value;
+  final String label;
+  final String? description;
+  final bool requiresCredits;
+
+  factory ClaudeModelOption.fromJson(Map<String, dynamic> j) {
+    final value = _asStr(j['value']) ?? '';
+    final label = _asStr(j['label']);
+    return ClaudeModelOption(
+      value: value,
+      label: (label != null && label.isNotEmpty) ? label : value,
+      description: _asStr(j['description']),
+      requiresCredits: (j['requires_credits'] as bool?) ?? false,
+    );
+  }
+}
+
 class LlmTestResult {
   const LlmTestResult({
     this.provider,
@@ -292,6 +320,17 @@ class ModelRepository {
       _client.post<dynamic>('/codex/logout');
 
   // ── Claude ───────────────────────────────────────────────────────────────────
+
+  /// GET /claude/models — returns `{models: [...], error?: String}`.
+  ///
+  /// The model list is dynamic (depends on the server's claude binary), so the
+  /// form always fetches it rather than hardcoding. Pass [cliPath] to probe a
+  /// specific binary.
+  Future<Map<String, dynamic>> claudeModels({String? cliPath}) =>
+      _client.get<Map<String, dynamic>>(
+        '/claude/models',
+        query: (cliPath != null && cliPath.isNotEmpty) ? {'cli_path': cliPath} : null,
+      );
 
   /// GET /claude/auth/status
   Future<Map<String, dynamic>> claudeAuthStatus() =>

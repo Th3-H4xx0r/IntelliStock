@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import {
   LLM_PROVIDER_OPTIONS,
   LLM_REASONING_EFFORT_OPTIONS,
@@ -11,8 +11,20 @@ import {
 } from '../utils/strategyConfig.js'
 import { loadOllamaModels } from '../composables/useOllamaModels.js'
 import { loadBedrockModels } from '../composables/useBedrockModels.js'
+import { getToken } from '../utils/auth.js'
 import CodexCliSetupPanel from './CodexCliSetupPanel.vue'
 import ClaudeCliSetupPanel from './ClaudeCliSetupPanel.vue'
+
+const API_BASE = import.meta.env.DEV
+  ? '/api'
+  : (import.meta.env.VITE_API_URL || '/api')
+
+function authHeaders() {
+  const token = getToken()
+  return token
+    ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    : { 'Content-Type': 'application/json' }
+}
 
 const props = defineProps({
   draft: { type: Object, required: true },
@@ -195,6 +207,121 @@ function onProviderChange(value) {
   }
   emit('update:draft', next)
 }
+
+// ── Claude Code CLI model dropdown ───────────────────────────────────────────
+// For provider 'claude-cli' the model field becomes a <select> populated from
+// GET /api/claude/models (the list is dynamic — it merges the account's cached
+// options — so we always fetch, never hardcode). A "Custom…" sentinel reveals
+// the original free-text input so power users can type any alias, and an
+// existing draft.model that isn't in the fetched list keeps the dropdown on
+// "Custom…" with the value preserved. If the fetch fails or returns an error,
+// claudeModelsError is set and the template falls back to the free-text input
+// so the form always works.
+//
+// Per-instance lifecycle guards (closures in <script setup>, NOT module-level)
+// mirror ClaudeCliSetupPanel / CodexCliSetupPanel: _claudeAbort cancels the
+// in-flight fetch on unmount, _mounted blocks ref mutation after teardown.
+const CUSTOM_MODEL_SENTINEL = '__custom__'
+
+const claudeModels = ref([])           // [{ value, label, description, requires_credits }]
+const claudeModelsLoading = ref(false)
+const claudeModelsError = ref('')
+const claudeModelsLoaded = ref(false)  // a fetch has completed (success or error)
+const claudeCustomSelected = ref(false)  // user explicitly chose "Custom…"
+
+let _claudeAbort = new AbortController()
+let _mounted = true
+
+// The dropdown's bound value: the matching option's value, or the sentinel
+// when the current draft.model isn't in the list (or "Custom…" was chosen).
+const claudeModelSelectValue = computed(() => {
+  if (claudeCustomSelected.value) return CUSTOM_MODEL_SENTINEL
+  const current = props.draft.model || ''
+  const match = claudeModels.value.find((m) => m.value === current)
+  return match ? match.value : CUSTOM_MODEL_SENTINEL
+})
+
+// Show the free-text input when the user picked "Custom…", when the current
+// value isn't a known option, or when the list isn't usable (loading / error /
+// empty) so the operator is never blocked from entering a value.
+const claudeShowCustomInput = computed(() => {
+  if (claudeModelsError.value) return true
+  if (!claudeModels.value.length) return true
+  return claudeModelSelectValue.value === CUSTOM_MODEL_SENTINEL
+})
+
+function claudeModelOptionLabel(m) {
+  return m.requires_credits ? `${m.label} — needs usage credits` : m.label
+}
+
+async function fetchClaudeModels() {
+  if (props.draft.provider !== 'claude-cli') return
+  claudeModelsLoading.value = true
+  claudeModelsError.value = ''
+  try {
+    const cliPath = props.draft.cliPath || 'claude'
+    const url = `${API_BASE}/claude/models?cli_path=${encodeURIComponent(cliPath)}`
+    const res = await fetch(url, {
+      headers: authHeaders(),
+      signal: _claudeAbort.signal,
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`)
+    if (!_mounted) return
+    if (data.error) {
+      claudeModels.value = Array.isArray(data.models) ? data.models : []
+      claudeModelsError.value = data.error
+    } else {
+      claudeModels.value = Array.isArray(data.models) ? data.models : []
+      claudeModelsError.value = ''
+    }
+  } catch (e) {
+    if (e.name === 'AbortError' || !_mounted) return
+    claudeModels.value = []
+    claudeModelsError.value = e.message || 'Failed to load Claude models'
+  } finally {
+    if (_mounted) {
+      claudeModelsLoading.value = false
+      claudeModelsLoaded.value = true
+    }
+  }
+}
+
+function onClaudeModelSelect(value) {
+  if (value === CUSTOM_MODEL_SENTINEL) {
+    // Reveal the free-text input but keep whatever's already in draft.model
+    // (e.g. an existing alias) so the operator's value is never lost.
+    claudeCustomSelected.value = true
+    return
+  }
+  claudeCustomSelected.value = false
+  update('model', value)
+}
+
+// Fetch when the form mounts already on claude-cli, and whenever the provider
+// switches to claude-cli. cliPath is also watched so changing the binary path
+// re-fetches the account's merged option list.
+watch(
+  () => [props.draft?.provider, props.draft?.cliPath],
+  ([provider], oldVal) => {
+    if (provider !== 'claude-cli') {
+      claudeModels.value = []
+      claudeModelsError.value = ''
+      claudeModelsLoaded.value = false
+      claudeCustomSelected.value = false
+      return
+    }
+    // Re-arming a fresh controller so a fetch after a previous abort works.
+    if (oldVal && oldVal[0] !== 'claude-cli') claudeCustomSelected.value = false
+    fetchClaudeModels()
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => {
+  _mounted = false
+  try { _claudeAbort.abort() } catch (e) { /* ignore */ }
+})
 </script>
 
 <template>
@@ -215,12 +342,55 @@ function onProviderChange(value) {
       <label class="block text-xs font-medium text-slate-400 mb-1.5">
         {{ draft.provider === 'azure' ? 'Deployment / Model Name' : 'Model' }}
       </label>
+
+      <!-- claude-cli: dropdown of available Claude models with a "Custom…"
+           escape hatch. Falls back to the plain free-text input below when the
+           list fails to load or is empty so the form always works. -->
+      <template v-if="draft.provider === 'claude-cli'">
+        <select
+          v-if="claudeModels.length && !claudeModelsError"
+          :value="claudeModelSelectValue"
+          @change="onClaudeModelSelect($event.target.value)"
+          :disabled="disabled || readOnly"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+        >
+          <option v-for="m in claudeModels" :key="m.value" :value="m.value">{{ claudeModelOptionLabel(m) }}</option>
+          <option :value="CUSTOM_MODEL_SENTINEL">Custom…</option>
+        </select>
+        <p v-if="claudeModelsLoading" class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Loading available Claude models…
+        </p>
+        <div v-else-if="claudeModelsError" class="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-300 mb-2 space-y-1">
+          <div>Couldn't load the Claude model list — enter the model name manually below.</div>
+          <div class="text-amber-200/70 font-mono whitespace-pre-wrap break-words">{{ claudeModelsError }}</div>
+        </div>
+
+        <!-- Free-text input: shown for "Custom…", unknown current values, or
+             when the list is unusable (loading/error/empty). Pre-filled with
+             draft.model so an existing value is never lost. -->
+        <input
+          v-if="claudeShowCustomInput"
+          :value="draft.model"
+          @input="update('model', $event.target.value)"
+          type="text"
+          :disabled="disabled || readOnly"
+          placeholder="claude-sonnet-4-6"
+          :class="claudeModels.length && !claudeModelsError ? 'mt-2' : ''"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          1M-context models need usage credits enabled at <span class="font-mono">claude.ai/settings/usage</span>; standard models don't. Pick <span class="text-slate-400">Custom…</span> to type any model alias.
+        </p>
+      </template>
+
+      <!-- All other providers: free text exactly as before. -->
       <input
+        v-else
         :value="draft.model"
         @input="update('model', $event.target.value)"
         type="text"
         :disabled="disabled || readOnly"
-        :placeholder="draft.provider === 'azure' ? 'e.g. gpt-5.2 deployment name' : (draft.provider === 'claude-cli' ? 'claude-sonnet-4-6' : (draft.provider === 'codex-cli' ? 'gpt-5-codex' : 'e.g. gemini-3-flash-preview'))"
+        :placeholder="draft.provider === 'azure' ? 'e.g. gpt-5.2 deployment name' : (draft.provider === 'codex-cli' ? 'gpt-5-codex' : 'e.g. gemini-3-flash-preview')"
         class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
       />
     </div>

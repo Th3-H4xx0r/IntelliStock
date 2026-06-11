@@ -219,6 +219,178 @@ def test_submit_code_dead_proc_fails_cleanly():
             ClaudeCliLogin._jobs.pop("j2", None)
 
 
+# ── API-key env scrub (the subscription-vs-API-key 401 root cause) ──────────
+
+
+def test_strip_api_key_env_removes_conflicting_vars():
+    env = {
+        "PATH": "/usr/bin",
+        "HOME": "/root",
+        "ANTHROPIC_API_KEY": "sk-ant-stale",
+        "ANTHROPIC_AUTH_TOKEN": "tok-stale",
+        "LANG": "C.UTF-8",
+    }
+    out = provider._strip_api_key_env(env)
+    assert "ANTHROPIC_API_KEY" not in out
+    assert "ANTHROPIC_AUTH_TOKEN" not in out
+    # Everything else is preserved so PATH/HOME/locale still reach claude.
+    assert out["PATH"] == "/usr/bin"
+    assert out["HOME"] == "/root"
+    assert out["LANG"] == "C.UTF-8"
+    # Mutates-and-returns the same dict (used as copy().pipe pattern).
+    assert out is env
+
+
+def test_strip_api_key_env_noop_when_absent():
+    env = {"PATH": "/usr/bin"}
+    assert provider._strip_api_key_env(env) == {"PATH": "/usr/bin"}
+
+
+def test_neutralize_api_key_config_removes_all_sources(tmp_path):
+    import json as _json
+    home = tmp_path
+    (home / ".claude").mkdir()
+    (home / ".claude.json").write_text(
+        _json.dumps({"primaryApiKey": "sk-bogus", "oauthAccount": {"email": "x@y.z"}})
+    )
+    (home / ".claude" / "settings.json").write_text(
+        _json.dumps({
+            "apiKeyHelper": "/path/helper.sh",
+            "env": {
+                "ANTHROPIC_API_KEY": "sk", "ANTHROPIC_AUTH_TOKEN": "t",
+                "ANTHROPIC_BETAS": "context-1m-2025-08-07", "FOO": "bar",
+            },
+            "theme": "dark",
+        })
+    )
+    provider._neutralize_api_key_config(str(home))
+
+    cj = _json.loads((home / ".claude.json").read_text())
+    assert "primaryApiKey" not in cj
+    assert cj["oauthAccount"] == {"email": "x@y.z"}  # subscription state preserved
+
+    s = _json.loads((home / ".claude" / "settings.json").read_text())
+    assert "apiKeyHelper" not in s
+    assert "ANTHROPIC_API_KEY" not in s.get("env", {})
+    assert "ANTHROPIC_AUTH_TOKEN" not in s.get("env", {})
+    assert "ANTHROPIC_BETAS" not in s.get("env", {})  # 1M-context beta removed
+    assert s["env"]["FOO"] == "bar"   # unrelated env vars preserved
+    assert s["theme"] == "dark"       # unrelated settings preserved
+
+
+def test_neutralize_api_key_config_drops_empty_env_block(tmp_path):
+    import json as _json
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        _json.dumps({"env": {"ANTHROPIC_API_KEY": "sk"}})
+    )
+    provider._neutralize_api_key_config(str(tmp_path))
+    s = _json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    assert "env" not in s  # emptied env block removed entirely
+
+
+def test_neutralize_api_key_config_noop_when_files_absent(tmp_path):
+    # Must not raise when .claude.json / settings.json don't exist.
+    provider._neutralize_api_key_config(str(tmp_path))
+
+
+def test_scrub_json_file_leaves_clean_file_untouched(tmp_path):
+    import json as _json
+    p = tmp_path / "x.json"
+    p.write_text(_json.dumps({"a": 1}))
+    changed = provider._scrub_json_file(str(p), lambda d: d.pop("nope", None))
+    assert changed is False
+
+
+def test_force_subscription_settings_blanks_anthropic_keys():
+    import json as _json
+    d = _json.loads(provider._FORCE_SUBSCRIPTION_SETTINGS)
+    assert d["env"]["ANTHROPIC_API_KEY"] == ""
+    assert d["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+    # ANTHROPIC_BETAS blanked too — a leftover context-1m beta otherwise
+    # forces the 1M context window and 429s every call.
+    assert d["env"]["ANTHROPIC_BETAS"] == ""
+
+
+def test_structured_argv_injects_settings_override():
+    argv = provider._build_structured_argv(
+        cli_path="claude",
+        model="claude-sonnet-4-6",
+        system_prompt="hi",
+        json_schema="{}",
+        extra_args=[],
+    )
+    assert "--settings" in argv
+    i = argv.index("--settings")
+    assert argv[i + 1] == provider._FORCE_SUBSCRIPTION_SETTINGS
+
+
+def test_chat_argv_injects_settings_override():
+    argv = provider._build_chat_argv(
+        cli_path="claude",
+        model="claude-sonnet-4-6",
+        system_prompt="hi",
+        extra_args=[],
+    )
+    assert "--settings" in argv
+    i = argv.index("--settings")
+    assert argv[i + 1] == provider._FORCE_SUBSCRIPTION_SETTINGS
+
+
+def test_test_cli_maps_invalid_api_key_401_to_actionable_hint(monkeypatch):
+    monkeypatch.setattr(provider, "_resolve_cli_path", lambda p: "/usr/bin/claude")
+    monkeypatch.setattr(provider, "_init_claude_state_once", lambda: None)
+    monkeypatch.setattr(provider, "_prepare_runtime_home_for_id", lambda h: "/root")
+    monkeypatch.setattr(provider, "_cleanup_runtime_home", lambda p: None)
+    monkeypatch.setattr(provider, "_wrap_argv_for_runtime_user", lambda argv: argv)
+
+    def _runner(argv, **kw):
+        if "--version" in argv:
+            return SimpleNamespace(stdout="2.1.170 (Claude Code)\n", stderr="", returncode=0)
+        envelope = (
+            '{"type":"result","is_error":true,"api_error_status":401,'
+            '"result":"Invalid API key · Fix external API key"}'
+        )
+        return SimpleNamespace(stdout=envelope, stderr="", returncode=0)
+
+    monkeypatch.setattr(provider.subprocess, "run", _runner)
+    out = provider.test_claude_cli(cli_path="claude", model="claude-sonnet-4-6")
+    assert out["ok"] is False
+    assert "ANTHROPIC_API_KEY" in out["error"]
+    assert "subscription" in out["error"].lower()
+
+
+def test_list_available_models_merges_cache_and_flags_1m(tmp_path, monkeypatch):
+    import json as _json
+    (tmp_path / ".claude.json").write_text(_json.dumps({
+        "additionalModelOptionsCache": [
+            {"value": "claude-custom-x", "label": "Custom X", "description": "d"},
+            {"value": "claude-sonnet-4-6", "label": "dup"},  # collides with base
+        ]
+    }))
+    monkeypatch.setattr(provider, "_operator_home", lambda: str(tmp_path))
+    out = provider.list_available_models("claude")
+    by = {m["value"]: m for m in out["models"]}
+    vals = [m["value"] for m in out["models"]]
+    # Base set present
+    assert "claude-sonnet-4-6" in by and "claude-haiku-4-5" in by
+    # Account-specific extra merged in
+    assert "claude-custom-x" in by
+    # Collision with base is deduped (base entry wins, appears once)
+    assert vals.count("claude-sonnet-4-6") == 1
+    assert by["claude-sonnet-4-6"]["label"] == "Sonnet 4.6"  # not "dup"
+    # 1M variants flagged; standard ones not
+    assert by["claude-sonnet-4-6[1m]"]["requires_credits"] is True
+    assert by["claude-sonnet-4-6"]["requires_credits"] is False
+    assert by["claude-custom-x"]["requires_credits"] is False
+
+
+def test_list_available_models_tolerates_missing_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(provider, "_operator_home", lambda: str(tmp_path))
+    out = provider.list_available_models("claude")
+    assert len(out["models"]) >= 5  # base set always present
+
+
 def test_reader_parses_url_from_pty_output(monkeypatch):
     # Drive _reader with a fake fd that yields colorized output then EOF.
     chunks = [
