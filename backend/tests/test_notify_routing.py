@@ -4,6 +4,16 @@ a DB, Discord, or Apple.
 """
 from __future__ import annotations
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_operator(monkeypatch):
+    """Stop notify() from resolving the operator via a real DB connection."""
+    import notifications
+    notifications._reset_operator_cache()
+    monkeypatch.setattr(notifications, "_operator_user_id", lambda: "op1")
+
 
 def _patch(monkeypatch, route):
     import notifications
@@ -69,6 +79,25 @@ def test_discord_sink_failure_does_not_block_push(monkeypatch):
     # must not raise, and push must still fire
     _fire(notifications)
     assert len(calls["push"]) == 1
+
+
+def test_notify_uses_resolved_operator_for_prefs_and_push(monkeypatch):
+    """The live-alert path passes no user_id; prefs AND push must use the SAME
+    resolved operator id (not the literal default 'operator')."""
+    import notifications
+    monkeypatch.setattr(notifications, "_operator_user_id", lambda: "real-user-7")
+    seen = {}
+    def _prefs(uid):
+        seen["prefs_uid"] = uid
+        return {"categories": {"order_fill": {"discord": False, "push": True}}}
+    def _push(uid, **kw):
+        seen["push_uid"] = uid
+    monkeypatch.setattr(notifications, "_load_prefs", _prefs)
+    monkeypatch.setattr(notifications, "_push_sink", _push)
+    monkeypatch.setattr(notifications, "_discord_sink", lambda *a, **k: None)
+    _fire(notifications)  # user_id=None
+    assert seen["prefs_uid"] == "real-user-7"
+    assert seen["push_uid"] == "real-user-7"
 
 
 def test_prefs_load_failure_falls_back_to_discord(monkeypatch):

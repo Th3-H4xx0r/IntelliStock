@@ -736,6 +736,14 @@ def action_list_push_devices(conn, user_id, env=None):
     return list(sel.run(conn))
 
 
+def action_push_device_user_ids(conn):
+    """Distinct user_ids that have at least one registered push device.
+    Used to resolve the operator for the live-alert push path (single-operator)."""
+    ensure_push_devices_table(conn)
+    rows = r.db(DB_NAME).table("PushDevices").pluck("user_id").run(conn)
+    return sorted({row.get("user_id") for row in rows if isinstance(row, dict) and row.get("user_id")})
+
+
 def action_set_push_device_env(conn, token, env):
     """Correct a device's stored APNs env (e.g. after a fallback-host send
     succeeds), so future sends hit the right host first."""
