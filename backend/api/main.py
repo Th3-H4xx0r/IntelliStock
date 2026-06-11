@@ -158,6 +158,10 @@ from interactive_utils import (
     action_get_live_command,
     action_live_trading_logs,
     LiveInstanceNotFoundError,
+    action_get_notification_preferences,
+    action_set_notification_preferences,
+    action_register_push_device,
+    action_delete_push_device,
 )
 
 # OpenAPI / Swagger UI gated to admins-only in production. The schema
@@ -1675,6 +1679,90 @@ def api_test_benzinga_sources(body: BenzingaTestBody, current_user: dict = Depen
         "results": results,
         "message": f"{accessible_count}/{len(sources_to_test)} Benzinga sources accessible.",
     }
+
+
+# --- Notification preferences (per-category Discord / iOS push routing) ---
+
+
+class CategoryRoute(BaseModel):
+    discord: bool = True
+    push: bool = False
+
+
+class NotificationPrefsBody(BaseModel):
+    categories: Dict[str, CategoryRoute]
+
+
+@app.get("/notification-preferences", response_class=JSONResponse)
+def api_get_notification_prefs(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_get_notification_preferences, conn, current_user["id"])
+
+
+@app.put("/notification-preferences", response_class=JSONResponse)
+def api_put_notification_prefs(body: NotificationPrefsBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    # _validate_notification_categories raises ValueError on an unknown
+    # category, which _run maps to HTTP 400.
+    cats = {k: v.dict() for k, v in body.categories.items()}
+    return _run(action_set_notification_preferences, conn, current_user["id"], cats)
+
+
+# --- iOS push device registration (APNs tokens) ---
+
+
+class PushDeviceBody(BaseModel):
+    device_token: str
+    platform: str = "ios"
+    env: str = "prod"  # "sandbox" for debug builds, "prod" for release
+    app_version: Optional[str] = None
+
+
+@app.post("/push/devices", response_class=JSONResponse)
+def api_register_push_device(body: PushDeviceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(
+        action_register_push_device, conn, current_user["id"],
+        body.device_token, body.platform, body.env, body.app_version,
+    )
+
+
+@app.delete("/push/devices/{token}", response_class=JSONResponse)
+def api_delete_push_device(token: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    # Scope the delete to the caller so one user can't unregister another's token.
+    return _run(action_delete_push_device, conn, token, current_user["id"])
+
+
+# --- Send-test-notification (verify each delivery option) ---
+
+
+class TestNotificationBody(BaseModel):
+    channel: str  # "discord" | "push"
+
+
+@app.post("/notifications/test", response_class=JSONResponse)
+def api_test_notification(body: TestNotificationBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Send a sample notification through one sink directly (bypasses category
+    preferences) so the operator can confirm a delivery option works."""
+    channel = (body.channel or "").strip().lower()
+    if channel == "discord":
+        from notifications import _discord_sink
+        _discord_sink(
+            "notifications",
+            "🔔 IntelliStock test notification (Discord)",
+            {"title": "Test notification", "color": 0x3498DB,
+             "description": "If you can see this, Discord delivery works."},
+        )
+        return {"ok": True, "channel": "discord"}
+    if channel == "push":
+        from apns_sender import send_to_user
+        res = send_to_user(
+            current_user["id"],
+            title="IntelliStock",
+            body="✅ Test notification — iOS push works.",
+            category="test",
+            data={"category": "test"},
+        )
+        sent = int(res.get("sent", 0) or 0)
+        return {"ok": sent > 0, "channel": "push", **res}
+    raise HTTPException(status_code=400, detail=f"unknown channel: {body.channel}")
 
 
 @app.get("/tickers", response_class=JSONResponse)

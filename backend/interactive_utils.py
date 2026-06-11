@@ -497,18 +497,71 @@ def action_get_discord_message_id(conn, channel, message_key):
     return {"message_id": doc.get("message_id"), "guild_id": doc.get("guild_id")}
 
 
+# 2026-06-10 outbox hardening: retry transient send failures with backoff
+# instead of dropping a message on its first failure (a silent way fill
+# notifications went missing). Pure decision so it's unit-testable.
+RETRY_MAX_ATTEMPTS = 5
+
+
+def discord_retry_decision(attempts, now_ts):
+    """Given the current attempt count, decide whether to requeue (with a
+    backoff timestamp) or give up.
+
+    Returns ``(status, next_retry_at, new_attempts)``:
+      - status == "pending" and next_retry_at is a future epoch-seconds float
+        while attempts < RETRY_MAX_ATTEMPTS,
+      - status == "failed" and next_retry_at is None at/after the cap.
+    """
+    attempts = int(attempts or 0)
+    if attempts >= RETRY_MAX_ATTEMPTS:
+        return ("failed", None, attempts)
+    backoff = min(300, 5 * (2 ** attempts))  # 5,10,20,40,80 … capped at 300s
+    return ("pending", float(now_ts) + backoff, attempts + 1)
+
+
 def action_get_pending_discord_messages(conn, limit=50):
-    """Get pending messages from DiscordOutbox for the bot to send."""
+    """Get sendable pending messages from DiscordOutbox for the bot.
+
+    Skips rows whose ``next_retry_at`` is still in the future so a backed-off
+    message isn't retried before its window.
+    """
     ensure_discord_outbox_table(conn)
+    now_epoch = r.now().to_epoch_time()
     cursor = (
         r.db(DB_NAME)
         .table("DiscordOutbox")
-        .filter({"status": "pending"})
+        .filter(
+            lambda d: (d["status"] == "pending")
+            & ((~d.has_fields("next_retry_at")) | (d["next_retry_at"].le(now_epoch)))
+        )
         .order_by("created_at")
         .limit(limit)
         .run(conn)
     )
     return list(cursor)
+
+
+def action_requeue_or_fail_discord_message(conn, msg_id, error):
+    """On send failure, requeue with backoff (or mark failed at the cap).
+
+    Reads the current ``attempts``, applies ``discord_retry_decision`` and
+    writes ``status``/``attempts``/``next_retry_at``/``error``.
+    """
+    ensure_discord_outbox_table(conn)
+    import time as _time
+    from datetime import datetime, timezone
+    doc = r.db(DB_NAME).table("DiscordOutbox").get(msg_id).run(conn)
+    attempts = int((doc or {}).get("attempts", 0) or 0)
+    status, next_at, new_attempts = discord_retry_decision(attempts, _time.time())
+    update = {
+        "status": status,
+        "attempts": new_attempts,
+        "error": str(error)[:500],
+        "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
+        "next_retry_at": next_at,  # float epoch seconds, or None when failed
+    }
+    r.db(DB_NAME).table("DiscordOutbox").get(msg_id).update(update).run(conn)
+    return {"status": status, "attempts": new_attempts}
 
 
 def action_mark_discord_message_sent(conn, msg_id):
@@ -527,6 +580,176 @@ def action_mark_discord_message_failed(conn, msg_id, error):
     r.db(DB_NAME).table("DiscordOutbox").get(msg_id).update(
         {"status": "failed", "error": str(error)[:500], "updated_at": datetime.now(timezone.utc).isoformat() + "Z"}
     ).run(conn)
+
+
+# ----------------------------------------------------------------------------
+# Per-category notification preferences (Discord and/or iOS push routing).
+# One doc per user (id == user_id), categories nested as a map so a single
+# read serves notify() and a single write serves a settings save.
+# ----------------------------------------------------------------------------
+
+# The 9 live-trading notification categories (1:1 with live_alerts.alert_*).
+NOTIFICATION_CATEGORIES = (
+    "order_submit",
+    "order_fill",
+    "order_reject",
+    "order_retry",
+    "strategy_start",
+    "strategy_error",
+    "halt",
+    "drawdown_halt",
+    "crash_loop",
+)
+
+
+def _default_notification_categories():
+    """Defaults preserve today's behavior: Discord only, push off."""
+    return {c: {"discord": True, "push": False} for c in NOTIFICATION_CATEGORIES}
+
+
+def _coerce_route(v):
+    if not isinstance(v, dict):
+        return {"discord": True, "push": False}
+    return {"discord": bool(v.get("discord", True)), "push": bool(v.get("push", False))}
+
+
+def _merge_notification_categories(stored):
+    """Fill a full 9-category matrix from a (possibly partial) stored map,
+    ignoring any unknown stored keys."""
+    cats = _default_notification_categories()
+    if isinstance(stored, dict):
+        for c, v in stored.items():
+            if c in cats:
+                cats[c] = _coerce_route(v)
+    return cats
+
+
+def _validate_notification_categories(categories):
+    """Return a full cleaned matrix; raise ValueError on any unknown category."""
+    cats = _default_notification_categories()
+    for c, v in (categories or {}).items():
+        if c not in cats:
+            raise ValueError(f"unknown notification category: {c}")
+        cats[c] = _coerce_route(v)
+    return cats
+
+
+def _validate_provided_categories(categories):
+    """Return cleaned routes for ONLY the provided keys; raise on unknown.
+
+    Unlike _validate_notification_categories this does NOT fill omitted
+    categories with defaults — callers overlay it onto the stored matrix so an
+    omitted category keeps its stored value (a save from a client that doesn't
+    know about a future category can't silently reset it)."""
+    out = {}
+    for c, v in (categories or {}).items():
+        if c not in NOTIFICATION_CATEGORIES:
+            raise ValueError(f"unknown notification category: {c}")
+        out[c] = _coerce_route(v)
+    return out
+
+
+def ensure_notification_preferences_table(conn):
+    dbs = list(r.db_list().run(conn))
+    if DB_NAME not in dbs:
+        r.db_create(DB_NAME).run(conn)
+    tables = list(r.db(DB_NAME).table_list().run(conn))
+    if "NotificationPreferences" not in tables:
+        r.db(DB_NAME).table_create("NotificationPreferences").run(conn)
+
+
+def action_get_notification_preferences(conn, user_id):
+    """Return ``{"user_id", "categories"}`` with all 9 categories filled in
+    (defaults where unset)."""
+    ensure_notification_preferences_table(conn)
+    doc = r.db(DB_NAME).table("NotificationPreferences").get(str(user_id)).run(conn)
+    stored = doc.get("categories") if isinstance(doc, dict) else None
+    return {"user_id": str(user_id), "categories": _merge_notification_categories(stored)}
+
+
+def action_set_notification_preferences(conn, user_id, categories):
+    """Validate + persist preferences. Provided categories are OVERLAID onto the
+    stored matrix (omitted categories keep their stored value), so a save from a
+    client that doesn't know a future category can't silently reset it. Raises
+    ValueError on an unknown category."""
+    from datetime import datetime, timezone
+    ensure_notification_preferences_table(conn)
+    provided = _validate_provided_categories(categories)  # raises on unknown
+    existing_doc = r.db(DB_NAME).table("NotificationPreferences").get(str(user_id)).run(conn)
+    stored = existing_doc.get("categories") if isinstance(existing_doc, dict) else None
+    merged = _merge_notification_categories(stored)  # full 9, stored values kept
+    merged.update(provided)
+    doc = {
+        "id": str(user_id),
+        "user_id": str(user_id),
+        "categories": merged,
+        "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
+    }
+    r.db(DB_NAME).table("NotificationPreferences").insert(doc, conflict="replace").run(conn)
+    return {"user_id": str(user_id), "categories": merged}
+
+
+# ----------------------------------------------------------------------------
+# iOS push device registry (APNs device tokens). One row per device token
+# (id == token) so register is idempotent — re-register rewrites the row
+# (refreshing last_seen + app_version).
+# ----------------------------------------------------------------------------
+
+def _push_device_doc(user_id, token, platform="ios", env="prod", app_version=None, now_iso=None):
+    from datetime import datetime, timezone
+    now_iso = now_iso or (datetime.now(timezone.utc).isoformat() + "Z")
+    return {
+        "id": str(token),
+        "user_id": str(user_id),
+        "device_token": str(token),
+        "platform": str(platform or "ios"),
+        "env": str(env or "prod"),
+        "app_version": app_version,
+        "created_at": now_iso,
+        "last_seen": now_iso,
+    }
+
+
+def ensure_push_devices_table(conn):
+    dbs = list(r.db_list().run(conn))
+    if DB_NAME not in dbs:
+        r.db_create(DB_NAME).run(conn)
+    tables = list(r.db(DB_NAME).table_list().run(conn))
+    if "PushDevices" not in tables:
+        r.db(DB_NAME).table_create("PushDevices").run(conn)
+
+
+def action_register_push_device(conn, user_id, token, platform="ios", env="prod", app_version=None):
+    """Idempotently register/refresh an APNs device token (id == token)."""
+    ensure_push_devices_table(conn)
+    doc = _push_device_doc(user_id, token, platform=platform, env=env, app_version=app_version)
+    r.db(DB_NAME).table("PushDevices").insert(doc, conflict="replace").run(conn)
+    return doc
+
+
+def action_list_push_devices(conn, user_id, env=None):
+    """Return a user's registered devices, optionally filtered by env."""
+    ensure_push_devices_table(conn)
+    sel = r.db(DB_NAME).table("PushDevices").filter({"user_id": str(user_id)})
+    if env:
+        sel = sel.filter({"env": str(env)})
+    return list(sel.run(conn))
+
+
+def action_delete_push_device(conn, token, user_id=None):
+    """Remove a device token (logout / APNs 410 prune).
+
+    When ``user_id`` is provided the delete is scoped to that owner (a user
+    can't delete another user's token). The internal 410-prune path calls
+    without a user_id since it has no user context."""
+    ensure_push_devices_table(conn)
+    row = r.db(DB_NAME).table("PushDevices").get(str(token))
+    if user_id is not None:
+        doc = row.run(conn)
+        if doc and doc.get("user_id") != str(user_id):
+            return {"deleted": None, "reason": "not_owner"}
+    row.delete().run(conn)
+    return {"deleted": str(token)}
 
 
 def next_strategy_id(conn):

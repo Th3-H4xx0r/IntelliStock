@@ -38,7 +38,8 @@ import random
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from broker_adapters.base import (
@@ -432,6 +433,26 @@ class RobinhoodAdapter(BrokerAdapter):
                 f"{type(_imp_e).__name__}: {_imp_e}",
                 "red",
             )
+
+        # 2026-06-10 fill-alert hardening: idempotency ledger keyed by
+        # broker_order_id (fallback cid). A fill alert fires EXACTLY ONCE per
+        # order across both the polling path and the reconciliation catch-up
+        # path, so neither double-pages an order both observe. Bounded LRU.
+        self._alerted_fills: "OrderedDict[str, float]" = OrderedDict()
+        self._ALERTED_FILLS_CAP = 2048
+        # Catch-up reconciliation only pages fills within this recent window
+        # so a process restart never replays stale fills. Override via env.
+        self._reconcile_window_sec = float(
+            os.environ.get("RH_FILL_RECONCILE_WINDOW_SEC", "1800") or 1800
+        )
+        # Process-start floor: reconcile never pages a fill whose timestamp
+        # predates this process, so an empty ledger after a restart can't
+        # replay fills that a prior session already paged.
+        self._process_start_utc = datetime.now(timezone.utc)
+        # Coalesce reconciliation to once per poll cycle (an N-fill burst would
+        # otherwise fire N serial list_orders HTTP sweeps against a
+        # rate-limit-sensitive RH account).
+        self._pending_reconcile = False
 
         # Polling thread state (substitute for AlpacaAdapter's WebSocket)
         # 2026-05-07 deadlock defense-in-depth: was threading.Lock() — the
@@ -2427,6 +2448,12 @@ class RobinhoodAdapter(BrokerAdapter):
                         continue
                     self._handle_order_transition(oid, prev, cur)
 
+                # Coalesced fill-alert catch-up: at most one list_orders sweep
+                # per cycle, regardless of how many fills landed this cycle.
+                if self._pending_reconcile:
+                    self._pending_reconcile = False
+                    self._reconcile_fill_alerts()
+
                 # Step 2: every 60s, refresh token only. Per user directive
                 # 2026-05-05: cash + positions refreshes happen ONLY before
                 # the hourly dual-cadence cycle (broker.py pre-cycle hook
@@ -2449,6 +2476,17 @@ class RobinhoodAdapter(BrokerAdapter):
                 # so a stalled get_order/refresh_positions doesn't make the
                 # thread look healthy to health_check.
                 self._last_heartbeat_utc = datetime.now(timezone.utc)
+
+                # 2026-06-10 fill diagnostics: surface pending-vs-alerted so a
+                # future "fills went silent" incident is pinpointable from
+                # logs. Only when orders are in flight (avoids 5s idle spam).
+                if tracked:
+                    _alog(
+                        "BROKER",
+                        f"RH poll cycle: pending_orders={len(tracked)} "
+                        f"alerted_fills={len(getattr(self, '_alerted_fills', ()))}",
+                        "cyan",
+                    )
             except Exception as e:
                 consecutive_errors += 1
                 _alog(
@@ -2631,6 +2669,11 @@ class RobinhoodAdapter(BrokerAdapter):
             )
             # Fill alert reports the AGGREGATE order, not the last delta.
             self._fire_fill_alert(symbol, side, filled_qty, avg_px, cid, oid)
+            # 2026-06-10 hardening: request a reconcile sweep at the END of this
+            # poll cycle (not here) so an N-fill burst triggers ONE list_orders
+            # sweep, not N. It then pages only sibling fills the loop missed
+            # (the "8 buys, 1 notif" class) — idempotent + window/floor-bounded.
+            self._pending_reconcile = True
         elif cur_state == "partially_filled":
             # WAL marker if available; the delta accounting above already
             # handled cash + _trades.
@@ -2995,6 +3038,17 @@ class RobinhoodAdapter(BrokerAdapter):
     ) -> None:
         if self._alert_fill is None:
             return
+        # Idempotency: page each order's fill at most once (polling path +
+        # reconciliation catch-up can both observe the same terminal fill).
+        key = str(broker_order_id or cid or f"{symbol}:{side}")
+        ledger = getattr(self, "_alerted_fills", None)
+        if ledger is not None:
+            if key in ledger:
+                return
+            ledger[key] = filled_qty
+            cap = getattr(self, "_ALERTED_FILLS_CAP", 2048)
+            while len(ledger) > cap:
+                ledger.popitem(last=False)
         try:
             self._alert_fill(
                 instance_id=self._instance_id,
@@ -3004,6 +3058,77 @@ class RobinhoodAdapter(BrokerAdapter):
             )
         except Exception as e:
             _alog("BROKER", f"alert_order_fill failed: {e}", "yellow")
+
+    def _recent_filled_orders(self, limit: int = 25) -> list:
+        """Most-recent FILLED orders from RH, for fill-alert catch-up."""
+        return self._client.list_orders(limit=limit, state="filled")
+
+    @staticmethod
+    def _order_within_window(o: dict, now: "datetime", window_sec: float,
+                             floor_dt: "datetime | None" = None) -> bool:
+        """True only if the order's fill timestamp is recent AND at/after the
+        process-start floor. A missing/unparseable timestamp returns False: we
+        can't confirm it's a fresh fill, so we don't page it (this is what
+        prevents a post-restart reconcile from replaying stale fills)."""
+        ts_raw = o.get("last_transaction_at") or o.get("updated_at") or ""
+        if not ts_raw:
+            return False
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            return False
+        lower = now - timedelta(seconds=float(window_sec))
+        if floor_dt is not None and floor_dt > lower:
+            lower = floor_dt
+        # small future-skew tolerance for RH clock drift
+        return lower <= ts <= now + timedelta(seconds=5)
+
+    def _reconcile_fill_alerts(self) -> None:
+        """Page any recently-FILLED order we haven't already alerted.
+
+        Safety net for fills the 60s polling loop missed (e.g. RH rate-limiting
+        the rapid post-submit ``get_order`` burst — the root-cause class behind
+        the "8 buys, 1 Discord notif" incident). Triggered right after a
+        detected terminal fill (coalesced to once per poll cycle), so the
+        just-paged order is already in the ledger and only its missed siblings
+        fire. Idempotent via ``_alerted_fills``, bounded to
+        ``_reconcile_window_sec`` AND floored at process start, so an empty
+        ledger after a restart can never replay stale fills. Best-effort.
+        """
+        try:
+            recent = self._recent_filled_orders()
+        except Exception as e:
+            _alog("BROKER", f"fill-reconcile fetch failed: {type(e).__name__}: {e}", "yellow")
+            return
+        window_sec = getattr(self, "_reconcile_window_sec", 1800)
+        floor_dt = getattr(self, "_process_start_utc", None)
+        now = datetime.now(timezone.utc)
+        fired = 0
+        for o in (recent or []):
+            if not isinstance(o, dict):
+                continue
+            oid = str(o.get("id") or "")
+            if not oid or oid in self._alerted_fills:
+                continue
+            if not self._order_within_window(o, now, window_sec, floor_dt):
+                continue
+            sym = (o.get("symbol") or "").strip().upper()
+            if not sym:
+                sym = self._instrument_url_to_symbol((o.get("instrument") or "").strip())
+            side = (o.get("side") or "").strip().lower()
+            try:
+                q = float(o.get("cumulative_quantity") or 0.0)
+                px = float(o.get("average_price") or 0.0) if o.get("average_price") else 0.0
+            except Exception:
+                continue
+            if q > 0 and side in ("buy", "sell"):
+                cid = self._cid_for_broker_order_id(oid) or ""
+                self._fire_fill_alert(sym, side, q, px, cid, oid)
+                fired += 1
+        if fired:
+            _alog("BROKER", f"fill-reconcile paged {fired} missed fill(s)", "green")
 
     def _fire_reject_alert(
         self, symbol: str, side: str, reason_class: str, reason_text: str, cid: str,

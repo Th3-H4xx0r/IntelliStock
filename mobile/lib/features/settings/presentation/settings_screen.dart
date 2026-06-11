@@ -256,6 +256,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                     const SizedBox(height: 24),
 
+                    // ── Preferences section ───────────────────────────────
+                    _SectionLabel(label: 'Preferences'),
+                    const SizedBox(height: 8),
+                    GlassCard(
+                      padding: EdgeInsets.zero,
+                      child: _SettingsRow(
+                        icon: symbol('notifications'),
+                        iconColor: AppColors.info,
+                        title: 'Notifications',
+                        subtitle: 'Discord & iOS push per alert category',
+                        trailing: Icon(symbol('arrow_forward'),
+                            size: 16, color: AppColors.textDim),
+                        onTap: () => context.push('/settings/notifications'),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
                     // ── Account section ───────────────────────────────────
                     _SectionLabel(label: 'Account'),
                     const SizedBox(height: 8),

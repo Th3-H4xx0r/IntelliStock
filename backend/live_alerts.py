@@ -16,6 +16,7 @@ import os
 from typing import Any, Optional
 
 from intellistock_logger import intellistock_logger
+from notifications import notify
 
 
 def _channel(default: str = "trades") -> str:
@@ -133,7 +134,12 @@ def alert_order_submit(
     if extra:
         for k, v in extra.items():
             embed["fields"].append({"name": str(k), "value": str(v), "inline": True})
-    _safe_enqueue(_channel(), content, embed=embed)
+    notify(
+        category="order_submit", instance_id=instance_id,
+        title=f"Order submitted: {symbol}", body=content,
+        discord_channel=_channel(), discord_embed=embed,
+        push_body=f"SUBMIT {side.upper()} {qty_str} {symbol}",
+    )
 
 
 def alert_order_fill(
@@ -171,7 +177,12 @@ def alert_order_fill(
         "color": 0x2ECC71,
         "fields": _fields,
     }
-    _safe_enqueue(_channel(), content, embed=embed)
+    notify(
+        category="order_fill", instance_id=instance_id,
+        title=f"Filled: {symbol}", body=content,
+        discord_channel=_channel(), discord_embed=embed,
+        push_body=f"{side.upper()} {filled_qty:.4f} {symbol} @ ${filled_avg_price:.2f}",
+    )
 
 
 def alert_order_reject(
@@ -193,7 +204,12 @@ def alert_order_reject(
             {"name": "client_order_id", "value": client_order_id, "inline": False},
         ],
     }
-    _safe_enqueue(_channel(), content, embed=embed)
+    notify(
+        category="order_reject", instance_id=instance_id,
+        title=f"Rejected: {symbol}", body=content,
+        discord_channel=_channel(), discord_embed=embed,
+        push_body=f"REJECT {side.upper()} {symbol}: {reason_class}",
+    )
 
 
 def alert_order_retry(
@@ -230,7 +246,12 @@ def alert_order_retry(
             {"name": "client_order_id", "value": client_order_id, "inline": False},
         ],
     }
-    _safe_enqueue(_channel(), content, embed=embed)
+    notify(
+        category="order_retry", instance_id=instance_id,
+        title=f"Retrying: {symbol}", body=content,
+        discord_channel=_channel(), discord_embed=embed,
+        push_body=f"RETRY {side.upper()} {symbol} -> {retry_qty:.4f}",
+    )
 
 
 def alert_strategy_error(
@@ -245,13 +266,23 @@ def alert_strategy_error(
         "color": 0xE67E22,
         "description": message[:1500],
     }
-    _safe_enqueue(_channel(), content, embed=embed)
+    notify(
+        category="strategy_error", instance_id=instance_id,
+        title=f"Strategy error [{tag}]", body=content,
+        discord_channel=_channel(), discord_embed=embed,
+        push_body=f"{tag}: {message[:120]}",
+    )
 
 
 def alert_halt(*, instance_id: str, reason: str) -> None:
     content = f"HALT [{instance_id}] {reason}"
     embed = {"title": "Live trading HALTED", "color": 0x992D22, "description": reason[:1500]}
-    _safe_enqueue(_channel("notifications"), content, embed=embed)
+    notify(
+        category="halt", instance_id=instance_id,
+        title="Live trading HALTED", body=content,
+        discord_channel=_channel("notifications"), discord_embed=embed,
+        push_body=reason[:160],
+    )
 
 
 def alert_drawdown_halt(
@@ -285,7 +316,13 @@ def alert_drawdown_halt(
     # Routed to #trades (via LIVE_TRADES_CHANNEL env var) because a drawdown
     # halt is a trade-flow event (buys paused) rather than infrastructure
     # signal. Operators watching the trades channel see it immediately.
-    _safe_enqueue(os.environ.get("LIVE_TRADES_CHANNEL", "trades"), content, embed=embed)
+    notify(
+        category="drawdown_halt", instance_id=instance_id,
+        title="Drawdown halt activated", body=content,
+        discord_channel=os.environ.get("LIVE_TRADES_CHANNEL", "trades"),
+        discord_embed=embed,
+        push_body=f"-{drawdown_pct:.1f}% from peak; new buys paused",
+    )
 
 
 def alert_strategy_start(
@@ -316,7 +353,12 @@ def alert_strategy_start(
             {"name": "equity", "value": f"${equity:,.0f}", "inline": True},
         ],
     }
-    _safe_enqueue(_channel(), content, embed=embed)
+    notify(
+        category="strategy_start", instance_id=instance_id,
+        title=f"Strategy starting: {strategy_name}", body=content,
+        discord_channel=_channel(), discord_embed=embed,
+        push_body=f"{strategy_name} {date_key} ({symbols_count} symbols)",
+    )
 
 
 def alert_crash_loop(*, instance_id: str, restarts: int, window_sec: int) -> None:
@@ -332,4 +374,9 @@ def alert_crash_loop(*, instance_id: str, restarts: int, window_sec: int) -> Non
             {"name": "window_sec", "value": str(window_sec), "inline": True},
         ],
     }
-    _safe_enqueue(_channel("notifications"), content, embed=embed)
+    notify(
+        category="crash_loop", instance_id=instance_id,
+        title="Crash loop detected", body=content,
+        discord_channel=_channel("notifications"), discord_embed=embed,
+        push_body=f"{restarts} restarts in {window_sec}s; broker NOT auto-restarted",
+    )
