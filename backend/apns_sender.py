@@ -16,6 +16,7 @@ simply doesn't deliver — Discord and trading are unaffected.
 """
 from __future__ import annotations
 
+import base64
 import os
 from typing import Optional
 
@@ -47,7 +48,18 @@ def _load_creds() -> Optional[dict]:
     team_id = os.environ.get("APNS_TEAM_ID", "").strip()
     bundle_id = os.environ.get("APNS_BUNDLE_ID", "").strip()
     env = os.environ.get("APNS_ENV", "prod").strip() or "prod"
+    # Key, in order of preference: raw PEM (APNS_KEY), base64 of the .p8
+    # (APNS_KEY_B64 — best for a single-line .env value), or a file path
+    # (APNS_KEY_PATH).
     key = os.environ.get("APNS_KEY", "").strip()
+    if not key:
+        key_b64 = os.environ.get("APNS_KEY_B64", "").strip()
+        if key_b64:
+            try:
+                key = base64.b64decode(key_b64).decode("utf-8").strip()
+            except Exception as e:
+                _log(f"APNS_KEY_B64 decode failed: {type(e).__name__}: {e}")
+                key = ""
     if not key:
         key_path = os.environ.get("APNS_KEY_PATH", "").strip()
         if key_path and os.path.exists(key_path):
@@ -57,6 +69,10 @@ def _load_creds() -> Optional[dict]:
             except Exception as e:
                 _log(f"APNs key read failed: {type(e).__name__}: {e}")
                 key = ""
+    # Some env stores escape real newlines as the literal "\n"; restore them so
+    # the PEM parses.
+    if key and "\\n" in key and "BEGIN" in key:
+        key = key.replace("\\n", "\n")
     if not (key_id and team_id and bundle_id and key):
         if not _creds_missing_logged:
             _log("APNs credentials incomplete — iOS push disabled "

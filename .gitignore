@@ -145,6 +145,9 @@ celerybeat.pid
 .env
 .envrc
 .venv
+
+# Secrets — never commit APNs auth keys
+*.p8
 env/
 venv/
 ENV/
