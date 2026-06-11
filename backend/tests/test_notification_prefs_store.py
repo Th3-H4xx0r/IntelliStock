@@ -8,14 +8,16 @@ from __future__ import annotations
 import pytest
 
 
-def test_default_categories_cover_all_nine_discord_only():
+def test_default_categories_cover_all_types_discord_only():
     from interactive_utils import (
         NOTIFICATION_CATEGORIES,
         _default_notification_categories,
     )
     cats = _default_notification_categories()
     assert set(cats.keys()) == set(NOTIFICATION_CATEGORIES)
-    assert len(NOTIFICATION_CATEGORIES) == 9
+    # the 9 live-alert categories plus the broader taxonomy
+    assert len(NOTIFICATION_CATEGORIES) >= 9
+    assert "order_fill" in cats and "broker_boot" in cats
     for v in cats.values():
         assert v == {"discord": True, "push": False}
 
@@ -31,7 +33,8 @@ def test_merge_fills_missing_and_ignores_unknown_stored_keys():
     # untouched categories keep defaults
     assert merged["halt"] == {"discord": True, "push": False}
     assert "bogus_category" not in merged
-    assert len(merged) == 9
+    from interactive_utils import NOTIFICATION_CATEGORIES
+    assert len(merged) == len(NOTIFICATION_CATEGORIES)
 
 
 def test_merge_handles_none():
@@ -53,4 +56,5 @@ def test_validate_coerces_booleans_and_fills_defaults():
     assert cleaned["order_fill"] == {"discord": False, "push": True}
     # categories not provided fall back to defaults
     assert cleaned["crash_loop"] == {"discord": True, "push": False}
-    assert len(cleaned) == 9
+    from interactive_utils import NOTIFICATION_CATEGORIES
+    assert len(cleaned) == len(NOTIFICATION_CATEGORIES)

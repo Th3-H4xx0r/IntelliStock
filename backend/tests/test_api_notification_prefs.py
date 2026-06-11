@@ -28,7 +28,7 @@ def test_get_notification_prefs_returns_store_result(monkeypatch):
     monkeypatch.setattr(main, "action_get_notification_preferences", _fake_get)
     res = main.api_get_notification_prefs(conn=None, current_user={"id": "u1"})
     assert captured["uid"] == "u1"
-    assert len(res["categories"]) == 9
+    assert len(res["categories"]) >= 9
     assert res["categories"]["order_fill"] == {"discord": True, "push": False}
 
 

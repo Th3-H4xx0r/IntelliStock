@@ -588,23 +588,12 @@ def action_mark_discord_message_failed(conn, msg_id, error):
 # read serves notify() and a single write serves a settings save.
 # ----------------------------------------------------------------------------
 
-# The 9 live-trading notification categories (1:1 with live_alerts.alert_*).
-NOTIFICATION_CATEGORIES = (
-    "order_submit",
-    "order_fill",
-    "order_reject",
-    "order_retry",
-    "strategy_start",
-    "strategy_error",
-    "halt",
-    "drawdown_halt",
-    "crash_loop",
-)
-
-
-def _default_notification_categories():
-    """Defaults preserve today's behavior: Discord only, push off."""
-    return {c: {"discord": True, "push": False} for c in NOTIFICATION_CATEGORIES}
+# The full notification taxonomy — single source of truth in notification_types.py.
+# Covers the live-alert categories plus broker health, backtests, agent runs,
+# briefs, infra, etc. Defaults preserve today's behavior (every type's Discord
+# ON, push off / opt-in).
+from notification_types import NOTIFICATION_TYPE_KEYS as NOTIFICATION_CATEGORIES
+from notification_types import default_routing as _default_notification_categories
 
 
 def _coerce_route(v):
