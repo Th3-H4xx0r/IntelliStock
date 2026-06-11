@@ -21,6 +21,7 @@ import '../../features/nexus/presentation/nexus_screen.dart';
 import '../../features/models/presentation/models_screen.dart';
 import '../../features/token_usage/presentation/token_usage_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
+import '../../features/settings/presentation/notification_settings_screen.dart';
 
 final _rootKey = GlobalKey<NavigatorState>();
 
@@ -151,6 +152,11 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/settings',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const SettingsScreen(),
+      ),
+      GoRoute(
+        path: '/settings/notifications',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const NotificationSettingsScreen(),
       ),
     ],
   );
