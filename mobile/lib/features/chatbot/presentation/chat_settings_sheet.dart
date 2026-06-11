@@ -209,8 +209,12 @@ class _ChatSettingsSheetState extends ConsumerState<ChatSettingsSheet> {
     final mq = MediaQuery.of(context);
 
     return Positioned.fill(
-      child: Stack(
-        children: [
+      // Material ancestor — without it Text shows yellow underlines and
+      // Switch / IconButton / ExpansionTile render in fallback mode.
+      child: Material(
+        type: MaterialType.transparency,
+        child: Stack(
+          children: [
           // Scrim
           Positioned.fill(
             child: GestureDetector(
@@ -302,6 +306,7 @@ class _ChatSettingsSheetState extends ConsumerState<ChatSettingsSheet> {
             ),
           ),
         ],
+        ),
       ),
     );
   }
