@@ -100,6 +100,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/notification-settings',
+    name: 'notification-settings',
+    component: () => import('../views/NotificationSettingsView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/animation',
     name: 'animation',
     component: () => import('../views/AnimationView.vue'),
