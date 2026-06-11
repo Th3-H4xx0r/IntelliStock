@@ -68,18 +68,12 @@ import UserNotifications
     super.application(application, didFailToRegisterForRemoteNotificationsWithError: error)
   }
 
-  // Show the alert even when the app is in the foreground.
+  // Show the banner even when the app is in the foreground.
   override func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    // `.banner` is iOS 14+; the deployment target is iOS 13, where `.alert`
-    // is the equivalent foreground-presentation option.
-    if #available(iOS 14.0, *) {
-      completionHandler([.banner, .sound, .badge])
-    } else {
-      completionHandler([.alert, .sound, .badge])
-    }
+    completionHandler([.banner, .sound, .badge])
   }
 }
