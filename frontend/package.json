@@ -9,8 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "apexcharts": "^5.13.0",
-    "dompurify": "^3.4.7",
+    "apexcharts": "^5.14.0",
+    "dompurify": "^3.4.9",
     "marked": "^14.1.4",
     "vue": "^3.5.35",
     "vue3-apexcharts": "^1.11.1",
