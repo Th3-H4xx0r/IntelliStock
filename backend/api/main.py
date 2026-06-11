@@ -158,6 +158,8 @@ from interactive_utils import (
     action_get_live_command,
     action_live_trading_logs,
     LiveInstanceNotFoundError,
+    action_get_notification_preferences,
+    action_set_notification_preferences,
 )
 
 # OpenAPI / Swagger UI gated to admins-only in production. The schema
@@ -1675,6 +1677,31 @@ def api_test_benzinga_sources(body: BenzingaTestBody, current_user: dict = Depen
         "results": results,
         "message": f"{accessible_count}/{len(sources_to_test)} Benzinga sources accessible.",
     }
+
+
+# --- Notification preferences (per-category Discord / iOS push routing) ---
+
+
+class CategoryRoute(BaseModel):
+    discord: bool = True
+    push: bool = False
+
+
+class NotificationPrefsBody(BaseModel):
+    categories: Dict[str, CategoryRoute]
+
+
+@app.get("/notification-preferences", response_class=JSONResponse)
+def api_get_notification_prefs(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    return _run(action_get_notification_preferences, conn, current_user["id"])
+
+
+@app.put("/notification-preferences", response_class=JSONResponse)
+def api_put_notification_prefs(body: NotificationPrefsBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    # _validate_notification_categories raises ValueError on an unknown
+    # category, which _run maps to HTTP 400.
+    cats = {k: v.dict() for k, v in body.categories.items()}
+    return _run(action_set_notification_preferences, conn, current_user["id"], cats)
 
 
 @app.get("/tickers", response_class=JSONResponse)
