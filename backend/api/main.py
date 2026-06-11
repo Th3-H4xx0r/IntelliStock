@@ -2841,6 +2841,80 @@ def api_get_live_state(instance_id: str, conn=Depends(conn_dependency), current_
     return _run(action_get_live_state, conn, instance_id)
 
 
+# --- iOS widget: one-call payload so the widget can self-refresh w/o the app ---
+
+
+def _widget_iso_to_epoch(ts):
+    if ts is None:
+        return None
+    try:
+        if isinstance(ts, (int, float)):
+            return int(ts)
+        import datetime as _dt
+        d = _dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_dt.timezone.utc)
+        return int(d.timestamp())
+    except Exception:
+        return None
+
+
+def _widget_account_from_live_state(inst, ls):
+    pts = []
+    for p in (ls.get("portfolio_history") or []):
+        e = _widget_iso_to_epoch((p or {}).get("ts"))
+        if e is not None:
+            pts.append({"t": e, "v": float((p or {}).get("value") or 0.0)})
+    positions = []
+    for p in (ls.get("positions") or []):
+        positions.append({
+            "symbol": (p or {}).get("symbol") or "",
+            "unrealizedPnlPct": float((p or {}).get("unrealized_pnl_pct") or 0.0),
+            "marketValue": float((p or {}).get("market_value") or 0.0),
+        })
+    return {
+        "id": str((inst or {}).get("id") or ""),
+        "label": (inst or {}).get("name") or str((inst or {}).get("id") or ""),
+        "accountValue": float(ls.get("equity") or 0.0),
+        "dayPnlAbs": float(ls.get("day_pnl") or 0.0),
+        "dayPnlPct": float(ls.get("day_pnl_pct") or 0.0),
+        "intradayPoints": pts,
+        "positions": positions,
+    }
+
+
+@app.get("/widget/accounts", response_class=JSONResponse)
+def api_widget_accounts(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Full widget payload (live equity + day P&L + intraday curve + positions)
+    for each running instance, in ONE authenticated call — so the iOS widget can
+    fetch fresh data on its own timeline reloads instead of going stale whenever
+    the app isn't open."""
+    import time as _time
+    out = []
+    try:
+        res = action_instances(conn)
+        inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
+    except Exception:
+        inst_list = []
+    for inst in (inst_list or []):
+        iid = str((inst or {}).get("id") or "")
+        if not iid:
+            continue
+        try:
+            ls = action_get_live_state(conn, iid)
+        except Exception:
+            ls = None
+        if not isinstance(ls, dict) or not ls:
+            continue
+        try:
+            acct = _widget_account_from_live_state(inst, ls)
+            if acct["accountValue"] > 0 or acct["intradayPoints"]:
+                out.append(acct)
+        except Exception:
+            continue
+    return {"accounts": out, "synced_at": int(_time.time())}
+
+
 @app.get("/instances/{instance_id}/live-logs", response_class=JSONResponse)
 def api_get_live_trading_logs(instance_id: str, since_line: int = 0, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Live-tail of the broker's log for this instance. since_line cursor

@@ -106,6 +106,40 @@ private func resolveAccount(_ id: String?) -> AccountData? {
     return all.first
 }
 
+// MARK: - Self-refresh
+//
+// The widget fetches fresh data itself on each timeline reload, so it stays
+// current even when the Flutter app isn't open (the app writes the API base +
+// auth token into the App Group on login). On any failure it keeps the last
+// cached App-Group data. iOS still governs HOW OFTEN reloads happen (budgeted,
+// ~every 15-30 min in the background) — opening the app forces an instant one.
+private func fetchAndCacheAccounts() async {
+    let d = UserDefaults(suiteName: kAppGroup)
+    guard let base = d?.string(forKey: "widget_api_base"), !base.isEmpty,
+          let token = d?.string(forKey: "widget_token"), !token.isEmpty
+    else { return }
+    let path = base.hasSuffix("/") ? "widget/accounts" : "/widget/accounts"
+    guard let url = URL(string: base + path) else { return }
+    var req = URLRequest(url: url)
+    req.httpMethod = "GET"
+    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    req.setValue("application/json", forHTTPHeaderField: "Accept")
+    req.timeoutInterval = 15
+    do {
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accounts = obj["accounts"] as? [[String: Any]], !accounts.isEmpty,
+              let blob = try? JSONSerialization.data(withJSONObject: accounts),
+              let str = String(data: blob, encoding: .utf8)
+        else { return }
+        d?.set(str, forKey: "accounts_data")
+        d?.set(Date().timeIntervalSince1970, forKey: "synced_at")
+    } catch {
+        // Keep the cached App-Group data on any network/parse failure.
+    }
+}
+
 // MARK: - Timeline entry
 
 struct PortfolioEntry: TimelineEntry {
@@ -452,8 +486,13 @@ struct ConfigProvider: AppIntentTimelineProvider {
         portfolioEntry(for: configuration.account?.id)
     }
     func timeline(for configuration: SelectPortfolioIntent, in context: Context) async -> Timeline<PortfolioEntry> {
+        // Pull fresh data ourselves so the widget doesn't depend on the app being open.
+        await fetchAndCacheAccounts()
         let e = portfolioEntry(for: configuration.account?.id)
-        let next = Date().addingTimeInterval(configuration.refresh.seconds)
+        // iOS budgets background widget reloads (~15-30 min apart); requesting
+        // sub-10-min just burns the budget and makes it refresh LESS. Floor at 10m.
+        let interval = max(configuration.refresh.seconds, 600)
+        let next = Date().addingTimeInterval(interval)
         return Timeline(entries: [e], policy: .after(next))
     }
 }

@@ -2,9 +2,12 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:home_widget/home_widget.dart';
+import 'api_config.dart';
 
 const _kToken = 'intellistock_token';
 const _kUser = 'intellistock_user';
+const _kWidgetAppGroup = 'group.dev.pkrishna.intellistock';
 
 /// Holds the JWT + cached user, persisted in the platform keychain/keystore.
 ///
@@ -24,6 +27,18 @@ class SessionStore extends ChangeNotifier {
   bool get hasCompletedOnboarding => _user?['has_completed_onboarding'] == true;
   String get username => (_user?['username'] ?? _user?['name'] ?? 'User').toString();
 
+  /// Share the API base + token with the iOS widget (App Group) so the widget
+  /// can self-refresh `/widget/accounts` without the app being open. Best-effort.
+  Future<void> _syncWidgetCreds() async {
+    try {
+      await HomeWidget.setAppGroupId(_kWidgetAppGroup);
+      await HomeWidget.saveWidgetData<String>('widget_api_base', ApiConfig.baseUrl);
+      await HomeWidget.saveWidgetData<String>('widget_token', _token ?? '');
+    } catch (_) {
+      // Never surface widget-cred errors.
+    }
+  }
+
   /// Load persisted session on app start.
   Future<void> load() async {
     _token = await _storage.read(key: _kToken);
@@ -35,6 +50,7 @@ class SessionStore extends ChangeNotifier {
         _user = null;
       }
     }
+    await _syncWidgetCreds();
     notifyListeners();
   }
 
@@ -47,6 +63,7 @@ class SessionStore extends ChangeNotifier {
     } else {
       await _storage.delete(key: _kUser);
     }
+    await _syncWidgetCreds();
     notifyListeners();
   }
 
@@ -61,6 +78,7 @@ class SessionStore extends ChangeNotifier {
     _user = null;
     await _storage.delete(key: _kToken);
     await _storage.delete(key: _kUser);
+    await _syncWidgetCreds(); // clears the widget's token (logout)
     notifyListeners();
   }
 }
