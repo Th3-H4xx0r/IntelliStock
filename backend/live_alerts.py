@@ -62,7 +62,8 @@ def _scrub_embed(embed: Optional[dict]) -> Optional[dict]:
     return out
 
 
-def _safe_enqueue(channel: str, content: str, embed: Optional[dict] = None) -> None:
+def _safe_enqueue(channel: str, content: str, embed: Optional[dict] = None,
+                  notif_key: Optional[str] = None) -> None:
     """Enqueue a Discord message; on ANY failure log and continue.
 
     2026-05-07: emit a success/failure log line for EVERY call so operators
@@ -83,7 +84,7 @@ def _safe_enqueue(channel: str, content: str, embed: Optional[dict] = None) -> N
         from interactive_utils import get_conn
         conn = get_conn()
         try:
-            enqueue_discord_message(conn, channel, content, embed=embed)
+            enqueue_discord_message(conn, channel, content, embed=embed, notif_key=notif_key)
             try:
                 intellistock_logger.log(
                     f"discord ENQUEUED channel={channel} content={_content_preview}",

@@ -398,7 +398,7 @@ def ensure_discord_message_ids_table(conn):
         r.db(DB_NAME).table_create("DiscordMessageIds").run(conn)
 
 
-def action_enqueue_discord_message(conn, channel, content, embed=None, guild_id=None, message_key=None):
+def action_enqueue_discord_message(conn, channel, content, embed=None, guild_id=None, message_key=None, notif_key=None):
     """
     Enqueue a message for the Discord bot to send. Bot polls DiscordOutbox and sends to the given channel.
     channel: one of cli, notifications, trades, briefs, backtests (short names) or full names with emoji.
@@ -406,7 +406,12 @@ def action_enqueue_discord_message(conn, channel, content, embed=None, guild_id=
     embed: optional dict with title, description, color, fields (list of {name, value, inline}), etc.
     guild_id: optional Discord guild ID; if omitted bot uses first guild.
     message_key: optional string; if set, bot will store the sent message's Discord ID under this key for later edits.
+    notif_key: optional explicit notification-type key (from notify()); else the message is classified by content.
     Returns: { "id": "<uuid>", "channel": "...", "status": "pending" }.
+
+    Routing: EVERY message is classified into a notification type and routed to
+    Discord and/or iOS push per the operator's prefs. Fail-open — any routing
+    error falls back to a normal Discord enqueue (current behavior).
     """
     ensure_discord_outbox_table(conn)
     import uuid
@@ -424,6 +429,27 @@ def action_enqueue_discord_message(conn, channel, content, embed=None, guild_id=
         doc["guild_id"] = str(guild_id)
     if message_key is not None and str(message_key).strip():
         doc["message_key"] = str(message_key).strip()
+
+    # --- per-type routing (Discord and/or push) ---
+    try:
+        from notifications import resolve_routing
+        routing = resolve_routing(conn, doc["channel"], doc["content"], embed, notif_key)
+        if not routing.get("discord", True) and not routing.get("push", False):
+            # Both sinks off for this type → nothing to enqueue.
+            return {"id": None, "channel": doc["channel"], "status": "skipped"}
+        doc["notif_key"] = routing.get("notif_key")
+        if not routing.get("discord", True):
+            doc["route_discord"] = False
+        if routing.get("push"):
+            doc["want_push"] = True
+            doc["push_user_id"] = routing.get("push_user_id")
+            doc["push_title"] = routing.get("push_title")
+            doc["push_body"] = routing.get("push_body")
+            doc["push_data"] = routing.get("push_data") or {}
+    except Exception:
+        # Fail-open: a routing failure must never drop a Discord message.
+        pass
+
     r.db(DB_NAME).table("DiscordOutbox").insert(doc).run(conn)
     return {"id": doc["id"], "channel": doc["channel"], "status": "pending"}
 

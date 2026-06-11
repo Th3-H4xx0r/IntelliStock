@@ -97,27 +97,93 @@ def _load_prefs(user_id: Optional[str]) -> dict:
             pass
 
 
-def _discord_sink(channel: str, content: str, embed: Optional[dict]) -> None:
-    # Reuse the existing redact/scrub + graceful-degrade + log-line path.
+def _discord_sink(channel: str, content: str, embed: Optional[dict],
+                  notif_key: Optional[str] = None) -> None:
+    # Reuse the existing redact/scrub + graceful-degrade + log-line path. The
+    # explicit ``notif_key`` rides through to the outbox so the router classifies
+    # precisely (and the poller decides Discord-vs-push from prefs).
     from live_alerts import _safe_enqueue
-    _safe_enqueue(channel, content, embed=embed)
+    _safe_enqueue(channel, content, embed=embed, notif_key=notif_key)
 
 
-def _push_sink(user_id: str, *, title: str, body: str, category: str, data: dict) -> None:
-    try:
-        from apns_sender import send_to_user
-    except Exception:
-        return  # APNs module/deps absent → push simply doesn't deliver
-    # Push title/body are plaintext on Apple's servers + the lock screen — run
-    # them through the same redact filter the Discord path uses so an error
-    # message / reason text can never leak a key or token.
+# --- Outbox routing: the single point where ALL Discord-bound messages get
+# classified and their Discord/push fate decided (used by
+# interactive_utils.action_enqueue_discord_message). ----------------------------
+
+_prefs_cache = {"id": None, "cats": None, "ts": 0.0}
+
+
+def _reset_prefs_cache():
+    _prefs_cache.update(id=None, cats=None, ts=0.0)
+
+
+def _operator_prefs(conn):
+    """(operator_id, categories matrix) — cached ~30s on the given conn so an
+    alert burst doesn't re-read prefs per message."""
+    import time
+    op = _operator_user_id()
+    now = time.time()
+    if (_prefs_cache["id"] == op and _prefs_cache["cats"] is not None
+            and (now - _prefs_cache["ts"]) < 30):
+        return op, _prefs_cache["cats"]
+    from interactive_utils import action_get_notification_preferences
+    cats = action_get_notification_preferences(conn, op).get("categories", {})
+    _prefs_cache.update(id=op, cats=cats, ts=now)
+    return op, cats
+
+
+def _derive_push_title(embed, content):
+    if isinstance(embed, dict) and embed.get("title"):
+        return str(embed["title"])[:120]
+    return "IntelliStock"
+
+
+def _derive_push_body(content, embed):
+    if isinstance(content, str) and content.strip():
+        return content.strip()[:220]
+    if isinstance(embed, dict):
+        d = embed.get("description")
+        if d:
+            return str(d)[:220]
+    return "Notification"
+
+
+def _redact_text(s):
     try:
         from intellistock_logger import _redact
-        title = _redact(title) if isinstance(title, str) else title
-        body = _redact(body) if isinstance(body, str) else body
+        return _redact(s) if isinstance(s, str) else s
     except Exception:
-        pass
-    send_to_user(user_id, title=title, body=body, category=category, data=data)
+        return s
+
+
+def resolve_routing(conn, channel, content, embed=None, notif_key=None,
+                    push_title=None, push_body=None) -> dict:
+    """Classify a Discord-bound message and decide its Discord/push routing from
+    the operator's prefs. Returns ``{notif_key, discord, push, push_*}``.
+
+    FAIL-OPEN: on ANY error returns ``discord=True, push=False`` so the
+    real-money Discord path is never silenced by a routing bug.
+    """
+    try:
+        from notification_types import classify
+        key = classify(channel, content, embed, notif_key)
+        op, cats = _operator_prefs(conn)
+        route = cats.get(key) or {"discord": True, "push": False}
+        discord = bool(route.get("discord", True))
+        push = bool(route.get("push", False))
+        out = {"notif_key": key, "discord": discord, "push": push}
+        if push:
+            out["push_user_id"] = op
+            out["push_title"] = _redact_text(push_title or _derive_push_title(embed, content))
+            out["push_body"] = _redact_text(push_body or _derive_push_body(content, embed))
+            out["push_data"] = {"notif_key": key}
+        return out
+    except Exception as e:
+        intellistock_logger.log(
+            f"notify: resolve_routing failed ({type(e).__name__}: {e}); discord-only",
+            "yellow", service="NOTIFY",
+        )
+        return {"notif_key": notif_key or "other", "discord": True, "push": False}
 
 
 def notify(
@@ -133,44 +199,16 @@ def notify(
     user_id: Optional[str] = None,
     data: Optional[dict] = None,
 ) -> None:
-    """Route one notification to the sinks enabled for ``category``."""
-    # Resolve the target user ONCE so prefs and devices use the same identity
-    # (the live-alert path passes no user_id; it must resolve to whoever set up
-    # push, not the literal default "operator").
-    target_user = user_id or _operator_user_id()
+    """Build + enqueue a notification tagged with its ``category``.
+
+    Discord-vs-push routing is decided at the outbox (resolve_routing), so this
+    just enqueues the Discord message with the explicit category — one unified
+    path that also covers every direct ``enqueue_discord_message`` caller.
+    """
     try:
-        prefs = _load_prefs(target_user).get("categories", {})
+        _discord_sink(discord_channel, body, discord_embed, notif_key=category)
     except Exception as e:
-        # Fail OPEN to Discord so a prefs-store outage never silences alerts
-        # (preserves today's behavior).
         intellistock_logger.log(
-            f"notify: prefs load failed ({type(e).__name__}: {e}); discord fallback",
+            f"notify enqueue failed [{category}]: {type(e).__name__}: {e}",
             "yellow", service="NOTIFY",
         )
-        prefs = {category: {"discord": True, "push": False}}
-
-    route = prefs.get(category) or {"discord": True, "push": False}
-
-    if route.get("discord", True):
-        try:
-            _discord_sink(discord_channel, body, discord_embed)
-        except Exception as e:
-            intellistock_logger.log(
-                f"notify discord sink failed [{category}]: {type(e).__name__}: {e}",
-                "yellow", service="NOTIFY",
-            )
-
-    if route.get("push", False):
-        try:
-            _push_sink(
-                target_user,
-                title=push_title or title,
-                body=push_body or body,
-                category=category,
-                data=data or {"category": category, "instance_id": instance_id},
-            )
-        except Exception as e:
-            intellistock_logger.log(
-                f"notify push sink failed [{category}]: {type(e).__name__}: {e}",
-                "yellow", service="NOTIFY",
-            )

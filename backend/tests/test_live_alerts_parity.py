@@ -25,7 +25,7 @@ def _capture_enqueue(monkeypatch):
     captured = []
     monkeypatch.setattr(
         live_alerts, "_safe_enqueue",
-        lambda channel, content, embed=None: captured.append((channel, content, embed)),
+        lambda channel, content, embed=None, notif_key=None: captured.append((channel, content, embed, notif_key)),
     )
     return captured
 
@@ -39,11 +39,12 @@ def test_order_fill_discord_parity(default_prefs, monkeypatch):
         client_order_id="cid1", broker_order_id="oid1",
     )
     assert len(captured) == 1
-    channel, content, embed = captured[0]
+    channel, content, embed, notif_key = captured[0]
     assert channel == "trades"  # _channel() default
     assert content == "ORDER FILL [i1] BUY 1.0000 AAPL @ $100.00 = $100.00"
     assert embed["title"] == "Filled: AAPL"
     assert embed["color"] == 0x2ECC71
+    assert notif_key == "order_fill"
 
 
 def test_halt_routes_to_notifications_channel(default_prefs, monkeypatch):
@@ -51,9 +52,10 @@ def test_halt_routes_to_notifications_channel(default_prefs, monkeypatch):
     captured = _capture_enqueue(monkeypatch)
     live_alerts.alert_halt(instance_id="i1", reason="manual stop")
     assert len(captured) == 1
-    channel, content, embed = captured[0]
+    channel, content, embed, notif_key = captured[0]
     assert channel == "notifications"
     assert content == "HALT [i1] manual stop"
+    assert notif_key == "halt"
 
 
 def test_drawdown_halt_routes_to_trades_channel(default_prefs, monkeypatch):
@@ -63,8 +65,9 @@ def test_drawdown_halt_routes_to_trades_channel(default_prefs, monkeypatch):
         instance_id="i1", drawdown_pct=5.0, peak_value=1000.0, current_value=950.0,
     )
     assert len(captured) == 1
-    channel, _content, _embed = captured[0]
+    channel, _content, _embed, notif_key = captured[0]
     assert channel == "trades"
+    assert notif_key == "drawdown_halt"
 
 
 @pytest.mark.parametrize("fn_name,kwargs,category,channel", [

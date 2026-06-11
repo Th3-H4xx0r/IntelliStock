@@ -1358,6 +1358,28 @@ async def _handle_health(request):
     return aiohttp.web.json_response({"ok": True, "service": "discord_bot"})
 
 
+def _deliver_outbox_push(msg):
+    """Send the iOS push for an outbox row whose notification type has push
+    enabled. Best-effort; never raises (push must not block the Discord poller)."""
+    try:
+        from apns_sender import send_to_user
+        uid = msg.get("push_user_id")
+        if not uid:
+            return
+        send_to_user(
+            uid,
+            title=msg.get("push_title") or "IntelliStock",
+            body=msg.get("push_body") or "",
+            category=msg.get("notif_key") or "other",
+            data=msg.get("push_data") or {},
+        )
+    except Exception as e:
+        try:
+            log.warning("outbox_poller: push delivery failed for id=%s: %s", msg.get("id"), e)
+        except Exception:
+            pass
+
+
 async def _outbox_poller():
     """Background task: poll DiscordOutbox for pending messages and send them."""
     log.debug("outbox_poller: started")
@@ -1432,10 +1454,18 @@ async def _outbox_poller():
                             await discord_msg.edit(content=content or "(no content)", embed=None)
                         await run_sync(action_mark_discord_message_sent, conn, msg_id)
                     else:
-                        ok, sent = await send_to_discord_channel(channel, content=content, embed_dict=embed, guild_id=guild_id)
+                        # route_discord=False means this notification type is
+                        # push-only (Discord toggled off for it) — skip the
+                        # Discord post but still deliver the push below.
+                        route_discord = msg.get("route_discord", True)
+                        ok, sent = (True, None)
+                        if route_discord:
+                            ok, sent = await send_to_discord_channel(channel, content=content, embed_dict=embed, guild_id=guild_id)
                         if ok:
+                            if msg.get("want_push"):
+                                await run_sync(_deliver_outbox_push, msg)
                             await run_sync(action_mark_discord_message_sent, conn, msg_id)
-                            if message_key and sent:
+                            if route_discord and message_key and sent:
                                 await run_sync(action_store_discord_message_id, conn, channel, message_key, sent.id, guild_id)
                         else:
                             # Transient send failure: requeue with backoff

@@ -25,7 +25,7 @@ if _backend_dir not in sys.path:
 from interactive_utils import get_conn, action_enqueue_discord_message, action_enqueue_discord_edit, action_enqueue_discord_delete
 
 
-def enqueue_discord_message(conn, channel, content, embed=None, guild_id=None, message_key=None):
+def enqueue_discord_message(conn, channel, content, embed=None, guild_id=None, message_key=None, notif_key=None):
     """
     Enqueue a message for the Discord bot to send.
 
@@ -42,7 +42,7 @@ def enqueue_discord_message(conn, channel, content, embed=None, guild_id=None, m
     Returns:
         {"id": "<uuid>", "channel": "...", "status": "pending"}
     """
-    return action_enqueue_discord_message(conn, channel, content, embed=embed, guild_id=guild_id, message_key=message_key)
+    return action_enqueue_discord_message(conn, channel, content, embed=embed, guild_id=guild_id, message_key=message_key, notif_key=notif_key)
 
 
 def enqueue_discord_edit(conn, channel, message_key, content=None, embed=None, guild_id=None):

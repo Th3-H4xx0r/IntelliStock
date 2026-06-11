@@ -1,6 +1,9 @@
-"""notify() routing layer — fans a category out to Discord and/or iOS push per
-preference. Sinks are injectable module seams so we can assert routing without
-a DB, Discord, or Apple.
+"""notify() + the outbox routing layer.
+
+notify() now just enqueues a Discord message tagged with its category; the
+Discord-vs-push decision happens at the outbox (resolve_routing), so EVERY
+message — notify() callers and direct enqueue_discord_message callers — flows
+through one router.
 """
 from __future__ import annotations
 
@@ -9,108 +12,85 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _stub_operator(monkeypatch):
-    """Stop notify() from resolving the operator via a real DB connection."""
     import notifications
     notifications._reset_operator_cache()
+    notifications._reset_prefs_cache()
     monkeypatch.setattr(notifications, "_operator_user_id", lambda: "op1")
 
 
-def _patch(monkeypatch, route):
+def test_notify_enqueues_with_explicit_category(monkeypatch):
     import notifications
-    calls = {"discord": [], "push": []}
-    monkeypatch.setattr(notifications, "_load_prefs",
-                        lambda uid: {"categories": {"order_fill": route}})
-    monkeypatch.setattr(notifications, "_discord_sink",
-                        lambda channel, content, embed: calls["discord"].append((channel, content, embed)))
-    monkeypatch.setattr(notifications, "_push_sink",
-                        lambda uid, **kw: calls["push"].append((uid, kw)))
-    return notifications, calls
-
-
-def _fire(notifications):
-    notifications.notify(
-        category="order_fill", instance_id="inst1",
-        title="Filled AAPL", body="ORDER FILL ... AAPL",
-        discord_channel="trades", discord_embed={"title": "Filled: AAPL"},
-        push_body="BUY 1 AAPL @ $100",
+    calls = []
+    monkeypatch.setattr(
+        notifications, "_discord_sink",
+        lambda channel, content, embed, notif_key=None: calls.append((channel, content, embed, notif_key)),
     )
+    notifications.notify(
+        category="order_fill", instance_id="i1", title="Filled",
+        body="ORDER FILL [i1] BUY 1 AAPL", discord_channel="trades",
+        discord_embed={"title": "Filled: AAPL"},
+    )
+    assert calls == [("trades", "ORDER FILL [i1] BUY 1 AAPL", {"title": "Filled: AAPL"}, "order_fill")]
 
 
-def test_default_routes_discord_only(monkeypatch):
-    notifications, calls = _patch(monkeypatch, {"discord": True, "push": False})
-    _fire(notifications)
-    assert calls["discord"] == [("trades", "ORDER FILL ... AAPL", {"title": "Filled: AAPL"})]
-    assert calls["push"] == []
-
-
-def test_push_only(monkeypatch):
-    notifications, calls = _patch(monkeypatch, {"discord": False, "push": True})
-    _fire(notifications)
-    assert calls["discord"] == []
-    assert len(calls["push"]) == 1
-    uid, kw = calls["push"][0]
-    assert kw["category"] == "order_fill"
-    assert kw["body"] == "BUY 1 AAPL @ $100"
-
-
-def test_both(monkeypatch):
-    notifications, calls = _patch(monkeypatch, {"discord": True, "push": True})
-    _fire(notifications)
-    assert len(calls["discord"]) == 1
-    assert len(calls["push"]) == 1
-
-
-def test_neither(monkeypatch):
-    notifications, calls = _patch(monkeypatch, {"discord": False, "push": False})
-    _fire(notifications)
-    assert calls["discord"] == [] and calls["push"] == []
-
-
-def test_discord_sink_failure_does_not_block_push(monkeypatch):
+def _routing(monkeypatch, route, key="order_fill"):
     import notifications
-    calls = {"push": []}
-    monkeypatch.setattr(notifications, "_load_prefs",
-                        lambda uid: {"categories": {"order_fill": {"discord": True, "push": True}}})
-    def _boom(channel, content, embed):
-        raise RuntimeError("discord down")
-    monkeypatch.setattr(notifications, "_discord_sink", _boom)
-    monkeypatch.setattr(notifications, "_push_sink",
-                        lambda uid, **kw: calls["push"].append(kw))
-    # must not raise, and push must still fire
-    _fire(notifications)
-    assert len(calls["push"]) == 1
+    monkeypatch.setattr(notifications, "_operator_prefs", lambda conn: ("op1", {key: route}))
+    return notifications
 
 
-def test_notify_uses_resolved_operator_for_prefs_and_push(monkeypatch):
-    """The live-alert path passes no user_id; prefs AND push must use the SAME
-    resolved operator id (not the literal default 'operator')."""
+def test_resolve_routing_discord_only(monkeypatch):
+    n = _routing(monkeypatch, {"discord": True, "push": False})
+    out = n.resolve_routing(None, "trades", "ORDER FILL [main] BUY 1 AAPL")
+    assert out["notif_key"] == "order_fill"
+    assert out["discord"] is True and out["push"] is False
+    assert "push_user_id" not in out
+
+
+def test_resolve_routing_push_sets_fields(monkeypatch):
+    n = _routing(monkeypatch, {"discord": True, "push": True})
+    out = n.resolve_routing(None, "trades", "ORDER FILL [main] BUY 1 AAPL @ $100")
+    assert out["push"] is True
+    assert out["push_user_id"] == "op1"
+    assert "ORDER FILL" in out["push_body"]
+    assert out["push_data"]["notif_key"] == "order_fill"
+
+
+def test_resolve_routing_both_off(monkeypatch):
+    n = _routing(monkeypatch, {"discord": False, "push": False})
+    out = n.resolve_routing(None, "trades", "ORDER FILL [main]")
+    assert out["discord"] is False and out["push"] is False
+
+
+def test_resolve_routing_explicit_key_overrides_content(monkeypatch):
     import notifications
-    monkeypatch.setattr(notifications, "_operator_user_id", lambda: "real-user-7")
-    seen = {}
-    def _prefs(uid):
-        seen["prefs_uid"] = uid
-        return {"categories": {"order_fill": {"discord": False, "push": True}}}
-    def _push(uid, **kw):
-        seen["push_uid"] = uid
-    monkeypatch.setattr(notifications, "_load_prefs", _prefs)
-    monkeypatch.setattr(notifications, "_push_sink", _push)
-    monkeypatch.setattr(notifications, "_discord_sink", lambda *a, **k: None)
-    _fire(notifications)  # user_id=None
-    assert seen["prefs_uid"] == "real-user-7"
-    assert seen["push_uid"] == "real-user-7"
+    monkeypatch.setattr(notifications, "_operator_prefs",
+                        lambda conn: ("op1", {"halt": {"discord": True, "push": True}}))
+    # content looks like a fill, but the explicit notif_key wins
+    out = notifications.resolve_routing(None, "notifications", "ORDER FILL [x]", notif_key="halt")
+    assert out["notif_key"] == "halt" and out["push"] is True
 
 
-def test_prefs_load_failure_falls_back_to_discord(monkeypatch):
+def test_resolve_routing_classifies_direct_message(monkeypatch):
+    # a direct enqueue (no explicit key) — e.g. broker boot — is classified
+    n = _routing(monkeypatch, {"discord": True, "push": True}, key="broker_boot")
+    out = n.resolve_routing(None, "notifications", "[alpaca-main] Broker boot | broker=alpaca")
+    assert out["notif_key"] == "broker_boot" and out["push"] is True
+
+
+def test_resolve_routing_fail_open(monkeypatch):
     import notifications
-    calls = {"discord": [], "push": []}
-    def _boom(uid):
+    def _boom(conn):
         raise RuntimeError("rethink down")
-    monkeypatch.setattr(notifications, "_load_prefs", _boom)
-    monkeypatch.setattr(notifications, "_discord_sink",
-                        lambda channel, content, embed: calls["discord"].append((channel, content)))
-    monkeypatch.setattr(notifications, "_push_sink",
-                        lambda uid, **kw: calls["push"].append(kw))
-    _fire(notifications)
-    # fail-open to Discord preserves today's behavior when prefs are unreadable
-    assert len(calls["discord"]) == 1
-    assert calls["push"] == []
+    monkeypatch.setattr(notifications, "_operator_prefs", _boom)
+    out = notifications.resolve_routing(None, "trades", "ORDER FILL [main]")
+    # a routing failure must NEVER silence the real-money Discord path
+    assert out["discord"] is True and out["push"] is False
+
+
+def test_resolve_routing_unknown_type_defaults_discord(monkeypatch):
+    n = _routing(monkeypatch, {"discord": True, "push": False}, key="order_fill")
+    # an unclassifiable message -> 'other' (not in the stubbed prefs) -> default discord on
+    out = n.resolve_routing(None, "cli", "some random message")
+    assert out["notif_key"] == "other"
+    assert out["discord"] is True and out["push"] is False
