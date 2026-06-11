@@ -582,6 +582,91 @@ def action_mark_discord_message_failed(conn, msg_id, error):
     ).run(conn)
 
 
+# ----------------------------------------------------------------------------
+# Per-category notification preferences (Discord and/or iOS push routing).
+# One doc per user (id == user_id), categories nested as a map so a single
+# read serves notify() and a single write serves a settings save.
+# ----------------------------------------------------------------------------
+
+# The 9 live-trading notification categories (1:1 with live_alerts.alert_*).
+NOTIFICATION_CATEGORIES = (
+    "order_submit",
+    "order_fill",
+    "order_reject",
+    "order_retry",
+    "strategy_start",
+    "strategy_error",
+    "halt",
+    "drawdown_halt",
+    "crash_loop",
+)
+
+
+def _default_notification_categories():
+    """Defaults preserve today's behavior: Discord only, push off."""
+    return {c: {"discord": True, "push": False} for c in NOTIFICATION_CATEGORIES}
+
+
+def _coerce_route(v):
+    if not isinstance(v, dict):
+        return {"discord": True, "push": False}
+    return {"discord": bool(v.get("discord", True)), "push": bool(v.get("push", False))}
+
+
+def _merge_notification_categories(stored):
+    """Fill a full 9-category matrix from a (possibly partial) stored map,
+    ignoring any unknown stored keys."""
+    cats = _default_notification_categories()
+    if isinstance(stored, dict):
+        for c, v in stored.items():
+            if c in cats:
+                cats[c] = _coerce_route(v)
+    return cats
+
+
+def _validate_notification_categories(categories):
+    """Return a full cleaned matrix; raise ValueError on any unknown category."""
+    cats = _default_notification_categories()
+    for c, v in (categories or {}).items():
+        if c not in cats:
+            raise ValueError(f"unknown notification category: {c}")
+        cats[c] = _coerce_route(v)
+    return cats
+
+
+def ensure_notification_preferences_table(conn):
+    dbs = list(r.db_list().run(conn))
+    if DB_NAME not in dbs:
+        r.db_create(DB_NAME).run(conn)
+    tables = list(r.db(DB_NAME).table_list().run(conn))
+    if "NotificationPreferences" not in tables:
+        r.db(DB_NAME).table_create("NotificationPreferences").run(conn)
+
+
+def action_get_notification_preferences(conn, user_id):
+    """Return ``{"user_id", "categories"}`` with all 9 categories filled in
+    (defaults where unset)."""
+    ensure_notification_preferences_table(conn)
+    doc = r.db(DB_NAME).table("NotificationPreferences").get(str(user_id)).run(conn)
+    stored = doc.get("categories") if isinstance(doc, dict) else None
+    return {"user_id": str(user_id), "categories": _merge_notification_categories(stored)}
+
+
+def action_set_notification_preferences(conn, user_id, categories):
+    """Validate + persist the full matrix. Raises ValueError on unknown category."""
+    from datetime import datetime, timezone
+    ensure_notification_preferences_table(conn)
+    clean = _validate_notification_categories(categories)
+    doc = {
+        "id": str(user_id),
+        "user_id": str(user_id),
+        "categories": clean,
+        "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
+    }
+    r.db(DB_NAME).table("NotificationPreferences").insert(doc, conflict="replace").run(conn)
+    return {"user_id": str(user_id), "categories": clean}
+
+
 def next_strategy_id(conn):
     """Return next available integer id for Strategies table."""
     cursor = r.db(DB_NAME).table("Strategies").run(conn)
