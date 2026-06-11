@@ -50,3 +50,49 @@ double valueToY(double value, double min, double max, double height) {
   final t = ((value - min) / (max - min)).clamp(0.0, 1.0);
   return height * (1 - t);
 }
+
+// ── Time-based mapping ────────────────────────────────────────────────────────
+//
+// For charts plotted against real time (a DateTime axis spanning
+// first..last), the horizontal position of a point is proportional to its
+// timestamp, not its index — so unevenly-spaced samples and trade markers stay
+// aligned. These mirror [fractionToIndex] / [indexToFraction] for that case.
+
+/// Nearest data index to a horizontal [fraction] (0..1) on a time-based plot
+/// spanning `timestamps.first..timestamps.last`.
+int nearestIndexByTime(List<DateTime> timestamps, double fraction) {
+  if (timestamps.length <= 1) return 0;
+  final first = timestamps.first.millisecondsSinceEpoch;
+  final last = timestamps.last.millisecondsSinceEpoch;
+  if (last <= first) return 0;
+  final f = fraction.clamp(0.0, 1.0);
+  final target = first + f * (last - first);
+  var lo = 0;
+  var hi = timestamps.length - 1;
+  while (lo < hi) {
+    final mid = (lo + hi) ~/ 2;
+    if (timestamps[mid].millisecondsSinceEpoch < target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  if (lo <= 0) return 0;
+  final prev = lo - 1;
+  return (timestamps[lo].millisecondsSinceEpoch - target).abs() <
+          (timestamps[prev].millisecondsSinceEpoch - target).abs()
+      ? lo
+      : prev;
+}
+
+/// The horizontal fraction (0..1) of data point [index] on a time-based plot.
+/// Inverse of [nearestIndexByTime] at the data points.
+double timeFractionOf(List<DateTime> timestamps, int index) {
+  if (timestamps.length <= 1) return 0.0;
+  final i = index.clamp(0, timestamps.length - 1);
+  final first = timestamps.first.millisecondsSinceEpoch;
+  final last = timestamps.last.millisecondsSinceEpoch;
+  if (last <= first) return 0.0;
+  return ((timestamps[i].millisecondsSinceEpoch - first) / (last - first))
+      .clamp(0.0, 1.0);
+}

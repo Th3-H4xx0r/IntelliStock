@@ -119,6 +119,19 @@ String formatChartDate(DateTime ts, String range) {
   }
 }
 
+/// Formats an x-axis label by the total visible [span] — for charts whose
+/// range isn't a named preset (e.g. backtests over arbitrary windows).
+String formatChartDateBySpan(DateTime ts, Duration span) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  if (span.inDays <= 2) return '${two(ts.hour)}:${two(ts.minute)}';
+  if (span.inDays <= 120) return '${months[ts.month - 1]} ${ts.day}';
+  return "${months[ts.month - 1]} '${ts.year.toString().substring(2)}";
+}
+
 /// Picks up to [slots] evenly-spaced data indices for labelling (always
 /// includes first and last). Returns fewer when there are fewer points.
 List<int> evenlySpacedLabelIndices(int count, int slots) {

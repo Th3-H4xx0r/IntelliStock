@@ -69,6 +69,44 @@ void main() {
     });
   });
 
+  group('nearestIndexByTime / timeFractionOf', () {
+    final base = DateTime(2026, 1, 1);
+    // Unevenly spaced: 0h, 1h, 5h (so index fraction != time fraction).
+    final ts = [base, base.add(const Duration(hours: 1)), base.add(const Duration(hours: 5))];
+
+    test('empty / single returns 0', () {
+      expect(nearestIndexByTime(const [], 0.5), 0);
+      expect(nearestIndexByTime([base], 0.9), 0);
+      expect(timeFractionOf(const [], 0), 0.0);
+      expect(timeFractionOf([base], 0), 0.0);
+    });
+
+    test('fraction 0 -> first, 1 -> last', () {
+      expect(nearestIndexByTime(ts, 0.0), 0);
+      expect(nearestIndexByTime(ts, 1.0), 2);
+    });
+
+    test('maps by time, not index', () {
+      // 0.5 of a 5h span = 2.5h -> closest is the 1h point (index 1), since the
+      // next point is at 5h. An index-based mapping would have chosen index 1
+      // too here, so use a clearer case: 0.7*5h = 3.5h -> closer to 5h (index 2).
+      expect(nearestIndexByTime(ts, 0.7), 2);
+      expect(nearestIndexByTime(ts, 0.1), 0); // 0.5h -> closer to 0h
+    });
+
+    test('timeFractionOf returns the point time fraction', () {
+      expect(timeFractionOf(ts, 0), closeTo(0.0, 1e-9));
+      expect(timeFractionOf(ts, 1), closeTo(0.2, 1e-9)); // 1h / 5h
+      expect(timeFractionOf(ts, 2), closeTo(1.0, 1e-9));
+    });
+
+    test('round-trips: nearestIndexByTime(timeFractionOf(i)) == i', () {
+      for (var i = 0; i < ts.length; i++) {
+        expect(nearestIndexByTime(ts, timeFractionOf(ts, i)), i);
+      }
+    });
+  });
+
   group('valueToY', () {
     test('max value maps to top (y=0), min to bottom (y=height)', () {
       expect(valueToY(20.0, 10.0, 20.0, 100.0), closeTo(0.0, 1e-9));
