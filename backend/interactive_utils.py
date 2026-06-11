@@ -667,6 +667,59 @@ def action_set_notification_preferences(conn, user_id, categories):
     return {"user_id": str(user_id), "categories": clean}
 
 
+# ----------------------------------------------------------------------------
+# iOS push device registry (APNs device tokens). One row per device token so
+# register is idempotent (re-register just refreshes last_seen).
+# ----------------------------------------------------------------------------
+
+def _push_device_doc(user_id, token, platform="ios", env="prod", app_version=None, now_iso=None):
+    from datetime import datetime, timezone
+    now_iso = now_iso or (datetime.now(timezone.utc).isoformat() + "Z")
+    return {
+        "id": str(token),
+        "user_id": str(user_id),
+        "device_token": str(token),
+        "platform": str(platform or "ios"),
+        "env": str(env or "prod"),
+        "app_version": app_version,
+        "created_at": now_iso,
+        "last_seen": now_iso,
+    }
+
+
+def ensure_push_devices_table(conn):
+    dbs = list(r.db_list().run(conn))
+    if DB_NAME not in dbs:
+        r.db_create(DB_NAME).run(conn)
+    tables = list(r.db(DB_NAME).table_list().run(conn))
+    if "PushDevices" not in tables:
+        r.db(DB_NAME).table_create("PushDevices").run(conn)
+
+
+def action_register_push_device(conn, user_id, token, platform="ios", env="prod", app_version=None):
+    """Idempotently register/refresh an APNs device token (id == token)."""
+    ensure_push_devices_table(conn)
+    doc = _push_device_doc(user_id, token, platform=platform, env=env, app_version=app_version)
+    r.db(DB_NAME).table("PushDevices").insert(doc, conflict="replace").run(conn)
+    return doc
+
+
+def action_list_push_devices(conn, user_id, env=None):
+    """Return a user's registered devices, optionally filtered by env."""
+    ensure_push_devices_table(conn)
+    sel = r.db(DB_NAME).table("PushDevices").filter({"user_id": str(user_id)})
+    if env:
+        sel = sel.filter({"env": str(env)})
+    return list(sel.run(conn))
+
+
+def action_delete_push_device(conn, token):
+    """Remove a device token (logout / APNs 410 prune)."""
+    ensure_push_devices_table(conn)
+    r.db(DB_NAME).table("PushDevices").get(str(token)).delete().run(conn)
+    return {"deleted": str(token)}
+
+
 def next_strategy_id(conn):
     """Return next available integer id for Strategies table."""
     cursor = r.db(DB_NAME).table("Strategies").run(conn)
