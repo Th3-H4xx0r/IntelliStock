@@ -6,6 +6,10 @@ import '../../../core/widgets/app_background.dart';
 import '../../../core/widgets/app_toggle.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
+import '../../../core/push/push_device.dart';
+import '../../../core/push/push_devices_controller.dart';
+import '../../../core/push/push_repository.dart';
+import '../../../core/push/push_service.dart';
 import '../application/notification_prefs_controller.dart';
 import '../data/models/notification_prefs.dart';
 
@@ -16,10 +20,40 @@ import '../data/models/notification_prefs.dart';
 class NotificationSettingsScreen extends ConsumerWidget {
   const NotificationSettingsScreen({super.key});
 
-  void _snack(BuildContext context, String msg) {
+  void _snack(BuildContext context, String msg, {bool ok = true}) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(msg, style: AppTextStyles.body)));
+      ..showSnackBar(SnackBar(
+        content: Text(
+          msg,
+          style: AppTextStyles.body.copyWith(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        backgroundColor: ok ? AppColors.success : AppColors.danger,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
+      ));
+  }
+
+  Future<void> _enableOnThisDevice(BuildContext context, WidgetRef ref) async {
+    _snack(context, 'Requesting push permission…');
+    await ref.read(pushServiceProvider).enable();
+    // The APNs token arrives asynchronously via the native callback; give it a
+    // moment, then refresh the list.
+    await Future<void>.delayed(const Duration(seconds: 2));
+    await ref.read(pushDevicesProvider.notifier).refresh();
+  }
+
+  Future<void> _removeDevice(BuildContext context, WidgetRef ref, PushDevice d) async {
+    try {
+      await ref.read(pushRepositoryProvider).unregister(d.deviceToken);
+      await ref.read(pushDevicesProvider.notifier).refresh();
+      if (context.mounted) _snack(context, 'Device removed');
+    } catch (e) {
+      if (context.mounted) _snack(context, 'Could not remove: $e', ok: false);
+    }
   }
 
   Future<void> _onToggle(BuildContext context, WidgetRef ref, String category,
@@ -43,13 +77,13 @@ class NotificationSettingsScreen extends ConsumerWidget {
       if (channel == NotifChannel.push && !ok) {
         final devices = res['devices'] ?? 0;
         _snack(context, devices == 0
-            ? 'No iOS device registered for push yet.'
-            : 'Push not delivered — check APNs setup.');
+            ? 'No iOS device registered yet — tap "Enable push on this device".'
+            : 'Push not delivered — check APNs setup.', ok: false);
       } else {
-        _snack(context, ok ? '$label test sent ✓' : '$label test could not be sent');
+        _snack(context, ok ? '$label test sent ✓' : '$label test could not be sent', ok: ok);
       }
     } catch (e) {
-      if (context.mounted) _snack(context, '$label test failed: $e');
+      if (context.mounted) _snack(context, '$label test failed: $e', ok: false);
     }
   }
 
@@ -121,6 +155,64 @@ class NotificationSettingsScreen extends ConsumerWidget {
                                   ),
                                 ),
                               ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      _SectionLabel(label: 'Registered devices'),
+                      const SizedBox(height: 8),
+                      GlassCard(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ref.watch(pushDevicesProvider).when(
+                                  loading: () => Row(children: [
+                                    const SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(strokeWidth: 2)),
+                                    const SizedBox(width: 10),
+                                    Text('Checking registered devices…',
+                                        style: AppTextStyles.micro
+                                            .copyWith(color: AppColors.textDim)),
+                                  ]),
+                                  error: (e, _) => Text('Could not load devices: $e',
+                                      style: AppTextStyles.micro
+                                          .copyWith(color: AppColors.danger)),
+                                  data: (devices) => devices.isEmpty
+                                      ? Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text('No devices registered yet.',
+                                                style: AppTextStyles.bodyHi),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              'Tap "Enable push on this device" and allow '
+                                              'notifications. Requires a physical device with '
+                                              'the app installed (push doesn\'t work in the '
+                                              'simulator).',
+                                              style: AppTextStyles.micro
+                                                  .copyWith(color: AppColors.textDim),
+                                            ),
+                                          ],
+                                        )
+                                      : Column(
+                                          children: [
+                                            for (final d in devices)
+                                              _DeviceTile(
+                                                device: d,
+                                                onRemove: () =>
+                                                    _removeDevice(context, ref, d),
+                                              ),
+                                          ],
+                                        ),
+                                ),
+                            const SizedBox(height: 12),
+                            _TestButton(
+                              icon: symbol('notifications'),
+                              label: 'Enable push on this device',
+                              onTap: () => _enableOnThisDevice(context, ref),
                             ),
                           ],
                         ),
@@ -248,6 +340,44 @@ class _TestButton extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _DeviceTile extends StatelessWidget {
+  const _DeviceTile({required this.device, required this.onRemove});
+  final PushDevice device;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = <String>[device.platform.toUpperCase(), device.env];
+    if (device.lastSeen != null && device.lastSeen!.isNotEmpty) {
+      parts.add('seen ${device.lastSeen!.split('T').first}');
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Icon(symbol('notifications'), size: 16, color: AppColors.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(device.tokenSuffix, style: AppTextStyles.body),
+                Text(parts.join(' · '),
+                    style: AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(symbol('delete'), size: 18, color: AppColors.textDim),
+            tooltip: 'Remove',
+            onPressed: onRemove,
+          ),
+        ],
       ),
     );
   }

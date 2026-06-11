@@ -27,6 +27,27 @@ def test_register_push_device(monkeypatch):
     assert res["id"] == "TOK1"
 
 
+def test_list_push_devices_projects_fields(monkeypatch):
+    from api import main
+    monkeypatch.setattr(main, "action_list_push_devices", lambda conn, uid: [
+        {"id": "TOK1", "device_token": "TOK1", "user_id": uid, "platform": "ios",
+         "env": "sandbox", "app_version": "1.0", "last_seen": "2026-06-11T00:00:00Z",
+         "created_at": "2026-06-10T00:00:00Z"},
+    ])
+    res = main.api_list_push_devices(conn=None, current_user={"id": "u1"})
+    assert "devices" in res and len(res["devices"]) == 1
+    d = res["devices"][0]
+    assert d["device_token"] == "TOK1" and d["platform"] == "ios" and d["env"] == "sandbox"
+    assert "user_id" not in d  # internal field not exposed
+
+
+def test_list_push_devices_empty(monkeypatch):
+    from api import main
+    monkeypatch.setattr(main, "action_list_push_devices", lambda conn, uid: [])
+    res = main.api_list_push_devices(conn=None, current_user={"id": "u1"})
+    assert res == {"devices": []}
+
+
 def test_delete_push_device(monkeypatch):
     from api import main
     deleted = {}

@@ -162,6 +162,7 @@ from interactive_utils import (
     action_set_notification_preferences,
     action_register_push_device,
     action_delete_push_device,
+    action_list_push_devices,
 )
 
 # OpenAPI / Swagger UI gated to admins-only in production. The schema
@@ -1714,6 +1715,23 @@ class PushDeviceBody(BaseModel):
     platform: str = "ios"
     env: str = "prod"  # "sandbox" for debug builds, "prod" for release
     app_version: Optional[str] = None
+
+
+@app.get("/push/devices", response_class=JSONResponse)
+def api_list_push_devices(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    devices = _run(action_list_push_devices, conn, current_user["id"])
+    out = [
+        {
+            "device_token": d.get("device_token") or d.get("id"),
+            "platform": d.get("platform"),
+            "env": d.get("env"),
+            "app_version": d.get("app_version"),
+            "last_seen": d.get("last_seen"),
+            "created_at": d.get("created_at"),
+        }
+        for d in (devices or [])
+    ]
+    return {"devices": out}
 
 
 @app.post("/push/devices", response_class=JSONResponse)

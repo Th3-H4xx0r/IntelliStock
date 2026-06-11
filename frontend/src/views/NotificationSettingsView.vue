@@ -30,12 +30,44 @@ const testing = ref('')      // 'discord' | 'push' while in-flight
 const testMsg = ref('')
 const testOk = ref(false)
 
+const devices = ref([])
+const devicesError = ref('')
+
 function routeFor(key) {
   return categories.value[key] || { discord: true, push: false }
 }
 
 function headers() {
   return { ...authHeaders(), 'Content-Type': 'application/json' }
+}
+
+function tokenSuffix(t) {
+  return t && t.length > 8 ? '…' + t.slice(-8) : (t || '')
+}
+
+async function fetchDevices() {
+  devicesError.value = ''
+  try {
+    const res = await fetch(`${API_BASE}/push/devices`, { headers: authHeaders() })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    devices.value = data.devices || []
+  } catch (e) {
+    devicesError.value = `Could not load devices: ${e.message}`
+  }
+}
+
+async function removeDevice(token) {
+  try {
+    const res = await fetch(`${API_BASE}/push/devices/${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    await fetchDevices()
+  } catch (e) {
+    devicesError.value = `Could not remove: ${e.message}`
+  }
 }
 
 async function fetchPrefs() {
@@ -105,7 +137,7 @@ async function sendTest(channel) {
   }
 }
 
-onMounted(fetchPrefs)
+onMounted(() => { fetchPrefs(); fetchDevices() })
 </script>
 
 <template>
@@ -139,6 +171,30 @@ onMounted(fetchPrefs)
             {{ testMsg }}
           </span>
         </div>
+      </div>
+
+      <!-- Registered devices -->
+      <div class="mb-8 rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+        <p class="text-sm font-medium text-slate-200 mb-1">Registered devices</p>
+        <p v-if="devices.length === 0" class="text-xs text-slate-500">
+          No iOS device registered yet. Open the IntelliStock iOS app, sign in, and tap
+          <span class="text-slate-300">Settings → Notifications → Enable push on this device</span>,
+          then allow notifications. (Requires a physical device — push doesn't work in the simulator.)
+        </p>
+        <ul v-else class="divide-y divide-slate-800">
+          <li v-for="d in devices" :key="d.device_token" class="flex items-center justify-between py-2">
+            <div>
+              <p class="text-sm text-slate-200 font-mono">{{ tokenSuffix(d.device_token) }}</p>
+              <p class="text-xs text-slate-500">
+                {{ (d.platform || 'ios').toUpperCase() }} · {{ d.env
+                }}<span v-if="d.last_seen"> · seen {{ (d.last_seen || '').split('T')[0] }}</span>
+              </p>
+            </div>
+            <button @click="removeDevice(d.device_token)"
+              class="text-xs text-slate-400 hover:text-red-400 transition-colors">Remove</button>
+          </li>
+        </ul>
+        <p v-if="devicesError" class="text-amber-400 text-xs mt-2">{{ devicesError }}</p>
       </div>
 
       <!-- Loading / error -->
