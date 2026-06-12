@@ -3457,6 +3457,67 @@ def api_portfolio_history(
     return _run(action_get_portfolio_history, conn, brokerage_id, range)
 
 
+@app.get("/brokerages/{brokerage_id}/positions", response_class=JSONResponse)
+def api_brokerage_positions(
+    brokerage_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Current open positions (holdings) for a linked brokerage account.
+
+    Resolved via the broker-direct live-state of an instance using this
+    brokerage (positions are the whole account, shared by all its instances),
+    sorted by market value. Empty when the brokerage has no instance/positions.
+    """
+    ls = None
+    try:
+        res = action_instances(conn)
+        inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
+    except Exception:
+        inst_list = []
+    for inst in (inst_list or []):
+        iid = str((inst or {}).get("id") or "")
+        if not iid:
+            continue
+        full = inst
+        try:
+            full = action_get_instance(conn, iid) or inst
+        except Exception:
+            pass
+        if _widget_brokerage_id(full) != brokerage_id:
+            continue
+        try:
+            cand = action_get_live_state(conn, iid)
+        except Exception:
+            cand = None
+        if isinstance(cand, dict):
+            ls = cand
+            if cand.get("positions"):
+                break  # found an instance with live holdings
+
+    def _f(v):
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    positions = []
+    if isinstance(ls, dict):
+        for p in (ls.get("positions") or []):
+            p = p or {}
+            positions.append({
+                "symbol": (p.get("symbol") or "").upper(),
+                "qty": _f(p.get("qty")) or 0.0,
+                "avgEntryPrice": _f(p.get("avg_entry_price")),
+                "lastPrice": _f(p.get("last_price")),
+                "marketValue": _f(p.get("market_value")) or 0.0,
+                "unrealizedPnl": _f(p.get("unrealized_pnl")) or 0.0,
+                "unrealizedPnlPct": _f(p.get("unrealized_pnl_pct")) or 0.0,
+            })
+    positions.sort(key=lambda x: x.get("marketValue") or 0.0, reverse=True)
+    return {"brokerage_id": brokerage_id, "positions": positions}
+
+
 # ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
 #
 # Used by LiveTradingView so the frontend never has to learn the brokerage_id

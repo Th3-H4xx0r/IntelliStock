@@ -245,7 +245,7 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
             ],
           ),
         ),
-        const SizedBox(height: 8),
+        SizedBox(height: hero ? 22 : 8),
         histAsync.when(
           loading: () => const _ChartSkeleton(),
           error: (_, _) => const _ChartEmpty(message: 'Failed to load'),
@@ -468,7 +468,7 @@ class _ChartSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
-      child: Skeleton(height: 180, radius: 8),
+      child: Skeleton(height: 224, radius: 8),
     );
   }
 }
@@ -480,7 +480,7 @@ class _ChartEmpty extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 180,
+      height: 224,
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -515,7 +515,7 @@ class _ChartArea extends StatelessWidget {
   /// doesn't re-animate.
   final bool animate;
 
-  static const double _plotHeight = 172;
+  static const double _plotHeight = 224;
   static const double _dayMinutes = 24 * 60; // 1440
 
   bool get _isDay => range == '1D';
@@ -628,10 +628,23 @@ class _ChartArea extends StatelessWidget {
                         child: ValueListenableBuilder<ScrubSample?>(
                           valueListenable: scrub,
                           builder: (_, sample, _) {
+                            // Not scrubbing → a persistent dot marks the latest
+                            // value at the end of the line (no hairline).
                             if (sample == null ||
                                 sample.index < 0 ||
                                 sample.index >= n) {
-                              return const SizedBox.shrink();
+                              if (n == 0) return const SizedBox.shrink();
+                              final endFrac =
+                                  _isDay ? (xs.last / _dayMinutes) : 1.0;
+                              return CustomPaint(
+                                painter: ScrubPainter(
+                                  fraction: endFrac.clamp(0.0, 1.0),
+                                  dotY: valueToY(history.values[n - 1],
+                                      bounds.min, bounds.max, _plotHeight),
+                                  color: lineColor,
+                                  hairline: false,
+                                ),
+                              );
                             }
                             final dotY = valueToY(
                               history.values[sample.index],

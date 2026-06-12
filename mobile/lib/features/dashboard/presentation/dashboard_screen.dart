@@ -10,6 +10,7 @@ import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../widgets_bridge/widget_sync_service.dart';
+import '../application/account_positions_controller.dart';
 import '../application/dashboard_controller.dart';
 import '../application/selected_account_controller.dart';
 import '../data/dashboard_repository.dart';
@@ -243,6 +244,7 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
                   account: selected,
                   hero: true,
                 ),
+                _HoldingsList(brokerageId: selected.id),
               ],
             );
           },
@@ -435,6 +437,123 @@ class _AccountRow extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── Holdings ──────────────────────────────────────────────────────────────────
+
+/// The selected account's current holdings, shown below the hero chart like a
+/// modern brokerage app. Hidden while empty / loading / erroring (the backend
+/// positions endpoint may not be deployed yet), so it never shows a blank box.
+class _HoldingsList extends ConsumerWidget {
+  const _HoldingsList({required this.brokerageId});
+  final String brokerageId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final positions =
+        ref.watch(accountPositionsProvider(brokerageId)).valueOrNull ??
+            const <AccountPosition>[];
+    if (positions.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12, left: 2),
+            child: Text('Holdings', style: AppTextStyles.h3),
+          ),
+          GlassCard(
+            liquid: true,
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Column(
+              children: [
+                for (var i = 0; i < positions.length; i++) ...[
+                  if (i > 0)
+                    Divider(
+                      height: 1,
+                      thickness: 1,
+                      color: Colors.white.withValues(alpha: 0.05),
+                      indent: 14,
+                      endIndent: 14,
+                    ),
+                  _HoldingRow(p: positions[i]),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HoldingRow extends StatelessWidget {
+  const _HoldingRow({required this.p});
+  final AccountPosition p;
+
+  String get _qtyLabel {
+    final q = p.qty;
+    final s =
+        q == q.roundToDouble() ? q.toInt().toString() : q.toStringAsFixed(2);
+    return '$s ${q == 1 ? 'share' : 'shares'}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final up = p.unrealizedPnlPct >= 0;
+    final color = up ? AppColors.success : AppColors.danger;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+              border:
+                  Border.all(color: AppColors.primary.withValues(alpha: 0.18)),
+            ),
+            child: Text(
+              p.symbol.isNotEmpty ? p.symbol[0] : '?',
+              style: AppTextStyles.cardTitle.copyWith(color: AppColors.primary),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(p.symbol,
+                    style: AppTextStyles.bodyHi
+                        .copyWith(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text(_qtyLabel,
+                    style:
+                        AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+              ],
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(fmtMoney(p.marketValue),
+                  style: AppTextStyles.value.copyWith(color: AppColors.textHi)),
+              const SizedBox(height: 2),
+              Text(
+                fmtPct(p.unrealizedPnlPct),
+                style: AppTextStyles.micro
+                    .copyWith(color: color, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

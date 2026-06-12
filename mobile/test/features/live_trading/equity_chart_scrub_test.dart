@@ -13,10 +13,13 @@ void main() {
   testWidgets(
     'scrub maps left edge -> first point and right edge -> last point',
     (tester) async {
+      // 1D uses a fixed full-day (minute-of-day) x-axis, so spread the points
+      // across the whole day — otherwise they'd collapse into the first pixel
+      // and the edges couldn't resolve distinct points.
       final history = PortfolioHistory(
         timestamps: List.generate(
           11,
-          (i) => DateTime(2026, 1, 1).add(Duration(minutes: i)),
+          (i) => DateTime(2026, 1, 1).add(Duration(minutes: i * 143)),
         ),
         values: List.generate(11, (i) => i.toDouble()),
       );

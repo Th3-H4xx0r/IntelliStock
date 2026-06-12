@@ -13,6 +13,7 @@ class ScrubPainter extends CustomPainter {
     required this.fraction,
     required this.dotY,
     required this.color,
+    this.hairline = true,
   });
 
   /// Horizontal position 0..1 of the hairline + dot.
@@ -24,17 +25,23 @@ class ScrubPainter extends CustomPainter {
 
   final Color color;
 
+  /// Whether to draw the vertical hairline. False renders just the dot — used
+  /// for the persistent "current value" marker at the end of the line.
+  final bool hairline;
+
   @override
   void paint(Canvas canvas, Size size) {
     final x = (size.width * fraction).clamp(0.0, size.width);
 
-    canvas.drawLine(
-      Offset(x, 0),
-      Offset(x, size.height),
-      Paint()
-        ..color = color.withValues(alpha: 0.55)
-        ..strokeWidth = 1.2,
-    );
+    if (hairline) {
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(x, size.height),
+        Paint()
+          ..color = color.withValues(alpha: 0.55)
+          ..strokeWidth = 1.2,
+      );
+    }
 
     if (dotY != null) {
       final y = dotY!.clamp(0.0, size.height);
@@ -60,7 +67,10 @@ class ScrubPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(ScrubPainter old) =>
-      old.fraction != fraction || old.dotY != dotY || old.color != color;
+      old.fraction != fraction ||
+      old.dotY != dotY ||
+      old.color != color ||
+      old.hairline != hairline;
 }
 
 /// A thin row of evenly-spaced x-axis date/time labels rendered *below* the
