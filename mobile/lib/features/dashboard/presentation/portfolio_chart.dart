@@ -111,7 +111,7 @@ class PortfolioChart extends ConsumerStatefulWidget {
 
 class _PortfolioChartState extends ConsumerState<PortfolioChart>
     with AutomaticKeepAliveClientMixin {
-  String _range = '1M';
+  String _range = '1D';
 
   // Scrub state lives in a ValueNotifier so dragging repaints only the hairline
   // + header value, never the (expensive) Syncfusion chart — that's what made
