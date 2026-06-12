@@ -471,7 +471,7 @@ class _HoldingsList extends ConsumerWidget {
             child: Text('Holdings', style: AppTextStyles.h3),
           ),
           GlassCard(
-            liquid: true,
+            frosted: true,
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Column(
               children: [
