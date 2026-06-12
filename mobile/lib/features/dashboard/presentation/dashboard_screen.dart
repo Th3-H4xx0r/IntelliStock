@@ -28,15 +28,19 @@ class DashboardScreen extends ConsumerWidget {
     // Refresh the home-screen widget (live instance equity) on dashboard entry.
     ref.watch(widgetSyncProvider);
 
+    // The shell drops the top safe-area inset for the dashboard so the gradient
+    // bleeds under the status bar / dynamic island — re-add it as content pad.
+    final topInset = MediaQuery.viewPaddingOf(context).top;
+
     return Stack(
       children: [
-        // Purple gradient bloom across the top — matches the app's violet theme
-        // and sits behind the (scrolling) content as a static backdrop.
-        const _TopGlow(),
+        // Full-bleed violet→black gradient with a diagonal light streak, behind
+        // the (scrolling) glass content as a static backdrop.
+        const _DashboardBackdrop(),
         CustomScrollView(
           slivers: [
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 28, 16, 24),
+              padding: EdgeInsets.fromLTRB(16, topInset + 12, 16, 24),
               sliver: SliverList(
                 delegate: SliverChildListDelegate([
                   // ── Portfolio section ──────────────────────────────────────
@@ -60,61 +64,81 @@ class DashboardScreen extends ConsumerWidget {
   }
 }
 
-// ── Top glow ──────────────────────────────────────────────────────────────────
+// ── Dashboard backdrop ────────────────────────────────────────────────────────
 
-/// A purple gradient bloom anchored to the top of the dashboard. It does not
-/// scroll — the cards glide over it as glass floating on a violet glow.
-class _TopGlow extends StatelessWidget {
-  const _TopGlow();
+/// The professional violet gradient field behind the dashboard, modelled on a
+/// modern fintech home screen: a vivid violet crown that eases into the app's
+/// near-black, a soft diagonal specular streak sweeping from the upper-right,
+/// and a lavender bloom that caps the streak. It is full-bleed (paints under
+/// the dynamic island) and static, so the glass cards glide over it.
+class _DashboardBackdrop extends StatelessWidget {
+  const _DashboardBackdrop();
 
   @override
   Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: SizedBox(
-          height: 340,
-          width: double.infinity,
-          child: Stack(
-            children: [
-              // Vertical violet wash fading down — the "gradient on top".
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        const Color(0xFF7637F2).withValues(alpha: 0.30),
-                        const Color(0xFF7637F2).withValues(alpha: 0.04),
-                        const Color(0xFF7637F2).withValues(alpha: 0.0),
-                      ],
-                      stops: const [0.0, 0.55, 1.0],
-                    ),
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Stack(
+          children: [
+            // 1) Vivid violet crown easing into the canvas black.
+            const Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0xFF7A36E6), // vivid violet (under the island)
+                      Color(0xFF4A1E9E),
+                      Color(0xFF1C0F3A),
+                      Color(0xFF04040C), // canvas black
+                    ],
+                    stops: [0.0, 0.16, 0.34, 0.52],
                   ),
                 ),
               ),
-              // Focused radial bloom for a richer center highlight.
-              Positioned(
-                top: -140,
-                left: -60,
-                right: -60,
-                child: Container(
-                  height: 300,
-                  decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: const Alignment(0.0, 0.2),
-                      radius: 0.85,
-                      colors: [
-                        AppColors.primary.withValues(alpha: 0.20),
-                        AppColors.primary.withValues(alpha: 0.0),
-                      ],
-                    ),
+            ),
+            // 2) Diagonal specular light streak across the top.
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 440,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomLeft,
+                    end: Alignment.topRight,
+                    colors: [
+                      Colors.white.withValues(alpha: 0.0),
+                      Colors.white.withValues(alpha: 0.0),
+                      Colors.white.withValues(alpha: 0.13),
+                      Colors.white.withValues(alpha: 0.0),
+                    ],
+                    stops: const [0.0, 0.5, 0.68, 0.86],
                   ),
                 ),
               ),
-            ],
-          ),
+            ),
+            // 3) Lavender bloom capping the streak, upper-right.
+            Positioned(
+              top: -60,
+              right: -50,
+              child: Container(
+                width: 300,
+                height: 300,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      const Color(0xFFB794FF).withValues(alpha: 0.20),
+                      const Color(0xFFB794FF).withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

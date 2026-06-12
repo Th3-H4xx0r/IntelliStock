@@ -35,8 +35,8 @@ class GlassCard extends StatelessWidget {
       borderRadius: radius,
       child: BackdropFilter(
         filter: ImageFilter.blur(
-          sigmaX: liquid ? 26 : 14,
-          sigmaY: liquid ? 26 : 14,
+          sigmaX: liquid ? 30 : 14,
+          sigmaY: liquid ? 30 : 14,
         ),
         child: liquid ? _liquidBody(radius) : _plainBody(radius),
       ),
@@ -87,20 +87,23 @@ class GlassCard extends StatelessWidget {
   Widget _liquidBody(BorderRadius radius) {
     return Container(
       decoration: BoxDecoration(
-        // Diagonal wash with a white specular sheen in the top-left corner.
+        // A genuinely translucent frost: a white specular sheen in the
+        // top-left corner, a near-clear middle that lets the blurred backdrop
+        // bloom through (this is what makes it read as glass), and a dark foot
+        // that grounds the content for legibility.
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            Color(0x24FFFFFF), // ~14% white sheen
-            AppColors.glassTop,
-            AppColors.glassBottom,
+            Color(0x26FFFFFF), // ~15% white sheen (top-left)
+            Color(0x0AFFFFFF), // ~4% — near-clear, backdrop shows through
+            Color(0x4D000000), // ~30% black — grounds text at the foot
           ],
-          stops: [0.0, 0.32, 1.0],
+          stops: [0.0, 0.5, 1.0],
         ),
         borderRadius: radius,
         border: Border.all(
-          color: borderColor ?? const Color(0x3DBC9AFF), // ~24% violet edge
+          color: borderColor ?? const Color(0x33FFFFFF), // ~20% light rim
         ),
       ),
       child: Stack(
@@ -116,7 +119,7 @@ class GlassCard extends StatelessWidget {
                 gradient: LinearGradient(
                   colors: [
                     Colors.white.withValues(alpha: 0.0),
-                    Colors.white.withValues(alpha: 0.32),
+                    Colors.white.withValues(alpha: 0.45),
                     Colors.white.withValues(alpha: 0.0),
                   ],
                 ),

@@ -54,7 +54,14 @@ class _AppShellState extends ConsumerState<AppShell> {
       backgroundColor: AppColors.canvas,
       extendBody: true,
       body: AppBackground(
-        child: SafeArea(bottom: false, child: widget.navigationShell),
+        // The dashboard (branch 0) paints a full-bleed gradient up under the
+        // status bar / dynamic island, so it opts out of the top safe-area
+        // inset and adds its own top padding. Every other tab keeps the inset.
+        child: SafeArea(
+          top: widget.navigationShell.currentIndex != 0,
+          bottom: false,
+          child: widget.navigationShell,
+        ),
       ),
       floatingActionButton: const ChatbotFabSlot(),
       bottomNavigationBar: NavigationBar(
