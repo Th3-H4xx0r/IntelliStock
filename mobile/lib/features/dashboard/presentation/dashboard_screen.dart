@@ -67,10 +67,11 @@ class DashboardScreen extends ConsumerWidget {
 // ── Dashboard backdrop ────────────────────────────────────────────────────────
 
 /// The professional violet gradient field behind the dashboard, modelled on a
-/// modern fintech home screen: a vivid violet crown that eases into the app's
-/// near-black, a soft diagonal specular streak sweeping from the upper-right,
-/// and a lavender bloom that caps the streak. It is full-bleed (paints under
-/// the dynamic island) and static, so the glass cards glide over it.
+/// modern fintech home screen: a deep violet crown that falls off to the app's
+/// canvas black within the top ~third — leaving most of the screen dark — with
+/// a soft diagonal specular streak and a lavender bloom confined to the crown.
+/// It is full-bleed (paints under the dynamic island) and static, so the glass
+/// cards glide over it.
 class _DashboardBackdrop extends StatelessWidget {
   const _DashboardBackdrop();
 
@@ -80,7 +81,8 @@ class _DashboardBackdrop extends StatelessWidget {
       child: IgnorePointer(
         child: Stack(
           children: [
-            // 1) Vivid violet crown easing into the canvas black.
+            // 1) Deep violet crown that falls off to canvas black by ~a third
+            //    of the way down — the rest of the screen stays dark.
             const Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -88,22 +90,22 @@ class _DashboardBackdrop extends StatelessWidget {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Color(0xFF7A36E6), // vivid violet (under the island)
-                      Color(0xFF4A1E9E),
-                      Color(0xFF1C0F3A),
+                      Color(0xFF5A28BE), // deep violet crown (under the island)
+                      Color(0xFF34176E),
+                      Color(0xFF150A2C),
                       Color(0xFF04040C), // canvas black
                     ],
-                    stops: [0.0, 0.16, 0.34, 0.52],
+                    stops: [0.0, 0.10, 0.22, 0.35],
                   ),
                 ),
               ),
             ),
-            // 2) Diagonal specular light streak across the top.
+            // 2) Soft diagonal specular sheen, confined to the crown.
             Positioned(
               top: 0,
               left: 0,
               right: 0,
-              height: 440,
+              height: 320,
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -112,26 +114,26 @@ class _DashboardBackdrop extends StatelessWidget {
                     colors: [
                       Colors.white.withValues(alpha: 0.0),
                       Colors.white.withValues(alpha: 0.0),
-                      Colors.white.withValues(alpha: 0.13),
+                      Colors.white.withValues(alpha: 0.09),
                       Colors.white.withValues(alpha: 0.0),
                     ],
-                    stops: const [0.0, 0.5, 0.68, 0.86],
+                    stops: const [0.0, 0.52, 0.70, 0.88],
                   ),
                 ),
               ),
             ),
-            // 3) Lavender bloom capping the streak, upper-right.
+            // 3) Subtle lavender bloom capping the streak, upper-right.
             Positioned(
-              top: -60,
-              right: -50,
+              top: -70,
+              right: -60,
               child: Container(
-                width: 300,
-                height: 300,
+                width: 280,
+                height: 280,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   gradient: RadialGradient(
                     colors: [
-                      const Color(0xFFB794FF).withValues(alpha: 0.20),
+                      const Color(0xFFB794FF).withValues(alpha: 0.13),
                       const Color(0xFFB794FF).withValues(alpha: 0.0),
                     ],
                   ),
