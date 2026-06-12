@@ -11,6 +11,7 @@ import '../../../core/widgets/skeleton.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../widgets_bridge/widget_sync_service.dart';
 import '../application/dashboard_controller.dart';
+import '../application/selected_account_controller.dart';
 import '../data/dashboard_repository.dart';
 import 'portfolio_chart.dart';
 import 'service_card.dart';
@@ -149,10 +150,20 @@ class _DashboardBackdrop extends StatelessWidget {
 
 // ── Portfolio section ─────────────────────────────────────────────────────────
 
-class _PortfolioSection extends ConsumerWidget {
+class _PortfolioSection extends ConsumerStatefulWidget {
+  const _PortfolioSection();
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_PortfolioSection> createState() => _PortfolioSectionState();
+}
+
+class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
     final bkAsync = ref.watch(brokeragesProvider);
+    final selectedId = ref.watch(selectedAccountProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -185,7 +196,8 @@ class _PortfolioSection extends ConsumerWidget {
         ),
         const SizedBox(height: 14),
 
-        // Content — the first account is the hero, the rest are clean cards.
+        // Content — one hero for the selected account, switchable via a
+        // dropdown on the account label.
         bkAsync.when(
           loading: () => const _PortfolioSkeleton(),
           error: (e, _) => ErrorBanner(
@@ -202,20 +214,228 @@ class _PortfolioSection extends ConsumerWidget {
                 onAction: () => context.push('/brokerages'),
               );
             }
+            final selected = _resolveSelected(accounts, selectedId);
+            final canSwitch = accounts.length > 1;
             return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                for (var i = 0; i < accounts.length; i++)
-                  Padding(
-                    padding: EdgeInsets.only(
-                      bottom: i < accounts.length - 1 ? (i == 0 ? 22 : 14) : 0,
-                    ),
-                    child: PortfolioChart(account: accounts[i], hero: i == 0),
+                _AccountSelector(
+                  account: selected,
+                  canSwitch: canSwitch,
+                  expanded: _expanded,
+                  onToggle: () => setState(() => _expanded = !_expanded),
+                ),
+                if (canSwitch)
+                  _AccountDropdown(
+                    accounts: accounts,
+                    selectedId: selected.id,
+                    expanded: _expanded,
+                    onSelect: (id) {
+                      ref.read(selectedAccountProvider.notifier).select(id);
+                      setState(() => _expanded = false);
+                    },
                   ),
+                const SizedBox(height: 8),
+                // Keyed by account so switching accounts starts a fresh load
+                // (skeleton), while changing range reuses the cached value.
+                PortfolioChart(
+                  key: ValueKey(selected.id),
+                  account: selected,
+                  hero: true,
+                ),
               ],
             );
           },
         ),
       ],
+    );
+  }
+
+  BrokerageAccount _resolveSelected(
+      List<BrokerageAccount> accounts, String? id) {
+    if (id != null) {
+      for (final a in accounts) {
+        if (a.id == id) return a;
+      }
+    }
+    return accounts.first;
+  }
+}
+
+// ── Account switcher ──────────────────────────────────────────────────────────
+
+String _accountLabel(BrokerageAccount a) {
+  if (a.brokerageType == 'alpaca') {
+    return a.alpacaPaper ? 'Alpaca · Paper' : 'Alpaca';
+  }
+  if (a.brokerageType == 'robinhood') return 'Robinhood';
+  return a.accountName.isNotEmpty ? a.accountName : a.brokerageType;
+}
+
+IconData _accountIcon(BrokerageAccount a) =>
+    a.brokerageType == 'alpaca' ? symbol('show_chart') : symbol('savings');
+
+/// The hero's account identity — an uppercase eyebrow with a chevron (when more
+/// than one account exists) that toggles the [_AccountDropdown], plus a status
+/// dot on the right. Mirrors the look of the chart card header.
+class _AccountSelector extends StatelessWidget {
+  const _AccountSelector({
+    required this.account,
+    required this.canSwitch,
+    required this.expanded,
+    required this.onToggle,
+  });
+
+  final BrokerageAccount account;
+  final bool canSwitch;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = account.isActive ? AppColors.success : AppColors.danger;
+    final left = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(_accountIcon(account), color: AppColors.primary, size: 16),
+        const SizedBox(width: 6),
+        Text(
+          _accountLabel(account).toUpperCase(),
+          style: AppTextStyles.nano.copyWith(
+            color: AppColors.textDim,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.0,
+          ),
+        ),
+        if (canSwitch) ...[
+          const SizedBox(width: 4),
+          Icon(
+            expanded ? symbol('expand_less') : symbol('expand_more'),
+            size: 16,
+            color: AppColors.textMuted,
+          ),
+        ],
+      ],
+    );
+
+    return Row(
+      children: [
+        if (canSwitch)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onToggle,
+            child: left,
+          )
+        else
+          left,
+        const Spacer(),
+        Container(
+          width: 6,
+          height: 6,
+          decoration:
+              BoxDecoration(shape: BoxShape.circle, color: statusColor),
+        ),
+        const SizedBox(width: 4),
+        Text(account.status,
+            style: AppTextStyles.nano.copyWith(color: statusColor)),
+      ],
+    );
+  }
+}
+
+/// The dropdown that animates open below the selector, listing every account.
+class _AccountDropdown extends StatelessWidget {
+  const _AccountDropdown({
+    required this.accounts,
+    required this.selectedId,
+    required this.expanded,
+    required this.onSelect,
+  });
+
+  final List<BrokerageAccount> accounts;
+  final String selectedId;
+  final bool expanded;
+  final void Function(String) onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+      alignment: Alignment.topCenter,
+      child: expanded
+          ? Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: GlassCard(
+                liquid: true,
+                padding: const EdgeInsets.all(6),
+                child: Column(
+                  children: [
+                    for (final a in accounts)
+                      _AccountRow(
+                        account: a,
+                        selected: a.id == selectedId,
+                        onTap: () => onSelect(a.id),
+                      ),
+                  ],
+                ),
+              ),
+            )
+          : const SizedBox(width: double.infinity),
+    );
+  }
+}
+
+class _AccountRow extends StatelessWidget {
+  const _AccountRow({
+    required this.account,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final BrokerageAccount account;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = account.isActive ? AppColors.success : AppColors.danger;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0x1FFFFFFF) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(_accountIcon(account), color: AppColors.primary, size: 16),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _accountLabel(account),
+                style: AppTextStyles.bodyHi.copyWith(
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ),
+            Container(
+              width: 6,
+              height: 6,
+              decoration:
+                  BoxDecoration(shape: BoxShape.circle, color: statusColor),
+            ),
+            const SizedBox(width: 10),
+            Icon(
+              selected ? symbol('check') : symbol('arrow_forward'),
+              size: 15,
+              color: selected ? AppColors.primary : AppColors.textFaint,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -500,6 +500,9 @@ struct PortfolioWidget: Widget {
             .systemSmall, .systemMedium, .systemLarge,
             .accessoryRectangular, .accessoryInline,
         ])
+        // Drop the chunky default system content margins — the views supply
+        // their own ~12pt padding, roughly halving the outer margin.
+        .contentMarginsDisabled()
     }
 }
 

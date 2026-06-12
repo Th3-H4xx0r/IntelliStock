@@ -117,6 +117,11 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
     with AutomaticKeepAliveClientMixin {
   String _range = '1D';
 
+  // The last successfully-loaded history. Kept so switching range only reloads
+  // the chart — the headline value + P&L keep showing the previous data
+  // instead of flashing a skeleton. Null only before the very first load.
+  PortfolioHistory? _lastHistory;
+
   // Scrub state lives in a ValueNotifier so dragging repaints only the hairline
   // + header value, never the (expensive) Syncfusion chart — that's what made
   // the old setState-per-frame scrubber jank.
@@ -151,6 +156,12 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
     final hero = widget.hero;
     final histAsync = ref.watch(_historyProvider(_args));
 
+    // Cache the freshest data; render the value/P&L from it even while a range
+    // switch is loading (skeleton the value only on the very first load).
+    final current = histAsync.valueOrNull;
+    if (current != null) _lastHistory = current;
+    final valueHistory = current ?? _lastHistory;
+
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -162,23 +173,28 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _CardHeader(account: widget.account),
-              SizedBox(height: hero ? 8 : 12),
-              histAsync.when(
-                loading: () => _ValueSkeleton(big: hero),
-                error: (e, _) => Text(
-                  e.toString(),
-                  style: AppTextStyles.micro.copyWith(color: AppColors.danger),
-                ),
-                data: (h) => ValueListenableBuilder<ScrubSample?>(
+              // The hero's account identity is the dropdown selector above it,
+              // so the in-card header is only drawn for secondary cards.
+              if (!hero) ...[
+                _CardHeader(account: widget.account),
+                const SizedBox(height: 12),
+              ],
+              if (valueHistory != null)
+                ValueListenableBuilder<ScrubSample?>(
                   valueListenable: _scrub,
                   builder: (_, sample, _) => _ValueRow(
-                    history: h,
+                    history: valueHistory,
                     scrubIndex: sample?.index,
                     big: hero,
                   ),
-                ),
-              ),
+                )
+              else if (histAsync.hasError)
+                Text(
+                  histAsync.error.toString(),
+                  style: AppTextStyles.micro.copyWith(color: AppColors.danger),
+                )
+              else
+                _ValueSkeleton(big: hero),
               SizedBox(height: hero ? 16 : 12),
               _RangeTabs(active: _range, onSelect: _setRange),
             ],
