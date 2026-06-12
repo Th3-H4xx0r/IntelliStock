@@ -100,10 +100,14 @@ int nearestIndex(List<DateTime> timestamps, double fraction) {
 // ── Main widget ───────────────────────────────────────────────────────────────
 
 class PortfolioChart extends ConsumerStatefulWidget {
-  const PortfolioChart({super.key, required this.account});
+  const PortfolioChart({super.key, required this.account, this.hero = false});
 
   /// A [BrokerageAccount] from the dashboard brokerages list.
   final dynamic account; // BrokerageAccount from dashboard_repository.dart
+
+  /// The primary account renders as a borderless hero (big balance on the
+  /// gradient crown); secondary accounts render inside a clean surface card.
+  final bool hero;
 
   @override
   ConsumerState<PortfolioChart> createState() => _PortfolioChartState();
@@ -144,68 +148,74 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
   @override
   Widget build(BuildContext context) {
     super.build(context); // for AutomaticKeepAliveClientMixin
+    final hero = widget.hero;
     final histAsync = ref.watch(_historyProvider(_args));
-    return GlassCard(
-      liquid: true,
-      padding: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _CardHeader(account: widget.account),
-                const SizedBox(height: 12),
-                histAsync.when(
-                  loading: () => _ValueSkeleton(),
-                  error: (e, _) => Text(
-                    e.toString(),
-                    style:
-                        AppTextStyles.micro.copyWith(color: AppColors.danger),
-                  ),
-                  data: (h) => ValueListenableBuilder<ScrubSample?>(
-                    valueListenable: _scrub,
-                    builder: (_, sample, _) => _ValueRow(
-                      history: h,
-                      scrubIndex: sample?.index,
-                    ),
+
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          // Hero aligns to the page gutter; cards pad inside their surface.
+          padding: hero
+              ? EdgeInsets.zero
+              : const EdgeInsets.fromLTRB(16, 16, 16, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _CardHeader(account: widget.account),
+              SizedBox(height: hero ? 8 : 12),
+              histAsync.when(
+                loading: () => _ValueSkeleton(big: hero),
+                error: (e, _) => Text(
+                  e.toString(),
+                  style: AppTextStyles.micro.copyWith(color: AppColors.danger),
+                ),
+                data: (h) => ValueListenableBuilder<ScrubSample?>(
+                  valueListenable: _scrub,
+                  builder: (_, sample, _) => _ValueRow(
+                    history: h,
+                    scrubIndex: sample?.index,
+                    big: hero,
                   ),
                 ),
-                const SizedBox(height: 12),
-                _RangeTabs(active: _range, onSelect: _setRange),
-              ],
-            ),
+              ),
+              SizedBox(height: hero ? 16 : 12),
+              _RangeTabs(active: _range, onSelect: _setRange),
+            ],
           ),
-          const SizedBox(height: 8),
-          histAsync.when(
-            loading: () => const _ChartSkeleton(),
-            error: (_, _) => const _ChartEmpty(message: 'Failed to load'),
-            data: (history) {
-              if (history.isEmpty) {
-                return const _ChartEmpty(message: 'No data for this range');
-              }
-              // Play the entrance animation only the first time the chart
-              // renders with data; flip the flag afterwards so scrolling away
-              // and back (state kept alive) doesn't re-animate.
-              final shouldAnimate = !_animatedOnce;
-              if (shouldAnimate) {
-                WidgetsBinding.instance.addPostFrameCallback(
-                  (_) => _animatedOnce = true,
-                );
-              }
-              return _ChartArea(
-                history: history,
-                scrub: _scrub,
-                range: _range,
-                animate: shouldAnimate,
+        ),
+        const SizedBox(height: 8),
+        histAsync.when(
+          loading: () => const _ChartSkeleton(),
+          error: (_, _) => const _ChartEmpty(message: 'Failed to load'),
+          data: (history) {
+            if (history.isEmpty) {
+              return const _ChartEmpty(message: 'No data for this range');
+            }
+            // Play the entrance animation only the first time the chart
+            // renders with data; flip the flag afterwards so scrolling away
+            // and back (state kept alive) doesn't re-animate.
+            final shouldAnimate = !_animatedOnce;
+            if (shouldAnimate) {
+              WidgetsBinding.instance.addPostFrameCallback(
+                (_) => _animatedOnce = true,
               );
-            },
-          ),
-        ],
-      ),
+            }
+            return _ChartArea(
+              history: history,
+              scrub: _scrub,
+              range: _range,
+              animate: shouldAnimate,
+            );
+          },
+        ),
+      ],
     );
+
+    // Hero: borderless, sitting directly on the gradient crown.
+    if (hero) return content;
+    // Secondary accounts: a clean elevated surface card.
+    return GlassCard(liquid: true, padding: EdgeInsets.zero, child: content);
   }
 }
 
@@ -267,9 +277,10 @@ class _CardHeader extends StatelessWidget {
 }
 
 class _ValueRow extends StatelessWidget {
-  const _ValueRow({required this.history, this.scrubIndex});
+  const _ValueRow({required this.history, this.scrubIndex, this.big = false});
   final PortfolioHistory history;
   final int? scrubIndex;
+  final bool big;
 
   @override
   Widget build(BuildContext context) {
@@ -289,20 +300,20 @@ class _ValueRow extends StatelessWidget {
       children: [
         Text(
           fmtMoney(activeValue),
-          style: AppTextStyles.valueLg,
+          style: big ? AppTextStyles.valueHero : AppTextStyles.valueLg,
         ),
-        const SizedBox(height: 4),
+        SizedBox(height: big ? 6 : 4),
         Row(
           children: [
             Icon(
               positive ? symbol('trending_up') : symbol('trending_down'),
-              size: 14,
+              size: big ? 16 : 14,
               color: changeColor,
             ),
             const SizedBox(width: 4),
             Text(
               '${fmtPnl(changeAbs)} (${fmtPct(changePct)})',
-              style: AppTextStyles.meta.copyWith(
+              style: (big ? AppTextStyles.bodyHi : AppTextStyles.meta).copyWith(
                 color: changeColor,
                 fontWeight: FontWeight.w600,
               ),
@@ -315,14 +326,17 @@ class _ValueRow extends StatelessWidget {
 }
 
 class _ValueSkeleton extends StatelessWidget {
+  const _ValueSkeleton({this.big = false});
+  final bool big;
+
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Skeleton(width: 120, height: 24, radius: 6),
+        Skeleton(width: big ? 200 : 120, height: big ? 40 : 24, radius: 6),
         const SizedBox(height: 6),
-        Skeleton(width: 80, height: 13, radius: 5),
+        Skeleton(width: big ? 120 : 80, height: 13, radius: 5),
       ],
     );
   }
@@ -335,32 +349,44 @@ class _RangeTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 2,
-      children: _ranges.map((r) {
-        final isActive = r == active;
-        return GestureDetector(
-          onTap: () => onSelect(r),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: isActive
-                  ? AppColors.primary.withValues(alpha: 0.15)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-              r,
-              style: AppTextStyles.micro.copyWith(
-                color: isActive ? AppColors.primary : AppColors.textDim,
-                fontWeight: FontWeight.w600,
+    // A segmented control: a subtle track with the active range as a filled
+    // pill — clean and modern, evenly spaced across the width.
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0x0FFFFFFF),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0x0DFFFFFF)),
+      ),
+      child: Row(
+        children: _ranges.map((r) {
+          final isActive = r == active;
+          return Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => onSelect(r),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                curve: Curves.easeOut,
+                padding: const EdgeInsets.symmetric(vertical: 7),
+                decoration: BoxDecoration(
+                  color:
+                      isActive ? const Color(0x24FFFFFF) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: Text(
+                  r,
+                  textAlign: TextAlign.center,
+                  style: AppTextStyles.micro.copyWith(
+                    color: isActive ? AppColors.textHi : AppColors.textDim,
+                    fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
               ),
             ),
-          ),
-        );
-      }).toList(),
+          );
+        }).toList(),
+      ),
     );
   }
 }
@@ -471,7 +497,7 @@ class _ChartArea extends StatelessWidget {
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [
-              lineColor.withValues(alpha: 0.35),
+              lineColor.withValues(alpha: 0.22),
               lineColor.withValues(alpha: 0.0),
             ],
           ),

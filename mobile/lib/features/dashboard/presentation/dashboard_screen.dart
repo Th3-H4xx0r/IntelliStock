@@ -157,47 +157,35 @@ class _PortfolioSection extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Section header row
+        // Slim section header: just a label + a quiet "Manage" affordance.
         Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Portfolio', style: AppTextStyles.h2),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Live equity history from your linked brokerages.',
-                    style:
-                        AppTextStyles.micro.copyWith(color: AppColors.textDim),
-                  ),
-                ],
-              ),
-            ),
+            Text('Portfolio', style: AppTextStyles.h3),
+            const Spacer(),
             GestureDetector(
               onTap: () => context.push('/brokerages'),
+              behavior: HitTestBehavior.opaque,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    'Manage brokerages',
+                    'Manage',
                     style: AppTextStyles.micro.copyWith(
-                      color: AppColors.primary,
+                      color: AppColors.textMuted,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(width: 4),
+                  const SizedBox(width: 2),
                   Icon(symbol('arrow_forward'),
-                      size: 14, color: AppColors.primary),
+                      size: 13, color: AppColors.textMuted),
                 ],
               ),
             ),
           ],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
 
-        // Content
+        // Content — the first account is the hero, the rest are clean cards.
         bkAsync.when(
           loading: () => const _PortfolioSkeleton(),
           error: (e, _) => ErrorBanner(
@@ -215,12 +203,15 @@ class _PortfolioSection extends ConsumerWidget {
               );
             }
             return Column(
-              children: accounts
-                  .map((acct) => Padding(
-                        padding: const EdgeInsets.only(bottom: 16),
-                        child: PortfolioChart(account: acct),
-                      ))
-                  .toList(),
+              children: [
+                for (var i = 0; i < accounts.length; i++)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      bottom: i < accounts.length - 1 ? (i == 0 ? 22 : 14) : 0,
+                    ),
+                    child: PortfolioChart(account: accounts[i], hero: i == 0),
+                  ),
+              ],
             );
           },
         ),

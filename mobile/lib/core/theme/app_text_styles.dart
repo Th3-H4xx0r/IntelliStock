@@ -47,6 +47,10 @@ abstract class AppTextStyles {
   static TextStyle valueXl = _inter(30, weight: FontWeight.w800, tabular: true);
   static TextStyle value = _inter(16, weight: FontWeight.w600, tabular: true);
 
+  /// Dashboard hero headline figure — the front-and-centre balance.
+  static TextStyle valueHero = _inter(38,
+      weight: FontWeight.w800, tabular: true, height: 1.05, letterSpacing: -0.6);
+
   static TextStyle mono(double size,
       {Color color = AppColors.textMd, FontWeight weight = FontWeight.w400}) {
     return GoogleFonts.jetBrainsMono(

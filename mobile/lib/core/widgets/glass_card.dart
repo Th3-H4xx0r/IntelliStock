@@ -5,10 +5,11 @@ import '../theme/app_colors.dart';
 /// The signature translucent violet card used pervasively in the web UI
 /// (`.glass-card`): gradient fill + 14px backdrop blur + lavender border.
 ///
-/// Set [liquid] to render the heavier "liquid glass" treatment used on the
-/// dashboard — a stronger frosted blur, a specular top-edge sheen, a brighter
-/// violet border, and a soft violet drop-glow so the purple backdrop blooms
-/// through. The default ([liquid] = false) is unchanged from the web look and
+/// Set [liquid] for the dashboard's clean "elevated surface" treatment — a
+/// near-opaque dark card with a hairline light border, a whisper of a top
+/// highlight, and a soft drop shadow for depth. It deliberately avoids the
+/// frosted-glass blur so the dashboard reads like a modern fintech home
+/// screen. The default ([liquid] = false) is unchanged from the web look and
 /// is what every non-dashboard screen uses.
 class GlassCard extends StatelessWidget {
   const GlassCard({
@@ -31,28 +32,30 @@ class GlassCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final radius = BorderRadius.circular(borderRadius);
-    final card = ClipRRect(
-      borderRadius: radius,
-      child: BackdropFilter(
-        filter: ImageFilter.blur(
-          sigmaX: liquid ? 30 : 14,
-          sigmaY: liquid ? 30 : 14,
-        ),
-        child: liquid ? _liquidBody(radius) : _plainBody(radius),
-      ),
-    );
 
-    // Liquid cards float on a soft violet glow.
+    // Liquid (dashboard) cards are near-opaque, so they skip the backdrop blur
+    // — crisper and cheaper. The web glass card keeps its frosted blur.
+    final Widget card = liquid
+        ? ClipRRect(borderRadius: radius, child: _liquidBody(radius))
+        : ClipRRect(
+            borderRadius: radius,
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+              child: _plainBody(radius),
+            ),
+          );
+
+    // Elevated surfaces float on a soft, neutral drop shadow for depth.
     final framed = liquid
         ? DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: radius,
               boxShadow: [
                 BoxShadow(
-                  color: AppColors.primary.withValues(alpha: 0.12),
-                  blurRadius: 34,
-                  spreadRadius: -12,
-                  offset: const Offset(0, 16),
+                  color: const Color(0xFF000000).withValues(alpha: 0.28),
+                  blurRadius: 24,
+                  spreadRadius: -6,
+                  offset: const Offset(0, 12),
                 ),
               ],
             ),
@@ -87,39 +90,35 @@ class GlassCard extends StatelessWidget {
   Widget _liquidBody(BorderRadius radius) {
     return Container(
       decoration: BoxDecoration(
-        // A genuinely translucent frost: a white specular sheen in the
-        // top-left corner, a near-clear middle that lets the blurred backdrop
-        // bloom through (this is what makes it read as glass), and a dark foot
-        // that grounds the content for legibility.
+        // Clean elevated surface: a near-opaque dark card, very subtly lighter
+        // at the top, sitting a notch above the canvas — no frosted blur.
         gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
           colors: [
-            Color(0x26FFFFFF), // ~15% white sheen (top-left)
-            Color(0x0AFFFFFF), // ~4% — near-clear, backdrop shows through
-            Color(0x4D000000), // ~30% black — grounds text at the foot
+            Color(0xF21A1530), // ~95% — slightly lifted top
+            Color(0xF2120E22), // ~95% — deeper foot
           ],
-          stops: [0.0, 0.5, 1.0],
         ),
         borderRadius: radius,
         border: Border.all(
-          color: borderColor ?? const Color(0x33FFFFFF), // ~20% light rim
+          color: borderColor ?? const Color(0x14FFFFFF), // ~8% hairline rim
         ),
       ),
       child: Stack(
         children: [
-          // Specular highlight along the very top edge — the glassy "lip".
+          // A whisper of a highlight along the very top edge.
           Positioned(
             top: 0,
             left: 0,
             right: 0,
             child: Container(
-              height: 1.2,
+              height: 1,
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   colors: [
                     Colors.white.withValues(alpha: 0.0),
-                    Colors.white.withValues(alpha: 0.45),
+                    Colors.white.withValues(alpha: 0.10),
                     Colors.white.withValues(alpha: 0.0),
                   ],
                 ),
