@@ -3502,7 +3502,9 @@ def api_brokerage_positions(
             return None
 
     positions = []
+    cash = None
     if isinstance(ls, dict):
+        cash = _f(ls.get("cash"))
         for p in (ls.get("positions") or []):
             p = p or {}
             positions.append({
@@ -3515,7 +3517,7 @@ def api_brokerage_positions(
                 "unrealizedPnlPct": _f(p.get("unrealized_pnl_pct")) or 0.0,
             })
     positions.sort(key=lambda x: x.get("marketValue") or 0.0, reverse=True)
-    return {"brokerage_id": brokerage_id, "positions": positions}
+    return {"brokerage_id": brokerage_id, "cash": cash, "positions": positions}
 
 
 # ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
