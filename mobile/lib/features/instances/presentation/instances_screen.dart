@@ -12,6 +12,7 @@ import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
 import '../../../core/widgets/status_pill.dart';
 import '../application/instances_controller.dart';
+import '../application/pinned_instances_controller.dart';
 import '../data/models/instance.dart';
 
 // ── Granularity constants ────────────────────────────────────────────────────
@@ -177,6 +178,8 @@ class _InstancesBody extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final ctrl = ref.read(instancesControllerProvider.notifier);
+    final pinned = ref.watch(pinnedInstancesProvider);
+    final items = sortPinnedFirst(state.filtered, pinned);
 
     return RefreshIndicator(
       onRefresh: () => ctrl.refreshNow(),
@@ -210,10 +213,11 @@ class _InstancesBody extends ConsumerWidget {
                   : 'No user-created instances',
             )
           else
-            for (final inst in state.filtered) ...[
+            for (final inst in items) ...[
               _InstanceCard(
                 inst: inst,
                 busy: state.busyIds.contains(inst.id),
+                pinned: pinned.contains(inst.id),
               ),
               const SizedBox(height: 12),
             ],
@@ -384,10 +388,11 @@ class _Pill extends StatelessWidget {
 // ── Instance card ─────────────────────────────────────────────────────────────
 
 class _InstanceCard extends ConsumerWidget {
-  const _InstanceCard({required this.inst, required this.busy});
+  const _InstanceCard({required this.inst, required this.busy, this.pinned = false});
 
   final Instance inst;
   final bool busy;
+  final bool pinned;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -478,46 +483,24 @@ class _InstanceCard extends ConsumerWidget {
             runSpacing: 6,
             children: [
               _ActionBtn(
+                icon: symbol(pinned ? 'push_pin' : 'push_pin_outlined'),
+                label: pinned ? 'Pinned' : 'Pin',
+                color: pinned ? AppColors.warning : AppColors.textDim,
+                onTap: () =>
+                    ref.read(pinnedInstancesProvider.notifier).toggle(inst.id),
+              ),
+              _ActionBtn(
                 icon: symbol('open_in_new'),
                 label: 'View',
                 color: AppColors.primary,
                 onTap: () => context.push('/instances/${inst.id}'),
               ),
               _ActionBtn(
-                icon: symbol('play_circle'),
-                label: 'Backtest',
+                icon: symbol('show_chart'),
+                label: 'Live',
                 color: AppColors.info,
-                onTap: busy
-                    ? null
-                    : () => _showCreateBacktestSheet(context, ref, inst.id),
+                onTap: () => context.push('/instances/${inst.id}/live'),
               ),
-              if (inst.strategyId == null)
-                _ActionBtn(
-                  icon: symbol('link'),
-                  label: 'Link Strategy',
-                  color: AppColors.primary,
-                  onTap: busy
-                      ? null
-                      : () => _showLinkStrategySheet(
-                          context, ref, inst.id),
-                )
-              else
-                _ActionBtn(
-                  icon: symbol('tune'),
-                  label: 'Strategy',
-                  color: AppColors.warning,
-                  onTap: busy ? null : () {},
-                ),
-              if (inst.brokerageId != null)
-                _ActionBtn(
-                  icon: symbol('account_balance'),
-                  label: 'Brokerage',
-                  color: AppColors.teal,
-                  onTap: busy
-                      ? null
-                      : () => _showChangeBrokerageSheet(
-                          context, ref, inst),
-                ),
               if (isRunning)
                 _ActionBtn(
                   icon: busy ? symbol('progress_activity') : symbol('stop'),
@@ -560,42 +543,6 @@ class _InstanceCard extends ConsumerWidget {
       onConfirm: () async {
         await ctrl.delete(inst.id);
       },
-    );
-  }
-
-  Future<void> _showCreateBacktestSheet(
-      BuildContext context, WidgetRef ref, String instanceId) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _CreateBacktestSheet(instanceId: instanceId),
-      ),
-    );
-  }
-
-  Future<void> _showLinkStrategySheet(
-      BuildContext context, WidgetRef ref, String instanceId) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _LinkStrategySheet(instanceId: instanceId),
-      ),
-    );
-  }
-
-  Future<void> _showChangeBrokerageSheet(
-      BuildContext context, WidgetRef ref, Instance inst) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _ChangeBrokerageSheet(inst: inst),
-      ),
     );
   }
 }
@@ -1048,295 +995,6 @@ class _AddStockSheetState extends ConsumerState<_AddStockSheet> {
             ctrl: _ctrl,
             hint: 'e.g. AAPL',
             textCapitalization: TextCapitalization.characters,
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 12),
-            ErrorBanner(message: _error!),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ── Create Backtest sheet ─────────────────────────────────────────────────────
-
-class _CreateBacktestSheet extends ConsumerStatefulWidget {
-  const _CreateBacktestSheet({required this.instanceId});
-  final String instanceId;
-
-  @override
-  ConsumerState<_CreateBacktestSheet> createState() =>
-      _CreateBacktestSheetState();
-}
-
-class _CreateBacktestSheetState
-    extends ConsumerState<_CreateBacktestSheet> {
-  final _stocksCtrl = TextEditingController();
-  final _startCtrl = TextEditingController();
-  final _endCtrl = TextEditingController();
-  final _cashCtrl = TextEditingController(text: '100000');
-
-  String _granularity = '60';
-  bool _busy = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _stocksCtrl.dispose();
-    _startCtrl.dispose();
-    _endCtrl.dispose();
-    _cashCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submit() async {
-    if (_startCtrl.text.isEmpty) {
-      setState(() => _error = 'Start date is required');
-      return;
-    }
-    if (_endCtrl.text.isEmpty) {
-      setState(() => _error = 'End date is required');
-      return;
-    }
-    if (_startCtrl.text.compareTo(_endCtrl.text) >= 0) {
-      setState(() => _error = 'End date must be after start date');
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    final stocks = _stocksCtrl.text
-        .split(',')
-        .map((s) => s.trim().toUpperCase())
-        .where((s) => s.isNotEmpty)
-        .toList();
-    try {
-      await ref
-          .read(instancesControllerProvider.notifier)
-          .createBacktest(
-            instanceId: widget.instanceId,
-            stocks: stocks,
-            startDate: _startCtrl.text,
-            endDate: _endCtrl.text,
-            granularity: _granularity,
-            initialCash:
-                double.tryParse(_cashCtrl.text) ?? 100000,
-          );
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      setState(() {
-        _busy = false;
-        _error = e.toString();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _ModalSheet(
-      title: 'Create Backtest',
-      icon: symbol('play_circle'),
-      busy: _busy,
-      onSubmit: _submit,
-      submitLabel: 'Create',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _Field(
-            label: 'Stocks (comma-separated)',
-            ctrl: _stocksCtrl,
-            hint: 'AAPL, TSLA, NVDA',
-            textCapitalization: TextCapitalization.characters,
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                  child: _Field(label: 'Start Date *', ctrl: _startCtrl, hint: 'YYYY-MM-DD')),
-              const SizedBox(width: 12),
-              Expanded(
-                  child: _Field(label: 'End Date *', ctrl: _endCtrl, hint: 'YYYY-MM-DD')),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _SectionLabel('Granularity'),
-          const SizedBox(height: 6),
-          _GranularityPills(
-            selected: _granularity,
-            onSelect: (v) => setState(() => _granularity = v),
-          ),
-          const SizedBox(height: 12),
-          _Field(
-            label: 'Initial Cash (\$)',
-            ctrl: _cashCtrl,
-            hint: '100000',
-            keyboardType: TextInputType.number,
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 12),
-            ErrorBanner(message: _error!),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ── Link Strategy sheet ───────────────────────────────────────────────────────
-
-class _LinkStrategySheet extends ConsumerStatefulWidget {
-  const _LinkStrategySheet({required this.instanceId});
-  final String instanceId;
-
-  @override
-  ConsumerState<_LinkStrategySheet> createState() =>
-      _LinkStrategySheetState();
-}
-
-class _LinkStrategySheetState extends ConsumerState<_LinkStrategySheet> {
-  String _strategyId = '';
-  bool _busy = false;
-  String? _error;
-
-  Future<void> _submit() async {
-    if (_strategyId.isEmpty) {
-      setState(() => _error = 'Select a strategy');
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await ref
-          .read(instancesControllerProvider.notifier)
-          .linkStrategy(widget.instanceId, _strategyId);
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      setState(() {
-        _busy = false;
-        _error = e.toString();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final strategiesAsync = ref.watch(strategiesProvider);
-
-    return _ModalSheet(
-      title: 'Link Strategy',
-      icon: symbol('link'),
-      busy: _busy,
-      onSubmit: _submit,
-      submitLabel: 'Link',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          strategiesAsync.when(
-            loading: () => const LoadingState(),
-            error: (e, _) => ErrorBanner(message: e.toString()),
-            data: (list) => _DropdownField(
-              value: _strategyId.isEmpty ? null : _strategyId,
-              hint: 'Select a strategy',
-              items: [
-                for (final s in list)
-                  DropdownMenuItem(
-                    value: s['id'].toString(),
-                    child: Text(
-                      s['name']?.toString() ?? s['id'].toString(),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-              ],
-              onChanged: (v) => setState(() => _strategyId = v ?? ''),
-            ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 12),
-            ErrorBanner(message: _error!),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ── Change Brokerage sheet ────────────────────────────────────────────────────
-
-class _ChangeBrokerageSheet extends ConsumerStatefulWidget {
-  const _ChangeBrokerageSheet({required this.inst});
-  final Instance inst;
-
-  @override
-  ConsumerState<_ChangeBrokerageSheet> createState() =>
-      _ChangeBrokerageSheetState();
-}
-
-class _ChangeBrokerageSheetState
-    extends ConsumerState<_ChangeBrokerageSheet> {
-  late String _brokerageId;
-  bool _busy = false;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _brokerageId = widget.inst.brokerageId ?? '';
-  }
-
-  Future<void> _submit() async {
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await ref
-          .read(instancesControllerProvider.notifier)
-          .linkBrokerage(widget.inst.id, _brokerageId);
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      setState(() {
-        _busy = false;
-        _error = e.toString();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final brokeragesAsync = ref.watch(brokeragesProvider);
-
-    return _ModalSheet(
-      title: 'Change Brokerage',
-      icon: symbol('account_balance'),
-      busy: _busy,
-      onSubmit: _submit,
-      submitLabel: 'Update',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          brokeragesAsync.when(
-            loading: () => const LoadingState(),
-            error: (e, _) => ErrorBanner(message: e.toString()),
-            data: (list) => _DropdownField(
-              value: _brokerageId.isEmpty ? null : _brokerageId,
-              hint: '— None —',
-              items: [
-                const DropdownMenuItem(value: '', child: Text('— None —')),
-                for (final b in list)
-                  DropdownMenuItem(
-                    value: b['id'].toString(),
-                    child: Text(
-                      '${b['account_name'] ?? ''} (${b['brokerage_type'] ?? ''})'.trim(),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-              ],
-              onChanged: (v) => setState(() => _brokerageId = v ?? ''),
-            ),
           ),
           if (_error != null) ...[
             const SizedBox(height: 12),

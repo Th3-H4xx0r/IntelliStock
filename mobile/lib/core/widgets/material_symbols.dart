@@ -37,6 +37,8 @@ const Map<String, IconData> _symbols = {
   'settings': Icons.settings_outlined,
   'notifications': Icons.notifications_outlined,
   'discord': Icons.forum_outlined,
+  'push_pin': Icons.push_pin,
+  'push_pin_outlined': Icons.push_pin_outlined,
   'expand_more': Icons.expand_more,
   'expand_less': Icons.expand_less,
   'history': Icons.history,
