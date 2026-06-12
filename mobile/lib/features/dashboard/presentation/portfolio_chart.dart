@@ -146,6 +146,7 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
     super.build(context); // for AutomaticKeepAliveClientMixin
     final histAsync = ref.watch(_historyProvider(_args));
     return GlassCard(
+      liquid: true,
       padding: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

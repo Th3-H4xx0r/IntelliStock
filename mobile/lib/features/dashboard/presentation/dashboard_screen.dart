@@ -8,7 +8,6 @@ import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
-import '../../../core/network/session.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../widgets_bridge/widget_sync_service.dart';
 import '../application/dashboard_controller.dart';
@@ -26,73 +25,98 @@ class DashboardScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(sessionProvider);
-    final username = session.username;
-
     // Refresh the home-screen widget (live instance equity) on dashboard entry.
     ref.watch(widgetSyncProvider);
 
-    return CustomScrollView(
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
-          sliver: SliverList(
-            delegate: SliverChildListDelegate([
-              // ── Welcome header ───────────────────────────────────────────
-              _WelcomeHeader(username: username),
-              const SizedBox(height: 32),
+    return Stack(
+      children: [
+        // Purple gradient bloom across the top — matches the app's violet theme
+        // and sits behind the (scrolling) content as a static backdrop.
+        const _TopGlow(),
+        CustomScrollView(
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 28, 16, 24),
+              sliver: SliverList(
+                delegate: SliverChildListDelegate([
+                  // ── Portfolio section ──────────────────────────────────────
+                  _PortfolioSection(),
+                  const SizedBox(height: 32),
 
-              // ── Portfolio section ────────────────────────────────────────
-              _PortfolioSection(),
-              const SizedBox(height: 32),
+                  // ── Services section ───────────────────────────────────────
+                  _ServicesSection(),
+                  const SizedBox(height: 32),
 
-              // ── Services section ─────────────────────────────────────────
-              _ServicesSection(),
-              const SizedBox(height: 32),
-
-              // ── Re-run onboarding panel ──────────────────────────────────
-              _OnboardingPanel(),
-              const SizedBox(height: 16),
-            ]),
-          ),
+                  // ── Re-run onboarding panel ────────────────────────────────
+                  _OnboardingPanel(),
+                  const SizedBox(height: 16),
+                ]),
+              ),
+            ),
+          ],
         ),
       ],
     );
   }
 }
 
-// ── Welcome header ────────────────────────────────────────────────────────────
+// ── Top glow ──────────────────────────────────────────────────────────────────
 
-class _WelcomeHeader extends StatelessWidget {
-  const _WelcomeHeader({required this.username});
-  final String username;
+/// A purple gradient bloom anchored to the top of the dashboard. It does not
+/// scroll — the cards glide over it as glass floating on a violet glow.
+class _TopGlow extends StatelessWidget {
+  const _TopGlow();
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('Dashboard'.toUpperCase(), style: AppTextStyles.eyebrow),
-        const SizedBox(height: 6),
-        RichText(
-          text: TextSpan(
-            style: AppTextStyles.h1,
+    return IgnorePointer(
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: SizedBox(
+          height: 340,
+          width: double.infinity,
+          child: Stack(
             children: [
-              const TextSpan(text: 'Welcome back, '),
-              TextSpan(
-                text: username,
-                style: AppTextStyles.h1.copyWith(color: AppColors.primary),
+              // Vertical violet wash fading down — the "gradient on top".
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        const Color(0xFF7637F2).withValues(alpha: 0.30),
+                        const Color(0xFF7637F2).withValues(alpha: 0.04),
+                        const Color(0xFF7637F2).withValues(alpha: 0.0),
+                      ],
+                      stops: const [0.0, 0.55, 1.0],
+                    ),
+                  ),
+                ),
               ),
-              const TextSpan(text: '.'),
+              // Focused radial bloom for a richer center highlight.
+              Positioned(
+                top: -140,
+                left: -60,
+                right: -60,
+                child: Container(
+                  height: 300,
+                  decoration: BoxDecoration(
+                    gradient: RadialGradient(
+                      center: const Alignment(0.0, 0.2),
+                      radius: 0.85,
+                      colors: [
+                        AppColors.primary.withValues(alpha: 0.20),
+                        AppColors.primary.withValues(alpha: 0.0),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
-        const SizedBox(height: 6),
-        Text(
-          'Your workspace is ready.',
-          style: AppTextStyles.body.copyWith(color: AppColors.textDim),
-        ),
-      ],
+      ),
     );
   }
 }
@@ -714,6 +738,7 @@ class _PortfolioCardSkeleton extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(bottom: bottomPad),
       child: GlassCard(
+        liquid: true,
         padding: EdgeInsets.zero,
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -777,6 +802,7 @@ class _ServiceCardSkeleton extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(bottom: bottomPad),
       child: GlassCard(
+        liquid: true,
         padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -820,7 +846,7 @@ class _OnboardingPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GlassCard(
-      borderColor: AppColors.border,
+      liquid: true,
       child: Row(
         children: [
           Expanded(
