@@ -4,6 +4,7 @@ import 'package:syncfusion_flutter_charts/charts.dart';
 import '../../../core/charts/chart_decorations.dart';
 import '../../../core/charts/chart_geometry.dart';
 import '../../../core/charts/scrub_controller.dart';
+import '../../../core/polling/poller.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/glass_card.dart';
@@ -40,9 +41,53 @@ final _historyProvider = AutoDisposeAsyncNotifierProviderFamily<
 
 class _HistoryNotifier
     extends AutoDisposeFamilyAsyncNotifier<PortfolioHistory, _HistoryArgs> {
+  IntervalPoller? _poller;
+
   @override
-  Future<PortfolioHistory> build(_HistoryArgs arg) =>
-      ref.read(dashboardRepositoryProvider).portfolioHistory(arg.id, arg.range);
+  Future<PortfolioHistory> build(_HistoryArgs arg) async {
+    final lifecycle = ref.read(appLifecycleProvider);
+    final data = await _fetch(arg);
+
+    // Keep the value + curve live, like the live-trading screen. The 1D curve
+    // grows continuously (incl. overnight); longer ranges barely move, so poll
+    // those gently.
+    _poller = IntervalPoller(
+      fetch: () => _refresh(arg),
+      interval: () => arg.range == '1D'
+          ? const Duration(seconds: 5)
+          : const Duration(seconds: 30),
+    );
+    if (lifecycle.isForeground) {
+      _poller!.start();
+    } else {
+      _poller!.pause();
+    }
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next.isForeground) {
+        _poller?.resume();
+      } else {
+        _poller?.pause();
+      }
+    });
+    ref.onDispose(() => _poller?.dispose());
+    return data;
+  }
+
+  Future<PortfolioHistory> _fetch(_HistoryArgs arg) async {
+    final h = await ref
+        .read(dashboardRepositoryProvider)
+        .portfolioHistory(arg.id, arg.range);
+    // 1D is shown relative to the device's local midnight (overnight view).
+    return arg.range == '1D' ? h.sinceLocalMidnight() : h;
+  }
+
+  Future<void> _refresh(_HistoryArgs arg) async {
+    try {
+      state = AsyncData(await _fetch(arg));
+    } catch (_) {
+      // keep the last good data on a transient poll failure
+    }
+  }
 }
 
 // ── Change % helper (pure, also tested) ──────────────────────────────────────
@@ -314,10 +359,19 @@ class _ValueRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          fmtMoney(activeValue),
-          style: big ? AppTextStyles.valueHero : AppTextStyles.valueLg,
-        ),
+        // The hero value rolls like an odometer: 0 → value on first load, then
+        // value → scrubbed/updated value on every change. Secondary cards just
+        // snap to the value.
+        if (big)
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: activeValue),
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeOutCubic,
+            builder: (_, v, _) =>
+                Text(fmtMoney(v), style: AppTextStyles.valueHero),
+          )
+        else
+          Text(fmtMoney(activeValue), style: AppTextStyles.valueLg),
         SizedBox(height: big ? 6 : 4),
         Row(
           children: [
@@ -462,15 +516,14 @@ class _ChartArea extends StatelessWidget {
   final bool animate;
 
   static const double _plotHeight = 172;
+  static const double _dayMinutes = 24 * 60; // 1440
 
-  void _onDrag(double localDx, double width) {
-    if (history.values.isEmpty || width <= 0) return;
-    final n = history.values.length;
-    final frac = (localDx / width).clamp(0.0, 1.0);
-    final idx = fractionToIndex(frac, n);
-    // Draw the hairline + dot at the data point's own fraction so they sit
-    // exactly on the curve and match the value the header reports.
-    scrub.update(idx, indexToFraction(idx, n));
+  bool get _isDay => range == '1D';
+
+  /// Minutes since the point's own local midnight (used as the 1D x value).
+  static double _minuteOfDay(DateTime ts) {
+    final m = DateTime(ts.year, ts.month, ts.day);
+    return ts.difference(m).inSeconds / 60.0;
   }
 
   @override
@@ -482,21 +535,53 @@ class _ChartArea extends StatelessWidget {
     final n = history.values.length;
     final bounds = paddedBounds(history.values);
 
-    // Index-based points (gapless across weekends/closed sessions).
-    final dataSource = List<_ChartPoint>.generate(
-      n,
-      (i) => _ChartPoint(x: i.toDouble(), y: history.values[i]),
-    );
+    // 1D plots against a fixed full-day [0, 1440]-minute axis so the line fills
+    // only the elapsed part of the day (a short morning line, like Robinhood's
+    // overnight view). Other ranges plot edge-to-edge by index (gapless across
+    // weekends/closed sessions). history.values stays the single source of
+    // truth for both the curve and the scrubber, so the header value matches.
+    final xs = _isDay
+        ? [for (final t in history.timestamps) _minuteOfDay(t)]
+        : [for (var i = 0; i < n; i++) i.toDouble()];
 
-    final labels = [
-      for (final i in evenlySpacedLabelIndices(n, 4))
-        formatChartDate(history.timestamps[i], range),
+    final dataSource = [
+      for (var i = 0; i < n; i++) _ChartPoint(x: xs[i], y: history.values[i]),
     ];
+
+    final labels = _isDay
+        ? [for (final h in [0, 6, 12, 18, 24]) hourAmPm(h)]
+        : [
+            for (final i in evenlySpacedLabelIndices(n, 4))
+              formatChartDate(history.timestamps[i], range),
+          ];
+
+    // Map a drag x to a data index + the fraction to draw the hairline at.
+    void onDrag(double localDx, double width) {
+      if (n == 0 || width <= 0) return;
+      final frac = (localDx / width).clamp(0.0, 1.0);
+      if (_isDay) {
+        final targetMin = frac * _dayMinutes;
+        var idx = 0;
+        var best = double.infinity;
+        for (var i = 0; i < n; i++) {
+          final d = (xs[i] - targetMin).abs();
+          if (d < best) {
+            best = d;
+            idx = i;
+          }
+        }
+        scrub.update(idx, (xs[idx] / _dayMinutes).clamp(0.0, 1.0));
+      } else {
+        final idx = fractionToIndex(frac, n);
+        scrub.update(idx, indexToFraction(idx, n));
+      }
+    }
 
     final chart = SfCartesianChart(
       plotAreaBorderWidth: 0,
       margin: EdgeInsets.zero,
-      primaryXAxis: edgeToEdgeIndexAxis(n),
+      primaryXAxis:
+          _isDay ? edgeToEdgeRangeAxis(0, _dayMinutes) : edgeToEdgeIndexAxis(n),
       primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
       tooltipBehavior: TooltipBehavior(enable: false),
       series: <CartesianSeries<_ChartPoint, double>>[
@@ -570,9 +655,9 @@ class _ChartArea extends StatelessWidget {
                       child: GestureDetector(
                         behavior: HitTestBehavior.translucent,
                         onHorizontalDragStart: (d) =>
-                            _onDrag(d.localPosition.dx, width),
+                            onDrag(d.localPosition.dx, width),
                         onHorizontalDragUpdate: (d) =>
-                            _onDrag(d.localPosition.dx, width),
+                            onDrag(d.localPosition.dx, width),
                         onHorizontalDragEnd: (_) => scrub.clear(),
                         onHorizontalDragCancel: scrub.clear,
                       ),

@@ -100,4 +100,54 @@ void main() {
       expect(nearestIndex([DateTime.now()], 0.9), 0);
     });
   });
+
+  group('sinceLocalMidnight', () {
+    test('baselines at local midnight and trims to the day', () {
+      final now = DateTime.now();
+      final midnight = DateTime(now.year, now.month, now.day);
+      final h = PortfolioHistory(
+        timestamps: [
+          midnight.subtract(const Duration(hours: 2)),
+          midnight.subtract(const Duration(hours: 1)),
+          midnight.add(const Duration(hours: 1)),
+          midnight.add(const Duration(hours: 2)),
+        ],
+        values: const [100.0, 110.0, 120.0, 130.0],
+        currentValue: 130.0,
+      );
+      final r = h.sinceLocalMidnight();
+      // baseline = last pre-midnight value, carried to a point at 00:00
+      expect(r.openValue, 110.0);
+      expect(r.timestamps.first, midnight);
+      expect(r.values.first, 110.0);
+      // pre-midnight samples dropped, post-midnight kept
+      expect(r.values, [110.0, 120.0, 130.0]);
+      expect(r.changeAbs, closeTo(20.0, 0.001));
+      expect(r.changePct, closeTo(20.0 / 110.0 * 100, 0.001));
+    });
+
+    test('falls back to first value when no pre-midnight sample exists', () {
+      final now = DateTime.now();
+      final midnight = DateTime(now.year, now.month, now.day);
+      final h = PortfolioHistory(
+        timestamps: [
+          midnight.add(const Duration(hours: 1)),
+          midnight.add(const Duration(hours: 2)),
+        ],
+        values: const [200.0, 210.0],
+        currentValue: 210.0,
+      );
+      final r = h.sinceLocalMidnight();
+      expect(r.openValue, 200.0);
+      expect(r.timestamps.first, midnight);
+      expect(r.values, [200.0, 200.0, 210.0]);
+      expect(r.changeAbs, closeTo(10.0, 0.001));
+    });
+
+    test('is a no-op for empty history', () {
+      final r = PortfolioHistory(timestamps: const [], values: const [])
+          .sinceLocalMidnight();
+      expect(r.isEmpty, isTrue);
+    });
+  });
 }
