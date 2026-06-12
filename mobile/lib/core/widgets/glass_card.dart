@@ -107,21 +107,22 @@ class GlassCard extends StatelessWidget {
   Widget _frostedBody(BorderRadius radius) {
     return Container(
       decoration: BoxDecoration(
-        // Translucent frosted glass: a white sheen up top melting into a
-        // near-clear middle (the blurred backdrop reads through) and a soft
-        // violet foot for legibility.
+        // Genuinely transparent frosted glass: only a faint white sheen up top
+        // and a whisper of a violet foot — the rest is near-clear so the
+        // blurred backdrop reads straight through (the frost is the blur, not
+        // a grey fill).
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            Color(0x2EFFFFFF), // ~18% white sheen (top-left)
-            Color(0x0FFFFFFF), // ~6% near-clear middle
-            Color(0x40140E2A), // ~25% deep violet foot
+            Color(0x14FFFFFF), // ~8% white sheen (top-left)
+            Color(0x03FFFFFF), // ~1% near-clear middle
+            Color(0x12110A24), // ~7% violet foot
           ],
           stops: [0.0, 0.5, 1.0],
         ),
         borderRadius: radius,
-        border: Border.all(color: borderColor ?? const Color(0x33FFFFFF)),
+        border: Border.all(color: borderColor ?? const Color(0x2BFFFFFF)),
       ),
       child: Stack(
         children: [
