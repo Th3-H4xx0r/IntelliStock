@@ -260,7 +260,7 @@ struct PortfolioWidgetView: View {
             Text("Open the app to sync your portfolio").font(.system(size: 12)).foregroundColor(cDim)
             Spacer()
         }
-        .padding(12)
+        .padding(18)
     }
 
     // ── 1×1 ──
@@ -276,7 +276,7 @@ struct PortfolioWidgetView: View {
             Spacer(minLength: 4)
             curve(height: 40)
         }
-        .padding(12)
+        .padding(18)
     }
 
     // ── 1×2 ──
@@ -294,7 +294,7 @@ struct PortfolioWidgetView: View {
             positionsGrid(limit: 6, columns: 2, fontSize: 11)
                 .frame(maxWidth: .infinity)
         }
-        .padding(12)
+        .padding(18)
     }
 
     // ── 2×2 : curve top, positions bottom ──
@@ -318,7 +318,7 @@ struct PortfolioWidgetView: View {
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(14)
+        .padding(20)
     }
 
     // ── Positions — condensed: no dot, P&L right next to the ticker, packed
