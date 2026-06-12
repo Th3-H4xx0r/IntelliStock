@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -444,19 +446,21 @@ class _AccountRow extends StatelessWidget {
 
 // ── Holdings ──────────────────────────────────────────────────────────────────
 
-/// The selected account's current holdings, shown below the hero chart like a
-/// modern brokerage app. Hidden while empty / loading / erroring (the backend
-/// positions endpoint may not be deployed yet), so it never shows a blank box.
+/// The selected account's uninvested cash + holdings, shown below the hero
+/// chart like a modern brokerage app (Robinhood/Coinbase). Hidden while it has
+/// no data, so it never shows a blank box.
 class _HoldingsList extends ConsumerWidget {
   const _HoldingsList({required this.brokerageId});
   final String brokerageId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final positions =
-        ref.watch(accountPositionsProvider(brokerageId)).valueOrNull ??
-            const <AccountPosition>[];
-    if (positions.isEmpty) return const SizedBox.shrink();
+    final holdings = ref.watch(accountHoldingsProvider(brokerageId)).valueOrNull;
+    if (holdings == null || holdings.isEmpty) return const SizedBox.shrink();
+    final positions = holdings.positions;
+    // Total account value → each row's ring shows its share of the portfolio.
+    final total = (holdings.cash ?? 0) +
+        positions.fold<double>(0, (s, p) => s + p.marketValue);
     return Padding(
       padding: const EdgeInsets.only(top: 24),
       child: Column(
@@ -468,19 +472,16 @@ class _HoldingsList extends ConsumerWidget {
           ),
           GlassCard(
             liquid: true,
-            padding: const EdgeInsets.symmetric(vertical: 2),
+            padding: const EdgeInsets.symmetric(vertical: 4),
             child: Column(
               children: [
+                if (holdings.cash != null) ...[
+                  _CashRow(cash: holdings.cash!, total: total),
+                  if (positions.isNotEmpty) const _HoldingDivider(),
+                ],
                 for (var i = 0; i < positions.length; i++) ...[
-                  if (i > 0)
-                    Divider(
-                      height: 1,
-                      thickness: 1,
-                      color: Colors.white.withValues(alpha: 0.05),
-                      indent: 14,
-                      endIndent: 14,
-                    ),
-                  _HoldingRow(p: positions[i]),
+                  if (i > 0) const _HoldingDivider(),
+                  _HoldingRow(p: positions[i], total: total),
                 ],
               ],
             ),
@@ -491,9 +492,142 @@ class _HoldingsList extends ConsumerWidget {
   }
 }
 
+class _HoldingDivider extends StatelessWidget {
+  const _HoldingDivider();
+  @override
+  Widget build(BuildContext context) => Divider(
+        height: 1,
+        thickness: 1,
+        color: Colors.white.withValues(alpha: 0.05),
+        indent: 66,
+        endIndent: 14,
+      );
+}
+
+/// Deterministic per-symbol accent so each ticker gets a stable, distinct ring
+/// colour.
+Color _symbolColor(String s) {
+  var h = 0;
+  for (final c in s.codeUnits) {
+    h = (h * 31 + c) & 0x7fffffff;
+  }
+  return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.6).toColor();
+}
+
+/// A circular allocation ring: a progress arc = this item's share of the
+/// portfolio, with the percentage in the centre (the "diversity" indicator).
+class _AllocationRing extends StatelessWidget {
+  const _AllocationRing({required this.fraction, required this.color});
+  final double fraction;
+  final Color color;
+
+  static String _label(double f) {
+    final pct = f * 100;
+    if (pct <= 0) return '0%';
+    if (pct < 1) return '<1%';
+    return '${pct.round()}%';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 44,
+      height: 44,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CustomPaint(
+            size: const Size(44, 44),
+            painter: _RingPainter(fraction: fraction.clamp(0.0, 1.0), color: color),
+          ),
+          Text(
+            _label(fraction),
+            style: AppTextStyles.nano.copyWith(
+              color: AppColors.textHi,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  _RingPainter({required this.fraction, required this.color});
+  final double fraction;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.width / 2 - 3.5;
+    final track = Paint()
+      ..color = Colors.white.withValues(alpha: 0.10)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.5;
+    final prog = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.5
+      ..strokeCap = StrokeCap.round;
+    canvas.drawCircle(center, radius, track);
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2,
+      2 * math.pi * fraction.clamp(0.0, 1.0),
+      false,
+      prog,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter o) =>
+      o.fraction != fraction || o.color != color;
+}
+
+class _CashRow extends StatelessWidget {
+  const _CashRow({required this.cash, required this.total});
+  final double cash;
+  final double total;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      child: Row(
+        children: [
+          _AllocationRing(
+            fraction: total > 0 ? cash / total : 0,
+            color: AppColors.teal,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Cash',
+                    style: AppTextStyles.bodyHi
+                        .copyWith(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text('Available to invest',
+                    style:
+                        AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+              ],
+            ),
+          ),
+          Text(fmtMoney(cash),
+              style: AppTextStyles.value.copyWith(color: AppColors.textHi)),
+        ],
+      ),
+    );
+  }
+}
+
 class _HoldingRow extends StatelessWidget {
-  const _HoldingRow({required this.p});
+  const _HoldingRow({required this.p, required this.total});
   final AccountPosition p;
+  final double total;
 
   String get _qtyLabel {
     final q = p.qty;
@@ -507,23 +641,12 @@ class _HoldingRow extends StatelessWidget {
     final up = p.unrealizedPnlPct >= 0;
     final color = up ? AppColors.success : AppColors.danger;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       child: Row(
         children: [
-          Container(
-            width: 38,
-            height: 38,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: AppColors.primary.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(10),
-              border:
-                  Border.all(color: AppColors.primary.withValues(alpha: 0.18)),
-            ),
-            child: Text(
-              p.symbol.isNotEmpty ? p.symbol[0] : '?',
-              style: AppTextStyles.cardTitle.copyWith(color: AppColors.primary),
-            ),
+          _AllocationRing(
+            fraction: total > 0 ? p.marketValue / total : 0,
+            color: _symbolColor(p.symbol),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -545,11 +668,19 @@ class _HoldingRow extends StatelessWidget {
             children: [
               Text(fmtMoney(p.marketValue),
                   style: AppTextStyles.value.copyWith(color: AppColors.textHi)),
-              const SizedBox(height: 2),
-              Text(
-                fmtPct(p.unrealizedPnlPct),
-                style: AppTextStyles.micro
-                    .copyWith(color: color, fontWeight: FontWeight.w600),
+              const SizedBox(height: 3),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(up ? symbol('trending_up') : symbol('trending_down'),
+                      size: 12, color: color),
+                  const SizedBox(width: 3),
+                  Text(
+                    fmtPct(p.unrealizedPnlPct),
+                    style: AppTextStyles.micro
+                        .copyWith(color: color, fontWeight: FontWeight.w700),
+                  ),
+                ],
               ),
             ],
           ),

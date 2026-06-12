@@ -111,6 +111,15 @@ class AccountPosition {
       );
 }
 
+/// The account's uninvested cash + open positions (GET /brokerages/{id}/positions).
+class AccountHoldings {
+  const AccountHoldings({this.cash, required this.positions});
+  final double? cash;
+  final List<AccountPosition> positions;
+
+  bool get isEmpty => cash == null && positions.isEmpty;
+}
+
 // ── Repository ────────────────────────────────────────────────────────────────
 
 /// Thin data layer for all dashboard endpoints.
@@ -174,16 +183,19 @@ class DashboardRepository {
     return PortfolioHistory.fromJson(data);
   }
 
-  /// GET /brokerages/{id}/positions → current holdings (sorted by value).
-  Future<List<AccountPosition>> accountPositions(String id) async {
+  /// GET /brokerages/{id}/positions → uninvested cash + holdings (by value).
+  Future<AccountHoldings> accountHoldings(String id) async {
     final data = await _client.get<Map<String, dynamic>>(
       '/brokerages/$id/positions',
     );
     final list = (data['positions'] as List? ?? const []);
-    return list
-        .whereType<Map<String, dynamic>>()
-        .map(AccountPosition.fromJson)
-        .toList();
+    return AccountHoldings(
+      cash: (data['cash'] as num?)?.toDouble(),
+      positions: list
+          .whereType<Map<String, dynamic>>()
+          .map(AccountPosition.fromJson)
+          .toList(),
+    );
   }
 
   // ── Control POSTs ──────────────────────────────────────────────────────────
