@@ -37,7 +37,7 @@ neo4j>=6.2.0
 sec-edgar-downloader>=5.1.0
 beautifulsoup4>=4.14.3
 # For SEC EDGAR supply chain NER and fuzzy matching:
-spacy>=3.0.0
+spacy>=3.8.14
 rapidfuzz>=3.14.5
 # After install, run: python -m spacy download en_core_web_lg
 lxml>=6.1.0
