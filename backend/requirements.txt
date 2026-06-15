@@ -51,7 +51,7 @@ toon-format
 # PydanticAI slim install with only the providers used here:
 # - Gemini via Google provider
 # - DeepSeek via OpenAI-compatible provider
-pydantic-ai-slim[google,openai,bedrock]==1.106.0
+pydantic-ai-slim[google,openai,bedrock]==1.107.0
 # Live-mode trading (V32 Phase 5):
 # - alpaca-py: new TradingClient + TradingStream (supersedes alpaca_trade_api above for live order path)
 # - cryptography: Fernet-encrypted BrokerageAccounts credentials (secret_store.py)
