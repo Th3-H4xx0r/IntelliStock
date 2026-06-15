@@ -57,7 +57,7 @@ pydantic-ai-slim[google,openai,bedrock]==1.106.0
 # - cryptography: Fernet-encrypted BrokerageAccounts credentials (secret_store.py)
 # - exchange_calendars: NYSE market calendar with holidays + early closes (live_calendar.py)
 alpaca-py>=0.43.0
-cryptography>=41.0.0
+cryptography>=49.0.0
 # httpx[http2]: direct APNs sender (apns_sender.py) needs HTTP/2, which Apple's
 # push endpoint requires. PyJWT (above) signs the ES256 provider token.
 httpx[http2]>=0.27
