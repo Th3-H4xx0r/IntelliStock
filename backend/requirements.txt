@@ -60,7 +60,7 @@ alpaca-py>=0.43.0
 cryptography>=41.0.0
 # httpx[http2]: direct APNs sender (apns_sender.py) needs HTTP/2, which Apple's
 # push endpoint requires. PyJWT (above) signs the ES256 provider token.
-httpx[http2]>=0.27
+httpx[http2]>=0.28.1
 exchange_calendars>=4.13.2
 # Ollama provider — official Python SDK for local + remote + cloud Ollama
 # hosts. We use Client/AsyncClient + ResponseError; httpx is a transitive
