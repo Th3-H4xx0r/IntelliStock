@@ -10,6 +10,7 @@ import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
+import '../../../core/widgets/relative_time_text.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../widgets_bridge/widget_sync_service.dart';
 import '../application/account_positions_controller.dart';
@@ -246,6 +247,23 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
                   account: selected,
                   hero: true,
                 ),
+                // Live freshness line — ticks honestly even between polls.
+                Consumer(builder: (context, ref, _) {
+                  final updatedAt = ref.watch(portfolioUpdatedAtProvider);
+                  if (updatedAt == null) return const SizedBox.shrink();
+                  final faint = AppTextStyles.nano
+                      .copyWith(color: AppColors.textFaint);
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('Updated ', style: faint),
+                        RelativeTimeText(timestamp: updatedAt, style: faint),
+                      ],
+                    ),
+                  );
+                }),
                 _HoldingsList(brokerageId: selected.id),
               ],
             );

@@ -12,6 +12,7 @@ import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/models/portfolio_history.dart';
+import '../application/dashboard_controller.dart';
 import '../data/dashboard_repository.dart';
 
 // ── Range constants ───────────────────────────────────────────────────────────
@@ -47,6 +48,9 @@ class _HistoryNotifier
   Future<PortfolioHistory> build(_HistoryArgs arg) async {
     final lifecycle = ref.read(appLifecycleProvider);
     final data = await _fetch(arg);
+    // Stamp outside the build phase (Riverpod forbids mutating a provider
+    // during another provider's build).
+    Future.microtask(_stampUpdated);
 
     // Keep the value + curve live, like the live-trading screen. The 1D curve
     // grows continuously (incl. overnight); longer ranges barely move, so poll
@@ -84,9 +88,17 @@ class _HistoryNotifier
   Future<void> _refresh(_HistoryArgs arg) async {
     try {
       state = AsyncData(await _fetch(arg));
+      _stampUpdated();
     } catch (_) {
       // keep the last good data on a transient poll failure
     }
+  }
+
+  void _stampUpdated() {
+    // Guarded: the autoDispose notifier may already be gone on a late tick.
+    try {
+      ref.read(portfolioUpdatedAtProvider.notifier).state = DateTime.now();
+    } catch (_) {/* provider disposed — ignore */}
   }
 }
 
