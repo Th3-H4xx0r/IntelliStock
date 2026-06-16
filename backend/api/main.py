@@ -22,7 +22,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -49,6 +49,7 @@ from auth_utils import (
     verify_secret_auth_key,
     create_access_token,
     decode_access_token,
+    renewed_token_if_stale,
     user_doc_to_public,
     ensure_users_table,
     ensure_default_admin,
@@ -190,6 +191,7 @@ if _cors_origins:
         allow_credentials=False,  # JWT-in-Authorization-header is not a credential
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["X-Refreshed-Token"],
     )
 
 security = HTTPBearer(auto_error=True)
@@ -363,6 +365,7 @@ def conn_dependency():
 
 
 def get_current_user(
+    response: Response,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     conn=Depends(conn_dependency),
 ) -> dict:
@@ -377,6 +380,15 @@ def get_current_user(
     user = get_user_by_id(conn, user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Sliding renewal: once the token passes half-life, hand back a fresh one via
+    # a response header so active sessions never reach expiry. Best-effort — a
+    # renewal hiccup must never break the request.
+    try:
+        renewed = renewed_token_if_stale(payload)
+        if renewed:
+            response.headers["X-Refreshed-Token"] = renewed
+    except Exception:
+        pass
     return {
         "id": user.get("id"),
         "username": user.get("username"),
