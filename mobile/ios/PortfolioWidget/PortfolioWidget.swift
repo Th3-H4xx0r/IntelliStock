@@ -207,11 +207,17 @@ struct PortfolioWidgetView: View {
         // every "trailing" attempt landed on the LEFT. Force LTR so bottom-right
         // is truly bottom-right. Auto-updating date Text; `+ Text(" ago")` keeps
         // the live tick.
-        .overlay(alignment: .bottomTrailing) {
+        .overlay {
             if entry.hasData, entry.syncedAt > 0 {
                 (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                     .font(.system(size: 9)).foregroundColor(cFaint)
                     .lineLimit(1)
+                    // Fill the tile and pin the label bottom-trailing. The whole
+                    // body is forced to layoutDirection = .leftToRight below, so
+                    // "trailing" is the visual RIGHT even though this widget
+                    // inherited an RTL locale — which is exactly why every prior
+                    // attempt landed on (and clipped off) the LEFT edge.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                     .padding(.trailing, 14).padding(.bottom, 11)
             }
         }
