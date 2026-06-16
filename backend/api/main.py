@@ -383,6 +383,10 @@ def get_current_user(
     # Sliding renewal: once the token passes half-life, hand back a fresh one via
     # a response header so active sessions never reach expiry. Best-effort — a
     # renewal hiccup must never break the request.
+    # NOTE: this header only reaches the client when the endpoint RETURNS A DICT
+    # (FastAPI merges the injected Response's headers). If an authed endpoint is
+    # ever changed to return a `Response`/`JSONResponse` object directly, the
+    # header is dropped for that route — set it on that response explicitly.
     try:
         renewed = renewed_token_if_stale(payload)
         if renewed:
