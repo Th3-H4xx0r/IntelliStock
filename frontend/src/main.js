@@ -4,6 +4,10 @@ import App from './App.vue'
 import router from './router'
 import vReveal from './directives/scrollReveal'
 import VueApexCharts from 'vue3-apexcharts'
+import { installRefreshedTokenCapture } from './utils/auth.js'
+
+// Slide the web session: adopt any X-Refreshed-Token the backend hands back.
+installRefreshedTokenCapture()
 
 const app = createApp(App)
 app.use(router)
