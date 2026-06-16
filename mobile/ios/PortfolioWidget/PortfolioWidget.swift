@@ -208,15 +208,19 @@ struct PortfolioWidgetView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if entry.hasData, entry.syncedAt > 0 {
-                // Auto-updating, date-typed Text: WidgetKit re-renders it on its
-                // own clock between reloads. `+ Text(" ago")` keeps that auto-update
-                // (string interpolation would format once and freeze). No
-                // .fixedSize() — it collapses an auto-updating date Text.
-                (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
-                    .font(.system(size: 9)).foregroundColor(cFaint)
-                    .lineLimit(1)
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 12)
+                // In-flow footer, forced hard-right by a leading Spacer (no
+                // reliance on VStack alignment). Auto-updating, date-typed Text:
+                // WidgetKit re-renders it on its own clock between reloads;
+                // `+ Text(" ago")` keeps that auto-update. No .fixedSize() (it
+                // collapses an auto-updating date Text).
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
+                        .font(.system(size: 9)).foregroundColor(cFaint)
+                        .lineLimit(1)
+                }
+                .padding(.trailing, 16)
+                .padding(.bottom, 12)
             }
         }
         .containerBackground(widgetBG, for: .widget)
