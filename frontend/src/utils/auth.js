@@ -47,7 +47,9 @@ export function installRefreshedTokenCapture() {
     const res = await orig(...args)
     try {
       const t = res && res.headers && res.headers.get && res.headers.get('X-Refreshed-Token')
-      if (t) localStorage.setItem(TOKEN_KEY, t)
+      // Only slide an existing session — never resurrect a token into a tab
+      // that has logged out (cross-tab race with an in-flight request).
+      if (t && localStorage.getItem(TOKEN_KEY)) localStorage.setItem(TOKEN_KEY, t)
     } catch { /* never let token capture break a request */ }
     return res
   }
