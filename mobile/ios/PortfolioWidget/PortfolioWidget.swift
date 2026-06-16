@@ -189,32 +189,34 @@ struct PortfolioWidgetView: View {
     }
 
     private var systemBody: some View {
-        Group {
-            if !entry.hasData {
-                empty
-            } else {
-                switch family {
-                case .systemSmall:  small
-                case .systemMedium: medium
-                default:            large
+        // The timestamp lives IN-FLOW at the bottom (not a floating overlay), so
+        // it reserves its own space and physically can't overflow the edge or get
+        // clipped by the rounded corner. VStack(alignment: .trailing) pins it to
+        // the bottom-right; the family content above fills the remaining height.
+        VStack(alignment: .trailing, spacing: 0) {
+            Group {
+                if !entry.hasData {
+                    empty
+                } else {
+                    switch family {
+                    case .systemSmall:  small
+                    case .systemMedium: medium
+                    default:            large
+                    }
                 }
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .overlay(alignment: .bottomTrailing) {
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
             if entry.hasData, entry.syncedAt > 0 {
-                // Auto-updating relative text: WidgetKit re-renders a *date-typed*
-                // Text on its own clock between timeline reloads, so it ticks and
-                // never sticks on "Just now". The `+ Text(" ago")` concatenation
-                // KEEPS that auto-update (string interpolation would format once
-                // and freeze). The `+` is only deprecated on macOS 26 — not iOS.
+                // Auto-updating, date-typed Text: WidgetKit re-renders it on its
+                // own clock between reloads. `+ Text(" ago")` keeps that auto-update
+                // (string interpolation would format once and freeze). No
+                // .fixedSize() — it collapses an auto-updating date Text.
                 (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                     .font(.system(size: 9)).foregroundColor(cFaint)
                     .lineLimit(1)
-                    // Bottom-right, inset enough to clear the widget's rounded
-                    // corner so it doesn't read as overflowing the edge.
-                    // (No .fixedSize() — it collapses an auto-updating date Text.)
-                    .padding(.trailing, 14).padding(.bottom, 12)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 12)
             }
         }
         .containerBackground(widgetBG, for: .widget)
