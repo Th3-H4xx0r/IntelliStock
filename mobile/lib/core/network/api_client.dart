@@ -84,7 +84,10 @@ class ApiClient {
 }
 
 final dioProvider = Provider<Dio>((ref) {
-  final session = ref.watch(sessionProvider);
+  // read (not watch): the interceptor closes over the long-lived SessionStore
+  // and reads `.token` live on every request, so the Dio never needs to rebuild
+  // when the token changes (which now happens on every slid-token response).
+  final session = ref.read(sessionProvider);
   final dio = Dio(BaseOptions(
     baseUrl: ApiConfig.baseUrl,
     connectTimeout: ApiConfig.connectTimeout,

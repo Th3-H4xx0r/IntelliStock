@@ -144,6 +144,13 @@ private func lastSyncedAt() -> Double {
     UserDefaults(suiteName: kAppGroup)?.double(forKey: "synced_at") ?? 0
 }
 
+/// Sync instant clamped to never exceed now, so the auto-updating relative
+/// label can't render a nonsensical future phrasing ("in 2 seconds ago") on
+/// any clock skew between the stored epoch and the render clock.
+private func syncedDate(_ epoch: Double) -> Date {
+    Date(timeIntervalSince1970: min(epoch, Date().timeIntervalSince1970))
+}
+
 private func portfolioEntry(for id: String?, date: Date = Date()) -> PortfolioEntry {
     let synced = lastSyncedAt()
     if let a = resolveAccount(id) {
@@ -196,10 +203,14 @@ struct PortfolioWidgetView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .bottomTrailing) {
             if entry.hasData, entry.syncedAt > 0 {
-                // Auto-updating relative text: iOS re-renders this on its own
-                // clock between timeline reloads, so it never sticks on "Just now".
-                Text("\(Date(timeIntervalSince1970: entry.syncedAt), style: .relative) ago")
+                // Auto-updating relative text: WidgetKit re-renders a *date-typed*
+                // Text on its own clock between timeline reloads, so it ticks and
+                // never sticks on "Just now". The `+ Text(" ago")` concatenation
+                // KEEPS that auto-update (string interpolation would format once
+                // and freeze). The `+` is only deprecated on macOS 26 — not iOS.
+                (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                     .font(.system(size: 9)).foregroundColor(cFaint)
+                    .lineLimit(1)
                     .padding(.trailing, 10).padding(.bottom, 7)
             }
         }
@@ -219,8 +230,9 @@ struct PortfolioWidgetView: View {
                 }
                 Text(money(entry.value)).font(.system(size: 17, weight: .bold))
                 if entry.syncedAt > 0 {
-                    Text("\(Date(timeIntervalSince1970: entry.syncedAt), style: .relative) ago")
+                    (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                         .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .lineLimit(1).minimumScaleFactor(0.8)
                 }
             } else {
                 Text("IntelliStock").font(.system(size: 12, weight: .semibold))

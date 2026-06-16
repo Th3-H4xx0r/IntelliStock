@@ -73,7 +73,13 @@ class SessionStore extends ChangeNotifier {
   Future<void> setToken(String token) async {
     if (token.isEmpty || token == _token) return;
     _token = token;
-    await _storage.write(key: _kToken, value: token);
+    // Persistence is best-effort: a locked keychain must never throw out of
+    // this fire-and-forget path (the in-memory token is already updated).
+    try {
+      await _storage.write(key: _kToken, value: token);
+    } catch (_) {
+      // ignore — keep the running session; persistence retries next slide.
+    }
     await _syncWidgetCreds();
     notifyListeners();
   }
