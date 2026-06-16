@@ -3,6 +3,7 @@ Auth utilities: user storage in RethinkDB, password hashing, JWT.
 Used by server.py (default admin) and api/main.py (auth endpoints + protection).
 """
 
+import calendar
 import hmac
 import os
 import sys
@@ -235,8 +236,15 @@ def create_access_token(user_id: str, username: str, role: str) -> str:
     secret = os.environ.get("JWT_SECRET", "").strip()
     if not secret:
         raise RuntimeError("JWT_SECRET environment variable is required for auth")
-    expire = datetime.utcnow() + timedelta(hours=int(os.environ.get("JWT_EXPIRE_HOURS", "24")))
-    payload = {"sub": user_id, "username": username, "role": role, "exp": expire}
+    now = datetime.utcnow()
+    hours = int(os.environ.get("JWT_EXPIRE_HOURS", "720"))  # default ~30 days
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "role": role,
+        "iat": now,
+        "exp": now + timedelta(hours=hours),
+    }
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
@@ -252,6 +260,38 @@ def decode_access_token(token: str) -> Optional[Dict[str, Any]]:
         return payload
     except Exception:
         return None
+
+
+def token_needs_refresh(payload: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """True when a token is past the halfway point of its lifetime.
+
+    Requires both ``iat`` and ``exp`` (unix seconds, as PyJWT returns them).
+    Tokens minted before sliding renewal shipped have no ``iat`` and never
+    refresh — they expire once, then the user gets a fresh sliding token.
+    """
+    iat = payload.get("iat")
+    exp = payload.get("exp")
+    if not isinstance(iat, (int, float)) or not isinstance(exp, (int, float)):
+        return False
+    lifetime = exp - iat
+    if lifetime <= 0:
+        return False
+    now_dt = now or datetime.utcnow()
+    # Treat the naive datetime as UTC (matches utcnow + PyJWT's UTC encoding).
+    now_ts = calendar.timegm(now_dt.utctimetuple())
+    return (exp - now_ts) < lifetime / 2
+
+
+def renewed_token_if_stale(payload: Dict[str, Any], now: Optional[datetime] = None) -> Optional[str]:
+    """Return a freshly-minted token when ``payload`` is past half-life, else None."""
+    if not token_needs_refresh(payload, now):
+        return None
+    sub = payload.get("sub")
+    username = payload.get("username")
+    role = payload.get("role", "user")
+    if not sub or not username:
+        return None
+    return create_access_token(str(sub), str(username), str(role))
 
 
 def _strip_env_quotes(s: str) -> str:
