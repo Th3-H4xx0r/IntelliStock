@@ -209,19 +209,21 @@ struct PortfolioWidgetView: View {
         // the live tick.
         .overlay {
             if entry.hasData, entry.syncedAt > 0 {
-                (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
-                    .font(.system(size: 9)).foregroundColor(cFaint)
-                    .lineLimit(1)
-                    // Fill the tile and pin the label bottom-trailing. The whole
-                    // body is forced to layoutDirection = .leftToRight below, so
-                    // "trailing" is the visual RIGHT even though this widget
-                    // inherited an RTL locale — which is exactly why every prior
-                    // attempt landed on (and clipped off) the LEFT edge.
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .padding(.trailing, 14).padding(.bottom, 11)
+                // ABSOLUTE positioning — GeometryReader + .position use raw pixel
+                // coordinates that layout direction CANNOT flip (unlike
+                // leading/trailing alignment + padding, which kept resolving to
+                // the left and clipping on this RTL-locale widget). x is measured
+                // from the left edge, so width-46 sits near the right; .position
+                // places the label's centre there. No .fixedSize (it collapses an
+                // auto-updating date Text).
+                GeometryReader { geo in
+                    (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
+                        .font(.system(size: 9)).foregroundColor(cFaint)
+                        .lineLimit(1)
+                        .position(x: geo.size.width - 46, y: geo.size.height - 14)
+                }
             }
         }
-        .environment(\.layoutDirection, .leftToRight)
         .containerBackground(widgetBG, for: .widget)
     }
 
