@@ -144,17 +144,6 @@ private func lastSyncedAt() -> Double {
     UserDefaults(suiteName: kAppGroup)?.double(forKey: "synced_at") ?? 0
 }
 
-/// "30s ago" / "1m ago" / "2h ago" — relative time since the app last synced.
-private func relativeAgo(_ epoch: Double) -> String {
-    guard epoch > 0 else { return "" }
-    let diff = max(0, Date().timeIntervalSince1970 - epoch)
-    if diff < 5 { return "Just now" }
-    if diff < 60 { return "\(Int(diff))s ago" }
-    if diff < 3600 { return "\(Int(diff / 60))m ago" }
-    if diff < 86400 { return "\(Int(diff / 3600))h ago" }
-    return "\(Int(diff / 86400))d ago"
-}
-
 private func portfolioEntry(for id: String?, date: Date = Date()) -> PortfolioEntry {
     let synced = lastSyncedAt()
     if let a = resolveAccount(id) {
@@ -206,8 +195,10 @@ struct PortfolioWidgetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .bottomTrailing) {
-            if entry.hasData, !relativeAgo(entry.syncedAt).isEmpty {
-                Text(relativeAgo(entry.syncedAt))
+            if entry.hasData, entry.syncedAt > 0 {
+                // Auto-updating relative text: iOS re-renders this on its own
+                // clock between timeline reloads, so it never sticks on "Just now".
+                Text("\(Date(timeIntervalSince1970: entry.syncedAt), style: .relative) ago")
                     .font(.system(size: 9)).foregroundColor(cFaint)
                     .padding(.trailing, 10).padding(.bottom, 7)
             }
@@ -227,8 +218,8 @@ struct PortfolioWidgetView: View {
                         .font(.system(size: 12, weight: .semibold))
                 }
                 Text(money(entry.value)).font(.system(size: 17, weight: .bold))
-                if !relativeAgo(entry.syncedAt).isEmpty {
-                    Text(relativeAgo(entry.syncedAt))
+                if entry.syncedAt > 0 {
+                    Text("\(Date(timeIntervalSince1970: entry.syncedAt), style: .relative) ago")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             } else {
@@ -479,8 +470,11 @@ struct ConfigProvider: AppIntentTimelineProvider {
         // Pull fresh data ourselves so the widget doesn't depend on the app being open.
         await fetchAndCacheAccounts()
         let e = portfolioEntry(for: configuration.account?.id)
-        // iOS budgets background widget reloads (~15-30 min apart); requesting
-        // sub-10-min just burns the budget and makes it refresh LESS. Floor at 10m.
+        // iOS budgets background widget reloads (effectively ~every 15-30 min)
+        // and throttles further on usage; requesting sub-10-min just burns the
+        // budget and refreshes LESS. We pass the user's interval through with a
+        // 10-min floor. The relative-time label is auto-updating, so it always
+        // shows honest data age even between these reloads.
         let interval = max(configuration.refresh.seconds, 600)
         let next = Date().addingTimeInterval(interval)
         return Timeline(entries: [e], policy: .after(next))
