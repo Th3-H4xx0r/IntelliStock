@@ -112,10 +112,11 @@ String fmtDate(dynamic v) {
 }
 
 /// Relative time: `Just now` / `5m ago` / `2h ago` / `3d ago`.
-String fmtRelative(dynamic v) {
+/// Pass [now] to compute against a fixed clock (testing / self-ticking widgets).
+String fmtRelative(dynamic v, {DateTime? now}) {
   final dt = parseDateTime(v);
   if (dt == null) return _dash;
-  final diff = DateTime.now().difference(dt);
+  final diff = (now ?? DateTime.now()).difference(dt);
   if (diff.inSeconds < 60) return 'Just now';
   if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
   if (diff.inHours < 24) return '${diff.inHours}h ago';
