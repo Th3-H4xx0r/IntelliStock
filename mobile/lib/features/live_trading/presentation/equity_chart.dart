@@ -110,10 +110,15 @@ class _EquityChartState extends State<EquityChart> {
 
     final chart = _chartFor(pts, color, bounds);
 
-    final labels = [
-      for (final i in evenlySpacedLabelIndices(n, 4))
-        formatChartDate(pts[i].ts, widget.range),
-    ];
+    // 1D (area/line) plots against a fixed full-day axis → fixed day labels.
+    final useTimeAxis =
+        widget.range == '1D' && widget.style != ChartStyle.candle;
+    final labels = useTimeAxis
+        ? [for (final h in [0, 6, 12, 18, 24]) hourAmPm(h)]
+        : [
+            for (final i in evenlySpacedLabelIndices(n, 4))
+              formatChartDate(pts[i].ts, widget.range),
+          ];
 
     return SizedBox(
       height: widget.height,
@@ -128,9 +133,9 @@ class _EquityChartState extends State<EquityChart> {
                 return GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onHorizontalDragStart: (d) =>
-                      _handleScrub(d.localPosition.dx, width, n),
+                      _handleScrub(d.localPosition.dx, width, pts),
                   onHorizontalDragUpdate: (d) =>
-                      _handleScrub(d.localPosition.dx, width, n),
+                      _handleScrub(d.localPosition.dx, width, pts),
                   onHorizontalDragEnd: (_) => _endScrub(),
                   onHorizontalDragCancel: _endScrub,
                   child: Stack(
@@ -229,18 +234,25 @@ class _EquityChartState extends State<EquityChart> {
     }
 
     final isLine = widget.style == ChartStyle.line;
+    // Reached only for area/line (candle returns above). 1D plots against a
+    // fixed full-day [0,1440]-minute axis so the line fills only the elapsed
+    // part of the day (Robinhood overnight style).
+    final useTimeAxis = widget.range == '1D';
+    num xOf(_ChartPoint d) => useTimeAxis ? _minuteOfDay(d.ts) : d.x;
     return SfCartesianChart(
       backgroundColor: Colors.transparent,
       plotAreaBorderWidth: 0,
       margin: EdgeInsets.zero,
-      primaryXAxis: edgeToEdgeIndexAxis(pts.length),
+      primaryXAxis: useTimeAxis
+          ? edgeToEdgeRangeAxis(0, 24 * 60)
+          : edgeToEdgeIndexAxis(pts.length),
       primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
       series: <CartesianSeries>[
         if (!isLine)
           SplineAreaSeries<_ChartPoint, num>(
             dataSource: pts,
             splineType: SplineType.monotonic,
-            xValueMapper: (d, _) => d.x,
+            xValueMapper: (d, _) => xOf(d),
             yValueMapper: (d, _) => d.value,
             color: color.withValues(alpha: 0.28),
             borderColor: color,
@@ -258,7 +270,7 @@ class _EquityChartState extends State<EquityChart> {
           SplineSeries<_ChartPoint, num>(
             dataSource: pts,
             splineType: SplineType.monotonic,
-            xValueMapper: (d, _) => d.x,
+            xValueMapper: (d, _) => xOf(d),
             yValueMapper: (d, _) => d.value,
             color: color,
             width: 1.75,
@@ -267,14 +279,40 @@ class _EquityChartState extends State<EquityChart> {
     );
   }
 
-  void _handleScrub(double dx, double width, int n) {
+  static double _minuteOfDay(DateTime ts) {
+    final m = DateTime(ts.year, ts.month, ts.day);
+    return ts.difference(m).inSeconds / 60.0;
+  }
+
+  void _handleScrub(double dx, double width, List<_ChartPoint> pts) {
+    final n = pts.length;
     if (n == 0 || width <= 0) return;
     final frac = (dx / width).clamp(0.0, 1.0);
-    final idx = fractionToIndex(frac, n);
     final prev = _scrub.value?.index;
+    final useTimeAxis =
+        widget.range == '1D' && widget.style != ChartStyle.candle;
+    int idx;
+    double drawFrac;
+    if (useTimeAxis) {
+      // Nearest point by minute-of-day so the hairline tracks real time.
+      final targetMin = frac * (24 * 60);
+      idx = 0;
+      var best = double.infinity;
+      for (var i = 0; i < n; i++) {
+        final d = (_minuteOfDay(pts[i].ts) - targetMin).abs();
+        if (d < best) {
+          best = d;
+          idx = i;
+        }
+      }
+      drawFrac = (_minuteOfDay(pts[idx].ts) / (24 * 60)).clamp(0.0, 1.0);
+    } else {
+      idx = fractionToIndex(frac, n);
+      drawFrac = indexToFraction(idx, n);
+    }
     // Draw hairline + dot at the data point's own fraction so they land on the
     // curve and match the value the header reports.
-    _scrub.update(idx, indexToFraction(idx, n));
+    _scrub.update(idx, drawFrac);
     if (idx != prev) widget.onScrub?.call(idx);
   }
 

@@ -40,6 +40,7 @@ class ServiceCard extends StatelessWidget {
     final isRunning = status.toLowerCase() == 'running';
 
     return GlassCard(
+      liquid: true,
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

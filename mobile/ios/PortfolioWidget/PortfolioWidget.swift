@@ -144,15 +144,11 @@ private func lastSyncedAt() -> Double {
     UserDefaults(suiteName: kAppGroup)?.double(forKey: "synced_at") ?? 0
 }
 
-/// "30s ago" / "1m ago" / "2h ago" — relative time since the app last synced.
-private func relativeAgo(_ epoch: Double) -> String {
-    guard epoch > 0 else { return "" }
-    let diff = max(0, Date().timeIntervalSince1970 - epoch)
-    if diff < 5 { return "Just now" }
-    if diff < 60 { return "\(Int(diff))s ago" }
-    if diff < 3600 { return "\(Int(diff / 60))m ago" }
-    if diff < 86400 { return "\(Int(diff / 3600))h ago" }
-    return "\(Int(diff / 86400))d ago"
+/// Sync instant clamped to never exceed now, so the auto-updating relative
+/// label can't render a nonsensical future phrasing ("in 2 seconds ago") on
+/// any clock skew between the stored epoch and the render clock.
+private func syncedDate(_ epoch: Double) -> Date {
+    Date(timeIntervalSince1970: min(epoch, Date().timeIntervalSince1970))
 }
 
 private func portfolioEntry(for id: String?, date: Date = Date()) -> PortfolioEntry {
@@ -206,9 +202,15 @@ struct PortfolioWidgetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .bottomTrailing) {
-            if entry.hasData, !relativeAgo(entry.syncedAt).isEmpty {
-                Text(relativeAgo(entry.syncedAt))
+            if entry.hasData, entry.syncedAt > 0 {
+                // Auto-updating relative text: WidgetKit re-renders a *date-typed*
+                // Text on its own clock between timeline reloads, so it ticks and
+                // never sticks on "Just now". The `+ Text(" ago")` concatenation
+                // KEEPS that auto-update (string interpolation would format once
+                // and freeze). The `+` is only deprecated on macOS 26 — not iOS.
+                (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                     .font(.system(size: 9)).foregroundColor(cFaint)
+                    .lineLimit(1)
                     .padding(.trailing, 10).padding(.bottom, 7)
             }
         }
@@ -227,9 +229,10 @@ struct PortfolioWidgetView: View {
                         .font(.system(size: 12, weight: .semibold))
                 }
                 Text(money(entry.value)).font(.system(size: 17, weight: .bold))
-                if !relativeAgo(entry.syncedAt).isEmpty {
-                    Text(relativeAgo(entry.syncedAt))
+                if entry.syncedAt > 0 {
+                    (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                         .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .lineLimit(1).minimumScaleFactor(0.8)
                 }
             } else {
                 Text("IntelliStock").font(.system(size: 12, weight: .semibold))
@@ -260,7 +263,7 @@ struct PortfolioWidgetView: View {
             Text("Open the app to sync your portfolio").font(.system(size: 12)).foregroundColor(cDim)
             Spacer()
         }
-        .padding(12)
+        .padding(24)
     }
 
     // ── 1×1 ──
@@ -276,7 +279,7 @@ struct PortfolioWidgetView: View {
             Spacer(minLength: 4)
             curve(height: 40)
         }
-        .padding(12)
+        .padding(24)
     }
 
     // ── 1×2 ──
@@ -294,7 +297,7 @@ struct PortfolioWidgetView: View {
             positionsGrid(limit: 6, columns: 2, fontSize: 11)
                 .frame(maxWidth: .infinity)
         }
-        .padding(12)
+        .padding(24)
     }
 
     // ── 2×2 : curve top, positions bottom ──
@@ -318,7 +321,7 @@ struct PortfolioWidgetView: View {
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(14)
+        .padding(26)
     }
 
     // ── Positions — condensed: no dot, P&L right next to the ticker, packed
@@ -479,8 +482,11 @@ struct ConfigProvider: AppIntentTimelineProvider {
         // Pull fresh data ourselves so the widget doesn't depend on the app being open.
         await fetchAndCacheAccounts()
         let e = portfolioEntry(for: configuration.account?.id)
-        // iOS budgets background widget reloads (~15-30 min apart); requesting
-        // sub-10-min just burns the budget and makes it refresh LESS. Floor at 10m.
+        // iOS budgets background widget reloads (effectively ~every 15-30 min)
+        // and throttles further on usage; requesting sub-10-min just burns the
+        // budget and refreshes LESS. We pass the user's interval through with a
+        // 10-min floor. The relative-time label is auto-updating, so it always
+        // shows honest data age even between these reloads.
         let interval = max(configuration.refresh.seconds, 600)
         let next = Date().addingTimeInterval(interval)
         return Timeline(entries: [e], policy: .after(next))
@@ -500,6 +506,9 @@ struct PortfolioWidget: Widget {
             .systemSmall, .systemMedium, .systemLarge,
             .accessoryRectangular, .accessoryInline,
         ])
+        // Drop the chunky default system content margins — the views supply
+        // their own ~12pt padding, roughly halving the outer margin.
+        .contentMarginsDisabled()
     }
 }
 

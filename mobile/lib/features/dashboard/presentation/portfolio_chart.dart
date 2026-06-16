@@ -4,6 +4,7 @@ import 'package:syncfusion_flutter_charts/charts.dart';
 import '../../../core/charts/chart_decorations.dart';
 import '../../../core/charts/chart_geometry.dart';
 import '../../../core/charts/scrub_controller.dart';
+import '../../../core/polling/poller.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/glass_card.dart';
@@ -11,6 +12,7 @@ import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/models/portfolio_history.dart';
+import '../application/dashboard_controller.dart';
 import '../data/dashboard_repository.dart';
 
 // ── Range constants ───────────────────────────────────────────────────────────
@@ -40,9 +42,64 @@ final _historyProvider = AutoDisposeAsyncNotifierProviderFamily<
 
 class _HistoryNotifier
     extends AutoDisposeFamilyAsyncNotifier<PortfolioHistory, _HistoryArgs> {
+  IntervalPoller? _poller;
+
   @override
-  Future<PortfolioHistory> build(_HistoryArgs arg) =>
-      ref.read(dashboardRepositoryProvider).portfolioHistory(arg.id, arg.range);
+  Future<PortfolioHistory> build(_HistoryArgs arg) async {
+    final lifecycle = ref.read(appLifecycleProvider);
+    final data = await _fetch(arg);
+    // Stamp outside the build phase (Riverpod forbids mutating a provider
+    // during another provider's build).
+    Future.microtask(_stampUpdated);
+
+    // Keep the value + curve live, like the live-trading screen. The 1D curve
+    // grows continuously (incl. overnight); longer ranges barely move, so poll
+    // those gently.
+    _poller = IntervalPoller(
+      fetch: () => _refresh(arg),
+      interval: () => arg.range == '1D'
+          ? const Duration(seconds: 5)
+          : const Duration(seconds: 30),
+    );
+    if (lifecycle.isForeground) {
+      _poller!.start();
+    } else {
+      _poller!.pause();
+    }
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next.isForeground) {
+        _poller?.resume();
+      } else {
+        _poller?.pause();
+      }
+    });
+    ref.onDispose(() => _poller?.dispose());
+    return data;
+  }
+
+  Future<PortfolioHistory> _fetch(_HistoryArgs arg) async {
+    final h = await ref
+        .read(dashboardRepositoryProvider)
+        .portfolioHistory(arg.id, arg.range);
+    // 1D is shown relative to the device's local midnight (overnight view).
+    return arg.range == '1D' ? h.sinceLocalMidnight() : h;
+  }
+
+  Future<void> _refresh(_HistoryArgs arg) async {
+    try {
+      state = AsyncData(await _fetch(arg));
+      _stampUpdated();
+    } catch (_) {
+      // keep the last good data on a transient poll failure
+    }
+  }
+
+  void _stampUpdated() {
+    // Guarded: the autoDispose notifier may already be gone on a late tick.
+    try {
+      ref.read(portfolioUpdatedAtProvider.notifier).state = DateTime.now();
+    } catch (_) {/* provider disposed — ignore */}
+  }
 }
 
 // ── Change % helper (pure, also tested) ──────────────────────────────────────
@@ -100,10 +157,14 @@ int nearestIndex(List<DateTime> timestamps, double fraction) {
 // ── Main widget ───────────────────────────────────────────────────────────────
 
 class PortfolioChart extends ConsumerStatefulWidget {
-  const PortfolioChart({super.key, required this.account});
+  const PortfolioChart({super.key, required this.account, this.hero = false});
 
   /// A [BrokerageAccount] from the dashboard brokerages list.
   final dynamic account; // BrokerageAccount from dashboard_repository.dart
+
+  /// The primary account renders as a borderless hero (big balance on the
+  /// gradient crown); secondary accounts render inside a clean surface card.
+  final bool hero;
 
   @override
   ConsumerState<PortfolioChart> createState() => _PortfolioChartState();
@@ -111,7 +172,12 @@ class PortfolioChart extends ConsumerStatefulWidget {
 
 class _PortfolioChartState extends ConsumerState<PortfolioChart>
     with AutomaticKeepAliveClientMixin {
-  String _range = '1M';
+  String _range = '1D';
+
+  // The last successfully-loaded history. Kept so switching range only reloads
+  // the chart — the headline value + P&L keep showing the previous data
+  // instead of flashing a skeleton. Null only before the very first load.
+  PortfolioHistory? _lastHistory;
 
   // Scrub state lives in a ValueNotifier so dragging repaints only the hairline
   // + header value, never the (expensive) Syncfusion chart — that's what made
@@ -144,67 +210,85 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
   @override
   Widget build(BuildContext context) {
     super.build(context); // for AutomaticKeepAliveClientMixin
+    final hero = widget.hero;
     final histAsync = ref.watch(_historyProvider(_args));
-    return GlassCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+
+    // Cache the freshest data; render the value/P&L from it even while a range
+    // switch is loading (skeleton the value only on the very first load).
+    final current = histAsync.valueOrNull;
+    if (current != null) _lastHistory = current;
+    final valueHistory = current ?? _lastHistory;
+
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          // Hero aligns to the page gutter; cards pad inside their surface.
+          padding: hero
+              ? EdgeInsets.zero
+              : const EdgeInsets.fromLTRB(16, 16, 16, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // The hero's account identity is the dropdown selector above it,
+              // so the in-card header is only drawn for secondary cards.
+              if (!hero) ...[
                 _CardHeader(account: widget.account),
                 const SizedBox(height: 12),
-                histAsync.when(
-                  loading: () => _ValueSkeleton(),
-                  error: (e, _) => Text(
-                    e.toString(),
-                    style:
-                        AppTextStyles.micro.copyWith(color: AppColors.danger),
-                  ),
-                  data: (h) => ValueListenableBuilder<ScrubSample?>(
-                    valueListenable: _scrub,
-                    builder: (_, sample, _) => _ValueRow(
-                      history: h,
-                      scrubIndex: sample?.index,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                _RangeTabs(active: _range, onSelect: _setRange),
               ],
-            ),
+              if (valueHistory != null)
+                ValueListenableBuilder<ScrubSample?>(
+                  valueListenable: _scrub,
+                  builder: (_, sample, _) => _ValueRow(
+                    history: valueHistory,
+                    scrubIndex: sample?.index,
+                    big: hero,
+                  ),
+                )
+              else if (histAsync.hasError)
+                Text(
+                  histAsync.error.toString(),
+                  style: AppTextStyles.micro.copyWith(color: AppColors.danger),
+                )
+              else
+                _ValueSkeleton(big: hero),
+              SizedBox(height: hero ? 16 : 12),
+              _RangeTabs(active: _range, onSelect: _setRange),
+            ],
           ),
-          const SizedBox(height: 8),
-          histAsync.when(
-            loading: () => const _ChartSkeleton(),
-            error: (_, _) => const _ChartEmpty(message: 'Failed to load'),
-            data: (history) {
-              if (history.isEmpty) {
-                return const _ChartEmpty(message: 'No data for this range');
-              }
-              // Play the entrance animation only the first time the chart
-              // renders with data; flip the flag afterwards so scrolling away
-              // and back (state kept alive) doesn't re-animate.
-              final shouldAnimate = !_animatedOnce;
-              if (shouldAnimate) {
-                WidgetsBinding.instance.addPostFrameCallback(
-                  (_) => _animatedOnce = true,
-                );
-              }
-              return _ChartArea(
-                history: history,
-                scrub: _scrub,
-                range: _range,
-                animate: shouldAnimate,
+        ),
+        SizedBox(height: hero ? 22 : 8),
+        histAsync.when(
+          loading: () => const _ChartSkeleton(),
+          error: (_, _) => const _ChartEmpty(message: 'Failed to load'),
+          data: (history) {
+            if (history.isEmpty) {
+              return const _ChartEmpty(message: 'No data for this range');
+            }
+            // Play the entrance animation only the first time the chart
+            // renders with data; flip the flag afterwards so scrolling away
+            // and back (state kept alive) doesn't re-animate.
+            final shouldAnimate = !_animatedOnce;
+            if (shouldAnimate) {
+              WidgetsBinding.instance.addPostFrameCallback(
+                (_) => _animatedOnce = true,
               );
-            },
-          ),
-        ],
-      ),
+            }
+            return _ChartArea(
+              history: history,
+              scrub: _scrub,
+              range: _range,
+              animate: shouldAnimate,
+            );
+          },
+        ),
+      ],
     );
+
+    // Hero: borderless, sitting directly on the gradient crown.
+    if (hero) return content;
+    // Secondary accounts: a clean elevated surface card.
+    return GlassCard(liquid: true, padding: EdgeInsets.zero, child: content);
   }
 }
 
@@ -266,9 +350,10 @@ class _CardHeader extends StatelessWidget {
 }
 
 class _ValueRow extends StatelessWidget {
-  const _ValueRow({required this.history, this.scrubIndex});
+  const _ValueRow({required this.history, this.scrubIndex, this.big = false});
   final PortfolioHistory history;
   final int? scrubIndex;
+  final bool big;
 
   @override
   Widget build(BuildContext context) {
@@ -286,22 +371,31 @@ class _ValueRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          fmtMoney(activeValue),
-          style: AppTextStyles.valueLg,
-        ),
-        const SizedBox(height: 4),
+        // The hero value rolls like an odometer: 0 → value on first load, then
+        // value → scrubbed/updated value on every change. Secondary cards just
+        // snap to the value.
+        if (big)
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: activeValue),
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeOutCubic,
+            builder: (_, v, _) =>
+                Text(fmtMoney(v), style: AppTextStyles.valueHero),
+          )
+        else
+          Text(fmtMoney(activeValue), style: AppTextStyles.valueLg),
+        SizedBox(height: big ? 6 : 4),
         Row(
           children: [
             Icon(
               positive ? symbol('trending_up') : symbol('trending_down'),
-              size: 14,
+              size: big ? 16 : 14,
               color: changeColor,
             ),
             const SizedBox(width: 4),
             Text(
               '${fmtPnl(changeAbs)} (${fmtPct(changePct)})',
-              style: AppTextStyles.meta.copyWith(
+              style: (big ? AppTextStyles.bodyHi : AppTextStyles.meta).copyWith(
                 color: changeColor,
                 fontWeight: FontWeight.w600,
               ),
@@ -314,14 +408,17 @@ class _ValueRow extends StatelessWidget {
 }
 
 class _ValueSkeleton extends StatelessWidget {
+  const _ValueSkeleton({this.big = false});
+  final bool big;
+
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Skeleton(width: 120, height: 24, radius: 6),
+        Skeleton(width: big ? 200 : 120, height: big ? 40 : 24, radius: 6),
         const SizedBox(height: 6),
-        Skeleton(width: 80, height: 13, radius: 5),
+        Skeleton(width: big ? 120 : 80, height: 13, radius: 5),
       ],
     );
   }
@@ -334,32 +431,44 @@ class _RangeTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 2,
-      children: _ranges.map((r) {
-        final isActive = r == active;
-        return GestureDetector(
-          onTap: () => onSelect(r),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding:
-                const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: isActive
-                  ? AppColors.primary.withValues(alpha: 0.15)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-              r,
-              style: AppTextStyles.micro.copyWith(
-                color: isActive ? AppColors.primary : AppColors.textDim,
-                fontWeight: FontWeight.w600,
+    // A segmented control: a subtle track with the active range as a filled
+    // pill — clean and modern, evenly spaced across the width.
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0x0FFFFFFF),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0x0DFFFFFF)),
+      ),
+      child: Row(
+        children: _ranges.map((r) {
+          final isActive = r == active;
+          return Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => onSelect(r),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                curve: Curves.easeOut,
+                padding: const EdgeInsets.symmetric(vertical: 7),
+                decoration: BoxDecoration(
+                  color:
+                      isActive ? const Color(0x24FFFFFF) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: Text(
+                  r,
+                  textAlign: TextAlign.center,
+                  style: AppTextStyles.micro.copyWith(
+                    color: isActive ? AppColors.textHi : AppColors.textDim,
+                    fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
               ),
             ),
-          ),
-        );
-      }).toList(),
+          );
+        }).toList(),
+      ),
     );
   }
 }
@@ -371,7 +480,7 @@ class _ChartSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
-      child: Skeleton(height: 180, radius: 8),
+      child: Skeleton(height: 224, radius: 8),
     );
   }
 }
@@ -383,7 +492,7 @@ class _ChartEmpty extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 180,
+      height: 224,
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -418,16 +527,15 @@ class _ChartArea extends StatelessWidget {
   /// doesn't re-animate.
   final bool animate;
 
-  static const double _plotHeight = 172;
+  static const double _plotHeight = 224;
+  static const double _dayMinutes = 24 * 60; // 1440
 
-  void _onDrag(double localDx, double width) {
-    if (history.values.isEmpty || width <= 0) return;
-    final n = history.values.length;
-    final frac = (localDx / width).clamp(0.0, 1.0);
-    final idx = fractionToIndex(frac, n);
-    // Draw the hairline + dot at the data point's own fraction so they sit
-    // exactly on the curve and match the value the header reports.
-    scrub.update(idx, indexToFraction(idx, n));
+  bool get _isDay => range == '1D';
+
+  /// Minutes since the point's own local midnight (used as the 1D x value).
+  static double _minuteOfDay(DateTime ts) {
+    final m = DateTime(ts.year, ts.month, ts.day);
+    return ts.difference(m).inSeconds / 60.0;
   }
 
   @override
@@ -439,21 +547,53 @@ class _ChartArea extends StatelessWidget {
     final n = history.values.length;
     final bounds = paddedBounds(history.values);
 
-    // Index-based points (gapless across weekends/closed sessions).
-    final dataSource = List<_ChartPoint>.generate(
-      n,
-      (i) => _ChartPoint(x: i.toDouble(), y: history.values[i]),
-    );
+    // 1D plots against a fixed full-day [0, 1440]-minute axis so the line fills
+    // only the elapsed part of the day (a short morning line, like Robinhood's
+    // overnight view). Other ranges plot edge-to-edge by index (gapless across
+    // weekends/closed sessions). history.values stays the single source of
+    // truth for both the curve and the scrubber, so the header value matches.
+    final xs = _isDay
+        ? [for (final t in history.timestamps) _minuteOfDay(t)]
+        : [for (var i = 0; i < n; i++) i.toDouble()];
 
-    final labels = [
-      for (final i in evenlySpacedLabelIndices(n, 4))
-        formatChartDate(history.timestamps[i], range),
+    final dataSource = [
+      for (var i = 0; i < n; i++) _ChartPoint(x: xs[i], y: history.values[i]),
     ];
+
+    final labels = _isDay
+        ? [for (final h in [0, 6, 12, 18, 24]) hourAmPm(h)]
+        : [
+            for (final i in evenlySpacedLabelIndices(n, 4))
+              formatChartDate(history.timestamps[i], range),
+          ];
+
+    // Map a drag x to a data index + the fraction to draw the hairline at.
+    void onDrag(double localDx, double width) {
+      if (n == 0 || width <= 0) return;
+      final frac = (localDx / width).clamp(0.0, 1.0);
+      if (_isDay) {
+        final targetMin = frac * _dayMinutes;
+        var idx = 0;
+        var best = double.infinity;
+        for (var i = 0; i < n; i++) {
+          final d = (xs[i] - targetMin).abs();
+          if (d < best) {
+            best = d;
+            idx = i;
+          }
+        }
+        scrub.update(idx, (xs[idx] / _dayMinutes).clamp(0.0, 1.0));
+      } else {
+        final idx = fractionToIndex(frac, n);
+        scrub.update(idx, indexToFraction(idx, n));
+      }
+    }
 
     final chart = SfCartesianChart(
       plotAreaBorderWidth: 0,
       margin: EdgeInsets.zero,
-      primaryXAxis: edgeToEdgeIndexAxis(n),
+      primaryXAxis:
+          _isDay ? edgeToEdgeRangeAxis(0, _dayMinutes) : edgeToEdgeIndexAxis(n),
       primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
       tooltipBehavior: TooltipBehavior(enable: false),
       series: <CartesianSeries<_ChartPoint, double>>[
@@ -470,7 +610,7 @@ class _ChartArea extends StatelessWidget {
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [
-              lineColor.withValues(alpha: 0.35),
+              lineColor.withValues(alpha: 0.22),
               lineColor.withValues(alpha: 0.0),
             ],
           ),
@@ -500,10 +640,23 @@ class _ChartArea extends StatelessWidget {
                         child: ValueListenableBuilder<ScrubSample?>(
                           valueListenable: scrub,
                           builder: (_, sample, _) {
+                            // Not scrubbing → a persistent dot marks the latest
+                            // value at the end of the line (no hairline).
                             if (sample == null ||
                                 sample.index < 0 ||
                                 sample.index >= n) {
-                              return const SizedBox.shrink();
+                              if (n == 0) return const SizedBox.shrink();
+                              final endFrac =
+                                  _isDay ? (xs.last / _dayMinutes) : 1.0;
+                              return CustomPaint(
+                                painter: ScrubPainter(
+                                  fraction: endFrac.clamp(0.0, 1.0),
+                                  dotY: valueToY(history.values[n - 1],
+                                      bounds.min, bounds.max, _plotHeight),
+                                  color: lineColor,
+                                  hairline: false,
+                                ),
+                              );
                             }
                             final dotY = valueToY(
                               history.values[sample.index],
@@ -527,9 +680,9 @@ class _ChartArea extends StatelessWidget {
                       child: GestureDetector(
                         behavior: HitTestBehavior.translucent,
                         onHorizontalDragStart: (d) =>
-                            _onDrag(d.localPosition.dx, width),
+                            onDrag(d.localPosition.dx, width),
                         onHorizontalDragUpdate: (d) =>
-                            _onDrag(d.localPosition.dx, width),
+                            onDrag(d.localPosition.dx, width),
                         onHorizontalDragEnd: (_) => scrub.clear(),
                         onHorizontalDragCancel: scrub.clear,
                       ),

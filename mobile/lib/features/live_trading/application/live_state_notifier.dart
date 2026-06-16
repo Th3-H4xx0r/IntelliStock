@@ -179,9 +179,11 @@ class LiveStateNotifier
     final prev = state.valueOrNull;
     if (prev == null) return;
     try {
-      final history = await ref
+      var history = await ref
           .read(liveRepositoryProvider)
           .equityHistory(instanceId, prev.currentRange);
+      // 1D is shown relative to the device's local midnight (overnight view).
+      if (prev.currentRange == '1D') history = history.sinceLocalMidnight();
       if (state case AsyncData(:final value)) {
         state = AsyncData(value.copyWith(equityHistory: history));
       }

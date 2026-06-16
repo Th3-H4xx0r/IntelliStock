@@ -67,3 +67,9 @@ final brokeragesProvider = AutoDisposeAsyncNotifierProvider<BrokeragesNotifier,
     List<BrokerageAccount>>(
   BrokeragesNotifier.new,
 );
+
+// ── Portfolio freshness ───────────────────────────────────────────────────────
+
+/// Wall-clock time of the last *successful* portfolio-history fetch on the
+/// dashboard. Stamped by the history notifier; read by the freshness label.
+final portfolioUpdatedAtProvider = StateProvider<DateTime?>((ref) => null);

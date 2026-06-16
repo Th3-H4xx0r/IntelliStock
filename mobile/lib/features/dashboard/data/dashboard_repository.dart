@@ -80,6 +80,46 @@ class BrokerageAccount {
   bool get isActive => status.toLowerCase() == 'active';
 }
 
+/// A single open holding from GET /brokerages/{id}/positions.
+class AccountPosition {
+  const AccountPosition({
+    required this.symbol,
+    required this.qty,
+    required this.marketValue,
+    required this.unrealizedPnl,
+    required this.unrealizedPnlPct,
+    this.lastPrice,
+    this.avgEntryPrice,
+  });
+
+  final String symbol;
+  final double qty;
+  final double marketValue;
+  final double unrealizedPnl;
+  final double unrealizedPnlPct;
+  final double? lastPrice;
+  final double? avgEntryPrice;
+
+  factory AccountPosition.fromJson(Map<String, dynamic> json) => AccountPosition(
+        symbol: (json['symbol'] as String? ?? ''),
+        qty: (json['qty'] as num?)?.toDouble() ?? 0,
+        marketValue: (json['marketValue'] as num?)?.toDouble() ?? 0,
+        unrealizedPnl: (json['unrealizedPnl'] as num?)?.toDouble() ?? 0,
+        unrealizedPnlPct: (json['unrealizedPnlPct'] as num?)?.toDouble() ?? 0,
+        lastPrice: (json['lastPrice'] as num?)?.toDouble(),
+        avgEntryPrice: (json['avgEntryPrice'] as num?)?.toDouble(),
+      );
+}
+
+/// The account's uninvested cash + open positions (GET /brokerages/{id}/positions).
+class AccountHoldings {
+  const AccountHoldings({this.cash, required this.positions});
+  final double? cash;
+  final List<AccountPosition> positions;
+
+  bool get isEmpty => cash == null && positions.isEmpty;
+}
+
 // ── Repository ────────────────────────────────────────────────────────────────
 
 /// Thin data layer for all dashboard endpoints.
@@ -141,6 +181,21 @@ class DashboardRepository {
       query: {'range': range},
     );
     return PortfolioHistory.fromJson(data);
+  }
+
+  /// GET /brokerages/{id}/positions → uninvested cash + holdings (by value).
+  Future<AccountHoldings> accountHoldings(String id) async {
+    final data = await _client.get<Map<String, dynamic>>(
+      '/brokerages/$id/positions',
+    );
+    final list = (data['positions'] as List? ?? const []);
+    return AccountHoldings(
+      cash: (data['cash'] as num?)?.toDouble(),
+      positions: list
+          .whereType<Map<String, dynamic>>()
+          .map(AccountPosition.fromJson)
+          .toList(),
+    );
   }
 
   // ── Control POSTs ──────────────────────────────────────────────────────────

@@ -4,6 +4,15 @@ import 'api_config.dart';
 import 'api_error.dart';
 import 'session.dart';
 
+/// Response header the backend uses to hand back a slid (renewed) token.
+const _kRefreshedTokenHeader = 'x-refreshed-token';
+
+/// The renewed JWT carried by a response, or null when absent/blank.
+String? refreshedTokenFromHeaders(Headers headers) {
+  final v = headers.value(_kRefreshedTokenHeader);
+  return (v == null || v.isEmpty) ? null : v;
+}
+
 /// Adds the bearer token + JSON content-type, and clears the session on 401.
 class AuthInterceptor extends Interceptor {
   AuthInterceptor(this._session, this._onUnauthorized);
@@ -22,6 +31,16 @@ class AuthInterceptor extends Interceptor {
       options.headers.putIfAbsent('Content-Type', () => 'application/json');
     }
     handler.next(options);
+  }
+
+  @override
+  void onResponse(Response response, ResponseInterceptorHandler handler) {
+    final fresh = refreshedTokenFromHeaders(response.headers);
+    if (fresh != null) {
+      // Fire-and-forget: persist the slid token + re-mirror it to the widget.
+      _session.setToken(fresh);
+    }
+    handler.next(response);
   }
 
   @override
@@ -65,7 +84,10 @@ class ApiClient {
 }
 
 final dioProvider = Provider<Dio>((ref) {
-  final session = ref.watch(sessionProvider);
+  // read (not watch): the interceptor closes over the long-lived SessionStore
+  // and reads `.token` live on every request, so the Dio never needs to rebuild
+  // when the token changes (which now happens on every slid-token response).
+  final session = ref.read(sessionProvider);
   final dio = Dio(BaseOptions(
     baseUrl: ApiConfig.baseUrl,
     connectTimeout: ApiConfig.connectTimeout,

@@ -13,6 +13,7 @@ class ScrubPainter extends CustomPainter {
     required this.fraction,
     required this.dotY,
     required this.color,
+    this.hairline = true,
   });
 
   /// Horizontal position 0..1 of the hairline + dot.
@@ -24,17 +25,23 @@ class ScrubPainter extends CustomPainter {
 
   final Color color;
 
+  /// Whether to draw the vertical hairline. False renders just the dot — used
+  /// for the persistent "current value" marker at the end of the line.
+  final bool hairline;
+
   @override
   void paint(Canvas canvas, Size size) {
     final x = (size.width * fraction).clamp(0.0, size.width);
 
-    canvas.drawLine(
-      Offset(x, 0),
-      Offset(x, size.height),
-      Paint()
-        ..color = color.withValues(alpha: 0.55)
-        ..strokeWidth = 1.2,
-    );
+    if (hairline) {
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(x, size.height),
+        Paint()
+          ..color = color.withValues(alpha: 0.55)
+          ..strokeWidth = 1.2,
+      );
+    }
 
     if (dotY != null) {
       final y = dotY!.clamp(0.0, size.height);
@@ -60,7 +67,10 @@ class ScrubPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(ScrubPainter old) =>
-      old.fraction != fraction || old.dotY != dotY || old.color != color;
+      old.fraction != fraction ||
+      old.dotY != dotY ||
+      old.color != color ||
+      old.hairline != hairline;
 }
 
 /// A thin row of evenly-spaced x-axis date/time labels rendered *below* the
@@ -95,18 +105,27 @@ class ChartDateLabels extends StatelessWidget {
   }
 }
 
+/// A bare 12-hour clock label with meridiem and no minutes: `9AM`, `2PM`,
+/// `12AM`. Accepts hours 0–24 (24 wraps to `12AM`, i.e. next midnight).
+String hourAmPm(int hour24) {
+  final h = hour24 % 24;
+  final period = h < 12 ? 'AM' : 'PM';
+  var h12 = h % 12;
+  if (h12 == 0) h12 = 12;
+  return '$h12$period';
+}
+
 /// Formats a timestamp for an x-axis label, scaled to the selected [range]
-/// (e.g. `09:31` for 1D, `Mon` for 1W, `Jun 10` for 1M/3M/YTD, `Jun '26`
+/// (e.g. `9AM` for 1D, `Mon` for 1W, `Jun 10` for 1M/3M/YTD, `Jun '26`
 /// otherwise). Shared by the dashboard and live-trading charts.
 String formatChartDate(DateTime ts, String range) {
-  String two(int n) => n.toString().padLeft(2, '0');
   const months = [
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
   ];
   switch (range) {
     case '1D':
-      return '${two(ts.hour)}:${two(ts.minute)}';
+      return hourAmPm(ts.hour);
     case '1W':
       const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       return days[(ts.weekday - 1).clamp(0, 6)];
@@ -167,6 +186,24 @@ NumericAxis edgeToEdgeIndexAxis(int count) {
     isVisible: false,
     minimum: 0,
     maximum: (count <= 1 ? 1 : count - 1).toDouble(),
+    plotOffset: 0,
+    rangePadding: ChartRangePadding.none,
+    majorGridLines: const MajorGridLines(width: 0),
+    minorGridLines: const MinorGridLines(width: 0),
+    axisLine: const AxisLine(width: 0),
+    majorTickLines: const MajorTickLines(size: 0),
+  );
+}
+
+/// Like [edgeToEdgeIndexAxis] but with an explicit value range — used by the
+/// 1D portfolio chart whose x is "minutes since local midnight" over a fixed
+/// `[0, 1440]` full-day span, so the line fills only the elapsed part of the
+/// day (a short line early in the morning, like Robinhood's overnight view).
+NumericAxis edgeToEdgeRangeAxis(double minimum, double maximum) {
+  return NumericAxis(
+    isVisible: false,
+    minimum: minimum,
+    maximum: maximum,
     plotOffset: 0,
     rangePadding: ChartRangePadding.none,
     majorGridLines: const MajorGridLines(width: 0),

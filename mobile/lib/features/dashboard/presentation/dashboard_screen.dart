@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -8,10 +10,12 @@ import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
-import '../../../core/network/session.dart';
+import '../../../core/widgets/relative_time_text.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../widgets_bridge/widget_sync_service.dart';
+import '../application/account_positions_controller.dart';
 import '../application/dashboard_controller.dart';
+import '../application/selected_account_controller.dart';
 import '../data/dashboard_repository.dart';
 import 'portfolio_chart.dart';
 import 'service_card.dart';
@@ -26,128 +30,178 @@ class DashboardScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(sessionProvider);
-    final username = session.username;
-
     // Refresh the home-screen widget (live instance equity) on dashboard entry.
     ref.watch(widgetSyncProvider);
 
-    return CustomScrollView(
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
-          sliver: SliverList(
-            delegate: SliverChildListDelegate([
-              // ── Welcome header ───────────────────────────────────────────
-              _WelcomeHeader(username: username),
-              const SizedBox(height: 32),
+    // The shell drops the top safe-area inset for the dashboard so the gradient
+    // bleeds under the status bar / dynamic island — re-add it as content pad.
+    final topInset = MediaQuery.viewPaddingOf(context).top;
 
-              // ── Portfolio section ────────────────────────────────────────
-              _PortfolioSection(),
-              const SizedBox(height: 32),
+    return Stack(
+      children: [
+        // Full-bleed violet→black gradient with a diagonal light streak, behind
+        // the (scrolling) glass content as a static backdrop.
+        const _DashboardBackdrop(),
+        CustomScrollView(
+          slivers: [
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(16, topInset + 12, 16, 24),
+              sliver: SliverList(
+                delegate: SliverChildListDelegate([
+                  // ── Portfolio section ──────────────────────────────────────
+                  _PortfolioSection(),
+                  const SizedBox(height: 32),
 
-              // ── Services section ─────────────────────────────────────────
-              _ServicesSection(),
-              const SizedBox(height: 32),
+                  // ── Services section ───────────────────────────────────────
+                  _ServicesSection(),
+                  const SizedBox(height: 32),
 
-              // ── Re-run onboarding panel ──────────────────────────────────
-              _OnboardingPanel(),
-              const SizedBox(height: 16),
-            ]),
-          ),
+                  // ── Re-run onboarding panel ────────────────────────────────
+                  _OnboardingPanel(),
+                  const SizedBox(height: 16),
+                ]),
+              ),
+            ),
+          ],
         ),
       ],
     );
   }
 }
 
-// ── Welcome header ────────────────────────────────────────────────────────────
+// ── Dashboard backdrop ────────────────────────────────────────────────────────
 
-class _WelcomeHeader extends StatelessWidget {
-  const _WelcomeHeader({required this.username});
-  final String username;
+/// The professional violet gradient field behind the dashboard, modelled on a
+/// modern fintech home screen: a deep violet crown that falls off to the app's
+/// canvas black within the top ~third — leaving most of the screen dark — with
+/// a soft diagonal specular streak and a lavender bloom confined to the crown.
+/// It is full-bleed (paints under the dynamic island) and static, so the glass
+/// cards glide over it.
+class _DashboardBackdrop extends StatelessWidget {
+  const _DashboardBackdrop();
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('Dashboard'.toUpperCase(), style: AppTextStyles.eyebrow),
-        const SizedBox(height: 6),
-        RichText(
-          text: TextSpan(
-            style: AppTextStyles.h1,
-            children: [
-              const TextSpan(text: 'Welcome back, '),
-              TextSpan(
-                text: username,
-                style: AppTextStyles.h1.copyWith(color: AppColors.primary),
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Stack(
+          children: [
+            // 1) Deep violet crown that falls off to canvas black by ~a third
+            //    of the way down — the rest of the screen stays dark.
+            const Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0xFF5A28BE), // deep violet crown (under the island)
+                      Color(0xFF34176E),
+                      Color(0xFF150A2C),
+                      Color(0xFF04040C), // canvas black
+                    ],
+                    stops: [0.0, 0.10, 0.22, 0.35],
+                  ),
+                ),
               ),
-              const TextSpan(text: '.'),
-            ],
-          ),
+            ),
+            // 2) Soft diagonal specular sheen, confined to the crown.
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 320,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomLeft,
+                    end: Alignment.topRight,
+                    colors: [
+                      Colors.white.withValues(alpha: 0.0),
+                      Colors.white.withValues(alpha: 0.0),
+                      Colors.white.withValues(alpha: 0.09),
+                      Colors.white.withValues(alpha: 0.0),
+                    ],
+                    stops: const [0.0, 0.52, 0.70, 0.88],
+                  ),
+                ),
+              ),
+            ),
+            // 3) Subtle lavender bloom capping the streak, upper-right.
+            Positioned(
+              top: -70,
+              right: -60,
+              child: Container(
+                width: 280,
+                height: 280,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      const Color(0xFFB794FF).withValues(alpha: 0.13),
+                      const Color(0xFFB794FF).withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
-        const SizedBox(height: 6),
-        Text(
-          'Your workspace is ready.',
-          style: AppTextStyles.body.copyWith(color: AppColors.textDim),
-        ),
-      ],
+      ),
     );
   }
 }
 
 // ── Portfolio section ─────────────────────────────────────────────────────────
 
-class _PortfolioSection extends ConsumerWidget {
+class _PortfolioSection extends ConsumerStatefulWidget {
+  const _PortfolioSection();
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_PortfolioSection> createState() => _PortfolioSectionState();
+}
+
+class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
     final bkAsync = ref.watch(brokeragesProvider);
+    final selectedId = ref.watch(selectedAccountProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Section header row
+        // Slim section header: just a label + a quiet "Manage" affordance.
         Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Portfolio', style: AppTextStyles.h2),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Live equity history from your linked brokerages.',
-                    style:
-                        AppTextStyles.micro.copyWith(color: AppColors.textDim),
-                  ),
-                ],
-              ),
-            ),
+            Text('Portfolio', style: AppTextStyles.h3),
+            const Spacer(),
             GestureDetector(
               onTap: () => context.push('/brokerages'),
+              behavior: HitTestBehavior.opaque,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    'Manage brokerages',
+                    'Manage',
                     style: AppTextStyles.micro.copyWith(
-                      color: AppColors.primary,
+                      color: AppColors.textMuted,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(width: 4),
+                  const SizedBox(width: 2),
                   Icon(symbol('arrow_forward'),
-                      size: 14, color: AppColors.primary),
+                      size: 13, color: AppColors.textMuted),
                 ],
               ),
             ),
           ],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
 
-        // Content
+        // Content — one hero for the selected account, switchable via a
+        // dropdown on the account label.
         bkAsync.when(
           loading: () => const _PortfolioSkeleton(),
           error: (e, _) => ErrorBanner(
@@ -164,17 +218,492 @@ class _PortfolioSection extends ConsumerWidget {
                 onAction: () => context.push('/brokerages'),
               );
             }
+            final selected = _resolveSelected(accounts, selectedId);
+            final canSwitch = accounts.length > 1;
             return Column(
-              children: accounts
-                  .map((acct) => Padding(
-                        padding: const EdgeInsets.only(bottom: 16),
-                        child: PortfolioChart(account: acct),
-                      ))
-                  .toList(),
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _AccountSelector(
+                  account: selected,
+                  canSwitch: canSwitch,
+                  expanded: _expanded,
+                  onToggle: () => setState(() => _expanded = !_expanded),
+                ),
+                if (canSwitch)
+                  _AccountDropdown(
+                    accounts: accounts,
+                    selectedId: selected.id,
+                    expanded: _expanded,
+                    onSelect: (id) {
+                      ref.read(selectedAccountProvider.notifier).select(id);
+                      setState(() => _expanded = false);
+                    },
+                  ),
+                const SizedBox(height: 8),
+                // Keyed by account so switching accounts starts a fresh load
+                // (skeleton), while changing range reuses the cached value.
+                PortfolioChart(
+                  key: ValueKey(selected.id),
+                  account: selected,
+                  hero: true,
+                ),
+                // Live freshness line — ticks honestly even between polls.
+                Consumer(builder: (context, ref, _) {
+                  final updatedAt = ref.watch(portfolioUpdatedAtProvider);
+                  if (updatedAt == null) return const SizedBox.shrink();
+                  final faint = AppTextStyles.nano
+                      .copyWith(color: AppColors.textFaint);
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('Updated ', style: faint),
+                        RelativeTimeText(timestamp: updatedAt, style: faint),
+                      ],
+                    ),
+                  );
+                }),
+                _HoldingsList(brokerageId: selected.id),
+              ],
             );
           },
         ),
       ],
+    );
+  }
+
+  BrokerageAccount _resolveSelected(
+      List<BrokerageAccount> accounts, String? id) {
+    if (id != null) {
+      for (final a in accounts) {
+        if (a.id == id) return a;
+      }
+    }
+    return accounts.first;
+  }
+}
+
+// ── Account switcher ──────────────────────────────────────────────────────────
+
+String _accountLabel(BrokerageAccount a) {
+  if (a.brokerageType == 'alpaca') {
+    return a.alpacaPaper ? 'Alpaca · Paper' : 'Alpaca';
+  }
+  if (a.brokerageType == 'robinhood') return 'Robinhood';
+  return a.accountName.isNotEmpty ? a.accountName : a.brokerageType;
+}
+
+IconData _accountIcon(BrokerageAccount a) =>
+    a.brokerageType == 'alpaca' ? symbol('show_chart') : symbol('savings');
+
+/// The hero's account identity — an uppercase eyebrow with a chevron (when more
+/// than one account exists) that toggles the [_AccountDropdown], plus a status
+/// dot on the right. Mirrors the look of the chart card header.
+class _AccountSelector extends StatelessWidget {
+  const _AccountSelector({
+    required this.account,
+    required this.canSwitch,
+    required this.expanded,
+    required this.onToggle,
+  });
+
+  final BrokerageAccount account;
+  final bool canSwitch;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = account.isActive ? AppColors.success : AppColors.danger;
+    final left = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(_accountIcon(account), color: AppColors.primary, size: 16),
+        const SizedBox(width: 6),
+        Text(
+          _accountLabel(account).toUpperCase(),
+          style: AppTextStyles.nano.copyWith(
+            color: AppColors.textDim,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.0,
+          ),
+        ),
+        if (canSwitch) ...[
+          const SizedBox(width: 4),
+          Icon(
+            expanded ? symbol('expand_less') : symbol('expand_more'),
+            size: 16,
+            color: AppColors.textMuted,
+          ),
+        ],
+      ],
+    );
+
+    return Row(
+      children: [
+        if (canSwitch)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onToggle,
+            child: left,
+          )
+        else
+          left,
+        const Spacer(),
+        Container(
+          width: 6,
+          height: 6,
+          decoration:
+              BoxDecoration(shape: BoxShape.circle, color: statusColor),
+        ),
+        const SizedBox(width: 4),
+        Text(account.status,
+            style: AppTextStyles.nano.copyWith(color: statusColor)),
+      ],
+    );
+  }
+}
+
+/// The dropdown that animates open below the selector, listing every account.
+class _AccountDropdown extends StatelessWidget {
+  const _AccountDropdown({
+    required this.accounts,
+    required this.selectedId,
+    required this.expanded,
+    required this.onSelect,
+  });
+
+  final List<BrokerageAccount> accounts;
+  final String selectedId;
+  final bool expanded;
+  final void Function(String) onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+      alignment: Alignment.topCenter,
+      child: expanded
+          ? Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: GlassCard(
+                liquid: true,
+                padding: const EdgeInsets.all(6),
+                child: Column(
+                  children: [
+                    for (final a in accounts)
+                      _AccountRow(
+                        account: a,
+                        selected: a.id == selectedId,
+                        onTap: () => onSelect(a.id),
+                      ),
+                  ],
+                ),
+              ),
+            )
+          : const SizedBox(width: double.infinity),
+    );
+  }
+}
+
+class _AccountRow extends StatelessWidget {
+  const _AccountRow({
+    required this.account,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final BrokerageAccount account;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = account.isActive ? AppColors.success : AppColors.danger;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0x1FFFFFFF) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(_accountIcon(account), color: AppColors.primary, size: 16),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _accountLabel(account),
+                style: AppTextStyles.bodyHi.copyWith(
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ),
+            Container(
+              width: 6,
+              height: 6,
+              decoration:
+                  BoxDecoration(shape: BoxShape.circle, color: statusColor),
+            ),
+            const SizedBox(width: 10),
+            Icon(
+              selected ? symbol('check') : symbol('arrow_forward'),
+              size: 15,
+              color: selected ? AppColors.primary : AppColors.textFaint,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Holdings ──────────────────────────────────────────────────────────────────
+
+/// The selected account's uninvested cash + holdings, shown below the hero
+/// chart like a modern brokerage app (Robinhood/Coinbase). Hidden while it has
+/// no data, so it never shows a blank box.
+class _HoldingsList extends ConsumerWidget {
+  const _HoldingsList({required this.brokerageId});
+  final String brokerageId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final holdings = ref.watch(accountHoldingsProvider(brokerageId)).valueOrNull;
+    if (holdings == null || holdings.isEmpty) return const SizedBox.shrink();
+    final positions = holdings.positions;
+    // Total account value → each row's ring shows its share of the portfolio.
+    final total = (holdings.cash ?? 0) +
+        positions.fold<double>(0, (s, p) => s + p.marketValue);
+    return Padding(
+      padding: const EdgeInsets.only(top: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12, left: 2),
+            child: Text('Holdings', style: AppTextStyles.h3),
+          ),
+          GlassCard(
+            frosted: true,
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Column(
+              children: [
+                if (holdings.cash != null) ...[
+                  _CashRow(cash: holdings.cash!, total: total),
+                  if (positions.isNotEmpty) const _HoldingDivider(),
+                ],
+                for (var i = 0; i < positions.length; i++) ...[
+                  if (i > 0) const _HoldingDivider(),
+                  _HoldingRow(p: positions[i], total: total),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HoldingDivider extends StatelessWidget {
+  const _HoldingDivider();
+  @override
+  Widget build(BuildContext context) => Divider(
+        height: 1,
+        thickness: 1,
+        color: Colors.white.withValues(alpha: 0.05),
+        indent: 66,
+        endIndent: 14,
+      );
+}
+
+/// Deterministic per-symbol accent so each ticker gets a stable, distinct ring
+/// colour.
+Color _symbolColor(String s) {
+  var h = 0;
+  for (final c in s.codeUnits) {
+    h = (h * 31 + c) & 0x7fffffff;
+  }
+  return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.6).toColor();
+}
+
+/// A circular allocation ring: a progress arc = this item's share of the
+/// portfolio, with the percentage in the centre (the "diversity" indicator).
+class _AllocationRing extends StatelessWidget {
+  const _AllocationRing({required this.fraction, required this.color});
+  final double fraction;
+  final Color color;
+
+  static String _label(double f) {
+    final pct = f * 100;
+    if (pct <= 0) return '0%';
+    if (pct < 1) return '<1%';
+    return '${pct.round()}%';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 44,
+      height: 44,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CustomPaint(
+            size: const Size(44, 44),
+            painter: _RingPainter(fraction: fraction.clamp(0.0, 1.0), color: color),
+          ),
+          Text(
+            _label(fraction),
+            style: AppTextStyles.nano.copyWith(
+              color: AppColors.textHi,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  _RingPainter({required this.fraction, required this.color});
+  final double fraction;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.width / 2 - 3.5;
+    final track = Paint()
+      ..color = Colors.white.withValues(alpha: 0.10)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.5;
+    final prog = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.5
+      ..strokeCap = StrokeCap.round;
+    canvas.drawCircle(center, radius, track);
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2,
+      2 * math.pi * fraction.clamp(0.0, 1.0),
+      false,
+      prog,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter o) =>
+      o.fraction != fraction || o.color != color;
+}
+
+class _CashRow extends StatelessWidget {
+  const _CashRow({required this.cash, required this.total});
+  final double cash;
+  final double total;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      child: Row(
+        children: [
+          _AllocationRing(
+            fraction: total > 0 ? cash / total : 0,
+            color: AppColors.teal,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Cash',
+                    style: AppTextStyles.bodyHi
+                        .copyWith(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text('Available to invest',
+                    style:
+                        AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+              ],
+            ),
+          ),
+          Text(fmtMoney(cash),
+              style: AppTextStyles.value.copyWith(color: AppColors.textHi)),
+        ],
+      ),
+    );
+  }
+}
+
+class _HoldingRow extends StatelessWidget {
+  const _HoldingRow({required this.p, required this.total});
+  final AccountPosition p;
+  final double total;
+
+  String get _qtyLabel {
+    final q = p.qty;
+    final s =
+        q == q.roundToDouble() ? q.toInt().toString() : q.toStringAsFixed(2);
+    return '$s ${q == 1 ? 'share' : 'shares'}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final up = p.unrealizedPnlPct >= 0;
+    final color = up ? AppColors.success : AppColors.danger;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      child: Row(
+        children: [
+          _AllocationRing(
+            fraction: total > 0 ? p.marketValue / total : 0,
+            color: _symbolColor(p.symbol),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(p.symbol,
+                    style: AppTextStyles.bodyHi
+                        .copyWith(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text(_qtyLabel,
+                    style:
+                        AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+              ],
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(fmtMoney(p.marketValue),
+                  style: AppTextStyles.value.copyWith(color: AppColors.textHi)),
+              const SizedBox(height: 3),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(up ? symbol('trending_up') : symbol('trending_down'),
+                      size: 12, color: color),
+                  const SizedBox(width: 3),
+                  Text(
+                    fmtPct(p.unrealizedPnlPct),
+                    style: AppTextStyles.micro
+                        .copyWith(color: color, fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -714,6 +1243,7 @@ class _PortfolioCardSkeleton extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(bottom: bottomPad),
       child: GlassCard(
+        liquid: true,
         padding: EdgeInsets.zero,
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -777,6 +1307,7 @@ class _ServiceCardSkeleton extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(bottom: bottomPad),
       child: GlassCard(
+        liquid: true,
         padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -820,7 +1351,7 @@ class _OnboardingPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GlassCard(
-      borderColor: AppColors.border,
+      liquid: true,
       child: Row(
         children: [
           Expanded(
