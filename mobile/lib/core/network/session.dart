@@ -67,6 +67,17 @@ class SessionStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Replace just the JWT (e.g. a sliding-renewal token handed back by the
+  /// backend), keeping the cached user. Persists it and re-mirrors it to the
+  /// widget so the widget's self-refresh keeps working. No-op if unchanged.
+  Future<void> setToken(String token) async {
+    if (token.isEmpty || token == _token) return;
+    _token = token;
+    await _storage.write(key: _kToken, value: token);
+    await _syncWidgetCreds();
+    notifyListeners();
+  }
+
   Future<void> setUser(Map<String, dynamic> user) async {
     _user = user;
     await _storage.write(key: _kUser, value: jsonEncode(user));
