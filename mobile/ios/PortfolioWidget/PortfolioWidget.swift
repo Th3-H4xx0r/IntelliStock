@@ -482,35 +482,38 @@ struct SelectPortfolioIntent: WidgetConfigurationIntent {
     @Parameter(title: "Refresh every", default: .m15) var refresh: RefreshIntervalChoice
 }
 
-struct ConfigProvider: AppIntentTimelineProvider {
+// Static (non-configurable) provider. We deliberately do NOT use an
+// AppIntentConfiguration here: the configuration-intent metadata stopped
+// registering on the build (no "Edit Widget" in the long-press menu, and the
+// configurable widget's timeline stalled on the gray placeholder). A static
+// widget always runs its timeline and shows the primary account
+// (accounts_data.first). Picking which account to show lives in the app.
+struct StaticProvider: TimelineProvider {
     func placeholder(in context: Context) -> PortfolioEntry { portfolioEntry(for: nil) }
-    func snapshot(for configuration: SelectPortfolioIntent, in context: Context) async -> PortfolioEntry {
-        portfolioEntry(for: configuration.account?.id)
+    func getSnapshot(in context: Context, completion: @escaping (PortfolioEntry) -> Void) {
+        completion(portfolioEntry(for: nil))
     }
-    func timeline(for configuration: SelectPortfolioIntent, in context: Context) async -> Timeline<PortfolioEntry> {
-        // Pull fresh data ourselves so the widget doesn't depend on the app being open.
-        await fetchAndCacheAccounts()
-        let e = portfolioEntry(for: configuration.account?.id)
-        // iOS budgets background widget reloads (effectively ~every 15-30 min)
-        // and throttles further on usage; requesting sub-10-min just burns the
-        // budget and refreshes LESS. We pass the user's interval through with a
-        // 10-min floor. The relative-time label is auto-updating, so it always
-        // shows honest data age even between these reloads.
-        let interval = max(configuration.refresh.seconds, 600)
-        let next = Date().addingTimeInterval(interval)
-        return Timeline(entries: [e], policy: .after(next))
+    func getTimeline(in context: Context, completion: @escaping (Timeline<PortfolioEntry>) -> Void) {
+        Task {
+            // Pull fresh data ourselves so the widget doesn't depend on the app.
+            await fetchAndCacheAccounts()
+            let e = portfolioEntry(for: nil)
+            // iOS budgets background reloads (~every 15-30 min); the relative-time
+            // label is auto-updating, so it stays honest between reloads.
+            let next = Date().addingTimeInterval(900)
+            completion(Timeline(entries: [e], policy: .after(next)))
+        }
     }
 }
 
 struct PortfolioWidget: Widget {
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: "PortfolioWidget",
-                               intent: SelectPortfolioIntent.self,
-                               provider: ConfigProvider()) { entry in
+        StaticConfiguration(kind: "PortfolioWidget",
+                            provider: StaticProvider()) { entry in
             PortfolioWidgetView(entry: entry)
         }
         .configurationDisplayName("Portfolio")
-        .description("Live portfolio value, day P&L & positions. Long-press → Edit to pick a portfolio and refresh rate.")
+        .description("Live portfolio value, day P&L & positions.")
         .supportedFamilies([
             .systemSmall, .systemMedium, .systemLarge,
             .accessoryRectangular, .accessoryInline,
