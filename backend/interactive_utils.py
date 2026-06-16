@@ -7684,6 +7684,30 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
 
     timestamps = data.get("timestamps") or []
     values = data.get("values") or []
+
+    # Keep 1D LIVE: the Alpaca portfolio-history series is sampled at 15-min
+    # marks, so values[-1] lags the real account by up to a bar. Append a
+    # fresh broker-direct equity "tip" (Alpaca /v2/account) so current_value
+    # and the curve's end track the live account every poll — like the
+    # live-trading screen. Best-effort: any failure falls back to the sample.
+    if range_str == "1D" and btype == "alpaca":
+        try:
+            live_eq = _fetch_alpaca_current_equity(
+                key=_decrypt(doc.get("alpaca_key", "")) or "",
+                secret=_decrypt(doc.get("alpaca_secret", "")) or "",
+                base_url=doc.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
+            )
+        except Exception:
+            live_eq = None
+        if live_eq is not None and live_eq > 0:
+            import time as _t
+            now_ms = int(_t.time() * 1000)
+            if timestamps and now_ms <= timestamps[-1]:
+                values[-1] = live_eq
+            else:
+                timestamps.append(now_ms)
+                values.append(live_eq)
+
     current_value = values[-1] if values else 0.0
     open_value = values[0] if values else 0.0
     change_abs = current_value - open_value
@@ -7702,6 +7726,22 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
         "change_pct": round(change_pct, 4),
         "currency": "USD",
     }
+
+
+def _fetch_alpaca_current_equity(key, secret, base_url):
+    """Live broker-direct account equity (Alpaca /v2/account) for a fresh 1D
+    tip, so the dashboard value/curve update every poll instead of every bar.
+    Returns a float, or None on any failure (caller falls back to the sample)."""
+    import requests as _req
+    resp = _req.get(
+        f"{base_url}/v2/account",
+        headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+        timeout=10,
+    )
+    if not resp.ok:
+        raise ValueError(f"Alpaca account error (HTTP {resp.status_code})")
+    eq = (resp.json() or {}).get("equity")
+    return float(eq) if eq is not None else None
 
 
 def _fetch_alpaca_portfolio_history(key, secret, base_url, range_str):
