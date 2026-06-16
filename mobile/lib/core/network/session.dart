@@ -34,6 +34,13 @@ class SessionStore extends ChangeNotifier {
       await HomeWidget.setAppGroupId(_kWidgetAppGroup);
       await HomeWidget.saveWidgetData<String>('widget_api_base', ApiConfig.baseUrl);
       await HomeWidget.saveWidgetData<String>('widget_token', _token ?? '');
+      // Reload the widget so it self-fetches with the just-written token right
+      // away — otherwise a freshly logged-in widget stays on its empty
+      // placeholder until its own (~15 min) timeline next fires.
+      await HomeWidget.updateWidget(
+        iOSName: 'PortfolioWidget',
+        androidName: 'PortfolioWidgetProvider',
+      );
     } catch (_) {
       // Never surface widget-cred errors.
     }
