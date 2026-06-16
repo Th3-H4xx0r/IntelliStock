@@ -210,8 +210,10 @@ struct PortfolioWidgetView: View {
                 // and freeze). The `+` is only deprecated on macOS 26 — not iOS.
                 (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                     .font(.system(size: 9)).foregroundColor(cFaint)
-                    .lineLimit(1)
-                    .padding(.trailing, 10).padding(.bottom, 7)
+                    .lineLimit(1).fixedSize()
+                    // Bottom-right, inset enough to clear the widget's rounded
+                    // corner so it doesn't read as overflowing the edge.
+                    .padding(.trailing, 16).padding(.bottom, 14)
             }
         }
         .containerBackground(widgetBG, for: .widget)
