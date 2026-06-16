@@ -189,40 +189,33 @@ struct PortfolioWidgetView: View {
     }
 
     private var systemBody: some View {
-        // The timestamp lives IN-FLOW at the bottom (not a floating overlay), so
-        // it reserves its own space and physically can't overflow the edge or get
-        // clipped by the rounded corner. VStack(alignment: .trailing) pins it to
-        // the bottom-right; the family content above fills the remaining height.
-        VStack(alignment: .trailing, spacing: 0) {
-            Group {
-                if !entry.hasData {
-                    empty
-                } else {
-                    switch family {
-                    case .systemSmall:  small
-                    case .systemMedium: medium
-                    default:            large
-                    }
+        Group {
+            if !entry.hasData {
+                empty
+            } else {
+                switch family {
+                case .systemSmall:  small
+                case .systemMedium: medium
+                default:            large
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            if entry.hasData, entry.syncedAt > 0 {
-                // In-flow footer, forced hard-right by a leading Spacer (no
-                // reliance on VStack alignment). Auto-updating, date-typed Text:
-                // WidgetKit re-renders it on its own clock between reloads;
-                // `+ Text(" ago")` keeps that auto-update. No .fixedSize() (it
-                // collapses an auto-updating date Text).
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
-                        .font(.system(size: 9)).foregroundColor(cFaint)
-                        .lineLimit(1)
-                }
-                .padding(.trailing, 16)
-                .padding(.bottom, 12)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Floating corner label — doesn't consume layout height (so it can't push
+        // content or clip from overflow). `.bottomTrailing` resolves to the visual
+        // RIGHT only in LTR; this device runs RTL (Arabic region), which is why
+        // every "trailing" attempt landed on the LEFT. Force LTR so bottom-right
+        // is truly bottom-right. Auto-updating date Text; `+ Text(" ago")` keeps
+        // the live tick.
+        .overlay(alignment: .bottomTrailing) {
+            if entry.hasData, entry.syncedAt > 0 {
+                (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
+                    .font(.system(size: 9)).foregroundColor(cFaint)
+                    .lineLimit(1)
+                    .padding(.trailing, 14).padding(.bottom, 11)
+            }
+        }
+        .environment(\.layoutDirection, .leftToRight)
         .containerBackground(widgetBG, for: .widget)
     }
 
