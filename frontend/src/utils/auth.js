@@ -33,6 +33,26 @@ export function clearSession() {
   import('../composables/useChatbot.js').then(m => m.resetChatbot()).catch(() => { /* ignore */ })
 }
 
+/**
+ * Install a one-time global fetch wrapper that adopts a slid token from the
+ * backend's `X-Refreshed-Token` response header. The app has no central HTTP
+ * client (each view calls fetch directly), so this is the single chokepoint
+ * that keeps the web session sliding for ~30 days of activity. Idempotent.
+ */
+export function installRefreshedTokenCapture() {
+  if (typeof window === 'undefined' || window.__refreshTokenCaptureInstalled) return
+  window.__refreshTokenCaptureInstalled = true
+  const orig = window.fetch.bind(window)
+  window.fetch = async (...args) => {
+    const res = await orig(...args)
+    try {
+      const t = res && res.headers && res.headers.get && res.headers.get('X-Refreshed-Token')
+      if (t) localStorage.setItem(TOKEN_KEY, t)
+    } catch { /* never let token capture break a request */ }
+    return res
+  }
+}
+
 // ── API ───────────────────────────────────────────────────────────────────────
 
 // Dev:  /api → Vite proxy → VITE_API_URL (server-side, no CORS ever)
