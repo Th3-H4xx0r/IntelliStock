@@ -476,6 +476,7 @@ class _HoldingsList extends ConsumerWidget {
     final holdings = ref.watch(accountHoldingsProvider(brokerageId)).valueOrNull;
     if (holdings == null || holdings.isEmpty) return const SizedBox.shrink();
     final positions = holdings.positions;
+    final sparks = ref.watch(holdingsSparklinesProvider(brokerageId)).valueOrNull;
     // Total account value → each row's ring shows its share of the portfolio.
     final total = (holdings.cash ?? 0) +
         positions.fold<double>(0, (s, p) => s + p.marketValue);
@@ -499,7 +500,11 @@ class _HoldingsList extends ConsumerWidget {
                 ],
                 for (var i = 0; i < positions.length; i++) ...[
                   if (i > 0) const _HoldingDivider(),
-                  _HoldingRow(p: positions[i], total: total),
+                  _HoldingRow(
+                    p: positions[i],
+                    total: total,
+                    spark: sparks?[positions[i].symbol],
+                  ),
                 ],
               ],
             ),
@@ -530,6 +535,64 @@ Color _symbolColor(String s) {
     h = (h * 31 + c) & 0x7fffffff;
   }
   return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.6).toColor();
+}
+
+/// A tiny intraday (1D, since 12 AM) line for one holding — green if the day's
+/// move is up, red if down, mirroring the live-trading position cards.
+class _MiniSpark extends StatelessWidget {
+  const _MiniSpark({required this.values});
+  final List<double> values;
+
+  @override
+  Widget build(BuildContext context) {
+    if (values.length < 2) return const SizedBox(width: 68, height: 26);
+    final up = values.last >= values.first;
+    return SizedBox(
+      width: 68,
+      height: 26,
+      child: CustomPaint(
+        painter:
+            _SparkPainter(values, up ? AppColors.success : AppColors.danger),
+      ),
+    );
+  }
+}
+
+class _SparkPainter extends CustomPainter {
+  _SparkPainter(this.values, this.color);
+  final List<double> values;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    var lo = values.first, hi = values.first;
+    for (final v in values) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    final range = (hi - lo).abs() < 1e-9 ? 1.0 : hi - lo;
+    const pad = 2.0;
+    final h = size.height - pad * 2;
+    final path = Path();
+    for (var i = 0; i < values.length; i++) {
+      final x = i / (values.length - 1) * size.width;
+      final y = pad + (1 - (values[i] - lo) / range) * h;
+      i == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _SparkPainter old) =>
+      old.values != values || old.color != color;
 }
 
 /// A circular allocation ring: a progress arc = this item's share of the
@@ -643,9 +706,12 @@ class _CashRow extends StatelessWidget {
 }
 
 class _HoldingRow extends StatelessWidget {
-  const _HoldingRow({required this.p, required this.total});
+  const _HoldingRow({required this.p, required this.total, this.spark});
   final AccountPosition p;
   final double total;
+
+  /// Intraday 1D values (since 12 AM) for this symbol's mini sparkline.
+  final List<double>? spark;
 
   String get _qtyLabel {
     final q = p.qty;
@@ -656,7 +722,8 @@ class _HoldingRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final up = p.unrealizedPnlPct >= 0;
+    // Colour the whole row by this holding's TOTAL P&L (dollar) sign.
+    final up = p.unrealizedPnl >= 0;
     final color = up ? AppColors.success : AppColors.danger;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
@@ -673,32 +740,28 @@ class _HoldingRow extends StatelessWidget {
               children: [
                 Text(p.symbol,
                     style: AppTextStyles.bodyHi
-                        .copyWith(fontWeight: FontWeight.w700)),
+                        .copyWith(color: color, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 2),
                 Text(_qtyLabel,
-                    style:
-                        AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+                    style: AppTextStyles.micro
+                        .copyWith(color: color.withValues(alpha: 0.7))),
               ],
             ),
           ),
+          if (spark != null) ...[
+            _MiniSpark(values: spark!),
+            const SizedBox(width: 12),
+          ],
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Text(fmtMoney(p.marketValue),
-                  style: AppTextStyles.value.copyWith(color: AppColors.textHi)),
+                  style: AppTextStyles.value.copyWith(color: color)),
               const SizedBox(height: 3),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(up ? symbol('trending_up') : symbol('trending_down'),
-                      size: 12, color: color),
-                  const SizedBox(width: 3),
-                  Text(
-                    fmtPct(p.unrealizedPnlPct),
-                    style: AppTextStyles.micro
-                        .copyWith(color: color, fontWeight: FontWeight.w700),
-                  ),
-                ],
+              Text(
+                '${fmtPnl(p.unrealizedPnl)} · ${fmtPct(p.unrealizedPnlPct)}',
+                style: AppTextStyles.micro
+                    .copyWith(color: color, fontWeight: FontWeight.w700),
               ),
             ],
           ),
