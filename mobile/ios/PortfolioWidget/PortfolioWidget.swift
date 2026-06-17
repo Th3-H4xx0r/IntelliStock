@@ -220,8 +220,9 @@ struct PortfolioWidgetView: View {
                     (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
                         .font(.system(size: 9)).foregroundColor(cFaint)
                         .lineLimit(1)
-                        .position(x: geo.size.width - 46, y: geo.size.height - 14)
+                        .position(x: geo.size.width - 40, y: geo.size.height - 13)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .containerBackground(widgetBG, for: .widget)
