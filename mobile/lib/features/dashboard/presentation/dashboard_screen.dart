@@ -545,11 +545,11 @@ class _MiniSpark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (values.length < 2) return const SizedBox(width: 68, height: 26);
+    if (values.length < 2) return const SizedBox(height: 28);
     final up = values.last >= values.first;
     return SizedBox(
-      width: 68,
-      height: 26,
+      height: 28,
+      width: double.infinity, // fill the Expanded slot in the row
       child: CustomPaint(
         painter:
             _SparkPainter(values, up ? AppColors.success : AppColors.danger),
@@ -734,24 +734,33 @@ class _HoldingRow extends StatelessWidget {
             color: _symbolColor(p.symbol),
           ),
           const SizedBox(width: 12),
-          Expanded(
+          SizedBox(
+            width: 64,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(p.symbol,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: AppTextStyles.bodyHi
                         .copyWith(color: color, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 2),
                 Text(_qtyLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: AppTextStyles.micro
                         .copyWith(color: color.withValues(alpha: 0.7))),
               ],
             ),
           ),
-          if (spark != null) ...[
-            _MiniSpark(values: spark!),
-            const SizedBox(width: 12),
-          ],
+          const SizedBox(width: 10),
+          // The 1D sparkline fills the middle so it's nice and wide…
+          Expanded(
+            child: spark != null
+                ? _MiniSpark(values: spark!)
+                : const SizedBox.shrink(),
+          ),
+          const SizedBox(width: 16), // …with margin before the value column.
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
