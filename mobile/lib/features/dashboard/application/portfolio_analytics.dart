@@ -2,6 +2,8 @@
 // unit-testable. They take primitive inputs (value/sector/pct maps) rather than
 // model objects, keeping them decoupled from the data layer.
 
+import 'dart:math' as math;
+
 /// One sector's share of invested value.
 class SectorSlice {
   const SectorSlice(
@@ -91,4 +93,63 @@ List<Mover> todaysMovers(Map<String, double> pctBySymbol) {
 double? pctChangeOf(List<double> values) {
   if (values.length < 2 || values.first == 0) return null;
   return (values.last / values.first - 1) * 100;
+}
+
+/// Risk summary derived from an equity curve. Percentages are 0..100.
+class RiskMetrics {
+  const RiskMetrics({
+    required this.volatility,
+    required this.maxDrawdown,
+    required this.sharpe,
+    required this.points,
+  });
+  final double volatility; // annualized stdev of periodic returns, %
+  final double maxDrawdown; // worst peak-to-trough, %
+  final double? sharpe; // annualized; null when stdev is 0
+  final int points;
+
+  bool get isEmpty => points < 2;
+}
+
+/// Volatility, max drawdown and Sharpe from an equity [values] series. Returns
+/// are period-over-period; annualization uses √252 as a simple, consistent
+/// scale factor. Risk-free is assumed 0.
+RiskMetrics riskMetrics(List<double> values) {
+  if (values.length < 2) {
+    return const RiskMetrics(
+        volatility: 0, maxDrawdown: 0, sharpe: null, points: 0);
+  }
+  final returns = <double>[];
+  for (var i = 1; i < values.length; i++) {
+    if (values[i - 1] != 0) returns.add(values[i] / values[i - 1] - 1);
+  }
+  var peak = values.first;
+  var maxDd = 0.0;
+  for (final v in values) {
+    if (v > peak) peak = v;
+    if (peak > 0) {
+      final dd = (peak - v) / peak;
+      if (dd > maxDd) maxDd = dd;
+    }
+  }
+  if (returns.isEmpty) {
+    return RiskMetrics(
+        volatility: 0,
+        maxDrawdown: maxDd * 100,
+        sharpe: null,
+        points: values.length);
+  }
+  final mean = returns.reduce((a, b) => a + b) / returns.length;
+  final variance = returns
+          .map((r) => (r - mean) * (r - mean))
+          .reduce((a, b) => a + b) /
+      returns.length;
+  final stdev = variance <= 0 ? 0.0 : math.sqrt(variance);
+  const annualize = 15.874507866; // √252
+  return RiskMetrics(
+    volatility: stdev * annualize * 100,
+    maxDrawdown: maxDd * 100,
+    sharpe: stdev == 0 ? null : (mean / stdev) * annualize,
+    points: values.length,
+  );
 }

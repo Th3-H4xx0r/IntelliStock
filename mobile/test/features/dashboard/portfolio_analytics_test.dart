@@ -80,4 +80,30 @@ void main() {
       expect(pctChangeOf([0, 50]), isNull);
     });
   });
+
+  group('riskMetrics', () {
+    test('flat curve → zero vol, zero drawdown, null sharpe', () {
+      final r = riskMetrics([100, 100, 100, 100]);
+      expect(r.volatility, 0);
+      expect(r.maxDrawdown, 0);
+      expect(r.sharpe, isNull);
+    });
+
+    test('max drawdown is the largest peak-to-trough drop', () {
+      final r = riskMetrics([100, 120, 90, 110]); // 120→90 = 25%
+      expect(r.maxDrawdown, closeTo(25.0, 0.001));
+    });
+
+    test('rising curve → positive sharpe, no drawdown', () {
+      final r = riskMetrics([100, 101, 102, 103, 104]);
+      expect(r.sharpe, isNotNull);
+      expect(r.sharpe!, greaterThan(0));
+      expect(r.maxDrawdown, 0);
+    });
+
+    test('too few points → empty', () {
+      expect(riskMetrics([100]).isEmpty, isTrue);
+      expect(riskMetrics([]).isEmpty, isTrue);
+    });
+  });
 }

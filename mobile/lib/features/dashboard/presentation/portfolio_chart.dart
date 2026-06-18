@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
+import '../application/market_hours.dart';
 import '../../../core/charts/chart_decorations.dart';
 import '../../../core/charts/chart_geometry.dart';
 import '../../../core/charts/scrub_controller.dart';
@@ -252,6 +255,8 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
                 )
               else
                 _ValueSkeleton(big: hero),
+              const SizedBox(height: 8),
+              const _LiveStatusChip(),
               SizedBox(height: hero ? 16 : 12),
               _RangeTabs(active: _range, onSelect: _setRange),
             ],
@@ -703,6 +708,51 @@ class _ChartPoint {
   const _ChartPoint({required this.x, required this.y});
   final double x;
   final double y;
+}
+
+/// "Markets open · Live" / "Markets closed" pill — pairs with the pulsing end
+/// dot. Self-ticks every 30 s so it flips at the open/close boundary.
+class _LiveStatusChip extends StatefulWidget {
+  const _LiveStatusChip();
+
+  @override
+  State<_LiveStatusChip> createState() => _LiveStatusChipState();
+}
+
+class _LiveStatusChipState extends State<_LiveStatusChip> {
+  Timer? _t;
+
+  @override
+  void initState() {
+    super.initState();
+    _t = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _t?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final open = isMarketOpenAtEt(etFromUtc(DateTime.now().toUtc()));
+    final c = open ? AppColors.success : AppColors.textFaint;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: c)),
+        const SizedBox(width: 5),
+        Text(open ? 'Markets open · Live' : 'Markets closed',
+            style: AppTextStyles.nano.copyWith(color: c)),
+      ],
+    );
+  }
 }
 
 /// The end-of-line "current value" dot, with a soft halo that continuously

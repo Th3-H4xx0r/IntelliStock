@@ -46,6 +46,7 @@ class InsightsSection extends ConsumerWidget {
         ),
         const SizedBox(height: 12),
         _SectorAllocationCard(brokerageId: id),
+        _RiskCard(brokerageId: id),
         const SizedBox(height: 20),
         Text('Market', style: AppTextStyles.h3),
         const SizedBox(height: 14),
@@ -236,6 +237,65 @@ class _DiversificationValue extends StatelessWidget {
       ],
     );
   }
+}
+
+// ── Risk (volatility / drawdown / Sharpe from the equity curve) ──────────────
+
+class _RiskCard extends ConsumerWidget {
+  const _RiskCard({required this.brokerageId});
+  final String brokerageId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(riskMetricsProvider(brokerageId));
+    final r = async.valueOrNull;
+    if (r != null && r.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        liquid: true,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _tileLabel('RISK'),
+            const SizedBox(height: 12),
+            if (r == null)
+              const Skeleton(height: 22, radius: 6)
+            else
+              Row(
+                children: [
+                  Expanded(
+                      child: _riskMetric(
+                          'Volatility', '${r.volatility.round()}%')),
+                  Expanded(
+                      child: _riskMetric(
+                          'Max drawdown', '${r.maxDrawdown.round()}%')),
+                  Expanded(
+                      child: _riskMetric('Sharpe',
+                          r.sharpe == null ? '—' : r.sharpe!.toStringAsFixed(2))),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _riskMetric(String label, String value) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.value.copyWith(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 3),
+          Text(label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+        ],
+      );
 }
 
 // ── Sector allocation (your portfolio, by sector) ────────────────────────────

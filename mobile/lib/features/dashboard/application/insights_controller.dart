@@ -191,3 +191,21 @@ final todaysMoversProvider =
     }
   },
 );
+
+/// Risk metrics (volatility, max drawdown, Sharpe) from the account's 1Y equity
+/// curve. keepAlive — the curve barely moves intraday. Never-throws.
+final riskMetricsProvider =
+    FutureProvider.autoDispose.family<RiskMetrics, String>(
+  (ref, brokerageId) async {
+    ref.keepAlive();
+    try {
+      final h = await ref
+          .read(dashboardRepositoryProvider)
+          .portfolioHistory(brokerageId, '1Y');
+      return riskMetrics(h.values);
+    } catch (_) {
+      return const RiskMetrics(
+          volatility: 0, maxDrawdown: 0, sharpe: null, points: 0);
+    }
+  },
+);
