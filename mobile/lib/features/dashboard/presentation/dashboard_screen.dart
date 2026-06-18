@@ -17,6 +17,7 @@ import '../application/account_positions_controller.dart';
 import '../application/dashboard_controller.dart';
 import '../application/selected_account_controller.dart';
 import '../data/dashboard_repository.dart';
+import '../../stock/presentation/stock_screen.dart';
 import 'portfolio_chart.dart';
 import 'service_card.dart';
 
@@ -512,6 +513,7 @@ class _HoldingsList extends ConsumerWidget {
                     total: total,
                     spark: sparks?[positions[i].symbol],
                     mode: pnlMode,
+                    brokerageId: brokerageId,
                   ),
                 ],
               ],
@@ -755,9 +757,14 @@ class _CashRow extends StatelessWidget {
 
 class _HoldingRow extends StatelessWidget {
   const _HoldingRow(
-      {required this.p, required this.total, this.spark, required this.mode});
+      {required this.p,
+      required this.total,
+      this.spark,
+      required this.mode,
+      required this.brokerageId});
   final AccountPosition p;
   final double total;
+  final String brokerageId;
 
   /// Intraday 1D values (since 12 AM) for this symbol's mini sparkline.
   final List<double>? spark;
@@ -791,7 +798,11 @@ class _HoldingRow extends StatelessWidget {
     final color = !hasPnl
         ? AppColors.textDim
         : (up ? AppColors.success : AppColors.danger);
-    return Padding(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => context.push('/stock/${p.symbol}',
+          extra: StockScreenArgs(position: p, brokerageId: brokerageId)),
+      child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       child: Row(
         children: [
@@ -841,6 +852,7 @@ class _HoldingRow extends StatelessWidget {
             ],
           ),
         ],
+      ),
       ),
     );
   }

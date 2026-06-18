@@ -22,6 +22,7 @@ import '../../features/models/presentation/models_screen.dart';
 import '../../features/token_usage/presentation/token_usage_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
 import '../../features/settings/presentation/notification_settings_screen.dart';
+import '../../features/stock/presentation/stock_screen.dart';
 
 final _rootKey = GlobalKey<NavigatorState>();
 
@@ -127,6 +128,20 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/brokerages',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const BrokeragesScreen(),
+      ),
+      GoRoute(
+        path: '/stock/:symbol',
+        parentNavigatorKey: _rootKey,
+        builder: (_, s) {
+          final args = s.extra is StockScreenArgs
+              ? s.extra as StockScreenArgs
+              : null;
+          return StockScreen(
+            symbol: s.pathParameters['symbol']!,
+            position: args?.position,
+            brokerageId: args?.brokerageId,
+          );
+        },
       ),
       GoRoute(
         path: '/agent-runs',
