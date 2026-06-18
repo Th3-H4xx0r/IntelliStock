@@ -121,7 +121,13 @@ RiskMetrics riskMetrics(List<double> values) {
   }
   final returns = <double>[];
   for (var i = 1; i < values.length; i++) {
-    if (values[i - 1] != 0) returns.add(values[i] / values[i - 1] - 1);
+    if (values[i - 1] > 0) {
+      final ret = values[i] / values[i - 1] - 1;
+      // Skip funding/transfer artifacts: a >50% single-period jump is a deposit
+      // or a data gap, not a market move, and would otherwise blow up the
+      // annualized volatility/Sharpe (e.g. a garbage "997%").
+      if (ret.abs() <= 0.5) returns.add(ret);
+    }
   }
   var peak = values.first;
   var maxDd = 0.0;

@@ -365,6 +365,10 @@ class _SectorDonutState extends State<_SectorDonut>
     duration: const Duration(milliseconds: 1000),
   )..forward();
   int _selected = 0;
+  bool _is3d = false;
+  double _spin = 0; // Z-rotation (radians) driven by horizontal drag in 3D mode.
+
+  static const double _dim = 212.0;
 
   @override
   void dispose() {
@@ -372,13 +376,14 @@ class _SectorDonutState extends State<_SectorDonut>
     super.dispose();
   }
 
-  void _onTapDown(Offset local, double dim) {
-    final center = Offset(dim / 2, dim / 2);
+  void _selectAt(Offset local) {
+    final center = Offset(_dim / 2, _dim / 2);
     final v = local - center;
-    final dist = v.distance;
-    final r = dim / 2;
-    if (dist < r * 0.40 || dist > r) return; // outside the ring band
-    var a = math.atan2(v.dy, v.dx) + math.pi / 2; // 0 at 12 o'clock, CW
+    final r = _dim / 2;
+    if (v.distance < r * 0.34 || v.distance > r) return; // outside the ring band
+    // Subtract the drag-spin in 3D so taps still map to the right segment.
+    var a = math.atan2(v.dy, v.dx) + math.pi / 2 - (_is3d ? _spin : 0);
+    a %= 2 * math.pi;
     if (a < 0) a += 2 * math.pi;
     final total = widget.slices.fold<double>(0, (s, e) => s + e.pct);
     if (total <= 0) return;
@@ -397,25 +402,51 @@ class _SectorDonutState extends State<_SectorDonut>
   Widget build(BuildContext context) {
     final slices = widget.slices;
     final sel = _selected.clamp(0, slices.length - 1);
-    const dim = 210.0;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: SizedBox(
-          width: dim,
-          height: dim,
+
+    Widget donut = AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, _) => CustomPaint(
+        size: const Size(_dim, _dim),
+        painter: _DonutPainter(
+          slices: slices,
+          selected: sel,
+          progress: Curves.easeOutCubic.transform(_ctrl.value),
+          depth: _is3d ? 16 : 0,
+          showLabels: !_is3d,
+        ),
+      ),
+    );
+    if (_is3d) {
+      donut = Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()
+          ..setEntry(3, 2, 0.0013)
+          ..rotateX(1.02)
+          ..rotateZ(_spin),
+        child: donut,
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Align(alignment: Alignment.centerRight, child: _toggle()),
+        const SizedBox(height: 4),
+        SizedBox(
+          height: _dim,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapDown: (d) => _onTapDown(d.localPosition, dim),
-            child: AnimatedBuilder(
-              animation: _ctrl,
-              builder: (_, _) => CustomPaint(
-                painter: _DonutPainter(
-                  slices: slices,
-                  selected: sel,
-                  progress: Curves.easeOutCubic.transform(_ctrl.value),
-                ),
-                child: Center(
+            onTapDown: (d) => _selectAt(d.localPosition),
+            onHorizontalDragUpdate: _is3d
+                ? (d) => setState(() => _spin += d.delta.dx * 0.012)
+                : null,
+            child: Stack(
+              alignment: Alignment.center,
+              clipBehavior: Clip.none,
+              children: [
+                Center(child: SizedBox(width: _dim, height: _dim, child: donut)),
+                // Centre readout stays flat (never tilts with the 3D donut).
+                IgnorePointer(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -424,7 +455,7 @@ class _SectorDonutState extends State<_SectorDonut>
                               .copyWith(fontWeight: FontWeight.w800)),
                       const SizedBox(height: 2),
                       Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 34),
+                        padding: const EdgeInsets.symmetric(horizontal: 36),
                         child: Text(slices[sel].sector,
                             maxLines: 2,
                             textAlign: TextAlign.center,
@@ -435,21 +466,75 @@ class _SectorDonutState extends State<_SectorDonut>
                     ],
                   ),
                 ),
-              ),
+              ],
             ),
           ),
         ),
-      ),
+        if (_is3d)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text('Drag to rotate',
+                textAlign: TextAlign.center,
+                style:
+                    AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+          ),
+      ],
     );
   }
+
+  Widget _toggle() => Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _toggleBtn(Icons.pie_chart_outline_rounded, !_is3d,
+                () => setState(() => _is3d = false)),
+            _toggleBtn(Icons.threed_rotation, _is3d, () {
+              setState(() {
+                _is3d = true;
+                _spin = 0;
+              });
+            }),
+          ],
+        ),
+      );
+
+  Widget _toggleBtn(IconData icon, bool active, VoidCallback onTap) =>
+      GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+          decoration: BoxDecoration(
+            color:
+                active ? AppColors.fill(AppColors.primary) : Colors.transparent,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Icon(icon,
+              size: 16,
+              color: active ? AppColors.primary : AppColors.textDim),
+        ),
+      );
 }
 
 class _DonutPainter extends CustomPainter {
-  _DonutPainter(
-      {required this.slices, required this.selected, required this.progress});
+  _DonutPainter({
+    required this.slices,
+    required this.selected,
+    required this.progress,
+    this.depth = 0,
+    this.showLabels = true,
+  });
   final List<SectorSlice> slices;
   final int selected;
   final double progress;
+  final double depth; // px of fake extrusion (0 = flat)
+  final bool showLabels;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -457,10 +542,34 @@ class _DonutPainter extends CustomPainter {
     if (total <= 0) return;
     final center = size.center(Offset.zero);
     final r = size.width / 2;
-    final stroke = r * 0.26;
-    final ringR = r - stroke / 2 - 14; // leave room for the % labels outside
+    final stroke = r * 0.24;
+    final ringR = r - stroke / 2 - (showLabels ? 22 : 8);
     final rect = Rect.fromCircle(center: center, radius: ringR);
-    const gap = 0.05; // radians between segments
+
+    // Fake extrusion: a darker base ring offset downward shows below the top
+    // ring as 3D thickness (cheap; the outer rotateX makes it read as depth).
+    if (depth > 0) {
+      _drawRing(canvas, rect.translate(0, depth), total, stroke, 0.34);
+    }
+    _drawRing(canvas, rect, total, stroke, 1.0);
+
+    if (showLabels && progress > 0.5) {
+      _drawLabels(canvas, center, ringR, stroke, total);
+    }
+  }
+
+  void _drawRing(
+      Canvas canvas, Rect rect, double total, double stroke, double shade) {
+    const gap = 0.06;
+    Color sh(int hex) {
+      final c = Color(hex);
+      return Color.fromARGB(
+        255,
+        (c.r * 255 * shade).round().clamp(0, 255),
+        (c.g * 255 * shade).round().clamp(0, 255),
+        (c.b * 255 * shade).round().clamp(0, 255),
+      );
+    }
 
     var start = -math.pi / 2; // 12 o'clock
     for (var i = 0; i < slices.length; i++) {
@@ -469,14 +578,15 @@ class _DonutPainter extends CustomPainter {
       if (sweep > 0.001) {
         final isSel = i == selected;
         // Metallic gradient: violet for the selected segment, graphite for the
-        // rest. The looping 4th stop gives a subtle specular sheen.
-        final light = isSel ? const Color(0xFFCBB6FF) : const Color(0xFF585866);
-        final base = isSel ? const Color(0xFF9B6BFF) : const Color(0xFF35353F);
-        final dark = isSel ? const Color(0xFF5B21B6) : const Color(0xFF17171E);
+        // rest. All segments share the same stroke width (no lumpiness); the
+        // looping 4th stop gives a subtle specular sheen.
+        final colors = isSel
+            ? [sh(0xCBB6FF), sh(0x9B6BFF), sh(0x5B21B6), sh(0xCBB6FF)]
+            : [sh(0x5E5E6C), sh(0x3A3A45), sh(0x1A1A21), sh(0x5E5E6C)];
         final shader = SweepGradient(
           startAngle: start,
           endAngle: start + full,
-          colors: [light, base, dark, light],
+          colors: colors,
           stops: const [0.0, 0.4, 0.82, 1.0],
         ).createShader(rect);
         canvas.drawArc(
@@ -486,37 +596,37 @@ class _DonutPainter extends CustomPainter {
           false,
           Paint()
             ..style = PaintingStyle.stroke
-            ..strokeWidth = isSel ? stroke + 6 : stroke
+            ..strokeWidth = stroke
             ..strokeCap = StrokeCap.round
             ..shader = shader,
         );
       }
       start += full;
     }
+  }
 
-    // % labels just outside the ring at each segment's mid-angle (fade in late).
-    if (progress > 0.55) {
-      start = -math.pi / 2;
-      final labelR = ringR + stroke / 2 + 12;
-      for (var i = 0; i < slices.length; i++) {
-        final full = slices[i].pct / total * 2 * math.pi;
-        final mid = start + full / 2;
-        final pos =
-            center + Offset(math.cos(mid) * labelR, math.sin(mid) * labelR);
-        final tp = TextPainter(
-          text: TextSpan(
-            text: '${slices[i].pct.round()}%',
-            style: TextStyle(
-              color: i == selected ? AppColors.primary : AppColors.textMuted,
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-            ),
+  void _drawLabels(Canvas canvas, Offset center, double ringR, double stroke,
+      double total) {
+    var start = -math.pi / 2;
+    final labelR = ringR + stroke / 2 + 13;
+    for (var i = 0; i < slices.length; i++) {
+      final full = slices[i].pct / total * 2 * math.pi;
+      final mid = start + full / 2;
+      final pos =
+          center + Offset(math.cos(mid) * labelR, math.sin(mid) * labelR);
+      final tp = TextPainter(
+        text: TextSpan(
+          text: '${slices[i].pct.round()}%',
+          style: TextStyle(
+            color: i == selected ? AppColors.primary : AppColors.textMuted,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
           ),
-          textDirection: TextDirection.ltr,
-        )..layout();
-        tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
-        start += full;
-      }
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
+      start += full;
     }
   }
 
@@ -524,6 +634,8 @@ class _DonutPainter extends CustomPainter {
   bool shouldRepaint(_DonutPainter old) =>
       old.progress != progress ||
       old.selected != selected ||
+      old.depth != depth ||
+      old.showLabels != showLabels ||
       !identical(old.slices, slices);
 }
 

@@ -105,5 +105,12 @@ void main() {
       expect(riskMetrics([100]).isEmpty, isTrue);
       expect(riskMetrics([]).isEmpty, isTrue);
     });
+
+    test('a funding/deposit jump does not blow up volatility', () {
+      // A ~10x deposit (a +900% single-period jump) must be ignored, not
+      // produce a garbage ~1000% annualized volatility.
+      final r = riskMetrics([100, 1000, 1010, 1005, 1015, 1012]);
+      expect(r.volatility, lessThan(200));
+    });
   });
 }
