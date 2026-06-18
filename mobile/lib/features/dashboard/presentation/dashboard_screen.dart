@@ -18,6 +18,7 @@ import '../application/dashboard_controller.dart';
 import '../application/selected_account_controller.dart';
 import '../data/dashboard_repository.dart';
 import '../../stock/presentation/stock_screen.dart';
+import 'insights_section.dart';
 import 'portfolio_chart.dart';
 import 'service_card.dart';
 
@@ -51,6 +52,10 @@ class DashboardScreen extends ConsumerWidget {
                 delegate: SliverChildListDelegate([
                   // ── Portfolio section ──────────────────────────────────────
                   _PortfolioSection(),
+                  const SizedBox(height: 32),
+
+                  // ── Insights + Bot ideas ───────────────────────────────────
+                  const InsightsSection(),
                   const SizedBox(height: 32),
 
                   // ── Services section ───────────────────────────────────────
