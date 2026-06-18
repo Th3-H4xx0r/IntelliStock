@@ -26,8 +26,8 @@ class Sector3DChart extends StatefulWidget {
 
 class _Sector3DChartState extends State<Sector3DChart>
     with TickerProviderStateMixin {
-  static const double _flatH = 206;
-  static const double _drillH = 300;
+  static const double _flatH = 280;
+  static const double _drillH = 320;
 
   int _selected = 0;
   double _dragAcc = 0;
@@ -272,10 +272,10 @@ class _RingPainter extends CustomPainter {
 
     // Lerped geometry: flat ring → drilled (bigger, lower-tilt, taller walls,
     // centre pushed down so the raised focused block sits up top).
-    final sy = _lerp(0.86, 0.42);
-    final ro = size.width * _lerp(0.34, 0.60);
-    final ri = size.width * _lerp(0.21, 0.39);
-    final wall = _lerp(7, 64); // extrusion height
+    final sy = _lerp(1.0, 0.42); // flat = round top-down → tilted when drilled
+    final ro = size.width * _lerp(0.33, 0.60);
+    final ri = size.width * _lerp(0.205, 0.39);
+    final wall = _lerp(0, 64); // no extrusion flat → tall metallic blocks drilled
     final cx = size.width / 2;
     final cy = size.height * _lerp(0.5, 0.86);
     final c = Offset(cx, cy);
@@ -312,14 +312,14 @@ class _RingPainter extends CustomPainter {
           stops: const [0.0, 0.5, 1.0],
         ).createShader(r);
 
-    // Soft contact shadow.
+    // Soft contact shadow (subtle when flat, deeper as the blocks rise).
     canvas.drawOval(
       Rect.fromCenter(
-          center: c.translate(0, 12),
+          center: c.translate(0, _lerp(4, 14)),
           width: 2 * ro * 0.96,
           height: 2 * ro * sy * 0.72),
       Paint()
-        ..color = Colors.black.withValues(alpha: 0.5)
+        ..color = Colors.black.withValues(alpha: _lerp(0.28, 0.5))
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 16),
     );
 
@@ -351,23 +351,47 @@ class _RingPainter extends CustomPainter {
       final sel = i == selected;
       // Focused block rises higher when drilled.
       final segWall = wall + (sel ? _lerp(0, 38) : 0);
-      // Colour: selected is always violet; others are graphite when flat and
-      // lerp to violet as we drill (all-violet drilled, focused brightest).
-      final Color hiC, midC, loC;
-      if (sel) {
-        hiC = const Color(0xFFE7D6FF);
-        midC = const Color(0xFFA374FF);
-        loC = const Color(0xFF6A2DBE);
-      } else {
-        hiC = Color.lerp(
-            const Color(0xFF8C8C9C), const Color(0xFFC4A8FF), drill)!;
-        midC = Color.lerp(
-            const Color(0xFF45454F), const Color(0xFF7E50E0), drill)!;
-        loC = Color.lerp(
-            const Color(0xFF1B1B22), const Color(0xFF45228C), drill)!;
-      }
+      // Dashboard-violet metallic palette (keyed to AppColors.primary). Every
+      // wedge is violet; brightness varies by size so neighbours read apart,
+      // and the selected wedge is brightest. b: 0 (deep) .. 1 (bright).
+      final n = slices.length;
+      final double b = sel
+          ? 1.0
+          : (n <= 1 ? 0.58 : 0.30 + 0.42 * (1 - i / (n - 1)));
+      final hiC =
+          Color.lerp(const Color(0xFF7C5CE6), const Color(0xFFEBE0FF), b)!;
+      final midC =
+          Color.lerp(const Color(0xFF4A2C9E), const Color(0xFFB79BFF), b)!;
+      final loC =
+          Color.lerp(const Color(0xFF24114F), const Color(0xFF7E55E6), b)!;
 
       if (segWall > 1) {
+        // ── Inner wall (the hole side) ── only on back-leaning wedges, where
+        // it's visible across the hole; a front wedge's inner wall is self-
+        // occluded and would bleed into the hole, so skip it. This is what
+        // makes the ring read as a SOLID band instead of a hollow shell.
+        final midAng = (a0 + a1) / 2;
+        if (math.sin(midAng) < 0.18) {
+          final inner = Path();
+          final it0 = onOval(ri, a0, segWall);
+          inner.moveTo(it0.dx, it0.dy);
+          inner.arcTo(oval(ri, segWall), a0, a1 - a0, false);
+          final ib1 = onOval(ri, a1, 0);
+          inner.lineTo(ib1.dx, ib1.dy);
+          inner.arcTo(oval(ri, 0), a1, -(a1 - a0), false);
+          inner.close();
+          canvas.drawPath(
+            inner,
+            Paint()
+              ..isAntiAlias = true
+              ..shader = topShade(
+                  Color.lerp(midC, Colors.black, 0.30)!,
+                  Color.lerp(loC, Colors.black, 0.26)!,
+                  Color.lerp(loC, Colors.black, 0.55)!,
+                  inner.getBounds()),
+          );
+        }
+
         // ── Side caps (radial cut faces at each end) ── these close the block
         // so the gaps don't show an open "cut" / the wall fully drops down the
         // sides. Drawn before the outer wall + top so those sit on top.
@@ -415,13 +439,19 @@ class _RingPainter extends CustomPainter {
         );
       }
 
-      // ── Top face ──
+      // ── Top face ── metallic 4-stop gradient: a bright specular sheen band
+      // near the top edge then violet→deep, for a brushed-metal read.
       final top = sectorPath(a0, a1, segWall);
       canvas.drawPath(
         top,
         Paint()
           ..isAntiAlias = true
-          ..shader = topShade(hiC, midC, loC, outerBounds),
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color.lerp(hiC, Colors.white, 0.24)!, hiC, midC, loC],
+            stops: const [0.0, 0.20, 0.58, 1.0],
+          ).createShader(outerBounds),
       );
       // Bright top-edge highlight for the metallic read.
       canvas.drawPath(
