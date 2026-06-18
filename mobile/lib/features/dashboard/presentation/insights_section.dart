@@ -37,7 +37,7 @@ class InsightsSection extends ConsumerWidget {
         const SizedBox(height: 14),
         _TodaysMoversStrip(brokerageId: id),
         Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(child: _DayPnlTile(brokerageId: id)),
             const SizedBox(width: 12),
@@ -129,6 +129,7 @@ class _DayPnlTile extends ConsumerWidget {
     final async = ref.watch(dayChangeProvider(brokerageId));
     final d = async.valueOrNull;
     return GlassCard(
+      liquid: true,
       padding: const EdgeInsets.all(14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -185,6 +186,7 @@ class _DiversificationTile extends ConsumerWidget {
     final async = ref.watch(concentrationProvider(brokerageId));
     final s = async.valueOrNull;
     return GlassCard(
+      liquid: true,
       padding: const EdgeInsets.all(14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -262,6 +264,7 @@ class _SectorAllocationCard extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: GlassCard(
+        liquid: true,
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -360,6 +363,7 @@ class _MarketIndicesCard extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: GlassCard(
+        liquid: true,
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -428,6 +432,7 @@ class _SectorPerformanceCard extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: GlassCard(
+        liquid: true,
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
