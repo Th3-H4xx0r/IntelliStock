@@ -477,8 +477,13 @@ class _HoldingsList extends ConsumerWidget {
     final holdings = ref.watch(accountHoldingsProvider(brokerageId)).valueOrNull;
     if (holdings == null || holdings.isEmpty) return const SizedBox.shrink();
     final positions = holdings.positions;
-    final sparks = ref.watch(holdingsSparklinesProvider(brokerageId)).valueOrNull;
     final pnlMode = ref.watch(holdingsPnlModeProvider);
+    // Daily → intraday (since 12 AM); Total → full history. Re-fetches on toggle.
+    final sparkRange = pnlMode == HoldingsPnlMode.daily ? '1D' : 'ALL';
+    final sparksAsync = ref.watch(
+        holdingsSparklinesProvider((brokerageId: brokerageId, range: sparkRange)));
+    final sparks = sparksAsync.valueOrNull;
+    final sparksLoading = sparksAsync.isLoading;
     // Total account value → each row's ring shows its share of the portfolio.
     final total = (holdings.cash ?? 0) +
         positions.fold<double>(0, (s, p) => s + p.marketValue);
@@ -512,6 +517,7 @@ class _HoldingsList extends ConsumerWidget {
                     p: positions[i],
                     total: total,
                     spark: sparks?[positions[i].symbol],
+                    sparkLoading: sparksLoading,
                     mode: pnlMode,
                     brokerageId: brokerageId,
                   ),
@@ -760,14 +766,18 @@ class _HoldingRow extends StatelessWidget {
       {required this.p,
       required this.total,
       this.spark,
+      this.sparkLoading = false,
       required this.mode,
       required this.brokerageId});
   final AccountPosition p;
   final double total;
   final String brokerageId;
 
-  /// Intraday 1D values (since 12 AM) for this symbol's mini sparkline.
+  /// Price values for this symbol's mini sparkline (range depends on the mode).
   final List<double>? spark;
+
+  /// Whether the sparkline data is (re)loading — show a skeleton then.
+  final bool sparkLoading;
 
   /// Whether the row shows total (lifetime) or daily P&L.
   final HoldingsPnlMode mode;
@@ -801,7 +811,8 @@ class _HoldingRow extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () => context.push('/stock/${p.symbol}',
-          extra: StockScreenArgs(position: p, brokerageId: brokerageId)),
+          extra: StockScreenArgs(
+              position: p, brokerageId: brokerageId, portfolioTotal: total)),
       child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       child: Row(
@@ -831,11 +842,14 @@ class _HoldingRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          // The 1D sparkline fills the middle so it's nice and wide…
+          // Sparkline fills the middle (wide); a skeleton shows while it
+          // re-fetches on a Daily/Total toggle.
           Expanded(
-            child: spark != null
-                ? _MiniSpark(values: spark!)
-                : const SizedBox.shrink(),
+            child: sparkLoading
+                ? const Skeleton(height: 28, radius: 6)
+                : (spark != null
+                    ? _MiniSpark(values: spark!)
+                    : const SizedBox.shrink()),
           ),
           const SizedBox(width: 16), // …with margin before the value column.
           Column(

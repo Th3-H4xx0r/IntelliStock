@@ -1,23 +1,53 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/polling/poller.dart';
 import '../../live_trading/data/live_repository.dart';
 import '../../live_trading/data/models/live_state.dart';
 
-/// A symbol's price series for a given range. For 1D it's relative to the
-/// device's local midnight (the "since 12 AM" view used across the app).
 typedef StockSeriesArgs = ({String symbol, String range});
 typedef StockSeries = ({List<DateTime> ts, List<double> vals});
 
-final stockHistoryProvider =
-    FutureProvider.autoDispose.family<StockSeries, StockSeriesArgs>(
-  (ref, args) async {
+/// A symbol's price series for a range, kept LIVE: polls every 10 s on 1D
+/// (30 s on longer ranges), lifecycle-aware, keeping the last good data on a
+/// transient failure. For 1D the points are trimmed to local midnight.
+class StockHistoryNotifier
+    extends AutoDisposeFamilyAsyncNotifier<StockSeries, StockSeriesArgs> {
+  IntervalPoller? _poller;
+
+  @override
+  Future<StockSeries> build(StockSeriesArgs arg) async {
+    final lifecycle = ref.read(appLifecycleProvider);
+    final data = await _fetch(arg);
+    _poller = IntervalPoller(
+      fetch: () => _refresh(arg),
+      interval: () => arg.range == '1D'
+          ? const Duration(seconds: 10)
+          : const Duration(seconds: 30),
+    );
+    if (lifecycle.isForeground) {
+      _poller!.start();
+    } else {
+      _poller!.pause();
+    }
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next.isForeground) {
+        _poller?.resume();
+      } else {
+        _poller?.pause();
+      }
+    });
+    ref.onDispose(() => _poller?.dispose());
+    return data;
+  }
+
+  Future<StockSeries> _fetch(StockSeriesArgs arg) async {
     final map = await ref
         .read(liveRepositoryProvider)
-        .symbolHistoricals([args.symbol], args.range);
-    final pts = map[args.symbol] ?? const [];
+        .symbolHistoricals([arg.symbol], arg.range);
+    final pts = map[arg.symbol] ?? const [];
     DateTime? midnight;
-    if (args.range == '1D') {
+    if (arg.range == '1D') {
       final n = DateTime.now();
       midnight = DateTime(n.year, n.month, n.day);
     }
@@ -31,6 +61,35 @@ final stockHistoryProvider =
       vals.add(p.value);
     }
     return (ts: ts, vals: vals);
+  }
+
+  Future<void> _refresh(StockSeriesArgs arg) async {
+    try {
+      state = AsyncData(await _fetch(arg));
+    } catch (_) {
+      // keep the last good series on a transient poll failure
+    }
+  }
+}
+
+final stockHistoryProvider = AutoDisposeAsyncNotifierProviderFamily<
+    StockHistoryNotifier, StockSeries, StockSeriesArgs>(
+  StockHistoryNotifier.new,
+);
+
+/// Display info/stats for a symbol (name, sector, market cap, P/E, 52-week
+/// range, recommendation, summary…) from the backend's yfinance endpoint.
+/// Returns an empty map — never throws — so the screen renders without it.
+final stockInfoProvider =
+    FutureProvider.autoDispose.family<Map<String, dynamic>, String>(
+  (ref, symbol) async {
+    try {
+      return await ref
+          .read(apiClientProvider)
+          .get<Map<String, dynamic>>('/symbols/$symbol/info');
+    } catch (_) {
+      return const {};
+    }
   },
 );
 

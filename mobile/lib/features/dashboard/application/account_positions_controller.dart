@@ -62,30 +62,41 @@ enum HoldingsPnlMode { total, daily }
 final holdingsPnlModeProvider =
     StateProvider<HoldingsPnlMode>((ref) => HoldingsPnlMode.total);
 
-/// Per-holding 1D price sparklines for a brokerage, relative to the device's
-/// local midnight — the same "since 12 AM" intraday view as the portfolio 1D
-/// chart and the live-trading screen. Maps `symbol → intraday values`. Reuses
-/// the live-trading `/symbol-historicals` endpoint; fetched once per brokerage.
-final holdingsSparklinesProvider =
-    FutureProvider.autoDispose.family<Map<String, List<double>>, String>(
-        (ref, brokerageId) async {
-  final holdings = await ref.read(accountHoldingsProvider(brokerageId).future);
+/// Which brokerage + which range to fetch holding sparklines for.
+typedef HoldingsSparkArgs = ({String brokerageId, String range});
+
+/// Per-holding price sparklines for a brokerage at [range]. For `1D` the points
+/// are trimmed to the device's local midnight (the "since 12 AM" intraday view);
+/// longer ranges keep the full series. Maps `symbol → values`. Keyed by
+/// (brokerage, range) so the Daily/Total toggle re-fetches a different range.
+/// Reuses the live-trading `/symbol-historicals` endpoint.
+final holdingsSparklinesProvider = FutureProvider.autoDispose
+    .family<Map<String, List<double>>, HoldingsSparkArgs>((ref, args) async {
+  final holdings =
+      await ref.read(accountHoldingsProvider(args.brokerageId).future);
   final symbols = holdings.positions
       .map((p) => p.symbol)
       .where((s) => s.isNotEmpty)
       .toList();
   if (symbols.isEmpty) return const {};
-  final hist =
-      await ref.read(liveRepositoryProvider).symbolHistoricals(symbols, '1D');
-  final now = DateTime.now();
-  final midnight = DateTime(now.year, now.month, now.day);
+  final hist = await ref
+      .read(liveRepositoryProvider)
+      .symbolHistoricals(symbols, args.range);
+  DateTime? midnight;
+  if (args.range == '1D') {
+    final now = DateTime.now();
+    midnight = DateTime(now.year, now.month, now.day);
+  }
   final out = <String, List<double>>{};
   hist.forEach((sym, pts) {
     final vals = <double>[];
     for (final p in pts) {
-      final t = parseDateTime(p.ts);
-      // Keep points from local midnight onward (1D = since 12 AM).
-      if (t == null || !t.isBefore(midnight)) vals.add(p.value);
+      if (midnight == null) {
+        vals.add(p.value);
+      } else {
+        final t = parseDateTime(p.ts);
+        if (t == null || !t.isBefore(midnight)) vals.add(p.value);
+      }
     }
     if (vals.length >= 2) out[sym] = vals;
   });

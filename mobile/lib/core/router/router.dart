@@ -140,6 +140,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
             symbol: s.pathParameters['symbol']!,
             position: args?.position,
             brokerageId: args?.brokerageId,
+            portfolioTotal: args?.portfolioTotal,
           );
         },
       ),
