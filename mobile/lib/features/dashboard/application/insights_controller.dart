@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/polling/poller.dart';
 import '../../live_trading/data/live_repository.dart';
 import '../data/dashboard_repository.dart';
 import 'account_positions_controller.dart';
@@ -188,20 +189,63 @@ final sectorPerformanceProvider =
 /// of the chart's selected range. Null when unavailable.
 typedef DayChange = ({double abs, double? pct});
 
-final dayChangeProvider =
-    FutureProvider.autoDispose.family<DayChange?, String>(
-  (ref, brokerageId) async {
+/// Today's account change ($ and %) vs local midnight — LIVE and PERSISTENT.
+/// Polls the same /portfolio-history backend the hero value uses (every 5 s),
+/// and is a NON-autoDispose notifier so scrolling the TODAY card out of view and
+/// back doesn't reload it — it keeps updating in place. Pauses in the background.
+class DayChangeNotifier extends FamilyAsyncNotifier<DayChange?, String> {
+  IntervalPoller? _poller;
+
+  @override
+  Future<DayChange?> build(String brokerageId) async {
+    final lifecycle = ref.read(appLifecycleProvider);
+    DayChange? data;
     try {
-      final h = (await ref
-              .read(dashboardRepositoryProvider)
-              .portfolioHistory(brokerageId, '1D'))
-          .sinceLocalMidnight();
-      if (h.isEmpty) return null;
-      return (abs: h.changeAbs ?? 0.0, pct: h.changePct);
+      data = await _fetch(brokerageId);
     } catch (_) {
-      return null;
+      data = null;
     }
-  },
+    _poller = IntervalPoller(
+      fetch: () => _refresh(brokerageId),
+      interval: () => const Duration(seconds: 5),
+    );
+    if (lifecycle.isForeground) {
+      _poller!.start();
+    } else {
+      _poller!.pause();
+    }
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next.isForeground) {
+        _poller?.resume();
+      } else {
+        _poller?.pause();
+      }
+    });
+    ref.onDispose(() => _poller?.dispose());
+    return data;
+  }
+
+  Future<DayChange?> _fetch(String brokerageId) async {
+    final h = (await ref
+            .read(dashboardRepositoryProvider)
+            .portfolioHistory(brokerageId, '1D'))
+        .sinceLocalMidnight();
+    if (h.isEmpty) return null;
+    return (abs: h.changeAbs ?? 0.0, pct: h.changePct);
+  }
+
+  Future<void> _refresh(String brokerageId) async {
+    try {
+      state = AsyncData(await _fetch(brokerageId));
+    } catch (_) {
+      // keep last good value on a transient poll failure
+    }
+  }
+}
+
+final dayChangeProvider =
+    AsyncNotifierProvider.family<DayChangeNotifier, DayChange?, String>(
+  DayChangeNotifier.new,
 );
 
 /// Portfolio concentration / diversification for an account's holdings.

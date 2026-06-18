@@ -68,6 +68,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     // the stats/about skeletons.
     final infoLoading = infoAsync.isLoading && infoAsync.valueOrNull == null;
     final series = histAsync.valueOrNull;
+    final histLoading = histAsync.isLoading;
     final hasSummary = ((info['summary'] as String?) ?? '').trim().isNotEmpty;
     final topInset = MediaQuery.viewPaddingOf(context).top;
 
@@ -87,9 +88,11 @@ class _StockScreenState extends ConsumerState<StockScreen> {
               children: [
                 _topBar(),
                 const SizedBox(height: 14),
-                _header(series, info),
+                _header(series, info, loading: histLoading),
                 const SizedBox(height: 18),
-                _chartArea(series, error: histAsync.hasError && series == null),
+                _chartArea(series,
+                    error: histAsync.hasError && series == null,
+                    loading: histLoading),
                 const SizedBox(height: 10),
                 _rangeTabs(),
                 if (widget.position != null) ...[
@@ -143,7 +146,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   }
 
   // ── Header: name + odometer price on one row, ticker + change below ──
-  Widget _header(StockSeries? series, Map<String, dynamic> info) {
+  Widget _header(StockSeries? series, Map<String, dynamic> info,
+      {required bool loading}) {
     final name = ((info['name'] as String?) ?? '').trim();
     final vals = series?.vals;
     final ready = vals != null && vals.length >= 2;
@@ -188,16 +192,21 @@ class _StockScreenState extends ConsumerState<StockScreen> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                ready
-                    ? TweenAnimationBuilder<double>(
-                        tween: Tween<double>(begin: 0, end: shown),
-                        duration: const Duration(milliseconds: 450),
-                        curve: Curves.easeOutCubic,
-                        builder: (_, v, _) => Text(fmtMoney(v),
-                            style: AppTextStyles.valueXl
-                                .copyWith(fontWeight: FontWeight.w800)),
-                      )
-                    : Skeleton(width: 120, height: 28, radius: 8),
+                if (ready)
+                  TweenAnimationBuilder<double>(
+                    tween: Tween<double>(begin: 0, end: shown),
+                    duration: const Duration(milliseconds: 450),
+                    curve: Curves.easeOutCubic,
+                    builder: (_, v, _) => Text(fmtMoney(v),
+                        style: AppTextStyles.valueXl
+                            .copyWith(fontWeight: FontWeight.w800)),
+                  )
+                else if (loading)
+                  Skeleton(width: 120, height: 28, radius: 8)
+                else
+                  Text('—',
+                      style: AppTextStyles.valueXl
+                          .copyWith(fontWeight: FontWeight.w800)),
                 const SizedBox(height: 4),
                 if (ready)
                   Text(
@@ -205,8 +214,12 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                     style: AppTextStyles.meta.copyWith(
                         fontSize: 15, color: c, fontWeight: FontWeight.w700),
                   )
+                else if (loading)
+                  Skeleton(width: 100, height: 16, radius: 5)
                 else
-                  Skeleton(width: 100, height: 16, radius: 5),
+                  Text('No price data',
+                      style: AppTextStyles.micro
+                          .copyWith(color: AppColors.textDim)),
               ],
             ),
           ],
@@ -215,40 +228,50 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     );
   }
 
-  // ── Live, gapless chart (skeleton while a range loads) ──
-  Widget _chartArea(StockSeries? series, {required bool error}) {
-    if (error) {
-      return SizedBox(
+  // ── Live, gapless chart (skeleton while loading; graceful no-data state) ──
+  Widget _chartArea(StockSeries? series,
+      {required bool error, required bool loading}) {
+    if (series != null && series.vals.length >= 2) {
+      final up = series.vals.last >= series.vals.first;
+      // Animate only the first time this range's data appears; subsequent 10 s
+      // poll updates redraw without replaying the grow-in animation.
+      final animate = _chartAnimatedRange != _range;
+      if (animate) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _chartAnimatedRange = _range;
+        });
+      }
+      return ScrubbableAreaChart(
+        timestamps: series.ts,
+        values: series.vals,
+        lineColor: up ? AppColors.success : AppColors.danger,
         height: 280,
-        child: Center(
-          child: Text("Couldn't load prices",
-              style: AppTextStyles.micro.copyWith(color: AppColors.danger)),
-        ),
+        indexed: true, // evenly-spaced points → no weekend/overnight gaps
+        animate: animate,
+        onScrub: (i) => _scrub.value = i,
       );
     }
-    if (series == null || series.vals.length < 2) {
+    if (loading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 6),
         child: Skeleton(height: 280, radius: 16),
       );
     }
-    final up = series.vals.last >= series.vals.first;
-    // Animate only the first time this range's data appears; subsequent 10 s
-    // poll updates redraw without replaying the grow-in animation.
-    final animate = _chartAnimatedRange != _range;
-    if (animate) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _chartAnimatedRange = _range;
-      });
-    }
-    return ScrubbableAreaChart(
-      timestamps: series.ts,
-      values: series.vals,
-      lineColor: up ? AppColors.success : AppColors.danger,
+    // Loaded but no usable series — illiquid/obscure tickers (e.g. warrants)
+    // that the data source doesn't cover. Show a clear empty state, not a
+    // forever-spinning skeleton.
+    return SizedBox(
       height: 280,
-      indexed: true, // evenly-spaced points → no weekend/overnight gaps
-      animate: animate,
-      onScrub: (i) => _scrub.value = i,
+      child: Center(
+        child: Text(
+          error
+              ? "Couldn't load prices"
+              : 'No chart data available for ${widget.symbol}',
+          textAlign: TextAlign.center,
+          style: AppTextStyles.micro.copyWith(
+              color: error ? AppColors.danger : AppColors.textDim),
+        ),
+      ),
     );
   }
 

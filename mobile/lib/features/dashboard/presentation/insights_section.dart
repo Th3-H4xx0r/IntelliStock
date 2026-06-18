@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/formatters/formatters.dart';
 import '../../../core/theme/app_colors.dart';
@@ -163,8 +164,14 @@ class _DayPnlValue extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(fmtPnl(d.abs),
-            style: AppTextStyles.valueLg.copyWith(color: c)),
+        // Odometer roll on the live day-P&L value (updates every 5 s poll).
+        TweenAnimationBuilder<double>(
+          tween: Tween<double>(begin: 0, end: d.abs),
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeOutCubic,
+          builder: (_, v, _) =>
+              Text(fmtPnl(v), style: AppTextStyles.valueLg.copyWith(color: c)),
+        ),
         const SizedBox(height: 2),
         Row(
           children: [
@@ -413,73 +420,144 @@ class _SectorLegend extends StatelessWidget {
   }
 }
 
-// ── Market indices (real market data) ────────────────────────────────────────
+// ── Market indices — horizontal sparkline cards (S&P / Nasdaq / Dow / RUT) ───
 
 class _MarketIndicesCard extends ConsumerWidget {
   const _MarketIndicesCard();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(marketIndicesProvider);
-    final quotes = async.valueOrNull;
+    final quotes = ref.watch(marketIndicesProvider).valueOrNull;
     if (quotes != null && quotes.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: GlassCard(
-        frosted: true,
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _tileLabel('INDICES'),
-            const SizedBox(height: 12),
-            if (quotes == null)
-              const Skeleton(height: 34, radius: 7)
-            else
-              Row(
-                children: [
-                  for (var i = 0; i < quotes.length; i++) ...[
-                    if (i > 0) const SizedBox(width: 10),
-                    Expanded(child: _IndexCell(quote: quotes[i])),
-                  ],
-                ],
+      child: SizedBox(
+        height: 150,
+        child: quotes == null
+            ? const Skeleton(height: 150, radius: 16)
+            : ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: quotes.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 12),
+                itemBuilder: (_, i) => _IndexCard(quote: quotes[i]),
               ),
-          ],
-        ),
       ),
     );
   }
 }
 
-class _IndexCell extends StatelessWidget {
-  const _IndexCell({required this.quote});
+class _IndexCard extends StatelessWidget {
+  const _IndexCard({required this.quote});
   final MarketQuote quote;
 
   @override
   Widget build(BuildContext context) {
     final up = quote.pct >= 0;
     final c = up ? AppColors.success : AppColors.danger;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () =>
-          context.push('/stock/${quote.symbol}', extra: const StockScreenArgs()),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(quote.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
-          const SizedBox(height: 4),
-          Text('${up ? '▲' : '▼'} ${fmtPct(quote.pct)}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.micro
-                  .copyWith(color: c, fontWeight: FontWeight.w700)),
-        ],
+    final level = quote.values.isNotEmpty ? quote.values.last : null;
+    return SizedBox(
+      width: 156,
+      child: GlassCard(
+        frosted: true,
+        padding: const EdgeInsets.all(14),
+        onTap: () => context.push('/stock/${quote.symbol}',
+            extra: const StockScreenArgs()),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(quote.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    AppTextStyles.bodyHi.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 40,
+              width: double.infinity,
+              child: CustomPaint(
+                painter: _IndexSparkPainter(values: quote.values, color: c),
+              ),
+            ),
+            const Spacer(),
+            Text(level != null ? _fmtLevel(level) : '—',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    AppTextStyles.value.copyWith(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 2),
+            Text('${up ? '▲' : '▼'} ${fmtPct(quote.pct)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.micro
+                    .copyWith(color: c, fontWeight: FontWeight.w700)),
+          ],
+        ),
       ),
     );
   }
+
+  /// Thousands-separated index level, 2 dp (e.g. 7,489.78).
+  static String _fmtLevel(double v) {
+    final s = v.toStringAsFixed(2);
+    final parts = s.split('.');
+    final intPart = parts[0];
+    final buf = StringBuffer();
+    for (var i = 0; i < intPart.length; i++) {
+      if (i > 0 && (intPart.length - i) % 3 == 0) buf.write(',');
+      buf.write(intPart[i]);
+    }
+    return '$buf.${parts[1]}';
+  }
+}
+
+class _IndexSparkPainter extends CustomPainter {
+  _IndexSparkPainter({required this.values, required this.color});
+  final List<double> values;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (values.length < 2) return;
+    var lo = values.first, hi = values.first;
+    for (final v in values) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    final span = (hi - lo).abs() < 1e-9 ? 1.0 : (hi - lo);
+    double px(int i) => size.width * i / (values.length - 1);
+    double py(double v) =>
+        size.height - ((v - lo) / span) * (size.height - 8) - 4;
+
+    // Dashed baseline at the opening value.
+    final baseY = py(values.first);
+    final dash = Paint()
+      ..color = AppColors.textFaint.withValues(alpha: 0.4)
+      ..strokeWidth = 1;
+    for (double x = 0; x < size.width; x += 6) {
+      canvas.drawLine(Offset(x, baseY), Offset(x + 3, baseY), dash);
+    }
+
+    final path = Path()..moveTo(0, py(values.first));
+    for (var i = 1; i < values.length; i++) {
+      path.lineTo(px(i), py(values[i]));
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..strokeJoin = StrokeJoin.round
+        ..strokeCap = StrokeCap.round,
+    );
+    final end = Offset(size.width, py(values.last));
+    canvas.drawCircle(end, 5, Paint()..color = color.withValues(alpha: 0.22));
+    canvas.drawCircle(end, 3, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_IndexSparkPainter old) =>
+      old.color != color || !identical(old.values, values);
 }
 
 // ── Sector performance (today's market sectors, ranked) ──────────────────────
@@ -754,26 +832,44 @@ class _MarketNewsCard extends ConsumerWidget {
               const Skeleton(height: 60, radius: 7)
             else
               for (final a in articles.take(6))
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 7),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(a.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppTextStyles.bodyHi.copyWith(
-                              fontWeight: FontWeight.w600, height: 1.3)),
-                      const SizedBox(height: 3),
-                      Text(
-                        [
-                          if (a.source.isNotEmpty) a.source,
-                          if (a.publishedAt != null) fmtRelative(a.publishedAt),
-                        ].join('  ·  '),
-                        style: AppTextStyles.nano
-                            .copyWith(color: AppColors.textDim),
-                      ),
-                    ],
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _openInAppBrowser(a.url),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(a.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: AppTextStyles.bodyHi.copyWith(
+                                      fontWeight: FontWeight.w600, height: 1.3)),
+                              const SizedBox(height: 3),
+                              Text(
+                                [
+                                  if (a.source.isNotEmpty) a.source,
+                                  if (a.publishedAt != null)
+                                    fmtRelative(a.publishedAt),
+                                ].join('  ·  '),
+                                style: AppTextStyles.nano
+                                    .copyWith(color: AppColors.textDim),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Icon(symbol('arrow_forward'),
+                              size: 13, color: AppColors.textFaint),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
           ],
@@ -784,6 +880,22 @@ class _MarketNewsCard extends ConsumerWidget {
 }
 
 // ── Shared bits ───────────────────────────────────────────────────────────────
+
+/// Open a URL in an embedded in-app browser (SFSafariViewController on iOS).
+/// Best-effort — silently no-ops on a bad/empty URL or launch failure.
+Future<void> _openInAppBrowser(String url) async {
+  final u = url.trim();
+  if (u.isEmpty) return;
+  final uri = Uri.tryParse(u);
+  if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) return;
+  try {
+    await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
+  } catch (_) {
+    try {
+      await launchUrl(uri);
+    } catch (_) {/* give up silently */}
+  }
+}
 
 Widget _tileLabel(String s) => Text(
       s,
