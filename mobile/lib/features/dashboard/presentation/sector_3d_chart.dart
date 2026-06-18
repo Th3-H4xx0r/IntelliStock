@@ -25,8 +25,8 @@ class Sector3DChart extends StatefulWidget {
 }
 
 class _Sector3DChartState extends State<Sector3DChart>
-    with SingleTickerProviderStateMixin {
-  static const double _flatH = 232;
+    with TickerProviderStateMixin {
+  static const double _flatH = 206;
   static const double _drillH = 300;
 
   int _selected = 0;
@@ -38,9 +38,51 @@ class _Sector3DChartState extends State<Sector3DChart>
     duration: const Duration(milliseconds: 620),
   );
 
+  // Smooth ring rotation for drilled focus changes: when you swipe to another
+  // sector while drilled, the ring rotates the new sector up to the top rather
+  // than snapping. _rotNow lerps _rotFrom→_rotTo over _rotCtrl.
+  late final AnimationController _rotCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 380),
+  );
+  double _rotFrom = 0;
+  double _rotTo = 0;
+
+  double get _rotNow {
+    final t = Curves.easeInOut.transform(_rotCtrl.value);
+    return _rotFrom + (_rotTo - _rotFrom) * t;
+  }
+
+  /// Un-rotated mid-angle offset of sector [i] from the ring's start (-π/2).
+  double _natMid(int i) {
+    final total = widget.slices.fold<double>(0, (s, e) => s + e.pct);
+    if (total <= 0) return 0;
+    double off = 0;
+    for (var j = 0; j < i; j++) {
+      off += widget.slices[j].pct / total * 2 * math.pi;
+    }
+    return off + widget.slices[i].pct / total * math.pi;
+  }
+
+  /// Rotation that brings sector [i] to the top.
+  double _targetRot(int i) => -_natMid(i);
+
+  /// Pick the equivalent angle to [target] nearest [from] (shortest spin).
+  double _shortestTo(double target, double from) {
+    var t = target;
+    while (t - from > math.pi) {
+      t -= 2 * math.pi;
+    }
+    while (t - from < -math.pi) {
+      t += 2 * math.pi;
+    }
+    return t;
+  }
+
   @override
   void dispose() {
     _drill.dispose();
+    _rotCtrl.dispose();
     super.dispose();
   }
 
@@ -51,12 +93,32 @@ class _Sector3DChartState extends State<Sector3DChart>
     if (ns < 0) ns += n;
     if (ns == _selected) return;
     HapticFeedback.selectionClick();
-    setState(() => _selected = ns);
+    if (_drill.value > 0.5) {
+      // Drilled: animate the ring so the new sector rotates up to the top.
+      final from = _rotNow;
+      final to = _shortestTo(_targetRot(ns), from);
+      setState(() {
+        _selected = ns;
+        _rotFrom = from;
+        _rotTo = to;
+      });
+      _rotCtrl.forward(from: 0);
+    } else {
+      setState(() => _selected = ns);
+    }
   }
 
   void _drillInto(int i) {
     HapticFeedback.mediumImpact();
-    setState(() => _selected = i);
+    final target = _targetRot(i);
+    setState(() {
+      _selected = i;
+      _rotFrom = target;
+      _rotTo = target;
+    });
+    // Settle the rotation controller so _rotNow == target; the drill controller
+    // provides the easing as ringRot*drill sweeps the sector up while extruding.
+    _rotCtrl.value = 1;
     _drill.forward();
   }
 
@@ -82,7 +144,7 @@ class _Sector3DChartState extends State<Sector3DChart>
     if (slices.isEmpty) return const SizedBox(height: 8);
 
     return AnimatedBuilder(
-      animation: _drill,
+      animation: Listenable.merge([_drill, _rotCtrl]),
       builder: (context, _) {
         final d = Curves.easeInOutCubic
             .transform(widget.debugDrill ?? _drill.value);
@@ -111,6 +173,7 @@ class _Sector3DChartState extends State<Sector3DChart>
                           slices: slices,
                           selected: sel,
                           drill: d,
+                          ringRot: _rotNow,
                           hits: _hits),
                     ),
                   ),
@@ -188,11 +251,13 @@ class _RingPainter extends CustomPainter {
     required this.slices,
     required this.selected,
     required this.drill,
+    required this.ringRot,
     required this.hits,
   });
   final List<SectorSlice> slices;
   final int selected;
   final double drill; // 0 flat .. 1 drilled
+  final double ringRot; // animated ring rotation (radians)
   final List<_WedgeHit> hits;
 
   static const double _gap = 0.05;
@@ -208,22 +273,16 @@ class _RingPainter extends CustomPainter {
     // Lerped geometry: flat ring → drilled (bigger, lower-tilt, taller walls,
     // centre pushed down so the raised focused block sits up top).
     final sy = _lerp(0.86, 0.42);
-    final ro = size.width * _lerp(0.435, 0.62);
-    final ri = size.width * _lerp(0.275, 0.40);
-    final wall = _lerp(11, 66); // extrusion height
+    final ro = size.width * _lerp(0.34, 0.60);
+    final ri = size.width * _lerp(0.21, 0.39);
+    final wall = _lerp(7, 64); // extrusion height
     final cx = size.width / 2;
     final cy = size.height * _lerp(0.5, 0.86);
     final c = Offset(cx, cy);
 
-    // Rotate so the focused sector swings to the top (-pi/2) as we drill in.
-    var fStart = -math.pi / 2;
-    for (var i = 0; i < selected; i++) {
-      fStart += slices[i].pct / total * 2 * math.pi;
-    }
-    final focusMid = fStart + slices[selected].pct / total * math.pi;
-    var toTop = (-math.pi / 2) - focusMid;
-    toTop = math.atan2(math.sin(toTop), math.cos(toTop)); // shortest
-    final rot = toTop * drill;
+    // Ring rotation comes from the State (animated for smooth drilled focus
+    // changes); only applied as we drill in.
+    final rot = ringRot * drill;
 
     Offset onOval(double r, double ang, double yOff) =>
         Offset(c.dx + r * math.cos(ang), c.dy + r * sy * math.sin(ang) - yOff);
@@ -308,8 +367,37 @@ class _RingPainter extends CustomPainter {
             const Color(0xFF1B1B22), const Color(0xFF45228C), drill)!;
       }
 
-      // ── Outer wall (the 3D side facing the viewer) ──
       if (segWall > 1) {
+        // ── Side caps (radial cut faces at each end) ── these close the block
+        // so the gaps don't show an open "cut" / the wall fully drops down the
+        // sides. Drawn before the outer wall + top so those sit on top.
+        Path capPath(double a) {
+          final to = onOval(ro, a, segWall); // top outer
+          final ti = onOval(ri, a, segWall); // top inner
+          final bi = onOval(ri, a, 0); // bottom inner
+          final bo = onOval(ro, a, 0); // bottom outer
+          return Path()
+            ..moveTo(to.dx, to.dy)
+            ..lineTo(ti.dx, ti.dy)
+            ..lineTo(bi.dx, bi.dy)
+            ..lineTo(bo.dx, bo.dy)
+            ..close();
+        }
+        for (final a in [a0, a1]) {
+          final cap = capPath(a);
+          canvas.drawPath(
+            cap,
+            Paint()
+              ..isAntiAlias = true
+              ..shader = topShade(
+                  Color.lerp(midC, Colors.black, 0.28)!,
+                  Color.lerp(loC, Colors.black, 0.32)!,
+                  Color.lerp(loC, Colors.black, 0.55)!,
+                  cap.getBounds()),
+          );
+        }
+
+        // ── Outer wall (the 3D side facing the viewer) ──
         final wallPath = Path();
         final t0 = onOval(ro, a0, segWall);
         wallPath.moveTo(t0.dx, t0.dy);
@@ -402,5 +490,6 @@ class _RingPainter extends CustomPainter {
   bool shouldRepaint(_RingPainter old) =>
       old.selected != selected ||
       old.drill != drill ||
+      old.ringRot != ringRot ||
       !identical(old.slices, slices);
 }

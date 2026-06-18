@@ -66,3 +66,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/
+    # Inter + JetBrains Mono bundled so google_fonts loads them locally (no
+    # runtime fetch / fallback-font flash on first launch; deterministic tests).
+    - assets/google_fonts/
