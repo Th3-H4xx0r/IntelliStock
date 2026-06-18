@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/polling/poller.dart';
+import '../../agent_runs/data/agent_repository.dart';
 import '../../live_trading/data/live_repository.dart';
 import '../../live_trading/data/models/live_state.dart';
 
@@ -89,6 +90,30 @@ final stockInfoProvider =
           .get<Map<String, dynamic>>('/symbols/$symbol/info');
     } catch (_) {
       return const {};
+    }
+  },
+);
+
+/// Recent bot decision cycles that involved this symbol (from the agent cycle
+/// log). Each [AgentRun] has stages (with the stocks they touched) + a
+/// final-result summary of what the bot decided. Empty/never-throws.
+final stockDecisionsProvider =
+    FutureProvider.autoDispose.family<List<AgentRun>, String>(
+  (ref, symbol) async {
+    try {
+      final data = await ref.read(apiClientProvider).get<Map<String, dynamic>>(
+        '/agent-runs',
+        query: {'per_page': 40},
+      );
+      final page = AgentRunsPage.fromJson(data);
+      final sym = symbol.toUpperCase();
+      return page.runs
+          .where((run) => run.stages
+              .any((st) => st.stocks.any((s) => s.toUpperCase() == sym)))
+          .take(6)
+          .toList();
+    } catch (_) {
+      return const [];
     }
   },
 );

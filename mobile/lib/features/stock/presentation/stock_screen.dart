@@ -7,6 +7,7 @@ import '../../../core/formatters/formatters.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/skeleton.dart';
+import '../../agent_runs/data/agent_repository.dart';
 import '../../dashboard/data/dashboard_repository.dart';
 import '../../live_trading/data/models/live_state.dart';
 import '../application/stock_controller.dart';
@@ -82,6 +83,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 const SizedBox(height: 26),
                 _positionCard(widget.position!),
               ],
+              const SizedBox(height: 28),
+              _botCard(),
               const SizedBox(height: 28),
               _statsCard(series, info),
               if (((info['summary'] as String?) ?? '').trim().isNotEmpty) ...[
@@ -179,11 +182,11 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 if (ready)
                   Text(
                     '${dAbs >= 0 ? '▲' : '▼'} ${fmtPnl(dAbs)}  ${fmtPct(dPct)}',
-                    style: AppTextStyles.meta
-                        .copyWith(color: c, fontWeight: FontWeight.w600),
+                    style: AppTextStyles.meta.copyWith(
+                        fontSize: 15, color: c, fontWeight: FontWeight.w700),
                   )
                 else
-                  Skeleton(width: 90, height: 13, radius: 5),
+                  Skeleton(width: 100, height: 16, radius: 5),
               ],
             ),
           ],
@@ -289,7 +292,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
         children: [
           _sectionTitle('Key statistics'),
           const SizedBox(height: 16),
-          for (var i = 0; i < cells.length; i += 2)
+          for (var i = 0; i < cells.length; i += 3)
             Padding(
               padding: const EdgeInsets.only(bottom: 18),
               child: Row(
@@ -300,6 +303,10 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                       child: i + 1 < cells.length
                           ? _statCell(cells[i + 1])
                           : const SizedBox.shrink()),
+                  Expanded(
+                      child: i + 2 < cells.length
+                          ? _statCell(cells[i + 2])
+                          : const SizedBox.shrink()),
                 ],
               ),
             ),
@@ -308,16 +315,24 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     );
   }
 
-  Widget _statCell((String, String) s) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(s.$1.toUpperCase(),
-              style: AppTextStyles.nano
-                  .copyWith(color: AppColors.textFaint, letterSpacing: 0.4)),
-          const SizedBox(height: 4),
-          Text(s.$2,
-              style: AppTextStyles.value.copyWith(fontWeight: FontWeight.w700)),
-        ],
+  Widget _statCell((String, String) s) => Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(s.$1.toUpperCase(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.nano
+                    .copyWith(color: AppColors.textFaint, letterSpacing: 0.2)),
+            const SizedBox(height: 4),
+            Text(s.$2,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.value
+                    .copyWith(fontWeight: FontWeight.w700, fontSize: 15)),
+          ],
+        ),
       );
 
   Widget _sectionTitle(String s) => Text(
@@ -439,6 +454,40 @@ class _StockScreenState extends ConsumerState<StockScreen> {
             style: AppTextStyles.micro.copyWith(
                 color: AppColors.primary, fontWeight: FontWeight.w600)),
       );
+
+  // ── Bot activity: recent decision cycles that touched this symbol ──
+  Widget _botCard() {
+    return Consumer(builder: (context, ref, _) {
+      final async = ref.watch(stockDecisionsProvider(widget.symbol));
+      return Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('Bot activity'),
+            const SizedBox(height: 8),
+            async.when(
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Center(
+                    child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))),
+              ),
+              error: (_, _) => _ordersEmpty("Couldn't load bot activity"),
+              data: (runs) => runs.isEmpty
+                  ? _ordersEmpty('No recent bot decisions for ${widget.symbol}')
+                  : Column(children: [
+                      for (final r in runs)
+                        _BotRunRow(run: r, symbol: widget.symbol),
+                    ]),
+            ),
+          ],
+        ),
+      );
+    });
+  }
 
   // ── Orders ──
   Widget _ordersCard() {
@@ -638,6 +687,63 @@ class _GaugePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _GaugePainter old) =>
       old.fraction != fraction || old.color != color;
+}
+
+class _BotRunRow extends StatelessWidget {
+  const _BotRunRow({required this.run, required this.symbol});
+  final AgentRun run;
+  final String symbol;
+
+  @override
+  Widget build(BuildContext context) {
+    final sym = symbol.toUpperCase();
+    final labels = run.stages
+        .where((st) => st.stocks.any((s) => s.toUpperCase() == sym))
+        .map((st) => st.label)
+        .where((l) => l.isNotEmpty)
+        .toList();
+    final fr = (run.finalResult ?? '').trim();
+    final name = (run.name != null && run.name!.isNotEmpty)
+        ? run.name!
+        : 'Trading cycle';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.bodyHi
+                        .copyWith(fontWeight: FontWeight.w600)),
+              ),
+              if (run.createdAt != null)
+                Text(fmtRelative(run.createdAt),
+                    style:
+                        AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+            ],
+          ),
+          if (labels.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(labels.join('  ·  '),
+                style: AppTextStyles.micro.copyWith(
+                    color: AppColors.primary, fontWeight: FontWeight.w600)),
+          ],
+          if (fr.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Text(fr,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.body
+                    .copyWith(color: AppColors.textMd, height: 1.4)),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _OrderRow extends StatelessWidget {
