@@ -6,7 +6,6 @@ import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
-import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/skeleton.dart';
 import '../../dashboard/data/dashboard_repository.dart';
 import '../../live_trading/data/models/live_state.dart';
@@ -79,17 +78,17 @@ class _StockScreenState extends ConsumerState<StockScreen> {
               _chartArea(series, error: histAsync.hasError && series == null),
               const SizedBox(height: 10),
               _rangeTabs(),
-              const SizedBox(height: 26),
+              const SizedBox(height: 30),
               _statsCard(series, info),
               if (widget.position != null) ...[
-                const SizedBox(height: 16),
+                const SizedBox(height: 32),
                 _positionCard(widget.position!),
               ],
               if (((info['summary'] as String?) ?? '').trim().isNotEmpty) ...[
-                const SizedBox(height: 16),
+                const SizedBox(height: 32),
                 _aboutCard(info),
               ],
-              const SizedBox(height: 16),
+              const SizedBox(height: 32),
               _ordersCard(),
             ],
           ),
@@ -178,19 +177,10 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                     : Skeleton(width: 120, height: 28, radius: 8),
                 const SizedBox(height: 4),
                 if (ready)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                          dAbs >= 0
-                              ? Icons.arrow_drop_up
-                              : Icons.arrow_drop_down,
-                          color: c,
-                          size: 18),
-                      Text('${fmtPnl(dAbs)}  ${fmtPct(dPct)}',
-                          style: AppTextStyles.meta.copyWith(
-                              color: c, fontWeight: FontWeight.w700)),
-                    ],
+                  Text(
+                    '${dAbs >= 0 ? '▲' : '▼'} ${fmtPnl(dAbs)}  ${fmtPct(dPct)}',
+                    style: AppTextStyles.meta
+                        .copyWith(color: c, fontWeight: FontWeight.w600),
                   )
                 else
                   Skeleton(width: 90, height: 13, radius: 5),
@@ -294,7 +284,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     if (beta != null && beta != 0) rows.add(('Beta', beta.toStringAsFixed(2)));
 
     if (rows.isEmpty) return const SizedBox.shrink();
-    return GlassCard(
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -345,7 +336,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
         ? p.marketValue / widget.portfolioTotal!
         : null;
 
-    return GlassCard(
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -394,7 +386,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     final industry = ((info['industry'] as String?) ?? '').trim();
     final summary = ((info['summary'] as String?) ?? '').trim();
     final tags = [sector, industry].where((s) => s.isNotEmpty).toList();
-    return GlassCard(
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -430,7 +423,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   // ── Orders ──
   Widget _ordersCard() {
     final bid = widget.brokerageId;
-    return GlassCard(
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
