@@ -60,7 +60,7 @@ final accountHoldingsProvider = AutoDisposeAsyncNotifierProviderFamily<
 enum HoldingsPnlMode { total, daily }
 
 final holdingsPnlModeProvider =
-    StateProvider<HoldingsPnlMode>((ref) => HoldingsPnlMode.total);
+    StateProvider<HoldingsPnlMode>((ref) => HoldingsPnlMode.daily);
 
 /// Which brokerage + which range to fetch holding sparklines for.
 typedef HoldingsSparkArgs = ({String brokerageId, String range});
@@ -89,15 +89,20 @@ final holdingsSparklinesProvider = FutureProvider.autoDispose
   }
   final out = <String, List<double>>{};
   hist.forEach((sym, pts) {
-    final vals = <double>[];
+    final all = <double>[];
+    final sinceMidnight = <double>[];
     for (final p in pts) {
-      if (midnight == null) {
-        vals.add(p.value);
-      } else {
+      all.add(p.value);
+      if (midnight != null) {
         final t = parseDateTime(p.ts);
-        if (t == null || !t.isBefore(midnight)) vals.add(p.value);
+        if (t == null || !t.isBefore(midnight)) sinceMidnight.add(p.value);
       }
     }
+    // 1D = since midnight, but right after 12 AM / pre-market there may be no
+    // post-midnight bars yet → fall back to the full series so it still draws.
+    final vals = midnight == null
+        ? all
+        : (sinceMidnight.length >= 2 ? sinceMidnight : all);
     if (vals.length >= 2) out[sym] = vals;
   });
   return out;

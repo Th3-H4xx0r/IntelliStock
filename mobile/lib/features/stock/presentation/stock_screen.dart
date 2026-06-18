@@ -299,10 +299,12 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(child: _statCell(cells[i])),
+                  const SizedBox(width: 14),
                   Expanded(
                       child: i + 1 < cells.length
                           ? _statCell(cells[i + 1])
                           : const SizedBox.shrink()),
+                  const SizedBox(width: 14),
                   Expanded(
                       child: i + 2 < cells.length
                           ? _statCell(cells[i + 2])
@@ -315,24 +317,21 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     );
   }
 
-  Widget _statCell((String, String) s) => Padding(
-        padding: const EdgeInsets.only(right: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(s.$1.toUpperCase(),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AppTextStyles.nano
-                    .copyWith(color: AppColors.textFaint, letterSpacing: 0.2)),
-            const SizedBox(height: 4),
-            Text(s.$2,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AppTextStyles.value
-                    .copyWith(fontWeight: FontWeight.w700, fontSize: 15)),
-          ],
-        ),
+  Widget _statCell((String, String) s) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(s.$1.toUpperCase(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.nano
+                  .copyWith(color: AppColors.textFaint, letterSpacing: 0.2)),
+          const SizedBox(height: 4),
+          Text(s.$2,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.value
+                  .copyWith(fontWeight: FontWeight.w700, fontSize: 16)),
+        ],
       );
 
   Widget _sectionTitle(String s) => Text(
