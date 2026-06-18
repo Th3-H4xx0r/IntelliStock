@@ -648,14 +648,13 @@ class _ChartArea extends StatelessWidget {
                               if (n == 0) return const SizedBox.shrink();
                               final endFrac =
                                   _isDay ? (xs.last / _dayMinutes) : 1.0;
-                              return CustomPaint(
-                                painter: ScrubPainter(
-                                  fraction: endFrac.clamp(0.0, 1.0),
-                                  dotY: valueToY(history.values[n - 1],
-                                      bounds.min, bounds.max, _plotHeight),
-                                  color: lineColor,
-                                  hairline: false,
-                                ),
+                              // Persistent "current value" marker — pulses to
+                              // signal the chart is live-updating.
+                              return _PulsingEndDot(
+                                fraction: endFrac.clamp(0.0, 1.0),
+                                dotY: valueToY(history.values[n - 1],
+                                    bounds.min, bounds.max, _plotHeight),
+                                color: lineColor,
                               );
                             }
                             final dotY = valueToY(
@@ -704,4 +703,106 @@ class _ChartPoint {
   const _ChartPoint({required this.x, required this.y});
   final double x;
   final double y;
+}
+
+/// The end-of-line "current value" dot, with a soft halo that continuously
+/// expands and fades — a live-pulse signaling the chart is updating in
+/// real time. Kept in its own RepaintBoundary so the 60 fps pulse never
+/// repaints the Syncfusion chart underneath. Drawn only when not scrubbing.
+class _PulsingEndDot extends StatefulWidget {
+  const _PulsingEndDot({
+    required this.fraction,
+    required this.dotY,
+    required this.color,
+  });
+
+  final double fraction;
+  final double dotY;
+  final Color color;
+
+  @override
+  State<_PulsingEndDot> createState() => _PulsingEndDotState();
+}
+
+class _PulsingEndDotState extends State<_PulsingEndDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1600),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (_, _) => CustomPaint(
+          painter: _PulsingDotPainter(
+            fraction: widget.fraction,
+            dotY: widget.dotY,
+            color: widget.color,
+            t: _ctrl.value,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PulsingDotPainter extends CustomPainter {
+  _PulsingDotPainter({
+    required this.fraction,
+    required this.dotY,
+    required this.color,
+    required this.t,
+  });
+
+  final double fraction;
+  final double dotY;
+  final Color color;
+
+  /// Animation phase 0..1, driving the expanding/fading halo.
+  final double t;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final x = (size.width * fraction).clamp(0.0, size.width);
+    final y = dotY.clamp(0.0, size.height);
+    final center = Offset(x, y);
+
+    // Expanding, fading halo (the live "ping"): 4 → 16 px as it fades out.
+    final haloRadius = 4 + t * 12;
+    final haloAlpha = (1 - t) * 0.45;
+    canvas.drawCircle(
+      center,
+      haloRadius,
+      Paint()..color = color.withValues(alpha: haloAlpha),
+    );
+
+    // Static soft glow + solid core + white ring — matches the old end dot.
+    canvas.drawCircle(
+        center, 7, Paint()..color = color.withValues(alpha: 0.18));
+    canvas.drawCircle(center, 4, Paint()..color = color);
+    canvas.drawCircle(
+      center,
+      4,
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.9)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_PulsingDotPainter old) =>
+      old.t != t ||
+      old.fraction != fraction ||
+      old.dotY != dotY ||
+      old.color != color;
 }
