@@ -3562,11 +3562,12 @@ def api_brokerage_holding_opens(
         return {"opens": cached[1]}
 
     opens: dict = {}
+    meta: dict = {}
     try:
         from secret_store import decrypt as _decrypt
         row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
         if not row or str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
-            return {"opens": {}}
+            return {"opens": {}, "_meta": {"reason": "not-alpaca"}}
         key = _decrypt(row.get("alpaca_key")) or ""
         secret = _decrypt(row.get("alpaca_secret")) or ""
         if not key or not secret:
@@ -3585,31 +3586,87 @@ def api_brokerage_holding_opens(
                 held[sym] = float(getattr(p, "qty", 0.0) or 0.0)
 
         if held:
-            req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
-            orders = client.get_orders(filter=req) or []
-            fills = []
-            for o in orders:
-                if str(getattr(o.status, "value", o.status) or "").lower() != "filled":
-                    continue
-                ts = getattr(o, "filled_at", None) or getattr(o, "submitted_at", None)
-                ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else (str(ts) if ts else "")
-                if not ts_iso:
-                    continue
-                side = str(getattr(o.side, "value", o.side) or "").lower()
-                fills.append({
-                    "symbol": str(getattr(o, "symbol", "") or "").upper(),
-                    "side": "buy" if side == "buy" else "sell",
-                    "qty": float(getattr(o, "filled_qty", 0.0) or 0.0),
-                    "ts_iso": ts_iso,
-                    "ts_sort": ts_iso,
-                })
             from holding_opens import derive_open_dates
-            opens = derive_open_dates(fills, held)
-    except Exception:
+            # Page CLOSED orders **filtered to the held symbols** (so 500/page
+            # reaches back per-name instead of being drowned out by churn in
+            # other tickers), oldest-cursor on submitted_at, dedup by id. Stop
+            # once every symbol's open episode is reconstructable, or after a
+            # few pages.
+            fills: list = []
+            seen_ids: set = set()
+            until = None
+            n_pages = 0
+            n_pos = sum(1 for q in held.values() if q > 0)
+            for _page in range(4):
+                n_pages += 1
+                kwargs = dict(
+                    status=QueryOrderStatus.CLOSED,
+                    limit=500,
+                    symbols=list(held.keys()),
+                )  # default sort is newest-first → page backward via `until`
+                if until is not None:
+                    kwargs["until"] = until
+                try:
+                    batch = client.get_orders(filter=GetOrdersRequest(**kwargs)) or []
+                except Exception:
+                    break
+                if not batch:
+                    break
+                oldest = None
+                for o in batch:
+                    oid = str(getattr(o, "id", "") or "")
+                    sub = getattr(o, "submitted_at", None)
+                    if sub is not None and (oldest is None or sub < oldest):
+                        oldest = sub
+                    if oid and oid in seen_ids:
+                        continue
+                    if oid:
+                        seen_ids.add(oid)
+                    if str(getattr(o.status, "value", o.status) or "").lower() != "filled":
+                        continue
+                    ts = getattr(o, "filled_at", None) or getattr(o, "submitted_at", None)
+                    ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else (str(ts) if ts else "")
+                    if not ts_iso:
+                        continue
+                    side = str(getattr(o.side, "value", o.side) or "").lower()
+                    fills.append({
+                        "symbol": str(getattr(o, "symbol", "") or "").upper(),
+                        "side": "buy" if side == "buy" else "sell",
+                        "qty": float(getattr(o, "filled_qty", 0.0) or 0.0),
+                        "ts_iso": ts_iso,
+                        "ts_sort": ts_iso,
+                    })
+                # Early stop: every held symbol now reconstructs precisely.
+                if len(derive_open_dates(fills, held)) >= n_pos:
+                    break
+                if len(batch) < 500 or oldest is None:
+                    break  # no older page to fetch
+                until = oldest
+            # Best-effort: precise where possible, otherwise a reasonable date
+            # (so the Total spark clips to the holding period rather than the
+            # stock's whole history).
+            precise = derive_open_dates(fills, held)
+            opens = derive_open_dates(fills, held, allow_approx=True)
+            meta = {
+                "held": n_pos,
+                "fills": len(fills),
+                "pages": n_pages,
+                "precise": len(precise),
+                "returned": len(opens),
+            }
+            try:
+                logging.getLogger("uvicorn.error").info(
+                    "holding-opens b=%s held=%s fills=%s pages=%s precise=%s returned=%s",
+                    brokerage_id, n_pos, len(fills), n_pages, len(precise), len(opens),
+                )
+            except Exception:
+                pass
+    except Exception as _e:
         opens = {}
+        meta = {"error": f"{type(_e).__name__}: {_e}"}
 
     _HOLDING_OPENS_CACHE[str(brokerage_id)] = (now + _HOLDING_OPENS_TTL, opens)
-    return {"opens": opens}
+    return {"opens": opens, "_meta": meta}
 
 
 @app.get("/brokerages/{brokerage_id}/orders", response_class=JSONResponse)

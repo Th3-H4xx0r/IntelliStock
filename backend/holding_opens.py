@@ -23,14 +23,19 @@ def derive_open_dates(
     fills: Iterable[Mapping],
     held_qty: Mapping[str, float],
     qty_tol: float = 0.02,
+    allow_approx: bool = False,
 ) -> dict:
-    """Return ``{symbol: opened_at_iso}`` for held symbols whose current open
-    episode start is reconstructable from ``fills``.
+    """Return ``{symbol: opened_at_iso}`` for held symbols' current open episode.
 
     fills: dicts with ``symbol`` (str), ``side`` ('buy'/'sell'), ``qty`` (float,
            filled qty), ``ts_iso`` (str), ``ts_sort`` (comparable for ordering).
     held_qty: ``{symbol: qty}`` current position size (only these are returned).
     qty_tol: relative tolerance when matching reconstructed vs. reported qty.
+    allow_approx: when the reconstructed final qty doesn't match the reported
+        size (the opening fill is older than the fetched window), fall back to a
+        best-effort date instead of omitting the symbol — the current episode's
+        reconstructed start if we still hold shares, else the earliest buy seen.
+        With this False (default) such symbols are omitted (strict/precise).
     """
     by_sym: dict = defaultdict(list)
     held = {str(k).upper(): float(v or 0.0) for k, v in held_qty.items()}
@@ -44,11 +49,14 @@ def derive_open_dates(
         fl.sort(key=lambda x: x.get("ts_sort"))
         qty = 0.0
         open_ts = None
+        first_buy_ts = None
         for f in fl:
             q = float(f.get("qty") or 0.0)
             if q <= 0:
                 continue
             side = str(f.get("side") or "").lower()
+            if side == "buy" and first_buy_ts is None:
+                first_buy_ts = f.get("ts_iso")
             if qty <= _EPS and side == "buy":
                 open_ts = f.get("ts_iso")
             qty += q if side == "buy" else -q
@@ -57,8 +65,15 @@ def derive_open_dates(
                 open_ts = None
 
         target = held.get(sym, 0.0)
-        if open_ts and target > 0:
-            tol = max(qty_tol * target, 1e-3)
-            if abs(qty - target) <= tol:
-                out[sym] = open_ts
+        if target <= 0:
+            continue
+        tol = max(qty_tol * target, 1e-3)
+        if open_ts and abs(qty - target) <= tol:
+            out[sym] = open_ts  # precise: reconstructed episode matches the size
+        elif allow_approx:
+            # Best-effort when the window doesn't reach the true open.
+            if open_ts and qty > _EPS:
+                out[sym] = open_ts  # current episode start (our best estimate)
+            elif first_buy_ts:
+                out[sym] = first_buy_ts  # since you first bought this name
     return out

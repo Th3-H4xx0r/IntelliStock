@@ -56,6 +56,26 @@ def test_incomplete_history_is_omitted():
     assert "TSLA" not in out
 
 
+def test_incomplete_history_approx_uses_episode_start():
+    # Same incomplete window, but allow_approx → fall back to the reconstructed
+    # current-episode start (we still hold shares).
+    fills = [_fill("TSLA", "buy", 3, "2026-05-01T15:00:00+00:00")]
+    out = derive_open_dates(fills, {"TSLA": 10}, allow_approx=True)
+    assert out["TSLA"] == "2026-05-01T15:00:00+00:00"
+
+
+def test_approx_uses_earliest_buy_when_episode_unknown():
+    # Window misses earlier buys: reconstruction ends flat/negative even though
+    # we still hold, so the current episode start is unknown → approx falls back
+    # to the earliest buy seen.
+    fills = [
+        _fill("META", "buy", 3, "2026-04-10T15:00:00+00:00"),
+        _fill("META", "sell", 5, "2026-04-20T15:00:00+00:00"),
+    ]
+    out = derive_open_dates(fills, {"META": 5}, allow_approx=True)
+    assert out["META"] == "2026-04-10T15:00:00+00:00"
+
+
 def test_unordered_fills_are_sorted():
     fills = [
         _fill("AAPL", "buy", 6, "2026-03-05T15:00:00+00:00"),
