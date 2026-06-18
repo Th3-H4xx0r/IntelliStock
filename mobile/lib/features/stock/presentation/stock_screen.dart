@@ -68,25 +68,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
       backgroundColor: AppColors.canvas,
       body: Stack(
         children: [
-          // Violet gradient crown behind the header + chart (depth, like the
-          // dashboard) that falls off to canvas black.
-          IgnorePointer(
-            child: Container(
-              height: 360,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    AppColors.primary.withValues(alpha: 0.20),
-                    AppColors.primary.withValues(alpha: 0.04),
-                    AppColors.canvas.withValues(alpha: 0.0),
-                  ],
-                  stops: const [0.0, 0.45, 1.0],
-                ),
-              ),
-            ),
-          ),
+          const _StockBackdrop(),
           ListView(
             padding: EdgeInsets.fromLTRB(20, topInset + 4, 20, 40),
             children: [
@@ -166,12 +148,16 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                   Text(name.isNotEmpty ? name : widget.symbol,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTextStyles.h2
-                          .copyWith(fontWeight: FontWeight.w800, height: 1.1)),
-                  const SizedBox(height: 3),
+                      style: AppTextStyles.h2.copyWith(
+                          fontWeight: FontWeight.w700,
+                          height: 1.18,
+                          letterSpacing: -0.2)),
+                  const SizedBox(height: 4),
                   Text(widget.symbol,
-                      style: AppTextStyles.micro
-                          .copyWith(color: AppColors.textMuted)),
+                      style: AppTextStyles.micro.copyWith(
+                          color: AppColors.textMd,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5)),
                 ],
               ),
             ),
@@ -484,6 +470,80 @@ class _StockScreenState extends ConsumerState<StockScreen> {
         child: Text(msg,
             style: AppTextStyles.micro.copyWith(color: AppColors.textDim)),
       );
+}
+
+/// Violet crown matching the dashboard: a deep violet top that falls off to
+/// canvas black by ~a third down, a soft diagonal sheen, and a lavender bloom —
+/// static, so the content glides over it.
+class _StockBackdrop extends StatelessWidget {
+  const _StockBackdrop();
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Stack(
+          children: [
+            const Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0xFF5A28BE),
+                      Color(0xFF34176E),
+                      Color(0xFF150A2C),
+                      Color(0xFF04040C),
+                    ],
+                    stops: [0.0, 0.10, 0.22, 0.36],
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 320,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomLeft,
+                    end: Alignment.topRight,
+                    colors: [
+                      Colors.white.withValues(alpha: 0.0),
+                      Colors.white.withValues(alpha: 0.0),
+                      Colors.white.withValues(alpha: 0.08),
+                      Colors.white.withValues(alpha: 0.0),
+                    ],
+                    stops: const [0.0, 0.52, 0.70, 0.88],
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              top: -70,
+              right: -60,
+              child: Container(
+                width: 280,
+                height: 280,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      const Color(0xFFB794FF).withValues(alpha: 0.13),
+                      const Color(0xFFB794FF).withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 String _compact(num v) {
