@@ -3555,6 +3555,7 @@ def api_brokerage_holding_opens(
     Holdings "Total" sparkline uses it to clip to the holding period instead of
     the stock's whole history. Alpaca-only, read-only, cached; ``{}`` on any
     failure (the app then falls back to the full series)."""
+    import logging
     import time as _time
     now = _time.time()
     cached = _HOLDING_OPENS_CACHE.get(str(brokerage_id))
