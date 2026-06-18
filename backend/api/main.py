@@ -3561,31 +3561,53 @@ def api_brokerage_holding_opens(
     if cached and cached[0] > now:
         return {"opens": cached[1]}
 
+    _log = logging.getLogger("uvicorn.error")
+    _log.info("holding-opens b=%s start", brokerage_id)
+
     opens: dict = {}
     meta: dict = {}
     try:
         from secret_store import decrypt as _decrypt
         row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
-        if not row or str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
-            return {"opens": {}, "_meta": {"reason": "not-alpaca"}}
+        btype = str((row or {}).get("brokerage_type") or "").strip().lower()
+        if not row or btype != "alpaca":
+            _log.info("holding-opens b=%s skip: brokerage_type=%r", brokerage_id, btype)
+            return {"opens": {}, "_meta": {"reason": "not-alpaca", "btype": btype}}
         key = _decrypt(row.get("alpaca_key")) or ""
         secret = _decrypt(row.get("alpaca_secret")) or ""
         if not key or not secret:
-            return {"opens": {}}
+            _log.info("holding-opens b=%s skip: missing creds", brokerage_id)
+            return {"opens": {}, "_meta": {"reason": "no-creds"}}
         paper = bool(row.get("alpaca_paper", False))
 
         from alpaca.trading.client import TradingClient
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
-        client = TradingClient(api_key=key, secret_key=secret, paper=paper)
+
+        # The stored alpaca_paper flag can be wrong/unset; if positions fail on
+        # the chosen endpoint, retry on the opposite one (paper↔live) so a flag
+        # mismatch doesn't silently yield no data.
+        client = None
+        positions = []
+        for attempt_paper in (paper, not paper):
+            try:
+                client = TradingClient(api_key=key, secret_key=secret, paper=attempt_paper)
+                positions = client.get_all_positions() or []
+                paper = attempt_paper
+                break
+            except Exception as _pe:
+                _log.warning("holding-opens b=%s positions failed paper=%s: %s: %s",
+                             brokerage_id, attempt_paper, type(_pe).__name__, _pe)
+                positions = []
+                client = None
 
         held: dict = {}
-        for p in (client.get_all_positions() or []):
+        for p in positions:
             sym = str(getattr(p, "symbol", "") or "").upper()
             if sym:
                 held[sym] = float(getattr(p, "qty", 0.0) or 0.0)
 
-        if held:
+        if held and client is not None:
             from holding_opens import derive_open_dates
             # Page CLOSED orders **filtered to the held symbols** (so 500/page
             # reaches back per-name instead of being drowned out by churn in
@@ -3664,8 +3686,16 @@ def api_brokerage_holding_opens(
     except Exception as _e:
         opens = {}
         meta = {"error": f"{type(_e).__name__}: {_e}"}
+        try:
+            _log.warning("holding-opens b=%s ERROR %s: %s",
+                         brokerage_id, type(_e).__name__, _e)
+        except Exception:
+            pass
 
-    _HOLDING_OPENS_CACHE[str(brokerage_id)] = (now + _HOLDING_OPENS_TTL, opens)
+    # Cache real results for the full TTL; cache empties only briefly so a
+    # transient failure doesn't stick (and retries can recover).
+    ttl = _HOLDING_OPENS_TTL if opens else 60.0
+    _HOLDING_OPENS_CACHE[str(brokerage_id)] = (now + ttl, opens)
     return {"opens": opens, "_meta": meta}
 
 
@@ -3908,10 +3938,11 @@ def api_instance_portfolio_history(
         inst = action_get_instance(conn, instance_id)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Instance not found: {e}")
-    bid = (inst or {}).get("brokerage", {}).get("brokerage_id") or (inst or {}).get("brokerage_id")
+    brk = (inst or {}).get("brokerage") or {}
+    bid = brk.get("brokerage_id") or (inst or {}).get("brokerage_id")
     # Some action_get_instance shapes nest the id under brokerage.id; try that too.
     if not bid:
-        bid = (inst or {}).get("brokerage", {}).get("id")
+        bid = brk.get("id")
     if not bid:
         raise HTTPException(status_code=400, detail="Instance has no brokerage linked")
     return _run(action_get_portfolio_history, conn, bid, range)
