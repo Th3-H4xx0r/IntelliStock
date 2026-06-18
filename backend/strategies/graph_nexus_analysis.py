@@ -23103,6 +23103,18 @@ class GraphNexusAnalysis:
                         )
                         # Cache scored result for reuse by rotation swap later
                         strategy_cache["_momentum_ranked_cache"] = _mw_ranked
+                        # Telemetry for the app's "Nexus momentum" view: a small,
+                        # PERSISTED snapshot of the top ranked names (the full
+                        # ranked cache above is blacklisted from persistence).
+                        # Purely additive — never affects the trade decision.
+                        try:
+                            strategy_cache["_momentum_ranked_top"] = [
+                                [str(_t[0]), float(_t[1])]
+                                for _t in list(_mw_ranked)[:25]
+                                if isinstance(_t, (list, tuple)) and len(_t) >= 2
+                            ]
+                        except Exception:
+                            pass
                         _momentum_held_data = strategy_cache.get("_momentum_held", {})
                         if not isinstance(_momentum_held_data, dict):
                             _momentum_held_data = {}

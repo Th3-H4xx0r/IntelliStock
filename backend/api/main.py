@@ -3657,6 +3657,105 @@ def api_brokerage_trends(brokerage_id: str, conn=Depends(conn_dependency), curre
     return _run(action_list_trends, conn, iid, "active")
 
 
+@app.get("/market/news", response_class=JSONResponse)
+def api_market_news(limit: int = 20, current_user: dict = Depends(get_current_user)):
+    """Recent market/business headlines from Google News (no external key).
+    Best-effort — returns an empty list on any failure."""
+    n = max(1, min(int(limit or 20), 40))
+    arts = []
+    try:
+        from strategies.google_news import fetch_google_news_by_topic
+        arts = fetch_google_news_by_topic(topics=["BUSINESS"], max_total=n)
+        if not arts:
+            arts = fetch_google_news_by_topic(topics=None, max_total=n)
+    except Exception:
+        arts = []
+    out = []
+    for a in (arts or [])[:n]:
+        title = (a.get("title") or a.get("headline") or "").strip()
+        if not title:
+            continue
+        pub = a.get("published_date")
+        out.append({
+            "title": title,
+            "source": a.get("source") or "",
+            "url": a.get("url") or "",
+            "published_at": pub.isoformat() if hasattr(pub, "isoformat") else None,
+        })
+    return {"articles": out}
+
+
+@app.get("/brokerages/{brokerage_id}/movers", response_class=JSONResponse)
+def api_brokerage_movers(brokerage_id: str, top: int = 6, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Market gainers/losers from the account's Alpaca market-data screener.
+    Empty on any failure or a non-Alpaca account. Read-only."""
+    empty = {"gainers": [], "losers": []}
+    try:
+        from secret_store import decrypt as _decrypt
+        row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
+        if not row or str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
+            return empty
+        key = _decrypt(row.get("alpaca_key")) or ""
+        secret = _decrypt(row.get("alpaca_secret")) or ""
+        if not key or not secret:
+            return empty
+        import requests as _req
+        n = max(1, min(int(top or 6), 20))
+        rsp = _req.get(
+            "https://data.alpaca.markets/v1beta1/screener/stocks/movers",
+            params={"top": n},
+            headers={
+                "APCA-API-KEY-ID": key,
+                "APCA-API-SECRET-KEY": secret,
+                "accept": "application/json",
+            },
+            timeout=12,
+        )
+        if not rsp.ok:
+            return empty
+
+        def _norm(items):
+            out = []
+            for it in (items or []):
+                sym = str((it or {}).get("symbol") or "").upper()
+                if not sym:
+                    continue
+                pc = it.get("percent_change")
+                pr = it.get("price")
+                out.append({
+                    "symbol": sym,
+                    "pct": float(pc) if pc is not None else None,
+                    "price": float(pr) if pr is not None else None,
+                })
+            return out
+
+        data = rsp.json() or {}
+        return {"gainers": _norm(data.get("gainers")), "losers": _norm(data.get("losers"))}
+    except Exception:
+        return empty
+
+
+@app.get("/brokerages/{brokerage_id}/nexus-momentum", response_class=JSONResponse)
+def api_brokerage_nexus_momentum(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The nexus strategy's current top ranked momentum names for the instance
+    behind this account. Empty unless that instance runs graph_nexus_analysis
+    with momentum_watchlist_enabled. Read-only (reads the persisted cache)."""
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if not iid:
+        return {"momentum": []}
+    try:
+        from strategy_cache_persistence import load_strategy_cache_from_db
+        cache = load_strategy_cache_from_db(conn, _r_auth, iid, "graph_nexus_analysis")
+        ranked = (cache or {}).get("_momentum_ranked_top") or []
+        out = []
+        for t in ranked:
+            if isinstance(t, (list, tuple)) and len(t) >= 2:
+                out.append({"symbol": str(t[0]).upper(), "score": float(t[1])})
+        return {"momentum": out}
+    except Exception:
+        return {"momentum": []}
+
+
 # ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
 #
 # Used by LiveTradingView so the frontend never has to learn the brokerage_id
