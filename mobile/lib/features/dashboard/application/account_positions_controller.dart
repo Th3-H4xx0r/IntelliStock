@@ -55,6 +55,13 @@ final accountHoldingsProvider = AutoDisposeAsyncNotifierProviderFamily<
   AccountHoldingsNotifier.new,
 );
 
+/// Which P&L each holding row shows: lifetime unrealized [total] or [daily]
+/// (since 12 AM, derived from the 1D sparkline). Toggled by the Holdings pill.
+enum HoldingsPnlMode { total, daily }
+
+final holdingsPnlModeProvider =
+    StateProvider<HoldingsPnlMode>((ref) => HoldingsPnlMode.total);
+
 /// Per-holding 1D price sparklines for a brokerage, relative to the device's
 /// local midnight — the same "since 12 AM" intraday view as the portfolio 1D
 /// chart and the live-trading screen. Maps `symbol → intraday values`. Reuses

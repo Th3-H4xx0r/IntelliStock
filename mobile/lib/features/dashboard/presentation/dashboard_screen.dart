@@ -477,6 +477,7 @@ class _HoldingsList extends ConsumerWidget {
     if (holdings == null || holdings.isEmpty) return const SizedBox.shrink();
     final positions = holdings.positions;
     final sparks = ref.watch(holdingsSparklinesProvider(brokerageId)).valueOrNull;
+    final pnlMode = ref.watch(holdingsPnlModeProvider);
     // Total account value → each row's ring shows its share of the portfolio.
     final total = (holdings.cash ?? 0) +
         positions.fold<double>(0, (s, p) => s + p.marketValue);
@@ -486,8 +487,14 @@ class _HoldingsList extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.only(bottom: 12, left: 2),
-            child: Text('Holdings', style: AppTextStyles.h3),
+            padding: const EdgeInsets.only(bottom: 12, left: 2, right: 2),
+            child: Row(
+              children: [
+                Text('Holdings', style: AppTextStyles.h3),
+                const Spacer(),
+                const _PnlModeToggle(),
+              ],
+            ),
           ),
           GlassCard(
             frosted: true,
@@ -504,6 +511,7 @@ class _HoldingsList extends ConsumerWidget {
                     p: positions[i],
                     total: total,
                     spark: sparks?[positions[i].symbol],
+                    mode: pnlMode,
                   ),
                 ],
               ],
@@ -583,6 +591,56 @@ class _SparkPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _SparkPainter old) =>
       old.values != values || old.color != color;
+}
+
+/// Compact segmented pill to switch the Holdings P&L between Total and Daily.
+class _PnlModeToggle extends ConsumerWidget {
+  const _PnlModeToggle();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final mode = ref.watch(holdingsPnlModeProvider);
+    return Container(
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: const Color(0x0FFFFFFF),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: const Color(0x0DFFFFFF)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _seg(ref, 'Total', HoldingsPnlMode.total, mode),
+          _seg(ref, 'Daily', HoldingsPnlMode.daily, mode),
+        ],
+      ),
+    );
+  }
+
+  Widget _seg(
+      WidgetRef ref, String label, HoldingsPnlMode m, HoldingsPnlMode active) {
+    final isActive = m == active;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => ref.read(holdingsPnlModeProvider.notifier).state = m,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: isActive ? const Color(0x24FFFFFF) : Colors.transparent,
+          borderRadius: BorderRadius.circular(7),
+        ),
+        child: Text(
+          label,
+          style: AppTextStyles.micro.copyWith(
+            color: isActive ? AppColors.textHi : AppColors.textDim,
+            fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 /// A circular allocation ring: a progress arc = this item's share of the
@@ -696,12 +754,16 @@ class _CashRow extends StatelessWidget {
 }
 
 class _HoldingRow extends StatelessWidget {
-  const _HoldingRow({required this.p, required this.total, this.spark});
+  const _HoldingRow(
+      {required this.p, required this.total, this.spark, required this.mode});
   final AccountPosition p;
   final double total;
 
   /// Intraday 1D values (since 12 AM) for this symbol's mini sparkline.
   final List<double>? spark;
+
+  /// Whether the row shows total (lifetime) or daily P&L.
+  final HoldingsPnlMode mode;
 
   String get _qtyLabel {
     final q = p.qty;
@@ -712,9 +774,23 @@ class _HoldingRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Colour the whole row by this holding's TOTAL P&L (dollar) sign.
-    final up = p.unrealizedPnl >= 0;
-    final color = up ? AppColors.success : AppColors.danger;
+    // Active P&L depends on the Daily/Total toggle. Daily is derived from the 1D
+    // sparkline (start-of-day → now); Total is the lifetime unrealized P&L.
+    final daily = mode == HoldingsPnlMode.daily;
+    final s = spark;
+    final double? ratio =
+        (s != null && s.length >= 2 && s.first != 0) ? s.last / s.first : null;
+    final bool hasPnl = !daily || ratio != null;
+    final double pnlAbs = daily
+        ? (ratio != null ? p.marketValue * (1 - 1 / ratio) : 0)
+        : p.unrealizedPnl;
+    final double pnlPct = daily
+        ? (ratio != null ? (ratio - 1) * 100 : 0)
+        : p.unrealizedPnlPct;
+    final up = pnlAbs >= 0;
+    final color = !hasPnl
+        ? AppColors.textDim
+        : (up ? AppColors.success : AppColors.danger);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       child: Row(
@@ -758,7 +834,7 @@ class _HoldingRow extends StatelessWidget {
                   style: AppTextStyles.value.copyWith(color: color)),
               const SizedBox(height: 3),
               Text(
-                '${fmtPnl(p.unrealizedPnl)} · ${fmtPct(p.unrealizedPnlPct)}',
+                hasPnl ? '${fmtPnl(pnlAbs)} · ${fmtPct(pnlPct)}' : '—',
                 style: AppTextStyles.micro
                     .copyWith(color: color, fontWeight: FontWeight.w700),
               ),
