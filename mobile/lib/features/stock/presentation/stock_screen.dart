@@ -14,9 +14,8 @@ import '../application/stock_controller.dart';
 
 const _ranges = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL'];
 
-/// Passed as go_router `extra` when navigating from a holding so the screen has
-/// the position, its brokerage, and the portfolio total (for the diversity
-/// gauge) immediately, without a re-fetch.
+/// Passed as go_router `extra` from a holding so the screen has the position,
+/// its brokerage, and the portfolio total (for the diversity gauge) up front.
 class StockScreenArgs {
   const StockScreenArgs({this.position, this.brokerageId, this.portfolioTotal});
   final AccountPosition? position;
@@ -24,9 +23,10 @@ class StockScreenArgs {
   final double? portfolioTotal;
 }
 
-/// Full-screen view for one stock — modern-brokerage style: a price hero with an
-/// odometer roll + live (10 s) chart, range pills, key stats, the user's
-/// position with a diversity gauge, an About section, and recent orders.
+/// Full-screen stock view, modeled on modern brokerage apps (Robinhood-style):
+/// a violet gradient crown, name + odometer price header, a live (10 s) gapless
+/// chart with range pills, a clean stats list, the user's position with a
+/// diversity gauge, an About section, and recent orders.
 class StockScreen extends ConsumerStatefulWidget {
   const StockScreen({
     super.key,
@@ -62,103 +62,152 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     final info = ref.watch(stockInfoProvider(widget.symbol)).valueOrNull ??
         const <String, dynamic>{};
     final series = histAsync.valueOrNull;
+    final topInset = MediaQuery.viewPaddingOf(context).top;
 
     return Scaffold(
       backgroundColor: AppColors.canvas,
-      appBar: AppBar(
-        backgroundColor: AppColors.canvas,
-        elevation: 0,
-        titleSpacing: 0,
-        title: Text(widget.symbol,
-            style: AppTextStyles.h2.copyWith(fontWeight: FontWeight.w800)),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 36),
+      body: Stack(
         children: [
-          _hero(series, info, loading: series == null && histAsync.isLoading),
-          const SizedBox(height: 14),
-          _chartArea(series, error: histAsync.hasError && series == null),
-          const SizedBox(height: 10),
-          _rangeTabs(),
-          const SizedBox(height: 20),
-          _statsCard(series, info),
-          if (widget.position != null) ...[
-            const SizedBox(height: 16),
-            _positionCard(widget.position!),
-          ],
-          if (((info['summary'] as String?) ?? '').trim().isNotEmpty) ...[
-            const SizedBox(height: 16),
-            _aboutCard(info),
-          ],
-          const SizedBox(height: 16),
-          _ordersCard(),
+          // Violet gradient crown behind the header + chart (depth, like the
+          // dashboard) that falls off to canvas black.
+          IgnorePointer(
+            child: Container(
+              height: 360,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    AppColors.primary.withValues(alpha: 0.20),
+                    AppColors.primary.withValues(alpha: 0.04),
+                    AppColors.canvas.withValues(alpha: 0.0),
+                  ],
+                  stops: const [0.0, 0.45, 1.0],
+                ),
+              ),
+            ),
+          ),
+          ListView(
+            padding: EdgeInsets.fromLTRB(20, topInset + 4, 20, 40),
+            children: [
+              _topBar(),
+              const SizedBox(height: 14),
+              _header(series, info),
+              const SizedBox(height: 18),
+              _chartArea(series, error: histAsync.hasError && series == null),
+              const SizedBox(height: 10),
+              _rangeTabs(),
+              const SizedBox(height: 26),
+              _statsCard(series, info),
+              if (widget.position != null) ...[
+                const SizedBox(height: 16),
+                _positionCard(widget.position!),
+              ],
+              if (((info['summary'] as String?) ?? '').trim().isNotEmpty) ...[
+                const SizedBox(height: 16),
+                _aboutCard(info),
+              ],
+              const SizedBox(height: 16),
+              _ordersCard(),
+            ],
+          ),
         ],
       ),
     );
   }
 
-  // ── Hero: company name, odometer price, range change ──
-  Widget _hero(StockSeries? series, Map<String, dynamic> info,
-      {required bool loading}) {
+  Widget _topBar() {
+    return Row(
+      children: [
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => Navigator.of(context).maybePop(),
+          child: Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.06),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+            ),
+            child: const Icon(Icons.arrow_back_ios_new,
+                size: 15, color: AppColors.textHi),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Header: name + odometer price on one row, ticker + change below ──
+  Widget _header(StockSeries? series, Map<String, dynamic> info) {
     final name = ((info['name'] as String?) ?? '').trim();
-    if (series == null || series.vals.length < 2) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (name.isNotEmpty)
-            Text(name.toUpperCase(),
-                style: AppTextStyles.eyebrow,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 8),
-          Skeleton(width: 180, height: 38, radius: 10),
-          const SizedBox(height: 8),
-          Skeleton(width: 130, height: 16, radius: 6),
-        ],
-      );
-    }
-    final vals = series.vals;
-    final first = vals.first;
-    final last = vals.last;
+    final vals = series?.vals;
+    final ready = vals != null && vals.length >= 2;
+    final first = ready ? vals.first : 0.0;
+    final last = ready ? vals.last : 0.0;
+
     return ValueListenableBuilder<int?>(
       valueListenable: _scrub,
       builder: (_, idx, _) {
-        final shown = (idx != null && idx >= 0 && idx < vals.length)
+        final shown = (ready && idx != null && idx >= 0 && idx < vals.length)
             ? vals[idx]
             : last;
         final dAbs = shown - first;
         final dPct = first != 0 ? dAbs / first * 100 : 0.0;
         final c = dAbs >= 0 ? AppColors.success : AppColors.danger;
-        return Column(
+        return Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (name.isNotEmpty)
-              Text(name.toUpperCase(),
-                  style: AppTextStyles.eyebrow,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            const SizedBox(height: 6),
-            // Odometer roll — 0→price on load, then rolls on each live update.
-            TweenAnimationBuilder<double>(
-              tween: Tween<double>(begin: 0, end: shown),
-              duration: const Duration(milliseconds: 450),
-              curve: Curves.easeOutCubic,
-              builder: (_, v, _) =>
-                  Text(fmtMoney(v), style: AppTextStyles.valueHero),
+            // Name + ticker
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name.isNotEmpty ? name : widget.symbol,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTextStyles.h2
+                          .copyWith(fontWeight: FontWeight.w800, height: 1.1)),
+                  const SizedBox(height: 3),
+                  Text(widget.symbol,
+                      style: AppTextStyles.micro
+                          .copyWith(color: AppColors.textMuted)),
+                ],
+              ),
             ),
-            const SizedBox(height: 6),
-            Row(
-              mainAxisSize: MainAxisSize.min,
+            const SizedBox(width: 12),
+            // Price + change
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Icon(dAbs >= 0 ? Icons.arrow_drop_up : Icons.arrow_drop_down,
-                    color: c, size: 22),
-                Text('${fmtPnl(dAbs)}  ${fmtPct(dPct)}',
-                    style: AppTextStyles.bodyHi
-                        .copyWith(color: c, fontWeight: FontWeight.w700)),
-                const SizedBox(width: 6),
-                Text(_range,
-                    style: AppTextStyles.micro
-                        .copyWith(color: AppColors.textDim)),
+                ready
+                    ? TweenAnimationBuilder<double>(
+                        tween: Tween<double>(begin: 0, end: shown),
+                        duration: const Duration(milliseconds: 450),
+                        curve: Curves.easeOutCubic,
+                        builder: (_, v, _) => Text(fmtMoney(v),
+                            style: AppTextStyles.valueXl
+                                .copyWith(fontWeight: FontWeight.w800)),
+                      )
+                    : Skeleton(width: 120, height: 28, radius: 8),
+                const SizedBox(height: 4),
+                if (ready)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                          dAbs >= 0
+                              ? Icons.arrow_drop_up
+                              : Icons.arrow_drop_down,
+                          color: c,
+                          size: 18),
+                      Text('${fmtPnl(dAbs)}  ${fmtPct(dPct)}',
+                          style: AppTextStyles.meta.copyWith(
+                              color: c, fontWeight: FontWeight.w700)),
+                    ],
+                  )
+                else
+                  Skeleton(width: 90, height: 13, radius: 5),
               ],
             ),
           ],
@@ -167,7 +216,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     );
   }
 
-  // ── Chart (live; skeleton while a range loads) ──
+  // ── Live, gapless chart (skeleton while a range loads) ──
   Widget _chartArea(StockSeries? series, {required bool error}) {
     if (error) {
       return SizedBox(
@@ -196,109 +245,109 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   }
 
   Widget _rangeTabs() {
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: const Color(0x0FFFFFFF),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0x0DFFFFFF)),
-      ),
-      child: Row(
-        children: _ranges.map((r) {
-          final isActive = r == _range;
-          return Expanded(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () {
-                if (r != _range) {
-                  _scrub.value = null;
-                  setState(() => _range = r);
-                }
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                curve: Curves.easeOut,
-                padding: const EdgeInsets.symmetric(vertical: 7),
-                decoration: BoxDecoration(
-                  color:
-                      isActive ? const Color(0x24FFFFFF) : Colors.transparent,
-                  borderRadius: BorderRadius.circular(7),
-                ),
-                child: Text(r,
-                    textAlign: TextAlign.center,
-                    style: AppTextStyles.micro.copyWith(
-                      color: isActive ? AppColors.textHi : AppColors.textDim,
-                      fontWeight:
-                          isActive ? FontWeight.w700 : FontWeight.w500,
-                    )),
+    return Row(
+      children: _ranges.map((r) {
+        final isActive = r == _range;
+        return Expanded(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              if (r != _range) {
+                _scrub.value = null;
+                setState(() => _range = r);
+              }
+            },
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 2),
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              decoration: BoxDecoration(
+                color: isActive
+                    ? Colors.white.withValues(alpha: 0.10)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
               ),
+              child: Text(r,
+                  textAlign: TextAlign.center,
+                  style: AppTextStyles.micro.copyWith(
+                    color: isActive ? AppColors.textHi : AppColors.textDim,
+                    fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                  )),
             ),
-          );
-        }).toList(),
-      ),
+          ),
+        );
+      }).toList(),
     );
   }
 
-  // ── Key stats grid ──
+  // ── Clean stats LIST (label left / value right), like the reference ──
   Widget _statsCard(StockSeries? series, Map<String, dynamic> info) {
-    final stats = <(String, String)>[];
+    final rows = <(String, String)>[];
+    num? n(dynamic v) => v is num ? v : null;
+
+    final pc = n(info['previousClose']);
+    if (pc != null && pc != 0) rows.add(('Previous close', fmtMoney(pc)));
     if (series != null && series.vals.length >= 2) {
       final v = series.vals;
-      stats.add(('Open', fmtMoney(v.first)));
-      stats.add(('High', fmtMoney(v.reduce((a, b) => a > b ? a : b))));
-      stats.add(('Low', fmtMoney(v.reduce((a, b) => a < b ? a : b))));
+      rows.add(('Open', fmtMoney(v.first)));
+      final lo = v.reduce((a, b) => a < b ? a : b);
+      final hi = v.reduce((a, b) => a > b ? a : b);
+      rows.add(('$_range range', '${fmtMoney(lo)} – ${fmtMoney(hi)}'));
     }
-    void addNum(String label, dynamic raw, String Function(num) f) {
-      final n = (raw is num) ? raw : null;
-      if (n != null && n != 0) stats.add((label, f(n)));
+    final lo52 = n(info['fiftyTwoWeekLow']);
+    final hi52 = n(info['fiftyTwoWeekHigh']);
+    if (lo52 != null && hi52 != null && hi52 != 0) {
+      rows.add(('52-week range', '${fmtMoney(lo52)} – ${fmtMoney(hi52)}'));
     }
+    final vol = n(info['volume']);
+    if (vol != null && vol != 0) rows.add(('Volume', _compact(vol)));
+    final mcap = n(info['marketCap']);
+    if (mcap != null && mcap != 0) rows.add(('Market cap', '\$${_compact(mcap)}'));
+    final pe = n(info['trailingPE']);
+    if (pe != null && pe != 0) rows.add(('P/E ratio', pe.toStringAsFixed(2)));
+    final beta = n(info['beta']);
+    if (beta != null && beta != 0) rows.add(('Beta', beta.toStringAsFixed(2)));
 
-    addNum('Prev close', info['previousClose'], fmtMoney);
-    addNum('52W high', info['fiftyTwoWeekHigh'], fmtMoney);
-    addNum('52W low', info['fiftyTwoWeekLow'], fmtMoney);
-    addNum('Market cap', info['marketCap'], (n) => '\$${_compact(n)}');
-    addNum('P/E', info['trailingPE'], (n) => n.toStringAsFixed(2));
-    addNum('Beta', info['beta'], (n) => n.toStringAsFixed(2));
-    addNum('Volume', info['volume'], (n) => _compact(n));
-
-    if (stats.isEmpty) return const SizedBox.shrink();
+    if (rows.isEmpty) return const SizedBox.shrink();
     return GlassCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Key stats', style: AppTextStyles.h3),
-          const SizedBox(height: 12),
-          for (var i = 0; i < stats.length; i += 2)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Row(
-                children: [
-                  Expanded(child: _statCell(stats[i])),
-                  Expanded(
-                      child: i + 1 < stats.length
-                          ? _statCell(stats[i + 1])
-                          : const SizedBox.shrink()),
-                ],
-              ),
-            ),
+          _sectionTitle('Key statistics'),
+          const SizedBox(height: 6),
+          for (var i = 0; i < rows.length; i++) ...[
+            if (i > 0)
+              Divider(height: 1, color: Colors.white.withValues(alpha: 0.05)),
+            _statRow(rows[i].$1, rows[i].$2),
+          ],
         ],
       ),
     );
   }
 
-  Widget _statCell((String, String) s) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(s.$1.toUpperCase(),
-            style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-        const SizedBox(height: 2),
-        Text(s.$2, style: AppTextStyles.value),
-      ],
-    );
-  }
+  Widget _statRow(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 13),
+        child: Row(
+          children: [
+            Text(label,
+                style: AppTextStyles.body.copyWith(color: AppColors.textMuted)),
+            const Spacer(),
+            Text(value,
+                style: AppTextStyles.bodyHi
+                    .copyWith(fontWeight: FontWeight.w700)),
+          ],
+        ),
+      );
 
-  // ── Position card with diversity gauge + redesigned P&L ──
+  Widget _sectionTitle(String s) => Text(
+        s.toUpperCase(),
+        style: AppTextStyles.meta.copyWith(
+          color: AppColors.textMuted,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.0,
+        ),
+      );
+
+  // ── Position card with diversity gauge + total P&L ──
   Widget _positionCard(AccountPosition p) {
     final up = p.unrealizedPnl >= 0;
     final color = up ? AppColors.success : AppColors.danger;
@@ -314,8 +363,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Your position', style: AppTextStyles.h3),
-          const SizedBox(height: 14),
+          _sectionTitle('Your position'),
+          const SizedBox(height: 16),
           Row(
             children: [
               if (frac != null) ...[
@@ -329,27 +378,25 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                     Text('TOTAL P&L',
                         style: AppTextStyles.nano
                             .copyWith(color: AppColors.textFaint)),
-                    const SizedBox(height: 3),
+                    const SizedBox(height: 4),
                     Text(fmtPnl(p.unrealizedPnl),
                         style: AppTextStyles.valueLg.copyWith(color: color)),
                     const SizedBox(height: 2),
                     Text(fmtPct(p.unrealizedPnlPct),
-                        style: AppTextStyles.micro
-                            .copyWith(color: color, fontWeight: FontWeight.w700)),
+                        style: AppTextStyles.micro.copyWith(
+                            color: color, fontWeight: FontWeight.w700)),
                   ],
                 ),
               ),
             ],
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 14),
-            child: Divider(height: 1, color: Color(0x14FFFFFF)),
-          ),
-          Row(children: [
-            Expanded(child: _statCell(('Shares', qtyStr))),
-            Expanded(child: _statCell(('Market value', fmtMoney(p.marketValue)))),
-            Expanded(child: _statCell(('Avg entry', fmtMoney(p.avgEntryPrice)))),
-          ]),
+          const SizedBox(height: 4),
+          Divider(height: 26, color: Colors.white.withValues(alpha: 0.06)),
+          _statRow('Shares', qtyStr),
+          Divider(height: 1, color: Colors.white.withValues(alpha: 0.05)),
+          _statRow('Market value', fmtMoney(p.marketValue)),
+          Divider(height: 1, color: Colors.white.withValues(alpha: 0.05)),
+          _statRow('Average entry', fmtMoney(p.avgEntryPrice)),
         ],
       ),
     );
@@ -365,18 +412,17 @@ class _StockScreenState extends ConsumerState<StockScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('About', style: AppTextStyles.h3),
+          _sectionTitle('About'),
           if (tags.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [for (final t in tags) _tag(t)],
-            ),
+            const SizedBox(height: 12),
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final t in tags) _tag(t),
+            ]),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           Text(summary,
-              style: AppTextStyles.body.copyWith(height: 1.45),
+              style: AppTextStyles.body
+                  .copyWith(height: 1.5, color: AppColors.textMd),
               maxLines: 10,
               overflow: TextOverflow.ellipsis),
         ],
@@ -385,10 +431,10 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   }
 
   Widget _tag(String label) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
           color: AppColors.fill(AppColors.primary),
-          borderRadius: BorderRadius.circular(6),
+          borderRadius: BorderRadius.circular(7),
         ),
         child: Text(label,
             style: AppTextStyles.micro.copyWith(
@@ -402,15 +448,14 @@ class _StockScreenState extends ConsumerState<StockScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Order history', style: AppTextStyles.h3),
-          const SizedBox(height: 4),
+          _sectionTitle('Order history'),
+          const SizedBox(height: 6),
           if (bid == null)
             _ordersEmpty('No linked brokerage')
           else
             Consumer(builder: (context, ref, _) {
               final ordersAsync = ref.watch(
-                stockOrdersProvider(
-                    (brokerageId: bid, symbol: widget.symbol)),
+                stockOrdersProvider((brokerageId: bid, symbol: widget.symbol)),
               );
               return ordersAsync.when(
                 loading: () => const Padding(
@@ -419,8 +464,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                       child: SizedBox(
                           width: 18,
                           height: 18,
-                          child:
-                              CircularProgressIndicator(strokeWidth: 2))),
+                          child: CircularProgressIndicator(strokeWidth: 2))),
                 ),
                 error: (_, _) => _ordersEmpty("Couldn't load orders"),
                 data: (orders) => orders.isEmpty
@@ -451,8 +495,8 @@ String _compact(num v) {
   return v.toStringAsFixed(0);
 }
 
-/// A circular allocation gauge: an arc = this position's share of the
-/// portfolio, with the percentage in the centre — the "diversity" indicator.
+/// Circular allocation gauge: arc = this position's share of the portfolio,
+/// with the percentage in the centre — the diversity indicator.
 class _DiversityGauge extends StatelessWidget {
   const _DiversityGauge({required this.fraction, required this.color});
   final double fraction;
@@ -468,15 +512,15 @@ class _DiversityGauge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 58,
-      height: 58,
+      width: 60,
+      height: 60,
       child: Stack(
         alignment: Alignment.center,
         children: [
           CustomPaint(
-            size: const Size(58, 58),
-            painter: _GaugePainter(
-                fraction: fraction.clamp(0.0, 1.0), color: color),
+            size: const Size(60, 60),
+            painter:
+                _GaugePainter(fraction: fraction.clamp(0.0, 1.0), color: color),
           ),
           Text(_label,
               style: AppTextStyles.micro.copyWith(
