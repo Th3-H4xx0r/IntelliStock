@@ -6,24 +6,43 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../application/portfolio_analytics.dart';
 
-/// A smooth, metallic, subtly-3D allocation ring (Robinhood-style): each sector
-/// is a smooth elliptical band lit from above (a single global gradient gives
-/// the brushed-metal sheen), with gaps, a raised front rim for depth, a soft
-/// drop shadow, % labels, and a white selection pointer. Swipe to snap to the
-/// next/previous sector (with a haptic tick); tap a sector to select it.
+/// A smooth metallic allocation ring that DRILLS IN on tap: it starts flat
+/// (lit-from-above brushed-metal ring with gaps, % labels, a selection pointer
+/// and a centre readout), and when you tap a sector it animates — zooming,
+/// tilting low and extruding into tall 3D metallic blocks with the focused
+/// sector raised at the top, a "Growth / NAME %" header, and a "Back" affordance
+/// to return. Swipe snaps to the next sector (haptic) in either state.
 class Sector3DChart extends StatefulWidget {
-  const Sector3DChart({super.key, required this.slices});
+  const Sector3DChart({super.key, required this.slices, this.debugDrill});
   final List<SectorSlice> slices;
+
+  /// Test-only: force the drill animation value (0 flat .. 1 drilled).
+  @visibleForTesting
+  final double? debugDrill;
 
   @override
   State<Sector3DChart> createState() => _Sector3DChartState();
 }
 
-class _Sector3DChartState extends State<Sector3DChart> {
-  static const double _dim = 232;
+class _Sector3DChartState extends State<Sector3DChart>
+    with SingleTickerProviderStateMixin {
+  static const double _flatH = 232;
+  static const double _drillH = 300;
+
   int _selected = 0;
   double _dragAcc = 0;
   final List<_WedgeHit> _hits = [];
+
+  late final AnimationController _drill = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 620),
+  );
+
+  @override
+  void dispose() {
+    _drill.dispose();
+    super.dispose();
+  }
 
   void _advance(int delta) {
     final n = widget.slices.length;
@@ -35,12 +54,23 @@ class _Sector3DChartState extends State<Sector3DChart> {
     setState(() => _selected = ns);
   }
 
+  void _drillInto(int i) {
+    HapticFeedback.mediumImpact();
+    setState(() => _selected = i);
+    _drill.forward();
+  }
+
+  void _back() {
+    HapticFeedback.lightImpact();
+    _drill.reverse();
+  }
+
   void _onTapDown(Offset local) {
+    if (_drill.value > 0.05) return; // taps in drilled view do nothing but Back
     final hits = [..._hits];
     for (final h in hits) {
-      if (h.path.contains(local) && h.index != _selected) {
-        HapticFeedback.selectionClick();
-        setState(() => _selected = h.index);
+      if (h.path.contains(local)) {
+        _drillInto(h.index);
         return;
       }
     }
@@ -50,34 +80,99 @@ class _Sector3DChartState extends State<Sector3DChart> {
   Widget build(BuildContext context) {
     final slices = widget.slices;
     if (slices.isEmpty) return const SizedBox(height: 8);
-    final sel = _selected.clamp(0, slices.length - 1);
 
-    return Center(
-      child: SizedBox(
-        width: _dim,
-        height: _dim,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (d) => _onTapDown(d.localPosition),
-          onHorizontalDragUpdate: (d) {
-            // Swipe a little → snap to the next/prev sector (+haptic). Right =
-            // forward (clockwise), left = back.
-            _dragAcc += d.delta.dx;
-            const step = 26.0;
-            while (_dragAcc.abs() >= step) {
-              _advance(_dragAcc > 0 ? 1 : -1);
-              _dragAcc -= _dragAcc > 0 ? step : -step;
-            }
-          },
-          onHorizontalDragEnd: (_) => _dragAcc = 0,
-          child: RepaintBoundary(
-            child: CustomPaint(
-              size: const Size(_dim, _dim),
-              painter: _RingPainter(slices: slices, selected: sel, hits: _hits),
+    return AnimatedBuilder(
+      animation: _drill,
+      builder: (context, _) {
+        final d = Curves.easeInOutCubic
+            .transform(widget.debugDrill ?? _drill.value);
+        final sel = _selected.clamp(0, slices.length - 1);
+        final h = _flatH + (_drillH - _flatH) * d;
+        return SizedBox(
+          height: h,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (e) => _onTapDown(e.localPosition),
+            onHorizontalDragUpdate: (e) {
+              _dragAcc += e.delta.dx;
+              const step = 26.0;
+              while (_dragAcc.abs() >= step) {
+                _advance(_dragAcc > 0 ? 1 : -1);
+                _dragAcc -= _dragAcc > 0 ? step : -step;
+              }
+            },
+            onHorizontalDragEnd: (_) => _dragAcc = 0,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: RepaintBoundary(
+                    child: CustomPaint(
+                      painter: _RingPainter(
+                          slices: slices,
+                          selected: sel,
+                          drill: d,
+                          hits: _hits),
+                    ),
+                  ),
+                ),
+                // Drill-in header: "Growth / SECTOR  X%"
+                if (d > 0.05)
+                  Positioned(
+                    top: 6,
+                    left: 0,
+                    right: 0,
+                    child: Opacity(
+                      opacity: ((d - 0.2) / 0.8).clamp(0.0, 1.0),
+                      child: Column(
+                        children: [
+                          Text('Allocation',
+                              style: AppTextStyles.micro
+                                  .copyWith(color: AppColors.textMuted)),
+                          const SizedBox(height: 2),
+                          RichText(
+                            text: TextSpan(children: [
+                              TextSpan(
+                                  text: '${slices[sel].sector}  ',
+                                  style: AppTextStyles.h3
+                                      .copyWith(color: AppColors.textHi)),
+                              TextSpan(
+                                  text: '${slices[sel].pct.round()}%',
+                                  style: AppTextStyles.h3
+                                      .copyWith(color: AppColors.primary)),
+                            ]),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                // Drill-in "Back ^"
+                if (d > 0.05)
+                  Positioned(
+                    bottom: 6,
+                    left: 0,
+                    right: 0,
+                    child: Opacity(
+                      opacity: ((d - 0.2) / 0.8).clamp(0.0, 1.0),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _back,
+                        child: Column(
+                          children: [
+                            Text('Back',
+                                style: AppTextStyles.micro
+                                    .copyWith(color: AppColors.textMd)),
+                            Icon(Icons.keyboard_arrow_up,
+                                size: 18, color: AppColors.textMd),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -89,15 +184,20 @@ class _WedgeHit {
 }
 
 class _RingPainter extends CustomPainter {
-  _RingPainter(
-      {required this.slices, required this.selected, required this.hits});
+  _RingPainter({
+    required this.slices,
+    required this.selected,
+    required this.drill,
+    required this.hits,
+  });
   final List<SectorSlice> slices;
   final int selected;
+  final double drill; // 0 flat .. 1 drilled
   final List<_WedgeHit> hits;
 
-  static const double _sy = 0.86; // vertical squash → subtle tilt
-  static const double _depth = 11; // raised-rim thickness
-  static const double _gap = 0.05; // radians between sectors
+  static const double _gap = 0.05;
+
+  double _lerp(double a, double b) => a + (b - a) * drill;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -105,163 +205,202 @@ class _RingPainter extends CustomPainter {
     final total = slices.fold<double>(0, (s, e) => s + e.pct);
     if (total <= 0) return;
 
-    final c = size.center(Offset.zero);
-    final ro = size.width * 0.435;
-    final ri = size.width * 0.275;
-    final outer = Rect.fromCenter(center: c, width: 2 * ro, height: 2 * ro * _sy);
-    final inner = Rect.fromCenter(center: c, width: 2 * ri, height: 2 * ri * _sy);
+    // Lerped geometry: flat ring → drilled (bigger, lower-tilt, taller walls,
+    // centre pushed down so the raised focused block sits up top).
+    final sy = _lerp(0.86, 0.42);
+    final ro = size.width * _lerp(0.435, 0.62);
+    final ri = size.width * _lerp(0.275, 0.40);
+    final wall = _lerp(11, 66); // extrusion height
+    final cx = size.width / 2;
+    final cy = size.height * _lerp(0.5, 0.86);
+    final c = Offset(cx, cy);
 
-    // Soft contact shadow under the ring.
+    // Rotate so the focused sector swings to the top (-pi/2) as we drill in.
+    var fStart = -math.pi / 2;
+    for (var i = 0; i < selected; i++) {
+      fStart += slices[i].pct / total * 2 * math.pi;
+    }
+    final focusMid = fStart + slices[selected].pct / total * math.pi;
+    var toTop = (-math.pi / 2) - focusMid;
+    toTop = math.atan2(math.sin(toTop), math.cos(toTop)); // shortest
+    final rot = toTop * drill;
+
+    Offset onOval(double r, double ang, double yOff) =>
+        Offset(c.dx + r * math.cos(ang), c.dy + r * sy * math.sin(ang) - yOff);
+
+    Rect oval(double r, double yOff) =>
+        Rect.fromCenter(center: c.translate(0, -yOff), width: 2 * r, height: 2 * r * sy);
+
+    Path sectorPath(double a0, double a1, double yOff) {
+      final outer = oval(ro, yOff);
+      final inner = oval(ri, yOff);
+      final p = Path();
+      final o0 = onOval(ro, a0, yOff);
+      p.moveTo(o0.dx, o0.dy);
+      p.arcTo(outer, a0, a1 - a0, false);
+      final i1 = onOval(ri, a1, yOff);
+      p.lineTo(i1.dx, i1.dy);
+      p.arcTo(inner, a1, -(a1 - a0), false);
+      p.close();
+      return p;
+    }
+
+    // Metallic gradient builders (lit from above).
+    Shader topShade(Color hi, Color mid, Color lo, Rect r) => LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [hi, mid, lo],
+          stops: const [0.0, 0.5, 1.0],
+        ).createShader(r);
+
+    // Soft contact shadow.
     canvas.drawOval(
       Rect.fromCenter(
-          center: c.translate(0, _depth + 10),
+          center: c.translate(0, 12),
           width: 2 * ro * 0.96,
-          height: 2 * ro * _sy * 0.7),
+          height: 2 * ro * sy * 0.72),
       Paint()
-        ..color = Colors.black.withValues(alpha: 0.45)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14),
+        ..color = Colors.black.withValues(alpha: 0.5)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 16),
     );
 
-    // Global "lit from above" metallic gradients over the whole ring bounds, so
-    // the top of the ring is bright and the bottom falls into shadow — the same
-    // sheen across every sector reads as one brushed-metal surface.
-    final graphite = LinearGradient(
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter,
-      colors: const [Color(0xFF7B7B8A), Color(0xFF42424E), Color(0xFF1B1B22)],
-      stops: const [0.0, 0.5, 1.0],
-    ).createShader(outer);
-    final graphiteRim = LinearGradient(
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter,
-      colors: const [Color(0xFF34343E), Color(0xFF0E0E14)],
-    ).createShader(outer);
-    final violet = LinearGradient(
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter,
-      colors: const [Color(0xFFD8C2FF), Color(0xFF8B5CF6), Color(0xFF4C1D95)],
-      stops: const [0.0, 0.5, 1.0],
-    ).createShader(outer);
-    // ── Raised front rim (3D depth): the bottom half of the ring's outer edge,
-    // extruded downward. Drawn first; the top faces sit on top of it. ──
-    final rimTop = Path()..addArc(outer, 0, math.pi); // bottom semicircle (0→π)
-    final rimPath = Path()
-      ..addArc(outer, 0, math.pi)
-      ..lineTo(c.dx - ro, c.dy + _depth) // down at the left end
-      ..addArc(outer.shift(const Offset(0, _depth)), math.pi, -math.pi)
-      ..close();
-    // (rimTop kept implicit; rimPath is the filled wall band.)
-    canvas.drawPath(
-        rimPath, Paint()..shader = graphiteRim..isAntiAlias = true);
-    rimTop.reset();
-
-    // ── Top faces: smooth elliptical annular sectors, gapped, lit gradient. ──
-    var start = -math.pi / 2;
+    // Build sector angle ranges (rotated), with depth ordering back→front.
+    final order = <int>[];
     for (var i = 0; i < slices.length; i++) {
+      order.add(i);
+    }
+    double midOf(int i) {
+      var s = -math.pi / 2 + rot;
+      for (var j = 0; j < i; j++) {
+        s += slices[j].pct / total * 2 * math.pi;
+      }
+      return s + slices[i].pct / total * math.pi;
+    }
+    // Front (sin near +1) drawn last.
+    order.sort((a, b) => math.sin(midOf(a)).compareTo(math.sin(midOf(b))));
+
+    final outerBounds = oval(ro, wall);
+    for (final i in order) {
+      var s = -math.pi / 2 + rot;
+      for (var j = 0; j < i; j++) {
+        s += slices[j].pct / total * 2 * math.pi;
+      }
       final full = slices[i].pct / total * 2 * math.pi;
-      final a0 = start + _gap / 2;
-      final a1 = start + full - _gap / 2;
-      start += full;
+      final a0 = s + _gap / 2;
+      final a1 = s + full - _gap / 2;
       if (a1 <= a0) continue;
       final sel = i == selected;
-      final path = _sector(outer, inner, a0, a1);
+      // Focused block rises higher when drilled.
+      final segWall = wall + (sel ? _lerp(0, 38) : 0);
+      // Colour: selected is always violet; others are graphite when flat and
+      // lerp to violet as we drill (all-violet drilled, focused brightest).
+      final Color hiC, midC, loC;
+      if (sel) {
+        hiC = const Color(0xFFE7D6FF);
+        midC = const Color(0xFFA374FF);
+        loC = const Color(0xFF6A2DBE);
+      } else {
+        hiC = Color.lerp(
+            const Color(0xFF8C8C9C), const Color(0xFFC4A8FF), drill)!;
+        midC = Color.lerp(
+            const Color(0xFF45454F), const Color(0xFF7E50E0), drill)!;
+        loC = Color.lerp(
+            const Color(0xFF1B1B22), const Color(0xFF45228C), drill)!;
+      }
+
+      // ── Outer wall (the 3D side facing the viewer) ──
+      if (segWall > 1) {
+        final wallPath = Path();
+        final t0 = onOval(ro, a0, segWall);
+        wallPath.moveTo(t0.dx, t0.dy);
+        wallPath.arcTo(oval(ro, segWall), a0, a1 - a0, false);
+        final b1 = onOval(ro, a1, 0);
+        wallPath.lineTo(b1.dx, b1.dy);
+        wallPath.arcTo(oval(ro, 0), a1, -(a1 - a0), false);
+        wallPath.close();
+        canvas.drawPath(
+          wallPath,
+          Paint()
+            ..isAntiAlias = true
+            ..shader = topShade(midC, loC,
+                Color.lerp(loC, Colors.black, 0.45)!, wallPath.getBounds()),
+        );
+      }
+
+      // ── Top face ──
+      final top = sectorPath(a0, a1, segWall);
       canvas.drawPath(
-        path,
+        top,
         Paint()
-          ..shader = sel ? violet : graphite
-          ..isAntiAlias = true,
+          ..isAntiAlias = true
+          ..shader = topShade(hiC, midC, loC, outerBounds),
       );
-      // Crisp edge highlight so sectors read as separate metal pieces.
+      // Bright top-edge highlight for the metallic read.
       canvas.drawPath(
-        path,
+        top,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1
-          ..color = Colors.white.withValues(alpha: sel ? 0.16 : 0.07)
+          ..color = Colors.white.withValues(alpha: sel ? 0.22 : 0.10)
           ..isAntiAlias = true,
       );
-      hits.add(_WedgeHit(i, path));
+      // Hit-test against the flat top face (drill==0) only.
+      if (drill < 0.05) hits.add(_WedgeHit(i, top));
     }
 
-    // ── % labels just outside each sector. ──
-    start = -math.pi / 2;
-    final lro = ro + 14;
-    for (var i = 0; i < slices.length; i++) {
-      final full = slices[i].pct / total * 2 * math.pi;
-      final mid = start + full / 2;
-      start += full;
-      final pos = Offset(
-          c.dx + math.cos(mid) * lro, c.dy + math.sin(mid) * lro * _sy);
-      final tp = TextPainter(
-        text: TextSpan(
-          text: '${slices[i].pct.round()}%',
-          style: TextStyle(
-            color: i == selected ? AppColors.primary : AppColors.textMuted,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
+    // ── Flat-only chrome: % labels, pointer, centre readout (fade with drill) ──
+    final flatAlpha = (1 - drill * 2).clamp(0.0, 1.0);
+    if (flatAlpha > 0.02) {
+      var s = -math.pi / 2 + rot;
+      final lro = ro + 14;
+      for (var i = 0; i < slices.length; i++) {
+        final full = slices[i].pct / total * 2 * math.pi;
+        final mid = s + full / 2;
+        s += full;
+        final pos = onOval(lro, mid, wall);
+        final tp = TextPainter(
+          text: TextSpan(
+            text: '${slices[i].pct.round()}%',
+            style: TextStyle(
+              color: (i == selected ? AppColors.primary : AppColors.textMuted)
+                  .withValues(alpha: flatAlpha),
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-        ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
+      }
+      // Centre readout.
+      final cs = slices[selected];
+      final pctTp = TextPainter(
+        text: TextSpan(
+            text: '${cs.pct.round()}%',
+            style: AppTextStyles.valueXl.copyWith(
+                fontWeight: FontWeight.w800,
+                color: AppColors.textHi.withValues(alpha: flatAlpha))),
         textDirection: TextDirection.ltr,
       )..layout();
-      tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
+      pctTp.paint(
+          canvas, Offset(cx, cy - wall) - Offset(pctTp.width / 2, pctTp.height / 2 + 9));
+      final nameTp = TextPainter(
+        text: TextSpan(
+            text: cs.sector,
+            style: AppTextStyles.micro
+                .copyWith(color: AppColors.textMuted.withValues(alpha: flatAlpha))),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '…',
+      )..layout(maxWidth: ri * 1.7);
+      nameTp.paint(canvas,
+          Offset(cx, cy - wall) - Offset(nameTp.width / 2, nameTp.height / 2 - 13));
     }
-
-    // ── White selection pointer on the inner edge of the selected sector. ──
-    _drawPointer(canvas, c, ri, total);
-
-    // ── Centre readout. ──
-    final s = slices[selected.clamp(0, slices.length - 1)];
-    final pctTp = TextPainter(
-      text: TextSpan(
-          text: '${s.pct.round()}%',
-          style: AppTextStyles.valueXl.copyWith(fontWeight: FontWeight.w800)),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    pctTp.paint(canvas, c - Offset(pctTp.width / 2, pctTp.height / 2 + 9));
-    final nameTp = TextPainter(
-      text: TextSpan(
-          text: s.sector,
-          style: AppTextStyles.micro.copyWith(color: AppColors.textMuted)),
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-      ellipsis: '…',
-    )..layout(maxWidth: ri * 1.7);
-    nameTp.paint(canvas, c - Offset(nameTp.width / 2, nameTp.height / 2 - 13));
-  }
-
-  void _drawPointer(Canvas canvas, Offset c, double ri, double total) {
-    var start = -math.pi / 2;
-    for (var i = 0; i < selected; i++) {
-      start += slices[i].pct / total * 2 * math.pi;
-    }
-    final mid = start + slices[selected].pct / total * math.pi;
-    final px = c.dx + math.cos(mid) * (ri - 6);
-    final py = c.dy + math.sin(mid) * (ri - 6) * _sy;
-    final tri = Path()
-      ..moveTo(px, py)
-      ..lineTo(px - 5 * math.sin(mid), py + 5 * math.cos(mid) - 4)
-      ..lineTo(px + 5 * math.sin(mid), py - 5 * math.cos(mid) - 4)
-      ..close();
-    canvas.drawPath(tri, Paint()..color = Colors.white.withValues(alpha: 0.92));
-  }
-
-  /// Smooth elliptical annular sector path (gaps handled by the caller's a0/a1).
-  Path _sector(Rect outer, Rect inner, double a0, double a1) {
-    final c = outer.center;
-    final p = Path();
-    final o0 = Offset(c.dx + outer.width / 2 * math.cos(a0),
-        c.dy + outer.height / 2 * math.sin(a0));
-    p.moveTo(o0.dx, o0.dy);
-    p.arcTo(outer, a0, a1 - a0, false);
-    final i1 = Offset(c.dx + inner.width / 2 * math.cos(a1),
-        c.dy + inner.height / 2 * math.sin(a1));
-    p.lineTo(i1.dx, i1.dy);
-    p.arcTo(inner, a1, -(a1 - a0), false);
-    p.close();
-    return p;
   }
 
   @override
   bool shouldRepaint(_RingPainter old) =>
-      old.selected != selected || !identical(old.slices, slices);
+      old.selected != selected ||
+      old.drill != drill ||
+      !identical(old.slices, slices);
 }
