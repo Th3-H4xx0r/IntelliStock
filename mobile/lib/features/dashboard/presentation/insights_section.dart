@@ -369,11 +369,35 @@ class _SectorDonutState extends State<_SectorDonut>
   double _spin = 0; // Z-rotation (radians) driven by horizontal drag in 3D mode.
 
   static const double _dim = 212.0;
+  static const double _tilt = 0.55; // 3D perspective tilt (must match labels)
 
   @override
   void dispose() {
     _ctrl.dispose();
     super.dispose();
+  }
+
+  /// Index of the segment currently rotated to the front (bottom, facing the
+  /// viewer) given [_spin] — used in 3D so the centre shows whichever category
+  /// you've spun into view.
+  int _frontIndex() {
+    final total = widget.slices.fold<double>(0, (s, e) => s + e.pct);
+    if (total <= 0) return 0;
+    var start = -math.pi / 2;
+    var best = 0;
+    var bestDelta = double.infinity;
+    for (var i = 0; i < widget.slices.length; i++) {
+      final mid = start + widget.slices[i].pct / total * math.pi;
+      var d = (mid + _spin - math.pi / 2) % (2 * math.pi); // front = +pi/2
+      if (d < 0) d += 2 * math.pi;
+      final delta = math.min(d, 2 * math.pi - d);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = i;
+      }
+      start += widget.slices[i].pct / total * 2 * math.pi;
+    }
+    return best;
   }
 
   void _selectAt(Offset local) {
@@ -411,7 +435,7 @@ class _SectorDonutState extends State<_SectorDonut>
           slices: slices,
           selected: sel,
           progress: Curves.easeOutCubic.transform(_ctrl.value),
-          depth: _is3d ? 16 : 0,
+          depth: _is3d ? 24 : 0,
           showLabels: !_is3d,
         ),
       ),
@@ -420,8 +444,8 @@ class _SectorDonutState extends State<_SectorDonut>
       donut = Transform(
         alignment: Alignment.center,
         transform: Matrix4.identity()
-          ..setEntry(3, 2, 0.0013)
-          ..rotateX(1.02)
+          ..setEntry(3, 2, 0.0012)
+          ..rotateX(_tilt)
           ..rotateZ(_spin),
         child: donut,
       );
@@ -438,7 +462,10 @@ class _SectorDonutState extends State<_SectorDonut>
             behavior: HitTestBehavior.opaque,
             onTapDown: (d) => _selectAt(d.localPosition),
             onHorizontalDragUpdate: _is3d
-                ? (d) => setState(() => _spin += d.delta.dx * 0.012)
+                ? (d) => setState(() {
+                      _spin += d.delta.dx * 0.012;
+                      _selected = _frontIndex(); // reveal the front category
+                    })
                 : null,
             child: Stack(
               alignment: Alignment.center,
@@ -497,6 +524,7 @@ class _SectorDonutState extends State<_SectorDonut>
               setState(() {
                 _is3d = true;
                 _spin = 0;
+                _selected = _frontIndex();
               });
             }),
           ],
@@ -542,15 +570,37 @@ class _DonutPainter extends CustomPainter {
     if (total <= 0) return;
     final center = size.center(Offset.zero);
     final r = size.width / 2;
-    final stroke = r * 0.24;
-    final ringR = r - stroke / 2 - (showLabels ? 22 : 8);
+    final stroke = r * 0.30;
+    final ringR = r - stroke / 2 - (showLabels ? 24 : 12);
     final rect = Rect.fromCircle(center: center, radius: ringR);
 
-    // Fake extrusion: a darker base ring offset downward shows below the top
-    // ring as 3D thickness (cheap; the outer rotateX makes it read as depth).
-    if (depth > 0) {
-      _drawRing(canvas, rect.translate(0, depth), total, stroke, 0.34);
+    // Flat mode: a soft drop shadow under the ring for depth.
+    if (depth == 0) {
+      canvas.drawArc(
+        rect.shift(const Offset(0, 7)),
+        0,
+        2 * math.pi,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = stroke
+          ..color = Colors.black.withValues(alpha: 0.40)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 9),
+      );
     }
+
+    // 3D extrusion: stacked, progressively-darker solid copies offset downward
+    // build a real side wall; the top face (below) carries the metallic sheen.
+    if (depth > 0) {
+      final layers = depth.round();
+      for (var dy = layers; dy >= 1; dy--) {
+        final t = dy / layers; // 1 = bottom of the wall
+        _drawRing(canvas, rect.translate(0, dy.toDouble()), total, stroke,
+            0.26 + 0.22 * (1 - t),
+            solid: true);
+      }
+    }
+    // Top face (metallic gradient).
     _drawRing(canvas, rect, total, stroke, 1.0);
 
     if (showLabels && progress > 0.5) {
@@ -559,8 +609,9 @@ class _DonutPainter extends CustomPainter {
   }
 
   void _drawRing(
-      Canvas canvas, Rect rect, double total, double stroke, double shade) {
-    const gap = 0.06;
+      Canvas canvas, Rect rect, double total, double stroke, double shade,
+      {bool solid = false}) {
+    const gap = 0.055;
     Color sh(int hex) {
       final c = Color(hex);
       return Color.fromARGB(
@@ -577,29 +628,27 @@ class _DonutPainter extends CustomPainter {
       final sweep = (full - gap).clamp(0.0, full) * progress;
       if (sweep > 0.001) {
         final isSel = i == selected;
-        // Metallic gradient: violet for the selected segment, graphite for the
-        // rest. All segments share the same stroke width (no lumpiness); the
-        // looping 4th stop gives a subtle specular sheen.
-        final colors = isSel
-            ? [sh(0xCBB6FF), sh(0x9B6BFF), sh(0x5B21B6), sh(0xCBB6FF)]
-            : [sh(0x5E5E6C), sh(0x3A3A45), sh(0x1A1A21), sh(0x5E5E6C)];
-        final shader = SweepGradient(
-          startAngle: start,
-          endAngle: start + full,
-          colors: colors,
-          stops: const [0.0, 0.4, 0.82, 1.0],
-        ).createShader(rect);
-        canvas.drawArc(
-          rect,
-          start + gap / 2,
-          sweep,
-          false,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = stroke
-            ..strokeCap = StrokeCap.round
-            ..shader = shader,
-        );
+        final paint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = stroke
+          ..strokeCap = StrokeCap.round;
+        if (solid) {
+          // Wall layer: a flat darkened mid-tone (cheap, no shader per layer).
+          paint.color = isSel ? sh(0x7C3AED) : sh(0x2C2C36);
+        } else {
+          // Metallic top face: a light→base→dark→light sweep gives a tubular
+          // specular sheen; violet for the selected segment, graphite for rest.
+          final colors = isSel
+              ? [sh(0xD9C7FF), sh(0xA178FF), sh(0x6D28D9), sh(0xD9C7FF)]
+              : [sh(0x6A6A78), sh(0x40404C), sh(0x191920), sh(0x6A6A78)];
+          paint.shader = SweepGradient(
+            startAngle: start,
+            endAngle: start + full,
+            colors: colors,
+            stops: const [0.0, 0.38, 0.8, 1.0],
+          ).createShader(rect);
+        }
+        canvas.drawArc(rect, start + gap / 2, sweep, false, paint);
       }
       start += full;
     }
@@ -608,7 +657,7 @@ class _DonutPainter extends CustomPainter {
   void _drawLabels(Canvas canvas, Offset center, double ringR, double stroke,
       double total) {
     var start = -math.pi / 2;
-    final labelR = ringR + stroke / 2 + 13;
+    final labelR = ringR + stroke / 2 + 14;
     for (var i = 0; i < slices.length; i++) {
       final full = slices[i].pct / total * 2 * math.pi;
       final mid = start + full / 2;
