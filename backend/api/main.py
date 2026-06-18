@@ -3536,6 +3536,65 @@ def api_brokerage_positions(
     return {"brokerage_id": brokerage_id, "cash": cash, "positions": positions}
 
 
+@app.get("/brokerages/{brokerage_id}/orders", response_class=JSONResponse)
+def api_brokerage_orders(
+    brokerage_id: str,
+    symbol: str = "",
+    limit: int = 50,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Recent fills/orders for a linked brokerage, optionally filtered to one
+    symbol (newest first). Sourced from the broker-direct live-state
+    `recent_trades` of an instance using this brokerage — same resolution path
+    as the positions endpoint."""
+    trades = []
+    try:
+        res = action_instances(conn)
+        inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
+    except Exception:
+        inst_list = []
+    for inst in (inst_list or []):
+        iid = str((inst or {}).get("id") or "")
+        if not iid:
+            continue
+        full = inst
+        try:
+            full = action_get_instance(conn, iid) or inst
+        except Exception:
+            pass
+        if _widget_brokerage_id(full) != brokerage_id:
+            continue
+        try:
+            ls = action_get_live_state(conn, iid)
+        except Exception:
+            ls = None
+        if isinstance(ls, dict) and ls.get("recent_trades"):
+            trades = ls.get("recent_trades") or []
+            break
+
+    want = (symbol or "").strip().upper()
+    out = []
+    for t in (trades or []):
+        t = t or {}
+        sym = (t.get("symbol") or "").upper()
+        if want and sym != want:
+            continue
+        out.append({
+            "ts": t.get("ts"),
+            "symbol": sym,
+            "side": str(t.get("side") or "").lower(),
+            "qty": t.get("qty") or 0.0,
+            "price": t.get("price") or 0.0,
+            "order_id": t.get("order_id"),
+        })
+    try:
+        lim = max(1, int(limit))
+    except Exception:
+        lim = 50
+    return {"brokerage_id": brokerage_id, "symbol": want or None, "orders": out[:lim]}
+
+
 # ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
 #
 # Used by LiveTradingView so the frontend never has to learn the brokerage_id
