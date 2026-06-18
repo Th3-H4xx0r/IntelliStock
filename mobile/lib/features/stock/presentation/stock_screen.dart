@@ -78,17 +78,17 @@ class _StockScreenState extends ConsumerState<StockScreen> {
               _chartArea(series, error: histAsync.hasError && series == null),
               const SizedBox(height: 10),
               _rangeTabs(),
-              const SizedBox(height: 30),
-              _statsCard(series, info),
               if (widget.position != null) ...[
-                const SizedBox(height: 32),
+                const SizedBox(height: 26),
                 _positionCard(widget.position!),
               ],
+              const SizedBox(height: 28),
+              _statsCard(series, info),
               if (((info['summary'] as String?) ?? '').trim().isNotEmpty) ...[
-                const SizedBox(height: 32),
+                const SizedBox(height: 30),
                 _aboutCard(info),
               ],
-              const SizedBox(height: 32),
+              const SizedBox(height: 30),
               _ordersCard(),
             ],
           ),
@@ -196,7 +196,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   Widget _chartArea(StockSeries? series, {required bool error}) {
     if (error) {
       return SizedBox(
-        height: 248,
+        height: 280,
         child: Center(
           child: Text("Couldn't load prices",
               style: AppTextStyles.micro.copyWith(color: AppColors.danger)),
@@ -206,7 +206,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     if (series == null || series.vals.length < 2) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 6),
-        child: Skeleton(height: 248, radius: 16),
+        child: Skeleton(height: 280, radius: 16),
       );
     }
     final up = series.vals.last >= series.vals.first;
@@ -214,7 +214,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
       timestamps: series.ts,
       values: series.vals,
       lineColor: up ? AppColors.success : AppColors.danger,
-      height: 248,
+      height: 280,
       indexed: true, // evenly-spaced points → no weekend/overnight gaps
       onScrub: (i) => _scrub.value = i,
     );
@@ -257,62 +257,67 @@ class _StockScreenState extends ConsumerState<StockScreen> {
 
   // ── Clean stats LIST (label left / value right), like the reference ──
   Widget _statsCard(StockSeries? series, Map<String, dynamic> info) {
-    final rows = <(String, String)>[];
-    num? n(dynamic v) => v is num ? v : null;
+    final cells = <(String, String)>[];
+    num? nv(dynamic v) => v is num ? v : null;
+    void add(String l, dynamic raw, String Function(num) f) {
+      final n = nv(raw);
+      if (n != null && n != 0) cells.add((l, f(n)));
+    }
 
-    final pc = n(info['previousClose']);
-    if (pc != null && pc != 0) rows.add(('Previous close', fmtMoney(pc)));
+    add('Prev close', info['previousClose'], fmtMoney);
     if (series != null && series.vals.length >= 2) {
       final v = series.vals;
-      rows.add(('Open', fmtMoney(v.first)));
-      final lo = v.reduce((a, b) => a < b ? a : b);
-      final hi = v.reduce((a, b) => a > b ? a : b);
-      rows.add(('$_range range', '${fmtMoney(lo)} – ${fmtMoney(hi)}'));
+      cells.add(('Open', fmtMoney(v.first)));
+      cells.add(('$_range high', fmtMoney(v.reduce((a, b) => a > b ? a : b))));
+      cells.add(('$_range low', fmtMoney(v.reduce((a, b) => a < b ? a : b))));
     }
-    final lo52 = n(info['fiftyTwoWeekLow']);
-    final hi52 = n(info['fiftyTwoWeekHigh']);
-    if (lo52 != null && hi52 != null && hi52 != 0) {
-      rows.add(('52-week range', '${fmtMoney(lo52)} – ${fmtMoney(hi52)}'));
-    }
-    final vol = n(info['volume']);
-    if (vol != null && vol != 0) rows.add(('Volume', _compact(vol)));
-    final mcap = n(info['marketCap']);
-    if (mcap != null && mcap != 0) rows.add(('Market cap', '\$${_compact(mcap)}'));
-    final pe = n(info['trailingPE']);
-    if (pe != null && pe != 0) rows.add(('P/E ratio', pe.toStringAsFixed(2)));
-    final beta = n(info['beta']);
-    if (beta != null && beta != 0) rows.add(('Beta', beta.toStringAsFixed(2)));
+    add('52W high', info['fiftyTwoWeekHigh'], fmtMoney);
+    add('52W low', info['fiftyTwoWeekLow'], fmtMoney);
+    add('Volume', info['volume'], _compact);
+    add('Avg volume', info['averageVolume'], _compact);
+    add('Market cap', info['marketCap'], (n) => '\$${_compact(n)}');
+    add('P/E', info['trailingPE'], (n) => n.toStringAsFixed(2));
+    add('Fwd P/E', info['forwardPE'], (n) => n.toStringAsFixed(2));
+    add('Beta', info['beta'], (n) => n.toStringAsFixed(2));
+    add('Analyst target', info['targetMeanPrice'], fmtMoney);
 
-    if (rows.isEmpty) return const SizedBox.shrink();
+    if (cells.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _sectionTitle('Key statistics'),
-          const SizedBox(height: 6),
-          for (var i = 0; i < rows.length; i++) ...[
-            if (i > 0)
-              Divider(height: 1, color: Colors.white.withValues(alpha: 0.05)),
-            _statRow(rows[i].$1, rows[i].$2),
-          ],
+          const SizedBox(height: 16),
+          for (var i = 0; i < cells.length; i += 2)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 18),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: _statCell(cells[i])),
+                  Expanded(
+                      child: i + 1 < cells.length
+                          ? _statCell(cells[i + 1])
+                          : const SizedBox.shrink()),
+                ],
+              ),
+            ),
         ],
       ),
     );
   }
 
-  Widget _statRow(String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 13),
-        child: Row(
-          children: [
-            Text(label,
-                style: AppTextStyles.body.copyWith(color: AppColors.textMuted)),
-            const Spacer(),
-            Text(value,
-                style: AppTextStyles.bodyHi
-                    .copyWith(fontWeight: FontWeight.w700)),
-          ],
-        ),
+  Widget _statCell((String, String) s) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(s.$1.toUpperCase(),
+              style: AppTextStyles.nano
+                  .copyWith(color: AppColors.textFaint, letterSpacing: 0.4)),
+          const SizedBox(height: 4),
+          Text(s.$2,
+              style: AppTextStyles.value.copyWith(fontWeight: FontWeight.w700)),
+        ],
       );
 
   Widget _sectionTitle(String s) => Text(
@@ -342,12 +347,12 @@ class _StockScreenState extends ConsumerState<StockScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _sectionTitle('Your position'),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           Row(
             children: [
               if (frac != null) ...[
-                _DiversityGauge(fraction: frac, color: color),
-                const SizedBox(width: 16),
+                _DiversityGauge(fraction: frac, color: color, size: 46),
+                const SizedBox(width: 14),
               ],
               Expanded(
                 child: Column(
@@ -356,25 +361,40 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                     Text('TOTAL P&L',
                         style: AppTextStyles.nano
                             .copyWith(color: AppColors.textFaint)),
-                    const SizedBox(height: 4),
-                    Text(fmtPnl(p.unrealizedPnl),
-                        style: AppTextStyles.valueLg.copyWith(color: color)),
-                    const SizedBox(height: 2),
-                    Text(fmtPct(p.unrealizedPnlPct),
-                        style: AppTextStyles.micro.copyWith(
-                            color: color, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 3),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(fmtPnl(p.unrealizedPnl),
+                            style:
+                                AppTextStyles.valueLg.copyWith(color: color)),
+                        const SizedBox(width: 6),
+                        Text(fmtPct(p.unrealizedPnlPct),
+                            style: AppTextStyles.micro.copyWith(
+                                color: color, fontWeight: FontWeight.w700)),
+                      ],
+                    ),
                   ],
                 ),
               ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text('VALUE',
+                      style: AppTextStyles.nano
+                          .copyWith(color: AppColors.textFaint)),
+                  const SizedBox(height: 3),
+                  Text(fmtMoney(p.marketValue),
+                      style: AppTextStyles.value
+                          .copyWith(fontWeight: FontWeight.w700)),
+                ],
+              ),
             ],
           ),
-          const SizedBox(height: 4),
-          Divider(height: 26, color: Colors.white.withValues(alpha: 0.06)),
-          _statRow('Shares', qtyStr),
-          Divider(height: 1, color: Colors.white.withValues(alpha: 0.05)),
-          _statRow('Market value', fmtMoney(p.marketValue)),
-          Divider(height: 1, color: Colors.white.withValues(alpha: 0.05)),
-          _statRow('Average entry', fmtMoney(p.avgEntryPrice)),
+          const SizedBox(height: 10),
+          Text('$qtyStr shares · avg ${fmtMoney(p.avgEntryPrice)}',
+              style: AppTextStyles.micro.copyWith(color: AppColors.textMuted)),
         ],
       ),
     );
@@ -552,9 +572,11 @@ String _compact(num v) {
 /// Circular allocation gauge: arc = this position's share of the portfolio,
 /// with the percentage in the centre — the diversity indicator.
 class _DiversityGauge extends StatelessWidget {
-  const _DiversityGauge({required this.fraction, required this.color});
+  const _DiversityGauge(
+      {required this.fraction, required this.color, this.size = 60});
   final double fraction;
   final Color color;
+  final double size;
 
   String get _label {
     final pct = fraction * 100;
@@ -566,13 +588,13 @@ class _DiversityGauge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 60,
-      height: 60,
+      width: size,
+      height: size,
       child: Stack(
         alignment: Alignment.center,
         children: [
           CustomPaint(
-            size: const Size(60, 60),
+            size: Size(size, size),
             painter:
                 _GaugePainter(fraction: fraction.clamp(0.0, 1.0), color: color),
           ),
