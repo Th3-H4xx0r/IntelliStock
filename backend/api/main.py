@@ -3615,6 +3615,48 @@ def api_brokerage_bot_activity(
     )
 
 
+def _resolve_instance_for_brokerage(conn, brokerage_id):
+    """Id of an instance whose live brokerage == brokerage_id (or None). Same
+    resolution used by /orders and /bot-activity, so per-account views line up."""
+    try:
+        res = action_instances(conn)
+        inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
+    except Exception:
+        inst_list = []
+    for inst in (inst_list or []):
+        iid = str((inst or {}).get("id") or "")
+        if not iid:
+            continue
+        full = inst
+        try:
+            full = action_get_instance(conn, iid) or inst
+        except Exception:
+            pass
+        if _widget_brokerage_id(full) == brokerage_id:
+            return iid
+    return None
+
+
+@app.get("/brokerages/{brokerage_id}/discovered", response_class=JSONResponse)
+def api_brokerage_discovered(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Discover-engine opportunities for the instance behind this account
+    (active only, newest first). Empty when no instance is linked."""
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if not iid:
+        return {"stocks": [], "count": 0}
+    return _run(action_list_discovered_stocks, conn, iid, "active")
+
+
+@app.get("/brokerages/{brokerage_id}/trends", response_class=JSONResponse)
+def api_brokerage_trends(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Detected market trends for the instance behind this account (active only).
+    Empty when no instance is linked."""
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if not iid:
+        return {"trends": [], "count": 0}
+    return _run(action_list_trends, conn, iid, "active")
+
+
 # ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
 #
 # Used by LiveTradingView so the frontend never has to learn the brokerage_id
