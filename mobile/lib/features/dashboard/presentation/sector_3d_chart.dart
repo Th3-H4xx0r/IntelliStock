@@ -48,9 +48,32 @@ class _Sector3DChartState extends State<Sector3DChart>
   double _rotFrom = 0;
   double _rotTo = 0;
 
+  // Continuous finger-tracking rotation while drilled: during a drag the ring
+  // follows the finger (_rot), and on release it eases to the nearest sector.
+  bool _dragging = false;
+  double _rot = 0;
+  static const double _rotPerPx = 0.009; // drag sensitivity (rad per px)
+
   double get _rotNow {
+    if (_dragging) return _rot;
     final t = Curves.easeInOut.transform(_rotCtrl.value);
     return _rotFrom + (_rotTo - _rotFrom) * t;
+  }
+
+  /// Sector whose mid-angle is currently nearest the top, given rotation [rot].
+  int _nearestTop(double rot) {
+    var best = 0;
+    var bestD = double.infinity;
+    for (var i = 0; i < widget.slices.length; i++) {
+      var d = (_natMid(i) + rot) % (2 * math.pi);
+      if (d > math.pi) d -= 2 * math.pi;
+      if (d < -math.pi) d += 2 * math.pi;
+      if (d.abs() < bestD) {
+        bestD = d.abs();
+        best = i;
+      }
+    }
+    return best;
   }
 
   /// Un-rotated mid-angle offset of sector [i] from the ring's start (-π/2).
@@ -86,26 +109,41 @@ class _Sector3DChartState extends State<Sector3DChart>
     super.dispose();
   }
 
-  void _advance(int delta) {
+  // Flat view: a drag just moves the highlighted sector (the flat ring doesn't
+  // rotate). Drilled rotation is handled continuously in the drag callbacks.
+  void _advanceFlat(int delta) {
     final n = widget.slices.length;
     if (n == 0) return;
     var ns = (_selected + delta) % n;
     if (ns < 0) ns += n;
     if (ns == _selected) return;
     HapticFeedback.selectionClick();
-    if (_drill.value > 0.5) {
-      // Drilled: animate the ring so the new sector rotates up to the top.
-      final from = _rotNow;
-      final to = _shortestTo(_targetRot(ns), from);
-      setState(() {
+    setState(() => _selected = ns);
+  }
+
+  // Drilled drag: rotate the ring with the finger, live-selecting whatever
+  // sector is nearest the top.
+  void _dragRotate(double dx) {
+    setState(() {
+      _rot += dx * _rotPerPx;
+      final ns = _nearestTop(_rot);
+      if (ns != _selected) {
         _selected = ns;
-        _rotFrom = from;
-        _rotTo = to;
-      });
-      _rotCtrl.forward(from: 0);
-    } else {
-      setState(() => _selected = ns);
-    }
+        HapticFeedback.selectionClick();
+      }
+    });
+  }
+
+  // Drilled release: ease the nearest sector exactly to the top.
+  void _settleRotation() {
+    final target = _shortestTo(_targetRot(_selected), _rot);
+    _dragging = false;
+    setState(() {
+      _rotFrom = _rot;
+      _rotTo = target;
+      _rot = target;
+    });
+    _rotCtrl.forward(from: 0);
   }
 
   void _drillInto(int i) {
@@ -115,6 +153,7 @@ class _Sector3DChartState extends State<Sector3DChart>
       _selected = i;
       _rotFrom = target;
       _rotTo = target;
+      _rot = target;
     });
     // Settle the rotation controller so _rotNow == target; the drill controller
     // provides the easing as ringRot*drill sweeps the sector up while extruding.
@@ -155,15 +194,32 @@ class _Sector3DChartState extends State<Sector3DChart>
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTapDown: (e) => _onTapDown(e.localPosition),
-            onHorizontalDragUpdate: (e) {
-              _dragAcc += e.delta.dx;
-              const step = 26.0;
-              while (_dragAcc.abs() >= step) {
-                _advance(_dragAcc > 0 ? 1 : -1);
-                _dragAcc -= _dragAcc > 0 ? step : -step;
+            onHorizontalDragStart: (_) {
+              _dragAcc = 0;
+              if (_drill.value > 0.5) {
+                _rot = _rotNow; // grab the current displayed rotation
+                _dragging = true;
               }
             },
-            onHorizontalDragEnd: (_) => _dragAcc = 0,
+            onHorizontalDragUpdate: (e) {
+              if (_dragging) {
+                _dragRotate(e.delta.dx); // drilled: follow the finger
+              } else {
+                // Flat: gentle discrete highlight step (not snappy).
+                _dragAcc += e.delta.dx;
+                const step = 44.0;
+                while (_dragAcc.abs() >= step) {
+                  _advanceFlat(_dragAcc > 0 ? 1 : -1);
+                  _dragAcc -= _dragAcc > 0 ? step : -step;
+                }
+              }
+            },
+            onHorizontalDragEnd: (_) {
+              if (_dragging) {
+                _settleRotation(); // ease nearest sector to the top
+              }
+              _dragAcc = 0;
+            },
             child: Stack(
               children: [
                 Positioned.fill(
@@ -273,8 +329,8 @@ class _RingPainter extends CustomPainter {
     // Lerped geometry: flat ring → drilled (bigger, lower-tilt, taller walls,
     // centre pushed down so the raised focused block sits up top).
     final sy = _lerp(1.0, 0.42); // flat = round top-down → tilted when drilled
-    final ro = size.width * _lerp(0.33, 0.60);
-    final ri = size.width * _lerp(0.205, 0.39);
+    final ro = size.width * _lerp(0.33, 0.58);
+    final ri = size.width * _lerp(0.205, 0.33);
     final wall = _lerp(0, 64); // no extrusion flat → tall metallic blocks drilled
     final cx = size.width / 2;
     final cy = size.height * _lerp(0.5, 0.86);
@@ -322,6 +378,26 @@ class _RingPainter extends CustomPainter {
         ..color = Colors.black.withValues(alpha: _lerp(0.28, 0.5))
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 16),
     );
+
+    // Recessed floor inside the hole so you don't see through to the dark card
+    // — this is what kills the "hollow shell" look. Drilled only (flat shows a
+    // centre readout over the hole instead).
+    if (drill > 0.02) {
+      final fa = drill.clamp(0.0, 1.0);
+      final floor = oval(ri * 0.985, 2);
+      canvas.drawOval(
+        floor,
+        Paint()
+          ..isAntiAlias = true
+          ..shader = RadialGradient(
+            colors: [
+              const Color(0xFF1A0C36).withValues(alpha: fa),
+              const Color(0xFF0A0416).withValues(alpha: fa),
+            ],
+            stops: const [0.0, 1.0],
+          ).createShader(floor),
+      );
+    }
 
     // Build sector angle ranges (rotated), with depth ordering back→front.
     final order = <int>[];
@@ -371,7 +447,7 @@ class _RingPainter extends CustomPainter {
         // occluded and would bleed into the hole, so skip it. This is what
         // makes the ring read as a SOLID band instead of a hollow shell.
         final midAng = (a0 + a1) / 2;
-        if (math.sin(midAng) < 0.18) {
+        if (math.sin(midAng) < 0.35) {
           final inner = Path();
           final it0 = onOval(ri, a0, segWall);
           inner.moveTo(it0.dx, it0.dy);
@@ -452,6 +528,29 @@ class _RingPainter extends CustomPainter {
             colors: [Color.lerp(hiC, Colors.white, 0.24)!, hiC, midC, loC],
             stops: const [0.0, 0.20, 0.58, 1.0],
           ).createShader(outerBounds),
+      );
+      // Metallic angular reflection: additive highlight bands fixed in screen
+      // space (not rotated with the ring), so glints sweep across the metal as
+      // it turns — the way curved brushed metal reflects a fixed environment.
+      canvas.drawPath(
+        top,
+        Paint()
+          ..isAntiAlias = true
+          ..blendMode = BlendMode.plus
+          ..shader = SweepGradient(
+            startAngle: -math.pi / 2,
+            endAngle: 3 * math.pi / 2,
+            colors: [
+              Colors.transparent,
+              Colors.white.withValues(alpha: sel ? 0.22 : 0.14),
+              Colors.transparent,
+              Colors.white.withValues(alpha: 0.05),
+              Colors.transparent,
+              Colors.white.withValues(alpha: sel ? 0.15 : 0.10),
+              Colors.transparent,
+            ],
+            stops: const [0.0, 0.10, 0.26, 0.5, 0.74, 0.90, 1.0],
+          ).createShader(Rect.fromCircle(center: c, radius: ro)),
       );
       // Bright top-edge highlight for the metallic read.
       canvas.drawPath(

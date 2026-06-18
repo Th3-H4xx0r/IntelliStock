@@ -748,8 +748,9 @@ class _LiveStatusChipState extends State<_LiveStatusChip> {
             height: 6,
             decoration: BoxDecoration(shape: BoxShape.circle, color: c)),
         const SizedBox(width: 5),
-        Text(open ? 'Markets open · Live' : 'Markets closed',
-            style: AppTextStyles.nano.copyWith(color: c)),
+        Text(open ? 'Markets Open' : 'Markets Closed',
+            style: AppTextStyles.nano
+                .copyWith(color: c, fontWeight: FontWeight.w700)),
       ],
     );
   }
