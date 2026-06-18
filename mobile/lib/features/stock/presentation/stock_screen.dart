@@ -7,7 +7,6 @@ import '../../../core/formatters/formatters.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/skeleton.dart';
-import '../../agent_runs/data/agent_repository.dart';
 import '../../dashboard/data/dashboard_repository.dart';
 import '../../live_trading/data/models/live_state.dart';
 import '../application/stock_controller.dart';
@@ -48,6 +47,10 @@ class StockScreen extends ConsumerStatefulWidget {
 class _StockScreenState extends ConsumerState<StockScreen> {
   String _range = '1D';
   final ValueNotifier<int?> _scrub = ValueNotifier<int?>(null);
+  // The range whose entry animation has already played. Lets the chart animate
+  // once when a range first appears (or on a range switch) but NOT on every 10 s
+  // live poll — which otherwise replayed the grow-in animation each tick.
+  String? _chartAnimatedRange;
 
   @override
   void dispose() {
@@ -59,41 +62,58 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   Widget build(BuildContext context) {
     final histAsync =
         ref.watch(stockHistoryProvider((symbol: widget.symbol, range: _range)));
-    final info = ref.watch(stockInfoProvider(widget.symbol)).valueOrNull ??
-        const <String, dynamic>{};
+    final infoAsync = ref.watch(stockInfoProvider(widget.symbol));
+    final info = infoAsync.valueOrNull ?? const <String, dynamic>{};
+    // True only while the very first fetch is in flight (no data yet) — drives
+    // the stats/about skeletons.
+    final infoLoading = infoAsync.isLoading && infoAsync.valueOrNull == null;
     final series = histAsync.valueOrNull;
+    final hasSummary = ((info['summary'] as String?) ?? '').trim().isNotEmpty;
     final topInset = MediaQuery.viewPaddingOf(context).top;
 
+    // SingleChildScrollView + Column (not ListView) so every section stays
+    // mounted while scrolling: the chart animates once, and the orders/bot
+    // providers fetch once on init instead of re-firing each time a section
+    // scrolls back into view.
     return Scaffold(
       backgroundColor: AppColors.canvas,
       body: Stack(
         children: [
           const _StockBackdrop(),
-          ListView(
+          SingleChildScrollView(
             padding: EdgeInsets.fromLTRB(20, topInset + 4, 20, 40),
-            children: [
-              _topBar(),
-              const SizedBox(height: 14),
-              _header(series, info),
-              const SizedBox(height: 18),
-              _chartArea(series, error: histAsync.hasError && series == null),
-              const SizedBox(height: 10),
-              _rangeTabs(),
-              if (widget.position != null) ...[
-                const SizedBox(height: 26),
-                _positionCard(widget.position!),
-              ],
-              const SizedBox(height: 28),
-              _botCard(),
-              const SizedBox(height: 28),
-              _statsCard(series, info),
-              if (((info['summary'] as String?) ?? '').trim().isNotEmpty) ...[
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _topBar(),
+                const SizedBox(height: 14),
+                _header(series, info),
+                const SizedBox(height: 18),
+                _chartArea(series, error: histAsync.hasError && series == null),
+                const SizedBox(height: 10),
+                _rangeTabs(),
+                if (widget.position != null) ...[
+                  const SizedBox(height: 26),
+                  _positionCard(widget.position!),
+                ],
+                const SizedBox(height: 28),
+                _botCard(),
+                const SizedBox(height: 28),
+                if (infoLoading)
+                  _statsSkeleton()
+                else
+                  _statsCard(series, info),
+                if (infoLoading) ...[
+                  const SizedBox(height: 30),
+                  _aboutSkeleton(),
+                ] else if (hasSummary) ...[
+                  const SizedBox(height: 30),
+                  _aboutCard(info),
+                ],
                 const SizedBox(height: 30),
-                _aboutCard(info),
+                _ordersCard(),
               ],
-              const SizedBox(height: 30),
-              _ordersCard(),
-            ],
+            ),
           ),
         ],
       ),
@@ -213,12 +233,21 @@ class _StockScreenState extends ConsumerState<StockScreen> {
       );
     }
     final up = series.vals.last >= series.vals.first;
+    // Animate only the first time this range's data appears; subsequent 10 s
+    // poll updates redraw without replaying the grow-in animation.
+    final animate = _chartAnimatedRange != _range;
+    if (animate) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _chartAnimatedRange = _range;
+      });
+    }
     return ScrubbableAreaChart(
       timestamps: series.ts,
       values: series.vals,
       lineColor: up ? AppColors.success : AppColors.danger,
       height: 280,
       indexed: true, // evenly-spaced points → no weekend/overnight gaps
+      animate: animate,
       onScrub: (i) => _scrub.value = i,
     );
   }
@@ -343,6 +372,91 @@ class _StockScreenState extends ConsumerState<StockScreen> {
         ),
       );
 
+  // ── Skeleton placeholders (shown while a section's data loads) ──
+  Widget _statsSkeleton() => Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('Key statistics'),
+            const SizedBox(height: 18),
+            for (var r = 0; r < 3; r++)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 18),
+                child: Row(
+                  children: [
+                    for (var c = 0; c < 3; c++) ...[
+                      if (c > 0) const SizedBox(width: 14),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Skeleton(width: 46, height: 9, radius: 4),
+                            SizedBox(height: 7),
+                            Skeleton(width: 62, height: 15, radius: 5),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+          ],
+        ),
+      );
+
+  Widget _aboutSkeleton() => Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('About'),
+            const SizedBox(height: 14),
+            const Skeleton(height: 12, radius: 5),
+            const SizedBox(height: 9),
+            const Skeleton(height: 12, radius: 5),
+            const SizedBox(height: 9),
+            const Skeleton(width: 220, height: 12, radius: 5),
+          ],
+        ),
+      );
+
+  Widget _botRowSkeleton() => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: const [
+            Skeleton(width: 150, height: 13, radius: 5),
+            SizedBox(height: 6),
+            Skeleton(width: 90, height: 10, radius: 4),
+            SizedBox(height: 7),
+            Skeleton(height: 10, radius: 4),
+          ],
+        ),
+      );
+
+  Widget _orderRowSkeleton() => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            const Skeleton(width: 40, height: 18, radius: 5),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Skeleton(width: 110, height: 13, radius: 5),
+                  SizedBox(height: 5),
+                  Skeleton(width: 78, height: 10, radius: 4),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Skeleton(width: 54, height: 13, radius: 5),
+          ],
+        ),
+      );
+
   // ── Position card with diversity gauge + total P&L ──
   Widget _positionCard(AccountPosition p) {
     final up = p.unrealizedPnl >= 0;
@@ -454,38 +568,40 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 color: AppColors.primary, fontWeight: FontWeight.w600)),
       );
 
-  // ── Bot activity: recent decision cycles that touched this symbol ──
+  // ── Bot activity: the bot's own buy/sell decisions for this symbol + why ──
   Widget _botCard() {
-    return Consumer(builder: (context, ref, _) {
-      final async = ref.watch(stockDecisionsProvider(widget.symbol));
-      return Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _sectionTitle('Bot activity'),
-            const SizedBox(height: 8),
-            async.when(
-              loading: () => const Padding(
-                padding: EdgeInsets.symmetric(vertical: 16),
-                child: Center(
-                    child: SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2))),
-              ),
-              error: (_, _) => _ordersEmpty("Couldn't load bot activity"),
-              data: (runs) => runs.isEmpty
-                  ? _ordersEmpty('No recent bot decisions for ${widget.symbol}')
-                  : Column(children: [
-                      for (final r in runs)
-                        _BotRunRow(run: r, symbol: widget.symbol),
-                    ]),
-            ),
-          ],
-        ),
-      );
-    });
+    final bid = widget.brokerageId;
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle('Bot activity'),
+          const SizedBox(height: 8),
+          if (bid == null)
+            _ordersEmpty('No linked brokerage')
+          else
+            Consumer(builder: (context, ref, _) {
+              final async = ref.watch(
+                stockBotActivityProvider(
+                    (brokerageId: bid, symbol: widget.symbol)),
+              );
+              return async.when(
+                loading: () => Column(
+                  children: [for (var i = 0; i < 2; i++) _botRowSkeleton()],
+                ),
+                error: (_, _) => _ordersEmpty("Couldn't load bot activity"),
+                data: (events) => events.isEmpty
+                    ? _ordersEmpty(
+                        'No bot trades logged yet for ${widget.symbol}')
+                    : Column(children: [
+                        for (final e in events) _BotEventRow(event: e),
+                      ]),
+              );
+            }),
+        ],
+      ),
+    );
   }
 
   // ── Orders ──
@@ -506,13 +622,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 stockOrdersProvider((brokerageId: bid, symbol: widget.symbol)),
               );
               return ordersAsync.when(
-                loading: () => const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Center(
-                      child: SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2))),
+                loading: () => Column(
+                  children: [for (var i = 0; i < 3; i++) _orderRowSkeleton()],
                 ),
                 error: (_, _) => _ordersEmpty("Couldn't load orders"),
                 data: (orders) => orders.isEmpty
@@ -688,23 +799,27 @@ class _GaugePainter extends CustomPainter {
       old.fraction != fraction || old.color != color;
 }
 
-class _BotRunRow extends StatelessWidget {
-  const _BotRunRow({required this.run, required this.symbol});
-  final AgentRun run;
-  final String symbol;
+/// One real bot buy/sell for this symbol: a side chip, the driving strategy +
+/// when, the reasoning, and (if any) the price it acted on / an override tag.
+class _BotEventRow extends StatelessWidget {
+  const _BotEventRow({required this.event});
+  final BotTradeEvent event;
 
   @override
   Widget build(BuildContext context) {
-    final sym = symbol.toUpperCase();
-    final labels = run.stages
-        .where((st) => st.stocks.any((s) => s.toUpperCase() == sym))
-        .map((st) => st.label)
-        .where((l) => l.isNotEmpty)
+    final color = event.isBuy ? AppColors.success : AppColors.danger;
+    final title = (event.strategy ?? '').trim().isNotEmpty
+        ? event.strategy!.trim()
+        : (event.isBuy ? 'Buy decision' : 'Sell decision');
+    final reason = event.reason.trim();
+    // Other strategies that voted the same way (excluding the primary driver
+    // already shown as the title) — the "who else agreed" detail.
+    final backers = event.contributors
+        .map((c) => (c.strategy ?? '').trim())
+        .where((s) => s.isNotEmpty && s != title)
+        .toSet()
+        .take(3)
         .toList();
-    final fr = (run.finalResult ?? '').trim();
-    final name = (run.name != null && run.name!.isNotEmpty)
-        ? run.name!
-        : 'Trading cycle';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Column(
@@ -712,32 +827,72 @@ class _BotRunRow extends StatelessWidget {
         children: [
           Row(
             children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: AppColors.fill(color),
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Text(event.side.toUpperCase(),
+                    style: AppTextStyles.nano
+                        .copyWith(color: color, fontWeight: FontWeight.w800)),
+              ),
+              const SizedBox(width: 8),
               Expanded(
-                child: Text(name,
+                child: Text(title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: AppTextStyles.bodyHi
                         .copyWith(fontWeight: FontWeight.w600)),
               ),
-              if (run.createdAt != null)
-                Text(fmtRelative(run.createdAt),
+              if (event.ts != null)
+                Text(fmtRelative(event.ts),
                     style:
                         AppTextStyles.nano.copyWith(color: AppColors.textDim)),
             ],
           ),
-          if (labels.isNotEmpty) ...[
-            const SizedBox(height: 3),
-            Text(labels.join('  ·  '),
-                style: AppTextStyles.micro.copyWith(
-                    color: AppColors.primary, fontWeight: FontWeight.w600)),
-          ],
-          if (fr.isNotEmpty) ...[
+          if (reason.isNotEmpty) ...[
             const SizedBox(height: 5),
-            Text(fr,
+            Text(reason,
                 maxLines: 4,
                 overflow: TextOverflow.ellipsis,
                 style: AppTextStyles.body
                     .copyWith(color: AppColors.textMd, height: 1.4)),
+          ],
+          if (backers.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Text('Backed by ${backers.join(', ')}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.micro.copyWith(
+                    color: AppColors.primary, fontWeight: FontWeight.w600)),
+          ],
+          if (event.price != null || event.overrideApplied) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                if (event.price != null)
+                  Text('@ ${fmtMoney(event.price!)}',
+                      style: AppTextStyles.micro
+                          .copyWith(color: AppColors.textMuted)),
+                if (event.price != null && event.overrideApplied)
+                  const SizedBox(width: 10),
+                if (event.overrideApplied)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: AppColors.fill(AppColors.primary),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text('OVERRIDDEN',
+                        style: AppTextStyles.nano.copyWith(
+                            color: AppColors.primary,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.4)),
+                  ),
+              ],
+            ),
           ],
         ],
       ),

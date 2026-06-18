@@ -2,7 +2,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/formatters/formatters.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/polling/poller.dart';
-import '../../agent_runs/data/agent_repository.dart';
 import '../../live_trading/data/live_repository.dart';
 import '../../live_trading/data/models/live_state.dart';
 
@@ -106,37 +105,85 @@ final stockInfoProvider =
   },
 );
 
-/// Whole-word, regex-escaped matcher for a ticker (so `A` doesn't match inside
-/// `AAPL`, and `BRK.B`'s dot is literal). Operate on already-upper-cased text.
-RegExp _wordRegex(String sym) =>
-    RegExp(r'(?<![A-Z0-9.])' + RegExp.escape(sym) + r'(?![A-Z0-9.])');
+/// One contributing strategy behind a bot decision (who else agreed).
+class BotContributor {
+  const BotContributor({this.strategy, this.weight, this.reason});
+  final String? strategy;
+  final double? weight;
+  final String? reason;
 
-/// Recent bot decision cycles that involved this symbol (from the agent cycle
-/// log). Each [AgentRun] has stages (with the stocks they touched) + a
-/// final-result summary of what the bot decided. Empty/never-throws.
-final stockDecisionsProvider =
-    FutureProvider.autoDispose.family<List<AgentRun>, String>(
-  (ref, symbol) async {
+  factory BotContributor.fromJson(Map<String, dynamic> j) => BotContributor(
+        strategy: j['strategy']?.toString(),
+        weight: (j['weight'] as num?)?.toDouble(),
+        reason: j['reason']?.toString(),
+      );
+}
+
+/// One real buy/sell the bot made for a symbol, with the reasoning that drove
+/// it — from the backend's `BotTradeDecisions` log (per instance/brokerage).
+class BotTradeEvent {
+  const BotTradeEvent({
+    required this.symbol,
+    required this.side,
+    this.ts,
+    this.price,
+    this.strategy,
+    this.actionIntent,
+    this.reason = '',
+    this.score,
+    this.overrideApplied = false,
+    this.contributors = const [],
+  });
+
+  final String symbol;
+  final String side; // "buy" | "sell"
+  final DateTime? ts;
+  final double? price;
+  final String? strategy;
+  final String? actionIntent;
+  final String reason;
+  final double? score;
+  final bool overrideApplied;
+  final List<BotContributor> contributors;
+
+  bool get isBuy => side.toLowerCase() == 'buy';
+
+  factory BotTradeEvent.fromJson(Map<String, dynamic> j) => BotTradeEvent(
+        symbol: (j['symbol'] ?? '').toString(),
+        side: (j['side'] ?? 'buy').toString(),
+        // Fall back to created_at when ts is missing/null/blank/unparseable.
+        ts: parseDateTime(j['ts']) ?? parseDateTime(j['created_at']),
+        price: (j['price'] as num?)?.toDouble(),
+        strategy: j['strategy']?.toString(),
+        actionIntent: j['action_intent']?.toString(),
+        reason: (j['reason'] ?? '').toString(),
+        score: (j['score'] as num?)?.toDouble(),
+        overrideApplied: j['override_applied'] == true,
+        contributors: (j['contributors'] as List? ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(BotContributor.fromJson)
+            .toList(),
+      );
+}
+
+/// The bot's actual buy/sell decisions for a symbol on a brokerage (newest
+/// first), with reasoning. Reads the backend `BotTradeDecisions` log that live
+/// instances write on each confirmed trade. Empty/never-throws so the screen
+/// degrades gracefully if the backend isn't deployed yet or nothing's logged.
+typedef StockBotActivityArgs = ({String brokerageId, String symbol});
+
+final stockBotActivityProvider =
+    FutureProvider.autoDispose.family<List<BotTradeEvent>, StockBotActivityArgs>(
+  (ref, args) async {
     try {
       final data = await ref.read(apiClientProvider).get<Map<String, dynamic>>(
-        '/agent/runs',
-        query: {'page': 1, 'per_page': 60},
+        '/brokerages/${args.brokerageId}/bot-activity',
+        query: {'symbol': args.symbol, 'per_page': 20},
       );
-      final page = AgentRunsPage.fromJson(data);
-      final sym = symbol.toUpperCase();
-      // A cycle may reference the symbol in a stage's structured `stocks`, or
-      // only mention it in the stage details / final-result narrative — match
-      // any of those so a real buy/sell decision isn't missed.
-      bool mentions(String? text) =>
-          text != null && _wordRegex(sym).hasMatch(text.toUpperCase());
-      return page.runs
-          .where((run) =>
-              run.stages.any((st) =>
-                  st.stocks.any((s) => s.toUpperCase() == sym) ||
-                  mentions(st.details)) ||
-              mentions(run.finalResult) ||
-              mentions(run.name))
-          .take(6)
+      final list = (data['events'] as List? ?? const []);
+      return list
+          .whereType<Map<String, dynamic>>()
+          .map(BotTradeEvent.fromJson)
           .toList();
     } catch (_) {
       return const [];
