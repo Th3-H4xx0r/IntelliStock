@@ -6816,6 +6816,69 @@ if mode == MODE_LIVE:
     _log("[live_boot] BLOCKER #1 settlement: operator confirmed via launch checklist (no programmatic check)", "cyan")
 
 
+# ---------------------------------------------------------------------------
+# Bot trade-decision logging (for the mobile "Bot activity" view)
+#
+# On each CONFIRMED live buy/sell we record the decision + the reasoning the
+# strategies produced into the BotTradeDecisions table, keyed by this instance's
+# brokerage. This is purely additive telemetry: it runs OFF the trade path on a
+# daemon thread and is wrapped so it can never delay or break trading. The
+# record-building + primary-driver logic lives in the pure, unit-tested
+# bot_decision_log module.
+# ---------------------------------------------------------------------------
+
+def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
+                             post_decision_trace, pre_override_decision, normalized):
+    """Best-effort record of a confirmed live buy/sell + its reasoning. Never
+    raises; the DB write happens on a daemon thread so it stays off the trade
+    path."""
+    try:
+        import bot_decision_log as _bdl
+        iid = instance_id  # module-level global
+
+        def _persist():
+            conn = None
+            try:
+                from rethinkdb import RethinkDB
+                _rb = RethinkDB()
+                conn = _rb.connect(
+                    host=os.environ.get("RETHINKDB_HOST", "localhost"),
+                    port=int(os.environ.get("RETHINKDB_PORT", "28015")),
+                    timeout=10,
+                )
+                db = "IntelliStock"
+                if _bdl.TABLE not in list(_rb.db(db).table_list().run(conn)):
+                    try:
+                        _rb.db(db).table_create(_bdl.TABLE).run(conn)
+                    except Exception:
+                        pass
+                bid = ""
+                try:
+                    inst = _rb.db(db).table("Instances").get(str(iid)).run(conn)
+                    if inst:
+                        bid = str(inst.get("brokerage_id") or "")
+                except Exception:
+                    pass
+                doc = _bdl.build_decision_doc(
+                    iid, bid, symbol, decision, price, ts,
+                    strategy_summary, post_decision_trace,
+                    pre_override_decision, normalized,
+                )
+                _rb.db(db).table(_bdl.TABLE).insert(doc).run(conn)
+            except Exception:
+                pass
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=_persist, name="bot-trade-log", daemon=True).start()
+    except Exception:
+        pass
+
+
 while not shutdown_requested:
     try:
         ###################################
@@ -9435,7 +9498,16 @@ while not shutdown_requested:
                                         cash_per_trade=cash_to_use,
                                         sell_fraction=sell_fraction,
                                     )
-                                    _es_fut.result(timeout=90.0)
+                                    _es_placed = _es_fut.result(timeout=90.0)
+                                    # Telemetry only — record the confirmed
+                                    # buy/sell + reasoning for the app's "Bot
+                                    # activity". Fully off the trade path.
+                                    if _es_placed and decision in (1, -1):
+                                        _log_live_trade_decision(
+                                            symbol, decision, price, current_time,
+                                            strategy_summary, post_decision_trace,
+                                            pre_override_decision, normalized,
+                                        )
                                 except _live_cf.TimeoutError:
                                     _log(
                                         f"execute_signal hard-timeout (>90s) for "

@@ -8186,6 +8186,56 @@ def action_list_agent_runs(conn, page=1, per_page=20):
     }
 
 
+# --- Bot Trade Decisions (per-instance live buy/sell decisions + reasoning) ---
+#
+# Unlike AgentCycleLog (which logs the AI *strategy-backtesting* engine), this
+# table records the actual buy/sell decisions an instance made while LIVE — one
+# row per confirmed trade — with the reasoning the strategies produced. The
+# mobile stock screen's "Bot activity" reads it by brokerage + symbol so each
+# position shows why the bot traded it. Written best-effort from broker.py's
+# live loop; never on the critical trade path.
+
+BOT_TRADE_DECISIONS_TABLE = "BotTradeDecisions"
+
+
+def ensure_bot_trade_decisions_table(conn):
+    dbs = list(r.db_list().run(conn))
+    if DB_NAME not in dbs:
+        r.db_create(DB_NAME).run(conn)
+    tables = list(r.db(DB_NAME).table_list().run(conn))
+    if BOT_TRADE_DECISIONS_TABLE not in tables:
+        r.db(DB_NAME).table_create(BOT_TRADE_DECISIONS_TABLE).run(conn)
+    # Secondary index for fast per-account lookups.
+    idxs = list(r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).index_list().run(conn))
+    if "brokerage_id" not in idxs:
+        r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).index_create("brokerage_id").run(conn)
+        r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).index_wait("brokerage_id").run(conn)
+
+
+def action_list_bot_trade_decisions(conn, brokerage_id, symbol=None, page=1, per_page=20):
+    """Recent bot trade decisions for a brokerage (newest first), optionally
+    filtered to one symbol. Returns {events, total, page, per_page}."""
+    ensure_bot_trade_decisions_table(conn)
+    sel = r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).get_all(
+        str(brokerage_id), index="brokerage_id"
+    )
+    rows = list(sel.run(conn))
+    if symbol:
+        sym = str(symbol).upper()
+        rows = [d for d in rows if str(d.get("symbol") or "").upper() == sym]
+    rows.sort(key=lambda d: str(d.get("ts") or d.get("created_at") or ""), reverse=True)
+    total = len(rows)
+    page = max(1, int(page or 1))
+    per_page = max(1, int(per_page or 20))
+    offset = (page - 1) * per_page
+    return {
+        "events": rows[offset:offset + per_page],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Models CRUD  (centralized LLM model configurations)
 # ---------------------------------------------------------------------------

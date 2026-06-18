@@ -147,6 +147,7 @@ from interactive_utils import (
     action_agent_cycle_log_update,
     action_list_agent_runs,
     action_agent_run_force_stop,
+    action_list_bot_trade_decisions,
     action_list_models,
     action_get_model,
     action_create_model,
@@ -3593,6 +3594,25 @@ def api_brokerage_orders(
     except Exception:
         lim = 50
     return {"brokerage_id": brokerage_id, "symbol": want or None, "orders": out[:lim]}
+
+
+@app.get("/brokerages/{brokerage_id}/bot-activity", response_class=JSONResponse)
+def api_brokerage_bot_activity(
+    brokerage_id: str,
+    symbol: str = "",
+    per_page: int = 20,
+    page: int = 1,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """The bot's own buy/sell decisions (with reasoning) for a linked brokerage,
+    optionally filtered to one symbol — newest first. Read from the
+    BotTradeDecisions table that live instances write on each confirmed trade.
+    Complements /orders (the fills) with the *why* behind them."""
+    return _run(
+        action_list_bot_trade_decisions,
+        conn, brokerage_id, (symbol or "").strip() or None, page, per_page,
+    )
 
 
 # ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
