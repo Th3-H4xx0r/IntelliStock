@@ -3726,6 +3726,18 @@ def fetch_symbol_historicals(symbols: str, range_str: str = "1D") -> dict:
     return {"range": rng, "results": out}
 
 
+@app.get("/symbols/{symbol}/info", response_class=JSONResponse)
+def api_symbol_info(symbol: str, current_user: dict = Depends(get_current_user)):
+    """Display info/stats for a stock (via yfinance): name, sector, market cap,
+    P/E, dividend yield, 52-week range, day stats, analyst recommendation +
+    business summary. Fields are best-effort (None when unavailable)."""
+    try:
+        from fundamentals_util import get_stock_info
+        return get_stock_info(symbol)
+    except Exception:
+        return {"symbol": (symbol or "").upper()}
+
+
 @app.get("/symbol-historicals", response_class=JSONResponse)
 def api_symbol_historicals(
     symbols: str,

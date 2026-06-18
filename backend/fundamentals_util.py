@@ -79,6 +79,50 @@ def get_fundamentals(symbol: str) -> dict:
     return out
 
 
+def get_stock_info(symbol: str) -> dict:
+    """Display-oriented stock info for the mobile stock screen, via yfinance.
+
+    Name, sector/industry, market cap, P/E, dividend yield, 52-week range, day
+    stats, analyst recommendation + a business summary. Every field is optional
+    (None when Yahoo lacks it or 404s on an ETF)."""
+    out = {
+        "symbol": (symbol or "").upper(),
+        "name": None, "sector": None, "industry": None, "exchange": None,
+        "currency": None, "marketCap": None, "trailingPE": None,
+        "forwardPE": None, "dividendYield": None, "beta": None,
+        "fiftyTwoWeekHigh": None, "fiftyTwoWeekLow": None, "previousClose": None,
+        "open": None, "dayHigh": None, "dayLow": None, "volume": None,
+        "averageVolume": None, "targetMeanPrice": None, "recommendationKey": None,
+        "summary": None,
+    }
+    try:
+        info = yf.Ticker(symbol).info or {}
+        out["name"] = (info.get("longName") or info.get("shortName") or "").strip() or None
+        out["sector"] = (info.get("sector") or "").strip() or None
+        out["industry"] = (info.get("industry") or "").strip() or None
+        out["exchange"] = (info.get("fullExchangeName") or info.get("exchange") or "").strip() or None
+        out["currency"] = (info.get("currency") or "").strip() or None
+        out["marketCap"] = _num(info.get("marketCap"))
+        out["trailingPE"] = _num(info.get("trailingPE"))
+        out["forwardPE"] = _num(info.get("forwardPE"))
+        out["dividendYield"] = _num(info.get("dividendYield"))
+        out["beta"] = _num(info.get("beta"))
+        out["fiftyTwoWeekHigh"] = _num(info.get("fiftyTwoWeekHigh"))
+        out["fiftyTwoWeekLow"] = _num(info.get("fiftyTwoWeekLow"))
+        out["previousClose"] = _num(info.get("regularMarketPreviousClose") or info.get("previousClose"))
+        out["open"] = _num(info.get("regularMarketOpen") or info.get("open"))
+        out["dayHigh"] = _num(info.get("regularMarketDayHigh") or info.get("dayHigh"))
+        out["dayLow"] = _num(info.get("regularMarketDayLow") or info.get("dayLow"))
+        out["volume"] = _num(info.get("regularMarketVolume") or info.get("volume"))
+        out["averageVolume"] = _num(info.get("averageVolume"))
+        out["targetMeanPrice"] = _num(info.get("targetMeanPrice"))
+        out["recommendationKey"] = (info.get("recommendationKey") or "").strip().lower() or None
+        out["summary"] = (info.get("longBusinessSummary") or "").strip() or None
+    except Exception:
+        pass
+    return out
+
+
 def earnings_within_days(next_earnings_date, within_days: int = 7) -> bool:
     """True if next earnings is within the next N days (exclude such stocks)."""
     if next_earnings_date is None:
