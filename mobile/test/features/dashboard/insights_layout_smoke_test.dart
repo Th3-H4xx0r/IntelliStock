@@ -27,16 +27,19 @@ void main() {
     expect(find.text('TODAY'), findsOneWidget);
   });
 
-  // The fixed pattern: liquid cards (no BackdropFilter) + default Row cross-axis
-  // (no `stretch`, so no intrinsic-height query that BackdropFilter can't answer).
-  testWidgets('two Expanded liquid GlassCards in a Row render', (tester) async {
+  // The fixed pattern: default Row cross-axis (no `stretch`, so no intrinsic
+  // -height query that BackdropFilter can't answer). frosted cards (with the
+  // BackdropFilter blur) render fine here — the holdings card proves it on the
+  // real dashboard; the blank was the stretch, not the blur.
+  testWidgets('two Expanded frosted GlassCards in a Row render', (tester) async {
     await tester.pumpWidget(host(
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: const [
-          Expanded(child: GlassCard(liquid: true, child: Text('TODAY'))),
+          Expanded(child: GlassCard(frosted: true, child: Text('TODAY'))),
           SizedBox(width: 12),
-          Expanded(child: GlassCard(liquid: true, child: Text('DIVERSIFICATION'))),
+          Expanded(
+              child: GlassCard(frosted: true, child: Text('DIVERSIFICATION'))),
         ],
       ),
     ));
@@ -45,9 +48,9 @@ void main() {
     expect(find.text('DIVERSIFICATION'), findsOneWidget);
   });
 
-  testWidgets('liquid GlassCard variant renders inside a sliver', (tester) async {
+  testWidgets('frosted GlassCard variant renders inside a sliver', (tester) async {
     await tester.pumpWidget(host(
-      const GlassCard(liquid: true, child: Text('INDICES')),
+      const GlassCard(frosted: true, child: Text('INDICES')),
     ));
     expect(tester.takeException(), isNull);
     expect(find.text('INDICES'), findsOneWidget);
