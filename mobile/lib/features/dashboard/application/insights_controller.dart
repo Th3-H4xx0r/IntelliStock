@@ -1,11 +1,103 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/formatters/formatters.dart';
 import '../../../core/network/api_client.dart';
 import '../../live_trading/data/live_repository.dart';
 import '../data/dashboard_repository.dart';
 import 'account_positions_controller.dart';
 import 'portfolio_analytics.dart';
+
+// ── Market data: news, movers, nexus momentum ───────────────────────────────
+
+/// A market news headline from GET /market/news (Google News).
+class NewsArticle {
+  const NewsArticle(
+      {required this.title, this.source = '', this.url = '', this.publishedAt});
+  final String title;
+  final String source;
+  final String url;
+  final DateTime? publishedAt;
+
+  factory NewsArticle.fromJson(Map<String, dynamic> j) => NewsArticle(
+        title: (j['title'] ?? '').toString(),
+        source: (j['source'] ?? '').toString(),
+        url: (j['url'] ?? '').toString(),
+        publishedAt: parseDateTime(j['published_at']),
+      );
+}
+
+/// Market/business headlines. Empty/never-throws.
+final marketNewsProvider = FutureProvider.autoDispose<List<NewsArticle>>(
+  (ref) async {
+    try {
+      final data = await ref
+          .read(apiClientProvider)
+          .get<Map<String, dynamic>>('/market/news', query: {'limit': 15});
+      return ((data['articles'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(NewsArticle.fromJson)
+          .where((a) => a.title.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  },
+);
+
+typedef MarketMover = ({String symbol, double? pct, double? price});
+typedef MoversData = ({List<MarketMover> gainers, List<MarketMover> losers});
+
+/// Market gainers/losers for the account's Alpaca screener. Empty/never-throws.
+final marketMoversProvider =
+    FutureProvider.autoDispose.family<MoversData, String>(
+  (ref, brokerageId) async {
+    List<MarketMover> parse(dynamic l) =>
+        ((l as List?) ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map((m) => (
+                  symbol: (m['symbol'] ?? '').toString(),
+                  pct: (m['pct'] as num?)?.toDouble(),
+                  price: (m['price'] as num?)?.toDouble(),
+                ))
+            .where((x) => x.symbol.isNotEmpty)
+            .toList();
+    try {
+      final data = await ref.read(apiClientProvider).get<Map<String, dynamic>>(
+        '/brokerages/$brokerageId/movers',
+        query: {'top': 6},
+      );
+      return (gainers: parse(data['gainers']), losers: parse(data['losers']));
+    } catch (_) {
+      return (gainers: const <MarketMover>[], losers: const <MarketMover>[]);
+    }
+  },
+);
+
+typedef MomentumPick = ({String symbol, double score});
+
+/// The nexus strategy's top ranked momentum names for the account's instance.
+/// Empty unless that instance runs graph_nexus_analysis with momentum enabled.
+final nexusMomentumProvider =
+    FutureProvider.autoDispose.family<List<MomentumPick>, String>(
+  (ref, brokerageId) async {
+    try {
+      final data = await ref
+          .read(apiClientProvider)
+          .get<Map<String, dynamic>>('/brokerages/$brokerageId/nexus-momentum');
+      return ((data['momentum'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map((m) => (
+                symbol: (m['symbol'] ?? '').toString(),
+                score: (m['score'] as num?)?.toDouble() ?? 0.0,
+              ))
+          .where((x) => x.symbol.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  },
+);
 
 /// Session-level symbol → sector cache. Sectors are effectively static, so we
 /// only ever hit /symbols/{s}/info once per symbol per app run, no matter how

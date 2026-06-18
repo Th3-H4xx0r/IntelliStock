@@ -52,6 +52,9 @@ class InsightsSection extends ConsumerWidget {
         const SizedBox(height: 14),
         const _MarketIndicesCard(),
         const _SectorPerformanceCard(),
+        _MarketMoversCard(brokerageId: id),
+        _NexusMomentumCard(brokerageId: id),
+        const _MarketNewsCard(),
       ],
     );
   }
@@ -551,6 +554,230 @@ class _SectorPerfRow extends StatelessWidget {
                     .copyWith(color: c, fontWeight: FontWeight.w700)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Market movers (account's Alpaca screener) ───────────────────────────────
+
+class _MarketMoversCard extends ConsumerWidget {
+  const _MarketMoversCard({required this.brokerageId});
+  final String brokerageId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(marketMoversProvider(brokerageId));
+    final data = async.valueOrNull;
+    if (data != null && data.gainers.isEmpty && data.losers.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        frosted: true,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _tileLabel('MARKET MOVERS'),
+            const SizedBox(height: 12),
+            if (data == null)
+              const Skeleton(height: 70, radius: 7)
+            else
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                      child: _MoverColumn(
+                          title: 'Gainers',
+                          movers: data.gainers,
+                          brokerageId: brokerageId)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: _MoverColumn(
+                          title: 'Losers',
+                          movers: data.losers,
+                          brokerageId: brokerageId)),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MoverColumn extends StatelessWidget {
+  const _MoverColumn(
+      {required this.title, required this.movers, required this.brokerageId});
+  final String title;
+  final List<MarketMover> movers;
+  final String brokerageId;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title.toUpperCase(),
+            style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+        const SizedBox(height: 6),
+        for (final m in movers.take(5))
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => context.push('/stock/${m.symbol}',
+                extra: const StockScreenArgs()),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(m.symbol,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppTextStyles.micro.copyWith(
+                            color: AppColors.textHi,
+                            fontWeight: FontWeight.w700)),
+                  ),
+                  Text(fmtPct(m.pct),
+                      style: AppTextStyles.micro.copyWith(
+                          color: (m.pct ?? 0) >= 0
+                              ? AppColors.success
+                              : AppColors.danger,
+                          fontWeight: FontWeight.w700)),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ── Nexus momentum (the bot strategy's ranked picks for this account) ────────
+
+class _NexusMomentumCard extends ConsumerWidget {
+  const _NexusMomentumCard({required this.brokerageId});
+  final String brokerageId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final picks = ref.watch(nexusMomentumProvider(brokerageId)).valueOrNull;
+    // Only the nexus strategy with momentum enabled produces this — hide
+    // entirely otherwise.
+    if (picks == null || picks.isEmpty) return const SizedBox.shrink();
+    final maxScore = picks
+        .map((p) => p.score.abs())
+        .fold<double>(0, (a, b) => a > b ? a : b);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        frosted: true,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(symbol('bolt'), size: 15, color: AppColors.primary),
+                const SizedBox(width: 6),
+                _tileLabel('NEXUS MOMENTUM'),
+              ],
+            ),
+            const SizedBox(height: 10),
+            for (final p in picks.take(10))
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => context.push('/stock/${p.symbol}',
+                    extra: StockScreenArgs(brokerageId: brokerageId)),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 64,
+                        child: Text(p.symbol,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTextStyles.micro.copyWith(
+                                color: AppColors.textHi,
+                                fontWeight: FontWeight.w700)),
+                      ),
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(3),
+                          child: LinearProgressIndicator(
+                            value: maxScore > 0
+                                ? (p.score.abs() / maxScore).clamp(0.0, 1.0)
+                                : 0.0,
+                            minHeight: 5,
+                            backgroundColor:
+                                Colors.white.withValues(alpha: 0.06),
+                            valueColor: const AlwaysStoppedAnimation<Color>(
+                                AppColors.primary),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Market news (Google News headlines) ──────────────────────────────────────
+
+class _MarketNewsCard extends ConsumerWidget {
+  const _MarketNewsCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(marketNewsProvider);
+    final articles = async.valueOrNull;
+    if (articles != null && articles.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        frosted: true,
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _tileLabel('MARKET NEWS'),
+            const SizedBox(height: 8),
+            if (articles == null)
+              const Skeleton(height: 60, radius: 7)
+            else
+              for (final a in articles.take(6))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(a.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTextStyles.bodyHi.copyWith(
+                              fontWeight: FontWeight.w600, height: 1.3)),
+                      const SizedBox(height: 3),
+                      Text(
+                        [
+                          if (a.source.isNotEmpty) a.source,
+                          if (a.publishedAt != null) fmtRelative(a.publishedAt),
+                        ].join('  ·  '),
+                        style: AppTextStyles.nano
+                            .copyWith(color: AppColors.textDim),
+                      ),
+                    ],
+                  ),
+                ),
+          ],
+        ),
       ),
     );
   }
