@@ -85,3 +85,10 @@ List<Mover> todaysMovers(Map<String, double> pctBySymbol) {
   ]..sort((a, b) => b.pct.compareTo(a.pct));
   return movers;
 }
+
+/// First→last percent change of a price series, or null when not computable
+/// (fewer than 2 points, or a zero starting value).
+double? pctChangeOf(List<double> values) {
+  if (values.length < 2 || values.first == 0) return null;
+  return (values.last / values.first - 1) * 100;
+}

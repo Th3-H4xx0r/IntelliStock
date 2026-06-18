@@ -67,4 +67,17 @@ void main() {
       expect(todaysMovers({}), isEmpty);
     });
   });
+
+  group('pctChangeOf', () {
+    test('computes first→last percent change', () {
+      expect(pctChangeOf([100, 110]), closeTo(10.0, 0.001));
+      expect(pctChangeOf([100, 90, 95]), closeTo(-5.0, 0.001));
+    });
+
+    test('null when not computable', () {
+      expect(pctChangeOf([100]), isNull);
+      expect(pctChangeOf([]), isNull);
+      expect(pctChangeOf([0, 50]), isNull);
+    });
+  });
 }

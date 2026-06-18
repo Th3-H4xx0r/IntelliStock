@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/api_client.dart';
+import '../../live_trading/data/live_repository.dart';
 import '../data/dashboard_repository.dart';
-import '../data/insight_models.dart';
 import 'account_positions_controller.dart';
 import 'portfolio_analytics.dart';
 
@@ -12,44 +12,85 @@ import 'portfolio_analytics.dart';
 /// often the allocation card rebuilds or which account is selected.
 final Map<String, String?> _sectorCache = {};
 
-/// Discover-engine opportunities for an account. Empty/never-throws so the card
-/// simply hides if the backend isn't deployed or there's nothing flagged.
-final discoveredProvider =
-    FutureProvider.autoDispose.family<List<DiscoveredStock>, String>(
-  (ref, brokerageId) async {
-    try {
-      final data = await ref
-          .read(apiClientProvider)
-          .get<Map<String, dynamic>>('/brokerages/$brokerageId/discovered');
-      final list = (data['stocks'] as List? ?? const []);
-      return list
-          .whereType<Map<String, dynamic>>()
-          .map(DiscoveredStock.fromJson)
-          .toList();
-    } catch (_) {
-      return const [];
-    }
-  },
-);
+/// A market instrument's today snapshot (index or sector ETF): a display label,
+/// today's % move, and the intraday series for a mini sparkline.
+class MarketQuote {
+  const MarketQuote({
+    required this.symbol,
+    required this.label,
+    required this.pct,
+    this.values = const [],
+  });
+  final String symbol;
+  final String label;
+  final double pct;
+  final List<double> values;
+}
 
-/// Detected market trends for an account. Empty/never-throws.
-final trendsProvider =
-    FutureProvider.autoDispose.family<List<MarketTrend>, String>(
-  (ref, brokerageId) async {
-    try {
-      final data = await ref
-          .read(apiClientProvider)
-          .get<Map<String, dynamic>>('/brokerages/$brokerageId/trends');
-      final list = (data['trends'] as List? ?? const []);
-      return list
-          .whereType<Map<String, dynamic>>()
-          .map(MarketTrend.fromJson)
-          .toList();
-    } catch (_) {
-      return const [];
-    }
-  },
-);
+/// Major index proxies (liquid ETFs that the historicals endpoint serves like
+/// any stock symbol). Order = display order.
+const _indexSymbols = <String, String>{
+  'SPY': 'S&P 500',
+  'QQQ': 'Nasdaq',
+  'DIA': 'Dow',
+  'IWM': 'Russell 2000',
+};
+
+/// The 11 SPDR sector ETFs → sector display names.
+const _sectorEtfs = <String, String>{
+  'XLK': 'Technology',
+  'XLF': 'Financials',
+  'XLV': 'Health Care',
+  'XLY': 'Consumer Disc.',
+  'XLC': 'Communication',
+  'XLI': 'Industrials',
+  'XLP': 'Consumer Staples',
+  'XLE': 'Energy',
+  'XLU': 'Utilities',
+  'XLRE': 'Real Estate',
+  'XLB': 'Materials',
+};
+
+Future<List<MarketQuote>> _quotesFor(
+  Ref ref,
+  Map<String, String> universe, {
+  required bool sortByPct,
+}) async {
+  final hist = await ref
+      .read(liveRepositoryProvider)
+      .symbolHistoricals(universe.keys.toList(), '1D');
+  final out = <MarketQuote>[];
+  universe.forEach((sym, label) {
+    final pts = hist[sym];
+    if (pts == null) return;
+    final vals = [for (final p in pts) p.value];
+    final pct = pctChangeOf(vals);
+    if (pct == null) return;
+    out.add(MarketQuote(symbol: sym, label: label, pct: pct, values: vals));
+  });
+  if (sortByPct) out.sort((a, b) => b.pct.compareTo(a.pct));
+  return out;
+}
+
+/// Today's move for the major indices (in display order). Never-throws.
+final marketIndicesProvider =
+    FutureProvider.autoDispose<List<MarketQuote>>((ref) async {
+  try {
+    return await _quotesFor(ref, _indexSymbols, sortByPct: false);
+  } catch (_) {
+    return const [];
+  }
+});
+
+/// Today's sector performance (ranked best → worst). Never-throws.
+final sectorPerformanceProvider =
+    FutureProvider.autoDispose<List<MarketQuote>>((ref) async {
+  try {
+    return await _quotesFor(ref, _sectorEtfs, sortByPct: true);
+  } catch (_) {
+    return const [];
+  }
+});
 
 /// Today's account change ($ and %), relative to local midnight — independent
 /// of the chart's selected range. Null when unavailable.

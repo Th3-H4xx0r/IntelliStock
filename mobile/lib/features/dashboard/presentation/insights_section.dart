@@ -13,12 +13,11 @@ import '../application/dashboard_controller.dart';
 import '../application/insights_controller.dart';
 import '../application/portfolio_analytics.dart';
 import '../application/selected_account_controller.dart';
-import '../data/insight_models.dart';
 
-/// The "Insights" + "Bot ideas" block beneath the portfolio section: today's
-/// movers, day P&L, diversification, sector allocation, and the bot's
-/// discovered opportunities + detected market trends. Scoped to the selected
-/// account; renders nothing until one resolves.
+/// The "Insights" + "Market" block beneath the portfolio section: today's
+/// movers, day P&L, diversification, and sector allocation for the account,
+/// plus real market data (major indices + sector performance). Scoped to the
+/// selected account; renders nothing until one resolves.
 class InsightsSection extends ConsumerWidget {
   const InsightsSection({super.key});
 
@@ -47,7 +46,11 @@ class InsightsSection extends ConsumerWidget {
         ),
         const SizedBox(height: 12),
         _SectorAllocationCard(brokerageId: id),
-        _BotIdeasGroup(brokerageId: id),
+        const SizedBox(height: 20),
+        Text('Market', style: AppTextStyles.h3),
+        const SizedBox(height: 14),
+        const _MarketIndicesCard(),
+        const _SectorPerformanceCard(),
       ],
     );
   }
@@ -233,7 +236,7 @@ class _DiversificationValue extends StatelessWidget {
   }
 }
 
-// ── Sector allocation ───────────────────────────────────────────────────────
+// ── Sector allocation (your portfolio, by sector) ────────────────────────────
 
 const _sectorPalette = <Color>[
   Color(0xFFA78BFA),
@@ -344,41 +347,16 @@ class _SectorLegend extends StatelessWidget {
   }
 }
 
-// ── Bot ideas: discovered opportunities + trends ─────────────────────────────
+// ── Market indices (real market data) ────────────────────────────────────────
 
-class _BotIdeasGroup extends ConsumerWidget {
-  const _BotIdeasGroup({required this.brokerageId});
-  final String brokerageId;
+class _MarketIndicesCard extends ConsumerWidget {
+  const _MarketIndicesCard();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final discovered = ref.watch(discoveredProvider(brokerageId)).valueOrNull;
-    final trends = ref.watch(trendsProvider(brokerageId)).valueOrNull;
-    final hasDiscovered = discovered != null && discovered.isNotEmpty;
-    final hasTrends = trends != null && trends.isNotEmpty;
-    // Whole group hides when neither engine has produced anything.
-    if (!hasDiscovered && !hasTrends) return const SizedBox.shrink();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(height: 20),
-        Text('Bot ideas', style: AppTextStyles.h3),
-        const SizedBox(height: 14),
-        if (hasTrends) _TrendsCard(trends: trends, brokerageId: brokerageId),
-        if (hasDiscovered)
-          _DiscoveredCard(stocks: discovered, brokerageId: brokerageId),
-      ],
-    );
-  }
-}
-
-class _TrendsCard extends StatelessWidget {
-  const _TrendsCard({required this.trends, required this.brokerageId});
-  final List<MarketTrend> trends;
-  final String brokerageId;
-
-  @override
-  Widget build(BuildContext context) {
+    final async = ref.watch(marketIndicesProvider);
+    final quotes = async.valueOrNull;
+    if (quotes != null && quotes.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: GlassCard(
@@ -386,181 +364,128 @@ class _TrendsCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(symbol('trending_up'), size: 15, color: AppColors.primary),
-                const SizedBox(width: 6),
-                _tileLabel('MARKET TRENDS'),
-              ],
-            ),
+            _tileLabel('INDICES'),
             const SizedBox(height: 12),
-            for (var i = 0; i < trends.length; i++) ...[
-              if (i > 0)
-                Divider(
-                    height: 18,
-                    color: Colors.white.withValues(alpha: 0.06)),
-              _TrendRow(trend: trends[i], brokerageId: brokerageId),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TrendRow extends StatelessWidget {
-  const _TrendRow({required this.trend, required this.brokerageId});
-  final MarketTrend trend;
-  final String brokerageId;
-
-  @override
-  Widget build(BuildContext context) {
-    final title = trend.title.trim().isNotEmpty ? trend.title.trim() : 'Trend';
-    // Strength may arrive 0..1 or 0..100; normalize to a 0..1 bar fraction.
-    final raw = trend.strength;
-    final frac = raw == null
-        ? null
-        : (raw > 1 ? raw / 100 : raw).clamp(0.0, 1.0);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppTextStyles.bodyHi
-                      .copyWith(fontWeight: FontWeight.w600)),
-            ),
-            if (frac != null)
-              Text('${(frac * 100).round()}%',
-                  style: AppTextStyles.nano.copyWith(color: AppColors.primary)),
-          ],
-        ),
-        if (frac != null) ...[
-          const SizedBox(height: 6),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: LinearProgressIndicator(
-              value: frac,
-              minHeight: 4,
-              backgroundColor: Colors.white.withValues(alpha: 0.08),
-              valueColor:
-                  const AlwaysStoppedAnimation<Color>(AppColors.primary),
-            ),
-          ),
-        ],
-        if (trend.symbols.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              for (final s in trend.symbols.take(8))
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => context.push('/stock/$s',
-                      extra: StockScreenArgs(brokerageId: brokerageId)),
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: AppColors.fill(AppColors.primary),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(s,
-                        style: AppTextStyles.nano.copyWith(
-                            color: AppColors.primary,
-                            fontWeight: FontWeight.w700)),
-                  ),
-                ),
-            ],
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-class _DiscoveredCard extends StatelessWidget {
-  const _DiscoveredCard({required this.stocks, required this.brokerageId});
-  final List<DiscoveredStock> stocks;
-  final String brokerageId;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassCard(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(symbol('auto_awesome'), size: 15, color: AppColors.primary),
-              const SizedBox(width: 6),
-              _tileLabel('DISCOVERED'),
-            ],
-          ),
-          const SizedBox(height: 6),
-          for (final s in stocks)
-            _DiscoveredRow(stock: s, brokerageId: brokerageId),
-        ],
-      ),
-    );
-  }
-}
-
-class _DiscoveredRow extends StatelessWidget {
-  const _DiscoveredRow({required this.stock, required this.brokerageId});
-  final DiscoveredStock stock;
-  final String brokerageId;
-
-  @override
-  Widget build(BuildContext context) {
-    final reason = stock.reason.trim();
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => context.push('/stock/${stock.ticker}',
-          extra: StockScreenArgs(brokerageId: brokerageId)),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            if (quotes == null)
+              const Skeleton(height: 34, radius: 7)
+            else
+              Row(
                 children: [
-                  Row(
-                    children: [
-                      Text(stock.ticker,
-                          style: AppTextStyles.bodyHi
-                              .copyWith(fontWeight: FontWeight.w700)),
-                      if (stock.discoveredAt != null) ...[
-                        const SizedBox(width: 8),
-                        Text(fmtRelative(stock.discoveredAt),
-                            style: AppTextStyles.nano
-                                .copyWith(color: AppColors.textDim)),
-                      ],
-                    ],
-                  ),
-                  if (reason.isNotEmpty) ...[
-                    const SizedBox(height: 3),
-                    Text(reason,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: AppTextStyles.micro
-                            .copyWith(color: AppColors.textMd, height: 1.35)),
+                  for (var i = 0; i < quotes.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 10),
+                    Expanded(child: _IndexCell(quote: quotes[i])),
                   ],
                 ],
               ),
-            ),
-            const SizedBox(width: 8),
-            Icon(symbol('arrow_forward'),
-                size: 13, color: AppColors.textFaint),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _IndexCell extends StatelessWidget {
+  const _IndexCell({required this.quote});
+  final MarketQuote quote;
+
+  @override
+  Widget build(BuildContext context) {
+    final up = quote.pct >= 0;
+    final c = up ? AppColors.success : AppColors.danger;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () =>
+          context.push('/stock/${quote.symbol}', extra: const StockScreenArgs()),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(quote.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
+          const SizedBox(height: 4),
+          Text('${up ? '▲' : '▼'} ${fmtPct(quote.pct)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.micro
+                  .copyWith(color: c, fontWeight: FontWeight.w700)),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Sector performance (today's market sectors, ranked) ──────────────────────
+
+class _SectorPerformanceCard extends ConsumerWidget {
+  const _SectorPerformanceCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(sectorPerformanceProvider);
+    final quotes = async.valueOrNull;
+    if (quotes != null && quotes.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _tileLabel('SECTOR PERFORMANCE'),
+            const SizedBox(height: 12),
+            if (quotes == null)
+              const Skeleton(height: 80, radius: 7)
+            else
+              for (final q in quotes) _SectorPerfRow(quote: q),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SectorPerfRow extends StatelessWidget {
+  const _SectorPerfRow({required this.quote});
+  final MarketQuote quote;
+
+  @override
+  Widget build(BuildContext context) {
+    final up = quote.pct >= 0;
+    final c = up ? AppColors.success : AppColors.danger;
+    // Scale the bar against a nominal 3% daily move so typical moves are visible.
+    final frac = (quote.pct.abs() / 3.0).clamp(0.0, 1.0);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 108,
+            child: Text(quote.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.micro.copyWith(color: AppColors.textMd)),
+          ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: frac,
+                minHeight: 5,
+                backgroundColor: Colors.white.withValues(alpha: 0.06),
+                valueColor: AlwaysStoppedAnimation<Color>(c),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 58,
+            child: Text(fmtPct(quote.pct),
+                textAlign: TextAlign.right,
+                style: AppTextStyles.micro
+                    .copyWith(color: c, fontWeight: FontWeight.w700)),
+          ),
+        ],
       ),
     );
   }
