@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -308,18 +310,7 @@ class _RiskCard extends ConsumerWidget {
       );
 }
 
-// ── Sector allocation (your portfolio, by sector) ────────────────────────────
-
-const _sectorPalette = <Color>[
-  Color(0xFFA78BFA),
-  Color(0xFF34D399),
-  Color(0xFF60A5FA),
-  Color(0xFFFBBF24),
-  Color(0xFFF472B6),
-  Color(0xFF22D3EE),
-  Color(0xFFF87171),
-  Color(0xFFA3E635),
-];
+// ── Sector allocation — metallic gradient donut (Robinhood-style) ────────────
 
 class _SectorAllocationCard extends ConsumerWidget {
   const _SectorAllocationCard({required this.brokerageId});
@@ -340,14 +331,15 @@ class _SectorAllocationCard extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _tileLabel('SECTOR ALLOCATION'),
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             if (slices == null)
-              const Skeleton(height: 14, radius: 7)
-            else ...[
-              _SectorBar(slices: slices),
-              const SizedBox(height: 14),
-              _SectorLegend(slices: slices),
-            ],
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 20),
+                child: Center(child: Skeleton(width: 180, height: 180, radius: 90)),
+              )
+            else
+              // Sorted desc by aggregateBySector, so index 0 is the largest.
+              _SectorDonut(slices: slices),
           ],
         ),
       ),
@@ -355,69 +347,184 @@ class _SectorAllocationCard extends ConsumerWidget {
   }
 }
 
-class _SectorBar extends StatelessWidget {
-  const _SectorBar({required this.slices});
+/// An animated, tappable metallic donut: each sector is a graphite-gradient
+/// segment; the selected one (largest by default) is a violet gradient. Tap a
+/// segment to select it; the centre shows its name + %. Sweeps in on first paint.
+class _SectorDonut extends StatefulWidget {
+  const _SectorDonut({required this.slices});
   final List<SectorSlice> slices;
 
   @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(7),
-      child: SizedBox(
-        height: 14,
-        child: Row(
-          children: [
-            for (var i = 0; i < slices.length; i++)
-              Expanded(
-                flex: (slices[i].pct * 100).round().clamp(1, 1000000),
-                child: Container(
-                    color: _sectorPalette[i % _sectorPalette.length]),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
+  State<_SectorDonut> createState() => _SectorDonutState();
 }
 
-class _SectorLegend extends StatelessWidget {
-  const _SectorLegend({required this.slices});
-  final List<SectorSlice> slices;
+class _SectorDonutState extends State<_SectorDonut>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  )..forward();
+  int _selected = 0;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _onTapDown(Offset local, double dim) {
+    final center = Offset(dim / 2, dim / 2);
+    final v = local - center;
+    final dist = v.distance;
+    final r = dim / 2;
+    if (dist < r * 0.40 || dist > r) return; // outside the ring band
+    var a = math.atan2(v.dy, v.dx) + math.pi / 2; // 0 at 12 o'clock, CW
+    if (a < 0) a += 2 * math.pi;
+    final total = widget.slices.fold<double>(0, (s, e) => s + e.pct);
+    if (total <= 0) return;
+    var acc = 0.0;
+    for (var i = 0; i < widget.slices.length; i++) {
+      final seg = widget.slices[i].pct / total * 2 * math.pi;
+      if (a >= acc && a < acc + seg) {
+        setState(() => _selected = i);
+        return;
+      }
+      acc += seg;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        for (var i = 0; i < slices.length; i++)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: [
-                Container(
-                  width: 9,
-                  height: 9,
-                  decoration: BoxDecoration(
-                    color: _sectorPalette[i % _sectorPalette.length],
-                    borderRadius: BorderRadius.circular(2.5),
+    final slices = widget.slices;
+    final sel = _selected.clamp(0, slices.length - 1);
+    const dim = 210.0;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: SizedBox(
+          width: dim,
+          height: dim,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (d) => _onTapDown(d.localPosition, dim),
+            child: AnimatedBuilder(
+              animation: _ctrl,
+              builder: (_, _) => CustomPaint(
+                painter: _DonutPainter(
+                  slices: slices,
+                  selected: sel,
+                  progress: Curves.easeOutCubic.transform(_ctrl.value),
+                ),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('${slices[sel].pct.round()}%',
+                          style: AppTextStyles.valueXl
+                              .copyWith(fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 2),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 34),
+                        child: Text(slices[sel].sector,
+                            maxLines: 2,
+                            textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTextStyles.micro
+                                .copyWith(color: AppColors.textMuted)),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(slices[i].sector,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTextStyles.micro
-                          .copyWith(color: AppColors.textMd)),
-                ),
-                Text('${slices[i].pct.round()}%',
-                    style: AppTextStyles.micro.copyWith(
-                        color: AppColors.textHi, fontWeight: FontWeight.w700)),
-              ],
+              ),
             ),
           ),
-      ],
+        ),
+      ),
     );
   }
+}
+
+class _DonutPainter extends CustomPainter {
+  _DonutPainter(
+      {required this.slices, required this.selected, required this.progress});
+  final List<SectorSlice> slices;
+  final int selected;
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final total = slices.fold<double>(0, (s, e) => s + e.pct);
+    if (total <= 0) return;
+    final center = size.center(Offset.zero);
+    final r = size.width / 2;
+    final stroke = r * 0.26;
+    final ringR = r - stroke / 2 - 14; // leave room for the % labels outside
+    final rect = Rect.fromCircle(center: center, radius: ringR);
+    const gap = 0.05; // radians between segments
+
+    var start = -math.pi / 2; // 12 o'clock
+    for (var i = 0; i < slices.length; i++) {
+      final full = slices[i].pct / total * 2 * math.pi;
+      final sweep = (full - gap).clamp(0.0, full) * progress;
+      if (sweep > 0.001) {
+        final isSel = i == selected;
+        // Metallic gradient: violet for the selected segment, graphite for the
+        // rest. The looping 4th stop gives a subtle specular sheen.
+        final light = isSel ? const Color(0xFFCBB6FF) : const Color(0xFF585866);
+        final base = isSel ? const Color(0xFF9B6BFF) : const Color(0xFF35353F);
+        final dark = isSel ? const Color(0xFF5B21B6) : const Color(0xFF17171E);
+        final shader = SweepGradient(
+          startAngle: start,
+          endAngle: start + full,
+          colors: [light, base, dark, light],
+          stops: const [0.0, 0.4, 0.82, 1.0],
+        ).createShader(rect);
+        canvas.drawArc(
+          rect,
+          start + gap / 2,
+          sweep,
+          false,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = isSel ? stroke + 6 : stroke
+            ..strokeCap = StrokeCap.round
+            ..shader = shader,
+        );
+      }
+      start += full;
+    }
+
+    // % labels just outside the ring at each segment's mid-angle (fade in late).
+    if (progress > 0.55) {
+      start = -math.pi / 2;
+      final labelR = ringR + stroke / 2 + 12;
+      for (var i = 0; i < slices.length; i++) {
+        final full = slices[i].pct / total * 2 * math.pi;
+        final mid = start + full / 2;
+        final pos =
+            center + Offset(math.cos(mid) * labelR, math.sin(mid) * labelR);
+        final tp = TextPainter(
+          text: TextSpan(
+            text: '${slices[i].pct.round()}%',
+            style: TextStyle(
+              color: i == selected ? AppColors.primary : AppColors.textMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
+        start += full;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DonutPainter old) =>
+      old.progress != progress ||
+      old.selected != selected ||
+      !identical(old.slices, slices);
 }
 
 // ── Market indices — horizontal sparkline cards (S&P / Nasdaq / Dow / RUT) ───
