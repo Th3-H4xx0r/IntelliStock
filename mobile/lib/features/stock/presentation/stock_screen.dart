@@ -171,7 +171,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   Widget _chartArea(StockSeries? series, {required bool error}) {
     if (error) {
       return SizedBox(
-        height: 200,
+        height: 248,
         child: Center(
           child: Text("Couldn't load prices",
               style: AppTextStyles.micro.copyWith(color: AppColors.danger)),
@@ -181,7 +181,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
     if (series == null || series.vals.length < 2) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 6),
-        child: Skeleton(height: 200, radius: 16),
+        child: Skeleton(height: 248, radius: 16),
       );
     }
     final up = series.vals.last >= series.vals.first;
@@ -189,7 +189,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
       timestamps: series.ts,
       values: series.vals,
       lineColor: up ? AppColors.success : AppColors.danger,
-      height: 200,
+      height: 248,
+      indexed: true, // evenly-spaced points → no weekend/overnight gaps
       onScrub: (i) => _scrub.value = i,
     );
   }

@@ -25,6 +25,7 @@ class ScrubbableAreaChart extends StatefulWidget {
     this.markerSeries,
     this.onScrub,
     this.animate = true,
+    this.indexed = false,
   });
 
   final List<DateTime> timestamps;
@@ -44,6 +45,12 @@ class ScrubbableAreaChart extends StatefulWidget {
   final ValueChanged<int?>? onScrub;
 
   final bool animate;
+
+  /// Plot points evenly spaced on a numeric index axis instead of real time —
+  /// no weekend/overnight gaps, so the spline can't balloon across them. The
+  /// scrub + date labels are already index-positioned, so this also makes them
+  /// line up with the curve.
+  final bool indexed;
 
   @override
   State<ScrubbableAreaChart> createState() => _ScrubbableAreaChartState();
@@ -164,19 +171,61 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
         _TVPoint(widget.timestamps[i], widget.values[i]),
     ];
     final c = widget.lineColor;
+    final fill = LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [c.withValues(alpha: 0.34), c.withValues(alpha: 0.0)],
+    );
+
+    // `indexed` → evenly-spaced numeric x (no weekend/overnight gaps, so the
+    // monotonic spline can't balloon across them). Else plot against real time.
+    final ChartAxis xAxis = widget.indexed
+        ? NumericAxis(
+            isVisible: false,
+            plotOffset: 0,
+            rangePadding: ChartRangePadding.none,
+            majorGridLines: const MajorGridLines(width: 0),
+            axisLine: const AxisLine(width: 0),
+            majorTickLines: const MajorTickLines(size: 0),
+          )
+        : DateTimeAxis(
+            isVisible: false,
+            plotOffset: 0,
+            rangePadding: ChartRangePadding.none,
+            majorGridLines: const MajorGridLines(width: 0),
+            axisLine: const AxisLine(width: 0),
+            majorTickLines: const MajorTickLines(size: 0),
+          );
+
+    final CartesianSeries priceSeries = widget.indexed
+        ? SplineAreaSeries<_TVPoint, num>(
+            dataSource: pts,
+            splineType: SplineType.monotonic,
+            animationDuration: widget.animate ? 700 : 0,
+            xValueMapper: (p, i) => i,
+            yValueMapper: (p, _) => p.v,
+            color: c.withValues(alpha: 0.18),
+            borderColor: c,
+            borderWidth: 2,
+            gradient: fill,
+          )
+        : SplineAreaSeries<_TVPoint, DateTime>(
+            dataSource: pts,
+            splineType: SplineType.monotonic,
+            animationDuration: widget.animate ? 700 : 0,
+            xValueMapper: (p, _) => p.t,
+            yValueMapper: (p, _) => p.v,
+            color: c.withValues(alpha: 0.18),
+            borderColor: c,
+            borderWidth: 2,
+            gradient: fill,
+          );
 
     return _cachedChart = SfCartesianChart(
       backgroundColor: Colors.transparent,
       plotAreaBorderWidth: 0,
       margin: EdgeInsets.zero,
-      primaryXAxis: DateTimeAxis(
-        isVisible: false,
-        plotOffset: 0,
-        rangePadding: ChartRangePadding.none,
-        majorGridLines: const MajorGridLines(width: 0),
-        axisLine: const AxisLine(width: 0),
-        majorTickLines: const MajorTickLines(size: 0),
-      ),
+      primaryXAxis: xAxis,
       primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
       annotations: widget.baseline != null
           ? <CartesianChartAnnotation>[
@@ -187,30 +236,13 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
                   color: AppColors.textFaint.withValues(alpha: 0.4),
                 ),
                 coordinateUnit: CoordinateUnit.point,
-                x: widget.timestamps.first,
+                x: widget.indexed ? 0 : widget.timestamps.first,
                 y: widget.baseline,
               ),
             ]
           : null,
       series: <CartesianSeries>[
-        SplineAreaSeries<_TVPoint, DateTime>(
-          dataSource: pts,
-          splineType: SplineType.monotonic,
-          animationDuration: widget.animate ? 700 : 0,
-          xValueMapper: (p, _) => p.t,
-          yValueMapper: (p, _) => p.v,
-          color: c.withValues(alpha: 0.18),
-          borderColor: c,
-          borderWidth: 2,
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              c.withValues(alpha: 0.34),
-              c.withValues(alpha: 0.0),
-            ],
-          ),
-        ),
+        priceSeries,
         if (widget.markerSeries != null) ...widget.markerSeries!(),
       ],
     );
@@ -219,11 +251,20 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
   void _onDrag(double dx, double width, int n) {
     if (width <= 0) return;
     final frac = (dx / width).clamp(0.0, 1.0);
-    final idx = nearestIndexByTime(widget.timestamps, frac);
+    final int idx;
+    final double hairFrac;
+    if (widget.indexed) {
+      // Evenly-spaced points: index ↔ x-fraction are linear.
+      idx = n <= 1 ? 0 : (frac * (n - 1)).round().clamp(0, n - 1);
+      hairFrac = n <= 1 ? 0 : idx / (n - 1);
+    } else {
+      idx = nearestIndexByTime(widget.timestamps, frac);
+      // Draw the hairline + dot at the data point's own time-fraction so they
+      // sit on the curve and match the value reported to the header.
+      hairFrac = timeFractionOf(widget.timestamps, idx);
+    }
     final prev = _scrub.value?.index;
-    // Draw the hairline + dot at the data point's own time-fraction so they sit
-    // on the curve and match the value reported to the header.
-    _scrub.update(idx, timeFractionOf(widget.timestamps, idx));
+    _scrub.update(idx, hairFrac);
     if (idx != prev) widget.onScrub?.call(idx);
   }
 
