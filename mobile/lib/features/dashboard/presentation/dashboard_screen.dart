@@ -527,16 +527,6 @@ class _HoldingDivider extends StatelessWidget {
       );
 }
 
-/// Deterministic per-symbol accent so each ticker gets a stable, distinct ring
-/// colour.
-Color _symbolColor(String s) {
-  var h = 0;
-  for (final c in s.codeUnits) {
-    h = (h * 31 + c) & 0x7fffffff;
-  }
-  return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.6).toColor();
-}
-
 /// A tiny intraday (1D, since 12 AM) line for one holding — green if the day's
 /// move is up, red if down, mirroring the live-trading position cards.
 class _MiniSpark extends StatelessWidget {
@@ -624,7 +614,7 @@ class _AllocationRing extends StatelessWidget {
           Text(
             _label(fraction),
             style: AppTextStyles.nano.copyWith(
-              color: AppColors.textHi,
+              color: color,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -731,7 +721,7 @@ class _HoldingRow extends StatelessWidget {
         children: [
           _AllocationRing(
             fraction: total > 0 ? p.marketValue / total : 0,
-            color: _symbolColor(p.symbol),
+            color: color,
           ),
           const SizedBox(width: 12),
           SizedBox(
