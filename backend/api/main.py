@@ -3537,6 +3537,81 @@ def api_brokerage_positions(
     return {"brokerage_id": brokerage_id, "cash": cash, "positions": positions}
 
 
+# Acquisition-date cache: brokerage_id -> (expiry_epoch, {symbol: opened_at_iso}).
+# Open dates change only when a position opens, so a coarse TTL keeps the broker
+# order-history fetch off the hot path (positions poll every 15s).
+_HOLDING_OPENS_CACHE: dict = {}
+_HOLDING_OPENS_TTL = 600.0  # seconds
+
+
+@app.get("/brokerages/{brokerage_id}/holding-opens", response_class=JSONResponse)
+def api_brokerage_holding_opens(
+    brokerage_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Acquisition date per currently-held symbol — when the current open
+    position started — derived from the account's filled order history. The
+    Holdings "Total" sparkline uses it to clip to the holding period instead of
+    the stock's whole history. Alpaca-only, read-only, cached; ``{}`` on any
+    failure (the app then falls back to the full series)."""
+    import time as _time
+    now = _time.time()
+    cached = _HOLDING_OPENS_CACHE.get(str(brokerage_id))
+    if cached and cached[0] > now:
+        return {"opens": cached[1]}
+
+    opens: dict = {}
+    try:
+        from secret_store import decrypt as _decrypt
+        row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
+        if not row or str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
+            return {"opens": {}}
+        key = _decrypt(row.get("alpaca_key")) or ""
+        secret = _decrypt(row.get("alpaca_secret")) or ""
+        if not key or not secret:
+            return {"opens": {}}
+        paper = bool(row.get("alpaca_paper", False))
+
+        from alpaca.trading.client import TradingClient
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        client = TradingClient(api_key=key, secret_key=secret, paper=paper)
+
+        held: dict = {}
+        for p in (client.get_all_positions() or []):
+            sym = str(getattr(p, "symbol", "") or "").upper()
+            if sym:
+                held[sym] = float(getattr(p, "qty", 0.0) or 0.0)
+
+        if held:
+            req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
+            orders = client.get_orders(filter=req) or []
+            fills = []
+            for o in orders:
+                if str(getattr(o.status, "value", o.status) or "").lower() != "filled":
+                    continue
+                ts = getattr(o, "filled_at", None) or getattr(o, "submitted_at", None)
+                ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else (str(ts) if ts else "")
+                if not ts_iso:
+                    continue
+                side = str(getattr(o.side, "value", o.side) or "").lower()
+                fills.append({
+                    "symbol": str(getattr(o, "symbol", "") or "").upper(),
+                    "side": "buy" if side == "buy" else "sell",
+                    "qty": float(getattr(o, "filled_qty", 0.0) or 0.0),
+                    "ts_iso": ts_iso,
+                    "ts_sort": ts_iso,
+                })
+            from holding_opens import derive_open_dates
+            opens = derive_open_dates(fills, held)
+    except Exception:
+        opens = {}
+
+    _HOLDING_OPENS_CACHE[str(brokerage_id)] = (now + _HOLDING_OPENS_TTL, opens)
+    return {"opens": opens}
+
+
 @app.get("/brokerages/{brokerage_id}/orders", response_class=JSONResponse)
 def api_brokerage_orders(
     brokerage_id: str,

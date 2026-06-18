@@ -62,6 +62,19 @@ enum HoldingsPnlMode { total, daily }
 final holdingsPnlModeProvider =
     StateProvider<HoldingsPnlMode>((ref) => HoldingsPnlMode.daily);
 
+/// Acquisition date per currently-held symbol (when its current open position
+/// started), for the Total sparkline's holding-period clip. Alpaca-only; empty
+/// for other brokers or when the opening fill is outside the broker's fetched
+/// order window (callers then keep the full series).
+final holdingOpensProvider = FutureProvider.autoDispose
+    .family<Map<String, DateTime>, String>((ref, brokerageId) async {
+  try {
+    return await ref.read(liveRepositoryProvider).holdingOpens(brokerageId);
+  } catch (_) {
+    return const {};
+  }
+});
+
 /// Which brokerage + which range to fetch holding sparklines for.
 typedef HoldingsSparkArgs = ({String brokerageId, String range});
 
@@ -87,22 +100,39 @@ final holdingsSparklinesProvider = FutureProvider.autoDispose
     final now = DateTime.now();
     midnight = DateTime(now.year, now.month, now.day);
   }
+  // Total view: clip each holding's series to start at when it was bought, so
+  // the sparkline shows the holding period — not the stock's whole history.
+  Map<String, DateTime> opens = const {};
+  if (args.range == 'ALL') {
+    opens = await ref.read(holdingOpensProvider(args.brokerageId).future);
+  }
   final out = <String, List<double>>{};
   hist.forEach((sym, pts) {
     final all = <double>[];
     final sinceMidnight = <double>[];
+    final sinceBuy = <double>[];
+    final boughtAt = opens[sym];
     for (final p in pts) {
       all.add(p.value);
-      if (midnight != null) {
-        final t = parseDateTime(p.ts);
-        if (t == null || !t.isBefore(midnight)) sinceMidnight.add(p.value);
+      final t = parseDateTime(p.ts);
+      if (midnight != null && (t == null || !t.isBefore(midnight))) {
+        sinceMidnight.add(p.value);
+      }
+      if (boughtAt != null && (t == null || !t.isBefore(boughtAt))) {
+        sinceBuy.add(p.value);
       }
     }
-    // 1D = since midnight, but right after 12 AM / pre-market there may be no
-    // post-midnight bars yet → fall back to the full series so it still draws.
-    final vals = midnight == null
-        ? all
-        : (sinceMidnight.length >= 2 ? sinceMidnight : all);
+    // 1D = since midnight; Total = since purchase. Both fall back to the full
+    // series when there aren't ≥2 points in the window (e.g. just after 12 AM,
+    // or when the purchase date is unknown), so the spark always draws.
+    final List<double> vals;
+    if (midnight != null) {
+      vals = sinceMidnight.length >= 2 ? sinceMidnight : all;
+    } else if (boughtAt != null) {
+      vals = sinceBuy.length >= 2 ? sinceBuy : all;
+    } else {
+      vals = all;
+    }
     if (vals.length >= 2) out[sym] = vals;
   });
   return out;

@@ -86,6 +86,24 @@ class LiveRepository {
     });
   }
 
+  /// `GET /brokerages/{id}/holding-opens` → map of symbol → acquisition date
+  /// (when the current open position started). Empty for non-Alpaca accounts or
+  /// when the open fill is outside the fetched order window; callers fall back
+  /// to the full series in that case.
+  Future<Map<String, DateTime>> holdingOpens(String brokerageId) async {
+    final data = await _client.get<Map<String, dynamic>>(
+      '/brokerages/$brokerageId/holding-opens',
+    );
+    final opens = data['opens'];
+    if (opens is! Map) return {};
+    final out = <String, DateTime>{};
+    opens.forEach((k, v) {
+      final t = DateTime.tryParse(v?.toString() ?? '');
+      if (t != null) out[k.toString()] = t.toLocal();
+    });
+    return out;
+  }
+
   /// `POST /instances/{id}/live-command` → [CommandResult].
   Future<CommandResult> sendCommand(
     String id,
