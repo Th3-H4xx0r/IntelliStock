@@ -83,6 +83,17 @@ typedef HoldingsSparkArgs = ({String brokerageId, String range});
 /// longer ranges keep the full series. Maps `symbol → values`. Keyed by
 /// (brokerage, range) so the Daily/Total toggle re-fetches a different range.
 /// Reuses the live-trading `/symbol-historicals` endpoint.
+/// Pick a `/symbol-historicals` range whose bar resolution suits a holding
+/// [days] old, so a since-purchase slice has enough points (a 5-day-old name
+/// gets 10-min bars; months-old gets daily). Mirrors the backend range map.
+String _rangeForHoldingAge(int days) {
+  if (days <= 6) return '1W'; // 10-min bars
+  if (days <= 31) return '1M'; // hourly
+  if (days <= 93) return '3M'; // daily
+  if (days <= 366) return '1Y'; // daily
+  return 'ALL'; // weekly
+}
+
 final holdingsSparklinesProvider = FutureProvider.autoDispose
     .family<Map<String, List<double>>, HoldingsSparkArgs>((ref, args) async {
   final holdings =
@@ -92,48 +103,64 @@ final holdingsSparklinesProvider = FutureProvider.autoDispose
       .where((s) => s.isNotEmpty)
       .toList();
   if (symbols.isEmpty) return const {};
-  final hist = await ref
-      .read(liveRepositoryProvider)
-      .symbolHistoricals(symbols, args.range);
-  DateTime? midnight;
+  final repo = ref.read(liveRepositoryProvider);
+
+  // ── Daily (1D): one batch fetch, trimmed to the device's local midnight. ──
   if (args.range == '1D') {
+    final hist = await repo.symbolHistoricals(symbols, '1D');
     final now = DateTime.now();
-    midnight = DateTime(now.year, now.month, now.day);
+    final midnight = DateTime(now.year, now.month, now.day);
+    final out = <String, List<double>>{};
+    hist.forEach((sym, pts) {
+      final all = <double>[];
+      final since = <double>[];
+      for (final p in pts) {
+        all.add(p.value);
+        final t = parseDateTime(p.ts);
+        if (t == null || !t.isBefore(midnight)) since.add(p.value);
+      }
+      // Right after 12 AM there may be < 2 post-midnight bars → fall back.
+      final vals = since.length >= 2 ? since : all;
+      if (vals.length >= 2) out[sym] = vals;
+    });
+    return out;
   }
-  // Total view: clip each holding's series to start at when it was bought, so
-  // the sparkline shows the holding period — not the stock's whole history.
-  Map<String, DateTime> opens = const {};
-  if (args.range == 'ALL') {
-    opens = await ref.read(holdingOpensProvider(args.brokerageId).future);
+
+  // ── Total: each holding's series from WHEN IT WAS BOUGHT → today. Because a
+  // single coarse range (ALL = 5yr weekly) has too few points since a recent
+  // purchase, fetch each holding at a resolution matched to its age, then clip
+  // to the purchase date. Watch holdingOpens so this recomputes once dates load.
+  final opens = await ref.watch(holdingOpensProvider(args.brokerageId).future);
+  final now = DateTime.now();
+  final byRange = <String, List<String>>{};
+  for (final s in symbols) {
+    final boughtAt = opens[s];
+    final range = boughtAt == null
+        ? '3M'
+        : _rangeForHoldingAge(now.difference(boughtAt).inDays);
+    byRange.putIfAbsent(range, () => []).add(s);
   }
+
   final out = <String, List<double>>{};
-  hist.forEach((sym, pts) {
-    final all = <double>[];
-    final sinceMidnight = <double>[];
-    final sinceBuy = <double>[];
-    final boughtAt = opens[sym];
-    for (final p in pts) {
-      all.add(p.value);
-      final t = parseDateTime(p.ts);
-      if (midnight != null && (t == null || !t.isBefore(midnight))) {
-        sinceMidnight.add(p.value);
+  for (final entry in byRange.entries) {
+    final hist = await repo.symbolHistoricals(entry.value, entry.key);
+    hist.forEach((sym, pts) {
+      final boughtAt = opens[sym];
+      final all = <double>[];
+      final sinceBuy = <double>[];
+      for (final p in pts) {
+        all.add(p.value);
+        final t = parseDateTime(p.ts);
+        if (boughtAt != null && (t == null || !t.isBefore(boughtAt))) {
+          sinceBuy.add(p.value);
+        }
       }
-      if (boughtAt != null && (t == null || !t.isBefore(boughtAt))) {
-        sinceBuy.add(p.value);
-      }
-    }
-    // 1D = since midnight; Total = since purchase. Both fall back to the full
-    // series when there aren't ≥2 points in the window (e.g. just after 12 AM,
-    // or when the purchase date is unknown), so the spark always draws.
-    final List<double> vals;
-    if (midnight != null) {
-      vals = sinceMidnight.length >= 2 ? sinceMidnight : all;
-    } else if (boughtAt != null) {
-      vals = sinceBuy.length >= 2 ? sinceBuy : all;
-    } else {
-      vals = all;
-    }
-    if (vals.length >= 2) out[sym] = vals;
-  });
+      // Use the since-purchase window when it has enough points; otherwise the
+      // full series of the (already age-matched) range so the spark still draws.
+      final vals =
+          (boughtAt != null && sinceBuy.length >= 2) ? sinceBuy : all;
+      if (vals.length >= 2) out[sym] = vals;
+    });
+  }
   return out;
 });
