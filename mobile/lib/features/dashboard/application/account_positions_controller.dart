@@ -131,6 +131,13 @@ final holdingsSparklinesProvider = FutureProvider.autoDispose
   // purchase, fetch each holding at a resolution matched to its age, then clip
   // to the purchase date. Watch holdingOpens so this recomputes once dates load.
   final opens = await ref.watch(holdingOpensProvider(args.brokerageId).future);
+  // Cost basis + current price per symbol — used to anchor the series ends so
+  // the spark's direction matches the position's Total P&L exactly.
+  final entryOf = {
+    for (final p in holdings.positions) p.symbol: p.avgEntryPrice
+  };
+  final lastOf = {for (final p in holdings.positions) p.symbol: p.lastPrice};
+
   final now = DateTime.now();
   final byRange = <String, List<String>>{};
   for (final s in symbols) {
@@ -155,11 +162,24 @@ final holdingsSparklinesProvider = FutureProvider.autoDispose
           sinceBuy.add(p.value);
         }
       }
-      // Use the since-purchase window when it has enough points; otherwise the
-      // full series of the (already age-matched) range so the spark still draws.
-      final vals =
-          (boughtAt != null && sinceBuy.length >= 2) ? sinceBuy : all;
-      if (vals.length >= 2) out[sym] = vals;
+      if (boughtAt != null) {
+        // Anchor start = avg entry (cost basis), end = current price, with the
+        // since-purchase market path between. The first historical bar after a
+        // purchase isn't your fill price, so without this the line can point
+        // the opposite way to the P&L for volatile names (e.g. NET).
+        final series = <double>[];
+        final ent = entryOf[sym];
+        if (ent != null && ent > 0) series.add(ent);
+        series.addAll(sinceBuy);
+        final last = lastOf[sym];
+        if (last != null && last > 0) series.add(last);
+        if (series.length >= 2) {
+          out[sym] = series;
+          return;
+        }
+      }
+      // No purchase date (or too few points) → full age-matched series.
+      if (all.length >= 2) out[sym] = all;
     });
   }
   return out;
