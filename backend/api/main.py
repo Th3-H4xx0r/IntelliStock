@@ -131,6 +131,8 @@ from interactive_utils import (
     action_delete_trend,
     action_list_discovered_stocks,
     action_remove_discovered_stock,
+    action_nexus_trade_contexts,
+    action_nexus_outcome_stats,
     action_nexus_config_get,
     action_nexus_config_set,
     action_list_brokerages,
@@ -3811,13 +3813,18 @@ def api_brokerage_discovered(brokerage_id: str, conn=Depends(conn_dependency), c
 
 
 @app.get("/brokerages/{brokerage_id}/trends", response_class=JSONResponse)
-def api_brokerage_trends(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    """Detected market trends for the instance behind this account (active only).
-    Empty when no instance is linked."""
+def api_brokerage_trends(brokerage_id: str, status: str = "active", limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Detected market trends for the instance behind this account. `status` is
+    one of active|weakening|ended (default active). Empty when no instance is
+    linked. Read-only."""
     iid = _resolve_instance_for_brokerage(conn, brokerage_id)
     if not iid:
         return {"trends": [], "count": 0}
-    return _run(action_list_trends, conn, iid, "active")
+    res = _run(action_list_trends, conn, iid, status)
+    trends = (res or {}).get("trends") or []
+    n = max(1, min(int(limit or 50), 100))
+    trends = trends[:n]
+    return {"trends": trends, "count": len(trends)}
 
 
 @app.get("/market/news", response_class=JSONResponse)
@@ -3917,6 +3924,62 @@ def api_brokerage_nexus_momentum(brokerage_id: str, conn=Depends(conn_dependency
         return {"momentum": out}
     except Exception:
         return {"momentum": []}
+
+
+@app.get("/brokerages/{brokerage_id}/backfill-queue", response_class=JSONResponse)
+def api_brokerage_backfill_queue(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Pending buy candidates queued by the nexus strategy (read-only cache).
+    Empty unless the instance runs graph_nexus_analysis."""
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if not iid:
+        return {"queue": [], "count": 0}
+    try:
+        from strategy_cache_persistence import load_strategy_cache_from_db
+        from nexus_telemetry import normalize_backfill_item
+        cache = load_strategy_cache_from_db(conn, _r_auth, iid, "graph_nexus_analysis")
+        raw = (cache or {}).get("_backfill_queue") or []
+        items = [normalize_backfill_item(q) for q in raw if isinstance(q, dict)]
+        items = [q for q in items if q["ticker"]]
+        return {"queue": items, "count": len(items)}
+    except Exception:
+        return {"queue": [], "count": 0}
+
+
+@app.get("/brokerages/{brokerage_id}/momentum-watchlist", response_class=JSONResponse)
+def api_brokerage_momentum_watchlist(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Count + newest names in the nexus momentum watchlist (read-only cache).
+    Count saturates at the persist cap (500). Empty unless momentum_watchlist_enabled."""
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if not iid:
+        return {"count": 0, "newest": []}
+    try:
+        from strategy_cache_persistence import load_strategy_cache_from_db
+        from nexus_telemetry import newest_watchlist
+        cache = load_strategy_cache_from_db(conn, _r_auth, iid, "graph_nexus_analysis")
+        wl = (cache or {}).get("_momentum_watchlist") or {}
+        return {"count": len(wl), "newest": newest_watchlist(wl, limit=12)}
+    except Exception:
+        return {"count": 0, "newest": []}
+
+
+@app.get("/brokerages/{brokerage_id}/trade-contexts", response_class=JSONResponse)
+def api_brokerage_trade_contexts(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Latest per-symbol bot rationale for the instance behind this account.
+    Empty when no instance is linked. Read-only."""
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if not iid:
+        return {"contexts": []}
+    return _run(action_nexus_trade_contexts, conn, iid, 40)
+
+
+@app.get("/brokerages/{brokerage_id}/nexus-outcomes", response_class=JSONResponse)
+def api_brokerage_nexus_outcomes(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Signal->outcome scorecard (hit-rate) for the instance behind this account.
+    Empty when no instance is linked. Read-only."""
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if not iid:
+        return {"hit_rate": 0.0, "n": 0, "n_correct": 0, "avg_return": 0.0, "recent": []}
+    return _run(action_nexus_outcome_stats, conn, iid)
 
 
 # ── Instance-scoped portfolio history (proxies to broker's own API) ───────────
