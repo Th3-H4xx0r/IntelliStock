@@ -6825,6 +6825,52 @@ def action_remove_discovered_stock(conn, instance_id, ticker):
     return {"removed": True, "ticker": ticker, "instance_id": instance_id}
 
 
+_NEXUS_TRADE_CONTEXTS_TABLE = "GraphNexusTradeContexts"
+_NEXUS_TRADE_OUTCOMES_TABLE = "GraphNexusTradeOutcomes"
+
+
+def _ensure_nexus_trade_tables(conn):
+    tables = r.db(DB_NAME).table_list().run(conn)
+    if _NEXUS_TRADE_CONTEXTS_TABLE not in tables:
+        r.db(DB_NAME).table_create(_NEXUS_TRADE_CONTEXTS_TABLE).run(conn)
+    if _NEXUS_TRADE_OUTCOMES_TABLE not in tables:
+        r.db(DB_NAME).table_create(_NEXUS_TRADE_OUTCOMES_TABLE).run(conn)
+
+
+def action_nexus_trade_contexts(conn, instance_id, limit=40):
+    """Latest per-symbol bot rationale (reason + event type) for an instance.
+    Read-only. Empty when the instance has no nexus trade contexts."""
+    from nexus_telemetry import dedupe_latest_contexts
+    if not instance_id:
+        return {"contexts": []}
+    _ensure_nexus_trade_tables(conn)
+    cursor = (
+        r.db(DB_NAME)
+        .table(_NEXUS_TRADE_CONTEXTS_TABLE)
+        .filter(lambda doc: doc["instance_id"] == instance_id)
+        .order_by(r.desc("date_key"))
+        .limit(400)
+        .run(conn)
+    )
+    return {"contexts": dedupe_latest_contexts(list(cursor), limit=limit)}
+
+
+def action_nexus_outcome_stats(conn, instance_id):
+    """Aggregate signal->outcome hit-rate for an instance. Read-only."""
+    from nexus_telemetry import summarize_outcomes
+    if not instance_id:
+        return summarize_outcomes([])
+    _ensure_nexus_trade_tables(conn)
+    cursor = (
+        r.db(DB_NAME)
+        .table(_NEXUS_TRADE_OUTCOMES_TABLE)
+        .filter(lambda doc: doc["instance_id"] == instance_id)
+        .limit(2000)
+        .run(conn)
+    )
+    return summarize_outcomes(list(cursor))
+
+
 def action_nexus_config_get(conn, instance_id):
     """Get nexus trend/discovery configuration for an instance."""
     if not instance_id:
