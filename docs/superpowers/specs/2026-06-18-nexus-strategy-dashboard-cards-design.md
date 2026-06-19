@@ -39,12 +39,13 @@ new read-only backend endpoints and seven Flutter cards.
 - The live instance is `alpaca-main` (Alpaca LIVE, Strategies doc 179). Never
   execute trades or move money.
 - Backend edits must be additive, read-only, never on the trade path.
-- The single strategy-file edit (momentum watchlist summary, card #7) MUST be
-  preceded by `gitnexus_impact({target, direction:"upstream"})`; proceed only if
-  risk is LOW and `affected_processes` does not include the trade/decision path.
-  Report the blast radius before editing. Run `gitnexus_detect_changes()` before
-  commit. The GitNexus index is stale — trust `affected_processes: []` + risk
-  level over its line-drift symbol attribution.
+- **This feature requires ZERO edits to `graph_nexus_analysis.py`.** All cards
+  read from tables/cache the strategy already writes. Every new endpoint lives in
+  `backend/api/main.py` (+ two read-only actions in `interactive_utils.py`).
+- Standing GitNexus rules still apply to any symbol we touch: run
+  `gitnexus_impact({target, direction:"upstream"})` before editing and
+  `gitnexus_detect_changes()` before commit. The index is stale — trust
+  `affected_processes: []` + risk level over its line-drift symbol attribution.
 - Mobile ships via `cd mobile && scripts/deploy.sh 1`. Backend is NOT
   auto-deployed; the operator redeploys `main` to Dockploy.
 
@@ -60,15 +61,20 @@ All findings below were confirmed by reading the code, not assumed.
 | Trade rationale ("why") | `GraphNexusTradeContexts.reason` (+ `features.dominant_event_type`) | yes | none |
 | Signal outcomes | `GraphNexusOutcomes` table (confirm exact table name in code at impl time — may be `GraphNexusTradeOutcomes`) | yes | none |
 | Momentum ranked top | `NexusStrategyCache._momentum_ranked_top` | yes | `/brokerages/{id}/nexus-momentum` (existing card) |
-| Momentum **watchlist** (broad set) | `NexusStrategyCache._momentum_watchlist` | **NO — regenerated in-process each run** | none |
+| Momentum **watchlist** (broad set) | `NexusStrategyCache._momentum_watchlist` | **yes** (not blacklisted; survives save/load) | none |
 
 Key gotchas the design must respect:
 
-1. **The momentum watchlist is not persisted.** A read-only API reading
-   `load_strategy_cache_from_db(...)` will not see `_momentum_watchlist`. Card #7
-   therefore requires the strategy to write a small persisted summary (the one
-   strategy edit). It is also gated by `momentum_watchlist_enabled` (defaults
-   off) — the card self-hides when the summary is empty.
+1. **The momentum watchlist IS persisted — no strategy edit needed.** Verified
+   against `strategy_cache_persistence.py`: only `_momentum_ranked_cache` is
+   blacklisted; `_momentum_watchlist` is stored via `setdefault` and survives
+   `save_strategy_cache_to_db` / `load_strategy_cache_from_db`. So a read-only
+   endpoint can read it directly, exactly like the existing
+   `/brokerages/{id}/nexus-momentum` reads `_momentum_ranked_top`. Two caveats:
+   (a) the persist layer caps dicts at `_MAX_DICT_ENTRIES = 500`, so the reported
+   `count` saturates at 500; (b) the watchlist only populates when
+   `momentum_watchlist_enabled` is on for the instance (the same gate the
+   existing momentum card already depends on) — the card self-hides when empty.
 2. **"Why owned" has no persisted Neo4j hop-chain.** The richest persisted "why"
    is `GraphNexusTradeContexts.reason` (~1500-char LLM explanation) +
    `dominant_event_type`, plus discovery `source` / `source_ticker` (e.g.
@@ -117,27 +123,16 @@ All under `backend/api/main.py`, brokerage-scoped, read-only.
    server-side: `correct = (intent=="buy" & latest_return>0) or (intent=="sell"
    & latest_return<0)`; return `{hit_rate, n, n_correct, avg_return,
    recent: [{symbol, intent, latest_return, dominant_event_type, entry_date}]}`.
-6. **New** `GET /brokerages/{id}/momentum-watchlist` — read the persisted summary
-   written by the strategy (card #7); return `{enabled, count, newest:[{symbol,
-   first_seen_bar, ret_20d}]}` or `{}` when absent.
+6. **New** `GET /brokerages/{id}/momentum-watchlist` — read the persisted
+   `_momentum_watchlist` dict directly from the cache (card #7). Return
+   `{count, newest:[{symbol, first_seen_bar, ret_20d}]}` (newest = entries sorted
+   by `first_seen_bar` desc), or `{count: 0, newest: []}` when absent/empty.
+   Count saturates at 500 (persist cap); the card self-hides when empty.
 
-### The one strategy edit (card #7)
+### No strategy edit
 
-In `backend/strategies/graph_nexus_analysis.py`, at the end of each run, write a
-compact `_momentum_watchlist_summary` into the persisted strategy cache:
-
-```python
-strategy_cache["_momentum_watchlist_summary"] = {
-    "enabled": bool(momentum_watchlist_enabled),
-    "count": len(watchlist),
-    "newest": [ ...top N by first_seen_bar desc: {symbol, first_seen_bar, ret_20d}... ],
-}
-```
-
-Additive, telemetry-only, off the decision/trade path. **Gated by
-`gitnexus_impact` before editing and `gitnexus_detect_changes` before commit.**
-Confirm `_momentum_watchlist_summary` is not blacklisted in
-`strategy_cache_persistence.py` (add to persist set if needed).
+Confirmed unnecessary: `_momentum_watchlist` is already persisted (see Verified
+data sources, gotcha #1). The whole feature is new read-only endpoints + mobile.
 
 ## Mobile (Flutter)
 
@@ -176,9 +171,10 @@ Confirm `_momentum_watchlist_summary` is not blacklisted in
    `dominant_event_type` chip + discovery origin. Tap → stock screen.
 6. **Outcome Scorecard** — headline hit-rate (%), n signals, avg return, and a
    few recent signal→outcome rows (green/red by correctness).
-7. **Momentum Watchlist** — "monitoring N names", newest additions with age and
-   20d return. Hidden when `enabled` is false or summary empty. Distinct from the
-   existing top-10 "Nexus Momentum" card (which stays as-is).
+7. **Momentum Watchlist** — "monitoring N names" (count, capped at 500), newest
+   additions with age and 20d return. Hidden when the watchlist is empty (i.e.
+   `momentum_watchlist_enabled` off). Distinct from the existing top-10 "Nexus
+   Momentum" card (which stays as-is).
 
 ## Error / empty / loading
 
