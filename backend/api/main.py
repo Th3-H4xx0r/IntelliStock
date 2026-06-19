@@ -3494,6 +3494,7 @@ def api_brokerage_positions(
         inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
     except Exception:
         inst_list = []
+    _dbg = []  # TEMP DIAGNOSTIC: (instance_id -> its _widget_brokerage_id)
     for inst in (inst_list or []):
         iid = str((inst or {}).get("id") or "")
         if not iid:
@@ -3503,7 +3504,9 @@ def api_brokerage_positions(
             full = action_get_instance(conn, iid) or inst
         except Exception:
             pass
-        if _widget_brokerage_id(full) != brokerage_id:
+        _bid = _widget_brokerage_id(full)
+        _dbg.append("%s->%r" % (iid, _bid))
+        if _bid != brokerage_id:
             continue
         try:
             cand = action_get_live_state(conn, iid)
@@ -3536,6 +3539,17 @@ def api_brokerage_positions(
                 "unrealizedPnlPct": _f(p.get("unrealized_pnl_pct")) or 0.0,
             })
     positions.sort(key=lambda x: x.get("marketValue") or 0.0, reverse=True)
+    # TEMP DIAGNOSTIC (remove after): reveals why the app sees no positions —
+    # the brokerage id the app sent vs every instance's _widget_brokerage_id,
+    # whether a match was found, and how many positions came back.
+    try:
+        import logging as _lg
+        _lg.getLogger("uvicorn.error").warning(
+            "POSITIONS-DEBUG req_brokerage_id=%r matched=%s n_pos=%d cash=%r instance_bids=[%s]",
+            brokerage_id, isinstance(ls, dict), len(positions), cash, ", ".join(_dbg),
+        )
+    except Exception:
+        pass
     return {"brokerage_id": brokerage_id, "cash": cash, "positions": positions}
 
 
