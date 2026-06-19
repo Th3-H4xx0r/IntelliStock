@@ -5,12 +5,24 @@ import 'session.dart';
 
 const _kApiBaseUrl = 'api_base_url';
 
-/// Trim, drop empties, strip a single trailing slash. Scheme left untouched.
+/// Normalize to a backend ORIGIN: trim, then reduce a valid http(s) URL to
+/// `scheme://host[:port]` — dropping any path/query/fragment and all trailing
+/// slashes. The backend serves bare paths from root (e.g. `/auth/login`), and
+/// Dio's baseUrl join would silently drop a path prefix anyway, so keeping a
+/// path would be a footgun (`https://h/api` + `/auth/login` → `https://h/auth/login`).
+/// A non-http(s) / hostless input is returned trailing-slash-stripped so
+/// [isValidBaseUrl] can still reject it.
 String normalizeBaseUrl(String raw) {
-  var s = raw.trim();
+  final s = raw.trim();
   if (s.isEmpty) return '';
-  if (s.endsWith('/')) s = s.substring(0, s.length - 1);
-  return s;
+  final uri = Uri.tryParse(s);
+  if (uri != null &&
+      (uri.scheme == 'http' || uri.scheme == 'https') &&
+      uri.host.isNotEmpty) {
+    final authority = uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
+    return '${uri.scheme}://$authority';
+  }
+  return s.replaceFirst(RegExp(r'/+$'), '');
 }
 
 /// A syntactically usable backend base URL: http/https scheme + non-empty host.

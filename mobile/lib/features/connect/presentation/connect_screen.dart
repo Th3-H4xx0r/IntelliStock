@@ -29,7 +29,9 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: ref.read(apiBaseUrlProvider).baseUrl);
+    _controller = TextEditingController(
+      text: ref.read(apiBaseUrlProvider).baseUrl,
+    );
   }
 
   @override
@@ -39,21 +41,32 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   }
 
   Future<void> _save(String url) async {
+    if (!isValidBaseUrl(url)) {
+      setState(() {
+        _error = 'Enter a valid URL, e.g. https://your-instance.example.com';
+        _probing = false;
+        _probeFailed = false;
+      });
+      return;
+    }
     final store = ref.read(apiBaseUrlProvider);
     final wasConfigured = store.isConfigured;
     final previous = store.baseUrl;
     final next = normalizeBaseUrl(url);
+    final changed = next != previous;
     await store.set(next);
     // Changing to a different instance invalidates the existing session.
-    if (wasConfigured && next != previous) {
+    if (wasConfigured && changed) {
       await ref.read(sessionProvider).clear();
     }
-    // The merged refreshListenable re-runs the router redirect. From a pushed
-    // (edit) screen, nudge to /login so we don't sit on a now-popped route;
-    // first-run lands there automatically via the gate.
-    if (mounted && Navigator.of(context).canPop()) {
-      context.go('/login');
+    if (!mounted) return;
+    if (Navigator.of(context).canPop()) {
+      // Edited from Settings: re-login only if the instance actually changed;
+      // an unchanged save just returns the user to Settings.
+      changed ? context.go('/login') : context.pop();
     }
+    // First-run (can't pop): the merged refreshListenable re-runs the router
+    // redirect, which moves us off /connect to /login now that a URL is set.
   }
 
   Future<void> _testAndConnect() async {
@@ -85,89 +98,103 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   }
 
   Future<bool> _probe(String url) async {
-    try {
-      final dio = Dio(BaseOptions(
+    final dio = Dio(
+      BaseOptions(
         baseUrl: url,
         connectTimeout: const Duration(seconds: 4),
         receiveTimeout: const Duration(seconds: 4),
         headers: {'Accept': 'application/json'},
-      ));
+      ),
+    );
+    try {
       final res = await dio.get<dynamic>('/health');
       return res.statusCode == 200;
     } catch (_) {
       return false;
+    } finally {
+      dio.close(force: true);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final canPop = Navigator.of(context).canPop();
-    return Scaffold(
-      backgroundColor: AppColors.canvas,
-      appBar: canPop
-          ? AppBar(backgroundColor: Colors.transparent, elevation: 0)
-          : null,
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Connect to your instance', style: AppTextStyles.h2),
-                const SizedBox(height: 8),
-                Text(
-                  'Enter the URL of your IntelliStock backend. You can change '
-                  'this later in Settings.',
-                  style: AppTextStyles.body.copyWith(color: AppColors.textMuted),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: _controller,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  keyboardType: TextInputType.url,
-                  style: AppTextStyles.body.copyWith(color: AppColors.textHi),
-                  decoration: InputDecoration(
-                    hintText: 'https://your-instance.example.com',
-                    hintStyle: AppTextStyles.body.copyWith(color: AppColors.textDim),
-                    errorText: _error,
-                    filled: true,
-                    fillColor: AppColors.surface,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: AppColors.border),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: AppColors.border),
+    return PopScope(
+      // First-run gate (nothing to pop): swallow hardware back so the user
+      // can't escape into an unconfigured blank state. Edit-from-Settings
+      // (canPop) keeps normal back behaviour.
+      canPop: canPop,
+      child: Scaffold(
+        backgroundColor: AppColors.canvas,
+        appBar: canPop
+            ? AppBar(backgroundColor: Colors.transparent, elevation: 0)
+            : null,
+        body: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Connect to your instance', style: AppTextStyles.h2),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Enter the URL of your IntelliStock backend. You can change '
+                    'this later in Settings.',
+                    style: AppTextStyles.body.copyWith(
+                      color: AppColors.textMuted,
                     ),
                   ),
-                  onChanged: (_) {
-                    if (_error != null || _probeFailed) {
-                      setState(() {
-                        _error = null;
-                        _probeFailed = false;
-                      });
-                    }
-                  },
-                  onSubmitted: (_) => _testAndConnect(),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  width: double.infinity,
-                  child: AppButton.primary(
-                    label: _probeFailed ? 'Save anyway' : 'Test & Connect',
-                    busy: _probing,
-                    onPressed: _probing
-                        ? null
-                        : (_probeFailed
-                            ? () => _save(_controller.text)
-                            : _testAndConnect),
+                  const SizedBox(height: 20),
+                  TextField(
+                    controller: _controller,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    keyboardType: TextInputType.url,
+                    style: AppTextStyles.body.copyWith(color: AppColors.textHi),
+                    decoration: InputDecoration(
+                      hintText: 'https://your-instance.example.com',
+                      hintStyle: AppTextStyles.body.copyWith(
+                        color: AppColors.textDim,
+                      ),
+                      errorText: _error,
+                      filled: true,
+                      fillColor: AppColors.surface,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: AppColors.border),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: AppColors.border),
+                      ),
+                    ),
+                    onChanged: (_) {
+                      if (_error != null || _probeFailed) {
+                        setState(() {
+                          _error = null;
+                          _probeFailed = false;
+                        });
+                      }
+                    },
+                    onSubmitted: (_) => _testAndConnect(),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    child: AppButton.primary(
+                      label: _probeFailed ? 'Save anyway' : 'Test & Connect',
+                      busy: _probing,
+                      onPressed: _probing
+                          ? null
+                          : (_probeFailed
+                                ? () => _save(_controller.text)
+                                : _testAndConnect),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
