@@ -6,7 +6,6 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
-import '../../../core/widgets/skeleton.dart';
 import '../../stock/presentation/stock_screen.dart';
 import '../application/dashboard_controller.dart';
 import '../application/selected_account_controller.dart';
@@ -15,13 +14,13 @@ import '../data/nexus_models.dart';
 
 /// Eyebrow label, matching insights_section.dart's _tileLabel.
 Widget _label(String s) => Text(
-      s,
-      style: AppTextStyles.nano.copyWith(
-        color: AppColors.textFaint,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0.8,
-      ),
-    );
+  s,
+  style: AppTextStyles.nano.copyWith(
+    color: AppColors.textFaint,
+    fontWeight: FontWeight.w700,
+    letterSpacing: 0.8,
+  ),
+);
 
 void _openStock(BuildContext context, String sym, String brokerageId) {
   if (sym.isEmpty) return;
@@ -29,20 +28,44 @@ void _openStock(BuildContext context, String sym, String brokerageId) {
 }
 
 GlassCard _cardShell({required List<Widget> children}) => GlassCard(
-      frosted: true,
-      padding: const EdgeInsets.all(16),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
-    );
+  frosted: true,
+  padding: const EdgeInsets.all(16),
+  child: Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: children,
+  ),
+);
 
 /// The bot strategy's live telemetry, grouped as its own dashboard section.
-/// Every card self-hides when its data is empty, and the whole section
-/// (header included) hides once all cards have loaded with no data — so a
-/// non-nexus account, or one with the strategy disabled, sees nothing new.
-class StrategySection extends ConsumerWidget {
+/// Each card self-hides until it actually has data (no loading skeletons), and
+/// the whole section (header included) only renders once at least one card has
+/// data — so a non-nexus account, or one still loading, sees nothing (no
+/// skeleton wall, no orphaned header). The fetches are also deferred briefly so
+/// they don't compete with the core dashboard + market requests on first load.
+class StrategySection extends ConsumerStatefulWidget {
   const StrategySection({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<StrategySection> createState() => _StrategySectionState();
+}
+
+class _StrategySectionState extends ConsumerState<StrategySection> {
+  bool _armed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Defer the (optional, read-only) strategy telemetry fetches so they don't
+    // pile onto the backend alongside the core + market requests at initial
+    // load — those get priority; the strategy cards fill in a moment later.
+    Future.delayed(const Duration(milliseconds: 900), () {
+      if (mounted) setState(() => _armed = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_armed) return const SizedBox.shrink();
     final accounts = ref.watch(brokeragesProvider).valueOrNull;
     if (accounts == null || accounts.isEmpty) return const SizedBox.shrink();
     final selectedId = ref.watch(selectedAccountProvider);
@@ -50,27 +73,20 @@ class StrategySection extends ConsumerWidget {
         ? selectedId
         : accounts.first.id;
 
-    // Hide the entire section (header too) when every card has resolved empty.
-    // While anything is still loading we render so the cards can show skeletons.
-    final trends = ref.watch(nexusTrendsProvider(id));
-    final backfill = ref.watch(backfillQueueProvider(id));
-    final discovered = ref.watch(discoveredStocksProvider(id));
-    final contexts = ref.watch(tradeContextsProvider(id));
-    final outcomes = ref.watch(nexusOutcomesProvider(id));
-    final watchlist = ref.watch(momentumWatchlistProvider(id));
-    final anyLoading = trends.isLoading ||
-        backfill.isLoading ||
-        discovered.isLoading ||
-        contexts.isLoading ||
-        outcomes.isLoading ||
-        watchlist.isLoading;
-    final anyData = (trends.valueOrNull?.isEmpty == false) ||
-        (backfill.valueOrNull?.isNotEmpty ?? false) ||
-        (discovered.valueOrNull?.isNotEmpty ?? false) ||
-        (contexts.valueOrNull?.isNotEmpty ?? false) ||
-        (outcomes.valueOrNull?.isEmpty == false) ||
-        (watchlist.valueOrNull?.isEmpty == false);
-    if (!anyLoading && !anyData) return const SizedBox.shrink();
+    // Render only when at least one card has data. While requests are in flight
+    // (or all empty) the whole section stays hidden — no skeletons, no header.
+    final anyData =
+        (ref.watch(nexusTrendsProvider(id)).valueOrNull?.isEmpty == false) ||
+        (ref.watch(backfillQueueProvider(id)).valueOrNull?.isNotEmpty ??
+            false) ||
+        (ref.watch(discoveredStocksProvider(id)).valueOrNull?.isNotEmpty ??
+            false) ||
+        (ref.watch(tradeContextsProvider(id)).valueOrNull?.isNotEmpty ??
+            false) ||
+        (ref.watch(nexusOutcomesProvider(id)).valueOrNull?.isEmpty == false) ||
+        (ref.watch(momentumWatchlistProvider(id)).valueOrNull?.isEmpty ==
+            false);
+    if (!anyData) return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -98,20 +114,21 @@ class _MarketTrendsCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final view = ref.watch(nexusTrendsProvider(brokerageId)).valueOrNull;
-    if (view != null && view.isEmpty) return const SizedBox.shrink();
+    if (view == null || view.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: _cardShell(children: [
-        Row(children: [
-          Icon(symbol('trending_up'), size: 15, color: AppColors.primary),
-          const SizedBox(width: 6),
-          _label('MARKET TRENDS'),
-        ]),
-        const SizedBox(height: 10),
-        if (view == null)
-          const Skeleton(height: 80, radius: 7)
-        else ...[
-          for (final t in view.active) _TrendRow(trend: t, brokerageId: brokerageId),
+      child: _cardShell(
+        children: [
+          Row(
+            children: [
+              Icon(symbol('trending_up'), size: 15, color: AppColors.primary),
+              const SizedBox(width: 6),
+              _label('MARKET TRENDS'),
+            ],
+          ),
+          const SizedBox(height: 10),
+          for (final t in view.active)
+            _TrendRow(trend: t, brokerageId: brokerageId),
           if (view.recentlyEnded.isNotEmpty) ...[
             const SizedBox(height: 6),
             _label('RECENTLY ENDED'),
@@ -119,7 +136,7 @@ class _MarketTrendsCard extends ConsumerWidget {
             for (final t in view.recentlyEnded) _EndedTrendRow(trend: t),
           ],
         ],
-      ]),
+      ),
     );
   }
 }
@@ -137,19 +154,34 @@ class _TrendRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Icon(trend.bullish ? Icons.arrow_upward : Icons.arrow_downward, size: 13, color: c),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(trend.name,
+          Row(
+            children: [
+              Icon(
+                trend.bullish ? Icons.arrow_upward : Icons.arrow_downward,
+                size: 13,
+                color: c,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  trend.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: AppTextStyles.micro.copyWith(
-                      color: AppColors.textHi, fontWeight: FontWeight.w700)),
-            ),
-            Text('${(trend.strength * 100).round()}%',
-                style: AppTextStyles.nano.copyWith(color: c, fontWeight: FontWeight.w700)),
-          ]),
+                    color: AppColors.textHi,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Text(
+                '${(trend.strength * 100).round()}%',
+                style: AppTextStyles.nano.copyWith(
+                  color: c,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 4),
           ClipRRect(
             borderRadius: BorderRadius.circular(3),
@@ -168,12 +200,20 @@ class _TrendRow extends StatelessWidget {
                 for (final s in trend.tickers.take(5))
                   GestureDetector(
                     onTap: () => _openStock(context, s, brokerageId),
-                    child: Text(s,
-                        style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
+                    child: Text(
+                      s,
+                      style: AppTextStyles.nano.copyWith(
+                        color: AppColors.textMuted,
+                      ),
+                    ),
                   ),
                 if (trend.tickers.length > 5)
-                  Text('+${trend.tickers.length - 5}',
-                      style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+                  Text(
+                    '+${trend.tickers.length - 5}',
+                    style: AppTextStyles.nano.copyWith(
+                      color: AppColors.textFaint,
+                    ),
+                  ),
               ],
             ),
           ],
@@ -191,18 +231,24 @@ class _EndedTrendRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(children: [
-        Icon(symbol('check'), size: 12, color: AppColors.textFaint),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(trend.name,
+      child: Row(
+        children: [
+          Icon(symbol('check'), size: 12, color: AppColors.textFaint),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              trend.name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
-        ),
-        Text(_agoLabel(trend.endedAt),
-            style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-      ]),
+              style: AppTextStyles.nano.copyWith(color: AppColors.textMuted),
+            ),
+          ),
+          Text(
+            _agoLabel(trend.endedAt),
+            style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -230,28 +276,42 @@ class _ReversalWatchCard extends ConsumerWidget {
     if (items.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: _cardShell(children: [
-        Row(children: [
-          Icon(symbol('warning'), size: 15, color: AppColors.warning),
-          const SizedBox(width: 6),
-          _label('REVERSAL WATCH'),
-        ]),
-        const SizedBox(height: 10),
-        for (final t in items)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 5),
-            child: Row(children: [
-              Expanded(
-                child: Text(t.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppTextStyles.micro.copyWith(color: AppColors.textHi)),
-              ),
-              Text('${t.reversalCount} signal${t.reversalCount == 1 ? '' : 's'}',
-                  style: AppTextStyles.nano.copyWith(color: AppColors.warning)),
-            ]),
+      child: _cardShell(
+        children: [
+          Row(
+            children: [
+              Icon(symbol('warning'), size: 15, color: AppColors.warning),
+              const SizedBox(width: 6),
+              _label('REVERSAL WATCH'),
+            ],
           ),
-      ]),
+          const SizedBox(height: 10),
+          for (final t in items)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 5),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      t.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTextStyles.micro.copyWith(
+                        color: AppColors.textHi,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${t.reversalCount} signal${t.reversalCount == 1 ? '' : 's'}',
+                    style: AppTextStyles.nano.copyWith(
+                      color: AppColors.warning,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -265,53 +325,73 @@ class _BackfillQueueCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final items = ref.watch(backfillQueueProvider(brokerageId)).valueOrNull;
-    if (items != null && items.isEmpty) return const SizedBox.shrink();
+    if (items == null || items.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: _cardShell(children: [
-        Row(children: [
-          Icon(symbol('hourglass_empty'), size: 15, color: AppColors.info),
-          const SizedBox(width: 6),
-          _label('BACKFILL QUEUE'),
-          const Spacer(),
-          if (items != null)
-            Text('${items.length} pending',
-                style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-        ]),
-        const SizedBox(height: 10),
-        if (items == null)
-          const Skeleton(height: 60, radius: 7)
-        else
+      child: _cardShell(
+        children: [
+          Row(
+            children: [
+              Icon(symbol('hourglass_empty'), size: 15, color: AppColors.info),
+              const SizedBox(width: 6),
+              _label('BACKFILL QUEUE'),
+              const Spacer(),
+              Text(
+                '${items.length} pending',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
           for (final q in items.take(12))
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => _openStock(context, q.ticker, brokerageId),
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 5),
-                child: Row(children: [
-                  if (q.priority) ...[
-                    Icon(symbol('push_pin'), size: 12, color: AppColors.warning),
-                    const SizedBox(width: 4),
-                  ],
-                  SizedBox(
-                    width: 64,
-                    child: Text(q.ticker,
+                child: Row(
+                  children: [
+                    if (q.priority) ...[
+                      Icon(
+                        symbol('push_pin'),
+                        size: 12,
+                        color: AppColors.warning,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    SizedBox(
+                      width: 64,
+                      child: Text(
+                        q.ticker,
                         style: AppTextStyles.micro.copyWith(
-                            color: AppColors.textHi, fontWeight: FontWeight.w700)),
-                  ),
-                  Expanded(
-                    child: Text(q.source,
+                          color: AppColors.textHi,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        q.source,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-                  ),
-                  if (q.nPaths > 0)
-                    Text('${q.nPaths} paths',
-                        style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
-                ]),
+                        style: AppTextStyles.nano.copyWith(
+                          color: AppColors.textFaint,
+                        ),
+                      ),
+                    ),
+                    if (q.nPaths > 0)
+                      Text(
+                        '${q.nPaths} paths',
+                        style: AppTextStyles.nano.copyWith(
+                          color: AppColors.textMuted,
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
-      ]),
+        ],
+      ),
     );
   }
 }
@@ -325,45 +405,55 @@ class _DiscoveredStocksCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final items = ref.watch(discoveredStocksProvider(brokerageId)).valueOrNull;
-    if (items != null && items.isEmpty) return const SizedBox.shrink();
+    if (items == null || items.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: _cardShell(children: [
-        Row(children: [
-          Icon(symbol('search'), size: 15, color: AppColors.teal),
-          const SizedBox(width: 6),
-          _label('DISCOVERED'),
-        ]),
-        const SizedBox(height: 10),
-        if (items == null)
-          const Skeleton(height: 60, radius: 7)
-        else
+      child: _cardShell(
+        children: [
+          Row(
+            children: [
+              Icon(symbol('search'), size: 15, color: AppColors.teal),
+              const SizedBox(width: 6),
+              _label('DISCOVERED'),
+            ],
+          ),
+          const SizedBox(height: 10),
           for (final d in items.take(12))
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => _openStock(context, d.ticker, brokerageId),
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 5),
-                child: Row(children: [
-                  SizedBox(
-                    width: 64,
-                    child: Text(d.ticker,
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 64,
+                      child: Text(
+                        d.ticker,
                         style: AppTextStyles.micro.copyWith(
-                            color: AppColors.textHi, fontWeight: FontWeight.w700)),
-                  ),
-                  Expanded(
-                    child: Text(
+                          color: AppColors.textHi,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
                         d.sourceTicker != null && d.sourceTicker!.isNotEmpty
                             ? '${d.source} · via ${d.sourceTicker}'
                             : d.source,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-                  ),
-                ]),
+                        style: AppTextStyles.nano.copyWith(
+                          color: AppColors.textFaint,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-      ]),
+        ],
+      ),
     );
   }
 }
@@ -377,19 +467,19 @@ class _BotRationaleCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final items = ref.watch(tradeContextsProvider(brokerageId)).valueOrNull;
-    if (items != null && items.isEmpty) return const SizedBox.shrink();
+    if (items == null || items.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: _cardShell(children: [
-        Row(children: [
-          Icon(symbol('psychology'), size: 15, color: AppColors.primary),
-          const SizedBox(width: 6),
-          _label('BOT RATIONALE'),
-        ]),
-        const SizedBox(height: 10),
-        if (items == null)
-          const Skeleton(height: 70, radius: 7)
-        else
+      child: _cardShell(
+        children: [
+          Row(
+            children: [
+              Icon(symbol('psychology'), size: 15, color: AppColors.primary),
+              const SizedBox(width: 6),
+              _label('BOT RATIONALE'),
+            ],
+          ),
+          const SizedBox(height: 10),
           for (final r in items.take(8))
             GestureDetector(
               behavior: HitTestBehavior.opaque,
@@ -399,35 +489,53 @@ class _BotRationaleCard extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(children: [
-                      Text(r.symbol,
+                    Row(
+                      children: [
+                        Text(
+                          r.symbol,
                           style: AppTextStyles.micro.copyWith(
-                              color: AppColors.textHi, fontWeight: FontWeight.w700)),
-                      const SizedBox(width: 8),
-                      if (r.eventType.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: AppColors.fill(AppColors.primary),
-                            borderRadius: BorderRadius.circular(5),
+                            color: AppColors.textHi,
+                            fontWeight: FontWeight.w700,
                           ),
-                          child: Text(r.eventType,
-                              style: AppTextStyles.nano.copyWith(color: AppColors.primary)),
                         ),
-                    ]),
+                        const SizedBox(width: 8),
+                        if (r.eventType.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppColors.fill(AppColors.primary),
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: Text(
+                              r.eventType,
+                              style: AppTextStyles.nano.copyWith(
+                                color: AppColors.primary,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                     if (r.reason.isNotEmpty) ...[
                       const SizedBox(height: 3),
-                      Text(r.reason,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: AppTextStyles.nano.copyWith(
-                              color: AppColors.textMuted, height: 1.3)),
+                      Text(
+                        r.reason,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppTextStyles.nano.copyWith(
+                          color: AppColors.textMuted,
+                          height: 1.3,
+                        ),
+                      ),
                     ],
                   ],
                 ),
               ),
             ),
-      ]),
+        ],
+      ),
     );
   }
 }
@@ -441,54 +549,81 @@ class _OutcomeScorecardCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final s = ref.watch(nexusOutcomesProvider(brokerageId)).valueOrNull;
-    if (s != null && s.isEmpty) return const SizedBox.shrink();
+    if (s == null || s.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: _cardShell(children: [
-        Row(children: [
-          Icon(symbol('score'), size: 15, color: AppColors.info),
-          const SizedBox(width: 6),
-          _label('OUTCOME SCORECARD'),
-        ]),
-        const SizedBox(height: 10),
-        if (s == null)
-          const Skeleton(height: 60, radius: 7)
-        else ...[
-          Row(children: [
-            Text('${(s.hitRate * 100).round()}%',
+      child: _cardShell(
+        children: [
+          Row(
+            children: [
+              Icon(symbol('score'), size: 15, color: AppColors.info),
+              const SizedBox(width: 6),
+              _label('OUTCOME SCORECARD'),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Text(
+                '${(s.hitRate * 100).round()}%',
                 style: AppTextStyles.valueLg.copyWith(
-                    color: s.hitRate >= 0.5 ? AppColors.success : AppColors.danger)),
-            const SizedBox(width: 8),
-            Text('hit rate · ${s.nCorrect}/${s.n} signals',
-                style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-          ]),
+                  color: s.hitRate >= 0.5
+                      ? AppColors.success
+                      : AppColors.danger,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'hit rate · ${s.nCorrect}/${s.n} signals',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
           for (final o in s.recent)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 3),
-              child: Row(children: [
-                Icon(o.correct ? symbol('check') : symbol('close'),
-                    size: 12, color: o.correct ? AppColors.success : AppColors.danger),
-                const SizedBox(width: 6),
-                SizedBox(
-                  width: 56,
-                  child: Text(o.symbol,
+              child: Row(
+                children: [
+                  Icon(
+                    o.correct ? symbol('check') : symbol('close'),
+                    size: 12,
+                    color: o.correct ? AppColors.success : AppColors.danger,
+                  ),
+                  const SizedBox(width: 6),
+                  SizedBox(
+                    width: 56,
+                    child: Text(
+                      o.symbol,
                       style: AppTextStyles.nano.copyWith(
-                          color: AppColors.textHi, fontWeight: FontWeight.w700)),
-                ),
-                Expanded(
-                  child: Text(o.eventType,
+                        color: AppColors.textHi,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      o.eventType,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-                ),
-                Text('${o.latestReturn >= 0 ? '+' : ''}${o.latestReturn.toStringAsFixed(1)}%',
+                      style: AppTextStyles.nano.copyWith(
+                        color: AppColors.textFaint,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${o.latestReturn >= 0 ? '+' : ''}${o.latestReturn.toStringAsFixed(1)}%',
                     style: AppTextStyles.nano.copyWith(
-                        color: o.latestReturn >= 0 ? AppColors.success : AppColors.danger)),
-              ]),
+                      color: o.latestReturn >= 0
+                          ? AppColors.success
+                          : AppColors.danger,
+                    ),
+                  ),
+                ],
+              ),
             ),
         ],
-      ]),
+      ),
     );
   }
 }
@@ -502,23 +637,24 @@ class _MomentumWatchlistCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final w = ref.watch(momentumWatchlistProvider(brokerageId)).valueOrNull;
-    if (w != null && w.isEmpty) return const SizedBox.shrink();
+    if (w == null || w.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: _cardShell(children: [
-        Row(children: [
-          Icon(symbol('visibility'), size: 15, color: AppColors.teal),
-          const SizedBox(width: 6),
-          _label('MOMENTUM WATCHLIST'),
-          const Spacer(),
-          if (w != null)
-            Text('monitoring ${w.count}',
-                style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-        ]),
-        const SizedBox(height: 10),
-        if (w == null)
-          const Skeleton(height: 40, radius: 7)
-        else
+      child: _cardShell(
+        children: [
+          Row(
+            children: [
+              Icon(symbol('visibility'), size: 15, color: AppColors.teal),
+              const SizedBox(width: 6),
+              _label('MOMENTUM WATCHLIST'),
+              const Spacer(),
+              Text(
+                'monitoring ${w.count}',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -527,27 +663,44 @@ class _MomentumWatchlistCard extends ConsumerWidget {
                 GestureDetector(
                   onTap: () => _openStock(context, e.symbol, brokerageId),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 6,
+                    ),
                     decoration: BoxDecoration(
                       color: AppColors.fill(AppColors.teal),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: AppColors.stroke(AppColors.teal)),
+                      border: Border.all(
+                        color: AppColors.stroke(AppColors.teal),
+                      ),
                     ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Text(e.symbol,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          e.symbol,
                           style: AppTextStyles.nano.copyWith(
-                              color: AppColors.textHi, fontWeight: FontWeight.w700)),
-                      if (e.firstSeenPrice > 0) ...[
-                        const SizedBox(width: 5),
-                        Text('@\$${e.firstSeenPrice.toStringAsFixed(0)}',
-                            style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
+                            color: AppColors.textHi,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        if (e.firstSeenPrice > 0) ...[
+                          const SizedBox(width: 5),
+                          Text(
+                            '@\$${e.firstSeenPrice.toStringAsFixed(0)}',
+                            style: AppTextStyles.nano.copyWith(
+                              color: AppColors.textMuted,
+                            ),
+                          ),
+                        ],
                       ],
-                    ]),
+                    ),
                   ),
                 ),
             ],
           ),
-      ]),
+        ],
+      ),
     );
   }
 }
@@ -559,5 +712,6 @@ class MarketTrendsCardForTest extends StatelessWidget {
   const MarketTrendsCardForTest({super.key, required this.brokerageId});
   final String brokerageId;
   @override
-  Widget build(BuildContext context) => _MarketTrendsCard(brokerageId: brokerageId);
+  Widget build(BuildContext context) =>
+      _MarketTrendsCard(brokerageId: brokerageId);
 }
