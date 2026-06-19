@@ -3780,14 +3780,31 @@ def api_brokerage_bot_activity(
     )
 
 
+# Short-TTL cache for brokerage -> instance resolution. A single dashboard load
+# fires ~10 per-brokerage read endpoints (positions, nexus-momentum, trends,
+# discovered, backfill-queue, …), and each previously re-scanned every instance
+# (action_instances + action_get_instance per instance). The link rarely
+# changes, so cache the resolution briefly to collapse that to one scan.
+_BROKERAGE_INSTANCE_CACHE: dict = {}
+_BROKERAGE_INSTANCE_TTL = 60.0  # seconds
+
+
 def _resolve_instance_for_brokerage(conn, brokerage_id):
     """Id of an instance whose live brokerage == brokerage_id (or None). Same
-    resolution used by /orders and /bot-activity, so per-account views line up."""
+    resolution used by /orders and /bot-activity, so per-account views line up.
+    Cached for _BROKERAGE_INSTANCE_TTL seconds (hits AND misses) to avoid
+    re-scanning every instance on each per-brokerage request."""
+    import time as _time
+    now = _time.monotonic()
+    cached = _BROKERAGE_INSTANCE_CACHE.get(brokerage_id)
+    if cached is not None and cached[1] > now:
+        return cached[0]
     try:
         res = action_instances(conn)
         inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
     except Exception:
         inst_list = []
+    resolved = None
     for inst in (inst_list or []):
         iid = str((inst or {}).get("id") or "")
         if not iid:
@@ -3798,8 +3815,10 @@ def _resolve_instance_for_brokerage(conn, brokerage_id):
         except Exception:
             pass
         if _widget_brokerage_id(full) == brokerage_id:
-            return iid
-    return None
+            resolved = iid
+            break
+    _BROKERAGE_INSTANCE_CACHE[brokerage_id] = (resolved, now + _BROKERAGE_INSTANCE_TTL)
+    return resolved
 
 
 @app.get("/brokerages/{brokerage_id}/discovered", response_class=JSONResponse)
