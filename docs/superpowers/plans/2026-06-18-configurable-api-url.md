@@ -659,14 +659,14 @@ git commit -m "feat(mobile): editable backend URL row in Settings"
 
 - [ ] **Step 1: Replace the literal domain strings with a placeholder**
 
-In both files, replace every `https://intellistock-api.pkrishna.dev` and `intellistock.pkrishna.dev` occurrence with `https://your-instance.example.com` (or, in prose describing the old default, reword to "the configured backend URL"). Keep surrounding sentences sensible.
+In both files, replace every occurrence of the former hardcoded backend host with `https://your-instance.example.com` (or, in prose describing the old default, reword to "the configured backend URL"). Keep surrounding sentences sensible. Scrub this spec/plan pair too, so the former host string appears nowhere in the repo.
 
-- [ ] **Step 2: Verify the repo is clean of the domains**
+- [ ] **Step 2: Verify the repo is clean of the former host**
 
-Run:
+Run a recursive, case-sensitive search for the former backend host (excluding `.git`/`build`/`.dart_tool`) and confirm zero matches. Build the search term at the shell so this document does not itself contain the literal:
 ```bash
 cd /Users/pranavkrishna/PranavFiles/coding-projects/IntelliStock
-grep -rnI "pkrishna.dev" . --exclude-dir=.git --exclude-dir=build --exclude-dir=.dart_tool || echo "CLEAN: no references"
+host="pkrishna""\.dev"; grep -rnIE "$host" . --exclude-dir=.git --exclude-dir=build --exclude-dir=.dart_tool || echo "CLEAN: no references"
 ```
 Expected: `CLEAN: no references`.
 

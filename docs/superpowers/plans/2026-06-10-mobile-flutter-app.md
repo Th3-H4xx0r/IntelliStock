@@ -156,7 +156,7 @@ Color pnlColor(num? v);           // >=0 success else danger
 
 ### Task 1.5: Networking + auth session
 **Files:** Create `lib/core/network/{api_config,api_client,auth_interceptor,api_error}.dart`, `lib/features/auth/data/session.dart` (token store via flutter_secure_storage).
-- [ ] Implement per Locked Contracts. `ApiConfig.baseUrl` from `--dart-define=API_URL` defaulting to `https://intellistock-api.pkrishna.dev`.
+- [ ] Implement per Locked Contracts. `ApiConfig.baseUrl` from `--dart-define=API_URL` defaulting to `https://your-instance.example.com`.
 - [ ] Tests `test/api_error_test.dart`: `{detail:"x"}`→"x", `{detail:[{msg:"a"},{msg:"b"}]}`→"a; b", `{detail:{...}}`→stringified; 401 triggers session clear callback.
 - [ ] Commit.
 

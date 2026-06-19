@@ -13,8 +13,8 @@ appear anywhere in the repository.
 
 ## Goals
 
-- Zero hardcoded backend domain in the codebase (no `intellistock-api.pkrishna.dev`
-  / `intellistock.pkrishna.dev` in code OR docs).
+- Zero hardcoded backend domain in the codebase — the former default host must
+  not appear in code OR docs.
 - First-run **Connect** screen prompts for the API base URL before login.
 - The URL is persisted and editable later in **Settings**.
 - The base URL is applied at runtime (Dio, the iOS/Android home widget, and any
@@ -42,7 +42,7 @@ appear anywhere in the repository.
 ## Current state (verified)
 
 - `mobile/lib/core/network/api_config.dart:10` — the ONLY code reference:
-  `String.fromEnvironment('API_URL', defaultValue: 'https://intellistock-api.pkrishna.dev')`.
+  `String.fromEnvironment('API_URL', defaultValue: '<former hardcoded backend URL>')`.
 - Consumers of `ApiConfig.baseUrl`: `api_client.dart:92` (Dio `BaseOptions.baseUrl`),
   `session.dart:35` (`_syncWidgetCreds` → home-widget `widget_api_base`),
   `settings_screen.dart:344` (read-only display).

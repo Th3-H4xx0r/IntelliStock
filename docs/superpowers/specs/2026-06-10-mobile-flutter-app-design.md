@@ -7,7 +7,7 @@
 
 ## 1. Goal
 
-Build a native iOS + Android app in Flutter that **faithfully replicates the existing IntelliStock web UI** (a Vue 3 + Vite + Tailwind + ApexCharts SPA in `frontend/`) and talks to the **same backend API** (`https://intellistock-api.pkrishna.dev`). The app adds two mobile-only capabilities the web does not have: a **native Settings screen** and a **biometric (Face ID / Touch ID) app lock**, plus **iOS home-screen widget support** (scaffolded now, full WidgetKit rendering later).
+Build a native iOS + Android app in Flutter that **faithfully replicates the existing IntelliStock web UI** (a Vue 3 + Vite + Tailwind + ApexCharts SPA in `frontend/`) and talks to the **same backend API** (`https://your-instance.example.com`). The app adds two mobile-only capabilities the web does not have: a **native Settings screen** and a **biometric (Face ID / Touch ID) app lock**, plus **iOS home-screen widget support** (scaffolded now, full WidgetKit rendering later).
 
 The backend is **unchanged**; the app is a pure client of the existing REST API.
 
@@ -122,7 +122,7 @@ Dark theme only (web hardcodes `<html class="dark">`; no toggle).
 
 ## 7. Data & networking layer
 
-- **`ApiConfig`** — base URL `https://intellistock-api.pkrishna.dev`; **bare paths** (the web's `/api` is a dev-proxy artifact; the backend serves `/auth/login` etc. directly). Overridable via `--dart-define=API_URL=`.
+- **`ApiConfig`** — base URL `https://your-instance.example.com`; **bare paths** (the web's `/api` is a dev-proxy artifact; the backend serves `/auth/login` etc. directly). Overridable via `--dart-define=API_URL=`.
 - **`ApiClient`** (dio) + **`AuthInterceptor`**: injects `Authorization: Bearer <token>`, `Content-Type: application/json` on writes; on 401 clears session and routes to `/login`; **no refresh** (matches web).
 - **`ApiError`** — parses FastAPI `{detail}` as string | `[{msg}]` | object into a user-facing message.
 - **freezed models** for: User, Instance, LiveState (account + positions + recent_trades), Strategy (+ sub-strategies), Backtest (+ summary, status, graph-data, playback-data, llm-cost), Brokerage, Model (LLM config), AgentRun (+ stages), NexusStatus (+ stages/counts/bootstrap), PortfolioHistory, SymbolHistoricals, LlmUsage (summary/timeseries/top-spenders/by-backtest/calls), Chatbot Conversation/Message/ToolCall, OnboardingState, EngineStatus.
@@ -226,7 +226,7 @@ Global floating assistant (matches web `ChatbotDock`). FAB (violet, `smart_toy`,
 
 ## 17. Assumptions & non-goals
 
-- **Assumptions:** new `mobile/` dir in this repo; backend API unchanged; iOS-first for widgets; the live API is reachable at `https://intellistock-api.pkrishna.dev`.
+- **Assumptions:** new `mobile/` dir in this repo; backend API unchanged; iOS-first for widgets; the live API is reachable at `https://your-instance.example.com`.
 - **Non-goals (this pass):** marketing landing page, WebGL orb, Android home-screen widget, push notifications, offline caching/persistence beyond auth token, full SwiftUI widget visual polish (stubbed now).
 
 ## 18. Risks
