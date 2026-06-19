@@ -6739,12 +6739,21 @@ def _ensure_nexus_trends_tables(conn):
         r.db(DB_NAME).table_create(_NEXUS_DISCOVERED_TABLE).run(conn)
 
 
-def action_list_trends(conn, instance_id=None, status=None):
-    """List market trends, optionally filtered by instance_id and/or status."""
+def action_list_trends(conn, instance_id=None, status=None, match_base=False):
+    """List market trends, optionally filtered by instance_id and/or status.
+
+    The strategy writes rows under a SCOPE-suffixed instance_id, e.g.
+    'alpaca-main|<config_hash>'. When match_base is True, instance_id matches the
+    base (the part before the first '|'), so a plain id like 'alpaca-main' finds
+    those scoped rows. Default False keeps exact-match behaviour for the CLI."""
     _ensure_nexus_trends_tables(conn)
     query = r.db(DB_NAME).table(_NEXUS_TRENDS_TABLE)
     if instance_id:
-        query = query.filter(lambda doc: doc["instance_id"] == instance_id)
+        if match_base:
+            query = query.filter(
+                lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
+        else:
+            query = query.filter(lambda doc: doc["instance_id"] == instance_id)
     if status:
         query = query.filter(lambda doc: doc["status"] == status)
     cursor = query.order_by(r.desc("updated_at")).limit(100).run(conn)
@@ -6794,12 +6803,18 @@ def action_delete_trend(conn, trend_id):
     return {"deleted": True, "id": trend_id}
 
 
-def action_list_discovered_stocks(conn, instance_id=None, status=None):
-    """List discovered stocks, optionally filtered by instance_id and/or status."""
+def action_list_discovered_stocks(conn, instance_id=None, status=None, match_base=False):
+    """List discovered stocks, optionally filtered by instance_id and/or status.
+    match_base matches the base of a scope-suffixed instance_id (see
+    action_list_trends). Default False keeps exact-match behaviour for the CLI."""
     _ensure_nexus_trends_tables(conn)
     query = r.db(DB_NAME).table(_NEXUS_DISCOVERED_TABLE)
     if instance_id:
-        query = query.filter(lambda doc: doc["instance_id"] == instance_id)
+        if match_base:
+            query = query.filter(
+                lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
+        else:
+            query = query.filter(lambda doc: doc["instance_id"] == instance_id)
     if status:
         query = query.filter(lambda doc: doc["status"] == status)
     cursor = query.order_by(r.desc("discovered_at")).limit(100).run(conn)
@@ -6844,10 +6859,12 @@ def action_nexus_trade_contexts(conn, instance_id, limit=40):
     if not instance_id:
         return {"contexts": []}
     _ensure_nexus_trade_tables(conn)
+    # The strategy writes instance_id scope-suffixed (e.g. 'alpaca-main|<hash>'),
+    # so match the base (part before the first '|').
     cursor = (
         r.db(DB_NAME)
         .table(_NEXUS_TRADE_CONTEXTS_TABLE)
-        .filter(lambda doc: doc["instance_id"] == instance_id)
+        .filter(lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
         .order_by(r.desc("date_key"))
         .limit(400)
         .run(conn)
@@ -6861,10 +6878,11 @@ def action_nexus_outcome_stats(conn, instance_id):
     if not instance_id:
         return summarize_outcomes([])
     _ensure_nexus_trade_tables(conn)
+    # Match the base of a scope-suffixed instance_id (see action_nexus_trade_contexts).
     cursor = (
         r.db(DB_NAME)
         .table(_NEXUS_TRADE_OUTCOMES_TABLE)
-        .filter(lambda doc: doc["instance_id"] == instance_id)
+        .filter(lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
         .limit(2000)
         .run(conn)
     )

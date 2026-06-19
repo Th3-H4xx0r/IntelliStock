@@ -3494,7 +3494,6 @@ def api_brokerage_positions(
         inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
     except Exception:
         inst_list = []
-    _dbg = []  # TEMP DIAGNOSTIC: (instance_id -> its _widget_brokerage_id)
     for inst in (inst_list or []):
         iid = str((inst or {}).get("id") or "")
         if not iid:
@@ -3504,9 +3503,7 @@ def api_brokerage_positions(
             full = action_get_instance(conn, iid) or inst
         except Exception:
             pass
-        _bid = _widget_brokerage_id(full)
-        _dbg.append("%s->%r" % (iid, _bid))
-        if _bid != brokerage_id:
+        if _widget_brokerage_id(full) != brokerage_id:
             continue
         try:
             cand = action_get_live_state(conn, iid)
@@ -3539,17 +3536,6 @@ def api_brokerage_positions(
                 "unrealizedPnlPct": _f(p.get("unrealized_pnl_pct")) or 0.0,
             })
     positions.sort(key=lambda x: x.get("marketValue") or 0.0, reverse=True)
-    # TEMP DIAGNOSTIC (remove after): reveals why the app sees no positions —
-    # the brokerage id the app sent vs every instance's _widget_brokerage_id,
-    # whether a match was found, and how many positions came back.
-    try:
-        import logging as _lg
-        _lg.getLogger("uvicorn.error").warning(
-            "POSITIONS-DEBUG req_brokerage_id=%r matched=%s n_pos=%d cash=%r instance_bids=[%s]",
-            brokerage_id, isinstance(ls, dict), len(positions), cash, ", ".join(_dbg),
-        )
-    except Exception:
-        pass
     return {"brokerage_id": brokerage_id, "cash": cash, "positions": positions}
 
 
@@ -3848,7 +3834,7 @@ def api_brokerage_discovered(brokerage_id: str, conn=Depends(conn_dependency), c
     iid = _resolve_instance_for_brokerage(conn, brokerage_id)
     if not iid:
         return {"stocks": [], "count": 0}
-    return _run(action_list_discovered_stocks, conn, iid, "active")
+    return _run(action_list_discovered_stocks, conn, iid, "active", True)
 
 
 @app.get("/brokerages/{brokerage_id}/trends", response_class=JSONResponse)
@@ -3859,32 +3845,8 @@ def api_brokerage_trends(brokerage_id: str, status: str = "active", limit: int =
     iid = _resolve_instance_for_brokerage(conn, brokerage_id)
     if not iid:
         return {"trends": [], "count": 0}
-    res = _run(action_list_trends, conn, iid, status)
+    res = _run(action_list_trends, conn, iid, status, True)
     trends = (res or {}).get("trends") or []
-    # TEMP DIAGNOSTIC (remove after): nexus cards empty — log the iid we resolved
-    # to vs the distinct instance_ids that actually carry nexus rows, so we can
-    # see if the bot wrote the data under a different id than 'alpaca-main'.
-    try:
-        import logging as _lg
-
-        def _ids(tbl):
-            try:
-                rows = (_r_auth.db("IntelliStock").table(tbl)
-                        .pluck("instance_id").distinct().limit(50).run(conn))
-                return sorted({str((d or {}).get("instance_id")) for d in rows})
-            except Exception as _e:
-                return ["ERR:%s" % _e]
-
-        _lg.getLogger("uvicorn.error").warning(
-            "NEXUS-DEBUG resolved_iid=%r status=%r trends_for_iid=%d "
-            "trend_ids=%s ctx_ids=%s disc_ids=%s",
-            iid, status, len(trends),
-            _ids("GraphNexusMarketTrends"),
-            _ids("GraphNexusTradeContexts"),
-            _ids("GraphNexusDiscoveredStocks"),
-        )
-    except Exception:
-        pass
     n = max(1, min(int(limit or 50), 100))
     trends = trends[:n]
     return {"trends": trends, "count": len(trends)}
