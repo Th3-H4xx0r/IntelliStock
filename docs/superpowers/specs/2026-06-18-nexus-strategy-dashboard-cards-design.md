@@ -124,10 +124,12 @@ All under `backend/api/main.py`, brokerage-scoped, read-only.
    & latest_return<0)`; return `{hit_rate, n, n_correct, avg_return,
    recent: [{symbol, intent, latest_return, dominant_event_type, entry_date}]}`.
 6. **New** `GET /brokerages/{id}/momentum-watchlist` — read the persisted
-   `_momentum_watchlist` dict directly from the cache (card #7). Return
-   `{count, newest:[{symbol, first_seen_bar, ret_20d}]}` (newest = entries sorted
-   by `first_seen_bar` desc), or `{count: 0, newest: []}` when absent/empty.
-   Count saturates at 500 (persist cap); the card self-hides when empty.
+   `_momentum_watchlist` dict directly from the cache (card #7). The strategy
+   stores only `{first_seen_bar, first_seen_price}` per symbol (verified — no
+   return field exists), so return `{count, newest:[{symbol, first_seen_bar,
+   first_seen_price}]}` (newest = entries sorted by `first_seen_bar` desc), or
+   `{count: 0, newest: []}` when absent/empty. Count saturates at 500 (persist
+   cap); the card self-hides when empty.
 
 ### No strategy edit
 
@@ -172,9 +174,9 @@ data sources, gotcha #1). The whole feature is new read-only endpoints + mobile.
 6. **Outcome Scorecard** — headline hit-rate (%), n signals, avg return, and a
    few recent signal→outcome rows (green/red by correctness).
 7. **Momentum Watchlist** — "monitoring N names" (count, capped at 500), newest
-   additions with age and 20d return. Hidden when the watchlist is empty (i.e.
-   `momentum_watchlist_enabled` off). Distinct from the existing top-10 "Nexus
-   Momentum" card (which stays as-is).
+   additions with the entry price the bot first saw (`first_seen_price`). Hidden
+   when the watchlist is empty (i.e. `momentum_watchlist_enabled` off). Distinct
+   from the existing top-10 "Nexus Momentum" card (which stays as-is).
 
 ## Error / empty / loading
 

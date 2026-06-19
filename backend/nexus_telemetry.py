@@ -59,26 +59,36 @@ def summarize_outcomes(docs: list) -> dict:
 
 
 def normalize_backfill_item(raw: dict) -> dict:
-    """Map a _backfill_queue item to a stable view, tolerating key drift
-    (raw_net_score|score, priority|is_priority)."""
+    """Map a _backfill_queue item to a stable view.
+
+    The live queue (graph_nexus_analysis._enqueue_backfill_candidate) stores
+    `raw_net_score`, `signal_source`, and the priority flags
+    `is_watchlist_priority` / `is_propagation_expansion`. We read those exact
+    keys and also tolerate the simpler `score` / `source` / `priority` forms.
+    """
     raw = raw or {}
     score = raw.get("raw_net_score")
     if score is None:
         score = raw.get("score")
-    priority = raw.get("priority")
-    if priority is None:
-        priority = raw.get("is_priority")
     return {
         "ticker": str(raw.get("ticker") or "").upper(),
         "score": float(score or 0.0),
         "n_paths": int(raw.get("n_paths") or 0),
-        "source": str(raw.get("source") or ""),
-        "priority": bool(priority),
+        "source": str(raw.get("source") or raw.get("signal_source") or ""),
+        "priority": bool(
+            raw.get("priority")
+            or raw.get("is_priority")
+            or raw.get("is_watchlist_priority")
+            or raw.get("is_propagation_expansion")
+        ),
     }
 
 
 def newest_watchlist(watchlist: dict, limit: int = 12) -> list:
-    """Newest entries of the _momentum_watchlist dict, by first_seen_bar desc."""
+    """Newest entries of the _momentum_watchlist dict, by first_seen_bar desc.
+
+    The strategy stores only `first_seen_bar` and `first_seen_price` per symbol
+    (no return field), so we surface the entry price the bot first saw."""
     if not isinstance(watchlist, dict):
         return []
     rows = []
@@ -87,7 +97,7 @@ def newest_watchlist(watchlist: dict, limit: int = 12) -> list:
         rows.append({
             "symbol": str(sym).upper(),
             "first_seen_bar": int(meta.get("first_seen_bar") or 0),
-            "ret_20d": float(meta.get("ret_20d") or 0.0),
+            "first_seen_price": float(meta.get("first_seen_price") or 0.0),
         })
     rows.sort(key=lambda e: e["first_seen_bar"], reverse=True)
     return rows[: max(0, int(limit))]

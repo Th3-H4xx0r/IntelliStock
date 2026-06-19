@@ -189,18 +189,19 @@ class OutcomeStats {
       );
 }
 
-/// One newest watchlist entry.
+/// One newest watchlist entry. The strategy persists the bar it was first seen
+/// and the price at that time (no return field is stored).
 class WatchlistEntry {
   const WatchlistEntry(
-      {required this.symbol, required this.firstSeenBar, required this.ret20d});
+      {required this.symbol, required this.firstSeenBar, required this.firstSeenPrice});
   final String symbol;
   final int firstSeenBar;
-  final double ret20d;
+  final double firstSeenPrice;
 
   factory WatchlistEntry.fromJson(Map<String, dynamic> json) => WatchlistEntry(
         symbol: (json['symbol'] as String? ?? '').toUpperCase(),
         firstSeenBar: (json['first_seen_bar'] as num?)?.toInt() ?? 0,
-        ret20d: (json['ret_20d'] as num?)?.toDouble() ?? 0,
+        firstSeenPrice: (json['first_seen_price'] as num?)?.toDouble() ?? 0,
       );
 }
 

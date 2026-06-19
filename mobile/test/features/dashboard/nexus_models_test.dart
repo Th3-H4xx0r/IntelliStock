@@ -88,11 +88,12 @@ void main() {
     final w = WatchlistSummary.fromJson({
       'count': 42,
       'newest': [
-        {'symbol': 'NVDA', 'first_seen_bar': 30, 'ret_20d': 1.1}
+        {'symbol': 'NVDA', 'first_seen_bar': 30, 'first_seen_price': 450.5}
       ],
     });
     expect(w.count, 42);
     expect(w.newest.single.symbol, 'NVDA');
+    expect(w.newest.single.firstSeenPrice, 450.5);
     expect(w.isEmpty, isFalse);
   });
 

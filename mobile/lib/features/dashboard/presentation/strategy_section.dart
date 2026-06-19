@@ -35,8 +35,9 @@ GlassCard _cardShell({required List<Widget> children}) => GlassCard(
     );
 
 /// The bot strategy's live telemetry, grouped as its own dashboard section.
-/// Every card self-hides when its data is empty, so non-nexus accounts (and
-/// accounts where a feature is disabled) see nothing new.
+/// Every card self-hides when its data is empty, and the whole section
+/// (header included) hides once all cards have loaded with no data — so a
+/// non-nexus account, or one with the strategy disabled, sees nothing new.
 class StrategySection extends ConsumerWidget {
   const StrategySection({super.key});
 
@@ -48,6 +49,28 @@ class StrategySection extends ConsumerWidget {
     final id = (selectedId != null && accounts.any((a) => a.id == selectedId))
         ? selectedId
         : accounts.first.id;
+
+    // Hide the entire section (header too) when every card has resolved empty.
+    // While anything is still loading we render so the cards can show skeletons.
+    final trends = ref.watch(nexusTrendsProvider(id));
+    final backfill = ref.watch(backfillQueueProvider(id));
+    final discovered = ref.watch(discoveredStocksProvider(id));
+    final contexts = ref.watch(tradeContextsProvider(id));
+    final outcomes = ref.watch(nexusOutcomesProvider(id));
+    final watchlist = ref.watch(momentumWatchlistProvider(id));
+    final anyLoading = trends.isLoading ||
+        backfill.isLoading ||
+        discovered.isLoading ||
+        contexts.isLoading ||
+        outcomes.isLoading ||
+        watchlist.isLoading;
+    final anyData = (trends.valueOrNull?.isEmpty == false) ||
+        (backfill.valueOrNull?.isNotEmpty ?? false) ||
+        (discovered.valueOrNull?.isNotEmpty ?? false) ||
+        (contexts.valueOrNull?.isNotEmpty ?? false) ||
+        (outcomes.valueOrNull?.isEmpty == false) ||
+        (watchlist.valueOrNull?.isEmpty == false);
+    if (!anyLoading && !anyData) return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -514,11 +537,10 @@ class _MomentumWatchlistCard extends ConsumerWidget {
                       Text(e.symbol,
                           style: AppTextStyles.nano.copyWith(
                               color: AppColors.textHi, fontWeight: FontWeight.w700)),
-                      if (e.ret20d != 0) ...[
+                      if (e.firstSeenPrice > 0) ...[
                         const SizedBox(width: 5),
-                        Text('${e.ret20d >= 0 ? '+' : ''}${e.ret20d.toStringAsFixed(0)}%',
-                            style: AppTextStyles.nano.copyWith(
-                                color: e.ret20d >= 0 ? AppColors.success : AppColors.danger)),
+                        Text('@\$${e.firstSeenPrice.toStringAsFixed(0)}',
+                            style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
                       ],
                     ]),
                   ),

@@ -32,26 +32,34 @@ def test_summarize_outcomes_hit_rate_and_direction():
     assert [r["symbol"] for r in s["recent"]][:2] == ["D", "C"]
 
 
-def test_normalize_backfill_item_score_fallback_and_defaults():
+def test_normalize_backfill_item_uses_real_cache_keys():
+    # Real _backfill_queue items use signal_source + is_watchlist_priority,
+    # NOT source/priority. The normalizer must read the real keys.
     a = normalize_backfill_item({"ticker": "nvda", "raw_net_score": 1.4, "n_paths": 3,
-                                 "source": "propagation", "priority": 1})
+                                 "signal_source": "propagation", "is_watchlist_priority": True})
     assert a == {"ticker": "NVDA", "score": 1.4, "n_paths": 3,
                  "source": "propagation", "priority": True}
+    # is_propagation_expansion also marks priority.
+    assert normalize_backfill_item(
+        {"ticker": "t", "is_propagation_expansion": True})["priority"] is True
+    # Defaults + legacy source/score forms still tolerated.
     b = normalize_backfill_item({"ticker": "amd", "score": 0.9})
     assert b["ticker"] == "AMD" and b["score"] == 0.9 and b["n_paths"] == 0
     assert b["source"] == "" and b["priority"] is False
-    assert normalize_backfill_item({"is_priority": True, "ticker": "t"})["priority"] is True
+    c = normalize_backfill_item({"ticker": "x", "source": "momentum", "priority": 1})
+    assert c["source"] == "momentum" and c["priority"] is True
 
 
-def test_newest_watchlist_sorts_and_caps():
+def test_newest_watchlist_sorts_caps_and_reads_first_seen_price():
+    # Real _momentum_watchlist meta holds first_seen_bar + first_seen_price only.
     wl = {
-        "AAA": {"first_seen_bar": 10, "ret_20d": 1.1},
-        "BBB": {"first_seen_bar": 30, "ret_20d": 2.2},
-        "CCC": {"first_seen_bar": 20, "ret_20d": 3.3},
+        "AAA": {"first_seen_bar": 10, "first_seen_price": 1.1},
+        "BBB": {"first_seen_bar": 30, "first_seen_price": 2.2},
+        "CCC": {"first_seen_bar": 20, "first_seen_price": 3.3},
     }
     out = newest_watchlist(wl, limit=2)
     assert [e["symbol"] for e in out] == ["BBB", "CCC"]
-    assert out[0] == {"symbol": "BBB", "first_seen_bar": 30, "ret_20d": 2.2}
+    assert out[0] == {"symbol": "BBB", "first_seen_bar": 30, "first_seen_price": 2.2}
 
 
 def test_dedupe_latest_contexts_keeps_first_per_symbol_and_truncates_reason():
