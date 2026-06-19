@@ -46,6 +46,16 @@ class DashboardScreen extends ConsumerWidget {
         // the (scrolling) glass content as a static backdrop.
         const _DashboardBackdrop(),
         CustomScrollView(
+          // Keep every section built while scrolling (the dashboard is taller
+          // than the viewport). Without this, off-screen cards are disposed and
+          // their autoDispose providers RE-FETCH when scrolled back into view —
+          // a request storm that hammers the backend. With it, each card loads
+          // ONCE on entry and is reused; live data still arrives via the
+          // interval pollers (which update in place, no reload).
+          // (scrollCacheExtent/ScrollCacheExtent isn't cleanly exported in this
+          // SDK; the long-standing cacheExtent still works.)
+          // ignore: deprecated_member_use
+          cacheExtent: 10000,
           slivers: [
             SliverPadding(
               padding: EdgeInsets.fromLTRB(16, topInset + 12, 16, 24),

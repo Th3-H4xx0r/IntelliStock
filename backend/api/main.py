@@ -3799,10 +3799,12 @@ def _resolve_instance_for_brokerage(conn, brokerage_id):
     cached = _BROKERAGE_INSTANCE_CACHE.get(brokerage_id)
     if cached is not None and cached[1] > now:
         return cached[0]
+    fetch_ok = True
     try:
         res = action_instances(conn)
         inst_list = res.get("instances", []) if isinstance(res, dict) else (res or [])
     except Exception:
+        fetch_ok = False
         inst_list = []
     resolved = None
     for inst in (inst_list or []):
@@ -3817,7 +3819,11 @@ def _resolve_instance_for_brokerage(conn, brokerage_id):
         if _widget_brokerage_id(full) == brokerage_id:
             resolved = iid
             break
-    _BROKERAGE_INSTANCE_CACHE[brokerage_id] = (resolved, now + _BROKERAGE_INSTANCE_TTL)
+    # Only cache a definitive result. NEVER cache a transient instances-fetch
+    # failure — doing so would wrongly blank out every per-brokerage view
+    # (positions, sector, strategy, …) for the whole TTL.
+    if fetch_ok:
+        _BROKERAGE_INSTANCE_CACHE[brokerage_id] = (resolved, now + _BROKERAGE_INSTANCE_TTL)
     return resolved
 
 
