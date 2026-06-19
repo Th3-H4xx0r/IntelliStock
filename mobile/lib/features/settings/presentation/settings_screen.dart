@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/lock/app_lock_controller.dart';
 import '../../../core/lock/biometric_service.dart';
-import '../../../core/network/api_config.dart';
+import '../../../core/network/api_base_url.dart';
 import '../../../core/network/session.dart';
 import '../../onboarding/data/onboarding_repository.dart';
 import '../../../core/theme/app_colors.dart';
@@ -341,8 +341,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             icon: symbol('database'),
                             iconColor: AppColors.info,
                             title: 'Backend',
-                            subtitle: ApiConfig.baseUrl,
-                            trailing: null,
+                            subtitle: ref.watch(apiBaseUrlProvider).baseUrl,
+                            trailing: Icon(symbol('arrow_forward'),
+                                size: 16, color: AppColors.textDim),
+                            onTap: () => context.push('/connect'),
                           ),
                           const _Divider(),
                           // Licenses

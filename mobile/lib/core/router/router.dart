@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../network/api_base_url.dart';
 import '../network/session.dart';
 import 'app_shell.dart';
 
+import '../../features/connect/presentation/connect_screen.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/onboarding/presentation/onboarding_screen.dart';
 import '../../features/dashboard/presentation/dashboard_screen.dart';
@@ -35,14 +37,20 @@ final goRouterProvider = Provider<GoRouter>((ref) {
   // NOT recreated (losing the back stack) on every session change.
   // refreshListenable: session handles redirect re-evaluation on session changes.
   final session = ref.read(sessionProvider);
+  final urlStore = ref.read(apiBaseUrlProvider);
 
   return GoRouter(
     navigatorKey: _rootKey,
     initialLocation: '/dashboard',
-    refreshListenable: session,
+    refreshListenable: Listenable.merge([session, urlStore]),
     redirect: (context, state) {
-      final loggedIn = session.isAuthenticated;
       final loc = state.matchedLocation;
+      final onConnect = loc == '/connect';
+      // Gate everything behind a configured backend URL (before the auth gate).
+      if (!urlStore.isConfigured) {
+        return onConnect ? null : '/connect';
+      }
+      final loggedIn = session.isAuthenticated;
       final onLogin = loc == '/login';
       final onOnboarding = loc == '/onboarding';
 
@@ -68,6 +76,10 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
+      GoRoute(
+        path: '/connect',
+        builder: (_, _) => const ConnectScreen(),
+      ),
       GoRoute(
         path: '/login',
         builder: (_, state) =>
