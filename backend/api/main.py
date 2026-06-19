@@ -3861,6 +3861,30 @@ def api_brokerage_trends(brokerage_id: str, status: str = "active", limit: int =
         return {"trends": [], "count": 0}
     res = _run(action_list_trends, conn, iid, status)
     trends = (res or {}).get("trends") or []
+    # TEMP DIAGNOSTIC (remove after): nexus cards empty — log the iid we resolved
+    # to vs the distinct instance_ids that actually carry nexus rows, so we can
+    # see if the bot wrote the data under a different id than 'alpaca-main'.
+    try:
+        import logging as _lg
+
+        def _ids(tbl):
+            try:
+                rows = (_r_auth.db("IntelliStock").table(tbl)
+                        .pluck("instance_id").distinct().limit(50).run(conn))
+                return sorted({str((d or {}).get("instance_id")) for d in rows})
+            except Exception as _e:
+                return ["ERR:%s" % _e]
+
+        _lg.getLogger("uvicorn.error").warning(
+            "NEXUS-DEBUG resolved_iid=%r status=%r trends_for_iid=%d "
+            "trend_ids=%s ctx_ids=%s disc_ids=%s",
+            iid, status, len(trends),
+            _ids("GraphNexusMarketTrends"),
+            _ids("GraphNexusTradeContexts"),
+            _ids("GraphNexusDiscoveredStocks"),
+        )
+    except Exception:
+        pass
     n = max(1, min(int(limit or 50), 100))
     trends = trends[:n]
     return {"trends": trends, "count": len(trends)}
