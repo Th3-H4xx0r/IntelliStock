@@ -21,6 +21,7 @@ import '../../stock/presentation/stock_screen.dart';
 import 'insights_section.dart';
 import 'portfolio_chart.dart';
 import 'service_card.dart';
+import 'strategy_section.dart';
 
 // ── Dashboard screen ──────────────────────────────────────────────────────────
 
@@ -56,6 +57,10 @@ class DashboardScreen extends ConsumerWidget {
 
                   // ── Insights + Bot ideas ───────────────────────────────────
                   const InsightsSection(),
+                  const SizedBox(height: 32),
+
+                  // ── Strategy (nexus telemetry) ─────────────────────────────
+                  const StrategySection(),
                   const SizedBox(height: 32),
 
                   // ── Services section ───────────────────────────────────────
