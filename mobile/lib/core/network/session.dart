@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:home_widget/home_widget.dart';
-import 'api_config.dart';
+import 'api_base_url.dart';
 
 const _kToken = 'intellistock_token';
 const _kUser = 'intellistock_user';
@@ -14,9 +14,11 @@ const _kWidgetAppGroup = 'group.dev.pkrishna.intellistock';
 /// The token is mirrored in memory so the [AuthInterceptor] can read it
 /// synchronously on every request.
 class SessionStore extends ChangeNotifier {
-  SessionStore(this._storage);
+  SessionStore(this._storage, [this._apiBaseUrl]);
 
   final FlutterSecureStorage _storage;
+  /// Live getter for the active API base URL (mirrored to the home widget).
+  final String Function()? _apiBaseUrl;
 
   String? _token;
   Map<String, dynamic>? _user;
@@ -32,7 +34,7 @@ class SessionStore extends ChangeNotifier {
   Future<void> _syncWidgetCreds() async {
     try {
       await HomeWidget.setAppGroupId(_kWidgetAppGroup);
-      await HomeWidget.saveWidgetData<String>('widget_api_base', ApiConfig.baseUrl);
+      await HomeWidget.saveWidgetData<String>('widget_api_base', _apiBaseUrl?.call() ?? '');
       await HomeWidget.saveWidgetData<String>('widget_token', _token ?? '');
       // Reload the widget so it self-fetches with the just-written token right
       // away — otherwise a freshly logged-in widget stays on its empty
@@ -113,6 +115,9 @@ final secureStorageProvider = Provider<FlutterSecureStorage>(
   ),
 );
 
-final sessionProvider = ChangeNotifierProvider<SessionStore>(
-  (ref) => SessionStore(ref.watch(secureStorageProvider)),
-);
+final sessionProvider = ChangeNotifierProvider<SessionStore>((ref) {
+  // read (not watch) the URL store so a URL change does not rebuild the session
+  // (which would drop the in-memory token); the closure reads it live.
+  final urlStore = ref.read(apiBaseUrlProvider);
+  return SessionStore(ref.watch(secureStorageProvider), () => urlStore.baseUrl);
+});

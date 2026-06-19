@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'api_base_url.dart';
 import 'api_config.dart';
 import 'api_error.dart';
 import 'session.dart';
@@ -84,12 +85,13 @@ class ApiClient {
 }
 
 final dioProvider = Provider<Dio>((ref) {
-  // read (not watch): the interceptor closes over the long-lived SessionStore
-  // and reads `.token` live on every request, so the Dio never needs to rebuild
-  // when the token changes (which now happens on every slid-token response).
+  // read (not watch) the session: the interceptor reads `.token` live on every
+  // request, so a token change never needs a Dio rebuild. The base URL, by
+  // contrast, IS watched — changing instances rebuilds Dio with the new URL.
   final session = ref.read(sessionProvider);
+  final baseUrl = ref.watch(apiBaseUrlProvider).baseUrl;
   final dio = Dio(BaseOptions(
-    baseUrl: ApiConfig.baseUrl,
+    baseUrl: baseUrl,
     connectTimeout: ApiConfig.connectTimeout,
     receiveTimeout: ApiConfig.receiveTimeout,
     headers: {'Accept': 'application/json'},

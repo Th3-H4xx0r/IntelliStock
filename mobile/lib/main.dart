@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'app.dart';
+import 'core/network/api_base_url.dart';
 import 'core/network/session.dart';
 import 'core/lock/app_lock_controller.dart';
 
@@ -29,6 +30,10 @@ Future<void> main() async {
   final container = ProviderContainer(
     overrides: [appLockSeedProvider.overrideWithValue(seedState)],
   );
+  // Load the configured API base URL first so the very first router redirect
+  // sees the correct configured/unconfigured state and the session's widget
+  // sync mirrors the right URL.
+  await container.read(apiBaseUrlProvider).load();
   // Populate the in-memory SessionStore for the router's initial redirect.
   await container.read(sessionProvider).load();
 
