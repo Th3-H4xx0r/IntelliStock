@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/models/portfolio_history.dart';
+import 'nexus_models.dart';
 
 // ── Plain data models ─────────────────────────────────────────────────────────
 
@@ -196,6 +197,60 @@ class DashboardRepository {
           .map(AccountPosition.fromJson)
           .toList(),
     );
+  }
+
+  // ── Nexus strategy telemetry (read-only) ────────────────────────────────────
+
+  /// GET /brokerages/{id}/trends?status=&limit= → market trends.
+  Future<List<MarketTrend>> nexusTrends(String id,
+      {String status = 'active', int limit = 50}) async {
+    final data = await _client.get<Map<String, dynamic>>(
+      '/brokerages/$id/trends',
+      query: {'status': status, 'limit': '$limit'},
+    );
+    return (data['trends'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(MarketTrend.fromJson)
+        .toList();
+  }
+
+  /// GET /brokerages/{id}/backfill-queue → pending buy candidates.
+  Future<List<BackfillItem>> backfillQueue(String id) async {
+    final data = await _client.get<Map<String, dynamic>>('/brokerages/$id/backfill-queue');
+    return (data['queue'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(BackfillItem.fromJson)
+        .toList();
+  }
+
+  /// GET /brokerages/{id}/discovered → discover-engine opportunities.
+  Future<List<DiscoveredStock>> discoveredStocks(String id) async {
+    final data = await _client.get<Map<String, dynamic>>('/brokerages/$id/discovered');
+    return (data['stocks'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(DiscoveredStock.fromJson)
+        .toList();
+  }
+
+  /// GET /brokerages/{id}/trade-contexts → per-symbol bot rationale.
+  Future<List<TradeRationale>> tradeContexts(String id) async {
+    final data = await _client.get<Map<String, dynamic>>('/brokerages/$id/trade-contexts');
+    return (data['contexts'] as List? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(TradeRationale.fromJson)
+        .toList();
+  }
+
+  /// GET /brokerages/{id}/nexus-outcomes → signal→outcome scorecard.
+  Future<OutcomeStats> nexusOutcomes(String id) async {
+    final data = await _client.get<Map<String, dynamic>>('/brokerages/$id/nexus-outcomes');
+    return OutcomeStats.fromJson(data);
+  }
+
+  /// GET /brokerages/{id}/momentum-watchlist → watchlist count + newest names.
+  Future<WatchlistSummary> momentumWatchlist(String id) async {
+    final data = await _client.get<Map<String, dynamic>>('/brokerages/$id/momentum-watchlist');
+    return WatchlistSummary.fromJson(data);
   }
 
   // ── Control POSTs ──────────────────────────────────────────────────────────
