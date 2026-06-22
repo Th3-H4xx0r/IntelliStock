@@ -31,7 +31,7 @@ fastapi
 uvicorn[standard]
 bcrypt
 pyjwt
-discord.py>=2.3.0
+discord.py>=2.7.1
 aiohttp>=3.13.5
 neo4j>=6.2.0
 sec-edgar-downloader>=5.1.0
