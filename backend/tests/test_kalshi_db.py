@@ -13,6 +13,9 @@ def test_tables_cover_the_design():
         "kalshi_edges", "kalshi_orders", "kalshi_positions",
         "kalshi_portfolio_snapshots", "kalshi_clv_log", "team_stats",
         "kalshi_scan_budget",
+        # v2 intelligence
+        "kalshi_decisions", "match_features", "player_stats", "h2h_history",
+        "lineups", "kalshi_market_listings", "kalshi_capital_plan",
     ]:
         assert required in names
 

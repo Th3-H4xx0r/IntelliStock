@@ -370,7 +370,33 @@ def start_instance_container(instance_id):
     # service also mounts so /instances/{id}/live-logs can serve it.
     env['LIVE_TRADING_LOG_DIR'] = LIVE_TRADING_LOG_DIR_IN_CONTAINER
     env['LIVE_TRADING_LOG_VOLUME'] = LIVE_TRADING_LOG_VOLUME_NAME
+    # v2: a Kalshi instance runs a dedicated lean engine, NOT instance.py — which
+    # spins up Socket.IO + a broker subprocess ("0 seed tickers") that are
+    # irrelevant to Kalshi and pollute its logs. Default to the equities command;
+    # branch only on kind='kalshi'. DEFENSIVE: any lookup failure falls back to
+    # the unchanged equities path, so this CRITICAL-blast-radius launch point
+    # cannot break the equities instances.
     cmd = ['python', 'instance.py', str(instance_id)]
+    try:
+        _kc = get_conn()
+        try:
+            _idoc = r.db(DB_NAME).table('Instances').get(str(instance_id)).run(_kc) or {}
+        finally:
+            try:
+                _kc.close()
+            except Exception:
+                pass
+        if (_idoc or {}).get('kind') == 'kalshi':
+            cmd = ['python', '-m', 'kalshi.runner', str(instance_id)]
+            intellistock_logger.log(
+                f"Launching Kalshi instance {instance_id} via dedicated engine (kalshi.runner)",
+                "green", service="SERVER",
+            )
+    except Exception as _kind_e:
+        intellistock_logger.log(
+            f"kind lookup for {instance_id} failed ({_kind_e}); using default instance.py",
+            "yellow", service="SERVER",
+        )
     try:
         client = _get_docker_client()
         if not client:

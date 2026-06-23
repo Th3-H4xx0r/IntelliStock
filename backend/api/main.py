@@ -4091,6 +4091,69 @@ def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody
     return {"ok": True, "id": iid, "name": doc["name"], "live_enabled": live, "running": False}
 
 
+def _kalshi_instance_row(conn, instance_id: str) -> dict:
+    row = _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).run(conn)
+    if not row or row.get("kind") != "kalshi":
+        raise HTTPException(status_code=404, detail=f"Kalshi instance {instance_id!r} not found")
+    return row
+
+
+@app.get("/instances/{instance_id}/kalshi/detail", response_class=JSONResponse)
+def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Kalshi instance summary: config, run state, linked brokerage env."""
+    row = _kalshi_instance_row(conn, instance_id)
+    bid = row.get("brokerage_id")
+    env = "demo"
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        env = bk.get("kalshi_environment") or "demo"
+    except Exception:
+        pass
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "running": bool(row.get("runCommand", False)),
+        "brokerage_id": bid,
+        "environment": env,
+        "config": row.get("kalshi_config") or {},
+    }
+
+
+@app.get("/instances/{instance_id}/kalshi/decisions", response_class=JSONResponse)
+def api_kalshi_instance_decisions(instance_id: str, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The LLM-reasoned decision log for this instance (newest first)."""
+    from kalshi.decisions import summarize_decisions
+    _kalshi_instance_row(conn, instance_id)
+    rows = []
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("kalshi_decisions")
+            .filter({"instance_id": str(instance_id)}).run(conn)
+        )
+    except Exception:
+        rows = []
+    rows.sort(key=lambda d: d.get("ts", ""), reverse=True)
+    n = max(1, min(int(limit or 100), 500))
+    return {"decisions": rows[:n], "summary": summarize_decisions(rows), "count": len(rows)}
+
+
+@app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)
+def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Equity curve for the instance's brokerage (reuses portfolio snapshots)."""
+    from kalshi.api_payloads import portfolio_payload
+    row = _kalshi_instance_row(conn, instance_id)
+    bid = row.get("brokerage_id")
+    value_cents = cash_cents = 0
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        bal = _kalshi_client_from_row(bk).get_balance()
+        value_cents, cash_cents = bal.portfolio_value_cents, bal.cash_cents
+    except Exception:
+        pass
+    snaps = sorted(_kalshi_rows(conn, "kalshi_portfolio_snapshots", bid), key=lambda s: s.get("ts", ""))
+    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents)
+
+
 class TestKalshiBody(BaseModel):
     kalshi_key_id: Optional[str] = ""
     kalshi_private_key: Optional[str] = ""

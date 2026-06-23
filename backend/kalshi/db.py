@@ -29,6 +29,14 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("kalshi_clv_log", "id"),
     ("team_stats", "id"),
     ("kalshi_scan_budget", "window"),
+    # v2 intelligence
+    ("kalshi_decisions", "id"),
+    ("player_stats", "id"),
+    ("h2h_history", "id"),
+    ("lineups", "fixture_id"),
+    ("match_features", "fixture_id"),
+    ("kalshi_market_listings", "fixture_id"),
+    ("kalshi_capital_plan", "instance_id"),
 ]
 
 
