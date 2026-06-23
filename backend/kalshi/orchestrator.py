@@ -40,8 +40,9 @@ def plan_and_allocate(
         adjustments = analyst.get("adjustments") or {}
         rationales = analyst.get("rationales") or {}
 
-        fused = build_market_probs(eg, sharp, adjustments, w_sharp=w_sharp, llm_cap=llm_cap)
-        model_only = build_market_probs(eg, {}, {}, w_sharp=w_sharp, llm_cap=llm_cap)
+        player_probs = fx.get("player_probs")
+        fused = build_market_probs(eg, sharp, adjustments, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
+        model_only = build_market_probs(eg, {}, {}, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
         cands = generate_candidates(
             fx["fixture_id"], tier, fused, fx.get("kalshi_markets", []),
             fee_rate=fee_rate, edge_threshold=edge_threshold,

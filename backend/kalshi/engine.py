@@ -117,11 +117,15 @@ def run_once(
     live_enabled: bool,
     cid_prefix: str,
     exposure_by_league: dict | None = None,
+    open_exposure_frac: float = 0.0,
+    day_pnl_cents: int = 0,
 ) -> list[dict]:
     """One scan tick: for each fixture with a known fair value, fetch its
     markets, plan orders, and execute them (gated by should_execute). Takes the
     client + precomputed fair values so it's integration-testable with a fake
-    client and no DB. Returns per-fixture results."""
+    client and no DB. open_exposure_frac + day_pnl_cents feed the AGGREGATE risk
+    caps (max-exposure, daily-loss) so they actually trip in the live loop.
+    Returns per-fixture results."""
     exposure_by_league = exposure_by_league or {}
     dry = not should_execute(environment, live_enabled)
     out = []
@@ -138,6 +142,8 @@ def run_once(
             caps=caps,
             fee_rate=fee_rate,
             league_exposure_frac=exposure_by_league.get(fx.league, 0.0),
+            open_exposure_frac=open_exposure_frac,
+            day_pnl_cents=day_pnl_cents,
         )
         results = execute_plan(client, intents, dry_run=dry, cid_prefix=cid_prefix)
         out.append({"fixture_id": fx.fixture_id, "blocked": reason, "dry_run": dry, "results": results})
@@ -226,10 +232,30 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             if not fixtures:
                 log(f"tick {tick}: no odds snapshots to scan yet (waiting on ingest).", "white")
             else:
+                # Aggregate risk state so the max-exposure + daily-loss caps trip.
+                open_exposure_frac, day_pnl_cents = 0.0, 0
+                try:
+                    bank = max(1, config.caps.bankroll_cents)
+                    positions = client.get_positions()
+                    exposure_cents = sum(
+                        int(round((p.current_price_cents or p.avg_price_cents) * p.contracts)) for p in positions
+                    )
+                    open_exposure_frac = exposure_cents / bank
+                    snaps = sorted(
+                        kdb._r.db(kdb.DB_NAME).table("kalshi_portfolio_snapshots")
+                        .filter({"brokerage_id": config.brokerage_id}).run(conn),
+                        key=lambda s: s.get("ts", ""),
+                    )
+                    if snaps:
+                        bal0 = client.get_balance()
+                        day_pnl_cents = bal0.portfolio_value_cents - int(snaps[0].get("value_cents", bal0.portfolio_value_cents))
+                except Exception:
+                    pass
                 results = run_once(
                     client=client, fixtures=fixtures, fair_by_fixture=fair_by_fixture,
                     caps=config.caps, fee_rate=config.fee_rate, environment=config.environment,
                     live_enabled=config.live_enabled, cid_prefix=config.instance_id,
+                    open_exposure_frac=open_exposure_frac, day_pnl_cents=day_pnl_cents,
                 )
                 flagged = sum(len(r0.get("results", [])) for r0 in results)
                 placed = sum(1 for r0 in results for x in r0.get("results", []) if x.get("submitted"))

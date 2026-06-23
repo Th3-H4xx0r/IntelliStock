@@ -10,8 +10,11 @@ from kalshi.strategy.risk_tiers import allowed_markets, max_bets_per_game
 from kalshi.edge import compute_edge
 from kalshi.fees import fee_as_prob
 
-# Markets whose outcomes are mutually exclusive — keep only the top-edge side.
-_ME_TYPES = {"winner", "exact_score", "double_chance"}
+# Markets where the sides are one mutually-exclusive group — keep only the
+# top-edge side (you can't hold contradictory sides of the same group). NOT
+# exact_score: distinct scorelines (1-0, 2-1, ...) are independent bets, so
+# several can be held (subject to the per-game cap).
+_ME_TYPES = {"winner", "double_chance"}
 
 
 @dataclass(frozen=True)

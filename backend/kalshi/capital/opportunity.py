@@ -12,10 +12,12 @@ def liquidity_factor(liquidity: float) -> float:
 
 
 def time_factor(hours_to_kickoff: float) -> float:
-    """Nearer kickoff scores higher (more certain); in-play scores lower."""
+    """Nearer kickoff scores higher (lineups confirmed, prices firmer), smoothly
+    decreasing across the whole forward calendar; in-play scores lower (more
+    uncertain). Bounded (0, 1]."""
     if hours_to_kickoff <= 0:
-        return 0.2
-    return max(0.2, min(1.0, 48.0 / (hours_to_kickoff + 6.0)))
+        return 0.2  # in-play
+    return max(0.05, 1.0 / (1.0 + hours_to_kickoff / 24.0))
 
 
 def score(*, edge: float, model_confidence: float, liquidity: float, hours_to_kickoff: float) -> float:

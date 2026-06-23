@@ -107,3 +107,15 @@ def test_run_once_live_gated_is_dry():
                    cid_prefix="inst1")
     assert out[0]["dry_run"] is True
     assert client.submitted == []       # live without the gate places nothing
+
+
+def test_run_once_aggregate_exposure_cap_blocks():
+    # over the max_open_exposure_frac (0.6) -> the aggregate cap must block,
+    # placing nothing even on demo.
+    from kalshi.engine import run_once
+    client = _MarketClient()
+    out = run_once(client=client, fixtures=[_fixture()], fair_by_fixture={"f1": _fair()},
+                   caps=_caps(), fee_rate=0.07, environment="demo", live_enabled=False,
+                   cid_prefix="inst1", open_exposure_frac=0.95)
+    assert client.submitted == []
+    assert "exposure" in out[0]["blocked"].lower()
