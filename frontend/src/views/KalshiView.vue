@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import KalshiPortfolioChart from '../components/kalshi/KalshiPortfolioChart.vue'
 import KalshiCreateInstanceModal from '../components/kalshi/KalshiCreateInstanceModal.vue'
+import InstanceLiveLogs from '../components/InstanceLiveLogs.vue'
 import { getToken } from '../utils/auth.js'
 
 const API_BASE = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
@@ -240,6 +241,15 @@ onMounted(loadAccounts)
             </div>
             <p v-else class="text-sm text-slate-500">No budget data.</p>
           </div>
+        </div>
+
+        <!-- Live logs (streams the engine's per-instance log) -->
+        <div class="glass-card rounded-2xl p-4 sm:p-5">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="material-symbols-outlined text-primary text-[18px]">terminal</span>
+            <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Live logs</span>
+          </div>
+          <InstanceLiveLogs :key="instance.id" :instance-id="instance.id" />
         </div>
       </template>
     </main>

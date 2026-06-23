@@ -8,6 +8,7 @@ import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../dashboard/application/dashboard_controller.dart';
 import '../../dashboard/data/dashboard_repository.dart';
+import '../../instances/presentation/live_logs_panel.dart';
 import '../data/kalshi_repository.dart';
 
 /// Dedicated Kalshi monitoring screen (its own bottom-nav tab). Account
@@ -147,6 +148,12 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
                     _EdgeRadarCard(brokerageId: selectedId),
                     const SizedBox(height: 12),
                     _PositionsCard(brokerageId: selectedId),
+                    const SizedBox(height: 12),
+                    _KCard(
+                      icon: 'terminal',
+                      title: 'Live logs',
+                      child: SizedBox(height: 300, child: LiveLogsPanel(key: ValueKey(instance.id), instanceId: instance.id)),
+                    ),
                   ],
                 ],
               ),

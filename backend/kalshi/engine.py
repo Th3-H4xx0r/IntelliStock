@@ -144,22 +144,50 @@ def run_once(
     return out
 
 
+def _make_logger(instance_id: str):  # pragma: no cover - integration I/O
+    """Attach the per-instance live-trading log file (so /instances/{id}/live-logs
+    tails it, same mechanism as broker.py) and return a log(msg, color) fn that
+    degrades to print() on failure."""
+    try:
+        import live_state as _ls
+        from intellistock_logger import intellistock_logger as _logger
+        f, _path = _ls.open_live_log(instance_id)
+        _logger.set_context_log_file("live_trading", f)
+
+        def _log(msg, color="white"):
+            try:
+                _logger.log(msg, color, service="KALSHI")
+            except Exception:
+                pass
+        return _log
+    except Exception:
+        def _log(msg, color="white"):
+            try:
+                print(f"[KALSHI] {msg}")
+            except Exception:
+                pass
+        return _log
+
+
 def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integration loop
     """The lean instance loop. Polls runCommand + the kill switch each tick like
-    equities instances, ingests odds, computes fair value, and runs run_once.
-    DB-bound; exercised in Phase 1/3, not unit-tested. The trading math lives in
-    the tested helpers above — this only adds I/O, polling, and notifications.
+    equities instances, ingests odds, computes fair value, runs run_once, and
+    streams progress to the per-instance live log. DB-bound; the trading math
+    lives in the tested helpers above — this only adds I/O, polling, logging.
     """
     import time
     from kalshi import db as kdb
     from kalshi.client import KalshiClient
     from kalshi.fair_value import fair_from_odds
     from kalshi.ingest_odds import parse_three_way
+    from kalshi.models import Fixture
+
+    log = _make_logger(config.instance_id)
+    log(f"Kalshi engine starting — instance={config.instance_id} · env={config.environment} · "
+        f"live_enabled={config.live_enabled}", "green")
 
     conn = kdb.get_conn()
     kdb.ensure_tables(conn)
-    # Credentials + connection are resolved by the caller/bootstrap and stored on
-    # the brokerage row; build the client from them here.
     brokerage = kdb._r.db(kdb.DB_NAME).table("BrokerageAccounts").get(config.brokerage_id).run(conn) or {}
     from secret_store import decrypt
     client = KalshiClient(
@@ -167,59 +195,65 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         private_key_pem=decrypt(brokerage.get("kalshi_private_key")) or "",
         environment=config.environment,
     )
+    log(f"Connected to Kalshi ({config.environment}). Polling every {config.poll_seconds}s · "
+        f"bankroll ${config.caps.bankroll_cents / 100:.0f} · edge > {config.caps.edge_threshold:.1%} · "
+        f"¼-Kelly {config.caps.kelly_fraction}", "white")
 
+    tick = 0
     while True:
         inst = kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn) or {}
         if not inst.get("runCommand", False):
-            break  # stopped via UI or kill switch (runCommand flipped False)
+            log("runCommand=False — stopping engine.", "yellow")
+            break
 
-        # Pull cached odds rows, build fixtures + fair values, run one tick.
-        from kalshi.models import Fixture
-        fixtures, fair_by_fixture = [], {}
-        for row in kdb._r.db(kdb.DB_NAME).table("kalshi_odds_snapshots").filter(
-            {"brokerage_id": config.brokerage_id}
-        ).run(conn):
-            fid = row.get("fixture_id")
-            q = parse_three_way(row, book="pinnacle")
-            if q is None or not fid:
-                continue
-            fair_by_fixture[fid] = fair_from_odds(q, method="power")
-            fixtures.append(
-                Fixture(
-                    fixture_id=fid,
-                    sport="soccer",
-                    league=row.get("league", ""),
-                    home=row.get("home", ""),
-                    away=row.get("away", ""),
+        tick += 1
+        try:
+            fixtures, fair_by_fixture = [], {}
+            for row in kdb._r.db(kdb.DB_NAME).table("kalshi_odds_snapshots").filter(
+                {"brokerage_id": config.brokerage_id}
+            ).run(conn):
+                fid = row.get("fixture_id")
+                q = parse_three_way(row, book="pinnacle")
+                if q is None or not fid:
+                    continue
+                fair_by_fixture[fid] = fair_from_odds(q, method="power")
+                fixtures.append(Fixture(
+                    fixture_id=fid, sport="soccer", league=row.get("league", ""),
+                    home=row.get("home", ""), away=row.get("away", ""),
                     kickoff_utc=row.get("kickoff_utc", ""),
-                )
-            )
+                ))
 
-        if fixtures:
-            run_once(
-                client=client,
-                fixtures=fixtures,
-                fair_by_fixture=fair_by_fixture,
-                caps=config.caps,
-                fee_rate=config.fee_rate,
-                environment=config.environment,
-                live_enabled=config.live_enabled,
-                cid_prefix=config.instance_id,
-            )
-            bal = client.get_balance()
-            kdb.save_portfolio_snapshot(
-                conn,
-                brokerage_id=config.brokerage_id,
-                ts=_iso_now(),
-                value_cents=bal.portfolio_value_cents,
-                cash_cents=bal.cash_cents,
-            )
+            if not fixtures:
+                log(f"tick {tick}: no odds snapshots to scan yet (waiting on ingest).", "white")
+            else:
+                results = run_once(
+                    client=client, fixtures=fixtures, fair_by_fixture=fair_by_fixture,
+                    caps=config.caps, fee_rate=config.fee_rate, environment=config.environment,
+                    live_enabled=config.live_enabled, cid_prefix=config.instance_id,
+                )
+                flagged = sum(len(r0.get("results", [])) for r0 in results)
+                placed = sum(1 for r0 in results for x in r0.get("results", []) if x.get("submitted"))
+                blocked = [r0["fixture_id"] for r0 in results if r0.get("blocked")]
+                dry = " (dry-run, live gate off)" if flagged and not placed else ""
+                log(f"tick {tick}: scanned {len(fixtures)} fixtures → {flagged} edge order(s), {placed} placed{dry}."
+                    + (f" Risk-blocked: {', '.join(blocked)}" if blocked else ""), "cyan")
+                bal = client.get_balance()
+                kdb.save_portfolio_snapshot(
+                    conn, brokerage_id=config.brokerage_id, ts=_iso_now(),
+                    value_cents=bal.portfolio_value_cents, cash_cents=bal.cash_cents,
+                )
+                log(f"tick {tick}: portfolio ${bal.portfolio_value_cents / 100:.2f} "
+                    f"(cash ${bal.cash_cents / 100:.2f})", "white")
+        except Exception as e:
+            log(f"tick {tick} error: {type(e).__name__}: {e}", "red")
+
         time.sleep(config.poll_seconds)
 
     try:
         conn.close()
     except Exception:
         pass
+    log("Kalshi engine stopped.", "yellow")
 
 
 def _iso_now() -> str:  # pragma: no cover - thin clock wrapper
