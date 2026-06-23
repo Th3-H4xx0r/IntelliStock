@@ -10,7 +10,36 @@ import sys
 
 from kalshi import db as kdb
 from kalshi.engine import EngineConfig, run_instance
-from kalshi.instance_config import risk_caps_from_config
+from kalshi.instance_config import inplay_caps_from_config, risk_caps_from_config
+
+
+def _run_with_crash_alert(config, *, run=run_instance, notify=None) -> None:
+    """Run the engine; on an uncaught crash, alert the operator (Discord + iOS push,
+    category 'kalshi_runtime') then re-raise so the supervisor still sees the failure.
+    The alert is best-effort and never masks the original exception."""
+    try:
+        run(config)
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        import traceback
+        try:
+            _notify = notify
+            if _notify is None:
+                from notifications import notify as _notify
+            tb = traceback.format_exc()[-600:]
+            _notify(
+                category="kalshi_runtime",
+                instance_id=config.instance_id,
+                title=f"KALSHI RUNTIME [{config.instance_id}] crashed",
+                body=f"{type(e).__name__}: {e}\n\n{tb}",
+                discord_channel="notifications",
+                push_title="Kalshi runtime crashed",
+                push_body=f"{type(e).__name__}: {str(e)[:120]}",
+            )
+        except Exception:
+            pass
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-    run_instance(
+    _run_with_crash_alert(
         EngineConfig(
             instance_id=instance_id,
             brokerage_id=brokerage_id,
@@ -46,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
             poll_seconds=int(cfg.get("poll_seconds", 60)),
             tier=str(cfg.get("tier", "medium")),
             reserve_frac=float(cfg.get("reserve_frac", 0.3)),
+            live_monitoring=bool(cfg.get("live_monitoring", True)),
+            live_poll_seconds=int(cfg.get("live_poll_seconds", 30)),
+            inplay_caps=inplay_caps_from_config(cfg),
         )
     )
     return 0

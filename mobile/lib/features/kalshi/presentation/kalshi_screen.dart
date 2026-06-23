@@ -565,6 +565,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   bool _dailyLossTouched = false;
   double _dailyLossPct = 0.10;
   String _risk = 'medium';
+  bool _liveMonitoring = true;
   List<Map<String, dynamic>> _models = [];
   String? _selectedModel;
   bool _creating = false;
@@ -655,6 +656,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'daily_loss_cap_dollars': _d(_dailyLoss, 100),
         'bankroll_dollars': _effectiveBankroll,
         'poll_seconds': _i(_poll, 60),
+        'live_monitoring': _liveMonitoring,
         'tier': _risk,
         'model': _selectedModel,
       });
@@ -773,6 +775,20 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                         ],
                         onChanged: (v) => setState(() => _selectedModel = v),
                       ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Live in-match trading toggle
+                  Container(
+                    decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+                    child: SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                      activeColor: AppColors.primary,
+                      value: _liveMonitoring,
+                      onChanged: (v) => setState(() => _liveMonitoring = v),
+                      title: Text('Live in-match trading', style: AppTextStyles.body.copyWith(color: AppColors.textHi)),
+                      subtitle: Text('Monitor live matches and trade two-way (open/add/reduce/exit) in-play.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
                     ),
                   ),
                   const SizedBox(height: 12),

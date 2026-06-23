@@ -7,6 +7,7 @@ instance.py dispatches kind='kalshi' rows to the lean engine (kalshi/runner.py).
 """
 from __future__ import annotations
 
+from kalshi.live.live_decision import InPlayCaps
 from kalshi.risk import RiskCaps
 
 DEFAULT_LEAGUES = ["EPL", "Serie B", "Ligue 2"]
@@ -40,6 +41,13 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "tier": tier,
         "model": (str(raw.get("model")).strip() or None) if raw.get("model") else None,
         "live_enabled": bool(live_enabled),
+        # Live in-match monitoring (Kalshi-price-only, two-way in-play).
+        "live_monitoring": bool(raw.get("live_monitoring", True)),
+        "live_poll_seconds": max(10, int(raw.get("live_poll_seconds", 30))),
+        "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", 0.25)),
+        "max_adds_per_match": int(raw.get("max_adds_per_match", 3)),
+        "no_add_after_min": float(raw.get("no_add_after_min", 80.0)),
+        "stop_loss_frac": float(raw.get("stop_loss_frac", 0.5)),
     }
 
 
@@ -68,4 +76,20 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         per_league_cap_frac=float(c.get("per_league_cap_frac", 0.25)),
         daily_loss_cap_cents=int(c.get("daily_loss_cap_cents", 0)),
         bankroll_cents=int(c.get("bankroll_cents", 0)),
+    )
+
+
+def inplay_caps_from_config(config: dict) -> InPlayCaps:
+    """Build the live monitor's InPlayCaps from a stored kalshi_config (in-play
+    caps are intentionally tighter than the pre-match RiskCaps)."""
+    c = config or {}
+    return InPlayCaps(
+        edge_threshold=float(c.get("edge_threshold", 0.03)),
+        kelly_fraction=float(c.get("kelly_fraction", 0.25)),
+        bankroll_cents=int(c.get("bankroll_cents", 0)),
+        max_contracts_per_market=int(c.get("max_contracts_per_market", 50)),
+        inplay_exposure_frac=float(c.get("inplay_exposure_frac", 0.25)),
+        max_adds_per_match=int(c.get("max_adds_per_match", 3)),
+        no_add_after_min=float(c.get("no_add_after_min", 80.0)),
+        stop_loss_frac=float(c.get("stop_loss_frac", 0.5)),
     )

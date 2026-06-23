@@ -53,6 +53,9 @@ NOTIFICATION_TYPES = [
     {"key": "kalshi_budget_low", "group": "Kalshi", "label": "Kalshi odds budget low",
      "desc": "The OddsPapi monthly request budget is nearly exhausted", "channel": "notifications",
      "discord": True, "push": False, "prefixes": ["KALSHI BUDGET ["]},
+    {"key": "kalshi_runtime", "group": "Kalshi", "label": "Kalshi runtime crashed",
+     "desc": "The Kalshi instance runtime crashed unexpectedly", "channel": "notifications",
+     "discord": True, "push": True, "prefixes": ["KALSHI RUNTIME ["]},
 
     # --- Risk & Halts ---
     {"key": "halt", "group": "Risk & Halts", "label": "Halt",

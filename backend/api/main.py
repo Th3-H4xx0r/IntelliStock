@@ -4044,6 +4044,13 @@ class CreateKalshiInstanceBody(BaseModel):
     poll_seconds: Optional[int] = 60
     tier: Optional[str] = "medium"
     model: Optional[str] = None          # LLM model id for the analyst panel
+    # Live in-match monitoring (two-way in-play; Kalshi-price-only).
+    live_monitoring: Optional[bool] = True
+    live_poll_seconds: Optional[int] = 30
+    inplay_exposure_frac: Optional[float] = 0.25
+    max_adds_per_match: Optional[int] = 3
+    no_add_after_min: Optional[float] = 80.0
+    stop_loss_frac: Optional[float] = 0.5
 
 
 class UpdateKalshiInstanceBody(CreateKalshiInstanceBody):

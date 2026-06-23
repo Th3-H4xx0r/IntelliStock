@@ -56,6 +56,7 @@ const dailyLoss = ref(0)
 const dailyLossTouched = ref(false)
 const dailyLossPct = ref(0.10)
 const poll = ref(60)
+const liveMonitoring = ref(true)
 const risk = ref('medium')
 const riskBlurb = computed(() => RISK_PRESETS[risk.value]?.blurb || '')
 
@@ -131,6 +132,7 @@ function prefillFromEdit() {
   if (c.daily_loss_cap_cents != null) { dailyLoss.value = Math.round(c.daily_loss_cap_cents / 100); dailyLossTouched.value = true }
   if (c.bankroll_cents != null) manualBankroll.value = Math.round(c.bankroll_cents / 100)
   if (c.poll_seconds != null) poll.value = c.poll_seconds
+  if (c.live_monitoring != null) liveMonitoring.value = !!c.live_monitoring
   if (c.tier) risk.value = c.tier
   if (c.model) selectedModel.value = c.model
 }
@@ -167,6 +169,7 @@ async function submit() {
       daily_loss_cap_dollars: Number(dailyLoss.value),
       bankroll_dollars: effectiveBankroll.value,
       poll_seconds: Number(poll.value),
+      live_monitoring: liveMonitoring.value,
       tier: risk.value,
       model: selectedModel.value || null,
     }
@@ -330,6 +333,18 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
             <input v-model.number="dailyLoss" @input="dailyLossTouched = true" type="number" step="25" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
         </div>
+
+        <button type="button" @click="liveMonitoring = !liveMonitoring"
+                class="w-full flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface/50 px-3 py-2.5 text-left hover:border-primary/50 transition-colors">
+          <span class="min-w-0">
+            <span class="flex items-center gap-1 text-sm font-medium text-slate-200">Live in-match trading
+              <InfoTip text="While a match is in play, monitor the live Kalshi market, react to material price moves (goals/red cards), re-read news, and trade two-way (open/add/reduce/exit) under tighter in-play caps." size="13px" /></span>
+            <span class="block text-[11px] text-slate-500 mt-0.5">Two-way in-play trading on live matches</span>
+          </span>
+          <span class="shrink-0 w-10 h-6 rounded-full transition-colors relative" :class="liveMonitoring ? 'bg-primary' : 'bg-border-subtle'">
+            <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform" :class="liveMonitoring ? 'translate-x-4' : ''"></span>
+          </span>
+        </button>
 
         <p v-if="isLive" class="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">⚠ LIVE account — live execution is ON at creation. Starting this instance trades real money.</p>
         <p v-if="err" class="text-xs text-red-400">{{ err }}</p>

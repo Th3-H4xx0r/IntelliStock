@@ -15,12 +15,13 @@ until CLV is validated.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from kalshi.models import KalshiMarket
 from kalshi.edge import compute_edge
 from kalshi.fees import fee_as_prob
 from kalshi.risk import RiskCaps, size_order, check_caps
+from kalshi.live.live_decision import InPlayCaps
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,9 @@ class EngineConfig:
     poll_seconds: int = 60
     tier: str = "medium"      # risk tier -> allowed market types
     reserve_frac: float = 0.3
+    live_monitoring: bool = True
+    live_poll_seconds: int = 30
+    inplay_caps: InPlayCaps = field(default_factory=InPlayCaps)
 
 
 def run_once(
@@ -214,6 +218,8 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     from kalshi.data import discovery
     from kalshi.feature_models import MatchFeatures, TeamForm
     from kalshi.intelligence.analyst_panel import analyze as analyst_analyze, make_llm_call
+    from kalshi.intelligence.pricing import model_market_probs
+    from kalshi.live import match_clock, monitor as live_monitor
     from kalshi.orchestrator import plan_and_allocate
 
     # Resolve the configured analyst LLM model (reads news + adjusts probabilities).
@@ -237,7 +243,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         log(f"Analyst LLM resolution failed ({type(e).__name__}: {e}); trading model-only.", "yellow")
 
     elo_table: dict = {}
-    analyst_cache: dict = {}   # event_ticker -> {"tick": int, "out": dict}; news+LLM TTL cache
+    analyst_cache: dict = {}    # event_ticker -> {"ts": wall, "out": dict}; news+LLM TTL (wall-clock)
+    price_history: dict = {}    # market_ticker -> [mid_cents...]; live event detection
+    adds_by_match: dict = {}    # fixture_id -> in-play add count
+    live_llm_cd: dict = {}      # fixture_id -> wall ts of last in-play LLM read (cooldown)
     tick = 0
     while True:
         # Control-plane poll. A transient DB/connection blip must NOT kill the
@@ -254,6 +263,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
         tick += 1
         try:
+            now_wall = time.time()
             # 1) Team strength (free ClubElo; refresh ~hourly worth of ticks).
             if not elo_table or tick % 60 == 1:
                 elo_table = fetch_elo_table() or {}
@@ -273,6 +283,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     p = discovery.parse_kalshi_market(m)
                     if p["market_type"] != "other" and p["home"] and p["away"]:
                         p["series"] = series
+                        p["yes_bid_cents"] = int(m.get("yes_bid", 0) or 0)
+                        _a, _b = p["yes_ask_cents"], p["yes_bid_cents"]
+                        p["mid_cents"] = (_a + _b) / 2.0 if (_a and _b) else (_a or _b or None)
+                        p["kickoff_ts"] = match_clock.kickoff_from_market(m)
                         soccer.append(p)
             by_event = discovery.group_by_event(soccer)
             log(f"tick {tick}: scanned series {discovery.DEFAULT_SOCCER_SERIES} → {total_raw} markets, "
@@ -284,12 +298,13 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 continue
 
             # 3) Per-match: model pricing (national OR club Elo) + LLM analyst.
-            # The analyst reads match news (injuries/lineups/team news) and is cached
-            # per match for ~news_refresh_ticks so we don't re-hit Google News + the
-            # LLM every single minute (rate-limit + cost). News only changes slowly
-            # pre-match; the live-monitor (future) handles in-play re-reads.
-            news_refresh_ticks = max(1, int(1800 / max(1, config.poll_seconds)))  # ~30 min
-            fixtures_in = []
+            # Pregame matches go to the pre-match planner; LIVE matches go to the
+            # in-play monitor. The pre-match analyst reads match news (cached per
+            # match ~30 min, wall-clock, so we don't re-hit Google News + the LLM
+            # every minute); the live monitor re-reads on material price moves.
+            news_refresh_secs = 1800
+            fixtures_in = []     # pregame/unknown -> pre-match planner
+            live_matches = []    # live -> in-play monitor
             for event_ticker, mkts in by_event.items():
                 home = next((m["home"] for m in mkts if m["home"]), None)
                 away = next((m["away"] for m in mkts if m["away"]), None)
@@ -297,6 +312,11 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     continue
                 series = next((m.get("series") for m in mkts if m.get("series")), "")
                 national_series = series in discovery.NATIONAL_TEAM_SERIES
+                kickoff_ts = next((m.get("kickoff_ts") for m in mkts if m.get("kickoff_ts")), None)
+                phase, elapsed = match_clock.phase_for_market(
+                    kickoff_ts=kickoff_ts, ticker=event_ticker, now_ts=now_wall)
+                if phase == match_clock.ENDED:
+                    continue  # settled / over — nothing to price
 
                 def _team_elo(name):
                     # National series: always the national table (known -> rating,
@@ -309,17 +329,37 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 he, ae = _team_elo(home), _team_elo(away)
                 eg = elo_to_expected_goals(he, ae)
                 mtypes = sorted({m["market_type"] for m in mkts})
-                log(f"tick {tick}: {home} vs {away} — Elo {he:.0f}/{ae:.0f}, model xG "
+                log(f"tick {tick}: {home} vs {away} [{phase}] — Elo {he:.0f}/{ae:.0f}, model xG "
                     f"{eg[0]:.2f}/{eg[1]:.2f}; markets: {', '.join(mtypes)}.", "white")
 
-                # LLM analyst (news-reading), cached per match.
+                if phase == match_clock.LIVE:
+                    # In-play -> the live monitor (two-way). Resolve each ticker's raw
+                    # model prob for the hybrid live fair value; the in-play LLM tilt
+                    # is applied on material moves inside the monitor.
+                    mp = model_market_probs(eg)
+                    model_probs, mk_list = {}, []
+                    for m in mkts:
+                        model_probs[m["market_ticker"]] = (mp.get(m["market_type"], {}) or {}).get(m["side"])
+                        mk_list.append({
+                            "market_ticker": m["market_ticker"], "side": m["side"],
+                            "market_type": m["market_type"], "yes_ask_cents": m["yes_ask_cents"],
+                            "yes_bid_cents": m.get("yes_bid_cents", 0), "mid_cents": m.get("mid_cents"),
+                        })
+                    live_matches.append({
+                        "fixture_id": event_ticker, "home": home, "away": away,
+                        "phase": phase, "elapsed_min": elapsed,
+                        "model_probs": model_probs, "markets": mk_list,
+                    })
+                    continue
+
+                # Pregame/unknown: pre-match analyst (news-reading), cached per match.
                 analyst_out = {"adjustments": {}, "rationales": {}, "shortlist": []}
                 if llm_call is not None:
                     cached = analyst_cache.get(event_ticker)
-                    if cached and (tick - cached["tick"]) < news_refresh_ticks:
+                    if cached and (now_wall - cached["ts"]) < news_refresh_secs:
                         analyst_out = cached["out"]
                         if analyst_out.get("adjustments"):
-                            age_m = ((tick - cached["tick"]) * config.poll_seconds) // 60
+                            age_m = int((now_wall - cached["ts"]) // 60)
                             log(f"tick {tick}:   ↳ analyst (cached {age_m}m): "
                                 f"{_fmt_adj(analyst_out['adjustments'])}.", "white")
                     else:
@@ -331,7 +371,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                             feats = MatchFeatures(fixture_id=event_ticker, home=home, away=away,
                                                   home_form=TeamForm(elo=he), away_form=TeamForm(elo=ae))
                             analyst_out = analyst_analyze(feats, mtypes, news=news, llm_call=llm_call)
-                            analyst_cache[event_ticker] = {"tick": tick, "out": analyst_out}
+                            analyst_cache[event_ticker] = {"ts": now_wall, "out": analyst_out}
                             adj = analyst_out.get("adjustments") or {}
                             rats = analyst_out.get("rationales") or {}
                             if adj or rats:
@@ -393,6 +433,53 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 except Exception:
                     pass
 
+            # 8) Live in-match monitoring (two-way) for in-play matches.
+            if config.live_monitoring and live_matches:
+                try:
+                    positions = client.get_positions()
+                except Exception as e:
+                    log(f"tick {tick}: get_positions failed: {type(e).__name__}: {e}", "yellow")
+                    positions = []
+                positions_by_ticker = {p.market_ticker: p for p in positions}
+
+                def _live_llm_tilt(match, mk, move):
+                    """On a material move, re-read fresh news + ask the analyst for a
+                    bounded tilt on the moved market's side (per-fixture 5-min cooldown)."""
+                    if llm_call is None:
+                        return 0.0
+                    fid = match.get("fixture_id", "")
+                    if (now_wall - live_llm_cd.get(fid, 0)) < 300:
+                        return 0.0
+                    live_llm_cd[fid] = now_wall
+                    try:
+                        news = summarize_news_items(fetch_match_news(match["home"], match["away"]))
+                        feats = MatchFeatures(fixture_id=fid, home=match["home"], away=match["away"])
+                        out = analyst_analyze(feats, [mk.get("market_type", "winner")], news=news, llm_call=llm_call)
+                        tilt = float((out.get("adjustments") or {}).get(mk.get("market_type"), 0.0) or 0.0)
+                        if tilt:
+                            log(f"tick {tick}: live analyst tilt {tilt:+.3f} on {mk.get('market_ticker')} "
+                                f"after {move.direction} move ({move.delta_cents:+.0f}c).", "cyan")
+                        return tilt
+                    except Exception as e:
+                        log(f"tick {tick}: live analyst failed: {type(e).__name__}: {e}", "yellow")
+                        return 0.0
+
+                live_dry = not should_execute(config.environment, config.live_enabled)
+                live_rows = live_monitor.run_live_step(
+                    client=client, live_matches=live_matches, price_history=price_history,
+                    adds_by_match=adds_by_match, positions_by_ticker=positions_by_ticker,
+                    caps=config.inplay_caps, dry_run=live_dry, instance_id=config.instance_id,
+                    brokerage_id=config.brokerage_id, ts=ts, llm=_live_llm_tilt, log=log,
+                )
+                acted = sum(1 for r in live_rows if r.get("decision") == "placed")
+                log(f"tick {tick}: live monitor — {len(live_matches)} in-play match(es), "
+                    f"{len(live_rows)} markets watched, {acted} order(s).", "magenta")
+                for r in live_rows:
+                    try:
+                        kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(r, conflict="replace").run(conn)
+                    except Exception:
+                        pass
+
             # 7) Snapshot.
             bal = client.get_balance()
             kdb.save_portfolio_snapshot(
@@ -401,10 +488,14 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             )
             log(f"tick {tick}: portfolio ${bal.portfolio_value_cents / 100:.2f} "
                 f"(cash ${bal.cash_cents / 100:.2f}).", "white")
+            any_live = bool(live_matches)
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}", "red")
+            any_live = False
 
-        time.sleep(config.poll_seconds)
+        # Adaptive cadence: poll faster while matches are live.
+        time.sleep(config.live_poll_seconds if (config.live_monitoring and any_live)
+                   else config.poll_seconds)
 
     try:
         conn.close()
