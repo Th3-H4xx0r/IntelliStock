@@ -137,7 +137,7 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
                       title: 'No trading instance yet',
                       subtitle: 'Create a Kalshi instance to scan soccer markets, flag edge, and (when started) trade.',
                       actionLabel: 'Create instance',
-                      onAction: () => _showCreateSheet(selectedId),
+                      onAction: () => _showCreateSheet(accounts, selectedId),
                     )
                   else ...[
                     _InstanceStatus(instance: instance),
@@ -166,15 +166,16 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
     }
   }
 
-  void _showCreateSheet(String brokerageId) {
+  void _showCreateSheet(List<BrokerageAccount> accounts, String brokerageId) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _CreateInstanceSheet(
-        brokerageId: brokerageId,
-        onCreated: () {
-          if (_selectedId != null) ref.invalidate(kalshiInstancesProvider(_selectedId!));
+        accounts: accounts,
+        initialBrokerageId: brokerageId,
+        onCreated: (bid) {
+          ref.invalidate(kalshiInstancesProvider(bid));
         },
       ),
     );
@@ -505,35 +506,78 @@ class _InstanceStatus extends StatelessWidget {
       );
 }
 
+const _kLeagues = [
+  'EPL', 'EFL Championship', 'Serie A', 'Serie B', 'La Liga', 'La Liga 2',
+  'Bundesliga', '2. Bundesliga', 'Ligue 1', 'Ligue 2', 'Eredivisie',
+  'Primeira Liga', 'MLS', 'Brasileirão', 'Champions League',
+];
+
 class _CreateInstanceSheet extends ConsumerStatefulWidget {
-  const _CreateInstanceSheet({required this.brokerageId, required this.onCreated});
-  final String brokerageId;
-  final VoidCallback onCreated;
+  const _CreateInstanceSheet({required this.accounts, required this.initialBrokerageId, required this.onCreated});
+  final List<BrokerageAccount> accounts;
+  final String initialBrokerageId;
+  final ValueChanged<String> onCreated;
 
   @override
   ConsumerState<_CreateInstanceSheet> createState() => _CreateInstanceSheetState();
 }
 
 class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
+  late String _brokerageId = widget.initialBrokerageId;
   final _name = TextEditingController();
-  final _leagues = TextEditingController(text: 'EPL, Serie B, Ligue 2');
   final _edge = TextEditingController(text: '3');
   final _kelly = TextEditingController(text: '0.25');
-  final _bankroll = TextEditingController(text: '1000');
   final _maxContracts = TextEditingController(text: '50');
   final _exposure = TextEditingController(text: '60');
   final _leagueCap = TextEditingController(text: '25');
-  final _dailyLoss = TextEditingController(text: '400');
+  final _dailyLoss = TextEditingController(text: '100');
   final _poll = TextEditingController(text: '60');
+  final _manualBankroll = TextEditingController(text: '1000');
+  final Set<String> _leagues = {'EPL', 'Serie B', 'Ligue 2'};
+  double _usagePct = 50;
+  double _balance = 0;
+  bool _loadingBalance = false;
+  bool _dailyLossTouched = false;
   bool _creating = false;
   String _err = '';
 
   @override
+  void initState() {
+    super.initState();
+    _loadBalance();
+  }
+
+  @override
   void dispose() {
-    for (final c in [_name, _leagues, _edge, _kelly, _bankroll, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll]) {
+    for (final c in [_name, _edge, _kelly, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll, _manualBankroll]) {
       c.dispose();
     }
     super.dispose();
+  }
+
+  bool get _hasBalance => _balance > 0;
+  double get _effectiveBankroll =>
+      _hasBalance ? (_balance * _usagePct / 100).roundToDouble() : (double.tryParse(_manualBankroll.text.trim()) ?? 0);
+
+  Future<void> _loadBalance() async {
+    if (_brokerageId.isEmpty) return;
+    setState(() => _loadingBalance = true);
+    try {
+      final p = await ref.read(kalshiRepositoryProvider).portfolio(_brokerageId);
+      _balance = (p.cash > 0) ? p.cash : p.value;
+    } catch (_) {
+      _balance = 0;
+    } finally {
+      if (mounted) {
+        setState(() => _loadingBalance = false);
+        _scaleDailyLoss();
+      }
+    }
+  }
+
+  void _scaleDailyLoss() {
+    if (_dailyLossTouched) return;
+    _dailyLoss.text = (_effectiveBankroll * 0.10).round().clamp(1, 1 << 30).toString();
   }
 
   double _d(TextEditingController c, double dflt) => double.tryParse(c.text.trim()) ?? dflt;
@@ -541,22 +585,23 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
 
   Future<void> _submit() async {
     if (_name.text.trim().isEmpty) { setState(() => _err = 'Name is required'); return; }
+    if (_leagues.isEmpty) { setState(() => _err = 'Pick at least one league'); return; }
     setState(() { _creating = true; _err = ''; });
     try {
-      await ref.read(kalshiRepositoryProvider).createInstance(widget.brokerageId, {
+      await ref.read(kalshiRepositoryProvider).createInstance(_brokerageId, {
         'name': _name.text.trim(),
-        'leagues': _leagues.text.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList(),
+        'leagues': _leagues.toList(),
         'edge_threshold': _d(_edge, 3) / 100,
         'kelly_fraction': _d(_kelly, 0.25),
         'max_contracts_per_market': _i(_maxContracts, 50),
         'max_open_exposure_frac': _d(_exposure, 60) / 100,
         'per_league_cap_frac': _d(_leagueCap, 25) / 100,
-        'daily_loss_cap_dollars': _d(_dailyLoss, 400),
-        'bankroll_dollars': _d(_bankroll, 1000),
+        'daily_loss_cap_dollars': _d(_dailyLoss, 100),
+        'bankroll_dollars': _effectiveBankroll,
         'poll_seconds': _i(_poll, 60),
       });
       if (mounted) Navigator.pop(context);
-      widget.onCreated();
+      widget.onCreated(_brokerageId);
     } catch (e) {
       if (mounted) setState(() => _err = '$e');
     } finally {
@@ -570,7 +615,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
     return Padding(
       padding: EdgeInsets.only(bottom: bottom),
       child: Container(
-        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.85),
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.9),
         decoration: const BoxDecoration(
           color: AppColors.panel,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -580,44 +625,111 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-              child: Row(
-                children: [
-                  Icon(symbol('smart_toy'), color: AppColors.primary, size: 20),
-                  const SizedBox(width: 8),
-                  Text('Create Kalshi instance', style: AppTextStyles.cardTitle),
-                  const Spacer(),
-                  GestureDetector(onTap: () => Navigator.pop(context), child: Icon(Icons.close, color: AppColors.textDim)),
-                ],
-              ),
+              child: Row(children: [
+                Icon(symbol('smart_toy'), color: AppColors.primary, size: 20),
+                const SizedBox(width: 8),
+                Text('Create Kalshi instance', style: AppTextStyles.cardTitle),
+                const Spacer(),
+                GestureDetector(onTap: () => Navigator.pop(context), child: Icon(Icons.close, color: AppColors.textDim)),
+              ]),
             ),
             Flexible(
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
                 children: [
+                  // Brokerage selector + balance
+                  _label('Kalshi account', 'Which Kalshi account this bot trades on.'),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        isExpanded: true,
+                        value: _brokerageId.isEmpty ? null : _brokerageId,
+                        dropdownColor: AppColors.panel,
+                        icon: Icon(Icons.expand_more, color: AppColors.textDim),
+                        style: AppTextStyles.body.copyWith(color: AppColors.textHi),
+                        items: widget.accounts.map((a) => DropdownMenuItem(value: a.id, child: Text(a.accountName))).toList(),
+                        onChanged: (v) { if (v != null) { setState(() => _brokerageId = v); _loadBalance(); } },
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, bottom: 12),
+                    child: Text(
+                      _loadingBalance ? 'Balance: …' : (_hasBalance ? 'Balance: \$${_balance.toStringAsFixed(2)}' : 'Live balance unavailable'),
+                      style: AppTextStyles.nano.copyWith(color: _hasBalance ? AppColors.textMd : AppColors.warning),
+                    ),
+                  ),
+
                   _field(_name, 'Instance name', hint: 'e.g. Soccer edge — demo'),
-                  _field(_leagues, 'Leagues (comma-separated)'),
+
+                  // Leagues multi-select chips
+                  _label('Leagues', 'Which soccer leagues to scan. Thinner divisions often carry more edge.'),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Wrap(
+                      spacing: 8, runSpacing: 8,
+                      children: _kLeagues.map((l) {
+                        final on = _leagues.contains(l);
+                        return GestureDetector(
+                          onTap: () => setState(() => on ? _leagues.remove(l) : _leagues.add(l)),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                            decoration: BoxDecoration(
+                              color: on ? AppColors.fill(AppColors.primary) : AppColors.surface,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: on ? AppColors.stroke(AppColors.primary) : AppColors.border),
+                            ),
+                            child: Text(l, style: AppTextStyles.meta.copyWith(
+                              color: on ? AppColors.primary : AppColors.textMuted,
+                              fontWeight: on ? FontWeight.bold : FontWeight.normal)),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+
+                  // Bankroll usage
+                  _label('Bankroll usage', 'How much of this account the bot sizes against. The daily-loss cap scales with it.'),
+                  if (_hasBalance) ...[
+                    Row(children: [
+                      Expanded(child: Slider(
+                        value: _usagePct, min: 5, max: 100, divisions: 19,
+                        activeColor: AppColors.primary, label: '${_usagePct.round()}%',
+                        onChanged: (v) => setState(() { _usagePct = v; _scaleDailyLoss(); }),
+                      )),
+                      Text('${_usagePct.round()}% · \$${_effectiveBankroll.round()}',
+                          style: AppTextStyles.meta.copyWith(color: AppColors.textMd, fontWeight: FontWeight.bold)),
+                    ]),
+                    const SizedBox(height: 12),
+                  ] else
+                    Padding(padding: const EdgeInsets.only(bottom: 12), child: _field(_manualBankroll, 'Bankroll (\$)', number: true)),
+
                   Row(children: [
                     Expanded(child: _field(_edge, 'Edge threshold (%)', number: true)),
                     const SizedBox(width: 12),
                     Expanded(child: _field(_kelly, 'Kelly fraction', number: true)),
                   ]),
                   Row(children: [
-                    Expanded(child: _field(_bankroll, 'Bankroll (\$)', number: true)),
-                    const SizedBox(width: 12),
                     Expanded(child: _field(_maxContracts, 'Max contracts', number: true)),
-                  ]),
-                  Row(children: [
-                    Expanded(child: _field(_exposure, 'Max exposure (%)', number: true)),
                     const SizedBox(width: 12),
-                    Expanded(child: _field(_leagueCap, 'Per-league cap (%)', number: true)),
+                    Expanded(child: _field(_exposure, 'Max exposure (%)', number: true)),
                   ]),
                   Row(children: [
-                    Expanded(child: _field(_dailyLoss, 'Daily-loss cap (\$)', number: true)),
+                    Expanded(child: _field(_leagueCap, 'Per-league cap (%)', number: true)),
                     const SizedBox(width: 12),
                     Expanded(child: _field(_poll, 'Scan cadence (s)', number: true)),
                   ]),
+                  TextField(
+                    controller: _dailyLoss,
+                    onChanged: (_) => _dailyLossTouched = true,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    style: AppTextStyles.body.copyWith(color: AppColors.textHi),
+                    decoration: _dec('Daily-loss cap (\$) — auto-scales with bankroll'),
+                  ),
                   if (_err.isNotEmpty)
-                    Padding(padding: const EdgeInsets.only(top: 6),
+                    Padding(padding: const EdgeInsets.only(top: 10),
                         child: Text(_err, style: AppTextStyles.meta.copyWith(color: AppColors.danger))),
                 ],
               ),
@@ -629,8 +741,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                 child: ElevatedButton(
                   onPressed: _creating ? null : _submit,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: AppColors.onPrimary,
+                    backgroundColor: AppColors.primary, foregroundColor: AppColors.onPrimary,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
@@ -645,6 +756,31 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
     );
   }
 
+  Widget _label(String text, String info) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Row(children: [
+          Text(text, style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
+          const SizedBox(width: 4),
+          Tooltip(
+            message: info,
+            triggerMode: TooltipTriggerMode.tap,
+            child: Icon(Icons.info_outline, size: 13, color: AppColors.textFaint),
+          ),
+        ]),
+      );
+
+  InputDecoration _dec(String? hint) => InputDecoration(
+        hintText: hint,
+        hintStyle: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        filled: true,
+        fillColor: AppColors.surface,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.primary)),
+      );
+
   Widget _field(TextEditingController c, String label, {String? hint, bool number = false}) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: Column(
@@ -656,17 +792,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
               controller: c,
               keyboardType: number ? const TextInputType.numberWithOptions(decimal: true) : TextInputType.text,
               style: AppTextStyles.body.copyWith(color: AppColors.textHi),
-              decoration: InputDecoration(
-                hintText: hint,
-                hintStyle: AppTextStyles.body.copyWith(color: AppColors.textFaint),
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                filled: true,
-                fillColor: AppColors.surface,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
-                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
-                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.primary)),
-              ),
+              decoration: _dec(hint),
             ),
           ],
         ),

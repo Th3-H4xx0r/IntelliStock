@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import KalshiPortfolioChart from '../components/kalshi/KalshiPortfolioChart.vue'
+import KalshiCreateInstanceModal from '../components/kalshi/KalshiCreateInstanceModal.vue'
 import { getToken } from '../utils/auth.js'
 
 const API_BASE = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
@@ -95,41 +96,11 @@ async function kill() {
 
 // ── Create modal ──
 const showCreate = ref(false)
-const creating = ref(false)
-const createErr = ref('')
-const form = ref(blankForm())
-function blankForm() {
-  return { name: '', leagues: 'EPL, Serie B, Ligue 2', edge_pct: 3, kelly: 0.25, max_contracts: 50, exposure_pct: 60, league_pct: 25, daily_loss: 400, bankroll: 1000, poll: 60 }
-}
-function openCreate() { form.value = blankForm(); createErr.value = ''; showCreate.value = true }
-
-async function submitCreate() {
-  if (creating.value) return
-  if (!form.value.name.trim()) { createErr.value = 'Name is required'; return }
-  creating.value = true
-  createErr.value = ''
-  try {
-    const f = form.value
-    const body = {
-      name: f.name.trim(),
-      leagues: f.leagues.split(',').map((s) => s.trim()).filter(Boolean),
-      edge_threshold: Number(f.edge_pct) / 100,
-      kelly_fraction: Number(f.kelly),
-      max_contracts_per_market: Number(f.max_contracts),
-      max_open_exposure_frac: Number(f.exposure_pct) / 100,
-      per_league_cap_frac: Number(f.league_pct) / 100,
-      daily_loss_cap_dollars: Number(f.daily_loss),
-      bankroll_dollars: Number(f.bankroll),
-      poll_seconds: Number(f.poll),
-    }
-    const res = await fetch(`${API_BASE}/brokerages/${selectedId.value}/kalshi/instances`, {
-      method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
-    })
-    if (!res.ok) { createErr.value = `Create failed (HTTP ${res.status})`; return }
-    showCreate.value = false
-    await loadAll()
-  } catch (e) { createErr.value = String(e.message || e) }
-  finally { creating.value = false }
+function openCreate() { showCreate.value = true }
+function onCreated(bid) {
+  showCreate.value = false
+  if (bid) selectedId.value = bid
+  loadAll()
 }
 
 function pct(v) { return `${(v * 100).toFixed(1)}%` }
@@ -274,40 +245,12 @@ onMounted(loadAccounts)
     </main>
 
     <!-- Create instance modal -->
-    <div v-if="showCreate" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div @click="showCreate = false" class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
-      <div class="relative glass-card rounded-2xl w-full max-w-lg max-h-[88vh] overflow-y-auto">
-        <div class="px-6 pt-5 pb-3 border-b border-border-subtle flex items-center justify-between">
-          <h3 class="text-base font-bold text-slate-100 flex items-center gap-2"><span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span> Create Kalshi instance</h3>
-          <button @click="showCreate = false" class="text-slate-500 hover:text-slate-300"><span class="material-symbols-outlined">close</span></button>
-        </div>
-        <div class="px-6 py-5 space-y-4">
-          <p v-if="isLive" class="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">⚠ LIVE account — live execution is ON at creation. Starting this instance trades real money.</p>
-          <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Instance name</label>
-            <input v-model="form.name" type="text" placeholder="e.g. Soccer edge — demo" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
-          </div>
-          <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Leagues (comma-separated)</label>
-            <input v-model="form.leagues" type="text" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Edge threshold (%)</span><input v-model.number="form.edge_pct" type="number" step="0.5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Kelly fraction</span><input v-model.number="form.kelly" type="number" step="0.05" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Bankroll ($)</span><input v-model.number="form.bankroll" type="number" step="50" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Max contracts / market</span><input v-model.number="form.max_contracts" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Max open exposure (%)</span><input v-model.number="form.exposure_pct" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Per-league cap (%)</span><input v-model.number="form.league_pct" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Daily-loss cap ($)</span><input v-model.number="form.daily_loss" type="number" step="50" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-            <label class="block"><span class="block text-xs font-medium text-slate-400 mb-1.5">Scan cadence (s)</span><input v-model.number="form.poll" type="number" step="15" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" /></label>
-          </div>
-          <p v-if="createErr" class="text-xs text-red-400">{{ createErr }}</p>
-        </div>
-        <div class="px-6 py-4 border-t border-border-subtle flex gap-3">
-          <button @click="showCreate = false" class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200">Cancel</button>
-          <button @click="submitCreate" :disabled="creating" class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 disabled:opacity-50">{{ creating ? 'Creating…' : 'Create instance' }}</button>
-        </div>
-      </div>
-    </div>
+    <KalshiCreateInstanceModal
+      v-if="showCreate"
+      :brokerages="accounts"
+      :initial-brokerage-id="selectedId"
+      @close="showCreate = false"
+      @created="onCreated"
+    />
   </AppShell>
 </template>
