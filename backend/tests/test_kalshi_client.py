@@ -86,3 +86,28 @@ def test_prod_environment_uses_prod_host():
     c = KalshiClient(key_id="abc", private_key_pem=pem, environment="live", session=sess)
     c.get_balance()
     assert sess.calls[0]["url"].startswith("https://api.elections.kalshi.com")
+
+
+class _RoutingSession:
+    """Returns resting orders on the list call, empty on deletes."""
+
+    def __init__(self):
+        self.deletes = []
+
+    def request(self, method, url, headers=None, params=None, json=None, timeout=None):
+        if method == "GET" and url.endswith("/portfolio/orders"):
+            return _Resp({"orders": [{"order_id": "o1"}, {"order_id": "o2"}]})
+        if method == "DELETE":
+            self.deletes.append(url)
+            return _Resp({})
+        return _Resp({})
+
+
+def test_cancel_all_open_orders_cancels_each():
+    _, pem = _pem()
+    sess = _RoutingSession()
+    c = KalshiClient(key_id="abc", private_key_pem=pem, environment="demo", session=sess)
+    n = c.cancel_all_open_orders()
+    assert n == 2
+    assert any(u.endswith("/portfolio/orders/o1") for u in sess.deletes)
+    assert any(u.endswith("/portfolio/orders/o2") for u in sess.deletes)

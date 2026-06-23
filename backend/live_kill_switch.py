@@ -236,6 +236,30 @@ def halt_live_trading(
                         summary["errors"].append(f"brokerage {b.get('id')}: {e}")
                     continue
 
+                if bt == "kalshi":
+                    # 2026-06-22: Kalshi support. Cancel ALL resting orders on the
+                    # linked Kalshi account via the lean client's kill primitive.
+                    # Like the other branches this is an emergency stop — it does
+                    # not respect any per-instance dry-run flag.
+                    try:
+                        from secret_store import decrypt
+                        key_id = (b.get("kalshi_key_id") or "").strip()
+                        pem = decrypt(b.get("kalshi_private_key")) or ""
+                        environment = (b.get("kalshi_environment") or "demo").strip().lower()
+                        if not key_id or not pem:
+                            summary["errors"].append(
+                                f"brokerage {b.get('id')}: kalshi creds missing/blank after decrypt"
+                            )
+                            continue
+                        from kalshi.client import KalshiClient
+                        client = KalshiClient(
+                            key_id=key_id, private_key_pem=pem, environment=environment
+                        )
+                        summary["orders_canceled"] += int(client.cancel_all_open_orders())
+                    except Exception as e:
+                        summary["errors"].append(f"brokerage {b.get('id')}: {e}")
+                    continue
+
                 # Unknown brokerage_type — note and skip
                 summary["errors"].append(
                     f"brokerage {b.get('id')}: unsupported brokerage_type={bt!r}"
