@@ -4171,6 +4171,24 @@ def api_kalshi_instance_decisions(instance_id: str, limit: int = 100, conn=Depen
     return {"decisions": rows[:n], "summary": summarize_decisions(rows), "count": len(rows)}
 
 
+@app.get("/instances/{instance_id}/kalshi/live", response_class=JSONResponse)
+def api_kalshi_instance_live(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Live in-match cards for this instance — current score (when matchable),
+    market-implied probabilities, the latest detected event, a news snippet, and the
+    monitor's recent in-play decisions. Empty when no matches are live."""
+    _kalshi_instance_row(conn, instance_id)
+    rows = []
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("kalshi_live")
+            .filter({"instance_id": str(instance_id)}).run(conn)
+        )
+    except Exception:
+        rows = []
+    rows.sort(key=lambda d: d.get("updated_at", ""), reverse=True)
+    return {"matches": rows, "count": len(rows)}
+
+
 @app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)
 def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Equity curve for the instance's brokerage (reuses portfolio snapshots)."""

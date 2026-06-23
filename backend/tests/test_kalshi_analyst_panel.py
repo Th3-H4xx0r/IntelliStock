@@ -1,5 +1,16 @@
 from kalshi.feature_models import MatchFeatures, TeamForm
-from kalshi.intelligence.analyst_panel import _normalize_provider, analyze, build_prompt
+from kalshi.intelligence.analyst_panel import (
+    _normalize_provider, _provider_config_from_doc, analyze, build_prompt,
+)
+
+
+def test_provider_config_includes_bedrock_region():
+    cfg = _provider_config_from_doc("bedrock", {"bedrock_region": "us-east-1"})
+    assert cfg["bedrock_region"] == "us-east-1"
+    # Azure endpoint/version mapped; non-matching providers stay empty.
+    az = _provider_config_from_doc("azure", {"azure_openai_endpoint": "https://x", "azure_openai_api_version": "2024-10-21"})
+    assert az == {"azure_endpoint": "https://x", "api_version": "2024-10-21"}
+    assert _provider_config_from_doc("deepseek", {}) == {}
 
 
 def test_normalize_provider_maps_display_names_to_dispatch_keys():

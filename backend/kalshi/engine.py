@@ -247,6 +247,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     price_history: dict = {}    # market_ticker -> [mid_cents...]; live event detection
     adds_by_match: dict = {}    # fixture_id -> in-play add count
     live_llm_cd: dict = {}      # fixture_id -> wall ts of last in-play LLM read (cooldown)
+    live_news_cache: dict = {}  # fixture_id -> {"ts": wall, "snip": str}; live-card news (5 min)
     tick = 0
     while True:
         # Control-plane poll. A transient DB/connection blip must NOT kill the
@@ -479,6 +480,59 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(r, conflict="replace").run(conn)
                     except Exception:
                         pass
+
+                # 8b) Persist live-match cards (score + market probs + event + news +
+                # decisions) for the web/mobile live view.
+                from kalshi.live import cards as _cards, scoreboard as _sb
+                try:
+                    board = _sb.fetch_scoreboard()
+                except Exception:
+                    board = []
+                rows_by_fixture = {}
+                for r in live_rows:
+                    rows_by_fixture.setdefault(r["fixture_id"], []).append(r)
+                for match in live_matches:
+                    fid = match["fixture_id"]
+                    frows = rows_by_fixture.get(fid, [])
+                    sc = _sb.match_score(board, match["home"], match["away"])
+                    score = {"home": sc.get("home_score"), "away": sc.get("away_score"),
+                             "clock": sc.get("clock"), "detail": sc.get("detail"),
+                             "state": sc.get("state")} if sc else None
+                    nc = live_news_cache.get(fid)
+                    if nc and (now_wall - nc["ts"]) < 300:
+                        snip = nc["snip"]
+                    else:
+                        try:
+                            snip = summarize_news_items(fetch_match_news(match["home"], match["away"]), limit=3)
+                        except Exception:
+                            snip = nc["snip"] if nc else ""
+                        live_news_cache[fid] = {"ts": now_wall, "snip": snip}
+                    decs = [{"market_ticker": d["market_ticker"], "side": d.get("side"),
+                             "action": d.get("live_action"), "decision": d.get("decision"),
+                             "reason": d.get("block_reason") or d.get("llm_rationale") or "",
+                             "size": d.get("size", 0)} for d in frows]
+                    last_event = next((d.get("event") for d in frows if d.get("event")), "")
+                    card = _cards.build_live_card(
+                        instance_id=config.instance_id, fixture_id=fid,
+                        home=match["home"], away=match["away"],
+                        market_probs=_cards.market_probs_from_markets(match["markets"]),
+                        score=score, elapsed_min=match.get("elapsed_min"),
+                        event=last_event, news=snip, decisions=decs, ts=ts)
+                    try:
+                        kdb._r.db(kdb.DB_NAME).table("kalshi_live").insert(card, conflict="replace").run(conn)
+                    except Exception:
+                        pass
+
+            # 8c) Prune live cards for matches no longer in play this tick.
+            if config.live_monitoring:
+                try:
+                    keep = {f"{config.instance_id}|{m['fixture_id']}" for m in live_matches}
+                    for row in kdb._r.db(kdb.DB_NAME).table("kalshi_live").filter(
+                            {"instance_id": config.instance_id}).pluck("id").run(conn):
+                        if row["id"] not in keep:
+                            kdb._r.db(kdb.DB_NAME).table("kalshi_live").get(row["id"]).delete().run(conn)
+                except Exception:
+                    pass
 
             # 7) Snapshot.
             bal = client.get_balance()

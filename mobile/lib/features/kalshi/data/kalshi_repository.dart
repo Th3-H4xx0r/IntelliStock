@@ -115,6 +115,9 @@ class KalshiRepository {
   Future<Map<String, dynamic>> instanceDecisions(String id) =>
       _client.get<Map<String, dynamic>>('/instances/$id/kalshi/decisions', query: {'limit': 200});
 
+  Future<Map<String, dynamic>> instanceLive(String id) =>
+      _client.get<Map<String, dynamic>>('/instances/$id/kalshi/live');
+
   Future<List<Map<String, dynamic>>> models() async {
     final d = await _client.get<dynamic>('/models');
     final list = (d is Map ? (d['models'] ?? []) : d) as List? ?? [];
@@ -163,4 +166,9 @@ final kalshiInstanceDetailProvider =
 final kalshiInstanceDecisionsProvider =
     FutureProvider.autoDispose.family<Map<String, dynamic>, String>((ref, id) {
   return ref.watch(kalshiRepositoryProvider).instanceDecisions(id);
+});
+
+final kalshiInstanceLiveProvider =
+    FutureProvider.autoDispose.family<Map<String, dynamic>, String>((ref, id) {
+  return ref.watch(kalshiRepositoryProvider).instanceLive(id);
 });

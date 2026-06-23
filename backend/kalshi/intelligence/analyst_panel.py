@@ -95,8 +95,13 @@ def make_llm_call(model_doc: dict | None, log=None):  # pragma: no cover - integ
                  f"model={model!r}) — analyst disabled.", "yellow")
             return None
         api_key = (model_doc.get("api_key") or "").strip() or resolve_api_key_for_provider(provider)
+        provider_config = _provider_config_from_doc(provider, model_doc)
         _log(f"Analyst LLM bound: provider={provider!r} model={model!r} "
-             f"api_key={'set' if api_key else 'none(env)'}.", "white")
+             f"api_key={'set' if api_key else 'none(env)'}"
+             + (f" config={provider_config}" if provider_config else "") + ".", "white")
+        if provider == "bedrock" and not provider_config.get("bedrock_region"):
+            _log("Analyst LLM: bedrock has no region (set bedrock_region on the model "
+                 "or BEDROCK_REGION/AWS_REGION env) — the call will fail.", "yellow")
 
         class _AnalystOut(BaseModel):
             adjustments: dict = Field(default_factory=dict)
@@ -108,6 +113,7 @@ def make_llm_call(model_doc: dict | None, log=None):  # pragma: no cover - integ
                 res = call_structured_llm_by_provider(
                     provider, api_key, model, prompt, _AnalystOut,
                     max_output_tokens=512, temperature=0.2,
+                    provider_config=provider_config or None,
                 )
             except Exception as e:
                 _log(f"Analyst LLM call FAILED: {type(e).__name__}: {e}", "red")
@@ -135,6 +141,41 @@ _PROVIDER_ALIASES = {
     "open ai": "openai", "claude cli": "claude-cli", "codex cli": "codex-cli",
     "google": "gemini", "google gemini": "gemini",
 }
+
+
+def _provider_config_from_doc(provider: str, model_doc: dict) -> dict:
+    """Provider-specific settings call_structured_llm_by_provider needs but that
+    aren't (provider, api_key, model). For bedrock the REGION is required — without
+    it the call silently returns None. Mirrors graph_nexus_analysis's resolver but
+    reads the fields straight off the Models-table row."""
+    import os
+    d = model_doc or {}
+    cfg: dict = {}
+    if provider == "bedrock":
+        region = (str(d.get("bedrock_region") or "").strip()
+                  or os.environ.get("BEDROCK_REGION", "").strip()
+                  or os.environ.get("AWS_REGION", "").strip())
+        if region:
+            cfg["bedrock_region"] = region
+        reasoning = str(d.get("bedrock_reasoning") or "").strip()
+        if reasoning:
+            cfg["bedrock_reasoning"] = reasoning
+    elif provider == "azure":
+        ep = str(d.get("azure_openai_endpoint") or "").strip()
+        ver = str(d.get("azure_openai_api_version") or "").strip()
+        if ep:
+            cfg["azure_endpoint"] = ep
+        if ver:
+            cfg["api_version"] = ver
+    elif provider == "ollama":
+        bu = str(d.get("ollama_base_url") or "").strip()
+        if bu:
+            cfg["ollama_base_url"] = bu
+    elif provider in ("openai", "nvidia"):
+        bu = str(d.get("openai_base_url") or d.get("nvidia_base_url") or "").strip()
+        if bu:
+            cfg[f"{provider}_base_url"] = bu
+    return cfg
 
 
 def _normalize_provider(raw: str) -> str:

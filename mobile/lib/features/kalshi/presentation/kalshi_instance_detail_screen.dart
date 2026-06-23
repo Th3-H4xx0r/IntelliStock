@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -23,10 +25,26 @@ class KalshiInstanceDetailScreen extends ConsumerStatefulWidget {
 class _State extends ConsumerState<KalshiInstanceDetailScreen> {
   bool _busy = false;
   final Set<int> _expanded = {};
+  Timer? _liveTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _liveTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) ref.invalidate(kalshiInstanceLiveProvider(widget.instanceId));
+    });
+  }
+
+  @override
+  void dispose() {
+    _liveTimer?.cancel();
+    super.dispose();
+  }
 
   Future<void> _refresh() async {
     ref.invalidate(kalshiInstanceDetailProvider(widget.instanceId));
     ref.invalidate(kalshiInstanceDecisionsProvider(widget.instanceId));
+    ref.invalidate(kalshiInstanceLiveProvider(widget.instanceId));
   }
 
   Future<void> _startStop(bool start) async {
@@ -76,6 +94,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
   Widget build(BuildContext context) {
     final detailAsync = ref.watch(kalshiInstanceDetailProvider(widget.instanceId));
     final decAsync = ref.watch(kalshiInstanceDecisionsProvider(widget.instanceId));
+    final liveAsync = ref.watch(kalshiInstanceLiveProvider(widget.instanceId));
     final detail = detailAsync.value;
     final running = detail?['running'] == true;
 
@@ -134,6 +153,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   const SizedBox(height: 12),
                   _summary(decAsync.value?['summary'] as Map<String, dynamic>?),
                   const SizedBox(height: 12),
+                  _liveCards(liveAsync),
                   _decisionLog(decAsync),
                   const SizedBox(height: 12),
                   GlassCard(
@@ -175,6 +195,110 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
       Expanded(child: StatTile(label: 'Blocked', value: blocked, valueColor: AppColors.danger)),
     ]);
   }
+
+  Widget _liveCards(AsyncValue<Map<String, dynamic>> liveAsync) {
+    final matches = (liveAsync.value?['matches'] as List?) ?? const [];
+    if (matches.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Container(width: 8, height: 8, decoration: const BoxDecoration(color: Color(0xFFEF4444), shape: BoxShape.circle)),
+            const SizedBox(width: 8),
+            Text('LIVE NOW · ${matches.length}', style: AppTextStyles.eyebrow),
+          ]),
+          const SizedBox(height: 10),
+          ...matches.map((raw) => _liveCard(raw as Map<String, dynamic>)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _liveCard(Map<String, dynamic> m) {
+    final score = m['score'] as Map<String, dynamic>?;
+    final probs = (m['market_probs'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final decisions = (m['decisions'] as List?) ?? const [];
+    final news = (m['news'] as String?) ?? '';
+    String clock;
+    if (score != null && (score['clock']?.toString().isNotEmpty ?? false)) {
+      clock = score['clock'].toString();
+    } else if (m['elapsed_min'] != null) {
+      clock = "${(m['elapsed_min'] as num).round()}'";
+    } else {
+      clock = 'LIVE';
+    }
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.fill(AppColors.surface),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text('${m['home']}  vs  ${m['away']}',
+              style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600),
+              overflow: TextOverflow.ellipsis)),
+          if (score != null)
+            Text('${score['home'] ?? '–'} : ${score['away'] ?? '–'}',
+                style: AppTextStyles.cardTitle.copyWith(color: AppColors.textHi)),
+          const SizedBox(width: 6),
+          Text(clock, style: AppTextStyles.nano.copyWith(color: AppColors.success, fontWeight: FontWeight.bold)),
+        ]),
+        const SizedBox(height: 8),
+        ...probs.entries.map((e) {
+          final v = (((e.value as num?)?.toDouble()) ?? 0.0).clamp(0.0, 1.0);
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 5),
+            child: Row(children: [
+              SizedBox(width: 72, child: Text(_sideLabel(m, e.key),
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textDim), overflow: TextOverflow.ellipsis)),
+              Expanded(child: ClipRRect(borderRadius: BorderRadius.circular(3),
+                  child: LinearProgressIndicator(value: v, minHeight: 6,
+                      backgroundColor: AppColors.fill(AppColors.surface),
+                      valueColor: AlwaysStoppedAnimation(AppColors.primary)))),
+              const SizedBox(width: 8),
+              Text('${(v * 100).round()}%', style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
+            ]),
+          );
+        }),
+        if (news.isNotEmpty)
+          Padding(padding: const EdgeInsets.only(top: 4), child: Text(news.split('\n').first,
+              style: AppTextStyles.nano.copyWith(color: AppColors.textDim), maxLines: 2, overflow: TextOverflow.ellipsis)),
+        if (decisions.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Wrap(spacing: 6, runSpacing: 6, children: decisions.take(4).map((d) {
+              final dm = d as Map<String, dynamic>;
+              final act = (dm['action'] ?? '').toString();
+              final c = _actionColor(act);
+              final sz = (dm['size'] != null && dm['size'] != 0) ? ' ${dm['size']}' : '';
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(color: AppColors.fill(c), borderRadius: BorderRadius.circular(4)),
+                child: Text('${act.toUpperCase()}$sz', style: AppTextStyles.nano.copyWith(color: c, fontWeight: FontWeight.bold)),
+              );
+            }).toList()),
+          ),
+      ]),
+    );
+  }
+
+  String _sideLabel(Map<String, dynamic> m, String side) {
+    if (side == 'home') return m['home']?.toString() ?? 'Home';
+    if (side == 'away') return m['away']?.toString() ?? 'Away';
+    return 'Draw';
+  }
+
+  Color _actionColor(String a) => {
+        'open': AppColors.success,
+        'add': AppColors.success,
+        'reduce': AppColors.warning,
+        'exit': AppColors.danger,
+      }[a] ?? AppColors.textDim;
 
   Widget _decisionLog(AsyncValue<Map<String, dynamic>> decAsync) {
     return GlassCard(

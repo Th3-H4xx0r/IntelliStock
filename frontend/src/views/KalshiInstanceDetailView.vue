@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
 import KalshiPortfolioChart from '../components/kalshi/KalshiPortfolioChart.vue'
@@ -19,8 +19,10 @@ const id = route.params.id
 
 const detail = ref(null)
 const decisions = ref([])
+const live = ref([])
 const summary = ref({ total: 0, placed: 0, skipped: 0, queued: 0, blocked: 0 })
 const loading = ref(true)
+let liveTimer = null
 const busy = ref(false)
 const expanded = ref(new Set())
 
@@ -41,6 +43,12 @@ async function load() {
   detail.value = d
   if (dec) { decisions.value = dec.decisions || []; summary.value = dec.summary || summary.value }
   loading.value = false
+  loadLive()
+}
+
+async function loadLive() {
+  const l = await getJson(`/instances/${id}/kalshi/live`)
+  if (l) live.value = l.matches || []
 }
 
 async function startStop(start) {
@@ -90,7 +98,27 @@ function decColor(d) {
   return { placed: 'text-emerald-400', skipped: 'text-slate-500', queued: 'text-amber-400', blocked: 'text-red-400' }[d] || 'text-slate-400'
 }
 
-onMounted(load)
+const ACTION_STYLE = {
+  open: 'bg-emerald-500/15 text-emerald-400', add: 'bg-emerald-500/15 text-emerald-400',
+  reduce: 'bg-amber-500/15 text-amber-400', exit: 'bg-red-500/15 text-red-400',
+  hold: 'bg-slate-500/15 text-slate-400',
+}
+function topSide(m) {
+  const p = m.market_probs || {}
+  const k = Object.keys(p).sort((a, b) => p[b] - p[a])[0]
+  return k ? { side: k, prob: p[k] } : null
+}
+function sideLabel(m, side) {
+  if (side === 'home') return m.home
+  if (side === 'away') return m.away
+  return 'Draw'
+}
+
+onMounted(() => {
+  load()
+  liveTimer = setInterval(loadLive, 15000)
+})
+onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
 </script>
 
 <template>
@@ -142,6 +170,47 @@ onMounted(load)
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-slate-100 tabular-nums">{{ summary.skipped }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Skipped</div></div>
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-amber-400 tabular-nums">{{ summary.queued }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Queued</div></div>
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-red-400 tabular-nums">{{ summary.blocked }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Blocked</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live now -->
+        <div v-if="live.length" class="glass-card rounded-2xl p-4 sm:p-5">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="relative flex h-2.5 w-2.5"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500/60"></span><span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span></span>
+            <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Live now · {{ live.length }} match{{ live.length === 1 ? '' : 'es' }}</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div v-for="m in live" :key="m.id" class="rounded-xl border border-border-subtle bg-surface/40 p-3.5">
+              <div class="flex items-start justify-between gap-2">
+                <div class="text-sm font-semibold text-slate-100 min-w-0">
+                  <span class="truncate">{{ m.home }}</span> <span class="text-slate-500">vs</span> <span class="truncate">{{ m.away }}</span>
+                </div>
+                <div class="shrink-0 text-right">
+                  <div v-if="m.score" class="text-lg font-bold text-slate-100 tabular-nums leading-none">{{ m.score.home ?? '–' }}<span class="text-slate-500"> : </span>{{ m.score.away ?? '–' }}</div>
+                  <div v-if="m.score && m.score.clock" class="text-[10px] text-emerald-400 font-semibold mt-0.5">{{ m.score.clock }}</div>
+                  <div v-else-if="m.elapsed_min != null" class="text-[10px] text-emerald-400 font-semibold">{{ Math.round(m.elapsed_min) }}'</div>
+                  <div v-else class="text-[10px] text-slate-500 font-semibold uppercase">Live</div>
+                </div>
+              </div>
+
+              <!-- market-implied probabilities -->
+              <div v-if="topSide(m)" class="mt-2.5 space-y-1.5">
+                <div v-for="(p, side) in m.market_probs" :key="side" class="flex items-center gap-2">
+                  <span class="text-[11px] text-slate-400 w-20 truncate">{{ sideLabel(m, side) }}</span>
+                  <div class="flex-1 h-1.5 rounded-full bg-surface overflow-hidden"><div class="h-full bg-primary/70 rounded-full" :style="{ width: `${Math.round((p || 0) * 100)}%` }"></div></div>
+                  <span class="text-[11px] tabular-nums text-slate-300 w-9 text-right">{{ Math.round((p || 0) * 100) }}%</span>
+                </div>
+              </div>
+
+              <p v-if="m.news" class="mt-2.5 text-[11px] text-slate-400 line-clamp-2 whitespace-pre-line">{{ m.news.split('\n')[0] }}</p>
+
+              <!-- in-play decisions -->
+              <div v-if="m.decisions && m.decisions.length" class="mt-2.5 flex flex-wrap gap-1.5">
+                <span v-for="(d, di) in m.decisions.slice(0, 4)" :key="di" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase" :class="ACTION_STYLE[d.action] || 'bg-slate-500/15 text-slate-400'">
+                  {{ d.action }}<span v-if="d.size" class="font-normal normal-case">{{ d.size }}</span>
+                </span>
+              </div>
             </div>
           </div>
         </div>

@@ -37,6 +37,7 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("match_features", "fixture_id"),
     ("kalshi_market_listings", "fixture_id"),
     ("kalshi_capital_plan", "instance_id"),
+    ("kalshi_live", "id"),   # live in-match cards: id = "{instance_id}|{fixture_id}"
 ]
 
 
