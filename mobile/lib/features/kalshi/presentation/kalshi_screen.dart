@@ -507,9 +507,10 @@ class _InstanceStatus extends StatelessWidget {
 }
 
 const _kLeagues = [
+  'World Cup', 'World Cup Qualifiers', 'Champions League', 'Europa League',
   'EPL', 'EFL Championship', 'Serie A', 'Serie B', 'La Liga', 'La Liga 2',
   'Bundesliga', '2. Bundesliga', 'Ligue 1', 'Ligue 2', 'Eredivisie',
-  'Primeira Liga', 'MLS', 'Brasileirão', 'Champions League',
+  'Primeira Liga', 'MLS', 'Brasileirão',
 ];
 
 // Risk presets tune every config value; dlpct = daily-loss cap as a fraction of
