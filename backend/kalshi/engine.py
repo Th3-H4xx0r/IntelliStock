@@ -299,17 +299,19 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 total_raw += len(rs)
                 if tick == 1 and rs and not raw_dumped:
                     _s = rs[0]
-                    log(f"raw market sample — keys: {sorted(_s.keys())}", "white")
-                    log(f"raw prices — yes_ask={_s.get('yes_ask')} yes_bid={_s.get('yes_bid')} "
-                        f"no_ask={_s.get('no_ask')} no_bid={_s.get('no_bid')} "
-                        f"last_price={_s.get('last_price')} status={_s.get('status')}", "cyan")
+                    log(f"raw prices — yes_ask_dollars={_s.get('yes_ask_dollars')} "
+                        f"yes_bid_dollars={_s.get('yes_bid_dollars')} "
+                        f"last_price_dollars={_s.get('last_price_dollars')} "
+                        f"ask_size={_s.get('yes_ask_size_fp')} status={_s.get('status')}", "cyan")
                     raw_dumped = True
                 for m in rs:
                     p = discovery.parse_kalshi_market(m)
                     if p["market_type"] != "other" and p["home"] and p["away"]:
                         p["series"] = series
-                        p["yes_ask_cents"] = price_cents(m, "yes_ask")
-                        p["yes_bid_cents"] = price_cents(m, "yes_bid")
+                        # Kalshi returns prices under *_dollars fields (0.40 = 40c);
+                        # fall back to the bare/cents names + last trade for the ask.
+                        p["yes_ask_cents"] = price_cents(m, "yes_ask_dollars", "yes_ask", "last_price_dollars", "last_price")
+                        p["yes_bid_cents"] = price_cents(m, "yes_bid_dollars", "yes_bid")
                         _a, _b = p["yes_ask_cents"], p["yes_bid_cents"]
                         p["mid_cents"] = (_a + _b) / 2.0 if (_a and _b) else (_a or _b or None)
                         p["kickoff_ts"] = match_clock.kickoff_from_market(m)
