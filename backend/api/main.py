@@ -768,8 +768,12 @@ class FetchRobinhoodAccountsBody(BaseModel):
 
 
 class LinkBrokerageBody(BaseModel):
-    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood)$")
+    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood|kalshi)$")
     account_name: str = Field(..., min_length=1)
+    # Kalshi (RSA-PSS v2): API key id + PEM private key + demo/live environment.
+    kalshi_key_id: Optional[str] = None
+    kalshi_private_key: Optional[str] = None
+    kalshi_environment: Optional[str] = Field(default="demo", pattern="^(demo|live)$")
     # Alpaca
     key: Optional[str] = None
     secret: Optional[str] = None
@@ -3317,7 +3321,7 @@ def api_fetch_robinhood_accounts(body: FetchRobinhoodAccountsBody, current_user:
 
 @app.post("/brokerages", response_class=JSONResponse)
 def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    """Link a new brokerage account (Alpaca or Robinhood). Validates credentials before saving."""
+    """Link a new brokerage account (Alpaca, Robinhood, or Kalshi). Validates credentials before saving."""
     if body.brokerage_type == "alpaca":
         if not body.key or not body.secret:
             raise HTTPException(status_code=400, detail="key and secret are required for Alpaca")
@@ -3326,6 +3330,34 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
             body.paper if body.paper is not None else True,
             (body.alpaca_data_feed or "iex"),
         )
+    elif body.brokerage_type == "kalshi":
+        if not body.kalshi_key_id or not body.kalshi_private_key:
+            raise HTTPException(status_code=400, detail="kalshi_key_id and kalshi_private_key are required for Kalshi")
+        import uuid as _uuid
+        from secret_store import encrypt as _encrypt
+        from kalshi.signing import load_private_key as _load_pk
+        # Validate the PEM parses as an RSA private key before persisting it.
+        try:
+            _load_pk(body.kalshi_private_key)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"invalid Kalshi RSA private key: {e}")
+        bid = str(_uuid.uuid4())
+        row = {
+            "id": bid,
+            "brokerage_type": "kalshi",
+            "account_name": body.account_name,
+            "kalshi_key_id": body.kalshi_key_id.strip(),
+            "kalshi_private_key": _encrypt(body.kalshi_private_key),  # Fernet at rest
+            "kalshi_environment": (body.kalshi_environment or "demo"),
+            "created_at": _r_auth.now(),
+        }
+        _r_auth.db("IntelliStock").table("BrokerageAccounts").insert(row).run(conn)
+        try:
+            from kalshi.db import ensure_tables as _ensure_kalshi_tables
+            _ensure_kalshi_tables(conn)
+        except Exception:
+            pass
+        return {"ok": True, "id": bid, "brokerage_type": "kalshi", "environment": row["kalshi_environment"]}
     else:
         if not body.access_token or not body.refresh_token:
             raise HTTPException(status_code=400, detail="access_token and refresh_token are required for Robinhood")
@@ -3850,6 +3882,153 @@ def api_brokerage_trends(brokerage_id: str, status: str = "active", limit: int =
     n = max(1, min(int(limit or 50), 100))
     trends = trends[:n]
     return {"trends": trends, "count": len(trends)}
+
+
+# ---------------------------------------------------------------------------
+# Kalshi prediction-markets read endpoints (brokerage-scoped, read-only).
+# The lean Kalshi instance engine populates kalshi_* tables; these surface them
+# to the web Kalshi tab, the dashboard card, and the mobile Kalshi screen. Live
+# balance/positions/fills come straight off the Kalshi API; edges/clv/budget
+# come from the DB. Every path degrades to an empty shape on error (mirrors the
+# nexus endpoints) so the UI never hard-fails.
+# ---------------------------------------------------------------------------
+
+def _kalshi_brokerage_row(conn, brokerage_id: str) -> dict:
+    row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Brokerage {brokerage_id!r} not found")
+    if str(row.get("brokerage_type") or "").strip().lower() != "kalshi":
+        raise HTTPException(status_code=400, detail=f"Brokerage {brokerage_id!r} is not a Kalshi account")
+    return row
+
+
+def _kalshi_client_from_row(row: dict):
+    from secret_store import decrypt as _decrypt
+    from kalshi.client import KalshiClient
+    return KalshiClient(
+        key_id=(row.get("kalshi_key_id") or "").strip(),
+        private_key_pem=_decrypt(row.get("kalshi_private_key")) or "",
+        environment=(row.get("kalshi_environment") or "demo"),
+    )
+
+
+def _kalshi_rows(conn, table: str, brokerage_id: str) -> list:
+    try:
+        return list(
+            _r_auth.db("IntelliStock").table(table).filter({"brokerage_id": brokerage_id}).run(conn)
+        )
+    except Exception:
+        return []  # table may not exist yet / transient outage -> empty
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/portfolio", response_class=JSONResponse)
+def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Account value + equity curve for a Kalshi brokerage. Live balance + DB
+    snapshot series. Read-only."""
+    from kalshi.api_payloads import portfolio_payload
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    value_cents = cash_cents = 0
+    try:
+        bal = _kalshi_client_from_row(row).get_balance()
+        value_cents, cash_cents = bal.portfolio_value_cents, bal.cash_cents
+    except Exception:
+        pass
+    snaps = sorted(_kalshi_rows(conn, "kalshi_portfolio_snapshots", brokerage_id), key=lambda s: s.get("ts", ""))
+    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents)
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse)
+def api_kalshi_positions(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import positions_payload
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        positions = [p.__dict__ for p in _kalshi_client_from_row(row).get_positions()]
+    except Exception:
+        positions = _kalshi_rows(conn, "kalshi_positions", brokerage_id)
+    return positions_payload(positions)
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/edges", response_class=JSONResponse)
+def api_kalshi_edges(brokerage_id: str, limit: int = 10, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import edges_payload
+    _kalshi_brokerage_row(conn, brokerage_id)
+    return edges_payload(_kalshi_rows(conn, "kalshi_edges", brokerage_id), limit=max(1, min(int(limit or 10), 50)))
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/clv", response_class=JSONResponse)
+def api_kalshi_clv(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import clv_payload
+    _kalshi_brokerage_row(conn, brokerage_id)
+    return clv_payload(_kalshi_rows(conn, "kalshi_clv_log", brokerage_id))
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/settlement", response_class=JSONResponse)
+def api_kalshi_settlement(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import positions_payload
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        positions = [p.__dict__ for p in _kalshi_client_from_row(row).get_positions()]
+    except Exception:
+        positions = _kalshi_rows(conn, "kalshi_positions", brokerage_id)
+    return positions_payload(positions)
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/fills", response_class=JSONResponse)
+def api_kalshi_fills(brokerage_id: str, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        fills = [f.__dict__ for f in _kalshi_client_from_row(row).get_fills(limit=max(1, min(int(limit or 50), 200)))]
+    except Exception:
+        fills = []
+    return {"fills": fills, "count": len(fills)}
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/scan-budget", response_class=JSONResponse)
+def api_kalshi_scan_budget(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    import datetime, calendar
+    from kalshi.api_payloads import scan_budget_payload
+    from kalshi.db import scan_budget_window
+    _kalshi_brokerage_row(conn, brokerage_id)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    window = scan_budget_window(now.isoformat())
+    used = 0
+    try:
+        r0 = _r_auth.db("IntelliStock").table("kalshi_scan_budget").get(window).run(conn)
+        used = int((r0 or {}).get("used", 0))
+    except Exception:
+        pass
+    days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
+    return scan_budget_payload(used, days_left_in_month=days_left)
+
+
+class TestKalshiBody(BaseModel):
+    kalshi_key_id: Optional[str] = ""
+    kalshi_private_key: Optional[str] = ""
+    kalshi_environment: Optional[str] = Field(default="demo", pattern="^(demo|live)$")
+    brokerage_id: Optional[str] = None
+
+
+@app.post("/brokerages/test-kalshi", response_class=JSONResponse)
+def api_test_kalshi_brokerage(body: TestKalshiBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Probe Kalshi creds against /portfolio/balance. Accepts raw creds (add
+    mode) or a brokerage_id (edit mode, decrypts stored creds). Saves nothing."""
+    from kalshi.client import KalshiClient
+    key_id = (body.kalshi_key_id or "").strip()
+    pem = body.kalshi_private_key or ""
+    env = body.kalshi_environment or "demo"
+    if (not key_id or not pem) and body.brokerage_id:
+        row = _kalshi_brokerage_row(conn, body.brokerage_id)
+        from secret_store import decrypt as _decrypt
+        key_id = (row.get("kalshi_key_id") or "").strip()
+        pem = _decrypt(row.get("kalshi_private_key")) or ""
+        env = row.get("kalshi_environment") or "demo"
+    if not key_id or not pem:
+        raise HTTPException(status_code=400, detail="kalshi_key_id and kalshi_private_key are required")
+    try:
+        bal = KalshiClient(key_id=key_id, private_key_pem=pem, environment=env).get_balance()
+        return {"ok": True, "environment": env, "balance_cents": bal.cash_cents}
+    except Exception as e:
+        return {"ok": False, "environment": env, "error": f"{type(e).__name__}: {e}"}
 
 
 @app.get("/market/news", response_class=JSONResponse)
