@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
 import { getToken } from '../../utils/auth.js'
+import InfoTip from './InfoTip.vue'
 
 const props = defineProps({
   brokerages: { type: Array, required: true },      // kalshi accounts [{id, account_name, kalshi_environment}]
@@ -20,6 +21,19 @@ const LEAGUES = [
   'Primeira Liga', 'MLS', 'Brasileirão', 'Champions League',
 ]
 
+// Risk presets tune every config value. dailyLossPct = daily-loss cap as a
+// fraction of the effective bankroll. Users can still tweak any value after.
+const RISK_PRESETS = {
+  low:    { label: 'Low',    edgePct: 5, kelly: 0.15, maxContracts: 25,  exposurePct: 30,  leagueCapPct: 12, usagePct: 25,  poll: 90, dailyLossPct: 0.05,
+            blurb: 'Conservative — fewer, higher-confidence trades; small stakes and a tight daily-loss cap.' },
+  medium: { label: 'Medium', edgePct: 3, kelly: 0.25, maxContracts: 50,  exposurePct: 60,  leagueCapPct: 25, usagePct: 50,  poll: 60, dailyLossPct: 0.10,
+            blurb: 'Balanced — the default. Quarter-Kelly with moderate exposure.' },
+  high:   { label: 'High',   edgePct: 2, kelly: 0.40, maxContracts: 100, exposurePct: 80,  leagueCapPct: 40, usagePct: 75,  poll: 45, dailyLossPct: 0.20,
+            blurb: 'Aggressive — lower edge bar, bigger Kelly and exposure. More trades, more variance.' },
+  max:    { label: 'Max',    edgePct: 1, kelly: 0.60, maxContracts: 200, exposurePct: 100, leagueCapPct: 60, usagePct: 100, poll: 30, dailyLossPct: 0.35,
+            blurb: 'Maximum — trades nearly everything +EV at full size. Highest variance and drawdown risk.' },
+}
+
 const brokerageId = ref(props.initialBrokerageId || (props.brokerages[0]?.id ?? ''))
 const accountBalance = ref(0)
 const loadingBalance = ref(false)
@@ -36,7 +50,26 @@ const usagePct = ref(50)
 const manualBankroll = ref(1000)
 const dailyLoss = ref(0)
 const dailyLossTouched = ref(false)
+const dailyLossPct = ref(0.10)
 const poll = ref(60)
+const risk = ref('medium')
+const riskBlurb = computed(() => RISK_PRESETS[risk.value]?.blurb || '')
+
+function applyPreset(level) {
+  const p = RISK_PRESETS[level]
+  if (!p) return
+  risk.value = level
+  edgePct.value = p.edgePct
+  kelly.value = p.kelly
+  maxContracts.value = p.maxContracts
+  exposurePct.value = p.exposurePct
+  leagueCapPct.value = p.leagueCapPct
+  usagePct.value = p.usagePct
+  poll.value = p.poll
+  dailyLossPct.value = p.dailyLossPct
+  dailyLossTouched.value = false
+  dailyLoss.value = Math.max(1, Math.round(effectiveBankroll.value * p.dailyLossPct))
+}
 
 const leaguesOpen = ref(false)
 const creating = ref(false)
@@ -69,7 +102,7 @@ async function loadBalance() {
 // Scale the dollar-denominated daily-loss cap from the effective bankroll
 // (default 10%) unless the user has manually edited it.
 watch(effectiveBankroll, (v) => {
-  if (!dailyLossTouched.value) dailyLoss.value = Math.max(1, Math.round(v * 0.10))
+  if (!dailyLossTouched.value) dailyLoss.value = Math.max(1, Math.round(v * dailyLossPct.value))
 }, { immediate: true })
 watch(brokerageId, loadBalance)
 onMounted(loadBalance)
@@ -126,7 +159,7 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
         <div>
           <div class="flex items-center gap-1.5 mb-1.5">
             <label class="text-xs font-medium text-slate-400">Kalshi account</label>
-            <span class="material-symbols-outlined text-slate-600 text-[14px]" title="Which Kalshi account this bot trades on. Demo = paper, Live = real money.">info</span>
+            <InfoTip text="Which Kalshi account this bot trades on. Demo = paper, Live = real money." />
           </div>
           <div class="relative">
             <select v-model="brokerageId" class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
@@ -145,6 +178,22 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
           </div>
         </div>
 
+        <!-- Risk tolerance preset -->
+        <div>
+          <div class="flex items-center gap-1.5 mb-1.5">
+            <label class="text-xs font-medium text-slate-400">Risk tolerance</label>
+            <InfoTip text="Pick a preset and we'll tune edge, Kelly, exposure, caps, bankroll usage, cadence, and the daily-loss cap. You can still tweak any value after." />
+          </div>
+          <div class="grid grid-cols-4 gap-1.5 bg-surface border border-border-subtle rounded-lg p-1">
+            <button v-for="(p, k) in RISK_PRESETS" :key="k" type="button" @click="applyPreset(k)"
+                    class="py-1.5 rounded-md text-xs font-semibold transition-all"
+                    :class="risk === k ? 'bg-primary text-background-dark' : 'text-slate-400 hover:text-slate-200'">
+              {{ p.label }}
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ riskBlurb }}</p>
+        </div>
+
         <!-- Name -->
         <div>
           <label class="block text-xs font-medium text-slate-400 mb-1.5">Instance name</label>
@@ -155,7 +204,7 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
         <div>
           <div class="flex items-center gap-1.5 mb-1.5">
             <label class="text-xs font-medium text-slate-400">Leagues</label>
-            <span class="material-symbols-outlined text-slate-600 text-[14px]" title="Which soccer leagues to scan. Thinner/lower divisions often carry more edge than marquee games.">info</span>
+            <InfoTip text="Which soccer leagues to scan. Thinner/lower divisions often carry more edge than marquee games." />
           </div>
           <div class="relative">
             <button @click="leaguesOpen = !leaguesOpen" type="button" class="w-full flex items-center justify-between gap-2 bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-200 hover:border-primary/50 transition-colors">
@@ -179,7 +228,7 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
           <div class="flex items-center justify-between mb-1.5">
             <div class="flex items-center gap-1.5">
               <label class="text-xs font-medium text-slate-400">Bankroll usage</label>
-              <span class="material-symbols-outlined text-slate-600 text-[14px]" title="How much of this account's balance the bot sizes against. The daily-loss cap scales with this automatically.">info</span>
+              <InfoTip text="How much of this account's balance the bot sizes against. The daily-loss cap scales with this automatically." />
             </div>
             <span class="text-xs text-slate-300 font-semibold tabular-nums">{{ usagePct }}% · {{ fmt(effectiveBankroll) }}</span>
           </div>
@@ -193,31 +242,31 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
         <!-- Numeric config grid with info tooltips -->
         <div class="grid grid-cols-2 gap-x-3 gap-y-3">
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Edge threshold (%) <span class="material-symbols-outlined text-slate-600 text-[13px]" title="Minimum +EV edge (fair − price − fee) needed to place a trade.">info</span></span>
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Edge threshold (%) <InfoTip text="Minimum +EV edge (fair − price − fee) needed to place a trade." size="13px" /></span>
             <input v-model.number="edgePct" type="number" step="0.5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Kelly fraction <span class="material-symbols-outlined text-slate-600 text-[13px]" title="Fraction of full Kelly to stake. ¼ (0.25) is conservative; higher = larger bets and more variance.">info</span></span>
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Kelly fraction <InfoTip text="Fraction of full Kelly to stake. ¼ (0.25) is conservative; higher = larger bets and more variance." size="13px" /></span>
             <input v-model.number="kelly" type="number" step="0.05" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max contracts / market <span class="material-symbols-outlined text-slate-600 text-[13px]" title="Hard cap on contracts bought in any single market.">info</span></span>
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max contracts / market <InfoTip text="Hard cap on contracts bought in any single market." size="13px" /></span>
             <input v-model.number="maxContracts" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max open exposure (%) <span class="material-symbols-outlined text-slate-600 text-[13px]" title="Cap on total open exposure as a % of bankroll.">info</span></span>
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max open exposure (%) <InfoTip text="Cap on total open exposure as a % of bankroll." size="13px" /></span>
             <input v-model.number="exposurePct" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Per-league cap (%) <span class="material-symbols-outlined text-slate-600 text-[13px]" title="Cap on exposure to any one league — limits correlated risk.">info</span></span>
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Per-league cap (%) <InfoTip text="Cap on exposure to any one league — limits correlated risk." size="13px" /></span>
             <input v-model.number="leagueCapPct" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Scan cadence (s) <span class="material-symbols-outlined text-slate-600 text-[13px]" title="How often it polls odds, respecting the OddsPapi monthly budget.">info</span></span>
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Scan cadence (s) <InfoTip text="How often it polls odds, respecting the OddsPapi monthly budget." size="13px" /></span>
             <input v-model.number="poll" type="number" step="15" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block col-span-2">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Daily-loss cap ($) <span class="material-symbols-outlined text-slate-600 text-[13px]" title="Bot halts for the day if losses hit this. Auto-scales to 10% of bankroll usage until you edit it.">info</span></span>
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Daily-loss cap ($) <InfoTip text="Bot halts for the day if losses hit this. Auto-scales with your risk preset until you edit it." size="13px" /></span>
             <input v-model.number="dailyLoss" @input="dailyLossTouched = true" type="number" step="25" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
         </div>

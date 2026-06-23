@@ -512,6 +512,19 @@ const _kLeagues = [
   'Primeira Liga', 'MLS', 'Brasileirão', 'Champions League',
 ];
 
+// Risk presets tune every config value; dlpct = daily-loss cap as a fraction of
+// the effective bankroll. Mirrors the web KalshiCreateInstanceModal presets.
+const _kRiskPresets = <String, Map<String, dynamic>>{
+  'low': {'label': 'Low', 'edge': 5.0, 'kelly': 0.15, 'maxC': 25, 'exp': 30.0, 'lcap': 12.0, 'usage': 25.0, 'poll': 90, 'dlpct': 0.05,
+    'blurb': 'Conservative — fewer, higher-confidence trades; small stakes, tight daily-loss cap.'},
+  'medium': {'label': 'Medium', 'edge': 3.0, 'kelly': 0.25, 'maxC': 50, 'exp': 60.0, 'lcap': 25.0, 'usage': 50.0, 'poll': 60, 'dlpct': 0.10,
+    'blurb': 'Balanced — the default. Quarter-Kelly with moderate exposure.'},
+  'high': {'label': 'High', 'edge': 2.0, 'kelly': 0.40, 'maxC': 100, 'exp': 80.0, 'lcap': 40.0, 'usage': 75.0, 'poll': 45, 'dlpct': 0.20,
+    'blurb': 'Aggressive — lower edge bar, bigger Kelly and exposure. More variance.'},
+  'max': {'label': 'Max', 'edge': 1.0, 'kelly': 0.60, 'maxC': 200, 'exp': 100.0, 'lcap': 60.0, 'usage': 100.0, 'poll': 30, 'dlpct': 0.35,
+    'blurb': 'Maximum — trades nearly everything +EV at full size. Highest drawdown risk.'},
+};
+
 class _CreateInstanceSheet extends ConsumerStatefulWidget {
   const _CreateInstanceSheet({required this.accounts, required this.initialBrokerageId, required this.onCreated});
   final List<BrokerageAccount> accounts;
@@ -538,6 +551,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   double _balance = 0;
   bool _loadingBalance = false;
   bool _dailyLossTouched = false;
+  double _dailyLossPct = 0.10;
+  String _risk = 'medium';
   bool _creating = false;
   String _err = '';
 
@@ -577,7 +592,26 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
 
   void _scaleDailyLoss() {
     if (_dailyLossTouched) return;
-    _dailyLoss.text = (_effectiveBankroll * 0.10).round().clamp(1, 1 << 30).toString();
+    _dailyLoss.text = (_effectiveBankroll * _dailyLossPct).round().clamp(1, 1 << 30).toString();
+  }
+
+  String _num(num v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
+
+  void _applyPreset(String level) {
+    final p = _kRiskPresets[level]!;
+    setState(() {
+      _risk = level;
+      _edge.text = _num(p['edge'] as num);
+      _kelly.text = _num(p['kelly'] as num);
+      _maxContracts.text = _num(p['maxC'] as num);
+      _exposure.text = _num(p['exp'] as num);
+      _leagueCap.text = _num(p['lcap'] as num);
+      _poll.text = _num(p['poll'] as num);
+      _usagePct = (p['usage'] as num).toDouble();
+      _dailyLossPct = (p['dlpct'] as num).toDouble();
+      _dailyLossTouched = false;
+      _scaleDailyLoss();
+    });
   }
 
   double _d(TextEditingController c, double dflt) => double.tryParse(c.text.trim()) ?? dflt;
@@ -660,6 +694,38 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                       _loadingBalance ? 'Balance: …' : (_hasBalance ? 'Balance: \$${_balance.toStringAsFixed(2)}' : 'Live balance unavailable'),
                       style: AppTextStyles.nano.copyWith(color: _hasBalance ? AppColors.textMd : AppColors.warning),
                     ),
+                  ),
+
+                  // Risk tolerance preset
+                  _label('Risk tolerance', "Pick a preset and we'll tune edge, Kelly, exposure, caps, bankroll usage, cadence, and the daily-loss cap. You can still tweak any value after."),
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+                    child: Row(
+                      children: _kRiskPresets.entries.map((e) {
+                        final on = _risk == e.key;
+                        return Expanded(
+                          child: GestureDetector(
+                            onTap: () => _applyPreset(e.key),
+                            child: Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 2),
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: on ? AppColors.primary : Colors.transparent,
+                                borderRadius: BorderRadius.circular(7),
+                              ),
+                              child: Text(e.value['label'] as String, textAlign: TextAlign.center,
+                                  style: AppTextStyles.meta.copyWith(
+                                      color: on ? AppColors.onPrimary : AppColors.textMuted, fontWeight: FontWeight.bold)),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, bottom: 12),
+                    child: Text(_kRiskPresets[_risk]!['blurb'] as String, style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
                   ),
 
                   _field(_name, 'Instance name', hint: 'e.g. Soccer edge — demo'),
