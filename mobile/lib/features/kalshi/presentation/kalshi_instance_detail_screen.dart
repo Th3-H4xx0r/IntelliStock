@@ -312,6 +312,48 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
         'exit': AppColors.danger,
       }[a] ?? AppColors.textDim;
 
+  Widget _orderTile(Map<String, dynamic> o, {required bool filled}) {
+    final match = (o['match'] ?? o['market_ticker'] ?? '').toString();
+    final pick = (o['pick_label'] ?? o['side'] ?? '').toString();
+    final edge = (o['edge'] as num?)?.toDouble();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: AppColors.fill(AppColors.surface),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text(match, maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600))),
+          if (!filled && o['in_play'] == true)
+            Text('LIVE', style: AppTextStyles.nano.copyWith(color: AppColors.danger, fontWeight: FontWeight.bold)),
+          if (filled)
+            Text((o['action'] ?? '').toString().toUpperCase(),
+                style: AppTextStyles.nano.copyWith(
+                    color: o['action'] == 'sell' ? AppColors.warning : AppColors.success,
+                    fontWeight: FontWeight.bold)),
+        ]),
+        const SizedBox(height: 4),
+        Row(children: [
+          Expanded(child: Text(pick, maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.nano.copyWith(color: AppColors.primary, fontWeight: FontWeight.w500))),
+          if (filled)
+            Text('${o['contracts']} @ ${o['price_cents']}¢',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim))
+          else ...[
+            Text('${o['size'] ?? 0} contracts  ', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+            Text(edge == null ? '' : '${edge >= 0 ? '+' : ''}${(edge * 100).toStringAsFixed(1)}% edge',
+                style: AppTextStyles.nano.copyWith(
+                    color: (edge ?? 0) >= 0 ? AppColors.success : AppColors.danger, fontWeight: FontWeight.w600)),
+          ],
+        ]),
+      ]),
+    );
+  }
+
   Widget _teamBadge(String logo, String name) {
     return SizedBox(
       width: 76,
@@ -352,47 +394,26 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
           Text('ORDERS', style: AppTextStyles.eyebrow),
         ]),
         const SizedBox(height: 10),
-        Text('PLACED · PENDING (${placed.length})',
-            style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 4),
+        Row(children: [
+          Icon(Icons.pending_outlined, color: AppColors.warning, size: 14),
+          const SizedBox(width: 5),
+          Text('PENDING · ${placed.length}',
+              style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+        ]),
+        const SizedBox(height: 6),
         if (placed.isEmpty)
           Text('No orders placed yet.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
-        ...placed.take(10).map((o) {
-          final om = o as Map<String, dynamic>;
-          final edge = (om['edge'] as num?)?.toDouble();
-          return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(children: [
-              Expanded(child: Text('${om['market_ticker']} · ${om['side']}',
-                  maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: AppTextStyles.nano.copyWith(color: AppColors.textMuted))),
-              if (om['in_play'] == true)
-                Padding(padding: const EdgeInsets.only(right: 6),
-                    child: Text('LIVE', style: AppTextStyles.nano.copyWith(color: AppColors.danger, fontWeight: FontWeight.bold))),
-              Text('${om['size'] ?? 0}×  ', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
-              Text(edge == null ? '' : '${edge >= 0 ? '+' : ''}${(edge * 100).toStringAsFixed(1)}%',
-                  style: AppTextStyles.nano.copyWith(color: (edge ?? 0) >= 0 ? AppColors.success : AppColors.danger)),
-            ]),
-          );
-        }),
+        ...placed.take(12).map((o) => _orderTile(o as Map<String, dynamic>, filled: false)),
         if (fills.isNotEmpty) ...[
           const SizedBox(height: 12),
-          Text('FILLED (${fills.length})',
-              style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 4),
-          ...fills.take(10).map((f) {
-            final fm = f as Map<String, dynamic>;
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Row(children: [
-                Expanded(child: Text('${fm['market_ticker']} · ${fm['action']} ${fm['side']}',
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: AppTextStyles.nano.copyWith(color: AppColors.textMuted))),
-                Text('${fm['contracts']}× @ ${fm['price_cents']}¢',
-                    style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
-              ]),
-            );
-          }),
+          Row(children: [
+            Icon(Icons.check_circle_outline, color: AppColors.success, size: 14),
+            const SizedBox(width: 5),
+            Text('FILLED · ${fills.length}',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+          ]),
+          const SizedBox(height: 6),
+          ...fills.take(12).map((f) => _orderTile(f as Map<String, dynamic>, filled: true)),
         ],
       ]),
     );

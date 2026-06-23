@@ -4241,6 +4241,7 @@ def _espn_live_board():
 def api_kalshi_instance_orders(instance_id: str, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Orders for this instance — placed/pending (from the decision log) + filled
     (from the broker). Drives the pending/past-orders cards."""
+    from kalshi.data.ticker_names import parse_market_ticker
     row = _kalshi_instance_row(conn, instance_id)
     n = max(1, min(int(limit or 50), 200))
     placed = []
@@ -4249,13 +4250,18 @@ def api_kalshi_instance_orders(instance_id: str, limit: int = 50, conn=Depends(c
             _r_auth.db("IntelliStock").table("kalshi_decisions")
             .filter({"instance_id": str(instance_id)}).run(conn)
         )
-        placed = [
-            {"market_ticker": r.get("market_ticker"), "side": r.get("side"),
-             "size": r.get("size", 0), "edge": r.get("edge"), "fair": r.get("fused_fair"),
-             "in_play": bool(r.get("in_play")), "action": r.get("live_action") or "buy",
-             "ts": r.get("ts", "")}
-            for r in rows if r.get("decision") == "placed"
-        ]
+        for r in rows:
+            if r.get("decision") != "placed":
+                continue
+            info = parse_market_ticker(r.get("market_ticker", ""), r.get("side"))
+            placed.append({
+                "market_ticker": r.get("market_ticker"), "side": r.get("side"),
+                "size": r.get("size", 0), "edge": r.get("edge"), "fair": r.get("fused_fair"),
+                "in_play": bool(r.get("in_play")), "action": r.get("live_action") or "buy",
+                "ts": r.get("ts", ""),
+                "match": info["match"], "home": info["home"], "away": info["away"],
+                "pick_label": info["pick_label"],
+            })
         placed.sort(key=lambda d: d.get("ts", ""), reverse=True)
     except Exception:
         placed = []
@@ -4263,8 +4269,10 @@ def api_kalshi_instance_orders(instance_id: str, limit: int = 50, conn=Depends(c
     try:
         bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(row.get("brokerage_id")).run(conn) or {}
         for f in _kalshi_client_from_row(bk).get_fills(limit=n):
+            info = parse_market_ticker(f.market_ticker)
             fills.append({"market_ticker": f.market_ticker, "side": f.side, "action": f.action,
-                          "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts})
+                          "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts,
+                          "match": info["match"], "pick_label": info["pick_label"]})
     except Exception:
         fills = []
     return {"placed": placed[:n], "fills": fills[:n]}

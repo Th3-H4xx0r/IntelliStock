@@ -275,21 +275,32 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
           <!-- Orders -->
           <div class="glass-card rounded-2xl p-4 sm:p-5">
             <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">receipt_long</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Orders</span></div>
-            <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mb-1.5">Placed · pending ({{ orders.placed.length }})</div>
+            <div class="flex items-center gap-1.5 mb-2"><span class="material-symbols-outlined text-amber-400 text-[14px]">pending</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Pending · {{ orders.placed.length }}</span></div>
             <p v-if="!orders.placed.length" class="text-xs text-slate-500 mb-2">No orders placed yet.</p>
-            <div v-for="(o, i) in orders.placed.slice(0, 10)" :key="'p' + i" class="flex items-center justify-between gap-2 py-1.5 border-b border-border-subtle/40 last:border-0">
-              <span class="text-xs text-slate-300 truncate min-w-0">{{ o.market_ticker }} <span class="text-slate-500">· {{ o.side }}</span></span>
-              <span class="flex items-center gap-2 shrink-0 text-xs">
-                <span v-if="o.in_play" class="px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 text-[9px] font-bold uppercase">live</span>
-                <span class="text-slate-400 tabular-nums">{{ o.size }}×</span>
-                <span class="tabular-nums" :class="(o.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ o.edge == null ? '' : (o.edge >= 0 ? '+' : '') + pct(o.edge) }}</span>
-              </span>
+            <div v-for="(o, i) in orders.placed.slice(0, 12)" :key="'p' + i" class="rounded-xl border border-border-subtle bg-surface/40 p-3 mb-2">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-sm font-semibold text-slate-100 truncate min-w-0">{{ o.match || o.market_ticker }}</span>
+                <span v-if="o.in_play" class="shrink-0 px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 text-[9px] font-bold uppercase">live</span>
+              </div>
+              <div class="flex items-center justify-between gap-2 mt-1.5">
+                <span class="text-xs text-primary font-medium truncate">{{ o.pick_label || o.side }}</span>
+                <span class="flex items-center gap-2.5 shrink-0 text-xs">
+                  <span class="text-slate-400 tabular-nums">{{ o.size }} contracts</span>
+                  <span class="tabular-nums font-semibold" :class="(o.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ o.edge == null ? '' : (o.edge >= 0 ? '+' : '') + pct(o.edge) }} edge</span>
+                </span>
+              </div>
             </div>
             <template v-if="orders.fills.length">
-              <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-4 mb-1.5">Filled ({{ orders.fills.length }})</div>
-              <div v-for="(f, i) in orders.fills.slice(0, 10)" :key="'f' + i" class="flex items-center justify-between gap-2 py-1.5 border-b border-border-subtle/40 last:border-0">
-                <span class="text-xs text-slate-300 truncate min-w-0">{{ f.market_ticker }} <span class="text-slate-500">· {{ f.action }} {{ f.side }}</span></span>
-                <span class="text-xs text-slate-400 tabular-nums shrink-0">{{ f.contracts }}× @ {{ f.price_cents }}¢</span>
+              <div class="flex items-center gap-1.5 mt-4 mb-2"><span class="material-symbols-outlined text-emerald-400 text-[14px]">check_circle</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Filled · {{ orders.fills.length }}</span></div>
+              <div v-for="(f, i) in orders.fills.slice(0, 12)" :key="'f' + i" class="rounded-xl border border-border-subtle bg-surface/40 p-3 mb-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-sm font-semibold text-slate-100 truncate min-w-0">{{ f.match || f.market_ticker }}</span>
+                  <span class="text-[10px] uppercase font-bold shrink-0" :class="f.action === 'sell' ? 'text-amber-400' : 'text-emerald-400'">{{ f.action }}</span>
+                </div>
+                <div class="flex items-center justify-between gap-2 mt-1.5">
+                  <span class="text-xs text-primary font-medium truncate">{{ f.pick_label || f.side }}</span>
+                  <span class="text-xs text-slate-400 tabular-nums shrink-0">{{ f.contracts }} @ {{ f.price_cents }}¢</span>
+                </div>
               </div>
             </template>
           </div>

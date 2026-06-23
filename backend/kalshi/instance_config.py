@@ -28,10 +28,14 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
     tier = str(raw.get("tier") or "medium").lower()
     if tier not in ("low", "medium", "high", "max"):
         tier = "medium"
+    # Per-bet minimum stake as a fraction of bankroll, scaled by risk tier — so a
+    # +EV bet isn't dust even on a thin edge (the user's risk choice sets how big).
+    _min_stake_by_tier = {"low": 0.04, "medium": 0.08, "high": 0.12, "max": 0.20}
     return {
         "leagues": [str(x) for x in leagues if str(x).strip()] or DEFAULT_LEAGUES,
         "edge_threshold": float(raw.get("edge_threshold", 0.03)),
         "kelly_fraction": float(raw.get("kelly_fraction", 0.25)),
+        "min_stake_frac": float(raw.get("min_stake_frac", _min_stake_by_tier.get(tier, 0.08))),
         "max_contracts_per_market": int(raw.get("max_contracts_per_market", 50)),
         "max_open_exposure_frac": float(raw.get("max_open_exposure_frac", 0.60)),
         "per_league_cap_frac": float(raw.get("per_league_cap_frac", 0.25)),
@@ -86,6 +90,7 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         per_league_cap_frac=float(c.get("per_league_cap_frac", 0.25)),
         daily_loss_cap_cents=int(c.get("daily_loss_cap_cents", 0)),
         bankroll_cents=int(c.get("bankroll_cents", 0)),
+        min_stake_frac=float(c.get("min_stake_frac", 0.08)),
     )
 
 

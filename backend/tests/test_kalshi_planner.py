@@ -4,6 +4,19 @@ from kalshi.capital.planner import allocate
 CAPS = RiskCaps(max_contracts_per_market=50, bankroll_cents=100000)
 
 
+def test_kelly_fraction_and_min_stake_scale_bet_size():
+    # A thin 2% edge: hardcoded quarter-Kelly would be dust (~$1 on $95). The tier's
+    # kelly_fraction + min_stake_frac floor make it a meaningful bet.
+    caps = RiskCaps(kelly_fraction=0.4, min_stake_frac=0.12, max_contracts_per_market=50, bankroll_cents=9500)
+    cands = [{"id": "x", "score": 1.0, "edge": 0.022, "price_cents": 52}]
+    a = allocate(cands, bankroll_cents=9500, caps=caps, reserve_frac=0.3, expected_better_soon=False)[0]
+    assert a["stake_cents"] >= 1000          # >= ~$10 (12% floor of $95), not dust
+    # Max tier stakes more than high tier on the same candidate.
+    caps_max = RiskCaps(kelly_fraction=0.6, min_stake_frac=0.20, max_contracts_per_market=200, bankroll_cents=9500)
+    a_max = allocate(cands, bankroll_cents=9500, caps=caps_max, reserve_frac=0.3, expected_better_soon=False)[0]
+    assert a_max["stake_cents"] > a["stake_cents"]
+
+
 def test_holds_reserve_for_better_future_opp():
     cands = [{"id": "now", "score": 0.3, "edge": 0.04, "price_cents": 50}]
     allocs = allocate(cands, bankroll_cents=100000, caps=CAPS, reserve_frac=0.4, expected_better_soon=True)

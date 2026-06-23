@@ -9,45 +9,44 @@ import math
 from dataclasses import dataclass
 
 
-def quarter_kelly_fraction(*, edge: float, price_cents: float) -> float:
-    """Binary-contract quarter-Kelly: 0.25 * edge / (1 - price).
+def quarter_kelly_fraction(*, edge: float, price_cents: float, kelly: float = 0.25) -> float:
+    """Fractional-Kelly stake (of bankroll) for a binary contract: kelly * edge /
+    (1 - price). `kelly` is the Kelly MULTIPLE (the risk tier's setting — 0.25
+    quarter-Kelly default, up to 0.60 for max). Named for the historical default.
 
-    For a YES contract bought at price p (settling to $1), Kelly is
-    (fair - p) / (1 - p) — the denominator is 1 - PRICE, not 1 - fair_prob.
-    Using (1 - fair_prob) systematically over-sizes (the denominator is smaller
-    since fair > price for any +EV trade). `edge` is the fee-net edge, so the
-    numerator is already conservative. Full Kelly on a mis-estimated edge is the
-    fastest path to ruin, and the edge here IS mis-estimated. Non-positive edge
-    -> no stake.
-    """
+    For a YES contract bought at price p (settling to $1), Kelly is (fair - p) /
+    (1 - p) — the denominator is 1 - PRICE, not 1 - fair_prob. `edge` is the
+    fee-net edge, so the numerator is already conservative. Non-positive edge ->
+    no stake."""
     if edge <= 0.0:
         return 0.0
     price = price_cents / 100.0
     denom = 1.0 - price
     if denom <= 0.0:
         return 0.0
-    return 0.25 * edge / denom
+    return max(0.0, kelly) * edge / denom
 
 
 @dataclass
 class RiskCaps:
     edge_threshold: float = 0.03            # min net edge to trade
-    kelly_fraction: float = 0.25            # quarter-Kelly
+    kelly_fraction: float = 0.25            # Kelly MULTIPLE (tier aggression)
     max_contracts_per_market: int = 50
     max_open_exposure_frac: float = 0.60    # fraction of bankroll
     per_league_cap_frac: float = 0.25       # per correlated category
     daily_loss_cap_cents: int = 0           # 0 = disabled
     bankroll_cents: int = 0
+    min_stake_frac: float = 0.0             # floor: any +EV bet stakes >= this frac of bankroll
 
 
 def size_order(*, edge: float, yes_ask_cents: float, caps: RiskCaps) -> int:
-    """Number of YES contracts to buy: quarter-Kelly stake / price, floored,
-    clamped to the per-market cap. Returns 0 when there's no stake or no
-    bankroll/price."""
-    frac = quarter_kelly_fraction(edge=edge, price_cents=yes_ask_cents)
+    """Number of YES contracts to buy: Kelly stake (at the tier's kelly_fraction,
+    floored at min_stake_frac of bankroll) / price, clamped to the per-market cap.
+    Returns 0 when there's no edge or no bankroll/price."""
+    frac = quarter_kelly_fraction(edge=edge, price_cents=yes_ask_cents, kelly=caps.kelly_fraction)
     if frac <= 0.0 or caps.bankroll_cents <= 0 or yes_ask_cents <= 0:
         return 0
-    stake_cents = frac * caps.bankroll_cents
+    stake_cents = max(frac, max(0.0, caps.min_stake_frac)) * caps.bankroll_cents
     contracts = int(math.floor(stake_cents / yes_ask_cents))
     return max(0, min(contracts, caps.max_contracts_per_market))
 

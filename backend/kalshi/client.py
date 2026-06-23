@@ -39,6 +39,19 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _fp(v) -> float:
+    """Parse a Kalshi fixed-point string/number (e.g. '3.00') to float; 0 on junk."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dollars_cents(v) -> float:
+    """Dollar amount (string/number, e.g. '1.56') -> cents (156.0)."""
+    return _fp(v) * 100.0
+
+
 class KalshiClient:
     def __init__(
         self,
@@ -103,32 +116,39 @@ class KalshiClient:
         d = self._request("GET", "/portfolio/positions")
         out = []
         for p in d.get("market_positions", []) or []:
-            qty = int(p.get("position", 0))
+            # New API: position_fp (fixed-point string) + market_exposure_dollars.
+            # The legacy integer `position`/`market_exposure` fields are gone.
+            qty = int(round(_fp(p.get("position_fp", p.get("position", 0)))))
             if qty == 0:
                 continue
+            exposure_cents = _dollars_cents(p.get("market_exposure_dollars", p.get("market_exposure", 0)))
             out.append(
                 KalshiContractPosition(
                     market_ticker=p.get("ticker", ""),
                     side="YES" if qty > 0 else "NO",
                     contracts=abs(qty),
-                    avg_price_cents=float(p.get("market_exposure", 0)) / max(abs(qty), 1),
+                    avg_price_cents=exposure_cents / max(abs(qty), 1),
                 )
             )
         return out
 
     def get_fills(self, limit: int = 100) -> list[KalshiFill]:
         d = self._request("GET", "/portfolio/fills", params={"limit": limit})
-        return [
-            KalshiFill(
+        out = []
+        for f in (d.get("fills", []) or []):
+            # New API: count_fp + yes_price_dollars/no_price_dollars (legacy
+            # count/yes_price are gone -> they read as 0, hence "0x @ 0c").
+            count = int(round(_fp(f.get("count_fp", f.get("count", 0)))))
+            px = _dollars_cents(f.get("yes_price_dollars", f.get("yes_price", f.get("price", 0))))
+            out.append(KalshiFill(
                 market_ticker=f.get("ticker", ""),
                 side=f.get("side", ""),
                 action=f.get("action", ""),
-                contracts=int(f.get("count", 0)),
-                price_cents=int(f.get("yes_price", f.get("price", 0))),
+                contracts=count,
+                price_cents=int(round(px)),
                 ts=f.get("created_time", ""),
-            )
-            for f in (d.get("fills", []) or [])
-        ]
+            ))
+        return out
 
     # --- markets ---
     def get_markets(self, event_ticker: str) -> list[KalshiMarket]:
