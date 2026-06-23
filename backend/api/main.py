@@ -4193,7 +4193,48 @@ def api_kalshi_instance_live(instance_id: str, conn=Depends(conn_dependency), cu
     except Exception:
         rows = []
     rows.sort(key=lambda d: d.get("updated_at", ""), reverse=True)
+    # Refresh score/clock/flags from ESPN at read time so the live card stays live
+    # (every poll) regardless of the engine tick cadence or whether it's running.
+    try:
+        board = _espn_live_board()
+        if board:
+            from kalshi.live import scoreboard as _sb
+            fresh = []
+            for r in rows:
+                sc = _sb.match_score(board, r.get("home", ""), r.get("away", ""))
+                if sc:
+                    if (sc.get("state") or "") == "post":
+                        continue  # match ended -> drop from the live list
+                    r["score"] = {"home": sc.get("home_score"), "away": sc.get("away_score"),
+                                  "clock": sc.get("clock"), "detail": sc.get("detail"),
+                                  "state": sc.get("state")}
+                    if sc.get("home_logo"):
+                        r["home_logo"] = sc["home_logo"]
+                    if sc.get("away_logo"):
+                        r["away_logo"] = sc["away_logo"]
+                fresh.append(r)
+            rows = fresh
+    except Exception:
+        pass
     return {"matches": rows, "count": len(rows)}
+
+
+_ESPN_BOARD_CACHE = {"ts": 0.0, "board": []}
+
+
+def _espn_live_board():
+    """Process-wide ESPN scoreboard cache (~15s) so live-card reads stay fresh
+    without hammering ESPN per request."""
+    import time as _t
+    now = _t.time()
+    if now - _ESPN_BOARD_CACHE["ts"] > 15:
+        try:
+            from kalshi.live import scoreboard as _sb
+            _ESPN_BOARD_CACHE["board"] = _sb.fetch_scoreboard()
+        except Exception:
+            pass
+        _ESPN_BOARD_CACHE["ts"] = now
+    return _ESPN_BOARD_CACHE["board"]
 
 
 @app.get("/instances/{instance_id}/kalshi/orders", response_class=JSONResponse)
