@@ -51,13 +51,16 @@ def edges_payload(edge_rows: list[dict], limit: int = 10) -> dict:
     return {"edges": out, "count": len(out)}
 
 
-def positions_payload(position_rows: list[dict]) -> dict:
+def positions_payload(position_rows: list[dict], info_fn=None) -> dict:
+    """info_fn(market_ticker) -> {match, pick_label, pick_logo} enriches each
+    position with readable team names + crest (league-agnostic). Optional."""
     out = []
     for p in position_rows:
         cur = p.get("current_price_cents")
         avg = p.get("avg_price_cents", 0.0)
         qty = p.get("contracts", 0)
         unreal = None if cur is None else round((cur - avg) * qty, 2)
+        info = ((info_fn(p.get("market_ticker")) if info_fn else None) or {})
         out.append(
             {
                 "market_ticker": p.get("market_ticker"),
@@ -67,6 +70,9 @@ def positions_payload(position_rows: list[dict]) -> dict:
                 "current_price_cents": cur,
                 "unrealized_cents": unreal,
                 "settlement_eta": p.get("settlement_eta"),
+                "match": info.get("match", ""),
+                "pick_label": info.get("pick_label", ""),
+                "pick_logo": info.get("pick_logo", ""),
             }
         )
     return {"positions": out, "count": len(out)}

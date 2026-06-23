@@ -236,11 +236,11 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
         </div>
 
         <!-- Decision log (half) + Orders (half) -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
-          <div class="glass-card rounded-2xl p-4 sm:p-5">
-            <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">history_edu</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Decision log</span></div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-stretch h-[560px]">
+          <div class="glass-card rounded-2xl p-4 sm:p-5 flex flex-col min-h-0">
+            <div class="flex items-center gap-2 mb-3 shrink-0"><span class="material-symbols-outlined text-primary text-[18px]">history_edu</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Decision log</span></div>
             <p v-if="!decisions.length" class="text-sm text-slate-500">No decisions logged yet. The engine writes a row for every bet placed and every candidate it considered.</p>
-            <div class="max-h-[460px] overflow-y-auto -mr-2 pr-2">
+            <div class="flex-1 min-h-0 overflow-y-auto -mr-2 pr-2">
               <div v-for="(d, i) in decisions" :key="d.id || i" class="border-b border-border-subtle/60 last:border-0">
                 <button @click="toggle(i)" class="w-full flex items-center justify-between gap-2 py-2.5 text-left">
                   <span class="flex items-center gap-2 min-w-0">
@@ -273,36 +273,46 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
           </div>
 
           <!-- Orders -->
-          <div class="glass-card rounded-2xl p-4 sm:p-5">
-            <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">receipt_long</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Orders</span></div>
-            <div class="flex items-center gap-1.5 mb-2"><span class="material-symbols-outlined text-amber-400 text-[14px]">pending</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Pending · {{ orders.placed.length }}</span></div>
-            <p v-if="!orders.placed.length" class="text-xs text-slate-500 mb-2">No orders placed yet.</p>
-            <div v-for="(o, i) in orders.placed.slice(0, 12)" :key="'p' + i" class="rounded-xl border border-border-subtle bg-surface/40 p-3 mb-2">
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-sm font-semibold text-slate-100 truncate min-w-0">{{ o.match || o.market_ticker }}</span>
-                <span v-if="o.in_play" class="shrink-0 px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 text-[9px] font-bold uppercase">live</span>
+          <div class="glass-card rounded-2xl p-4 sm:p-5 flex flex-col min-h-0">
+            <div class="flex items-center gap-2 mb-3 shrink-0"><span class="material-symbols-outlined text-primary text-[18px]">receipt_long</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Orders</span></div>
+            <div class="flex-1 min-h-0 overflow-y-auto -mr-2 pr-2">
+              <div class="flex items-center gap-1.5 mb-2"><span class="material-symbols-outlined text-amber-400 text-[14px]">pending</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Pending · {{ orders.placed.length }}</span></div>
+              <p v-if="!orders.placed.length" class="text-xs text-slate-500 mb-2">No resting orders — everything filled.</p>
+              <div v-for="(o, i) in orders.placed" :key="'p' + i" class="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface/40 p-3 mb-2">
+                <img v-if="o.pick_logo" :src="o.pick_logo" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />
+                <div v-else class="w-8 h-8 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[10px] font-bold text-slate-400 shrink-0">{{ initials((o.pick_label || '').replace(' to win','')) }}</div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-sm font-semibold text-slate-100 truncate">{{ o.match || o.market_ticker }}</span>
+                    <span v-if="o.in_play" class="shrink-0 px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 text-[9px] font-bold uppercase">live</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-2 mt-0.5">
+                    <span class="text-xs text-primary font-medium truncate">{{ o.pick_label || o.side }}</span>
+                    <span class="flex items-center gap-2.5 shrink-0 text-xs">
+                      <span class="text-slate-400 tabular-nums">{{ o.contracts || o.size }}×</span>
+                      <span v-if="o.edge != null" class="tabular-nums font-semibold" :class="(o.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (o.edge >= 0 ? '+' : '') + pct(o.edge) }}</span>
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div class="flex items-center justify-between gap-2 mt-1.5">
-                <span class="text-xs text-primary font-medium truncate">{{ o.pick_label || o.side }}</span>
-                <span class="flex items-center gap-2.5 shrink-0 text-xs">
-                  <span class="text-slate-400 tabular-nums">{{ o.size }} contracts</span>
-                  <span class="tabular-nums font-semibold" :class="(o.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ o.edge == null ? '' : (o.edge >= 0 ? '+' : '') + pct(o.edge) }} edge</span>
-                </span>
-              </div>
+              <template v-if="orders.fills.length">
+                <div class="flex items-center gap-1.5 mt-4 mb-2"><span class="material-symbols-outlined text-emerald-400 text-[14px]">check_circle</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Filled · {{ orders.fills.length }}</span></div>
+                <div v-for="(f, i) in orders.fills" :key="'f' + i" class="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface/40 p-3 mb-2">
+                  <img v-if="f.pick_logo" :src="f.pick_logo" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />
+                  <div v-else class="w-8 h-8 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[10px] font-bold text-slate-400 shrink-0">{{ initials((f.pick_label || '').replace(' to win','')) }}</div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-sm font-semibold text-slate-100 truncate">{{ f.match || f.market_ticker }}</span>
+                      <span class="text-[10px] uppercase font-bold shrink-0" :class="f.action === 'sell' ? 'text-amber-400' : 'text-emerald-400'">{{ f.action }}</span>
+                    </div>
+                    <div class="flex items-center justify-between gap-2 mt-0.5">
+                      <span class="text-xs text-primary font-medium truncate">{{ f.pick_label || f.side }}</span>
+                      <span class="text-xs text-slate-400 tabular-nums shrink-0">{{ f.contracts }} @ {{ f.price_cents }}¢</span>
+                    </div>
+                  </div>
+                </div>
+              </template>
             </div>
-            <template v-if="orders.fills.length">
-              <div class="flex items-center gap-1.5 mt-4 mb-2"><span class="material-symbols-outlined text-emerald-400 text-[14px]">check_circle</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Filled · {{ orders.fills.length }}</span></div>
-              <div v-for="(f, i) in orders.fills.slice(0, 12)" :key="'f' + i" class="rounded-xl border border-border-subtle bg-surface/40 p-3 mb-2">
-                <div class="flex items-center justify-between gap-2">
-                  <span class="text-sm font-semibold text-slate-100 truncate min-w-0">{{ f.match || f.market_ticker }}</span>
-                  <span class="text-[10px] uppercase font-bold shrink-0" :class="f.action === 'sell' ? 'text-amber-400' : 'text-emerald-400'">{{ f.action }}</span>
-                </div>
-                <div class="flex items-center justify-between gap-2 mt-1.5">
-                  <span class="text-xs text-primary font-medium truncate">{{ f.pick_label || f.side }}</span>
-                  <span class="text-xs text-slate-400 tabular-nums shrink-0">{{ f.contracts }} @ {{ f.price_cents }}¢</span>
-                </div>
-              </div>
-            </template>
           </div>
         </div>
 

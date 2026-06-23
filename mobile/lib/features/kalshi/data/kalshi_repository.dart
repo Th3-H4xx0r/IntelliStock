@@ -45,17 +45,26 @@ class KalshiPosition {
     required this.side,
     required this.contracts,
     this.unrealizedCents,
+    this.match = '',
+    this.pickLabel = '',
+    this.pickLogo = '',
   });
   final String marketTicker;
   final String side;
   final int contracts;
   final double? unrealizedCents;
+  final String match;
+  final String pickLabel;
+  final String pickLogo;
 
   factory KalshiPosition.fromJson(Map<String, dynamic> j) => KalshiPosition(
         marketTicker: (j['market_ticker'] ?? '').toString(),
         side: (j['side'] ?? '').toString(),
         contracts: (j['contracts'] as num?)?.toInt() ?? 0,
         unrealizedCents: (j['unrealized_cents'] as num?)?.toDouble(),
+        match: (j['match'] ?? '').toString(),
+        pickLabel: (j['pick_label'] ?? '').toString(),
+        pickLogo: (j['pick_logo'] ?? '').toString(),
       );
 }
 
@@ -138,12 +147,17 @@ final kalshiRepositoryProvider = Provider<KalshiRepository>(
   (ref) => KalshiRepository(ref.watch(apiClientProvider)),
 );
 
-// Family providers keyed by brokerageId. autoDispose (NOT keepAlive) so a
-// stale-empty first fetch can't get stuck for the app lifetime — pull-to-refresh
-// invalidates them. (Known repo gotcha with keep-alive telemetry providers.)
+// Family providers keyed by brokerageId. autoDispose so a stale-empty FIRST fetch
+// can't get stuck (pull-to-refresh invalidates). But we keepAlive after a
+// SUCCESSFUL, non-empty fetch so the data survives a transient dispose+refetch when
+// the app briefly backgrounds (e.g. the iOS push-permission dialog) — otherwise the
+// instance section collapses to its empty state and every Kalshi item "disappears".
+// keepAlive only on non-empty success avoids re-introducing the empty-cache trap.
 final kalshiPortfolioProvider =
-    FutureProvider.autoDispose.family<KalshiPortfolio, String>((ref, bid) {
-  return ref.watch(kalshiRepositoryProvider).portfolio(bid);
+    FutureProvider.autoDispose.family<KalshiPortfolio, String>((ref, bid) async {
+  final v = await ref.watch(kalshiRepositoryProvider).portfolio(bid);
+  ref.keepAlive();
+  return v;
 });
 
 final kalshiEdgesProvider =
@@ -152,13 +166,17 @@ final kalshiEdgesProvider =
 });
 
 final kalshiPositionsProvider =
-    FutureProvider.autoDispose.family<List<KalshiPosition>, String>((ref, bid) {
-  return ref.watch(kalshiRepositoryProvider).positions(bid);
+    FutureProvider.autoDispose.family<List<KalshiPosition>, String>((ref, bid) async {
+  final v = await ref.watch(kalshiRepositoryProvider).positions(bid);
+  if (v.isNotEmpty) ref.keepAlive();
+  return v;
 });
 
 final kalshiInstancesProvider =
-    FutureProvider.autoDispose.family<List<KalshiInstance>, String>((ref, bid) {
-  return ref.watch(kalshiRepositoryProvider).instances(bid);
+    FutureProvider.autoDispose.family<List<KalshiInstance>, String>((ref, bid) async {
+  final v = await ref.watch(kalshiRepositoryProvider).instances(bid);
+  if (v.isNotEmpty) ref.keepAlive();   // keep the instance list across app-background refetches
+  return v;
 });
 
 final kalshiInstanceDetailProvider =

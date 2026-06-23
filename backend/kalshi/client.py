@@ -238,6 +238,29 @@ class KalshiClient:
         d = self._request("GET", "/portfolio/orders", params={"status": "resting"})
         return [o.get("order_id") for o in (d.get("orders", []) or []) if o.get("order_id")]
 
+    def get_resting_orders(self) -> list[dict]:
+        """Resting (still-open, not-yet-filled) orders as dicts — the TRUE pending
+        set. New-API fields are *_dollars / *_fp (with legacy fallbacks). Empty when
+        nothing is resting."""
+        try:
+            d = self._request("GET", "/portfolio/orders", params={"status": "resting"})
+        except Exception:
+            return []
+        out = []
+        for o in (d.get("orders", []) or []):
+            remaining = _fp(o.get("remaining_count_fp", o.get("remaining_count", o.get("count", 0))))
+            if remaining <= 0:
+                continue
+            out.append({
+                "market_ticker": o.get("ticker", ""),
+                "side": "yes" if (o.get("side") in ("yes", "bid")) else o.get("side", ""),
+                "contracts": int(round(remaining)),
+                "price_cents": int(round(_dollars_cents(
+                    o.get("yes_price_dollars", o.get("price_dollars", o.get("yes_price", 0)))))),
+                "ts": o.get("created_time", ""),
+            })
+        return out
+
     def cancel_all_open_orders(self) -> int:
         """Kill-switch primitive: cancel every resting order. Returns the count
         canceled."""

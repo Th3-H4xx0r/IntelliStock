@@ -416,10 +416,15 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     ask = m.get("yes_ask_cents") or 0
                     if prob is not None and ask > 0:
                         best_edge = max(best_edge, prob - ask / 100.0)
+                # Crests (any league): ESPN provides national flags AND club badges.
+                _sc = espn.match_score(board, home, away) if board else None
+                home_logo = (_sc or {}).get("home_logo", "")
+                away_logo = (_sc or {}).get("away_logo", "")
                 metas.append({
                     "id": event_ticker, "home": home, "away": away, "mkts": mkts, "eg": eg,
                     "fused": fused, "sharp_probs": sharp, "sharp_matched": bool(sharp),
                     "he": he, "ae": ae, "phase": phase, "elapsed": elapsed,
+                    "home_logo": home_logo, "away_logo": away_logo,
                     "mtypes": sorted({m["market_type"] for m in mkts}), "best_edge": best_edge,
                 })
 
@@ -543,6 +548,18 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             log(f"tick {tick}: {len(decisions)} candidate(s) evaluated → {len(allocations)} to place "
                 f"(tier {config.tier}, edge > {config.caps.edge_threshold:.1%}).", "cyan")
 
+            # Readable, LEAGUE-AGNOSTIC team names + crests for the UI: names from
+            # discovery (any league/club), logos from ESPN when matched. Stamped on
+            # every decision row so orders/positions never show a raw ticker.
+            fixture_info = {m["id"]: {"home": m["home"], "away": m["away"],
+                                      "home_logo": m.get("home_logo", ""),
+                                      "away_logo": m.get("away_logo", "")} for m in metas}
+            for d in decisions:
+                fi = fixture_info.get(d.get("fixture_id"))
+                if fi:
+                    d["home"], d["away"] = fi["home"], fi["away"]
+                    d["home_logo"], d["away_logo"] = fi["home_logo"], fi["away_logo"]
+
             # 5) Execute (gated) + 6) write decision rows. Fetch current positions
             # first and skip markets we already hold or already ordered this run —
             # so we don't re-submit the same order every tick.
@@ -553,7 +570,15 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 log(f"tick {tick}: get_positions failed: {type(e).__name__}: {e}", "yellow")
                 positions = []
             positions_by_ticker = {p.market_ticker: p for p in positions}
-            placed_markets |= set(positions_by_ticker)   # filled -> never re-order
+            try:
+                resting_tickers = {o["market_ticker"] for o in client.get_resting_orders()}
+            except Exception:
+                resting_tickers = set()
+            # Re-sync from the BROKER's actual state each tick (positions + resting
+            # orders) — NOT a forever-accumulating set. If you manually sell on Kalshi,
+            # the position vanishes here, so the bot can re-buy it; if you still hold
+            # it, it won't double-order. This is the source of truth.
+            placed_markets = set(positions_by_ticker) | resting_tickers
 
             alloc_by_id = {a["id"]: a for a in allocations}
             for d in decisions:

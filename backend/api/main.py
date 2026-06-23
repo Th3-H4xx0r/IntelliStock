@@ -3949,12 +3949,34 @@ def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), curre
 @app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse)
 def api_kalshi_positions(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     from kalshi.api_payloads import positions_payload
+    from kalshi.data.ticker_names import parse_market_ticker
     row = _kalshi_brokerage_row(conn, brokerage_id)
     try:
         positions = [p.__dict__ for p in _kalshi_client_from_row(row).get_positions()]
     except Exception:
         positions = _kalshi_rows(conn, "kalshi_positions", brokerage_id)
-    return positions_payload(positions)
+    # Readable names + crests: prefer the names/logos the engine stamped on decision
+    # rows (any league/club); fall back to the ticker parser (national-team flags).
+    names = {}
+    try:
+        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
+                      .filter({"brokerage_id": str(brokerage_id)}).run(conn)):
+            mt = r.get("market_ticker")
+            if mt and (r.get("home") or r.get("away")):
+                pk = parse_market_ticker(mt, r.get("side"))
+                names[mt] = {"match": f"{r.get('home')} vs {r.get('away')}",
+                             "pick_label": pk["pick_label"],
+                             "pick_logo": (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", "")}
+    except Exception:
+        pass
+
+    def _pinfo(mt):
+        if mt in names:
+            return names[mt]
+        p = parse_market_ticker(mt or "")
+        return {"match": p["match"], "pick_label": p["pick_label"], "pick_logo": p["pick_flag"]}
+
+    return positions_payload(positions, info_fn=_pinfo)
 
 
 @app.get("/brokerages/{brokerage_id}/kalshi/edges", response_class=JSONResponse)
@@ -4244,38 +4266,69 @@ def api_kalshi_instance_orders(instance_id: str, limit: int = 50, conn=Depends(c
     from kalshi.data.ticker_names import parse_market_ticker
     row = _kalshi_instance_row(conn, instance_id)
     n = max(1, min(int(limit or 50), 200))
-    placed = []
+
+    # Lookup: market_ticker -> readable info stamped on the decision rows (real team
+    # NAMES + crests from the engine, league-agnostic). Parser is only a fallback.
+    info_by_ticker: dict = {}
+    edge_by_ticker: dict = {}
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("kalshi_decisions")
-            .filter({"instance_id": str(instance_id)}).run(conn)
-        )
-        for r in rows:
-            if r.get("decision") != "placed":
+        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
+                      .filter({"instance_id": str(instance_id)}).run(conn)):
+            mt = r.get("market_ticker")
+            if not mt:
                 continue
-            info = parse_market_ticker(r.get("market_ticker", ""), r.get("side"))
-            placed.append({
-                "market_ticker": r.get("market_ticker"), "side": r.get("side"),
-                "size": r.get("size", 0), "edge": r.get("edge"), "fair": r.get("fused_fair"),
-                "in_play": bool(r.get("in_play")), "action": r.get("live_action") or "buy",
-                "ts": r.get("ts", ""),
-                "match": info["match"], "home": info["home"], "away": info["away"],
-                "pick_label": info["pick_label"],
-            })
-        placed.sort(key=lambda d: d.get("ts", ""), reverse=True)
+            if r.get("home") or r.get("away"):
+                pk = parse_market_ticker(mt, r.get("side"))
+                info_by_ticker[mt] = {
+                    "match": f"{r.get('home')} vs {r.get('away')}",
+                    "home": r.get("home", ""), "away": r.get("away", ""),
+                    "home_logo": r.get("home_logo", "") or pk.get("home_flag", ""),
+                    "away_logo": r.get("away_logo", "") or pk.get("away_flag", ""),
+                    "pick_label": pk["pick_label"],
+                    "pick_logo": (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", ""),
+                }
+            if r.get("edge") is not None and r.get("decision") == "placed":
+                edge_by_ticker[mt] = r.get("edge")
     except Exception:
-        placed = []
-    fills = []
+        pass
+
+    def _info(ticker, side=None):
+        i = info_by_ticker.get(ticker)
+        if i:
+            return i
+        p = parse_market_ticker(ticker or "", side)
+        return {"match": p["match"], "home": p["home"], "away": p["away"],
+                "home_logo": p["home_flag"], "away_logo": p["away_flag"],
+                "pick_label": p["pick_label"], "pick_logo": p["pick_flag"]}
+
+    bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(row.get("brokerage_id")).run(conn) or {}
+    client = None
     try:
-        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(row.get("brokerage_id")).run(conn) or {}
-        for f in _kalshi_client_from_row(bk).get_fills(limit=n):
-            info = parse_market_ticker(f.market_ticker)
-            fills.append({"market_ticker": f.market_ticker, "side": f.side, "action": f.action,
-                          "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts,
-                          "match": info["match"], "pick_label": info["pick_label"]})
+        client = _kalshi_client_from_row(bk)
     except Exception:
-        fills = []
-    return {"placed": placed[:n], "fills": fills[:n]}
+        client = None
+
+    # PENDING = the broker's truly-resting orders (empty when everything filled),
+    # NOT the bot's placed decisions (which fill instantly and would double-show).
+    pending = []
+    if client is not None:
+        try:
+            for o in client.get_resting_orders():
+                inf = _info(o.get("market_ticker"), o.get("side"))
+                pending.append({**o, **inf, "edge": edge_by_ticker.get(o.get("market_ticker"))})
+        except Exception:
+            pending = []
+
+    fills = []
+    if client is not None:
+        try:
+            for f in client.get_fills(limit=n):
+                inf = _info(f.market_ticker)
+                fills.append({"market_ticker": f.market_ticker, "side": f.side, "action": f.action,
+                              "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts, **inf})
+        except Exception:
+            fills = []
+    return {"placed": pending[:n], "fills": fills[:n]}
 
 
 @app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)

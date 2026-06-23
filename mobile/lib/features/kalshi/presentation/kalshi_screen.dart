@@ -294,6 +294,20 @@ Widget _rowItem(String left, Widget right) => Padding(
       ),
     );
 
+Widget _posCrest(String url, String fallbackName) {
+  final init = fallbackName.replaceAll(RegExp(r'[^A-Za-z ]'), '').split(' ')
+      .where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join();
+  final fb = Container(
+    width: 32, height: 32, color: AppColors.surface, alignment: Alignment.center,
+    child: Text(init, style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+  );
+  return ClipOval(
+    child: url.isNotEmpty
+        ? Image.network(url, width: 32, height: 32, fit: BoxFit.contain, errorBuilder: (_, __, ___) => fb)
+        : fb,
+  );
+}
+
 // ── Cards ────────────────────────────────────────────────────────────────────
 
 class _PortfolioCard extends ConsumerWidget {
@@ -388,15 +402,27 @@ class _PositionsCard extends ConsumerWidget {
                 children: positions.map((p) {
                   final u = p.unrealizedCents;
                   final positive = (u ?? 0) >= 0;
-                  return _rowItem(
-                    '${p.marketTicker}  ${p.side} ×${p.contracts}',
-                    Text(
-                      u == null ? '—' : '${positive ? '+' : ''}\$${(u / 100).toStringAsFixed(2)}',
-                      style: AppTextStyles.value.copyWith(
-                        color: u == null ? AppColors.textDim : (positive ? AppColors.success : AppColors.danger),
-                        fontSize: 14,
+                  final title = p.match.isNotEmpty ? p.match : p.marketTicker;
+                  final sub = p.pickLabel.isNotEmpty ? p.pickLabel : p.side;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Row(children: [
+                      _posCrest(p.pickLogo, sub.replaceAll(' to win', '')),
+                      const SizedBox(width: 10),
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600)),
+                        Text('$sub · ${p.contracts}×', maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: AppTextStyles.nano.copyWith(color: AppColors.primary)),
+                      ])),
+                      Text(
+                        u == null ? '—' : '${positive ? '+' : ''}\$${(u / 100).toStringAsFixed(2)}',
+                        style: AppTextStyles.value.copyWith(
+                          color: u == null ? AppColors.textDim : (positive ? AppColors.success : AppColors.danger),
+                          fontSize: 14,
+                        ),
                       ),
-                    ),
+                    ]),
                   );
                 }).toList(),
               ),

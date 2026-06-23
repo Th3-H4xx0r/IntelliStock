@@ -37,10 +37,36 @@ _CODE_TO_NAME = {
 
 _DATE = re.compile(r"^\d{2}[A-Z]{3}\d{2}", re.I)
 
+# FIFA/IOC code -> ISO 3166-1 alpha-2 (flagcdn key; gb-* for the home nations).
+_CODE_TO_ISO = {
+    "ARG": "ar", "AUT": "at", "FRA": "fr", "BRA": "br", "ENG": "gb-eng", "ESP": "es",
+    "POR": "pt", "NED": "nl", "BEL": "be", "GER": "de", "ITA": "it", "CRO": "hr",
+    "URU": "uy", "COL": "co", "MAR": "ma", "SUI": "ch", "DEN": "dk", "MEX": "mx",
+    "USA": "us", "JPN": "jp", "SEN": "sn", "SRB": "rs", "ECU": "ec", "POL": "pl",
+    "NGA": "ng", "EGY": "eg", "PER": "pe", "KOR": "kr", "AUS": "au", "CAN": "ca",
+    "IRI": "ir", "IRN": "ir", "UKR": "ua", "SWE": "se", "WAL": "gb-wls", "SCO": "gb-sct",
+    "NOR": "no", "TUR": "tr", "GHA": "gh", "CMR": "cm", "CIV": "ci", "TUN": "tn",
+    "DZA": "dz", "ALG": "dz", "CRC": "cr", "PAR": "py", "CHI": "cl", "KSA": "sa",
+    "QAT": "qa", "IRQ": "iq", "GRE": "gr", "CZE": "cz", "HUN": "hu", "ROU": "ro",
+    "SVK": "sk", "SVN": "si", "NZL": "nz", "COD": "cd", "BIH": "ba", "UZB": "uz",
+    "CUW": "cw", "JOR": "jo", "PAN": "pa", "HTI": "ht", "HAI": "ht", "RSA": "za",
+    "CPV": "cv", "UGA": "ug", "BOL": "bo", "VEN": "ve", "HON": "hn", "JAM": "jm",
+    "MLI": "ml", "BFA": "bf", "GUI": "gn", "GAB": "ga", "ALB": "al", "MKD": "mk",
+    "GEO": "ge", "FIN": "fi", "ISL": "is", "IRL": "ie", "NIR": "gb-nir", "ISR": "il",
+    "BUL": "bg", "IDN": "id", "THA": "th", "CHN": "cn", "OMA": "om", "BHR": "bh",
+    "UAE": "ae",
+}
+
 
 def name_for_code(code: str) -> str:
     c = (code or "").upper()
     return _CODE_TO_NAME.get(c, c.title() if c else "")
+
+
+def flag_url(code: str) -> str:
+    """Country-flag image URL (flagcdn, no API key) for a FIFA/IOC code; '' if unknown."""
+    iso = _CODE_TO_ISO.get((code or "").upper())
+    return f"https://flagcdn.com/w80/{iso}.png" if iso else ""
 
 
 def parse_market_ticker(ticker: str, side: str | None = None) -> dict:
@@ -48,7 +74,7 @@ def parse_market_ticker(ticker: str, side: str | None = None) -> dict:
     pick_label, match}. Robust to variable code lengths (splits using the suffix
     code when possible). Falls back to the raw ticker when it can't parse."""
     raw = {"home": "", "away": "", "pick": "", "pick_label": "",
-           "match": ticker or ""}
+           "match": ticker or "", "home_flag": "", "away_flag": "", "pick_flag": ""}
     segs = (ticker or "").split("-")
     if len(segs) < 3:
         return raw
@@ -70,12 +96,14 @@ def parse_market_ticker(ticker: str, side: str | None = None) -> dict:
         home_code, away_code = teams[:half], teams[half:]
 
     home, away = name_for_code(home_code), name_for_code(away_code)
+    home_flag, away_flag = flag_url(home_code), flag_url(away_code)
     s = (side or "").lower()
     if is_draw or suffix in ("TIE", "DRAW"):
-        pick, pick_label = "draw", "Draw"
+        pick, pick_label, pick_flag = "draw", "Draw", ""
     elif s == "away" or (not s and suffix == away_code):
-        pick, pick_label = "away", f"{away} to win"
+        pick, pick_label, pick_flag = "away", f"{away} to win", away_flag
     else:
-        pick, pick_label = "home", f"{home} to win"
+        pick, pick_label, pick_flag = "home", f"{home} to win", home_flag
     return {"home": home, "away": away, "pick": pick, "pick_label": pick_label,
-            "match": f"{home} vs {away}" if home and away else (ticker or "")}
+            "match": f"{home} vs {away}" if home and away else (ticker or ""),
+            "home_flag": home_flag, "away_flag": away_flag, "pick_flag": pick_flag}
