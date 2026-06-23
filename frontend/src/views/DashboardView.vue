@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, defineComponent, h } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import PortfolioChart from '../components/PortfolioChart.vue'
+import KalshiDashboardCard from '../components/KalshiDashboardCard.vue'
 import { getUser, getToken } from '../utils/auth.js'
 
 const STATUS_COLORS = {
@@ -239,6 +240,12 @@ onUnmounted(() => {
             :account="acct"
           />
         </div>
+      </section>
+
+      <!-- ── Kalshi ───────────────────────────────────────────────────────── -->
+      <!-- Self-hides when no Kalshi account is linked. -->
+      <section>
+        <KalshiDashboardCard />
       </section>
 
       <!-- ── Services ─────────────────────────────────────────────────────── -->

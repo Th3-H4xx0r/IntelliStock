@@ -4001,6 +4001,25 @@ def api_kalshi_scan_budget(brokerage_id: str, conn=Depends(conn_dependency), cur
     return scan_budget_payload(used, days_left_in_month=days_left)
 
 
+@app.post("/brokerages/{brokerage_id}/kalshi/kill", response_class=JSONResponse)
+def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """KILL: stop the instance bound to this Kalshi account and cancel its
+    resting orders. Scoped to the linked instance (fail-safe). If no instance is
+    linked, cancel resting orders on THIS account only — never touch others."""
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if iid:
+        from live_kill_switch import halt_live_trading
+        summary = halt_live_trading(reason="manual kalshi kill (UI)", cancel_open_orders=True, instance_id=iid)
+        return {"ok": True, "summary": summary}
+    # No linked instance: cancel resting orders on this Kalshi account only.
+    try:
+        canceled = _kalshi_client_from_row(row).cancel_all_open_orders()
+        return {"ok": True, "summary": {"orders_canceled": canceled, "instances_halted": 0, "scope": brokerage_id}}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 class TestKalshiBody(BaseModel):
     kalshi_key_id: Optional[str] = ""
     kalshi_private_key: Optional[str] = ""
