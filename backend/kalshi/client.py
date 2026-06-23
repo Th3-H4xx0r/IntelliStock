@@ -13,6 +13,7 @@ network or credentials.
 from __future__ import annotations
 
 import time
+import uuid as _uuid
 from typing import Any, Optional
 
 from kalshi.signing import access_headers
@@ -180,6 +181,13 @@ class KalshiClient:
         # YES book with fixed-point DOLLAR strings — `bid` = buy YES, `ask` = sell
         # YES (we only ever trade the YES leg). count/price are string fixed-point.
         book_side = "ask" if action == "sell" else "bid"
+        # V2 validates client_order_id as a UUID (the legacy endpoint accepted any
+        # string). Map our logical id to a deterministic UUID so retries of the same
+        # order stay idempotent.
+        try:
+            cid = str(_uuid.UUID(client_order_id))
+        except (ValueError, AttributeError, TypeError):
+            cid = str(_uuid.uuid5(_uuid.NAMESPACE_OID, str(client_order_id)))
         body = {
             "ticker": market_ticker,
             "side": book_side,
@@ -187,12 +195,12 @@ class KalshiClient:
             "price": f"{int(limit_cents) / 100:.4f}",  # FixedPointDollars
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
-            "client_order_id": client_order_id,
+            "client_order_id": cid,
         }
         d = self._request("POST", "/portfolio/events/orders", body=body)
         o = d.get("order", d)
         return KalshiOrderRef(
-            client_order_id=o.get("client_order_id", client_order_id),
+            client_order_id=o.get("client_order_id", cid),
             broker_order_id=o.get("order_id"),
             market_ticker=market_ticker,
             side=side.upper(),

@@ -85,6 +85,15 @@ def test_submit_order_builds_v2_body():
     assert body["time_in_force"] == "good_till_canceled"
     assert body["self_trade_prevention_type"] == "taker_at_cross"
     assert sess.calls[0]["url"].endswith("/trade-api/v2/portfolio/events/orders")
+    # V2 requires client_order_id to be a UUID — a non-UUID logical id is mapped
+    # deterministically (uuid5) so retries stay idempotent.
+    import uuid
+    cid1 = uuid.UUID(body["client_order_id"])   # raises if not a valid UUID
+    sess2 = _FakeSession({"order_id": "o2"})
+    KalshiClient(key_id="abc", private_key_pem=pem, environment="demo", session=sess2).submit_order(
+        market_ticker="KXEPL-LEEDS-YES", side="yes", action="buy",
+        contracts=40, limit_cents=52, client_order_id="cid-1")
+    assert sess2.calls[0]["json"]["client_order_id"] == str(cid1)   # deterministic
 
 
 def test_submit_order_sell_maps_to_ask():
