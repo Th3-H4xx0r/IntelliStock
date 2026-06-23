@@ -4042,6 +4042,7 @@ class CreateKalshiInstanceBody(BaseModel):
     daily_loss_cap_dollars: Optional[float] = 0
     bankroll_dollars: Optional[float] = 0
     poll_seconds: Optional[int] = 60
+    bankroll_usage_pct: Optional[int] = 50
     tier: Optional[str] = "medium"
     model: Optional[str] = None          # LLM model id for the analyst panel
     # Live in-match monitoring (two-way in-play; Kalshi-price-only).

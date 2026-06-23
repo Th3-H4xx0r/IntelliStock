@@ -658,6 +658,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'daily_loss_cap_dollars': _d(_dailyLoss, 100),
         'bankroll_dollars': _effectiveBankroll,
         'poll_seconds': _i(_poll, 60),
+        'bankroll_usage_pct': _usagePct.round(),
         'live_monitoring': _liveMonitoring,
         'odds_api_key': _oddsKey.text.trim(),
         'sharp_weight': _sharpWeight / 100,

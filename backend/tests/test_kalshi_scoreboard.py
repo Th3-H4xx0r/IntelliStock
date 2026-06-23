@@ -36,6 +36,20 @@ def test_parse_scoreboard_extracts_score_and_clock():
     assert e["clock"] == "67'" and e["state"] == "in"
 
 
+def test_parse_scoreboard_extracts_logo_string_or_array():
+    # ESPN uses team.logo (string) for some sports, team.logos[].href (array) for soccer.
+    payload = {"events": [{"competitions": [{
+        "status": {"type": {"state": "in"}},
+        "competitors": [
+            {"homeAway": "home", "score": "1", "team": {"displayName": "England", "logo": "http://x/eng.png"}},
+            {"homeAway": "away", "score": "0", "team": {"displayName": "Ghana", "logos": [{"href": "http://x/gha.png"}]}},
+        ],
+    }]}]}
+    e = parse_scoreboard(payload)[0]
+    assert e["home_logo"] == "http://x/eng.png"
+    assert e["away_logo"] == "http://x/gha.png"
+
+
 def test_parse_scoreboard_handles_empty():
     assert parse_scoreboard(None) == []
     assert parse_scoreboard({"events": []}) == []

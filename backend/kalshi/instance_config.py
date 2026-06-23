@@ -38,6 +38,7 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "daily_loss_cap_cents": _dollars_to_cents(raw.get("daily_loss_cap_dollars"), 0),
         "bankroll_cents": _dollars_to_cents(raw.get("bankroll_dollars"), 0),
         "poll_seconds": max(15, int(raw.get("poll_seconds", 60))),
+        "bankroll_usage_pct": min(100, max(0, int(raw.get("bankroll_usage_pct", 50)))),
         "tier": tier,
         "model": (str(raw.get("model")).strip() or None) if raw.get("model") else None,
         "live_enabled": bool(live_enabled),

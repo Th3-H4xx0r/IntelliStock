@@ -133,6 +133,7 @@ function prefillFromEdit() {
   if (c.per_league_cap_frac != null) leagueCapPct.value = Math.round(c.per_league_cap_frac * 100)
   if (c.daily_loss_cap_cents != null) { dailyLoss.value = Math.round(c.daily_loss_cap_cents / 100); dailyLossTouched.value = true }
   if (c.bankroll_cents != null) manualBankroll.value = Math.round(c.bankroll_cents / 100)
+  if (c.bankroll_usage_pct != null) usagePct.value = c.bankroll_usage_pct
   if (c.poll_seconds != null) poll.value = c.poll_seconds
   if (c.live_monitoring != null) liveMonitoring.value = !!c.live_monitoring
   if (c.odds_api_key) oddsApiKey.value = c.odds_api_key
@@ -173,6 +174,7 @@ async function submit() {
       daily_loss_cap_dollars: Number(dailyLoss.value),
       bankroll_dollars: effectiveBankroll.value,
       poll_seconds: Number(poll.value),
+      bankroll_usage_pct: Number(usagePct.value),
       live_monitoring: liveMonitoring.value,
       odds_api_key: oddsApiKey.value.trim(),
       sharp_weight: Number(sharpWeight.value) / 100,

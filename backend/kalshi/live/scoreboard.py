@@ -20,6 +20,20 @@ def _int(v):
         return None
 
 
+def _logo(team) -> str:
+    """ESPN crest URL — single `team.logo` string OR `team.logos[0].href` (soccer
+    uses the array form)."""
+    if not isinstance(team, dict):
+        return ""
+    lg = team.get("logo")
+    if isinstance(lg, str) and lg:
+        return lg
+    logos = team.get("logos")
+    if isinstance(logos, list) and logos and isinstance(logos[0], dict):
+        return logos[0].get("href") or ""
+    return ""
+
+
 def parse_scoreboard(data) -> list[dict]:
     """ESPN scoreboard JSON -> [{home, away, home_score, away_score, clock, state, detail}].
     state is ESPN's 'pre' | 'in' | 'post'. Never raises."""
@@ -39,8 +53,8 @@ def parse_scoreboard(data) -> list[dict]:
                 "away": (away.get("team") or {}).get("displayName") or "",
                 "home_score": _int(home.get("score")),
                 "away_score": _int(away.get("score")),
-                "home_logo": (home.get("team") or {}).get("logo") or "",
-                "away_logo": (away.get("team") or {}).get("logo") or "",
+                "home_logo": _logo(home.get("team")),
+                "away_logo": _logo(away.get("team")),
                 "clock": status.get("displayClock") or "",
                 "state": st.get("state") or "",
                 "detail": st.get("shortDetail") or st.get("detail") or "",
