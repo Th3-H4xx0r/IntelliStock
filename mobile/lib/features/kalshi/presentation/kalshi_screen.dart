@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/common_widgets.dart';
@@ -265,6 +266,7 @@ class _KCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GlassCard(
+      liquid: true,
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -310,41 +312,69 @@ Widget _posCrest(String url, String fallbackName) {
 
 // ── Cards ────────────────────────────────────────────────────────────────────
 
-class _PortfolioCard extends ConsumerWidget {
+class _PortfolioCard extends ConsumerStatefulWidget {
   const _PortfolioCard({required this.brokerageId});
   final String brokerageId;
+  @override
+  ConsumerState<_PortfolioCard> createState() => _PortfolioCardState();
+}
+
+class _PortfolioCardState extends ConsumerState<_PortfolioCard> {
+  final ValueNotifier<int?> _scrub = ValueNotifier<int?>(null);
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(kalshiPortfolioProvider(brokerageId));
+  void dispose() {
+    _scrub.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final async = ref.watch(kalshiPortfolioProvider(widget.brokerageId));
     return _KCard(
       icon: 'monitoring',
       title: 'Portfolio value',
       child: async.when(
         loading: () => const SizedBox(height: 56, child: LoadingState()),
-        error: (e, _) => ErrorBanner(message: '$e', onRetry: () => ref.invalidate(kalshiPortfolioProvider(brokerageId))),
+        error: (e, _) => ErrorBanner(message: '$e', onRetry: () => ref.invalidate(kalshiPortfolioProvider(widget.brokerageId))),
         data: (p) {
-          final positive = p.dayChange >= 0;
-          final color = positive ? AppColors.success : AppColors.danger;
+          final baseline = p.series.isNotEmpty ? p.series.first : 0.0;
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.baseline,
-                textBaseline: TextBaseline.alphabetic,
-                children: [
-                  Text('\$${p.value.toStringAsFixed(2)}',
-                      style: AppTextStyles.value.copyWith(fontSize: 26, color: AppColors.textHi)),
-                  const SizedBox(width: 8),
-                  Icon(positive ? Icons.trending_up : Icons.trending_down, size: 16, color: color),
-                  const SizedBox(width: 2),
-                  Text('${positive ? '+' : '-'}\$${p.dayChange.abs().toStringAsFixed(2)}',
-                      style: AppTextStyles.meta.copyWith(color: color, fontWeight: FontWeight.bold)),
-                ],
+              ValueListenableBuilder<int?>(
+                valueListenable: _scrub,
+                builder: (_, idx, __) {
+                  final v = (idx != null && idx >= 0 && idx < p.series.length) ? p.series[idx] : p.value;
+                  final change = (idx != null && idx >= 0 && idx < p.series.length) ? (v - baseline) : p.dayChange;
+                  final positive = change >= 0;
+                  final color = positive ? AppColors.success : AppColors.danger;
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text('\$${v.toStringAsFixed(2)}',
+                          style: AppTextStyles.value.copyWith(fontSize: 28, color: AppColors.textHi, fontWeight: FontWeight.bold)),
+                      const SizedBox(width: 8),
+                      Icon(positive ? Icons.trending_up : Icons.trending_down, size: 16, color: color),
+                      const SizedBox(width: 2),
+                      Text('${positive ? '+' : '-'}\$${change.abs().toStringAsFixed(2)}',
+                          style: AppTextStyles.meta.copyWith(color: color, fontWeight: FontWeight.bold)),
+                    ],
+                  );
+                },
               ),
               if (p.series.length > 1) ...[
                 const SizedBox(height: 14),
-                SizedBox(height: 56, child: CustomPaint(painter: _Sparkline(p.series), size: Size.infinite)),
+                ScrubbableAreaChart(
+                  timestamps: p.seriesTs,
+                  values: p.series,
+                  lineColor: p.dayChange >= 0 ? AppColors.success : AppColors.danger,
+                  height: 120,
+                  baseline: baseline,
+                  indexed: true,
+                  onScrub: (i) => _scrub.value = i,
+                ),
               ],
             ],
           );
@@ -429,51 +459,6 @@ class _PositionsCard extends ConsumerWidget {
       ),
     );
   }
-}
-
-class _Sparkline extends CustomPainter {
-  _Sparkline(this.data);
-  final List<double> data;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (data.length < 2) return;
-    final lo = data.reduce((a, b) => a < b ? a : b);
-    final hi = data.reduce((a, b) => a > b ? a : b);
-    final range = (hi - lo).abs() < 1e-9 ? 1.0 : (hi - lo);
-    final dx = size.width / (data.length - 1);
-    final path = Path();
-    for (var i = 0; i < data.length; i++) {
-      final x = dx * i;
-      final y = size.height - ((data[i] - lo) / range) * size.height;
-      i == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
-    }
-    // Soft violet fill under the line, matching the web chart.
-    final fill = Path.from(path)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-    canvas.drawPath(
-      fill,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [AppColors.primary.withValues(alpha: 0.28), AppColors.primary.withValues(alpha: 0.0)],
-        ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)),
-    );
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = AppColors.primary
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5
-        ..strokeJoin = StrokeJoin.round,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _Sparkline old) => old.data != data;
 }
 
 // ── Lifecycle bits ───────────────────────────────────────────────────────────

@@ -4184,8 +4184,10 @@ def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), 
 
 @app.get("/instances/{instance_id}/kalshi/decisions", response_class=JSONResponse)
 def api_kalshi_instance_decisions(instance_id: str, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    """The LLM-reasoned decision log for this instance (newest first)."""
+    """The LLM-reasoned decision log for this instance (newest first), enriched
+    with readable team names + crests (league-agnostic)."""
     from kalshi.decisions import summarize_decisions
+    from kalshi.data.ticker_names import parse_market_ticker
     _kalshi_instance_row(conn, instance_id)
     rows = []
     try:
@@ -4197,7 +4199,13 @@ def api_kalshi_instance_decisions(instance_id: str, limit: int = 100, conn=Depen
         rows = []
     rows.sort(key=lambda d: d.get("ts", ""), reverse=True)
     n = max(1, min(int(limit or 100), 500))
-    return {"decisions": rows[:n], "summary": summarize_decisions(rows), "count": len(rows)}
+    out = rows[:n]
+    for r in out:
+        pk = parse_market_ticker(r.get("market_ticker", ""), r.get("side"))
+        r["match"] = (f"{r.get('home')} vs {r.get('away')}" if (r.get("home") or r.get("away")) else pk["match"])
+        r["pick_label"] = pk["pick_label"]
+        r["pick_logo"] = (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", "")
+    return {"decisions": out, "summary": summarize_decisions(rows), "count": len(rows)}
 
 
 @app.get("/instances/{instance_id}/kalshi/live", response_class=JSONResponse)

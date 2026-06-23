@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/common_widgets.dart';
@@ -25,6 +26,8 @@ class KalshiInstanceDetailScreen extends ConsumerStatefulWidget {
 class _State extends ConsumerState<KalshiInstanceDetailScreen> {
   bool _busy = false;
   final Set<int> _expanded = {};
+  int _decPage = 0;
+  static const _decPageSize = 8;
   Timer? _liveTimer;
 
   @override
@@ -41,6 +44,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
   @override
   void dispose() {
     _liveTimer?.cancel();
+    _scrubIdx.dispose();
     super.dispose();
   }
 
@@ -158,10 +162,12 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   const SizedBox(height: 12),
                   _summary(decAsync.value?['summary'] as Map<String, dynamic>?),
                   const SizedBox(height: 12),
-                  _liveCards(liveAsync),
-                  _decisionLog(decAsync),
+                  _portfolioChart(detail['brokerage_id']?.toString() ?? ''),
                   const SizedBox(height: 12),
+                  _liveCards(liveAsync),
                   _ordersCard(ordersAsync),
+                  const SizedBox(height: 12),
+                  _decisionLog(decAsync),
                   const SizedBox(height: 12),
                   GlassCard(
                     padding: const EdgeInsets.all(14),
@@ -201,6 +207,71 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
       const SizedBox(width: 8),
       Expanded(child: StatTile(label: 'Blocked', value: blocked, valueColor: AppColors.danger)),
     ]);
+  }
+
+  final ValueNotifier<int?> _scrubIdx = ValueNotifier<int?>(null);
+
+  Widget _portfolioChart(String brokerageId) {
+    if (brokerageId.isEmpty) return const SizedBox.shrink();
+    final async = ref.watch(kalshiPortfolioProvider(brokerageId));
+    return GlassCard(
+      liquid: true,
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(symbol('monitoring'), color: AppColors.primary, size: 18),
+          const SizedBox(width: 8),
+          Text('PORTFOLIO VALUE', style: AppTextStyles.eyebrow),
+        ]),
+        const SizedBox(height: 14),
+        async.when(
+          loading: () => const SizedBox(height: 90, child: LoadingState()),
+          error: (e, _) => ErrorBanner(message: '$e', onRetry: () => ref.invalidate(kalshiPortfolioProvider(brokerageId))),
+          data: (p) {
+            final hasSeries = p.series.length > 1;
+            final baseline = p.series.isNotEmpty ? p.series.first : 0.0;
+            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // Scrub-aware headline: dragging the chart updates value + change.
+              ValueListenableBuilder<int?>(
+                valueListenable: _scrubIdx,
+                builder: (_, idx, __) {
+                  final v = (idx != null && idx >= 0 && idx < p.series.length) ? p.series[idx] : p.value;
+                  final change = (idx != null && idx >= 0 && idx < p.series.length) ? (v - baseline) : p.dayChange;
+                  final positive = change >= 0;
+                  final color = positive ? AppColors.success : AppColors.danger;
+                  return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('\$${v.toStringAsFixed(2)}',
+                        style: AppTextStyles.value.copyWith(fontSize: 30, color: AppColors.textHi, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Row(children: [
+                      Icon(positive ? Icons.trending_up : Icons.trending_down, size: 16, color: color),
+                      const SizedBox(width: 3),
+                      Text('${positive ? '+' : '-'}\$${change.abs().toStringAsFixed(2)}',
+                          style: AppTextStyles.meta.copyWith(color: color, fontWeight: FontWeight.bold)),
+                    ]),
+                  ]);
+                },
+              ),
+              if (hasSeries) ...[
+                const SizedBox(height: 14),
+                ScrubbableAreaChart(
+                  timestamps: p.seriesTs,
+                  values: p.series,
+                  lineColor: p.dayChange >= 0 ? AppColors.success : AppColors.danger,
+                  height: 150,
+                  baseline: baseline,
+                  indexed: true,
+                  onScrub: (i) => _scrubIdx.value = i,
+                ),
+              ] else
+                Padding(padding: const EdgeInsets.only(top: 8),
+                    child: Text('Equity curve appears once the engine records snapshots.',
+                        style: AppTextStyles.nano.copyWith(color: AppColors.textDim))),
+            ]);
+          },
+        ),
+      ]),
+    );
   }
 
   Widget _liveCards(AsyncValue<Map<String, dynamic>> liveAsync) {
@@ -449,7 +520,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
           const SizedBox(width: 8),
           Text('DECISION LOG', style: AppTextStyles.eyebrow),
         ]),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         decAsync.when(
           loading: () => const LoadingState(),
           error: (e, _) => ErrorBanner(message: '$e', onRetry: _refresh),
@@ -458,53 +529,124 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
             if (rows.isEmpty) {
               return Text('No decisions logged yet.', style: AppTextStyles.body.copyWith(color: AppColors.textDim));
             }
-            return Column(
-              children: List.generate(rows.length, (i) {
-                final r = rows[i] as Map<String, dynamic>;
-                final open = _expanded.contains(i);
-                final dec = (r['decision'] ?? '').toString();
-                return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  GestureDetector(
-                    onTap: () => setState(() => open ? _expanded.remove(i) : _expanded.add(i)),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Row(children: [
-                        Icon(open ? Icons.expand_more : Icons.chevron_right, size: 16, color: AppColors.textDim),
-                        const SizedBox(width: 4),
-                        Expanded(child: Text('${r['market_ticker']}  ·  ${r['side']}',
-                            style: AppTextStyles.meta.copyWith(color: AppColors.textMd), overflow: TextOverflow.ellipsis)),
-                        Text(dec.toUpperCase(),
-                            style: AppTextStyles.nano.copyWith(color: _decColor(dec), fontWeight: FontWeight.bold)),
-                      ]),
-                    ),
-                  ),
-                  if (open)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 20, bottom: 8),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text('Model ${_pct(r['model_prob'])} · Sharp ${_pct(r['sharp_prob'])} · LLM ${_pct(r['llm_adjustment'])} · Fair ${_pct(r['fused_fair'])}',
-                            style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
-                        if (r['llm_rationale'] != null && (r['llm_rationale'] as String).isNotEmpty) ...[
-                          const SizedBox(height: 6),
-                          Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: AppColors.surface.withValues(alpha: 0.4),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: AppColors.border),
-                            ),
-                            child: Text(r['llm_rationale'].toString(),
-                                style: AppTextStyles.nano.copyWith(color: AppColors.textMd)),
-                          ),
-                        ],
-                      ]),
-                    ),
-                ]);
-              }),
-            );
+            final pages = (rows.length / _decPageSize).ceil();
+            final page = _decPage.clamp(0, pages - 1);
+            final start = page * _decPageSize;
+            final slice = rows.sublist(start, (start + _decPageSize).clamp(0, rows.length));
+            return Column(children: [
+              ...List.generate(slice.length, (j) => _decisionCard(slice[j] as Map<String, dynamic>, start + j)),
+              if (pages > 1) ...[
+                const SizedBox(height: 8),
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  _pageBtn(Icons.chevron_left, page > 0, () => setState(() { _decPage = page - 1; _expanded.clear(); })),
+                  Text('Page ${page + 1} / $pages', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+                  _pageBtn(Icons.chevron_right, page < pages - 1, () => setState(() { _decPage = page + 1; _expanded.clear(); })),
+                ]),
+              ],
+            ]);
           },
         ),
       ]),
     );
   }
+
+  Widget _pageBtn(IconData icon, bool enabled, VoidCallback onTap) => GestureDetector(
+        onTap: enabled ? onTap : null,
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: enabled ? AppColors.fill(AppColors.primary) : AppColors.fill(AppColors.surface),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: enabled ? AppColors.stroke(AppColors.primary) : AppColors.border),
+          ),
+          child: Icon(icon, size: 18, color: enabled ? AppColors.primary : AppColors.textDim),
+        ),
+      );
+
+  Widget _decisionCard(Map<String, dynamic> r, int i) {
+    final open = _expanded.contains(i);
+    final dec = (r['decision'] ?? '').toString();
+    final match = (r['match'] ?? r['market_ticker'] ?? '').toString();
+    final pick = (r['pick_label'] ?? r['side'] ?? '').toString();
+    final edge = (r['edge'] as num?)?.toDouble();
+    return GestureDetector(
+      onTap: () => setState(() => open ? _expanded.remove(i) : _expanded.add(i)),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppColors.fill(AppColors.surface),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            _crest((r['pick_logo'] ?? '').toString(), pick.replaceAll(' to win', '')),
+            const SizedBox(width: 10),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(match, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text(pick, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.nano.copyWith(color: AppColors.primary)),
+            ])),
+            const SizedBox(width: 8),
+            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              if (edge != null)
+                Text('${edge >= 0 ? '+' : ''}${(edge * 100).toStringAsFixed(1)}%',
+                    style: AppTextStyles.meta.copyWith(
+                        color: edge >= 0 ? AppColors.success : AppColors.danger, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 2),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(color: AppColors.fill(_decColor(dec)), borderRadius: BorderRadius.circular(4)),
+                child: Text(dec.toUpperCase(), style: AppTextStyles.nano.copyWith(color: _decColor(dec), fontWeight: FontWeight.bold)),
+              ),
+            ]),
+            const SizedBox(width: 4),
+            Icon(open ? Icons.expand_less : Icons.expand_more, size: 18, color: AppColors.textDim),
+          ]),
+          if (open) ...[
+            const SizedBox(height: 10),
+            Wrap(spacing: 14, runSpacing: 6, children: [
+              _kv('Model', _pct(r['model_prob'])),
+              _kv('Sharp', _pct(r['sharp_prob'])),
+              _kv('LLM', _pct(r['llm_adjustment'])),
+              _kv('Fair', _pct(r['fused_fair'])),
+              _kv('Size', '${r['size'] ?? 0}'),
+            ]),
+            if (r['llm_rationale'] != null && (r['llm_rationale'] as String).isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppColors.surface.withValues(alpha: 0.4),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Icon(symbol('psychology'), size: 14, color: AppColors.primary),
+                  const SizedBox(width: 6),
+                  Expanded(child: Text(r['llm_rationale'].toString(),
+                      style: AppTextStyles.nano.copyWith(color: AppColors.textMd))),
+                ]),
+              ),
+            ],
+            if (r['block_reason'] != null && (r['block_reason'] as String).isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text('Blocked: ${r['block_reason']}', style: AppTextStyles.nano.copyWith(color: AppColors.danger.withValues(alpha: 0.85))),
+            ],
+          ],
+        ]),
+      ),
+    );
+  }
+
+  Widget _kv(String k, String v) => RichText(
+        text: TextSpan(children: [
+          TextSpan(text: '$k ', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          TextSpan(text: v, style: AppTextStyles.nano.copyWith(color: AppColors.textMd, fontWeight: FontWeight.w600)),
+        ]),
+      );
 }

@@ -9,21 +9,25 @@ class KalshiPortfolio {
     required this.cash,
     required this.dayChange,
     required this.series,
+    required this.seriesTs,
   });
 
   final double value;
   final double cash;
   final double dayChange;
   final List<double> series; // value points, chronological
+  final List<DateTime> seriesTs; // matching timestamps for the scrubbable chart
 
-  factory KalshiPortfolio.fromJson(Map<String, dynamic> j) => KalshiPortfolio(
-        value: (j['value'] as num?)?.toDouble() ?? 0,
-        cash: (j['cash'] as num?)?.toDouble() ?? 0,
-        dayChange: (j['day_change'] as num?)?.toDouble() ?? 0,
-        series: ((j['series'] as List?) ?? [])
-            .map((p) => ((p as Map)['value'] as num?)?.toDouble() ?? 0)
-            .toList(),
-      );
+  factory KalshiPortfolio.fromJson(Map<String, dynamic> j) {
+    final raw = (j['series'] as List?) ?? const [];
+    return KalshiPortfolio(
+      value: (j['value'] as num?)?.toDouble() ?? 0,
+      cash: (j['cash'] as num?)?.toDouble() ?? 0,
+      dayChange: (j['day_change'] as num?)?.toDouble() ?? 0,
+      series: raw.map((p) => ((p as Map)['value'] as num?)?.toDouble() ?? 0).toList(),
+      seriesTs: raw.map((p) => DateTime.tryParse(((p as Map)['ts'] ?? '').toString()) ?? DateTime.now()).toList(),
+    );
+  }
 }
 
 class KalshiEdge {
