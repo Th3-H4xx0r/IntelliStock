@@ -21,6 +21,14 @@ _NATIONAL_ELO = {
     "Tunisia": 1650, "Algeria": 1700, "Costa Rica": 1640, "Paraguay": 1670, "Chile": 1700,
     "Saudi Arabia": 1620, "Qatar": 1600, "Iraq": 1560, "Greece": 1700, "Czechia": 1690,
     "Hungary": 1700, "Romania": 1670, "Slovakia": 1660, "Slovenia": 1650, "New Zealand": 1560,
+    # Additional World-Cup-field sides seen in discovery.
+    "Congo Dr": 1645, "Bosnia And Herzegovina": 1660, "Uzbekistan": 1635, "Curacao": 1490,
+    "Jordan": 1565, "Panama": 1605, "Haiti": 1500, "South Africa": 1625, "Cape Verde": 1590,
+    "Uganda": 1520, "Bolivia": 1580, "Venezuela": 1640, "Honduras": 1580, "Jamaica": 1590,
+    "Mali": 1660, "Burkina Faso": 1620, "Guinea": 1600, "Gabon": 1560, "Albania": 1640,
+    "North Macedonia": 1610, "Georgia": 1640, "Finland": 1620, "Iceland": 1600, "Ireland": 1640,
+    "Northern Ireland": 1580, "Israel": 1620, "Bulgaria": 1560, "Indonesia": 1500, "Thailand": 1500,
+    "China": 1530, "Oman": 1550, "Bahrain": 1500, "Uae": 1560, "United Arab Emirates": 1560,
 }
 DEFAULT_NATIONAL_ELO = 1600.0
 

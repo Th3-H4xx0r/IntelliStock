@@ -29,6 +29,26 @@ def test_extract_teams_common_formats():
     assert extract_teams("no teams here") == (None, None)
 
 
+def test_extract_teams_strips_market_suffix_from_away():
+    # Kalshi titles append the market label after the away team — it must not
+    # contaminate the team name (otherwise the Elo/national lookup misses).
+    assert extract_teams("Argentina vs Austria Winner") == ("Argentina", "Austria")
+    assert extract_teams("France vs Iraq Total Goals") == ("France", "Iraq")
+    assert extract_teams("Japan vs Sweden Both Teams To Score") == ("Japan", "Sweden")
+    # Multi-word names with no trailing market word are preserved.
+    assert extract_teams("Bosnia and Herzegovina vs Qatar") == ("Bosnia and Herzegovina", "Qatar")
+
+
+def test_parse_world_cup_away_side_maps_after_suffix_strip():
+    # With the suffix stripped, the away team's yes_sub_title now matches -> "away".
+    p = parse_kalshi_market({
+        "ticker": "KXWCGAME-...-AUT", "event_ticker": "KXWCGAME-26JUN22ARGAUT",
+        "title": "Argentina vs Austria Winner", "yes_sub_title": "Austria", "yes_ask": 40,
+    })
+    assert p["home"] == "Argentina" and p["away"] == "Austria"
+    assert (p["market_type"], p["side"]) == ("winner", "away")
+
+
 def test_parse_kalshi_market():
     p = parse_kalshi_market({
         "ticker": "KXEPLGAME-ARSCHE-ARS", "event_ticker": "KXEPLGAME-ARSCHE",

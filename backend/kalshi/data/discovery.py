@@ -11,6 +11,29 @@ from __future__ import annotations
 # them (EPL, La Liga, MLS, Serie A, ... each have their own series).
 DEFAULT_SOCCER_SERIES = ["KXWCGAME"]
 
+# Series whose teams are national sides (price via the national-Elo table, with
+# the national average as the default for unknowns — NOT the club default).
+NATIONAL_TEAM_SERIES = {"KXWCGAME"}
+
+# Words a Kalshi title appends after the away team to label the market
+# ("Argentina vs Austria Winner"). They contaminate the extracted away-team name,
+# so strip them before any team lookup.
+_MARKET_SUFFIX_TOKENS = {
+    "winner", "moneyline", "result", "h2h", "btts", "total", "totals", "goals",
+    "over", "under", "draw", "tie", "corners", "cards", "halftime", "ht",
+    "scorer", "anytime", "score", "to", "win", "double", "chance", "correct",
+    "both", "teams", "match", "outcome",
+}
+
+
+def _strip_market_suffix(name: str) -> str:
+    """Drop a trailing market label ('Winner', 'Total Goals', 'BTTS', ...) from a
+    team name extracted off a market title."""
+    words = (name or "").split()
+    while words and words[-1].lower().strip("?.:") in _MARKET_SUFFIX_TOKENS:
+        words.pop()
+    return " ".join(words).strip(" ?.")
+
 
 def market_type_from_ticker(ticker: str = "", subtitle: str = "") -> str:
     """Best-effort classification of a Kalshi soccer market into an internal type."""
@@ -47,7 +70,9 @@ def extract_teams(text: str) -> tuple:
     for sep in _TEAM_SEPS:
         if sep in t.lower():
             i = t.lower().index(sep)
-            return (t[:i].strip(" ?."), t[i + len(sep):].strip(" ?."))
+            home = _strip_market_suffix(t[:i].strip(" ?."))
+            away = _strip_market_suffix(t[i + len(sep):].strip(" ?."))
+            return (home or None, away or None)
     return (None, None)
 
 

@@ -36,3 +36,10 @@ def test_common_aliases_resolve_to_canonical_nation():
     assert national_elo("Czech Republic") == national_elo("Czechia")
     assert national_elo("Korea Republic") == national_elo("South Korea")
     assert national_elo("IR Iran") == national_elo("Iran")
+
+
+def test_expanded_world_cup_field_is_covered():
+    # Teams that previously fell to the club default are now recognized nationals.
+    for team in ["Congo DR", "Bosnia and Herzegovina", "Uzbekistan", "Curacao",
+                 "Jordan", "Panama", "South Africa", "Cape Verde"]:
+        assert is_national_team(team), team

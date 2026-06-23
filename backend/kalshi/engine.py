@@ -267,6 +267,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 for m in rs:
                     p = discovery.parse_kalshi_market(m)
                     if p["market_type"] != "other" and p["home"] and p["away"]:
+                        p["series"] = series
                         soccer.append(p)
             by_event = discovery.group_by_event(soccer)
             log(f"tick {tick}: scanned series {discovery.DEFAULT_SOCCER_SERIES} → {total_raw} markets, "
@@ -284,8 +285,18 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 away = next((m["away"] for m in mkts if m["away"]), None)
                 if not home or not away:
                     continue
-                he = national_elo(home) if is_national_team(home) else elo_for(elo_table, home)
-                ae = national_elo(away) if is_national_team(away) else elo_for(elo_table, away)
+                series = next((m.get("series") for m in mkts if m.get("series")), "")
+                national_series = series in discovery.NATIONAL_TEAM_SERIES
+
+                def _team_elo(name):
+                    # National series: always the national table (known -> rating,
+                    # unknown -> ~1600 national default). Club series: club table,
+                    # but honor a national side if one shows up.
+                    if national_series or is_national_team(name):
+                        return national_elo(name)
+                    return elo_for(elo_table, name)
+
+                he, ae = _team_elo(home), _team_elo(away)
                 eg = elo_to_expected_goals(he, ae)
 
                 analyst_out = {"adjustments": {}, "rationales": {}}
