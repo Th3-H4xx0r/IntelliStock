@@ -12,6 +12,10 @@ pytz
 yfinance
 numpy
 pandas
+# Kalshi v2 intelligence: soccer team/player/xG/Elo/lineup data (FBref, Understat,
+# ClubElo, Sofascore). Optional at runtime — the data adapters lazy-import it and
+# degrade to sharp-only pricing if unavailable.
+soccerdata
 requests
 tqdm
 pyrh
