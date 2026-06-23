@@ -351,6 +351,14 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 log(f"tick {tick}: analyst targets — {len(targets)}/{len(pregame_metas)} pregame "
                     f"match(es) within reach of the {config.caps.edge_threshold:.1%} bar "
                     f"(cap {config.analyst_max_calls}); the rest priced model-only to save tokens.", "cyan")
+            # Diagnostic: how close are the best matches to the edge bar? (model vs ask,
+            # pre-fee). If these are all negative the model agrees with the market —
+            # there's no edge to bet, regardless of risk tier.
+            if pregame_metas:
+                _top = sorted(pregame_metas, key=lambda m: m["best_edge"], reverse=True)[:3]
+                log(f"tick {tick}: closest model edges (vs ask, pre-fee): "
+                    + "; ".join(f"{m['home']} {m['best_edge']:+.1%}" for m in _top)
+                    + f" — need > {config.caps.edge_threshold:.1%} to place.", "white")
 
             # 3c) Build the planner + monitor inputs (analyst only for the targets).
             fixtures_in, live_matches = [], []
