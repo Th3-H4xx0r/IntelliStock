@@ -5,6 +5,8 @@ score/clock when we can match the fixture by team name. Parsing + matching are
 pure/tested; the HTTP fetch is integration and degrade-safe (empty on failure)."""
 from __future__ import annotations
 
+import re
+
 from kalshi.normalize import normalize_team
 
 # ESPN soccer league slugs to poll for live scores. World Cup = fifa.world.
@@ -64,6 +66,31 @@ def match_score(scoreboard, home: str, away: str):
             return {**e, "home": e["away"], "away": e["home"],
                     "home_score": e["away_score"], "away_score": e["home_score"]}
     return None
+
+
+def clock_minutes(clock: str):
+    """ESPN display clock -> elapsed minutes. "67'" -> 67.0; "45'+7'" -> 52.0;
+    empty/unparseable -> None."""
+    nums = re.findall(r"\d+", clock or "")
+    if not nums:
+        return None
+    return float(sum(int(n) for n in nums[:2]))   # base minute + stoppage
+
+
+def live_status(entry):
+    """ESPN scoreboard entry -> (phase, elapsed_min) using its state + clock.
+    state 'in' -> ('live', minute); 'post' -> ('ended', None); 'pre' ->
+    ('pregame', None); unknown -> (None, None). Phase strings match match_clock's."""
+    if not entry:
+        return (None, None)
+    st = (entry.get("state") or "").lower()
+    if st == "in":
+        return ("live", clock_minutes(entry.get("clock", "")))
+    if st == "post":
+        return ("ended", None)
+    if st == "pre":
+        return ("pregame", None)
+    return (None, None)
 
 
 def fetch_scoreboard(leagues=DEFAULT_SCOREBOARD_LEAGUES) -> list[dict]:  # pragma: no cover - integration

@@ -226,7 +226,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     from kalshi.feature_models import MatchFeatures, TeamForm
     from kalshi.intelligence.analyst_panel import analyze as analyst_analyze, make_llm_call
     from kalshi.intelligence.pricing import build_market_probs, model_market_probs
-    from kalshi.live import match_clock, monitor as live_monitor
+    from kalshi.live import match_clock, monitor as live_monitor, scoreboard as espn
     from kalshi.data.sources import odds_api
     from kalshi.fair_value import sharp_probs_from_quote
     from kalshi.orchestrator import plan_and_allocate
@@ -258,6 +258,8 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     live_llm_cd: dict = {}      # fixture_id -> wall ts of last in-play LLM read (cooldown)
     live_news_cache: dict = {}  # fixture_id -> {"ts": wall, "snip": str}; live-card news (5 min)
     odds_cache: dict = {}       # sport_key -> {"ts": wall, "events": [...], "quota": int|None}
+    espn_cache: dict = {"ts": 0.0, "board": []}   # ESPN live scores+clock (timing only, ~30s)
+    raw_dumped = False           # one-time raw-market field dump (price diagnostics)
     odds_sport_keys = [k for k in (odds_api.sport_key_for_series(s)
                                    for s in discovery.DEFAULT_SOCCER_SERIES) if k]
     if not config.odds_api_key:
@@ -295,11 +297,19 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     log(f"tick {tick}: list_markets({series}) failed: {type(e).__name__}: {e}", "red")
                     rs = []
                 total_raw += len(rs)
+                if tick == 1 and rs and not raw_dumped:
+                    _s = rs[0]
+                    log(f"raw market sample — keys: {sorted(_s.keys())}", "white")
+                    log(f"raw prices — yes_ask={_s.get('yes_ask')} yes_bid={_s.get('yes_bid')} "
+                        f"no_ask={_s.get('no_ask')} no_bid={_s.get('no_bid')} "
+                        f"last_price={_s.get('last_price')} status={_s.get('status')}", "cyan")
+                    raw_dumped = True
                 for m in rs:
                     p = discovery.parse_kalshi_market(m)
                     if p["market_type"] != "other" and p["home"] and p["away"]:
                         p["series"] = series
-                        p["yes_bid_cents"] = int(m.get("yes_bid", 0) or 0)
+                        p["yes_ask_cents"] = price_cents(m, "yes_ask")
+                        p["yes_bid_cents"] = price_cents(m, "yes_bid")
                         _a, _b = p["yes_ask_cents"], p["yes_bid_cents"]
                         p["mid_cents"] = (_a + _b) / 2.0 if (_a and _b) else (_a or _b or None)
                         p["kickoff_ts"] = match_clock.kickoff_from_market(m)
@@ -339,6 +349,17 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     log(f"tick {tick}: sharp odds — fetched {len(evs)} events for {sk}"
                         + (f" (quota left {quota})" if quota is not None else "") + ".", "white")
 
+            # 2c) Live scores/clock (ESPN) — TIMING ONLY (not pricing): gives the true
+            # in-play minute so the live monitor knows a match is actually live and can
+            # act, instead of waiting on a price move. Cached ~30s.
+            if now_wall - espn_cache["ts"] > 30:
+                try:
+                    espn_cache["board"] = espn.fetch_scoreboard()
+                except Exception:
+                    espn_cache["board"] = espn_cache.get("board") or []
+                espn_cache["ts"] = now_wall
+            board = espn_cache.get("board") or []
+
             # 3) Per-match: phase split + model pricing. Pregame -> pre-match planner,
             # LIVE -> in-play monitor. To control latency + LLM cost, the analyst runs
             # ONLY on the most promising pregame matches: those whose best model edge is
@@ -359,6 +380,15 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 kickoff_ts = next((m.get("kickoff_ts") for m in mkts if m.get("kickoff_ts")), None)
                 phase, elapsed = match_clock.phase_for_market(
                     kickoff_ts=kickoff_ts, ticker=event_ticker, now_ts=now_wall)
+                # ESPN's real clock (when matched) overrides the date heuristic: it
+                # confirms a match is actually in-play and gives the true minute, so
+                # the live monitor can open instead of waiting on a price move.
+                if board:
+                    _ep, _emin = espn.live_status(espn.match_score(board, home, away))
+                    if _ep:
+                        phase = _ep
+                        if _emin is not None:
+                            elapsed = _emin
                 if phase == match_clock.ENDED:
                     continue  # settled / over — nothing to price
 
@@ -407,14 +437,26 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 log(f"tick {tick}: analyst targets — {len(targets)}/{len(pregame_metas)} pregame "
                     f"match(es) within reach of the {config.caps.edge_threshold:.1%} bar "
                     f"(cap {config.analyst_max_calls}); the rest priced model-only to save tokens.", "cyan")
-            # Diagnostic: how close are the best matches to the edge bar? (model vs ask,
-            # pre-fee). If these are all negative the model agrees with the market —
-            # there's no edge to bet, regardless of risk tier.
+            # Diagnostics: liquidity (are there asks to buy?) + the closest match's
+            # per-side fair vs ask. This pins down WHY nothing trades — no ask
+            # (illiquid), a real negative edge (price agrees with sharp), or a hit.
+            _asks = sum(1 for mt in metas for m in mt["mkts"] if (m.get("yes_ask_cents") or 0) > 0)
+            _tot = sum(len(mt["mkts"]) for mt in metas) or 1
+            log(f"tick {tick}: liquidity — {_asks}/{_tot} contracts have a YES ask to buy"
+                + ("" if _asks else " (nothing to lift — no offers on these markets right now)") + ".",
+                "white" if _asks else "yellow")
             if pregame_metas:
-                _top = sorted(pregame_metas, key=lambda m: m["best_edge"], reverse=True)[:3]
-                log(f"tick {tick}: closest model edges (vs ask, pre-fee): "
-                    + "; ".join(f"{m['home']} {m['best_edge']:+.1%}" for m in _top)
-                    + f" — need > {config.caps.edge_threshold:.1%} to place.", "white")
+                m = max(pregame_metas, key=lambda x: x["best_edge"])
+                fused = m["fused"]
+                sides = []
+                for mk in m["mkts"]:
+                    prob = (fused.get(mk["market_type"], {}) or {}).get(mk["side"])
+                    ask = mk.get("yes_ask_cents") or 0
+                    if prob is not None:
+                        sides.append(f"{mk['side']} fair {prob:.0%} @ {ask}c"
+                                     + (f" → edge {prob - ask / 100.0:+.1%}" if ask > 0 else " (no ask)"))
+                log(f"tick {tick}: closest — {m['home']} v {m['away']}: " + "; ".join(sides)
+                    + f" (need > {config.caps.edge_threshold:.1%}).", "white")
 
             # 3c) Build the planner + monitor inputs (analyst only for the targets).
             fixtures_in, live_matches = [], []
@@ -572,11 +614,8 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
                 # 8b) Persist live-match cards (score + market probs + event + news +
                 # decisions) for the web/mobile live view.
-                from kalshi.live import cards as _cards, scoreboard as _sb
-                try:
-                    board = _sb.fetch_scoreboard()
-                except Exception:
-                    board = []
+                from kalshi.live import cards as _cards
+                _sb = espn   # reuse the board fetched in 2c
                 rows_by_fixture = {}
                 for r in live_rows:
                     rows_by_fixture.setdefault(r["fixture_id"], []).append(r)
@@ -657,6 +696,25 @@ def _fmt_adj(adj: dict) -> str:  # pragma: no cover - logging helper
     if not adj:
         return "no adjustment"
     return ", ".join(f"{k} {v:+.3f}" for k, v in adj.items())
+
+
+def price_cents(raw: dict, *keys) -> int:
+    """Read a Kalshi price field as integer cents, robust to scale. Kalshi prices
+    are 1..99 (cents) — but a feed that returns dollars (0.40) or a different key
+    would otherwise read as 0 and block all trading. >1 -> already cents; (0,1] ->
+    dollars*100; <=0 / unparseable -> try the next key, else 0."""
+    for k in keys:
+        v = (raw or {}).get(k)
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f <= 0:
+            continue
+        return int(round(f * 100)) if f <= 1.0 else int(round(f))
+    return 0
 
 
 ANALYST_ADJ_CAP = 0.05  # the analyst's bounded ±adjustment (matches analyst_panel)

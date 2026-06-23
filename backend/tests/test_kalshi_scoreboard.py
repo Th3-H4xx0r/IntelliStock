@@ -1,4 +1,18 @@
-from kalshi.live.scoreboard import match_score, parse_scoreboard
+from kalshi.live.scoreboard import clock_minutes, live_status, match_score, parse_scoreboard
+
+
+def test_clock_minutes():
+    assert clock_minutes("67'") == 67.0
+    assert clock_minutes("45'+7'") == 52.0
+    assert clock_minutes("") is None
+    assert clock_minutes("HT") is None
+
+
+def test_live_status_maps_state_and_clock():
+    assert live_status({"state": "in", "clock": "67'"}) == ("live", 67.0)
+    assert live_status({"state": "post"}) == ("ended", None)
+    assert live_status({"state": "pre"}) == ("pregame", None)
+    assert live_status(None) == (None, None)
 
 _ESPN = {
     "events": [{
