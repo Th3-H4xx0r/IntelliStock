@@ -59,6 +59,21 @@ class KalshiPosition {
       );
 }
 
+class KalshiInstance {
+  KalshiInstance({required this.id, required this.name, required this.running, required this.liveEnabled});
+  final String id;
+  final String name;
+  final bool running;
+  final bool liveEnabled;
+
+  factory KalshiInstance.fromJson(Map<String, dynamic> j) => KalshiInstance(
+        id: (j['id'] ?? '').toString(),
+        name: (j['name'] ?? 'Kalshi instance').toString(),
+        running: j['running'] == true,
+        liveEnabled: j['live_enabled'] == true,
+      );
+}
+
 // ── Repository ──────────────────────────────────────────────────────────────
 
 class KalshiRepository {
@@ -82,6 +97,17 @@ class KalshiRepository {
 
   Future<Map<String, dynamic>> kill(String bid) =>
       _client.post<Map<String, dynamic>>('/brokerages/$bid/kalshi/kill');
+
+  Future<List<KalshiInstance>> instances(String bid) async {
+    final d = await _client.get<Map<String, dynamic>>('/brokerages/$bid/kalshi/instances');
+    return ((d['instances'] as List?) ?? []).map((e) => KalshiInstance.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<void> createInstance(String bid, Map<String, dynamic> body) =>
+      _client.post('/brokerages/$bid/kalshi/instances', body: body);
+
+  Future<void> startInstance(String id) => _client.post('/instances/$id/start');
+  Future<void> stopInstance(String id) => _client.post('/instances/$id/stop');
 }
 
 final kalshiRepositoryProvider = Provider<KalshiRepository>(
@@ -104,4 +130,9 @@ final kalshiEdgesProvider =
 final kalshiPositionsProvider =
     FutureProvider.autoDispose.family<List<KalshiPosition>, String>((ref, bid) {
   return ref.watch(kalshiRepositoryProvider).positions(bid);
+});
+
+final kalshiInstancesProvider =
+    FutureProvider.autoDispose.family<List<KalshiInstance>, String>((ref, bid) {
+  return ref.watch(kalshiRepositoryProvider).instances(bid);
 });

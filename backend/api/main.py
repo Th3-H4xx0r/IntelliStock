@@ -4029,6 +4029,68 @@ def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_us
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
+# --- Kalshi instances (a Kalshi bot = an Instances row kind='kalshi') ---
+
+class CreateKalshiInstanceBody(BaseModel):
+    name: str = Field(..., min_length=1)
+    leagues: Optional[list[str]] = None
+    edge_threshold: Optional[float] = 0.03
+    kelly_fraction: Optional[float] = 0.25
+    max_contracts_per_market: Optional[int] = 50
+    max_open_exposure_frac: Optional[float] = 0.60
+    per_league_cap_frac: Optional[float] = 0.25
+    daily_loss_cap_dollars: Optional[float] = 0
+    bankroll_dollars: Optional[float] = 0
+    poll_seconds: Optional[int] = 60
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
+def api_kalshi_list_instances(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Kalshi bots bound to this brokerage (kind='kalshi'). Powers the Kalshi
+    tab's instance-awareness: no rows -> prompt to create one."""
+    _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("Instances")
+            .filter({"brokerage_id": brokerage_id, "kind": "kalshi"})
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+    out = [
+        {
+            "id": r0.get("id"),
+            "name": r0.get("name"),
+            "running": bool(r0.get("runCommand", False)),
+            "live_enabled": bool((r0.get("kalshi_config") or {}).get("live_enabled", False)),
+            "config": r0.get("kalshi_config") or {},
+        }
+        for r0 in rows
+    ]
+    return {"instances": out, "count": len(out)}
+
+
+@app.post("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
+def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Create a Kalshi trading instance bound to this brokerage. live execution
+    is ON at creation when the brokerage is a LIVE account (user choice)."""
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    import uuid as _uuid
+    from kalshi.instance_config import normalize_config, build_kalshi_instance_doc
+    from kalshi.db import ensure_tables as _ensure_kalshi_tables
+
+    live = (row.get("kalshi_environment") or "demo") == "live"
+    config = normalize_config(body.model_dump(), live_enabled=live)
+    iid = str(_uuid.uuid4())
+    doc = build_kalshi_instance_doc(iid, brokerage_id=brokerage_id, name=body.name.strip(), config=config)
+    _r_auth.db("IntelliStock").table("Instances").insert(doc, conflict="replace").run(conn)
+    try:
+        _ensure_kalshi_tables(conn)
+    except Exception:
+        pass
+    return {"ok": True, "id": iid, "name": doc["name"], "live_enabled": live, "running": False}
+
+
 class TestKalshiBody(BaseModel):
     kalshi_key_id: Optional[str] = ""
     kalshi_private_key: Optional[str] = ""

@@ -1087,6 +1087,7 @@ def action_instances(conn):
             "created_by",
             "brokerage_id",
             "max_usage",
+            "kind",
         )
         .run(conn)
     )
@@ -1102,6 +1103,10 @@ def action_instances(conn):
             "created_by": row.get("created_by", "user"),
             "brokerage_id": row.get("brokerage_id"),
             "max_usage": row.get("max_usage"),
+            # Additive: lets the equities Instances UI filter out kind='kalshi'
+            # bots (which have their own Kalshi-tab workflow). Stock instances
+            # have no 'kind', so this is None for them.
+            "kind": row.get("kind"),
         })
     return {"instances": instances}
 

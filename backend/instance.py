@@ -164,13 +164,34 @@ def start_broker(symbols):
         return
 
     instance_id = str(args_list[1])
-    time_increment = (current_granularity_time_increment or '60').strip()
-    # broker.py <instance_id> <mode> <start_date> <end_date> <time_increment> [SYM1 ...]
-    # Secrets are read from DB inside broker.py; NOT passed as argv.
-    cmd = [
-        'python', 'broker.py', instance_id, 'live',
-        'NULL', 'NULL', time_increment,
-    ] + list(symbols)
+    # Kalshi instances run the lean prediction-markets engine, NOT the equities
+    # broker. Dispatch on the Instances row's 'kind'. Equities instances (no
+    # 'kind') take the unchanged broker.py path below.
+    _kind = None
+    try:
+        _kc = get_conn()
+        try:
+            _kdoc = r.db(DB_NAME).table('Instances').get(instance_id).run(_kc) or {}
+            _kind = _kdoc.get('kind')
+        finally:
+            safe_close(_kc)
+    except Exception:
+        _kind = None
+
+    if _kind == 'kalshi':
+        # kalshi/runner.py reads kalshi_config + linked brokerage from the DB.
+        cmd = ['python', '-m', 'kalshi.runner', instance_id]
+        intellistock_logger.log(
+            f"Started Kalshi engine for instance {instance_id}", "green", service="INSTANCE",
+        )
+    else:
+        time_increment = (current_granularity_time_increment or '60').strip()
+        # broker.py <instance_id> <mode> <start_date> <end_date> <time_increment> [SYM1 ...]
+        # Secrets are read from DB inside broker.py; NOT passed as argv.
+        cmd = [
+            'python', 'broker.py', instance_id, 'live',
+            'NULL', 'NULL', time_increment,
+        ] + list(symbols)
     broker_process = subprocess.Popen(
         cmd,
         cwd=BACKEND_DIR,
