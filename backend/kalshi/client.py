@@ -1,0 +1,206 @@
+"""Kalshi v2 REST client with RSA-PSS auth. WebSocket prices/fills are exposed
+via `ws_url()` + `ws_headers()` for a consumer to connect (websocket-client is
+available in the env).
+
+Environments: 'demo' -> demo-api.kalshi.co (paper), 'live'/'prod' -> production.
+The exact production host is configurable and must be confirmed in Phase 0; the
+signed path is always the full `/trade-api/v2/...` path WITHOUT query string.
+
+The transport (a `requests`-like session with `.request(method, url, headers,
+params, json)`) is injectable so request construction is unit-tested without
+network or credentials.
+"""
+from __future__ import annotations
+
+import time
+from typing import Any, Optional
+
+from kalshi.signing import access_headers
+from kalshi.models import (
+    KalshiBalance,
+    KalshiContractPosition,
+    KalshiFill,
+    KalshiOrderRef,
+    KalshiMarket,
+)
+
+_API_PREFIX = "/trade-api/v2"
+_HOSTS = {
+    "demo": "https://demo-api.kalshi.co",
+    # Production host changed post-election-markets merger; confirm in Phase 0.
+    "live": "https://api.elections.kalshi.com",
+    "prod": "https://api.elections.kalshi.com",
+}
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+class KalshiClient:
+    def __init__(
+        self,
+        *,
+        key_id: str,
+        private_key_pem: str,
+        environment: str = "demo",
+        session: Any = None,
+        host: Optional[str] = None,
+        timeout: float = 15.0,
+    ):
+        self.key_id = key_id
+        self.private_key_pem = private_key_pem
+        self.environment = environment
+        self.host = host or _HOSTS.get(environment, _HOSTS["demo"])
+        self.timeout = timeout
+        if session is None:
+            import requests
+            session = requests.Session()
+        self._session = session
+
+    # --- low level ---
+    def _request(self, method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> Any:
+        full_path = _API_PREFIX + path
+        ts = _now_ms()
+        headers = access_headers(
+            key_id=self.key_id,
+            method=method,
+            path=full_path,  # sign the bare path; access_headers strips any query
+            ts_ms=ts,
+            private_key_pem=self.private_key_pem,
+        )
+        headers["Content-Type"] = "application/json"
+        url = self.host + full_path
+        resp = self._session.request(
+            method, url, headers=headers, params=params, json=body, timeout=self.timeout
+        )
+        resp.raise_for_status()
+        if resp.content:
+            return resp.json()
+        return {}
+
+    # --- portfolio ---
+    def get_balance(self) -> KalshiBalance:
+        d = self._request("GET", "/portfolio/balance")
+        cash = int(d.get("balance", 0))
+        return KalshiBalance(
+            cash_cents=cash,
+            portfolio_value_cents=int(d.get("portfolio_value", cash)),
+        )
+
+    def get_positions(self) -> list[KalshiContractPosition]:
+        d = self._request("GET", "/portfolio/positions")
+        out = []
+        for p in d.get("market_positions", []) or []:
+            qty = int(p.get("position", 0))
+            if qty == 0:
+                continue
+            out.append(
+                KalshiContractPosition(
+                    market_ticker=p.get("ticker", ""),
+                    side="YES" if qty > 0 else "NO",
+                    contracts=abs(qty),
+                    avg_price_cents=float(p.get("market_exposure", 0)) / max(abs(qty), 1),
+                )
+            )
+        return out
+
+    def get_fills(self, limit: int = 100) -> list[KalshiFill]:
+        d = self._request("GET", "/portfolio/fills", params={"limit": limit})
+        return [
+            KalshiFill(
+                market_ticker=f.get("ticker", ""),
+                side=f.get("side", ""),
+                action=f.get("action", ""),
+                contracts=int(f.get("count", 0)),
+                price_cents=int(f.get("yes_price", f.get("price", 0))),
+                ts=f.get("created_time", ""),
+            )
+            for f in (d.get("fills", []) or [])
+        ]
+
+    # --- markets ---
+    def get_markets(self, event_ticker: str) -> list[KalshiMarket]:
+        d = self._request("GET", "/markets", params={"event_ticker": event_ticker})
+        out = []
+        for m in d.get("markets", []) or []:
+            out.append(
+                KalshiMarket(
+                    market_ticker=m.get("ticker", ""),
+                    fixture_id=event_ticker,
+                    side=str(m.get("yes_sub_title", "")).lower() or "yes",
+                    yes_ask_cents=int(m.get("yes_ask", 0)),
+                )
+            )
+        return out
+
+    def get_orderbook(self, ticker: str) -> dict:
+        return self._request("GET", f"/markets/{ticker}/orderbook")
+
+    # --- orders ---
+    def submit_order(
+        self,
+        *,
+        market_ticker: str,
+        side: str,           # 'yes' | 'no'
+        action: str,         # 'buy' | 'sell'
+        contracts: int,
+        limit_cents: int,
+        client_order_id: str,
+    ) -> KalshiOrderRef:
+        body = {
+            "ticker": market_ticker,
+            "type": "limit",
+            "action": action,
+            "side": side,
+            "count": contracts,
+            "yes_price": limit_cents,
+            "client_order_id": client_order_id,
+        }
+        d = self._request("POST", "/portfolio/orders", body=body)
+        o = d.get("order", d)
+        return KalshiOrderRef(
+            client_order_id=client_order_id,
+            broker_order_id=o.get("order_id"),
+            market_ticker=market_ticker,
+            side=side.upper(),
+            action=action,
+            contracts=contracts,
+            limit_cents=limit_cents,
+            status=o.get("status", "pending"),
+        )
+
+    def cancel_order(self, order_id: str) -> bool:
+        self._request("DELETE", f"/portfolio/orders/{order_id}")
+        return True
+
+    def list_open_orders(self) -> list[str]:
+        d = self._request("GET", "/portfolio/orders", params={"status": "resting"})
+        return [o.get("order_id") for o in (d.get("orders", []) or []) if o.get("order_id")]
+
+    def cancel_all_open_orders(self) -> int:
+        """Kill-switch primitive: cancel every resting order. Returns the count
+        canceled."""
+        n = 0
+        for oid in self.list_open_orders():
+            try:
+                if self.cancel_order(oid):
+                    n += 1
+            except Exception:
+                continue
+        return n
+
+    # --- websocket ---
+    def ws_url(self) -> str:
+        scheme = "wss://" + self.host.split("://", 1)[-1]
+        return scheme + _API_PREFIX + "/ws"
+
+    def ws_headers(self) -> dict:
+        ts = _now_ms()
+        return access_headers(
+            key_id=self.key_id,
+            method="GET",
+            path=_API_PREFIX + "/ws",
+            ts_ms=ts,
+            private_key_pem=self.private_key_pem,
+        )
