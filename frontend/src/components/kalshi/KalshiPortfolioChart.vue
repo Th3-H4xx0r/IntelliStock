@@ -46,7 +46,21 @@ onMounted(load)
 watch(() => props.brokerageId, load)
 
 const positive = computed(() => dayChange.value >= 0)
-const chartSeries = computed(() => [{ name: 'Value', data: series.value }])
+
+// Slice the full server series to the selected range client-side (the backend
+// returns the whole snapshot history). 'ALL' shows everything; unparseable
+// timestamps fall through to the full series so the chart never goes blank.
+const displayed = computed(() => {
+  if (activeRange.value === 'ALL') return series.value
+  const days = { '1D': 1, '1W': 7, '1M': 30 }[activeRange.value] || 36500
+  const cutoff = Date.now() - days * 86400000
+  const sliced = series.value.filter(([ts]) => {
+    const t = Date.parse(ts)
+    return Number.isNaN(t) ? true : t >= cutoff
+  })
+  return sliced.length ? sliced : series.value
+})
+const chartSeries = computed(() => [{ name: 'Value', data: displayed.value }])
 const chartOptions = computed(() => ({
   chart: { type: 'area', height: 220, toolbar: { show: false }, animations: { enabled: false }, background: 'transparent' },
   theme: { mode: 'dark' },

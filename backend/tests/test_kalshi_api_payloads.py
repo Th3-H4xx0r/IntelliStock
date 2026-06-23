@@ -17,6 +17,14 @@ def test_portfolio_payload_empty():
     assert p["value"] == 0.0 and p["day_change"] == 0.0 and p["series"] == []
 
 
+def test_portfolio_payload_day_change_from_24h_baseline():
+    # day_change must be value - prev_value (24h baseline), NOT the whole-window
+    # delta. Here the window spans weeks but the 24h baseline is 481000.
+    snaps = [{"ts": "t0", "value_cents": 400000}, {"ts": "t1", "value_cents": 481000}]
+    p = portfolio_payload(snaps, value_cents=482014, cash_cents=0, prev_value_cents=481000)
+    assert p["day_change"] == round((482014 - 481000) / 100.0, 2)  # 10.14, not 820.14
+
+
 def test_edges_payload_sorted_limited():
     rows = [
         {"market_ticker": "A", "edge": 0.02},

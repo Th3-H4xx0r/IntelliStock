@@ -77,7 +77,7 @@ def plan_orders(
         e = compute_edge(fair_prob=fp, yes_ask_cents=m.yes_ask_cents, fee=fee)
         if e <= caps.edge_threshold:
             continue
-        n = size_order(edge=e, fair_prob=fp, yes_ask_cents=m.yes_ask_cents, caps=caps)
+        n = size_order(edge=e, yes_ask_cents=m.yes_ask_cents, caps=caps)
         if n <= 0:
             continue
         intents.append(

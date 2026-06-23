@@ -3934,7 +3934,16 @@ def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), curre
     except Exception:
         pass
     snaps = sorted(_kalshi_rows(conn, "kalshi_portfolio_snapshots", brokerage_id), key=lambda s: s.get("ts", ""))
-    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents)
+    # Baseline for a true "day change": value of the latest snapshot at or
+    # before 24h ago (falls back to the window delta inside portfolio_payload
+    # when there's no older snapshot).
+    import datetime as _dt
+    cutoff = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24)).isoformat()
+    prev_value_cents = None
+    for s in snaps:
+        if s.get("ts", "") <= cutoff:
+            prev_value_cents = int(s.get("value_cents", 0))
+    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents, prev_value_cents=prev_value_cents)
 
 
 @app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse)

@@ -9,13 +9,23 @@ from kalshi.clv import summarize_clv
 from kalshi.ingest_odds import budget_remaining, fixtures_per_day_budget
 
 
-def portfolio_payload(snapshot_rows: list[dict], *, value_cents: int, cash_cents: int) -> dict:
-    """Account value + equity curve. day_change is the window delta (first->last
-    snapshot) when snapshots exist."""
+def portfolio_payload(
+    snapshot_rows: list[dict],
+    *,
+    value_cents: int,
+    cash_cents: int,
+    prev_value_cents: int | None = None,
+) -> dict:
+    """Account value + equity curve. day_change is value - prev_value_cents (the
+    ~24h-ago baseline the caller resolves from raw snapshots). When no baseline
+    is given, falls back to the window delta (first->last snapshot)."""
     series = portfolio_series(snapshot_rows)
-    day_change = 0.0
-    if len(series) >= 2:
+    if prev_value_cents is not None:
+        day_change = round((value_cents - prev_value_cents) / 100.0, 2)
+    elif len(series) >= 2:
         day_change = round(series[-1]["value"] - series[0]["value"], 2)
+    else:
+        day_change = 0.0
     return {
         "value": round(value_cents / 100.0, 2),
         "cash": round(cash_cents / 100.0, 2),

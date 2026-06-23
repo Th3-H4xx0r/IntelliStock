@@ -9,15 +9,21 @@ import math
 from dataclasses import dataclass
 
 
-def quarter_kelly_fraction(*, edge: float, fair_prob: float) -> float:
-    """Binary-contract quarter-Kelly: 0.25 * edge / (1 - fair_prob).
+def quarter_kelly_fraction(*, edge: float, price_cents: float) -> float:
+    """Binary-contract quarter-Kelly: 0.25 * edge / (1 - price).
 
-    Full Kelly on a mis-estimated edge is the fastest path to ruin, and the
-    edge here IS mis-estimated. Non-positive edge -> no stake.
+    For a YES contract bought at price p (settling to $1), Kelly is
+    (fair - p) / (1 - p) — the denominator is 1 - PRICE, not 1 - fair_prob.
+    Using (1 - fair_prob) systematically over-sizes (the denominator is smaller
+    since fair > price for any +EV trade). `edge` is the fee-net edge, so the
+    numerator is already conservative. Full Kelly on a mis-estimated edge is the
+    fastest path to ruin, and the edge here IS mis-estimated. Non-positive edge
+    -> no stake.
     """
     if edge <= 0.0:
         return 0.0
-    denom = 1.0 - fair_prob
+    price = price_cents / 100.0
+    denom = 1.0 - price
     if denom <= 0.0:
         return 0.0
     return 0.25 * edge / denom
@@ -34,11 +40,11 @@ class RiskCaps:
     bankroll_cents: int = 0
 
 
-def size_order(*, edge: float, fair_prob: float, yes_ask_cents: float, caps: RiskCaps) -> int:
+def size_order(*, edge: float, yes_ask_cents: float, caps: RiskCaps) -> int:
     """Number of YES contracts to buy: quarter-Kelly stake / price, floored,
     clamped to the per-market cap. Returns 0 when there's no stake or no
     bankroll/price."""
-    frac = quarter_kelly_fraction(edge=edge, fair_prob=fair_prob)
+    frac = quarter_kelly_fraction(edge=edge, price_cents=yes_ask_cents)
     if frac <= 0.0 or caps.bankroll_cents <= 0 or yes_ask_cents <= 0:
         return 0
     stake_cents = frac * caps.bankroll_cents
