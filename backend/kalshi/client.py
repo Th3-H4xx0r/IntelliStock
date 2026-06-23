@@ -26,8 +26,9 @@ from kalshi.models import (
 
 _API_PREFIX = "/trade-api/v2"
 _HOSTS = {
-    "demo": "https://demo-api.kalshi.co",
-    # Production host changed post-election-markets merger; confirm in Phase 0.
+    # demo-api.kalshi.co is deprecated — it still serves reads but returns 410 Gone
+    # on order placement. The current demo Trade API root is external-api.demo.kalshi.co.
+    "demo": "https://external-api.demo.kalshi.co",
     "live": "https://api.elections.kalshi.com",
     "prod": "https://api.elections.kalshi.com",
 }

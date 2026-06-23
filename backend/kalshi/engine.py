@@ -260,6 +260,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     odds_cache: dict = {}       # sport_key -> {"ts": wall, "events": [...], "quota": int|None}
     espn_cache: dict = {"ts": 0.0, "board": []}   # ESPN live scores+clock (timing only, ~30s)
     raw_dumped = False           # one-time raw-market field dump (price diagnostics)
+    placed_markets: set = set()  # market_tickers already held/ordered — don't re-order
     odds_sport_keys = [k for k in (odds_api.sport_key_for_series(s)
                                    for s in discovery.DEFAULT_SOCCER_SERIES) if k]
     if not config.odds_api_key:
@@ -542,24 +543,39 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             log(f"tick {tick}: {len(decisions)} candidate(s) evaluated → {len(allocations)} to place "
                 f"(tier {config.tier}, edge > {config.caps.edge_threshold:.1%}).", "cyan")
 
-            # 5) Execute (gated) + 6) write decision rows.
+            # 5) Execute (gated) + 6) write decision rows. Fetch current positions
+            # first and skip markets we already hold or already ordered this run —
+            # so we don't re-submit the same order every tick.
             dry = not should_execute(config.environment, config.live_enabled)
+            try:
+                positions = client.get_positions()
+            except Exception as e:
+                log(f"tick {tick}: get_positions failed: {type(e).__name__}: {e}", "yellow")
+                positions = []
+            positions_by_ticker = {p.market_ticker: p for p in positions}
+            placed_markets |= set(positions_by_ticker)   # filled -> never re-order
+
             alloc_by_id = {a["id"]: a for a in allocations}
             for d in decisions:
                 a = alloc_by_id.get(f"{d['fixture_id']}|{d['market_ticker']}")
-                if a and not dry:
+                if a and d["market_ticker"] in placed_markets:
+                    log(f"tick {tick}: already positioned/ordered {d['market_ticker']} — skipping.", "white")
+                    d["decision"], d["block_reason"] = "skipped", "already positioned"
+                elif a and not dry:
                     try:
                         client.submit_order(
                             market_ticker=d["market_ticker"], side="yes", action="buy",
                             contracts=a["contracts"], limit_cents=a["price_cents"],
                             client_order_id=f"{config.instance_id}-{d['market_ticker']}-{ts}",
                         )
+                        placed_markets.add(d["market_ticker"])
                         log(f"tick {tick}: PLACED {a['contracts']}x {d['market_ticker']} @ {a['price_cents']}c "
                             f"(edge {(d['edge'] or 0):.1%}).", "green")
                     except Exception as e:
                         log(f"tick {tick}: order {d['market_ticker']} failed: {e}", "red")
                         d["decision"], d["block_reason"] = "blocked", str(e)
                 elif a and dry:
+                    placed_markets.add(d["market_ticker"])   # don't spam dry-run logs either
                     log(f"tick {tick}: DRY-RUN would place {a['contracts']}x {d['market_ticker']} @ "
                         f"{a['price_cents']}c (edge {(d['edge'] or 0):.1%}).", "cyan")
                 try:
@@ -569,13 +585,6 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
             # 8) Live in-match monitoring (two-way) for in-play matches.
             if config.live_monitoring and live_matches:
-                try:
-                    positions = client.get_positions()
-                except Exception as e:
-                    log(f"tick {tick}: get_positions failed: {type(e).__name__}: {e}", "yellow")
-                    positions = []
-                positions_by_ticker = {p.market_ticker: p for p in positions}
-
                 def _live_llm_tilt(match, mk, move):
                     """On a material move, re-read fresh news + ask the analyst for a
                     bounded tilt on the moved market's side (per-fixture 5-min cooldown)."""
@@ -604,6 +613,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     adds_by_match=adds_by_match, positions_by_ticker=positions_by_ticker,
                     caps=config.inplay_caps, dry_run=live_dry, instance_id=config.instance_id,
                     brokerage_id=config.brokerage_id, ts=ts, llm=_live_llm_tilt, log=log,
+                    already_placed=placed_markets,
                 )
                 acted = sum(1 for r in live_rows if r.get("decision") == "placed")
                 log(f"tick {tick}: live monitor — {len(live_matches)} in-play match(es), "

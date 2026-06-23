@@ -121,13 +121,23 @@ def make_llm_call(model_doc: dict | None, log=None, instance_id: str | None = No
         def _call(prompt: str) -> dict:
             try:
                 # Tag the call so its token usage is attributed to this instance on
-                # the Token Usage page (llm_utils records usage automatically).
+                # the Token Usage page. The structured path does NOT auto-record
+                # telemetry, so we read the usage it stashes and record it ourselves
+                # while still inside the context (which carries the instance_id).
                 with _llm_ctx(instance_id=instance_id, strategy="KalshiAnalyst", call_site="analyst"):
                     res = call_structured_llm_by_provider(
                         provider, api_key, model, prompt, _AnalystOut,
                         max_output_tokens=512, temperature=0.2,
                         provider_config=provider_config or None,
                     )
+                    try:
+                        import llm_utils as _lu
+                        from llm_telemetry import record_llm_call as _rec
+                        _usage = (getattr(_lu._LAST_STRUCTURED_LLM_CALL, "data", {}) or {}).get("usage") or {}
+                        if _usage:
+                            _rec(provider=provider, model=model, usage=_usage, ok=True)
+                    except Exception:
+                        pass
             except Exception as e:
                 _log(f"Analyst LLM call FAILED: {type(e).__name__}: {e}", "red")
                 return {}

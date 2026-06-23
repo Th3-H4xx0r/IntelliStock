@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from kalshi.decisions import decision_doc
 from kalshi.live.event_detect import detect_move
-from kalshi.live.live_decision import decide
+from kalshi.live.live_decision import LiveAction, decide
 from kalshi.live.live_fair import live_fair
 from kalshi.live.match_clock import LIVE
 
@@ -23,7 +23,7 @@ def _noop(*_a, **_k):
 def run_live_step(*, client, live_matches, price_history, adds_by_match,
                   positions_by_ticker, caps, dry_run, instance_id, brokerage_id, ts,
                   llm=None, log=_noop, move_threshold_cents: float = 8.0,
-                  max_history: int = 10) -> list[dict]:
+                  max_history: int = 10, already_placed=None) -> list[dict]:
     """For each live match's markets: update the rolling mid history, detect a
     material move, (on a move) get a bounded LLM tilt, compute hybrid live fair,
     decide open/add/reduce/exit/hold, execute (unless dry_run), and emit a
@@ -35,6 +35,7 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
     price_history / adds_by_match: mutable dicts persisted across ticks by the engine.
     positions_by_ticker: {market_ticker: KalshiContractPosition}.
     llm(match, market, move) -> tilt float in [-cap,cap] (optional)."""
+    already_placed = already_placed if already_placed is not None else set()
     rows: list[dict] = []
     for match in live_matches or []:
         fixture_id = match.get("fixture_id", "")
@@ -83,6 +84,8 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
             )
 
             executed = "skipped"
+            if action.kind == "open" and ticker in already_placed:
+                action = LiveAction("hold", 0, "already positioned/ordered")
             if action.contracts > 0 and action.kind in ("open", "add", "exit", "reduce"):
                 if dry_run:
                     executed = "skipped"
@@ -106,6 +109,8 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
                                 client_order_id=f"{instance_id}-live{action.kind}-{ticker}-{ts}",
                             )
                             executed = "placed"
+                            if action.kind in ("open", "add"):
+                                already_placed.add(ticker)
                             if action.kind == "add":
                                 adds_by_match[fixture_id] = int(adds_by_match.get(fixture_id, 0)) + 1
                             log(f"live {action.kind.upper()} {action.contracts}x {ticker} @ {price}c "

@@ -51,7 +51,7 @@ def test_get_balance_signs_correct_path_and_maps_dto():
 
     call = sess.calls[0]
     assert call["method"] == "GET"
-    assert call["url"] == "https://demo-api.kalshi.co/trade-api/v2/portfolio/balance"
+    assert call["url"] == "https://external-api.demo.kalshi.co/trade-api/v2/portfolio/balance"
     h = call["headers"]
     assert h["KALSHI-ACCESS-KEY"] == "abc"
     # the signature must verify over "{ts}GET/trade-api/v2/portfolio/balance"
