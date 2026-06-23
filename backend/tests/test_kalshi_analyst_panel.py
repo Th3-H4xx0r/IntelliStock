@@ -1,5 +1,13 @@
 from kalshi.feature_models import MatchFeatures, TeamForm
-from kalshi.intelligence.analyst_panel import analyze, build_prompt
+from kalshi.intelligence.analyst_panel import _normalize_provider, analyze, build_prompt
+
+
+def test_normalize_provider_maps_display_names_to_dispatch_keys():
+    assert _normalize_provider("AWS Bedrock") == "bedrock"
+    assert _normalize_provider("AWS Bedrock / Kimi-K2.5") == "bedrock"
+    assert _normalize_provider("Azure OpenAI") == "azure"
+    assert _normalize_provider("OpenAI") == "openai"
+    assert _normalize_provider("bedrock") == "bedrock"
 
 
 def _features():

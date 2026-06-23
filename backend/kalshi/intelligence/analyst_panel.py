@@ -61,21 +61,42 @@ def _default_llm_call(prompt: str) -> dict:  # pragma: no cover - integration
     return call_structured_llm(prompt=prompt, schema=schema) or {}
 
 
-def make_llm_call(model_doc: dict | None):  # pragma: no cover - integration
+def make_llm_call(model_doc: dict | None, log=None):  # pragma: no cover - integration
     """Build an llm_call(prompt)->dict bound to a chosen model (a Models-table row
     {provider, model, name, api_key}). Returns None if it can't be built, so the
-    analyst degrades to a no-op (the engine still trades on the statistical model)."""
+    analyst degrades to a no-op (the engine still trades on the statistical model).
+    `log(msg, color)` (optional) surfaces what's happening — which provider/model
+    is bound, each call, and the actual provider error when a call fails (otherwise
+    failures are invisible because the analyst swallows them)."""
+    def _log(msg, color="white"):
+        if log:
+            try:
+                log(msg, color)
+            except Exception:
+                pass
+
     if not model_doc:
+        _log("Analyst LLM: no model document — analyst disabled.", "yellow")
         return None
     try:
         from pydantic import BaseModel, Field
         from llm_utils import call_structured_llm_by_provider, resolve_api_key_for_provider
 
-        provider = (model_doc.get("provider") or "").strip()
-        model = (model_doc.get("model") or model_doc.get("name") or "").strip()
+        # The Models table may store the provider under a few different keys, and
+        # display names like "AWS Bedrock" must normalize to the dispatch key
+        # ("bedrock"). Likewise the model id may live under model/model_id/name.
+        provider_raw = (model_doc.get("provider") or model_doc.get("provider_key")
+                        or model_doc.get("type") or "").strip()
+        provider = _normalize_provider(provider_raw)
+        model = (model_doc.get("model") or model_doc.get("model_id")
+                 or model_doc.get("model_name") or model_doc.get("name") or "").strip()
         if not provider or not model:
+            _log(f"Analyst LLM: missing provider/model (provider={provider_raw!r}, "
+                 f"model={model!r}) — analyst disabled.", "yellow")
             return None
         api_key = (model_doc.get("api_key") or "").strip() or resolve_api_key_for_provider(provider)
+        _log(f"Analyst LLM bound: provider={provider!r} model={model!r} "
+             f"api_key={'set' if api_key else 'none(env)'}.", "white")
 
         class _AnalystOut(BaseModel):
             adjustments: dict = Field(default_factory=dict)
@@ -83,19 +104,51 @@ def make_llm_call(model_doc: dict | None):  # pragma: no cover - integration
             rationales: dict = Field(default_factory=dict)
 
         def _call(prompt: str) -> dict:
-            res = call_structured_llm_by_provider(
-                provider, api_key, model, prompt, _AnalystOut,
-                max_output_tokens=512, temperature=0.2,
-            )
+            try:
+                res = call_structured_llm_by_provider(
+                    provider, api_key, model, prompt, _AnalystOut,
+                    max_output_tokens=512, temperature=0.2,
+                )
+            except Exception as e:
+                _log(f"Analyst LLM call FAILED: {type(e).__name__}: {e}", "red")
+                return {}
             if isinstance(res, tuple):
                 res = res[0]
-            if hasattr(res, "model_dump"):
-                return res.model_dump()
-            return res if isinstance(res, dict) else {}
+            if res is None:
+                _log("Analyst LLM returned None (provider call failed or unsupported "
+                     f"provider {provider!r}) — match priced model-only.", "red")
+                return {}
+            out = res.model_dump() if hasattr(res, "model_dump") else (res if isinstance(res, dict) else {})
+            _log(f"Analyst LLM ok: adjustments={out.get('adjustments')} "
+                 f"shortlist={out.get('shortlist')}.", "cyan")
+            return out
 
         return _call
-    except Exception:
+    except Exception as e:
+        _log(f"Analyst LLM init failed: {type(e).__name__}: {e}", "red")
         return None
+
+
+_PROVIDER_ALIASES = {
+    "aws bedrock": "bedrock", "aws-bedrock": "bedrock", "amazon bedrock": "bedrock",
+    "bedrock converse": "bedrock", "azure openai": "azure", "azure-openai": "azure",
+    "open ai": "openai", "claude cli": "claude-cli", "codex cli": "codex-cli",
+    "google": "gemini", "google gemini": "gemini",
+}
+
+
+def _normalize_provider(raw: str) -> str:
+    """Map a stored/display provider name to the llm_utils dispatch key."""
+    k = " ".join((raw or "").strip().lower().split())
+    if k in _PROVIDER_ALIASES:
+        return _PROVIDER_ALIASES[k]
+    # "AWS Bedrock / Kimi-K2.5" style composites -> take the leading token group.
+    for needle, key in (("bedrock", "bedrock"), ("azure", "azure"), ("gemini", "gemini"),
+                        ("deepseek", "deepseek"), ("openai", "openai"), ("ollama", "ollama"),
+                        ("nvidia", "nvidia"), ("claude-cli", "claude-cli"), ("codex-cli", "codex-cli")):
+        if needle in k:
+            return key
+    return k
 
 
 def analyze(features, markets: list[str], *, news: str = "", llm_call=None, adj_cap: float = DEFAULT_ADJ_CAP) -> dict:

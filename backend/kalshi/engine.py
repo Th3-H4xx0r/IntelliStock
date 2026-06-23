@@ -219,20 +219,25 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     # Resolve the configured analyst LLM model (reads news + adjusts probabilities).
     # Optional: None -> the analyst is a no-op and the engine trades model-only.
     llm_call = None
+    _model_name = ""
     try:
         _cfg0 = inst.get("kalshi_config") or {} if (inst := kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn)) else {}
         _model_id = _cfg0.get("model")
         if _model_id:
             _mdoc = kdb._r.db(kdb.DB_NAME).table("Models").get(_model_id).run(conn) or {}
-            llm_call = make_llm_call(_mdoc)
-            log(f"Analyst LLM: {_mdoc.get('name') or _model_id} (reads injuries/lineups/news per match)."
-                if llm_call else f"Analyst LLM '{_model_id}' could not init — trading model-only.", "white")
+            _model_name = _mdoc.get("name") or _model_id
+            log(f"Resolving analyst LLM '{_model_name}' (provider={_mdoc.get('provider')!r})…", "white")
+            llm_call = make_llm_call(_mdoc, log=log)   # logs provider/model + every call's result/error
+            log(f"Analyst LLM ready: {_model_name} — reads injuries/lineups/news per match."
+                if llm_call else f"Analyst LLM '{_model_name}' could not init — trading model-only.",
+                "green" if llm_call else "yellow")
         else:
             log("No analyst LLM configured — trading on the statistical model only.", "white")
     except Exception as e:
-        log(f"Analyst LLM resolution failed ({e}); trading model-only.", "yellow")
+        log(f"Analyst LLM resolution failed ({type(e).__name__}: {e}); trading model-only.", "yellow")
 
     elo_table: dict = {}
+    analyst_cache: dict = {}   # event_ticker -> {"tick": int, "out": dict}; news+LLM TTL cache
     tick = 0
     while True:
         # Control-plane poll. A transient DB/connection blip must NOT kill the
@@ -278,7 +283,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 time.sleep(config.poll_seconds)
                 continue
 
-            # 3) Per-match: model pricing (national OR club Elo) + LLM analyst reading news.
+            # 3) Per-match: model pricing (national OR club Elo) + LLM analyst.
+            # The analyst reads match news (injuries/lineups/team news) and is cached
+            # per match for ~news_refresh_ticks so we don't re-hit Google News + the
+            # LLM every single minute (rate-limit + cost). News only changes slowly
+            # pre-match; the live-monitor (future) handles in-play re-reads.
+            news_refresh_ticks = max(1, int(1800 / max(1, config.poll_seconds)))  # ~30 min
             fixtures_in = []
             for event_ticker, mkts in by_event.items():
                 home = next((m["home"] for m in mkts if m["home"]), None)
@@ -298,20 +308,42 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
                 he, ae = _team_elo(home), _team_elo(away)
                 eg = elo_to_expected_goals(he, ae)
+                mtypes = sorted({m["market_type"] for m in mkts})
+                log(f"tick {tick}: {home} vs {away} — Elo {he:.0f}/{ae:.0f}, model xG "
+                    f"{eg[0]:.2f}/{eg[1]:.2f}; markets: {', '.join(mtypes)}.", "white")
 
-                analyst_out = {"adjustments": {}, "rationales": {}}
+                # LLM analyst (news-reading), cached per match.
+                analyst_out = {"adjustments": {}, "rationales": {}, "shortlist": []}
                 if llm_call is not None:
-                    try:
-                        news = summarize_news_items(fetch_match_news(home, away))
-                        feats = MatchFeatures(fixture_id=event_ticker, home=home, away=away,
-                                              home_form=TeamForm(elo=he), away_form=TeamForm(elo=ae))
-                        mtypes = sorted({m["market_type"] for m in mkts})
-                        analyst_out = analyst_analyze(feats, mtypes, news=news, llm_call=llm_call)
-                        rats = list((analyst_out.get("rationales") or {}).values())
-                        if rats:
-                            log(f"tick {tick}: analyst on {home} vs {away}: {rats[0]}", "white")
-                    except Exception as e:
-                        log(f"tick {tick}: analyst failed for {home} vs {away}: {e}", "yellow")
+                    cached = analyst_cache.get(event_ticker)
+                    if cached and (tick - cached["tick"]) < news_refresh_ticks:
+                        analyst_out = cached["out"]
+                        if analyst_out.get("adjustments"):
+                            age_m = ((tick - cached["tick"]) * config.poll_seconds) // 60
+                            log(f"tick {tick}:   ↳ analyst (cached {age_m}m): "
+                                f"{_fmt_adj(analyst_out['adjustments'])}.", "white")
+                    else:
+                        try:
+                            articles = fetch_match_news(home, away)
+                            news = summarize_news_items(articles)
+                            log(f"tick {tick}:   ↳ analyst: read {len(articles)} articles "
+                                f"(injuries/lineups/form) for {home} vs {away} → calling {_model_name}…", "white")
+                            feats = MatchFeatures(fixture_id=event_ticker, home=home, away=away,
+                                                  home_form=TeamForm(elo=he), away_form=TeamForm(elo=ae))
+                            analyst_out = analyst_analyze(feats, mtypes, news=news, llm_call=llm_call)
+                            analyst_cache[event_ticker] = {"tick": tick, "out": analyst_out}
+                            adj = analyst_out.get("adjustments") or {}
+                            rats = analyst_out.get("rationales") or {}
+                            if adj or rats:
+                                first_rat = next(iter(rats.values()), "")
+                                log(f"tick {tick}:   ↳ analyst {home} vs {away}: {_fmt_adj(adj)}"
+                                    + (f" — “{first_rat}”" if first_rat else "."), "cyan")
+                            else:
+                                log(f"tick {tick}:   ↳ analyst {home} vs {away}: no usable LLM output "
+                                    f"— priced on model+Elo only.", "yellow")
+                        except Exception as e:
+                            log(f"tick {tick}:   ↳ analyst failed for {home} vs {away}: "
+                                f"{type(e).__name__}: {e}", "yellow")
 
                 fixtures_in.append({
                     "fixture_id": event_ticker, "expected_goals": eg, "sharp_probs": {},
@@ -323,8 +355,6 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     ],
                     "liquidity": 500, "hours_to_kickoff": 24, "model_confidence": 0.6,
                 })
-                log(f"tick {tick}: {home} vs {away} — Elo {he:.0f}/{ae:.0f}, model xG {eg[0]:.2f}/{eg[1]:.2f} "
-                    f"({len(mkts)} markets).", "white")
 
             # 4) Plan + allocate across the forward book.
             ts = _iso_now()
@@ -386,6 +416,13 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 def _iso_now() -> str:  # pragma: no cover - thin clock wrapper
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _fmt_adj(adj: dict) -> str:  # pragma: no cover - logging helper
+    """Compact analyst-adjustment string for the live log, e.g. 'winner +0.030'."""
+    if not adj:
+        return "no adjustment"
+    return ", ".join(f"{k} {v:+.3f}" for k, v in adj.items())
 
 
 def execute_plan(client, intents: list[OrderIntent], *, dry_run: bool, cid_prefix: str) -> list[dict]:

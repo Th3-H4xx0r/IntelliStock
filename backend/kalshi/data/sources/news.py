@@ -17,15 +17,17 @@ def summarize_news_items(items: list, limit: int = 12) -> str:
     return "\n".join(lines)
 
 
-def fetch_match_news(home: str, away: str, *, max_total: int = 15) -> list:  # pragma: no cover - integration
-    """Recent news for the match: team news, injuries, lineups. Empty on failure
-    (the analyst then reasons from stats alone)."""
+def fetch_match_news(home: str, away: str, *, max_total: int = 18) -> list:  # pragma: no cover - integration
+    """Recent news for the match — the raw material the analyst reasons over:
+    match preview, predicted lineups / starting XI, injuries & suspensions, recent
+    form, and head-to-head. Empty on failure (analyst then reasons from stats alone)."""
     try:
         from strategies.google_news import fetch_google_news
         keywords = [
-            f"{home} {away}",
-            f"{home} team news injury lineup",
-            f"{away} team news injury lineup",
+            f"{home} vs {away} preview prediction",
+            f"{home} predicted lineup starting XI injury suspension team news",
+            f"{away} predicted lineup starting XI injury suspension team news",
+            f"{home} {away} head to head form",
         ]
         return fetch_google_news(keywords=keywords, max_total=max_total, max_results_per_keyword=6) or []
     except Exception:
