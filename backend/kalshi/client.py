@@ -75,8 +75,17 @@ class KalshiClient:
         resp = self._session.request(
             method, url, headers=headers, params=params, json=body, timeout=self.timeout
         )
-        resp.raise_for_status()
-        if resp.content:
+        # Surface the response body on 4xx/5xx — Kalshi returns a JSON {error/message}
+        # that names the offending field; raise_for_status alone discards it.
+        status = getattr(resp, "status_code", 200)
+        if status >= 400:
+            detail = ""
+            try:
+                detail = resp.text[:400]
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"Kalshi {method} {path} -> HTTP {status}: {detail}")
+        if getattr(resp, "content", None):
             return resp.json()
         return {}
 
@@ -174,8 +183,8 @@ class KalshiClient:
         body = {
             "ticker": market_ticker,
             "side": book_side,
-            "count": f"{int(contracts)}",
-            "price": f"{int(limit_cents) / 100:.4f}",
+            "count": f"{int(contracts)}.00",          # FixedPointCount (2dp per the spec example)
+            "price": f"{int(limit_cents) / 100:.4f}",  # FixedPointDollars
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
             "client_order_id": client_order_id,

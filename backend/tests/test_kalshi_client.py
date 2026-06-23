@@ -18,9 +18,11 @@ def _pem():
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, text=""):
         self._payload = payload
         self.content = b"x"
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self):
         pass
@@ -30,14 +32,16 @@ class _Resp:
 
 
 class _FakeSession:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, text=""):
         self.payload = payload
+        self.status_code = status_code
+        self.text = text
         self.calls = []
 
     def request(self, method, url, headers=None, params=None, json=None, timeout=None):
         self.calls.append({"method": method, "url": url, "headers": headers,
                            "params": params, "json": json})
-        return _Resp(self.payload)
+        return _Resp(self.payload, status_code=self.status_code, text=self.text)
 
 
 def test_get_balance_signs_correct_path_and_maps_dto():
@@ -76,7 +80,7 @@ def test_submit_order_builds_v2_body():
     body = sess.calls[0]["json"]
     assert body["ticker"] == "KXEPL-LEEDS-YES"
     # V2: fixed-point dollar strings + book side; buy YES -> bid.
-    assert body["count"] == "40" and body["price"] == "0.5200"
+    assert body["count"] == "40.00" and body["price"] == "0.5200"
     assert body["side"] == "bid"
     assert body["time_in_force"] == "good_till_canceled"
     assert body["self_trade_prevention_type"] == "taker_at_cross"
@@ -90,6 +94,16 @@ def test_submit_order_sell_maps_to_ask():
     c.submit_order(market_ticker="T", side="yes", action="sell",
                    contracts=5, limit_cents=30, client_order_id="c")
     assert sess.calls[0]["json"]["side"] == "ask"
+
+
+def test_http_error_surfaces_response_body():
+    import pytest
+    _, pem = _pem()
+    sess = _FakeSession({}, status_code=400, text='{"error":{"message":"invalid count"}}')
+    c = KalshiClient(key_id="abc", private_key_pem=pem, environment="demo", session=sess)
+    with pytest.raises(RuntimeError, match="invalid count"):
+        c.submit_order(market_ticker="T", side="yes", action="buy",
+                       contracts=1, limit_cents=50, client_order_id="c")
 
 
 def test_prod_environment_uses_prod_host():
