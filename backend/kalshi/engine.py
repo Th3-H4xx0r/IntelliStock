@@ -104,6 +104,8 @@ class EngineConfig:
     caps: RiskCaps
     fee_rate: float = 0.07
     poll_seconds: int = 60
+    tier: str = "medium"      # risk tier -> allowed market types
+    reserve_frac: float = 0.3
 
 
 def run_once(
@@ -205,6 +207,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         f"bankroll ${config.caps.bankroll_cents / 100:.0f} · edge > {config.caps.edge_threshold:.1%} · "
         f"¼-Kelly {config.caps.kelly_fraction}", "white")
 
+    from kalshi.quant.elo import elo_to_expected_goals
+    from kalshi.data.sources.clubelo import fetch_elo_table, elo_for
+    from kalshi.data import discovery
+    from kalshi.orchestrator import plan_and_allocate
+
+    elo_table: dict = {}
     tick = 0
     while True:
         inst = kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn) or {}
@@ -214,62 +222,96 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
         tick += 1
         try:
-            fixtures, fair_by_fixture = [], {}
-            for row in kdb._r.db(kdb.DB_NAME).table("kalshi_odds_snapshots").filter(
-                {"brokerage_id": config.brokerage_id}
-            ).run(conn):
-                fid = row.get("fixture_id")
-                q = parse_three_way(row, book="pinnacle")
-                if q is None or not fid:
-                    continue
-                fair_by_fixture[fid] = fair_from_odds(q, method="power")
-                fixtures.append(Fixture(
-                    fixture_id=fid, sport="soccer", league=row.get("league", ""),
-                    home=row.get("home", ""), away=row.get("away", ""),
-                    kickoff_utc=row.get("kickoff_utc", ""),
-                ))
+            # 1) Team strength (free ClubElo; refresh ~hourly worth of ticks).
+            if not elo_table or tick % 60 == 1:
+                elo_table = fetch_elo_table() or {}
+                log(f"tick {tick}: loaded {len(elo_table)} club Elo ratings.",
+                    "white" if elo_table else "yellow")
 
-            if not fixtures:
-                log(f"tick {tick}: no odds snapshots to scan yet (waiting on ingest).", "white")
-            else:
-                # Aggregate risk state so the max-exposure + daily-loss caps trip.
-                open_exposure_frac, day_pnl_cents = 0.0, 0
+            # 2) Discover open Kalshi markets.
+            raw = []
+            try:
+                raw = (client.list_markets(status="open", limit=200) or {}).get("markets", []) or []
+            except Exception as e:
+                log(f"tick {tick}: Kalshi market discovery failed: {type(e).__name__}: {e}", "red")
+            parsed = [discovery.parse_kalshi_market(m) for m in raw]
+            soccer = [p for p in parsed if p["market_type"] != "other" and p["home"] and p["away"]]
+            by_event = discovery.group_by_event(soccer)
+            log(f"tick {tick}: discovered {len(raw)} open markets → {len(soccer)} soccer, {len(by_event)} matches.", "cyan")
+            if not by_event:
+                sample = [m.get("ticker") for m in raw[:3]]
+                log(f"tick {tick}: no priceable soccer matches found. Soccer markets may be unavailable on "
+                    f"this {config.environment} account, or titles need a parser tweak. Sample tickers: {sample}", "yellow")
+                time.sleep(config.poll_seconds)
+                continue
+
+            # 3) Per-match model pricing from Elo.
+            fixtures_in = []
+            for event_ticker, mkts in by_event.items():
+                home = next((m["home"] for m in mkts if m["home"]), None)
+                away = next((m["away"] for m in mkts if m["away"]), None)
+                if not home or not away:
+                    continue
+                eg = elo_to_expected_goals(elo_for(elo_table, home), elo_for(elo_table, away))
+                fixtures_in.append({
+                    "fixture_id": event_ticker,
+                    "expected_goals": eg,
+                    "sharp_probs": {},
+                    "analyst": {"adjustments": {}, "rationales": {}},
+                    "kalshi_markets": [
+                        {"market_ticker": m["market_ticker"], "market_type": m["market_type"],
+                         "side": m["side"], "yes_ask_cents": m["yes_ask_cents"]}
+                        for m in mkts
+                    ],
+                    "liquidity": 500, "hours_to_kickoff": 24, "model_confidence": 0.55,
+                })
+                log(f"tick {tick}: {home} vs {away} — model xG {eg[0]:.2f}/{eg[1]:.2f} ({len(mkts)} markets).", "white")
+
+            # 4) Plan + allocate across the forward book.
+            ts = _iso_now()
+            plan = plan_and_allocate(
+                fixtures_in, instance_id=config.instance_id, brokerage_id=config.brokerage_id, ts=ts,
+                tier=config.tier, caps=config.caps, fee_rate=config.fee_rate,
+                edge_threshold=config.caps.edge_threshold, reserve_frac=config.reserve_frac,
+                expected_better_soon=False,
+            )
+            allocations, decisions = plan["allocations"], plan["decisions"]
+            log(f"tick {tick}: {len(decisions)} candidate(s) evaluated → {len(allocations)} to place "
+                f"(tier {config.tier}, edge > {config.caps.edge_threshold:.1%}).", "cyan")
+
+            # 5) Execute (gated) + 6) write decision rows.
+            dry = not should_execute(config.environment, config.live_enabled)
+            alloc_by_id = {a["id"]: a for a in allocations}
+            for d in decisions:
+                a = alloc_by_id.get(f"{d['fixture_id']}|{d['market_ticker']}")
+                if a and not dry:
+                    try:
+                        client.submit_order(
+                            market_ticker=d["market_ticker"], side="yes", action="buy",
+                            contracts=a["contracts"], limit_cents=a["price_cents"],
+                            client_order_id=f"{config.instance_id}-{d['market_ticker']}-{ts}",
+                        )
+                        log(f"tick {tick}: PLACED {a['contracts']}x {d['market_ticker']} @ {a['price_cents']}c "
+                            f"(edge {(d['edge'] or 0):.1%}).", "green")
+                    except Exception as e:
+                        log(f"tick {tick}: order {d['market_ticker']} failed: {e}", "red")
+                        d["decision"], d["block_reason"] = "blocked", str(e)
+                elif a and dry:
+                    log(f"tick {tick}: DRY-RUN would place {a['contracts']}x {d['market_ticker']} @ "
+                        f"{a['price_cents']}c (edge {(d['edge'] or 0):.1%}).", "cyan")
                 try:
-                    bank = max(1, config.caps.bankroll_cents)
-                    positions = client.get_positions()
-                    exposure_cents = sum(
-                        int(round((p.current_price_cents or p.avg_price_cents) * p.contracts)) for p in positions
-                    )
-                    open_exposure_frac = exposure_cents / bank
-                    snaps = sorted(
-                        kdb._r.db(kdb.DB_NAME).table("kalshi_portfolio_snapshots")
-                        .filter({"brokerage_id": config.brokerage_id}).run(conn),
-                        key=lambda s: s.get("ts", ""),
-                    )
-                    if snaps:
-                        bal0 = client.get_balance()
-                        day_pnl_cents = bal0.portfolio_value_cents - int(snaps[0].get("value_cents", bal0.portfolio_value_cents))
+                    kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(d, conflict="replace").run(conn)
                 except Exception:
                     pass
-                results = run_once(
-                    client=client, fixtures=fixtures, fair_by_fixture=fair_by_fixture,
-                    caps=config.caps, fee_rate=config.fee_rate, environment=config.environment,
-                    live_enabled=config.live_enabled, cid_prefix=config.instance_id,
-                    open_exposure_frac=open_exposure_frac, day_pnl_cents=day_pnl_cents,
-                )
-                flagged = sum(len(r0.get("results", [])) for r0 in results)
-                placed = sum(1 for r0 in results for x in r0.get("results", []) if x.get("submitted"))
-                blocked = [r0["fixture_id"] for r0 in results if r0.get("blocked")]
-                dry = " (dry-run, live gate off)" if flagged and not placed else ""
-                log(f"tick {tick}: scanned {len(fixtures)} fixtures → {flagged} edge order(s), {placed} placed{dry}."
-                    + (f" Risk-blocked: {', '.join(blocked)}" if blocked else ""), "cyan")
-                bal = client.get_balance()
-                kdb.save_portfolio_snapshot(
-                    conn, brokerage_id=config.brokerage_id, ts=_iso_now(),
-                    value_cents=bal.portfolio_value_cents, cash_cents=bal.cash_cents,
-                )
-                log(f"tick {tick}: portfolio ${bal.portfolio_value_cents / 100:.2f} "
-                    f"(cash ${bal.cash_cents / 100:.2f})", "white")
+
+            # 7) Snapshot.
+            bal = client.get_balance()
+            kdb.save_portfolio_snapshot(
+                conn, brokerage_id=config.brokerage_id, ts=ts,
+                value_cents=bal.portfolio_value_cents, cash_cents=bal.cash_cents,
+            )
+            log(f"tick {tick}: portfolio ${bal.portfolio_value_cents / 100:.2f} "
+                f"(cash ${bal.cash_cents / 100:.2f}).", "white")
         except Exception as e:
             log(f"tick {tick} error: {type(e).__name__}: {e}", "red")
 

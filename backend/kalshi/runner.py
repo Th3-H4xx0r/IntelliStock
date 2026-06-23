@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
             live_enabled=bool(cfg.get("live_enabled", False)),
             caps=risk_caps_from_config(cfg),
             poll_seconds=int(cfg.get("poll_seconds", 60)),
+            tier=str(cfg.get("tier", "medium")),
+            reserve_frac=float(cfg.get("reserve_frac", 0.3)),
         )
     )
     return 0

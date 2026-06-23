@@ -137,6 +137,23 @@ class KalshiClient:
     def get_orderbook(self, ticker: str) -> dict:
         return self._request("GET", f"/markets/{ticker}/orderbook")
 
+    def list_markets(self, *, status: str = "open", series_ticker: str | None = None,
+                     limit: int = 200, cursor: str | None = None) -> dict:
+        """Discover markets. Returns the raw {markets:[...], cursor} so the
+        caller can classify + paginate. Used by discovery to find soccer markets."""
+        params = {"status": status, "limit": max(1, min(int(limit), 1000))}
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", "/markets", params=params)
+
+    def get_events(self, *, series_ticker: str | None = None, status: str = "open", limit: int = 200) -> dict:
+        params = {"status": status, "limit": max(1, min(int(limit), 200))}
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        return self._request("GET", "/events", params=params)
+
     # --- orders ---
     def submit_order(
         self,
