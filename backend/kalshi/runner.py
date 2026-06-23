@@ -78,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             live_monitoring=bool(cfg.get("live_monitoring", True)),
             live_poll_seconds=int(cfg.get("live_poll_seconds", 30)),
             inplay_caps=inplay_caps_from_config(cfg),
+            analyst_max_calls=int(cfg.get("analyst_max_calls", 10)),
         )
     )
     return 0

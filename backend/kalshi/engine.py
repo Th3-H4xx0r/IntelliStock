@@ -110,6 +110,7 @@ class EngineConfig:
     live_monitoring: bool = True
     live_poll_seconds: int = 30
     inplay_caps: InPlayCaps = field(default_factory=InPlayCaps)
+    analyst_max_calls: int = 10   # cap on LLM analyst calls per tick (cost control)
 
 
 def run_once(
@@ -233,7 +234,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             _mdoc = kdb._r.db(kdb.DB_NAME).table("Models").get(_model_id).run(conn) or {}
             _model_name = _mdoc.get("name") or _model_id
             log(f"Resolving analyst LLM '{_model_name}' (provider={_mdoc.get('provider')!r})…", "white")
-            llm_call = make_llm_call(_mdoc, log=log)   # logs provider/model + every call's result/error
+            llm_call = make_llm_call(_mdoc, log=log, instance_id=config.instance_id)   # logs provider/model + every call; tags token usage
             log(f"Analyst LLM ready: {_model_name} — reads injuries/lineups/news per match."
                 if llm_call else f"Analyst LLM '{_model_name}' could not init — trading model-only.",
                 "green" if llm_call else "yellow")
@@ -298,14 +299,16 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 time.sleep(config.poll_seconds)
                 continue
 
-            # 3) Per-match: model pricing (national OR club Elo) + LLM analyst.
-            # Pregame matches go to the pre-match planner; LIVE matches go to the
-            # in-play monitor. The pre-match analyst reads match news (cached per
-            # match ~30 min, wall-clock, so we don't re-hit Google News + the LLM
-            # every minute); the live monitor re-reads on material price moves.
+            # 3) Per-match: phase split + model pricing. Pregame -> pre-match planner,
+            # LIVE -> in-play monitor. To control latency + LLM cost, the analyst runs
+            # ONLY on the most promising pregame matches: those whose best model edge is
+            # within the analyst's ±cap of the edge bar (so the LLM could plausibly tip
+            # them), capped at analyst_max_calls. Matches nowhere near tradeable are
+            # priced model-only — no tokens spent. Results cached per match ~30 min.
             news_refresh_secs = 1800
-            fixtures_in = []     # pregame/unknown -> pre-match planner
-            live_matches = []    # live -> in-play monitor
+
+            # 3a) Pre-pass: classify phase + model-price every match (no LLM yet).
+            metas = []
             for event_ticker, mkts in by_event.items():
                 home = next((m["home"] for m in mkts if m["home"]), None)
                 away = next((m["away"] for m in mkts if m["away"]), None)
@@ -319,25 +322,46 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 if phase == match_clock.ENDED:
                     continue  # settled / over — nothing to price
 
-                def _team_elo(name):
-                    # National series: always the national table (known -> rating,
-                    # unknown -> ~1600 national default). Club series: club table,
-                    # but honor a national side if one shows up.
-                    if national_series or is_national_team(name):
+                def _team_elo(name, _ns=national_series):
+                    if _ns or is_national_team(name):
                         return national_elo(name)
                     return elo_for(elo_table, name)
 
                 he, ae = _team_elo(home), _team_elo(away)
                 eg = elo_to_expected_goals(he, ae)
-                mtypes = sorted({m["market_type"] for m in mkts})
+                mp = model_market_probs(eg)
+                best_edge = -1.0
+                for m in mkts:
+                    prob = (mp.get(m["market_type"], {}) or {}).get(m["side"])
+                    ask = m.get("yes_ask_cents") or 0
+                    if prob is not None and ask > 0:
+                        best_edge = max(best_edge, prob - ask / 100.0)
+                metas.append({
+                    "id": event_ticker, "home": home, "away": away, "mkts": mkts, "eg": eg,
+                    "mp": mp, "he": he, "ae": ae, "phase": phase, "elapsed": elapsed,
+                    "mtypes": sorted({m["market_type"] for m in mkts}), "best_edge": best_edge,
+                })
+
+            # 3b) Pick the analyst targets (cost cap) among pregame matches.
+            pregame_metas = [m for m in metas if m["phase"] != match_clock.LIVE]
+            targets = (select_analyst_targets(
+                pregame_metas, edge_threshold=config.caps.edge_threshold,
+                max_calls=config.analyst_max_calls) if llm_call is not None else set())
+            if llm_call is not None:
+                log(f"tick {tick}: analyst targets — {len(targets)}/{len(pregame_metas)} pregame "
+                    f"match(es) within reach of the {config.caps.edge_threshold:.1%} bar "
+                    f"(cap {config.analyst_max_calls}); the rest priced model-only to save tokens.", "cyan")
+
+            # 3c) Build the planner + monitor inputs (analyst only for the targets).
+            fixtures_in, live_matches = [], []
+            for meta in metas:
+                home, away, mkts, eg, phase = meta["home"], meta["away"], meta["mkts"], meta["eg"], meta["phase"]
+                he, ae, elapsed, mtypes = meta["he"], meta["ae"], meta["elapsed"], meta["mtypes"]
                 log(f"tick {tick}: {home} vs {away} [{phase}] — Elo {he:.0f}/{ae:.0f}, model xG "
                     f"{eg[0]:.2f}/{eg[1]:.2f}; markets: {', '.join(mtypes)}.", "white")
 
                 if phase == match_clock.LIVE:
-                    # In-play -> the live monitor (two-way). Resolve each ticker's raw
-                    # model prob for the hybrid live fair value; the in-play LLM tilt
-                    # is applied on material moves inside the monitor.
-                    mp = model_market_probs(eg)
+                    mp = meta["mp"]
                     model_probs, mk_list = {}, []
                     for m in mkts:
                         model_probs[m["market_ticker"]] = (mp.get(m["market_type"], {}) or {}).get(m["side"])
@@ -347,16 +371,16 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                             "yes_bid_cents": m.get("yes_bid_cents", 0), "mid_cents": m.get("mid_cents"),
                         })
                     live_matches.append({
-                        "fixture_id": event_ticker, "home": home, "away": away,
+                        "fixture_id": meta["id"], "home": home, "away": away,
                         "phase": phase, "elapsed_min": elapsed,
                         "model_probs": model_probs, "markets": mk_list,
                     })
                     continue
 
-                # Pregame/unknown: pre-match analyst (news-reading), cached per match.
+                # Pregame: analyst only for selected targets (news-reading, cached).
                 analyst_out = {"adjustments": {}, "rationales": {}, "shortlist": []}
-                if llm_call is not None:
-                    cached = analyst_cache.get(event_ticker)
+                if llm_call is not None and meta["id"] in targets:
+                    cached = analyst_cache.get(meta["id"])
                     if cached and (now_wall - cached["ts"]) < news_refresh_secs:
                         analyst_out = cached["out"]
                         if analyst_out.get("adjustments"):
@@ -367,12 +391,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         try:
                             articles = fetch_match_news(home, away)
                             news = summarize_news_items(articles)
-                            log(f"tick {tick}:   ↳ analyst: read {len(articles)} articles "
-                                f"(injuries/lineups/form) for {home} vs {away} → calling {_model_name}…", "white")
-                            feats = MatchFeatures(fixture_id=event_ticker, home=home, away=away,
+                            log(f"tick {tick}:   ↳ analyst (edge {meta['best_edge']:+.1%}): read "
+                                f"{len(articles)} articles for {home} vs {away} → calling {_model_name}…", "white")
+                            feats = MatchFeatures(fixture_id=meta["id"], home=home, away=away,
                                                   home_form=TeamForm(elo=he), away_form=TeamForm(elo=ae))
                             analyst_out = analyst_analyze(feats, mtypes, news=news, llm_call=llm_call)
-                            analyst_cache[event_ticker] = {"ts": now_wall, "out": analyst_out}
+                            analyst_cache[meta["id"]] = {"ts": now_wall, "out": analyst_out}
                             adj = analyst_out.get("adjustments") or {}
                             rats = analyst_out.get("rationales") or {}
                             if adj or rats:
@@ -387,7 +411,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                                 f"{type(e).__name__}: {e}", "yellow")
 
                 fixtures_in.append({
-                    "fixture_id": event_ticker, "expected_goals": eg, "sharp_probs": {},
+                    "fixture_id": meta["id"], "expected_goals": eg, "sharp_probs": {},
                     "analyst": analyst_out,
                     "kalshi_markets": [
                         {"market_ticker": m["market_ticker"], "market_type": m["market_type"],
@@ -568,6 +592,21 @@ def _fmt_adj(adj: dict) -> str:  # pragma: no cover - logging helper
     if not adj:
         return "no adjustment"
     return ", ".join(f"{k} {v:+.3f}" for k, v in adj.items())
+
+
+ANALYST_ADJ_CAP = 0.05  # the analyst's bounded ±adjustment (matches analyst_panel)
+
+
+def select_analyst_targets(metas, *, edge_threshold: float, max_calls: int,
+                           llm_cap: float = ANALYST_ADJ_CAP) -> set:
+    """Choose which pregame matches get the costly LLM analyst this tick (latency +
+    cost control). A match is worth analyzing only if its best model edge is within
+    the analyst's ±cap of the edge bar — i.e. the LLM could plausibly tip it over.
+    Highest-edge first, capped at max_calls. metas: iterable of {"id", "best_edge"}.
+    Returns the set of ids to analyze."""
+    contestable = [m for m in metas if m.get("best_edge", -1.0) >= edge_threshold - llm_cap]
+    contestable.sort(key=lambda m: m.get("best_edge", -1.0), reverse=True)
+    return {m["id"] for m in contestable[:max(0, int(max_calls))]}
 
 
 def execute_plan(client, intents: list[OrderIntent], *, dry_run: bool, cid_prefix: str) -> list[dict]:

@@ -61,13 +61,23 @@ def _default_llm_call(prompt: str) -> dict:  # pragma: no cover - integration
     return call_structured_llm(prompt=prompt, schema=schema) or {}
 
 
-def make_llm_call(model_doc: dict | None, log=None):  # pragma: no cover - integration
+def make_llm_call(model_doc: dict | None, log=None, instance_id: str | None = None):  # pragma: no cover - integration
     """Build an llm_call(prompt)->dict bound to a chosen model (a Models-table row
     {provider, model, name, api_key}). Returns None if it can't be built, so the
     analyst degrades to a no-op (the engine still trades on the statistical model).
     `log(msg, color)` (optional) surfaces what's happening — which provider/model
     is bound, each call, and the actual provider error when a call fails (otherwise
-    failures are invisible because the analyst swallows them)."""
+    failures are invisible because the analyst swallows them). `instance_id` tags the
+    token usage so it shows on the Token Usage page, like regular instances."""
+    try:
+        from llm_telemetry import llm_call_context as _llm_ctx
+    except Exception:
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _llm_ctx(**_k):
+            yield
+
     def _log(msg, color="white"):
         if log:
             try:
@@ -110,11 +120,14 @@ def make_llm_call(model_doc: dict | None, log=None):  # pragma: no cover - integ
 
         def _call(prompt: str) -> dict:
             try:
-                res = call_structured_llm_by_provider(
-                    provider, api_key, model, prompt, _AnalystOut,
-                    max_output_tokens=512, temperature=0.2,
-                    provider_config=provider_config or None,
-                )
+                # Tag the call so its token usage is attributed to this instance on
+                # the Token Usage page (llm_utils records usage automatically).
+                with _llm_ctx(instance_id=instance_id, strategy="KalshiAnalyst", call_site="analyst"):
+                    res = call_structured_llm_by_provider(
+                        provider, api_key, model, prompt, _AnalystOut,
+                        max_output_tokens=512, temperature=0.2,
+                        provider_config=provider_config or None,
+                    )
             except Exception as e:
                 _log(f"Analyst LLM call FAILED: {type(e).__name__}: {e}", "red")
                 return {}

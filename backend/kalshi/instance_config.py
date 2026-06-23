@@ -44,6 +44,7 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         # Live in-match monitoring (Kalshi-price-only, two-way in-play).
         "live_monitoring": bool(raw.get("live_monitoring", True)),
         "live_poll_seconds": max(10, int(raw.get("live_poll_seconds", 30))),
+        "analyst_max_calls": max(0, int(raw.get("analyst_max_calls", 10))),
         "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", 0.25)),
         "max_adds_per_match": int(raw.get("max_adds_per_match", 3)),
         "no_add_after_min": float(raw.get("no_add_after_min", 80.0)),
