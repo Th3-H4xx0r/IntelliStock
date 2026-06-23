@@ -4051,6 +4051,12 @@ class CreateKalshiInstanceBody(BaseModel):
     max_adds_per_match: Optional[int] = 3
     no_add_after_min: Optional[float] = 80.0
     stop_loss_frac: Optional[float] = 0.5
+    # Sharp-odds anchor (fair value from de-vig'd bookmaker odds; edge vs Kalshi).
+    odds_api_key: Optional[str] = None
+    sharp_weight: Optional[float] = 0.7
+    devig_method: Optional[str] = "power"
+    odds_refresh_secs: Optional[int] = 3600
+    odds_regions: Optional[str] = "eu,uk,us"
 
 
 class UpdateKalshiInstanceBody(CreateKalshiInstanceBody):

@@ -49,6 +49,14 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "max_adds_per_match": int(raw.get("max_adds_per_match", 3)),
         "no_add_after_min": float(raw.get("no_add_after_min", 80.0)),
         "stop_loss_frac": float(raw.get("stop_loss_frac", 0.5)),
+        # Sharp-odds anchor (de-vig'd bookmaker odds -> fair value -> edge vs Kalshi).
+        "odds_api_key": str(raw.get("odds_api_key") or "").strip(),
+        "sharp_weight": min(1.0, max(0.0, float(raw.get("sharp_weight", 0.7)))),
+        "devig_method": (str(raw.get("devig_method") or "power").lower()
+                         if str(raw.get("devig_method") or "power").lower()
+                         in ("power", "shin", "proportional") else "power"),
+        "odds_refresh_secs": max(300, int(raw.get("odds_refresh_secs", 3600))),
+        "odds_regions": str(raw.get("odds_regions") or "eu,uk,us").strip() or "eu,uk,us",
     }
 
 

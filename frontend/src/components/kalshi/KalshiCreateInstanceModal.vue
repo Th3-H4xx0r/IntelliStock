@@ -57,6 +57,8 @@ const dailyLossTouched = ref(false)
 const dailyLossPct = ref(0.10)
 const poll = ref(60)
 const liveMonitoring = ref(true)
+const oddsApiKey = ref('')
+const sharpWeight = ref(70)
 const risk = ref('medium')
 const riskBlurb = computed(() => RISK_PRESETS[risk.value]?.blurb || '')
 
@@ -133,6 +135,8 @@ function prefillFromEdit() {
   if (c.bankroll_cents != null) manualBankroll.value = Math.round(c.bankroll_cents / 100)
   if (c.poll_seconds != null) poll.value = c.poll_seconds
   if (c.live_monitoring != null) liveMonitoring.value = !!c.live_monitoring
+  if (c.odds_api_key) oddsApiKey.value = c.odds_api_key
+  if (c.sharp_weight != null) sharpWeight.value = Math.round(c.sharp_weight * 100)
   if (c.tier) risk.value = c.tier
   if (c.model) selectedModel.value = c.model
 }
@@ -170,6 +174,8 @@ async function submit() {
       bankroll_dollars: effectiveBankroll.value,
       poll_seconds: Number(poll.value),
       live_monitoring: liveMonitoring.value,
+      odds_api_key: oddsApiKey.value.trim(),
+      sharp_weight: Number(sharpWeight.value) / 100,
       tier: risk.value,
       model: selectedModel.value || null,
     }
@@ -345,6 +351,20 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
             <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform" :class="liveMonitoring ? 'translate-x-4' : ''"></span>
           </span>
         </button>
+
+        <div class="rounded-lg border border-border-subtle bg-surface/50 px-3 py-3 space-y-3">
+          <label class="block">
+            <span class="flex items-center gap-1 text-sm font-medium text-slate-200 mb-1.5">Odds API key — sharp anchor
+              <InfoTip text="Anchor fair value to de-vig'd sharp bookmaker odds (The-Odds-API) so the bot bets where Kalshi disagrees with the books — the real edge. Free key at the-odds-api.com. Leave blank to price on the model only (rarely trades on efficient markets)." size="13px" /></span>
+            <input v-model="oddsApiKey" type="password" autocomplete="off" placeholder="the-odds-api.com key (optional)"
+                   class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+          </label>
+          <label class="block">
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Sharp weight ({{ sharpWeight }}%)
+              <InfoTip text="How much the sharp bookmaker line anchors fair value vs the in-house model. 70% = trust the books; lower leans on the model where books are thin." size="13px" /></span>
+            <input v-model.number="sharpWeight" type="range" min="0" max="100" step="5" class="w-full accent-primary" />
+          </label>
+        </div>
 
         <p v-if="isLive" class="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">⚠ LIVE account — live execution is ON at creation. Starting this instance trades real money.</p>
         <p v-if="err" class="text-xs text-red-400">{{ err }}</p>

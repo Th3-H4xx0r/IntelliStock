@@ -50,6 +50,14 @@ def _canon(name: str) -> str:
     return _NATIONAL_ALIASES.get(n, n)
 
 
+def canonical_team(name: str) -> str:
+    """Public canonical team name: normalize_team + national-alias folding (USA ->
+    United States, IR Iran -> Iran, …). Used to join Kalshi names to other feeds
+    (e.g. bookmaker odds) by EXACT match — safer than substring matching, which
+    confuses Guinea/Guinea-Bissau, the two Koreas, the two Congos."""
+    return _canon(name)
+
+
 def is_national_team(name: str) -> bool:
     return _canon(name) in _NATIONAL_ELO
 

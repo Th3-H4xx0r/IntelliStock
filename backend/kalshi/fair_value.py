@@ -24,6 +24,15 @@ def fair_from_odds(q: OddsQuote, method: str = "power") -> dict:
     return {"home": p[0], "draw": p[1], "away": p[2]}
 
 
+def sharp_probs_from_quote(quote, method: str = "power") -> dict:
+    """De-vig a 3-way OddsQuote into the ``sharp_probs`` shape the orchestrator +
+    build_market_probs expect: ``{"winner": {home, draw, away}}``. None quote -> ``{}``
+    (the engine then prices model-only)."""
+    if quote is None:
+        return {}
+    return {"winner": fair_from_odds(quote, method)}
+
+
 def blend_fair(sharp: dict, fallback: dict | None, sharp_weight: float = 1.0) -> dict:
     """Blend sharp-line fair value with a statistical fallback. With no
     fallback (thin-market coverage absent), returns the sharp value unchanged.

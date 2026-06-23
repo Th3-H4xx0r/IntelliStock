@@ -111,6 +111,12 @@ class EngineConfig:
     live_poll_seconds: int = 30
     inplay_caps: InPlayCaps = field(default_factory=InPlayCaps)
     analyst_max_calls: int = 10   # cap on LLM analyst calls per tick (cost control)
+    # Sharp-odds anchor: fair value from de-vig'd bookmaker odds -> edge vs Kalshi.
+    odds_api_key: str = ""
+    sharp_weight: float = 0.7
+    devig_method: str = "power"
+    odds_refresh_secs: int = 3600
+    odds_regions: str = "eu,uk,us"
 
 
 def run_once(
@@ -219,8 +225,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     from kalshi.data import discovery
     from kalshi.feature_models import MatchFeatures, TeamForm
     from kalshi.intelligence.analyst_panel import analyze as analyst_analyze, make_llm_call
-    from kalshi.intelligence.pricing import model_market_probs
+    from kalshi.intelligence.pricing import build_market_probs, model_market_probs
     from kalshi.live import match_clock, monitor as live_monitor
+    from kalshi.data.sources import odds_api
+    from kalshi.fair_value import sharp_probs_from_quote
     from kalshi.orchestrator import plan_and_allocate
 
     # Resolve the configured analyst LLM model (reads news + adjusts probabilities).
@@ -249,6 +257,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     adds_by_match: dict = {}    # fixture_id -> in-play add count
     live_llm_cd: dict = {}      # fixture_id -> wall ts of last in-play LLM read (cooldown)
     live_news_cache: dict = {}  # fixture_id -> {"ts": wall, "snip": str}; live-card news (5 min)
+    odds_cache: dict = {}       # sport_key -> {"ts": wall, "events": [...], "quota": int|None}
+    odds_sport_keys = [k for k in (odds_api.sport_key_for_series(s)
+                                   for s in discovery.DEFAULT_SOCCER_SERIES) if k]
+    if not config.odds_api_key:
+        log("No odds API key — pricing model-only. Set odds_api_key (or ODDS_API_KEY env) "
+            "to anchor fair value to sharp bookmaker odds and trade where Kalshi disagrees.", "yellow")
     tick = 0
     while True:
         # Control-plane poll. A transient DB/connection blip must NOT kill the
@@ -299,6 +313,32 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 time.sleep(config.poll_seconds)
                 continue
 
+            # 2b) Sharp-odds anchor: refresh bookmaker odds (cached + budget-aware) so
+            # fair value is anchored to the de-vig'd sharp consensus, not the model
+            # alone. Odds are environment-agnostic (same on demo + live) — only the
+            # Kalshi price we compare against differs.
+            all_events = []
+            if config.odds_api_key:
+                for sk in odds_sport_keys:
+                    c = odds_cache.get(sk)
+                    if c and (now_wall - c["ts"]) < config.odds_refresh_secs:
+                        all_events.extend(c["events"])
+                        continue
+                    if c and c.get("quota") is not None and c["quota"] <= 1:
+                        all_events.extend(c["events"])   # out of monthly quota — reuse cache
+                        if tick % 30 == 1:
+                            log(f"tick {tick}: odds quota exhausted for {sk}; reusing cached odds.", "yellow")
+                        continue
+                    evs, quota = odds_api.fetch_events(sk, config.odds_api_key, regions=config.odds_regions)
+                    odds_cache[sk] = {"ts": now_wall, "events": evs, "quota": quota}
+                    all_events.extend(evs)
+                    try:
+                        kdb.bump_scan_budget(conn, _iso_now())
+                    except Exception:
+                        pass
+                    log(f"tick {tick}: sharp odds — fetched {len(evs)} events for {sk}"
+                        + (f" (quota left {quota})" if quota is not None else "") + ".", "white")
+
             # 3) Per-match: phase split + model pricing. Pregame -> pre-match planner,
             # LIVE -> in-play monitor. To control latency + LLM cost, the analyst runs
             # ONLY on the most promising pregame matches: those whose best model edge is
@@ -329,18 +369,34 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
                 he, ae = _team_elo(home), _team_elo(away)
                 eg = elo_to_expected_goals(he, ae)
-                mp = model_market_probs(eg)
+                # Sharp anchor: de-vig the matched bookmaker odds, then fuse sharp+model.
+                # No match -> sharp_probs={} -> fused == model (degrade-safe).
+                sharp = {}
+                if all_events:
+                    ev = odds_api.match_event(all_events, home, away)
+                    if ev:
+                        sharp = sharp_probs_from_quote(odds_api.quote_for_event(ev), config.devig_method)
+                fused = build_market_probs(eg, sharp, {}, w_sharp=config.sharp_weight)
                 best_edge = -1.0
                 for m in mkts:
-                    prob = (mp.get(m["market_type"], {}) or {}).get(m["side"])
+                    prob = (fused.get(m["market_type"], {}) or {}).get(m["side"])
                     ask = m.get("yes_ask_cents") or 0
                     if prob is not None and ask > 0:
                         best_edge = max(best_edge, prob - ask / 100.0)
                 metas.append({
                     "id": event_ticker, "home": home, "away": away, "mkts": mkts, "eg": eg,
-                    "mp": mp, "he": he, "ae": ae, "phase": phase, "elapsed": elapsed,
+                    "fused": fused, "sharp_probs": sharp, "sharp_matched": bool(sharp),
+                    "he": he, "ae": ae, "phase": phase, "elapsed": elapsed,
                     "mtypes": sorted({m["market_type"] for m in mkts}), "best_edge": best_edge,
                 })
+
+            # Sharp-odds coverage this tick.
+            if config.odds_api_key:
+                _matched = sum(1 for m in metas if m["sharp_matched"])
+                log(f"tick {tick}: sharp anchor — matched {_matched}/{len(metas)} match(es) to "
+                    f"bookmaker odds (w_sharp {config.sharp_weight:.0%}); edge = sharp vs Kalshi price."
+                    + ("" if _matched else " No matches found in the odds feed — priced model-only."),
+                    "cyan" if _matched else "yellow")
 
             # 3b) Pick the analyst targets (cost cap) among pregame matches.
             pregame_metas = [m for m in metas if m["phase"] != match_clock.LIVE]
@@ -369,10 +425,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     f"{eg[0]:.2f}/{eg[1]:.2f}; markets: {', '.join(mtypes)}.", "white")
 
                 if phase == match_clock.LIVE:
-                    mp = meta["mp"]
+                    fused = meta["fused"]   # sharp-anchored when odds matched, else model
                     model_probs, mk_list = {}, []
                     for m in mkts:
-                        model_probs[m["market_ticker"]] = (mp.get(m["market_type"], {}) or {}).get(m["side"])
+                        model_probs[m["market_ticker"]] = (fused.get(m["market_type"], {}) or {}).get(m["side"])
                         mk_list.append({
                             "market_ticker": m["market_ticker"], "side": m["side"],
                             "market_type": m["market_type"], "yes_ask_cents": m["yes_ask_cents"],
@@ -419,7 +475,8 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                                 f"{type(e).__name__}: {e}", "yellow")
 
                 fixtures_in.append({
-                    "fixture_id": meta["id"], "expected_goals": eg, "sharp_probs": {},
+                    "fixture_id": meta["id"], "expected_goals": eg,
+                    "sharp_probs": meta["sharp_probs"],
                     "analyst": analyst_out,
                     "kalshi_markets": [
                         {"market_ticker": m["market_ticker"], "market_type": m["market_type"],
@@ -435,7 +492,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 fixtures_in, instance_id=config.instance_id, brokerage_id=config.brokerage_id, ts=ts,
                 tier=config.tier, caps=config.caps, fee_rate=config.fee_rate,
                 edge_threshold=config.caps.edge_threshold, reserve_frac=config.reserve_frac,
-                expected_better_soon=False,
+                expected_better_soon=False, w_sharp=config.sharp_weight,
             )
             allocations, decisions = plan["allocations"], plan["decisions"]
             log(f"tick {tick}: {len(decisions)} candidate(s) evaluated → {len(allocations)} to place "

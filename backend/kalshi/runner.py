@@ -79,6 +79,12 @@ def main(argv: list[str] | None = None) -> int:
             live_poll_seconds=int(cfg.get("live_poll_seconds", 30)),
             inplay_caps=inplay_caps_from_config(cfg),
             analyst_max_calls=int(cfg.get("analyst_max_calls", 10)),
+            odds_api_key=(str(cfg.get("odds_api_key") or "").strip()
+                          or __import__("os").environ.get("ODDS_API_KEY", "").strip()),
+            sharp_weight=float(cfg.get("sharp_weight", 0.7)),
+            devig_method=str(cfg.get("devig_method", "power")),
+            odds_refresh_secs=int(cfg.get("odds_refresh_secs", 3600)),
+            odds_regions=str(cfg.get("odds_regions", "eu,uk,us")),
         )
     )
     return 0

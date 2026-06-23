@@ -558,6 +558,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   final _dailyLoss = TextEditingController(text: '100');
   final _poll = TextEditingController(text: '60');
   final _manualBankroll = TextEditingController(text: '1000');
+  final _oddsKey = TextEditingController();
+  double _sharpWeight = 70;
   final Set<String> _leagues = {'EPL', 'Serie B', 'Ligue 2'};
   double _usagePct = 50;
   double _balance = 0;
@@ -657,6 +659,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'bankroll_dollars': _effectiveBankroll,
         'poll_seconds': _i(_poll, 60),
         'live_monitoring': _liveMonitoring,
+        'odds_api_key': _oddsKey.text.trim(),
+        'sharp_weight': _sharpWeight / 100,
         'tier': _risk,
         'model': _selectedModel,
       });
@@ -793,6 +797,23 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                   ),
                   const SizedBox(height: 12),
 
+                  // Sharp-odds anchor
+                  _label('Odds API key — sharp anchor',
+                      'Anchor fair value to de-vig\'d sharp bookmaker odds (the-odds-api.com) so it bets where Kalshi disagrees with the books. Free key. Blank = model-only (rarely trades).'),
+                  _field(_oddsKey, 'Odds API key', hint: 'the-odds-api.com key (optional)', obscure: true),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4, bottom: 12),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('Sharp weight: ${_sharpWeight.round()}%', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+                      Slider(
+                        value: _sharpWeight, min: 0, max: 100, divisions: 20,
+                        activeColor: AppColors.primary,
+                        label: '${_sharpWeight.round()}%',
+                        onChanged: (v) => setState(() => _sharpWeight = v),
+                      ),
+                    ]),
+                  ),
+
                   _field(_name, 'Instance name', hint: 'e.g. Soccer edge — demo'),
 
                   // Leagues multi-select chips
@@ -912,7 +933,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.primary)),
       );
 
-  Widget _field(TextEditingController c, String label, {String? hint, bool number = false}) => Padding(
+  Widget _field(TextEditingController c, String label, {String? hint, bool number = false, bool obscure = false}) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -921,6 +942,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
             const SizedBox(height: 6),
             TextField(
               controller: c,
+              obscureText: obscure,
               keyboardType: number ? const TextInputType.numberWithOptions(decimal: true) : TextInputType.text,
               style: AppTextStyles.body.copyWith(color: AppColors.textHi),
               decoration: _dec(hint),
