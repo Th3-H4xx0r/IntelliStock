@@ -1,4 +1,25 @@
-from kalshi.data.discovery import extract_teams, parse_kalshi_market, group_by_event
+from kalshi.data.discovery import (
+    DEFAULT_SOCCER_SERIES,
+    extract_teams,
+    parse_kalshi_market,
+    group_by_event,
+)
+
+
+def test_world_cup_series_is_discovered():
+    # World Cup series ticker (KXWCGAME) must be in the default scan set.
+    assert "KXWCGAME" in DEFAULT_SOCCER_SERIES
+
+
+def test_parse_world_cup_winner_sides_home_away_draw():
+    # Real Kalshi World Cup shape: Argentina vs Austria with Argentina/Austria/Tie.
+    base = {"event_ticker": "KXWCGAME-26JUN22ARGAUT", "title": "Argentina vs Austria", "yes_ask": 60}
+    home = parse_kalshi_market({**base, "ticker": "KXWCGAME-...-ARG", "yes_sub_title": "Argentina"})
+    away = parse_kalshi_market({**base, "ticker": "KXWCGAME-...-AUT", "yes_sub_title": "Austria"})
+    tie = parse_kalshi_market({**base, "ticker": "KXWCGAME-...-TIE", "yes_sub_title": "Tie"})
+    assert (home["market_type"], home["side"]) == ("winner", "home")
+    assert (away["market_type"], away["side"]) == ("winner", "away")
+    assert (tie["market_type"], tie["side"]) == ("winner", "draw")
 
 
 def test_extract_teams_common_formats():

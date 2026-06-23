@@ -30,12 +30,14 @@ def elo_for(table: dict, team_name: str, default: float = 1500.0) -> float:
 
 
 def fetch_elo_table(date_iso: str | None = None) -> dict:  # pragma: no cover - integration
-    """Fetch the current ClubElo table. Returns {} on any failure (engine then
-    falls back to default Elo / sharp-only)."""
+    """Fetch the ClubElo table for a date (ClubElo's endpoint is /YYYY-MM-DD; the
+    bare / does NOT return the table). Returns {} on any failure."""
     try:
         import requests
-        url = f"http://api.clubelo.com/{date_iso}" if date_iso else "http://api.clubelo.com/"
-        resp = requests.get(url, timeout=20)
+        import datetime
+        if not date_iso:
+            date_iso = datetime.date.today().isoformat()
+        resp = requests.get(f"http://api.clubelo.com/{date_iso}", timeout=20)
         resp.raise_for_status()
         return parse_clubelo_csv(resp.text)
     except Exception:

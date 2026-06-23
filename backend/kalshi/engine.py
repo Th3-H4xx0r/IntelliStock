@@ -208,14 +208,41 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         f"¼-Kelly {config.caps.kelly_fraction}", "white")
 
     from kalshi.quant.elo import elo_to_expected_goals
+    from kalshi.quant.national_elo import is_national_team, national_elo
     from kalshi.data.sources.clubelo import fetch_elo_table, elo_for
+    from kalshi.data.sources.news import fetch_match_news, summarize_news_items
     from kalshi.data import discovery
+    from kalshi.feature_models import MatchFeatures, TeamForm
+    from kalshi.intelligence.analyst_panel import analyze as analyst_analyze, make_llm_call
     from kalshi.orchestrator import plan_and_allocate
+
+    # Resolve the configured analyst LLM model (reads news + adjusts probabilities).
+    # Optional: None -> the analyst is a no-op and the engine trades model-only.
+    llm_call = None
+    try:
+        _cfg0 = inst.get("kalshi_config") or {} if (inst := kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn)) else {}
+        _model_id = _cfg0.get("model")
+        if _model_id:
+            _mdoc = kdb._r.db(kdb.DB_NAME).table("Models").get(_model_id).run(conn) or {}
+            llm_call = make_llm_call(_mdoc)
+            log(f"Analyst LLM: {_mdoc.get('name') or _model_id} (reads injuries/lineups/news per match)."
+                if llm_call else f"Analyst LLM '{_model_id}' could not init — trading model-only.", "white")
+        else:
+            log("No analyst LLM configured — trading on the statistical model only.", "white")
+    except Exception as e:
+        log(f"Analyst LLM resolution failed ({e}); trading model-only.", "yellow")
 
     elo_table: dict = {}
     tick = 0
     while True:
-        inst = kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn) or {}
+        # Control-plane poll. A transient DB/connection blip must NOT kill the
+        # 24/7 engine — log and retry next tick instead of propagating.
+        try:
+            inst = kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn) or {}
+        except Exception as e:
+            log(f"control-plane poll failed ({type(e).__name__}: {e}); retrying next tick.", "yellow")
+            time.sleep(config.poll_seconds)
+            continue
         if not inst.get("runCommand", False):
             log("runCommand=False — stopping engine.", "yellow")
             break
@@ -228,44 +255,65 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 log(f"tick {tick}: loaded {len(elo_table)} club Elo ratings.",
                     "white" if elo_table else "yellow")
 
-            # 2) Discover open Kalshi markets.
-            raw = []
-            try:
-                raw = (client.list_markets(status="open", limit=200) or {}).get("markets", []) or []
-            except Exception as e:
-                log(f"tick {tick}: Kalshi market discovery failed: {type(e).__name__}: {e}", "red")
-            parsed = [discovery.parse_kalshi_market(m) for m in raw]
-            soccer = [p for p in parsed if p["market_type"] != "other" and p["home"] and p["away"]]
+            # 2) Discover open Kalshi soccer markets by series (World Cup = KXWCGAME).
+            soccer, total_raw = [], 0
+            for series in discovery.DEFAULT_SOCCER_SERIES:
+                try:
+                    rs = (client.list_markets(status="open", series_ticker=series, limit=500) or {}).get("markets", []) or []
+                except Exception as e:
+                    log(f"tick {tick}: list_markets({series}) failed: {type(e).__name__}: {e}", "red")
+                    rs = []
+                total_raw += len(rs)
+                for m in rs:
+                    p = discovery.parse_kalshi_market(m)
+                    if p["market_type"] != "other" and p["home"] and p["away"]:
+                        soccer.append(p)
             by_event = discovery.group_by_event(soccer)
-            log(f"tick {tick}: discovered {len(raw)} open markets → {len(soccer)} soccer, {len(by_event)} matches.", "cyan")
+            log(f"tick {tick}: scanned series {discovery.DEFAULT_SOCCER_SERIES} → {total_raw} markets, "
+                f"{len(soccer)} priceable, {len(by_event)} matches.", "cyan")
             if not by_event:
-                sample = [m.get("ticker") for m in raw[:3]]
-                log(f"tick {tick}: no priceable soccer matches found. Soccer markets may be unavailable on "
-                    f"this {config.environment} account, or titles need a parser tweak. Sample tickers: {sample}", "yellow")
+                log(f"tick {tick}: no priceable soccer matches in {discovery.DEFAULT_SOCCER_SERIES}. "
+                    f"Add your leagues' series tickers to discovery.DEFAULT_SOCCER_SERIES.", "yellow")
                 time.sleep(config.poll_seconds)
                 continue
 
-            # 3) Per-match model pricing from Elo.
+            # 3) Per-match: model pricing (national OR club Elo) + LLM analyst reading news.
             fixtures_in = []
             for event_ticker, mkts in by_event.items():
                 home = next((m["home"] for m in mkts if m["home"]), None)
                 away = next((m["away"] for m in mkts if m["away"]), None)
                 if not home or not away:
                     continue
-                eg = elo_to_expected_goals(elo_for(elo_table, home), elo_for(elo_table, away))
+                he = national_elo(home) if is_national_team(home) else elo_for(elo_table, home)
+                ae = national_elo(away) if is_national_team(away) else elo_for(elo_table, away)
+                eg = elo_to_expected_goals(he, ae)
+
+                analyst_out = {"adjustments": {}, "rationales": {}}
+                if llm_call is not None:
+                    try:
+                        news = summarize_news_items(fetch_match_news(home, away))
+                        feats = MatchFeatures(fixture_id=event_ticker, home=home, away=away,
+                                              home_form=TeamForm(elo=he), away_form=TeamForm(elo=ae))
+                        mtypes = sorted({m["market_type"] for m in mkts})
+                        analyst_out = analyst_analyze(feats, mtypes, news=news, llm_call=llm_call)
+                        rats = list((analyst_out.get("rationales") or {}).values())
+                        if rats:
+                            log(f"tick {tick}: analyst on {home} vs {away}: {rats[0]}", "white")
+                    except Exception as e:
+                        log(f"tick {tick}: analyst failed for {home} vs {away}: {e}", "yellow")
+
                 fixtures_in.append({
-                    "fixture_id": event_ticker,
-                    "expected_goals": eg,
-                    "sharp_probs": {},
-                    "analyst": {"adjustments": {}, "rationales": {}},
+                    "fixture_id": event_ticker, "expected_goals": eg, "sharp_probs": {},
+                    "analyst": analyst_out,
                     "kalshi_markets": [
                         {"market_ticker": m["market_ticker"], "market_type": m["market_type"],
                          "side": m["side"], "yes_ask_cents": m["yes_ask_cents"]}
                         for m in mkts
                     ],
-                    "liquidity": 500, "hours_to_kickoff": 24, "model_confidence": 0.55,
+                    "liquidity": 500, "hours_to_kickoff": 24, "model_confidence": 0.6,
                 })
-                log(f"tick {tick}: {home} vs {away} — model xG {eg[0]:.2f}/{eg[1]:.2f} ({len(mkts)} markets).", "white")
+                log(f"tick {tick}: {home} vs {away} — Elo {he:.0f}/{ae:.0f}, model xG {eg[0]:.2f}/{eg[1]:.2f} "
+                    f"({len(mkts)} markets).", "white")
 
             # 4) Plan + allocate across the forward book.
             ts = _iso_now()

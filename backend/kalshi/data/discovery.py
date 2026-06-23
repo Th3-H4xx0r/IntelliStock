@@ -6,6 +6,12 @@ live listing (KalshiClient.get_markets per event) is integration."""
 from __future__ import annotations
 
 
+# Confirmed Kalshi soccer series tickers. World Cup = KXWCGAME (from the market
+# URL demo.kalshi.co/markets/kxwcgame/...). Add more as the discovery logs reveal
+# them (EPL, La Liga, MLS, Serie A, ... each have their own series).
+DEFAULT_SOCCER_SERIES = ["KXWCGAME"]
+
+
 def market_type_from_ticker(ticker: str = "", subtitle: str = "") -> str:
     """Best-effort classification of a Kalshi soccer market into an internal type."""
     t = f"{ticker} {subtitle}".lower()
