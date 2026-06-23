@@ -37,6 +37,23 @@ NOTIFICATION_TYPES = [
      "desc": "An unrecoverable strategy error occurred", "channel": "trades",
      "discord": True, "push": True, "prefixes": ["STRATEGY ERROR ["]},
 
+    # --- Kalshi ---
+    {"key": "kalshi_edge_flag", "group": "Kalshi", "label": "Kalshi edge flagged",
+     "desc": "A +EV Kalshi contract cleared the edge threshold", "channel": "trades",
+     "discord": True, "push": False, "prefixes": ["KALSHI EDGE ["]},
+    {"key": "kalshi_fill", "group": "Kalshi", "label": "Kalshi fill",
+     "desc": "A Kalshi order was filled", "channel": "trades",
+     "discord": True, "push": True, "prefixes": ["KALSHI FILL ["]},
+    {"key": "kalshi_settlement", "group": "Kalshi", "label": "Kalshi settlement",
+     "desc": "A Kalshi contract settled (resolved)", "channel": "trades",
+     "discord": True, "push": True, "prefixes": ["KALSHI SETTLE ["]},
+    {"key": "kalshi_risk_block", "group": "Kalshi", "label": "Kalshi risk block",
+     "desc": "A risk cap blocked a Kalshi trade", "channel": "trades",
+     "discord": True, "push": False, "prefixes": ["KALSHI RISK ["]},
+    {"key": "kalshi_budget_low", "group": "Kalshi", "label": "Kalshi odds budget low",
+     "desc": "The OddsPapi monthly request budget is nearly exhausted", "channel": "notifications",
+     "discord": True, "push": False, "prefixes": ["KALSHI BUDGET ["]},
+
     # --- Risk & Halts ---
     {"key": "halt", "group": "Risk & Halts", "label": "Halt",
      "desc": "Live trading was halted", "channel": "notifications",
