@@ -6,6 +6,7 @@ const Map<String, IconData> _symbols = {
   'account_balance': Icons.account_balance_outlined,
   'memory': Icons.memory_outlined,
   'analytics': Icons.analytics_outlined,
+  'sports_soccer': Icons.sports_soccer_outlined,
   'smart_toy': Icons.smart_toy_outlined,
   'hub': Icons.hub_outlined,
   'schema': Icons.schema_outlined,

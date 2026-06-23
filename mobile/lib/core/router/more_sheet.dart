@@ -20,6 +20,7 @@ class _MoreSheet extends ConsumerWidget {
   const _MoreSheet();
 
   static const _items = [
+    ('analytics', 'Backtests', '/backtests'),
     ('account_balance', 'Brokerages', '/brokerages'),
     ('smart_toy', 'Agent Runs', '/agent-runs'),
     ('hub', 'Nexus Graph', '/nexus'),

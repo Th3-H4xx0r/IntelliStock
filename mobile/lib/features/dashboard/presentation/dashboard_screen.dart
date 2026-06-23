@@ -15,6 +15,7 @@ import '../../../core/formatters/formatters.dart';
 import '../../../widgets_bridge/widget_sync_service.dart';
 import '../application/account_positions_controller.dart';
 import '../application/dashboard_controller.dart';
+import '../../kalshi/presentation/kalshi_dashboard_card.dart';
 import '../application/selected_account_controller.dart';
 import '../data/dashboard_repository.dart';
 import '../../stock/presentation/stock_screen.dart';
@@ -72,6 +73,9 @@ class DashboardScreen extends ConsumerWidget {
                   // ── Strategy (nexus telemetry) ─────────────────────────────
                   const StrategySection(),
                   const SizedBox(height: 32),
+
+                  // ── Kalshi (self-hides when no kalshi account) ─────────────
+                  const KalshiDashboardCard(),
 
                   // ── Services section ───────────────────────────────────────
                   _ServicesSection(),
