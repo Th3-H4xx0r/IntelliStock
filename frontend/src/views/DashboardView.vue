@@ -243,10 +243,8 @@ onUnmounted(() => {
       </section>
 
       <!-- ── Kalshi ───────────────────────────────────────────────────────── -->
-      <!-- Self-hides when no Kalshi account is linked. -->
-      <section>
-        <KalshiDashboardCard />
-      </section>
+      <!-- Self-hides (renders its own <section>) when no Kalshi account is linked. -->
+      <KalshiDashboardCard />
 
       <!-- ── Services ─────────────────────────────────────────────────────── -->
       <section>

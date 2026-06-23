@@ -33,23 +33,40 @@ async function load() {
 }
 
 const positive = computed(() => dayChange.value >= 0)
+const fmtValue = computed(() => `$${value.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)
 onMounted(load)
 </script>
 
 <template>
-  <div v-if="ready && account"
-       @click="router.push('/kalshi')"
-       class="rounded-xl border border-cyan-800/60 bg-[#111c30] p-4 cursor-pointer hover:border-cyan-600 transition-colors">
-    <div class="flex items-center justify-between mb-1">
-      <div class="text-[11px] font-bold uppercase tracking-wide text-sky-300">⚽ Kalshi portfolio</div>
-      <span class="text-[10px] text-sky-400 font-bold">Open →</span>
+  <section v-if="ready && account">
+    <div class="flex items-center justify-between mb-5">
+      <div>
+        <h2 class="text-lg font-bold text-slate-100 flex items-center gap-2">
+          <span class="material-symbols-outlined text-primary text-[20px]">sports_soccer</span> Kalshi
+        </h2>
+        <p class="text-slate-500 text-xs mt-0.5">Prediction-markets portfolio.</p>
+      </div>
+      <RouterLink to="/kalshi" class="flex items-center gap-1.5 text-xs font-medium text-primary hover:brightness-110 transition-all">
+        Open Kalshi
+        <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
+      </RouterLink>
     </div>
-    <div class="flex items-baseline gap-2">
-      <span class="text-2xl font-extrabold text-slate-50">${{ value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}</span>
-      <span class="text-xs font-bold" :class="positive ? 'text-emerald-400' : 'text-red-400'">
-        {{ positive ? '▲' : '▼' }} ${{ Math.abs(dayChange).toFixed(2) }}
-      </span>
+
+    <div @click="router.push('/kalshi')"
+         class="glass-card card-hover rounded-2xl p-4 sm:p-5 cursor-pointer">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="material-symbols-outlined text-primary text-[18px]">account_balance_wallet</span>
+        <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">{{ account.account_name }}</span>
+      </div>
+      <div class="flex flex-wrap items-end gap-2 sm:gap-3">
+        <span class="text-xl sm:text-2xl font-bold text-slate-100 tabular-nums break-all">{{ fmtValue }}</span>
+        <span class="flex items-center gap-1 text-xs sm:text-sm font-semibold mb-0.5"
+              :class="positive ? 'text-emerald-400' : 'text-red-400'">
+          <span class="material-symbols-outlined text-[16px]">{{ positive ? 'trending_up' : 'trending_down' }}</span>
+          {{ positive ? '+' : '-' }}${{ Math.abs(dayChange).toFixed(2) }}
+        </span>
+      </div>
+      <p class="text-xs text-slate-500 mt-3">{{ positions }} open position{{ positions === 1 ? '' : 's' }}</p>
     </div>
-    <div class="text-[11px] text-slate-500 mt-1">{{ account.account_name }} · {{ account.kalshi_environment || 'demo' }} · {{ positions }} open</div>
-  </div>
+  </section>
 </template>

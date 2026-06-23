@@ -59,7 +59,7 @@ async function loadAll() {
   scanBudget.value = b
 }
 
-function selectAccount(id) { selectedId.value = id; loadAll() }
+function selectAccount() { loadAll() }
 
 async function kill() {
   if (!selectedId.value || killing.value) return
@@ -79,109 +79,161 @@ onMounted(loadAccounts)
 
 <template>
   <AppShell>
-    <div class="max-w-5xl mx-auto px-4 py-6">
-      <!-- Header / account bar -->
-      <div class="flex flex-wrap items-center gap-2 mb-4">
-        <h1 class="text-xl font-extrabold text-slate-50 mr-2">⚽ Kalshi</h1>
-        <select v-model="selectedId" @change="selectAccount(selectedId)"
-                class="bg-[#0d1626] border border-slate-600 rounded-md text-xs text-slate-200 px-2 py-1">
-          <option v-for="a in accounts" :key="a.id" :value="a.id">
-            {{ a.account_name }} · {{ a.kalshi_environment || 'demo' }}
-          </option>
-        </select>
-        <button @click="kill" :disabled="killing || !selectedId"
-                class="ml-auto bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-md px-3 py-1.5 disabled:opacity-50">
-          ■ {{ killing ? 'KILLING…' : 'KILL' }}
-        </button>
+    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10 space-y-6">
+
+      <!-- Header -->
+      <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p class="text-primary text-xs font-bold uppercase tracking-widest mb-2 flex items-center gap-1.5">
+            <span class="material-symbols-outlined text-[16px]">sports_soccer</span> Kalshi
+          </p>
+          <h1 class="text-2xl sm:text-3xl font-bold leading-tight text-slate-100">Prediction markets</h1>
+          <p class="text-slate-500 mt-1.5 text-sm">Autonomous soccer event-contract trading.</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <div v-if="accounts.length" class="relative">
+            <select
+              v-model="selectedId" @change="selectAccount"
+              class="appearance-none bg-surface border border-border-subtle rounded-lg text-sm text-slate-200 pl-3 pr-9 py-2 focus:outline-none focus:border-primary transition-colors"
+            >
+              <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.account_name }}</option>
+            </select>
+            <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
+          </div>
+          <button
+            v-if="selectedId" @click="kill" :disabled="killing"
+            class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-red-500/40 text-red-400 text-sm font-semibold hover:bg-red-500/10 transition-all disabled:opacity-50"
+          >
+            <span class="material-symbols-outlined text-[18px]">stop_circle</span>
+            {{ killing ? 'Killing…' : 'Kill' }}
+          </button>
+        </div>
       </div>
 
-      <div v-if="loadingAcct" class="text-sm text-slate-500 py-12 text-center">Loading…</div>
-      <div v-else-if="!accounts.length" class="rounded-xl border border-border-subtle bg-[#111c30] p-8 text-center text-slate-400">
-        No Kalshi account linked yet. Add one in <RouterLink to="/brokerages" class="text-sky-400">Brokerages</RouterLink>.
+      <!-- Loading -->
+      <div v-if="loadingAcct" class="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div v-for="n in 2" :key="n" class="glass-card rounded-2xl h-[260px] animate-pulse"></div>
       </div>
 
-      <div v-else class="flex flex-col gap-3">
-        <!-- Chart hero (half on desktop) + account KPIs -->
-        <div class="grid md:grid-cols-2 gap-3">
+      <!-- No accounts -->
+      <div v-else-if="!accounts.length"
+           class="rounded-2xl border border-border-subtle bg-surface/20 px-8 py-12 flex flex-col items-center gap-3 text-center">
+        <span class="material-symbols-outlined text-4xl text-slate-700">sports_soccer</span>
+        <p class="text-slate-400 text-sm font-medium">No Kalshi account linked.</p>
+        <p class="text-slate-600 text-xs max-w-sm">Link a Kalshi brokerage (demo or live) to monitor your portfolio, edge, and positions here.</p>
+        <RouterLink to="/brokerages"
+                    class="mt-1 px-4 py-2 rounded-lg bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all">
+          Link a brokerage
+        </RouterLink>
+      </div>
+
+      <template v-else>
+        <!-- Chart (half on desktop) + account summary -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <KalshiPortfolioChart :brokerage-id="selectedId" />
-          <div class="rounded-xl border border-border-subtle bg-[#111c30] p-4">
-            <div class="text-[11px] font-bold uppercase tracking-wide text-sky-300 mb-2">💼 Account summary</div>
-            <div class="grid grid-cols-2 gap-2">
-              <div class="rounded-lg bg-[#0d1626] border border-slate-800 p-2">
-                <div class="text-base font-extrabold text-slate-50">{{ pct(clv.overall.avg_clv) }}</div>
-                <div class="text-[9px] uppercase text-slate-500 font-bold">Avg CLV</div>
+
+          <div class="glass-card rounded-2xl p-4 sm:p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <span class="material-symbols-outlined text-primary text-[18px]">account_balance_wallet</span>
+              <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Account summary</span>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3">
+                <div class="text-lg font-bold text-slate-100 tabular-nums">{{ pct(clv.overall.avg_clv) }}</div>
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Avg CLV</div>
               </div>
-              <div class="rounded-lg bg-[#0d1626] border border-slate-800 p-2">
-                <div class="text-base font-extrabold text-slate-50">{{ clv.overall.n }}</div>
-                <div class="text-[9px] uppercase text-slate-500 font-bold">Fixtures</div>
+              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3">
+                <div class="text-lg font-bold text-slate-100 tabular-nums">{{ clv.overall.n }}</div>
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Fixtures</div>
               </div>
-              <div class="rounded-lg bg-[#0d1626] border border-slate-800 p-2">
-                <div class="text-base font-extrabold text-slate-50">{{ positions.length }}</div>
-                <div class="text-[9px] uppercase text-slate-500 font-bold">Open</div>
+              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3">
+                <div class="text-lg font-bold text-slate-100 tabular-nums">{{ positions.length }}</div>
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Open</div>
               </div>
-              <div class="rounded-lg bg-[#0d1626] border border-slate-800 p-2">
-                <div class="text-base font-extrabold text-emerald-400">{{ edges.length ? pct(edges[0].edge) : '—' }}</div>
-                <div class="text-[9px] uppercase text-slate-500 font-bold">Top edge</div>
+              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3">
+                <div class="text-lg font-bold tabular-nums" :class="edges.length ? 'text-emerald-400' : 'text-slate-100'">{{ edges.length ? pct(edges[0].edge) : '—' }}</div>
+                <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Top edge</div>
               </div>
             </div>
           </div>
         </div>
 
         <!-- Edge Radar -->
-        <div class="rounded-xl border border-border-subtle bg-[#111c30] p-4">
-          <div class="text-[11px] font-bold uppercase tracking-wide text-sky-300 mb-2">⚡ Edge Radar</div>
-          <div v-if="!edges.length" class="text-xs text-slate-500">No +EV contracts flagged right now.</div>
-          <div v-for="e in edges" :key="e.market_ticker" class="flex justify-between text-xs py-1.5 border-b border-slate-800/60">
-            <span class="text-slate-300">{{ e.market_ticker }} · {{ e.side }}</span>
-            <span class="text-emerald-400 font-bold">+{{ pct(e.edge) }}</span>
+        <div class="glass-card rounded-2xl p-4 sm:p-5">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="material-symbols-outlined text-primary text-[18px]">bolt</span>
+            <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Edge Radar</span>
+          </div>
+          <p v-if="!edges.length" class="text-sm text-slate-500">No +EV contracts flagged right now.</p>
+          <div v-for="e in edges" :key="e.market_ticker" class="flex items-center justify-between text-sm py-2 border-b border-border-subtle/60 last:border-0">
+            <span class="text-slate-300">{{ e.market_ticker }} <span class="text-slate-500">· {{ e.side }}</span></span>
+            <span class="text-emerald-400 font-bold tabular-nums">+{{ pct(e.edge) }}</span>
           </div>
         </div>
 
         <!-- Positions -->
-        <div class="rounded-xl border border-border-subtle bg-[#111c30] p-4">
-          <div class="text-[11px] font-bold uppercase tracking-wide text-sky-300 mb-2">📑 Open positions</div>
-          <div v-if="!positions.length" class="text-xs text-slate-500">No open positions.</div>
-          <div v-for="p in positions" :key="p.market_ticker" class="flex justify-between text-xs py-1.5 border-b border-slate-800/60">
-            <span class="text-slate-300">{{ p.market_ticker }} {{ p.side }} ×{{ p.contracts }}</span>
-            <span :class="(p.unrealized_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'" class="font-bold">
+        <div class="glass-card rounded-2xl p-4 sm:p-5">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="material-symbols-outlined text-primary text-[18px]">receipt_long</span>
+            <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Open positions</span>
+          </div>
+          <p v-if="!positions.length" class="text-sm text-slate-500">No open positions.</p>
+          <div v-for="p in positions" :key="p.market_ticker" class="flex items-center justify-between text-sm py-2 border-b border-border-subtle/60 last:border-0">
+            <span class="text-slate-300">{{ p.market_ticker }} <span class="text-slate-500">{{ p.side }} ×{{ p.contracts }}</span></span>
+            <span class="font-bold tabular-nums" :class="(p.unrealized_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">
               {{ p.unrealized_cents == null ? '—' : (p.unrealized_cents >= 0 ? '+' : '') + '$' + (p.unrealized_cents / 100).toFixed(2) }}
             </span>
           </div>
         </div>
 
         <!-- CLV + Scan budget -->
-        <div class="grid md:grid-cols-2 gap-3">
-          <div class="rounded-xl border border-border-subtle bg-[#111c30] p-4">
-            <div class="text-[11px] font-bold uppercase tracking-wide text-sky-300 mb-2">📈 CLV scorecard</div>
-            <div v-if="!clvLeagues().length" class="text-xs text-slate-500">No CLV logged yet.</div>
-            <div v-for="[lg, s] in clvLeagues()" :key="lg" class="flex justify-between text-xs py-1.5 border-b border-slate-800/60">
-              <span class="text-slate-300">{{ lg }} ({{ s.n }})</span>
-              <span :class="s.avg_clv >= 0 ? 'text-emerald-400' : 'text-red-400'" class="font-bold">{{ pct(s.avg_clv) }}</span>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div class="glass-card rounded-2xl p-4 sm:p-5">
+            <div class="flex items-center gap-2 mb-3">
+              <span class="material-symbols-outlined text-primary text-[18px]">trending_up</span>
+              <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">CLV scorecard</span>
+            </div>
+            <p v-if="!clvLeagues().length" class="text-sm text-slate-500">No CLV logged yet.</p>
+            <div v-for="[lg, s] in clvLeagues()" :key="lg" class="flex items-center justify-between text-sm py-2 border-b border-border-subtle/60 last:border-0">
+              <span class="text-slate-300">{{ lg }} <span class="text-slate-500">({{ s.n }})</span></span>
+              <span class="font-bold tabular-nums" :class="s.avg_clv >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ pct(s.avg_clv) }}</span>
             </div>
           </div>
-          <div class="rounded-xl border border-border-subtle bg-[#111c30] p-4">
-            <div class="text-[11px] font-bold uppercase tracking-wide text-sky-300 mb-2">📡 Odds-budget guard</div>
-            <div v-if="scanBudget" class="text-xs text-slate-400">
-              OddsPapi this month: {{ scanBudget.used }} / {{ scanBudget.limit }} req
-              <div class="h-2 rounded bg-slate-800 mt-1 overflow-hidden">
-                <div class="h-full bg-indigo-500" :style="{ width: Math.min(100, (scanBudget.used / scanBudget.limit) * 100) + '%' }"></div>
-              </div>
-              <div class="mt-1 text-slate-500">~{{ scanBudget.fixtures_per_day }} fixtures/day affordable</div>
+          <div class="glass-card rounded-2xl p-4 sm:p-5">
+            <div class="flex items-center gap-2 mb-3">
+              <span class="material-symbols-outlined text-primary text-[18px]">speed</span>
+              <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Odds-budget guard</span>
             </div>
-            <div v-else class="text-xs text-slate-500">No budget data.</div>
+            <div v-if="scanBudget" class="text-sm text-slate-400">
+              <div class="flex justify-between mb-1.5">
+                <span>OddsPapi this month</span>
+                <span class="text-slate-300 tabular-nums">{{ scanBudget.used }} / {{ scanBudget.limit }}</span>
+              </div>
+              <div class="h-2 rounded-full bg-surface overflow-hidden">
+                <div class="h-full bg-primary rounded-full transition-all" :style="{ width: Math.min(100, (scanBudget.used / scanBudget.limit) * 100) + '%' }"></div>
+              </div>
+              <div class="mt-2 text-xs text-slate-500">~{{ scanBudget.fixtures_per_day }} fixtures/day affordable</div>
+            </div>
+            <p v-else class="text-sm text-slate-500">No budget data.</p>
           </div>
         </div>
 
         <!-- Recent fills -->
-        <div class="rounded-xl border border-border-subtle bg-[#111c30] p-4">
-          <div class="text-[11px] font-bold uppercase tracking-wide text-sky-300 mb-2">🧾 Recent fills</div>
-          <div v-if="!fills.length" class="text-xs text-slate-500">No fills.</div>
-          <div v-for="(f, i) in fills" :key="i" class="flex justify-between text-xs py-1.5 border-b border-slate-800/60">
-            <span class="text-slate-300">{{ f.action }} {{ f.market_ticker }} {{ f.side }} ×{{ f.contracts }} @ {{ f.price_cents }}¢</span>
-            <span class="text-slate-500">{{ f.ts }}</span>
+        <div class="glass-card rounded-2xl p-4 sm:p-5">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="material-symbols-outlined text-primary text-[18px]">history</span>
+            <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Recent fills</span>
+          </div>
+          <p v-if="!fills.length" class="text-sm text-slate-500">No fills.</p>
+          <div v-for="(f, i) in fills" :key="i" class="flex items-center justify-between text-sm py-2 border-b border-border-subtle/60 last:border-0">
+            <span class="text-slate-300">
+              <span class="font-semibold" :class="f.action === 'buy' ? 'text-emerald-400' : 'text-red-400'">{{ (f.action || '').toUpperCase() }}</span>
+              {{ f.market_ticker }} <span class="text-slate-500">{{ f.side }} ×{{ f.contracts }} @ {{ f.price_cents }}¢</span>
+            </span>
+            <span class="text-slate-500 text-xs tabular-nums">{{ f.ts }}</span>
           </div>
         </div>
-      </div>
-    </div>
+      </template>
+    </main>
   </AppShell>
 </template>
