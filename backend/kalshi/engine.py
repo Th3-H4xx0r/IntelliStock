@@ -657,7 +657,9 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         home=match["home"], away=match["away"],
                         market_probs=_cards.market_probs_from_markets(match["markets"]),
                         score=score, elapsed_min=match.get("elapsed_min"),
-                        event=last_event, news=snip, decisions=decs, ts=ts)
+                        event=last_event, news=snip, decisions=decs, ts=ts,
+                        home_logo=(sc or {}).get("home_logo", ""),
+                        away_logo=(sc or {}).get("away_logo", ""))
                     try:
                         kdb._r.db(kdb.DB_NAME).table("kalshi_live").insert(card, conflict="replace").run(conn)
                     except Exception:

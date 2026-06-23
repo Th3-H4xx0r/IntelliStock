@@ -31,7 +31,10 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
   void initState() {
     super.initState();
     _liveTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted) ref.invalidate(kalshiInstanceLiveProvider(widget.instanceId));
+      if (mounted) {
+        ref.invalidate(kalshiInstanceLiveProvider(widget.instanceId));
+        ref.invalidate(kalshiInstanceOrdersProvider(widget.instanceId));
+      }
     });
   }
 
@@ -45,6 +48,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     ref.invalidate(kalshiInstanceDetailProvider(widget.instanceId));
     ref.invalidate(kalshiInstanceDecisionsProvider(widget.instanceId));
     ref.invalidate(kalshiInstanceLiveProvider(widget.instanceId));
+    ref.invalidate(kalshiInstanceOrdersProvider(widget.instanceId));
   }
 
   Future<void> _startStop(bool start) async {
@@ -95,6 +99,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final detailAsync = ref.watch(kalshiInstanceDetailProvider(widget.instanceId));
     final decAsync = ref.watch(kalshiInstanceDecisionsProvider(widget.instanceId));
     final liveAsync = ref.watch(kalshiInstanceLiveProvider(widget.instanceId));
+    final ordersAsync = ref.watch(kalshiInstanceOrdersProvider(widget.instanceId));
     final detail = detailAsync.value;
     final running = detail?['running'] == true;
 
@@ -155,6 +160,8 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   const SizedBox(height: 12),
                   _liveCards(liveAsync),
                   _decisionLog(decAsync),
+                  const SizedBox(height: 12),
+                  _ordersCard(ordersAsync),
                   const SizedBox(height: 12),
                   GlassCard(
                     padding: const EdgeInsets.all(14),
@@ -238,17 +245,22 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
         border: Border.all(color: AppColors.border),
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // score header with flags
         Row(children: [
-          Expanded(child: Text('${m['home']}  vs  ${m['away']}',
-              style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600),
-              overflow: TextOverflow.ellipsis)),
-          if (score != null)
-            Text('${score['home'] ?? '–'} : ${score['away'] ?? '–'}',
-                style: AppTextStyles.cardTitle.copyWith(color: AppColors.textHi)),
-          const SizedBox(width: 6),
-          Text(clock, style: AppTextStyles.nano.copyWith(color: AppColors.success, fontWeight: FontWeight.bold)),
+          _teamBadge((m['home_logo'] ?? '').toString(), (m['home'] ?? '').toString()),
+          Expanded(child: Column(children: [
+            Text('${score != null ? (score['home'] ?? 0) : 0}  :  ${score != null ? (score['away'] ?? 0) : 0}',
+                style: AppTextStyles.h2.copyWith(color: AppColors.textHi, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Container(width: 6, height: 6, decoration: const BoxDecoration(color: Color(0xFF34D399), shape: BoxShape.circle)),
+              const SizedBox(width: 5),
+              Text(clock, style: AppTextStyles.nano.copyWith(color: AppColors.success, fontWeight: FontWeight.bold)),
+            ]),
+          ])),
+          _teamBadge((m['away_logo'] ?? '').toString(), (m['away'] ?? '').toString()),
         ]),
-        const SizedBox(height: 8),
+        const SizedBox(height: 10),
         ...probs.entries.map((e) {
           final v = (((e.value as num?)?.toDouble()) ?? 0.0).clamp(0.0, 1.0);
           return Padding(
@@ -299,6 +311,92 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
         'reduce': AppColors.warning,
         'exit': AppColors.danger,
       }[a] ?? AppColors.textDim;
+
+  Widget _teamBadge(String logo, String name) {
+    return SizedBox(
+      width: 76,
+      child: Column(children: [
+        ClipOval(
+          child: logo.isNotEmpty
+              ? Image.network(logo, width: 44, height: 44, fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => _badgeFallback(name))
+              : _badgeFallback(name),
+        ),
+        const SizedBox(height: 6),
+        Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center,
+            style: AppTextStyles.nano.copyWith(color: AppColors.textMuted)),
+      ]),
+    );
+  }
+
+  Widget _badgeFallback(String name) {
+    final init = name.replaceAll(RegExp(r'[^A-Za-z ]'), '').split(' ')
+        .map((w) => w.isNotEmpty ? w[0] : '').join();
+    return Container(
+      width: 44, height: 44, color: AppColors.surface, alignment: Alignment.center,
+      child: Text(init.length > 3 ? init.substring(0, 3) : init,
+          style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+    );
+  }
+
+  Widget _ordersCard(AsyncValue<Map<String, dynamic>> ordersAsync) {
+    final data = ordersAsync.value ?? const <String, dynamic>{};
+    final placed = (data['placed'] as List?) ?? const [];
+    final fills = (data['fills'] as List?) ?? const [];
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.receipt_long_outlined, color: AppColors.primary, size: 18),
+          const SizedBox(width: 8),
+          Text('ORDERS', style: AppTextStyles.eyebrow),
+        ]),
+        const SizedBox(height: 10),
+        Text('PLACED · PENDING (${placed.length})',
+            style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        if (placed.isEmpty)
+          Text('No orders placed yet.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+        ...placed.take(10).map((o) {
+          final om = o as Map<String, dynamic>;
+          final edge = (om['edge'] as num?)?.toDouble();
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(children: [
+              Expanded(child: Text('${om['market_ticker']} · ${om['side']}',
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textMuted))),
+              if (om['in_play'] == true)
+                Padding(padding: const EdgeInsets.only(right: 6),
+                    child: Text('LIVE', style: AppTextStyles.nano.copyWith(color: AppColors.danger, fontWeight: FontWeight.bold))),
+              Text('${om['size'] ?? 0}×  ', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+              Text(edge == null ? '' : '${edge >= 0 ? '+' : ''}${(edge * 100).toStringAsFixed(1)}%',
+                  style: AppTextStyles.nano.copyWith(color: (edge ?? 0) >= 0 ? AppColors.success : AppColors.danger)),
+            ]),
+          );
+        }),
+        if (fills.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Text('FILLED (${fills.length})',
+              style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          ...fills.take(10).map((f) {
+            final fm = f as Map<String, dynamic>;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(children: [
+                Expanded(child: Text('${fm['market_ticker']} · ${fm['action']} ${fm['side']}',
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.nano.copyWith(color: AppColors.textMuted))),
+                Text('${fm['contracts']}× @ ${fm['price_cents']}¢',
+                    style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+              ]),
+            );
+          }),
+        ],
+      ]),
+    );
+  }
 
   Widget _decisionLog(AsyncValue<Map<String, dynamic>> decAsync) {
     return GlassCard(

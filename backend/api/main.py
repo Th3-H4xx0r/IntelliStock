@@ -4195,6 +4195,39 @@ def api_kalshi_instance_live(instance_id: str, conn=Depends(conn_dependency), cu
     return {"matches": rows, "count": len(rows)}
 
 
+@app.get("/instances/{instance_id}/kalshi/orders", response_class=JSONResponse)
+def api_kalshi_instance_orders(instance_id: str, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Orders for this instance — placed/pending (from the decision log) + filled
+    (from the broker). Drives the pending/past-orders cards."""
+    row = _kalshi_instance_row(conn, instance_id)
+    n = max(1, min(int(limit or 50), 200))
+    placed = []
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("kalshi_decisions")
+            .filter({"instance_id": str(instance_id)}).run(conn)
+        )
+        placed = [
+            {"market_ticker": r.get("market_ticker"), "side": r.get("side"),
+             "size": r.get("size", 0), "edge": r.get("edge"), "fair": r.get("fused_fair"),
+             "in_play": bool(r.get("in_play")), "action": r.get("live_action") or "buy",
+             "ts": r.get("ts", "")}
+            for r in rows if r.get("decision") == "placed"
+        ]
+        placed.sort(key=lambda d: d.get("ts", ""), reverse=True)
+    except Exception:
+        placed = []
+    fills = []
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(row.get("brokerage_id")).run(conn) or {}
+        for f in _kalshi_client_from_row(bk).get_fills(limit=n):
+            fills.append({"market_ticker": f.market_ticker, "side": f.side, "action": f.action,
+                          "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts})
+    except Exception:
+        fills = []
+    return {"placed": placed[:n], "fills": fills[:n]}
+
+
 @app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)
 def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Equity curve for the instance's brokerage (reuses portfolio snapshots)."""

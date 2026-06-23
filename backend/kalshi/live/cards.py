@@ -22,15 +22,19 @@ def market_probs_from_markets(markets) -> dict:
 
 def build_live_card(*, instance_id: str, fixture_id: str, home: str, away: str,
                     market_probs: dict, score=None, elapsed_min=None, event: str = "",
-                    news: str = "", decisions=None, ts: str = "") -> dict:
+                    news: str = "", decisions=None, ts: str = "",
+                    home_logo: str = "", away_logo: str = "") -> dict:
     """Assemble the live-match card doc. id = '{instance_id}|{fixture_id}' so the
-    engine can upsert one row per (instance, match)."""
+    engine can upsert one row per (instance, match). home_logo/away_logo are crest
+    URLs (ESPN) for the country flags / club badges shown on the card."""
     return {
         "id": f"{instance_id}|{fixture_id}",
         "instance_id": instance_id,
         "fixture_id": fixture_id,
         "home": home,
         "away": away,
+        "home_logo": home_logo or "",
+        "away_logo": away_logo or "",
         "market_probs": market_probs or {},
         "score": score,                       # {home, away, clock, detail, state} or None
         "elapsed_min": (round(elapsed_min, 1) if isinstance(elapsed_min, (int, float)) else None),

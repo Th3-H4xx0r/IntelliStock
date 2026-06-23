@@ -39,6 +39,8 @@ def parse_scoreboard(data) -> list[dict]:
                 "away": (away.get("team") or {}).get("displayName") or "",
                 "home_score": _int(home.get("score")),
                 "away_score": _int(away.get("score")),
+                "home_logo": (home.get("team") or {}).get("logo") or "",
+                "away_logo": (away.get("team") or {}).get("logo") or "",
                 "clock": status.get("displayClock") or "",
                 "state": st.get("state") or "",
                 "detail": st.get("shortDetail") or st.get("detail") or "",
@@ -64,7 +66,8 @@ def match_score(scoreboard, home: str, away: str):
             return e
         if _sim(eh, na) and _sim(ea, nh):   # sides flipped -> swap back to our orientation
             return {**e, "home": e["away"], "away": e["home"],
-                    "home_score": e["away_score"], "away_score": e["home_score"]}
+                    "home_score": e["away_score"], "away_score": e["home_score"],
+                    "home_logo": e.get("away_logo", ""), "away_logo": e.get("home_logo", "")}
     return None
 
 

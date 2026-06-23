@@ -20,6 +20,7 @@ const id = route.params.id
 const detail = ref(null)
 const decisions = ref([])
 const live = ref([])
+const orders = ref({ placed: [], fills: [] })
 const summary = ref({ total: 0, placed: 0, skipped: 0, queued: 0, blocked: 0 })
 const loading = ref(true)
 let liveTimer = null
@@ -47,8 +48,12 @@ async function load() {
 }
 
 async function loadLive() {
-  const l = await getJson(`/instances/${id}/kalshi/live`)
+  const [l, o] = await Promise.all([
+    getJson(`/instances/${id}/kalshi/live`),
+    getJson(`/instances/${id}/kalshi/orders?limit=50`),
+  ])
   if (l) live.value = l.matches || []
+  if (o) orders.value = { placed: o.placed || [], fills: o.fills || [] }
 }
 
 async function startStop(start) {
@@ -113,6 +118,12 @@ function sideLabel(m, side) {
   if (side === 'away') return m.away
   return 'Draw'
 }
+function liveClock(m) {
+  if (m.score && m.score.clock) return m.score.clock
+  if (m.elapsed_min != null) return `${Math.round(m.elapsed_min)}'`
+  return 'LIVE'
+}
+function initials(name) { return (name || '').replace(/[^A-Za-z ]/g, '').split(' ').map(w => w[0]).join('').slice(0, 3).toUpperCase() }
 
 onMounted(() => {
   load()
@@ -181,21 +192,30 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
             <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Live now · {{ live.length }} match{{ live.length === 1 ? '' : 'es' }}</span>
           </div>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div v-for="m in live" :key="m.id" class="rounded-xl border border-border-subtle bg-surface/40 p-3.5">
-              <div class="flex items-start justify-between gap-2">
-                <div class="text-sm font-semibold text-slate-100 min-w-0">
-                  <span class="truncate">{{ m.home }}</span> <span class="text-slate-500">vs</span> <span class="truncate">{{ m.away }}</span>
+            <div v-for="m in live" :key="m.id" class="rounded-xl border border-border-subtle bg-surface/40 p-4">
+              <!-- score header with flags -->
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex flex-col items-center gap-1.5 w-20 shrink-0">
+                  <img v-if="m.home_logo" :src="m.home_logo" referrerpolicy="no-referrer" class="w-11 h-11 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle" :alt="m.home" />
+                  <div v-else class="w-11 h-11 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[11px] font-bold text-slate-400">{{ initials(m.home) }}</div>
+                  <span class="text-[11px] text-slate-300 text-center truncate w-full">{{ m.home }}</span>
                 </div>
-                <div class="shrink-0 text-right">
-                  <div v-if="m.score" class="text-lg font-bold text-slate-100 tabular-nums leading-none">{{ m.score.home ?? '–' }}<span class="text-slate-500"> : </span>{{ m.score.away ?? '–' }}</div>
-                  <div v-if="m.score && m.score.clock" class="text-[10px] text-emerald-400 font-semibold mt-0.5">{{ m.score.clock }}</div>
-                  <div v-else-if="m.elapsed_min != null" class="text-[10px] text-emerald-400 font-semibold">{{ Math.round(m.elapsed_min) }}'</div>
-                  <div v-else class="text-[10px] text-slate-500 font-semibold uppercase">Live</div>
+                <div class="flex flex-col items-center">
+                  <div class="text-2xl font-bold text-slate-100 tabular-nums leading-none">{{ m.score ? (m.score.home ?? 0) : 0 }}<span class="text-slate-600 mx-2">:</span>{{ m.score ? (m.score.away ?? 0) : 0 }}</div>
+                  <div class="flex items-center gap-1.5 mt-2">
+                    <span class="relative flex h-1.5 w-1.5"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500/60"></span><span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span></span>
+                    <span class="text-[11px] text-emerald-400 font-semibold tabular-nums">{{ liveClock(m) }}</span>
+                  </div>
+                </div>
+                <div class="flex flex-col items-center gap-1.5 w-20 shrink-0">
+                  <img v-if="m.away_logo" :src="m.away_logo" referrerpolicy="no-referrer" class="w-11 h-11 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle" :alt="m.away" />
+                  <div v-else class="w-11 h-11 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[11px] font-bold text-slate-400">{{ initials(m.away) }}</div>
+                  <span class="text-[11px] text-slate-300 text-center truncate w-full">{{ m.away }}</span>
                 </div>
               </div>
 
               <!-- market-implied probabilities -->
-              <div v-if="topSide(m)" class="mt-2.5 space-y-1.5">
+              <div v-if="topSide(m)" class="mt-3 space-y-1.5">
                 <div v-for="(p, side) in m.market_probs" :key="side" class="flex items-center gap-2">
                   <span class="text-[11px] text-slate-400 w-20 truncate">{{ sideLabel(m, side) }}</span>
                   <div class="flex-1 h-1.5 rounded-full bg-surface overflow-hidden"><div class="h-full bg-primary/70 rounded-full" :style="{ width: `${Math.round((p || 0) * 100)}%` }"></div></div>
@@ -203,10 +223,10 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                 </div>
               </div>
 
-              <p v-if="m.news" class="mt-2.5 text-[11px] text-slate-400 line-clamp-2 whitespace-pre-line">{{ m.news.split('\n')[0] }}</p>
+              <p v-if="m.news" class="mt-3 text-[11px] text-slate-400 line-clamp-2 whitespace-pre-line">{{ m.news.split('\n')[0] }}</p>
 
               <!-- in-play decisions -->
-              <div v-if="m.decisions && m.decisions.length" class="mt-2.5 flex flex-wrap gap-1.5">
+              <div v-if="m.decisions && m.decisions.length" class="mt-3 flex flex-wrap gap-1.5">
                 <span v-for="(d, di) in m.decisions.slice(0, 4)" :key="di" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase" :class="ACTION_STYLE[d.action] || 'bg-slate-500/15 text-slate-400'">
                   {{ d.action }}<span v-if="d.size" class="font-normal normal-case">{{ d.size }}</span>
                 </span>
@@ -215,37 +235,63 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
           </div>
         </div>
 
-        <!-- Decision log -->
-        <div class="glass-card rounded-2xl p-4 sm:p-5">
-          <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">history_edu</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Decision log</span></div>
-          <p v-if="!decisions.length" class="text-sm text-slate-500">No decisions logged yet. The engine writes a row for every bet placed and every candidate it considered.</p>
-          <div v-for="(d, i) in decisions" :key="d.id || i" class="border-b border-border-subtle/60 last:border-0">
-            <button @click="toggle(i)" class="w-full flex items-center justify-between gap-2 py-2.5 text-left">
-              <span class="flex items-center gap-2 min-w-0">
-                <span class="material-symbols-outlined text-slate-500 text-[16px] transition-transform" :class="{ 'rotate-90': expanded.has(i) }">chevron_right</span>
-                <span class="text-sm text-slate-300 truncate">{{ d.market_ticker }} <span class="text-slate-500">· {{ d.side }}</span></span>
-              </span>
-              <span class="flex items-center gap-3 shrink-0 text-xs">
-                <span class="tabular-nums" :class="(d.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ d.edge == null ? '' : (d.edge >= 0 ? '+' : '') + pct(d.edge) }}</span>
-                <span class="font-semibold uppercase" :class="decColor(d.decision)">{{ d.decision }}</span>
-              </span>
-            </button>
-            <div v-if="expanded.has(i)" class="pb-3 pl-6 text-xs text-slate-400 space-y-1">
-              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <div><span class="text-slate-600">Model</span> {{ pct(d.model_prob) }}</div>
-                <div><span class="text-slate-600">Sharp</span> {{ pct(d.sharp_prob) }}</div>
-                <div><span class="text-slate-600">LLM adj</span> {{ d.llm_adjustment == null ? '—' : (d.llm_adjustment >= 0 ? '+' : '') + pct(d.llm_adjustment) }}</div>
-                <div><span class="text-slate-600">Fair</span> {{ pct(d.fused_fair) }}</div>
-                <div><span class="text-slate-600">Size</span> {{ d.size || 0 }}</div>
-                <div><span class="text-slate-600">Opp score</span> {{ d.opportunity_score == null ? '—' : d.opportunity_score.toFixed(2) }}</div>
-                <div v-if="d.outcome"><span class="text-slate-600">Outcome</span> {{ d.outcome }}</div>
-                <div v-if="d.clv != null"><span class="text-slate-600">CLV</span> {{ pct(d.clv) }}</div>
+        <!-- Decision log (half) + Orders (half) -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+          <div class="glass-card rounded-2xl p-4 sm:p-5">
+            <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">history_edu</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Decision log</span></div>
+            <p v-if="!decisions.length" class="text-sm text-slate-500">No decisions logged yet. The engine writes a row for every bet placed and every candidate it considered.</p>
+            <div class="max-h-[460px] overflow-y-auto -mr-2 pr-2">
+              <div v-for="(d, i) in decisions" :key="d.id || i" class="border-b border-border-subtle/60 last:border-0">
+                <button @click="toggle(i)" class="w-full flex items-center justify-between gap-2 py-2.5 text-left">
+                  <span class="flex items-center gap-2 min-w-0">
+                    <span class="material-symbols-outlined text-slate-500 text-[16px] transition-transform" :class="{ 'rotate-90': expanded.has(i) }">chevron_right</span>
+                    <span class="text-sm text-slate-300 truncate">{{ d.market_ticker }} <span class="text-slate-500">· {{ d.side }}</span></span>
+                  </span>
+                  <span class="flex items-center gap-3 shrink-0 text-xs">
+                    <span class="tabular-nums" :class="(d.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ d.edge == null ? '' : (d.edge >= 0 ? '+' : '') + pct(d.edge) }}</span>
+                    <span class="font-semibold uppercase" :class="decColor(d.decision)">{{ d.decision }}</span>
+                  </span>
+                </button>
+                <div v-if="expanded.has(i)" class="pb-3 pl-6 text-xs text-slate-400 space-y-1">
+                  <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div><span class="text-slate-600">Model</span> {{ pct(d.model_prob) }}</div>
+                    <div><span class="text-slate-600">Sharp</span> {{ pct(d.sharp_prob) }}</div>
+                    <div><span class="text-slate-600">LLM adj</span> {{ d.llm_adjustment == null ? '—' : (d.llm_adjustment >= 0 ? '+' : '') + pct(d.llm_adjustment) }}</div>
+                    <div><span class="text-slate-600">Fair</span> {{ pct(d.fused_fair) }}</div>
+                    <div><span class="text-slate-600">Size</span> {{ d.size || 0 }}</div>
+                    <div><span class="text-slate-600">Opp score</span> {{ d.opportunity_score == null ? '—' : d.opportunity_score.toFixed(2) }}</div>
+                    <div v-if="d.outcome"><span class="text-slate-600">Outcome</span> {{ d.outcome }}</div>
+                    <div v-if="d.clv != null"><span class="text-slate-600">CLV</span> {{ pct(d.clv) }}</div>
+                  </div>
+                  <p v-if="d.llm_rationale" class="text-slate-300 bg-surface/40 border border-border-subtle rounded-lg px-3 py-2 mt-1">
+                    <span class="material-symbols-outlined text-primary text-[14px] align-middle mr-1">psychology</span>{{ d.llm_rationale }}
+                  </p>
+                  <p v-if="d.block_reason" class="text-red-400/80">Blocked: {{ d.block_reason }}</p>
+                </div>
               </div>
-              <p v-if="d.llm_rationale" class="text-slate-300 bg-surface/40 border border-border-subtle rounded-lg px-3 py-2 mt-1">
-                <span class="material-symbols-outlined text-primary text-[14px] align-middle mr-1">psychology</span>{{ d.llm_rationale }}
-              </p>
-              <p v-if="d.block_reason" class="text-red-400/80">Blocked: {{ d.block_reason }}</p>
             </div>
+          </div>
+
+          <!-- Orders -->
+          <div class="glass-card rounded-2xl p-4 sm:p-5">
+            <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">receipt_long</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Orders</span></div>
+            <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mb-1.5">Placed · pending ({{ orders.placed.length }})</div>
+            <p v-if="!orders.placed.length" class="text-xs text-slate-500 mb-2">No orders placed yet.</p>
+            <div v-for="(o, i) in orders.placed.slice(0, 10)" :key="'p' + i" class="flex items-center justify-between gap-2 py-1.5 border-b border-border-subtle/40 last:border-0">
+              <span class="text-xs text-slate-300 truncate min-w-0">{{ o.market_ticker }} <span class="text-slate-500">· {{ o.side }}</span></span>
+              <span class="flex items-center gap-2 shrink-0 text-xs">
+                <span v-if="o.in_play" class="px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 text-[9px] font-bold uppercase">live</span>
+                <span class="text-slate-400 tabular-nums">{{ o.size }}×</span>
+                <span class="tabular-nums" :class="(o.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ o.edge == null ? '' : (o.edge >= 0 ? '+' : '') + pct(o.edge) }}</span>
+              </span>
+            </div>
+            <template v-if="orders.fills.length">
+              <div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-4 mb-1.5">Filled ({{ orders.fills.length }})</div>
+              <div v-for="(f, i) in orders.fills.slice(0, 10)" :key="'f' + i" class="flex items-center justify-between gap-2 py-1.5 border-b border-border-subtle/40 last:border-0">
+                <span class="text-xs text-slate-300 truncate min-w-0">{{ f.market_ticker }} <span class="text-slate-500">· {{ f.action }} {{ f.side }}</span></span>
+                <span class="text-xs text-slate-400 tabular-nums shrink-0">{{ f.contracts }}× @ {{ f.price_cents }}¢</span>
+              </div>
+            </template>
           </div>
         </div>
 
