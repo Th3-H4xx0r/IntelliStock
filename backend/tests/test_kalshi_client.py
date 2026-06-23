@@ -64,20 +64,32 @@ def test_get_balance_signs_correct_path_and_maps_dto():
     )
 
 
-def test_submit_order_builds_limit_body():
+def test_submit_order_builds_v2_body():
     _, pem = _pem()
-    sess = _FakeSession({"order": {"order_id": "o123", "status": "resting"}})
+    sess = _FakeSession({"order_id": "o123", "remaining_count": "40.00"})
     c = KalshiClient(key_id="abc", private_key_pem=pem, environment="demo", session=sess)
     ref = c.submit_order(market_ticker="KXEPL-LEEDS-YES", side="yes", action="buy",
                          contracts=40, limit_cents=52, client_order_id="cid-1")
 
     assert isinstance(ref, KalshiOrderRef)
-    assert ref.broker_order_id == "o123" and ref.status == "resting"
+    assert ref.broker_order_id == "o123"
     body = sess.calls[0]["json"]
     assert body["ticker"] == "KXEPL-LEEDS-YES"
-    assert body["count"] == 40 and body["yes_price"] == 52
-    assert body["type"] == "limit" and body["action"] == "buy"
-    assert sess.calls[0]["url"].endswith("/trade-api/v2/portfolio/orders")
+    # V2: fixed-point dollar strings + book side; buy YES -> bid.
+    assert body["count"] == "40" and body["price"] == "0.5200"
+    assert body["side"] == "bid"
+    assert body["time_in_force"] == "good_till_canceled"
+    assert body["self_trade_prevention_type"] == "taker_at_cross"
+    assert sess.calls[0]["url"].endswith("/trade-api/v2/portfolio/events/orders")
+
+
+def test_submit_order_sell_maps_to_ask():
+    _, pem = _pem()
+    sess = _FakeSession({"order_id": "o9"})
+    c = KalshiClient(key_id="abc", private_key_pem=pem, environment="demo", session=sess)
+    c.submit_order(market_ticker="T", side="yes", action="sell",
+                   contracts=5, limit_cents=30, client_order_id="c")
+    assert sess.calls[0]["json"]["side"] == "ask"
 
 
 def test_prod_environment_uses_prod_host():

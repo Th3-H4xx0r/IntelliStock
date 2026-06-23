@@ -166,26 +166,31 @@ class KalshiClient:
         limit_cents: int,
         client_order_id: str,
     ) -> KalshiOrderRef:
+        # V2 create-order (POST /portfolio/events/orders): the legacy
+        # /portfolio/orders is deprecated and 410s on this API. V2 uses a single
+        # YES book with fixed-point DOLLAR strings — `bid` = buy YES, `ask` = sell
+        # YES (we only ever trade the YES leg). count/price are string fixed-point.
+        book_side = "ask" if action == "sell" else "bid"
         body = {
             "ticker": market_ticker,
-            "type": "limit",
-            "action": action,
-            "side": side,
-            "count": contracts,
-            "yes_price": limit_cents,
+            "side": book_side,
+            "count": f"{int(contracts)}",
+            "price": f"{int(limit_cents) / 100:.4f}",
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
             "client_order_id": client_order_id,
         }
-        d = self._request("POST", "/portfolio/orders", body=body)
+        d = self._request("POST", "/portfolio/events/orders", body=body)
         o = d.get("order", d)
         return KalshiOrderRef(
-            client_order_id=client_order_id,
+            client_order_id=o.get("client_order_id", client_order_id),
             broker_order_id=o.get("order_id"),
             market_ticker=market_ticker,
             side=side.upper(),
             action=action,
             contracts=contracts,
             limit_cents=limit_cents,
-            status=o.get("status", "pending"),
+            status=o.get("status", "resting" if o.get("order_id") else "pending"),
         )
 
     def cancel_order(self, order_id: str) -> bool:

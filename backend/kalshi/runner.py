@@ -13,6 +13,38 @@ from kalshi.engine import EngineConfig, run_instance
 from kalshi.instance_config import inplay_caps_from_config, risk_caps_from_config
 
 
+def _configure_telemetry() -> None:  # pragma: no cover - integration
+    """Enable LLM token-usage telemetry in THIS process. record_llm_call is gated on
+    llm_telemetry.configure() having run; the API + equities broker call it at their
+    startup, but the Kalshi runner is a separate process, so without this the analyst's
+    tokens are silently dropped (never reach the Token Usage page)."""
+    try:
+        import os
+        import llm_telemetry
+        from rethinkdb import RethinkDB
+        r = RethinkDB()
+        pricing_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "llm_pricing.yaml")
+        llm_telemetry.configure(
+            db_conn_factory=kdb.get_conn, enabled=True, flush_interval_s=2.0,
+            max_buffer=50, pricing_yaml_path=pricing_path if os.path.exists(pricing_path) else None,
+            r_module=r, db_name=kdb.DB_NAME,
+        )
+        try:
+            from llm_telemetry import ensure_llm_usage_tables
+            c = kdb.get_conn()
+            try:
+                ensure_llm_usage_tables(conn=c, r=r, db_name=kdb.DB_NAME)
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _run_with_crash_alert(config, *, run=run_instance, notify=None) -> None:
     """Run the engine; on an uncaught crash, alert the operator (Discord + iOS push,
     category 'kalshi_runtime') then re-raise so the supervisor still sees the failure.
@@ -65,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
+    _configure_telemetry()
     _run_with_crash_alert(
         EngineConfig(
             instance_id=instance_id,
