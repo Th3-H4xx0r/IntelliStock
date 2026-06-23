@@ -24,6 +24,9 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
     Dollar inputs (bankroll, daily-loss cap) are converted to cents."""
     raw = raw or {}
     leagues = raw.get("leagues") or DEFAULT_LEAGUES
+    tier = str(raw.get("tier") or "medium").lower()
+    if tier not in ("low", "medium", "high", "max"):
+        tier = "medium"
     return {
         "leagues": [str(x) for x in leagues if str(x).strip()] or DEFAULT_LEAGUES,
         "edge_threshold": float(raw.get("edge_threshold", 0.03)),
@@ -34,6 +37,8 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "daily_loss_cap_cents": _dollars_to_cents(raw.get("daily_loss_cap_dollars"), 0),
         "bankroll_cents": _dollars_to_cents(raw.get("bankroll_dollars"), 0),
         "poll_seconds": max(15, int(raw.get("poll_seconds", 60))),
+        "tier": tier,
+        "model": (str(raw.get("model")).strip() or None) if raw.get("model") else None,
         "live_enabled": bool(live_enabled),
     }
 

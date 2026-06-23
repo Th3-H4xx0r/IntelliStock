@@ -565,6 +565,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   bool _dailyLossTouched = false;
   double _dailyLossPct = 0.10;
   String _risk = 'medium';
+  List<Map<String, dynamic>> _models = [];
+  String? _selectedModel;
   bool _creating = false;
   String _err = '';
 
@@ -572,6 +574,14 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   void initState() {
     super.initState();
     _loadBalance();
+    _loadModels();
+  }
+
+  Future<void> _loadModels() async {
+    try {
+      final m = await ref.read(kalshiRepositoryProvider).models();
+      if (mounted) setState(() => _models = m);
+    } catch (_) {}
   }
 
   @override
@@ -645,6 +655,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'daily_loss_cap_dollars': _d(_dailyLoss, 100),
         'bankroll_dollars': _effectiveBankroll,
         'poll_seconds': _i(_poll, 60),
+        'tier': _risk,
+        'model': _selectedModel,
       });
       if (mounted) Navigator.pop(context);
       widget.onCreated(_brokerageId);
@@ -739,6 +751,31 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                     padding: const EdgeInsets.only(top: 6, bottom: 12),
                     child: Text(_kRiskPresets[_risk]!['blurb'] as String, style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
                   ),
+
+                  // Analyst LLM model
+                  _label('Analyst LLM model', 'The model that reads injuries/lineups/form and adjusts probabilities + writes the per-bet rationale.'),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String?>(
+                        isExpanded: true,
+                        value: _selectedModel,
+                        dropdownColor: AppColors.panel,
+                        icon: Icon(Icons.expand_more, color: AppColors.textDim),
+                        style: AppTextStyles.body.copyWith(color: AppColors.textHi),
+                        items: [
+                          const DropdownMenuItem<String?>(value: null, child: Text('Default (system model)')),
+                          ..._models.map((m) => DropdownMenuItem<String?>(
+                                value: m['id'] as String,
+                                child: Text((m['name'] ?? m['model'] ?? m['id']).toString(), overflow: TextOverflow.ellipsis),
+                              )),
+                        ],
+                        onChanged: (v) => setState(() => _selectedModel = v),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
 
                   _field(_name, 'Instance name', hint: 'e.g. Soccer edge — demo'),
 

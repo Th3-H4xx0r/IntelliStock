@@ -6,8 +6,11 @@ import InfoTip from './InfoTip.vue'
 const props = defineProps({
   brokerages: { type: Array, required: true },      // kalshi accounts [{id, account_name, kalshi_environment}]
   initialBrokerageId: { type: String, default: '' },
+  editInstance: { type: Object, default: null },     // {id, name, config} when editing
 })
-const emit = defineEmits(['close', 'created'])
+const emit = defineEmits(['close', 'created', 'saved'])
+
+const isEdit = computed(() => !!props.editInstance)
 
 const API_BASE = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
 function authHeaders() {
@@ -105,8 +108,39 @@ async function loadBalance() {
 watch(effectiveBankroll, (v) => {
   if (!dailyLossTouched.value) dailyLoss.value = Math.max(1, Math.round(v * dailyLossPct.value))
 }, { immediate: true })
+// LLM model for the analyst panel
+const models = ref([])
+const selectedModel = ref('')
+async function loadModels() {
+  try {
+    const res = await fetch(`${API_BASE}/models`, { headers: authHeaders() })
+    const d = await res.json()
+    models.value = (d.models || d || []).filter((m) => m && m.id)
+  } catch { models.value = [] }
+}
+
+function prefillFromEdit() {
+  const c = props.editInstance?.config || {}
+  name.value = props.editInstance?.name || ''
+  if (Array.isArray(c.leagues) && c.leagues.length) leagues.value = [...c.leagues]
+  if (c.edge_threshold != null) edgePct.value = Math.round(c.edge_threshold * 1000) / 10
+  if (c.kelly_fraction != null) kelly.value = c.kelly_fraction
+  if (c.max_contracts_per_market != null) maxContracts.value = c.max_contracts_per_market
+  if (c.max_open_exposure_frac != null) exposurePct.value = Math.round(c.max_open_exposure_frac * 100)
+  if (c.per_league_cap_frac != null) leagueCapPct.value = Math.round(c.per_league_cap_frac * 100)
+  if (c.daily_loss_cap_cents != null) { dailyLoss.value = Math.round(c.daily_loss_cap_cents / 100); dailyLossTouched.value = true }
+  if (c.bankroll_cents != null) manualBankroll.value = Math.round(c.bankroll_cents / 100)
+  if (c.poll_seconds != null) poll.value = c.poll_seconds
+  if (c.tier) risk.value = c.tier
+  if (c.model) selectedModel.value = c.model
+}
+
 watch(brokerageId, loadBalance)
-onMounted(loadBalance)
+onMounted(() => {
+  loadModels()
+  if (isEdit.value) prefillFromEdit()
+  loadBalance()
+})
 
 function toggleLeague(l) {
   const i = leagues.value.indexOf(l)
@@ -133,12 +167,22 @@ async function submit() {
       daily_loss_cap_dollars: Number(dailyLoss.value),
       bankroll_dollars: effectiveBankroll.value,
       poll_seconds: Number(poll.value),
+      tier: risk.value,
+      model: selectedModel.value || null,
     }
-    const res = await fetch(`${API_BASE}/brokerages/${brokerageId.value}/kalshi/instances`, {
-      method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
-    })
-    if (!res.ok) { err.value = `Create failed (HTTP ${res.status})`; return }
-    emit('created', brokerageId.value)
+    if (isEdit.value) {
+      const res = await fetch(`${API_BASE}/instances/${props.editInstance.id}/kalshi/config`, {
+        method: 'PATCH', headers: authHeaders(), body: JSON.stringify(body),
+      })
+      if (!res.ok) { err.value = `Save failed (HTTP ${res.status})`; return }
+      emit('saved')
+    } else {
+      const res = await fetch(`${API_BASE}/brokerages/${brokerageId.value}/kalshi/instances`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
+      })
+      if (!res.ok) { err.value = `Create failed (HTTP ${res.status})`; return }
+      emit('created', brokerageId.value)
+    }
   } catch (e) { err.value = String(e.message || e) }
   finally { creating.value = false }
 }
@@ -151,7 +195,7 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
     <div @click="emit('close')" class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
     <div class="relative glass-card rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
       <div class="px-6 pt-5 pb-3 border-b border-border-subtle flex items-center justify-between sticky top-0 bg-surface/80 backdrop-blur z-10">
-        <h3 class="text-base font-bold text-slate-100 flex items-center gap-2"><span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span> Create Kalshi instance</h3>
+        <h3 class="text-base font-bold text-slate-100 flex items-center gap-2"><span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span> {{ isEdit ? 'Edit Kalshi instance' : 'Create Kalshi instance' }}</h3>
         <button @click="emit('close')" class="text-slate-500 hover:text-slate-300"><span class="material-symbols-outlined">close</span></button>
       </div>
 
@@ -193,6 +237,21 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
             </button>
           </div>
           <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ riskBlurb }}</p>
+        </div>
+
+        <!-- LLM model (analyst panel) -->
+        <div>
+          <div class="flex items-center gap-1.5 mb-1.5">
+            <label class="text-xs font-medium text-slate-400">Analyst LLM model</label>
+            <InfoTip text="The model that reads injuries/lineups/form and adjusts probabilities + writes the per-bet rationale. Leave on Default to use the system model." />
+          </div>
+          <div class="relative">
+            <select v-model="selectedModel" class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
+              <option value="">Default (system model)</option>
+              <option v-for="m in models" :key="m.id" :value="m.id">{{ m.name || m.model || m.id }}</option>
+            </select>
+            <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
+          </div>
         </div>
 
         <!-- Name -->

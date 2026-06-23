@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
@@ -35,6 +36,30 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
       final repo = ref.read(kalshiRepositoryProvider);
       start ? await repo.startInstance(widget.instanceId) : await repo.stopInstance(widget.instanceId);
       await _refresh();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _delete() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: AppColors.panel,
+        title: Text('Delete instance?', style: AppTextStyles.cardTitle),
+        content: Text('This cannot be undone.', style: AppTextStyles.body.copyWith(color: AppColors.textMuted)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(c, true),
+              child: Text('Delete', style: AppTextStyles.body.copyWith(color: AppColors.danger, fontWeight: FontWeight.bold))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _busy = true);
+    try {
+      await ref.read(kalshiRepositoryProvider).deleteInstance(widget.instanceId);
+      if (mounted) context.pop();
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -84,6 +109,11 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                       ]),
                     ),
                   ),
+                ),
+                IconButton(
+                  onPressed: _busy ? null : _delete,
+                  icon: Icon(Icons.delete_outline, color: AppColors.danger),
+                  tooltip: 'Delete',
                 ),
               ],
       ),

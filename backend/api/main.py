@@ -4042,6 +4042,13 @@ class CreateKalshiInstanceBody(BaseModel):
     daily_loss_cap_dollars: Optional[float] = 0
     bankroll_dollars: Optional[float] = 0
     poll_seconds: Optional[int] = 60
+    tier: Optional[str] = "medium"
+    model: Optional[str] = None          # LLM model id for the analyst panel
+
+
+class UpdateKalshiInstanceBody(CreateKalshiInstanceBody):
+    """Same fields as create; edits an existing instance's name + kalshi_config."""
+    pass
 
 
 @app.get("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
@@ -4089,6 +4096,26 @@ def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody
     except Exception:
         pass
     return {"ok": True, "id": iid, "name": doc["name"], "live_enabled": live, "running": False}
+
+
+@app.patch("/instances/{instance_id}/kalshi/config", response_class=JSONResponse)
+def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Edit a Kalshi instance's name + config (risk tier, leagues, caps, model).
+    live_enabled is re-derived from the linked brokerage's environment."""
+    from kalshi.instance_config import normalize_config
+    row = _kalshi_instance_row(conn, instance_id)
+    bid = row.get("brokerage_id")
+    live = False
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        live = (bk.get("kalshi_environment") or "demo") == "live"
+    except Exception:
+        pass
+    config = normalize_config(body.model_dump(), live_enabled=live)
+    _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).update(
+        {"name": body.name.strip(), "kalshi_config": config}
+    ).run(conn)
+    return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config}
 
 
 def _kalshi_instance_row(conn, instance_id: str) -> dict:

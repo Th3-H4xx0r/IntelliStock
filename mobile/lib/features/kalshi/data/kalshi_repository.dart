@@ -114,6 +114,18 @@ class KalshiRepository {
 
   Future<Map<String, dynamic>> instanceDecisions(String id) =>
       _client.get<Map<String, dynamic>>('/instances/$id/kalshi/decisions', query: {'limit': 200});
+
+  Future<List<Map<String, dynamic>>> models() async {
+    final d = await _client.get<dynamic>('/models');
+    final list = (d is Map ? (d['models'] ?? []) : d) as List? ?? [];
+    return list.whereType<Map<String, dynamic>>().where((m) => m['id'] != null).toList();
+  }
+
+  Future<void> updateInstance(String id, Map<String, dynamic> body) =>
+      _client.patch('/instances/$id/kalshi/config', body: body);
+
+  Future<void> deleteInstance(String id) =>
+      _client.delete('/instances/$id', query: {'force': true});
 }
 
 final kalshiRepositoryProvider = Provider<KalshiRepository>(

@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
 import KalshiPortfolioChart from '../components/kalshi/KalshiPortfolioChart.vue'
+import KalshiCreateInstanceModal from '../components/kalshi/KalshiCreateInstanceModal.vue'
 import InstanceLiveLogs from '../components/InstanceLiveLogs.vue'
 import { getToken } from '../utils/auth.js'
 
@@ -66,6 +67,24 @@ function toggle(i) {
   expanded.value = s
 }
 const running = computed(() => !!detail.value?.running)
+
+// Edit / delete
+const showEdit = ref(false)
+const deleting = ref(false)
+const editBrokerages = computed(() => detail.value
+  ? [{ id: detail.value.brokerage_id, account_name: detail.value.name, kalshi_environment: detail.value.environment }]
+  : [])
+function onSaved() { showEdit.value = false; load() }
+async function del() {
+  if (deleting.value) return
+  if (!confirm('Delete this Kalshi instance? This cannot be undone.')) return
+  deleting.value = true
+  try {
+    await fetch(`${API_BASE}/instances/${id}?force=true`, { method: 'DELETE', headers: authHeaders() })
+    router.push('/kalshi')
+  } finally { deleting.value = false }
+}
+
 function pct(v) { return v == null ? '—' : `${(v * 100).toFixed(1)}%` }
 function decColor(d) {
   return { placed: 'text-emerald-400', skipped: 'text-slate-500', queued: 'text-amber-400', blocked: 'text-red-400' }[d] || 'text-slate-400'
@@ -105,6 +124,14 @@ onMounted(load)
             <button v-if="running" @click="kill" :disabled="busy"
                     class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-red-500/40 text-red-400 text-sm font-semibold hover:bg-red-500/10 transition-all disabled:opacity-50">
               <span class="material-symbols-outlined text-[18px]">stop_circle</span> Kill
+            </button>
+            <button @click="showEdit = true" :disabled="busy"
+                    class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border-subtle text-slate-300 text-sm font-semibold hover:text-slate-100 hover:border-primary/50 transition-all disabled:opacity-50">
+              <span class="material-symbols-outlined text-[18px]">tune</span> Edit
+            </button>
+            <button @click="del" :disabled="deleting"
+                    class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-red-500/40 text-red-400 text-sm font-semibold hover:bg-red-500/10 transition-all disabled:opacity-50">
+              <span class="material-symbols-outlined text-[18px]">delete</span> Delete
             </button>
           </div>
         </div>
@@ -168,5 +195,14 @@ onMounted(load)
         Instance not found. <button @click="router.push('/kalshi')" class="text-primary">Back to Kalshi</button>
       </div>
     </main>
+
+    <KalshiCreateInstanceModal
+      v-if="showEdit && detail"
+      :brokerages="editBrokerages"
+      :initial-brokerage-id="detail.brokerage_id"
+      :edit-instance="{ id, name: detail.name, config: detail.config }"
+      @close="showEdit = false"
+      @saved="onSaved"
+    />
   </AppShell>
 </template>
