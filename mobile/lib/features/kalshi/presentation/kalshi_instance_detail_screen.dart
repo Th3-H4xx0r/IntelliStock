@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/common_widgets.dart';
@@ -12,6 +11,7 @@ import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../instances/presentation/live_logs_panel.dart';
 import '../data/kalshi_repository.dart';
+import 'kalshi_portfolio_hero.dart';
 
 /// Kalshi instance detail: status + Start/Stop/KILL, decision summary, the
 /// LLM-reasoned decision log, and live logs.
@@ -170,7 +170,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   _decisionLog(decAsync),
                   const SizedBox(height: 12),
                   GlassCard(
-                    padding: const EdgeInsets.all(14),
+                    liquid: true,                    padding: const EdgeInsets.all(14),
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Row(children: [
                         Icon(symbol('terminal'), color: AppColors.primary, size: 18),
@@ -214,63 +214,11 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
   Widget _portfolioChart(String brokerageId) {
     if (brokerageId.isEmpty) return const SizedBox.shrink();
     final async = ref.watch(kalshiPortfolioProvider(brokerageId));
-    return GlassCard(
-      liquid: true,
-      padding: const EdgeInsets.all(16),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Icon(symbol('monitoring'), color: AppColors.primary, size: 18),
-          const SizedBox(width: 8),
-          Text('PORTFOLIO VALUE', style: AppTextStyles.eyebrow),
-        ]),
-        const SizedBox(height: 14),
-        async.when(
-          loading: () => const SizedBox(height: 90, child: LoadingState()),
-          error: (e, _) => ErrorBanner(message: '$e', onRetry: () => ref.invalidate(kalshiPortfolioProvider(brokerageId))),
-          data: (p) {
-            final hasSeries = p.series.length > 1;
-            final baseline = p.series.isNotEmpty ? p.series.first : 0.0;
-            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              // Scrub-aware headline: dragging the chart updates value + change.
-              ValueListenableBuilder<int?>(
-                valueListenable: _scrubIdx,
-                builder: (_, idx, __) {
-                  final v = (idx != null && idx >= 0 && idx < p.series.length) ? p.series[idx] : p.value;
-                  final change = (idx != null && idx >= 0 && idx < p.series.length) ? (v - baseline) : p.dayChange;
-                  final positive = change >= 0;
-                  final color = positive ? AppColors.success : AppColors.danger;
-                  return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('\$${v.toStringAsFixed(2)}',
-                        style: AppTextStyles.value.copyWith(fontSize: 30, color: AppColors.textHi, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 4),
-                    Row(children: [
-                      Icon(positive ? Icons.trending_up : Icons.trending_down, size: 16, color: color),
-                      const SizedBox(width: 3),
-                      Text('${positive ? '+' : '-'}\$${change.abs().toStringAsFixed(2)}',
-                          style: AppTextStyles.meta.copyWith(color: color, fontWeight: FontWeight.bold)),
-                    ]),
-                  ]);
-                },
-              ),
-              if (hasSeries) ...[
-                const SizedBox(height: 14),
-                ScrubbableAreaChart(
-                  timestamps: p.seriesTs,
-                  values: p.series,
-                  lineColor: p.dayChange >= 0 ? AppColors.success : AppColors.danger,
-                  height: 150,
-                  baseline: baseline,
-                  indexed: true,
-                  onScrub: (i) => _scrubIdx.value = i,
-                ),
-              ] else
-                Padding(padding: const EdgeInsets.only(top: 8),
-                    child: Text('Equity curve appears once the engine records snapshots.',
-                        style: AppTextStyles.nano.copyWith(color: AppColors.textDim))),
-            ]);
-          },
-        ),
-      ]),
+    return KalshiPortfolioHero(
+      title: 'PORTFOLIO VALUE',
+      async: async,
+      scrubIdx: _scrubIdx,
+      onRetry: () => ref.invalidate(kalshiPortfolioProvider(brokerageId)),
     );
   }
 
@@ -280,7 +228,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: GlassCard(
-        padding: const EdgeInsets.all(14),
+   liquid: true,        padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Container(width: 8, height: 8, decoration: const BoxDecoration(color: Color(0xFFEF4444), shape: BoxShape.circle)),
@@ -478,7 +426,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final placed = (data['placed'] as List?) ?? const [];
     final fills = (data['fills'] as List?) ?? const [];
     return GlassCard(
-      padding: const EdgeInsets.all(14),
+   liquid: true,      padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Icon(Icons.receipt_long_outlined, color: AppColors.primary, size: 18),
@@ -513,7 +461,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
 
   Widget _decisionLog(AsyncValue<Map<String, dynamic>> decAsync) {
     return GlassCard(
-      padding: const EdgeInsets.all(14),
+   liquid: true,      padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Icon(symbol('hub'), color: AppColors.primary, size: 18),

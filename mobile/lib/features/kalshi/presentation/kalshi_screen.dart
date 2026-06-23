@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/common_widgets.dart';
@@ -11,6 +10,7 @@ import '../../../core/widgets/material_symbols.dart';
 import '../../dashboard/application/dashboard_controller.dart';
 import '../../dashboard/data/dashboard_repository.dart';
 import '../../instances/presentation/live_logs_panel.dart';
+import 'kalshi_portfolio_hero.dart';
 import '../data/kalshi_repository.dart';
 
 /// Dedicated Kalshi monitoring screen (its own bottom-nav tab). Account
@@ -330,56 +330,11 @@ class _PortfolioCardState extends ConsumerState<_PortfolioCard> {
 
   @override
   Widget build(BuildContext context) {
-    final async = ref.watch(kalshiPortfolioProvider(widget.brokerageId));
-    return _KCard(
-      icon: 'monitoring',
+    return KalshiPortfolioHero(
       title: 'Portfolio value',
-      child: async.when(
-        loading: () => const SizedBox(height: 56, child: LoadingState()),
-        error: (e, _) => ErrorBanner(message: '$e', onRetry: () => ref.invalidate(kalshiPortfolioProvider(widget.brokerageId))),
-        data: (p) {
-          final baseline = p.series.isNotEmpty ? p.series.first : 0.0;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ValueListenableBuilder<int?>(
-                valueListenable: _scrub,
-                builder: (_, idx, __) {
-                  final v = (idx != null && idx >= 0 && idx < p.series.length) ? p.series[idx] : p.value;
-                  final change = (idx != null && idx >= 0 && idx < p.series.length) ? (v - baseline) : p.dayChange;
-                  final positive = change >= 0;
-                  final color = positive ? AppColors.success : AppColors.danger;
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.baseline,
-                    textBaseline: TextBaseline.alphabetic,
-                    children: [
-                      Text('\$${v.toStringAsFixed(2)}',
-                          style: AppTextStyles.value.copyWith(fontSize: 28, color: AppColors.textHi, fontWeight: FontWeight.bold)),
-                      const SizedBox(width: 8),
-                      Icon(positive ? Icons.trending_up : Icons.trending_down, size: 16, color: color),
-                      const SizedBox(width: 2),
-                      Text('${positive ? '+' : '-'}\$${change.abs().toStringAsFixed(2)}',
-                          style: AppTextStyles.meta.copyWith(color: color, fontWeight: FontWeight.bold)),
-                    ],
-                  );
-                },
-              ),
-              if (p.series.length > 1) ...[
-                const SizedBox(height: 14),
-                ScrubbableAreaChart(
-                  timestamps: p.seriesTs,
-                  values: p.series,
-                  lineColor: p.dayChange >= 0 ? AppColors.success : AppColors.danger,
-                  height: 120,
-                  baseline: baseline,
-                  indexed: true,
-                  onScrub: (i) => _scrub.value = i,
-                ),
-              ],
-            ],
-          );
-        },
-      ),
+      async: ref.watch(kalshiPortfolioProvider(widget.brokerageId)),
+      scrubIdx: _scrub,
+      onRetry: () => ref.invalidate(kalshiPortfolioProvider(widget.brokerageId)),
     );
   }
 }
@@ -503,6 +458,7 @@ class _InstanceStatus extends StatelessWidget {
   Widget build(BuildContext context) {
     final running = instance.running;
     return GlassCard(
+      liquid: true,
       onTap: () => context.push('/kalshi/instances/${instance.id}'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: Row(

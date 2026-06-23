@@ -102,6 +102,16 @@ function pct(v) { return v == null ? '—' : `${(v * 100).toFixed(1)}%` }
 function decColor(d) {
   return { placed: 'text-emerald-400', skipped: 'text-slate-500', queued: 'text-amber-400', blocked: 'text-red-400' }[d] || 'text-slate-400'
 }
+function decBadge(d) {
+  return { placed: 'bg-emerald-500/15 text-emerald-400', skipped: 'bg-slate-500/15 text-slate-500', queued: 'bg-amber-500/15 text-amber-400', blocked: 'bg-red-500/15 text-red-400' }[d] || 'bg-slate-500/15 text-slate-400'
+}
+
+// Decision log pagination
+const decPage = ref(0)
+const decPageSize = 12
+const decPages = computed(() => Math.max(1, Math.ceil(decisions.value.length / decPageSize)))
+const decStart = computed(() => Math.min(decPage.value, decPages.value - 1) * decPageSize)
+const pagedDecisions = computed(() => decisions.value.slice(decStart.value, decStart.value + decPageSize))
 
 const ACTION_STYLE = {
   open: 'bg-emerald-500/15 text-emerald-400', add: 'bg-emerald-500/15 text-emerald-400',
@@ -240,19 +250,22 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
           <div class="glass-card rounded-2xl p-4 sm:p-5 flex flex-col min-h-0">
             <div class="flex items-center gap-2 mb-3 shrink-0"><span class="material-symbols-outlined text-primary text-[18px]">history_edu</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Decision log</span></div>
             <p v-if="!decisions.length" class="text-sm text-slate-500">No decisions logged yet. The engine writes a row for every bet placed and every candidate it considered.</p>
-            <div class="flex-1 min-h-0 overflow-y-auto -mr-2 pr-2">
-              <div v-for="(d, i) in decisions" :key="d.id || i" class="border-b border-border-subtle/60 last:border-0">
-                <button @click="toggle(i)" class="w-full flex items-center justify-between gap-2 py-2.5 text-left">
-                  <span class="flex items-center gap-2 min-w-0">
-                    <span class="material-symbols-outlined text-slate-500 text-[16px] transition-transform" :class="{ 'rotate-90': expanded.has(i) }">chevron_right</span>
-                    <span class="text-sm text-slate-300 truncate">{{ d.market_ticker }} <span class="text-slate-500">· {{ d.side }}</span></span>
-                  </span>
-                  <span class="flex items-center gap-3 shrink-0 text-xs">
-                    <span class="tabular-nums" :class="(d.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ d.edge == null ? '' : (d.edge >= 0 ? '+' : '') + pct(d.edge) }}</span>
-                    <span class="font-semibold uppercase" :class="decColor(d.decision)">{{ d.decision }}</span>
-                  </span>
+            <div class="flex-1 min-h-0 overflow-y-auto -mr-2 pr-2 space-y-2">
+              <div v-for="(d, i) in pagedDecisions" :key="d.id || i" class="rounded-xl border border-border-subtle bg-surface/40 hover:border-primary/40 transition-colors">
+                <button @click="toggle(decStart + i)" class="w-full flex items-center gap-3 p-3 text-left">
+                  <img v-if="d.pick_logo" :src="d.pick_logo" referrerpolicy="no-referrer" class="w-9 h-9 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />
+                  <div v-else class="w-9 h-9 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[11px] font-bold text-slate-400 shrink-0">{{ initials((d.pick_label || '').replace(' to win','')) }}</div>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-sm font-semibold text-slate-100 truncate">{{ d.match || d.market_ticker }}</div>
+                    <div class="text-xs text-primary font-medium truncate">{{ d.pick_label || d.side }}</div>
+                  </div>
+                  <div class="flex flex-col items-end gap-1 shrink-0">
+                    <span class="text-xs tabular-nums font-semibold" :class="(d.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ d.edge == null ? '' : (d.edge >= 0 ? '+' : '') + pct(d.edge) }}</span>
+                    <span class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded" :class="decBadge(d.decision)">{{ d.decision }}</span>
+                  </div>
+                  <span class="material-symbols-outlined text-slate-500 text-[18px] transition-transform shrink-0" :class="{ 'rotate-180': expanded.has(decStart + i) }">expand_more</span>
                 </button>
-                <div v-if="expanded.has(i)" class="pb-3 pl-6 text-xs text-slate-400 space-y-1">
+                <div v-if="expanded.has(decStart + i)" class="px-3 pb-3 text-xs text-slate-400 space-y-2">
                   <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <div><span class="text-slate-600">Model</span> {{ pct(d.model_prob) }}</div>
                     <div><span class="text-slate-600">Sharp</span> {{ pct(d.sharp_prob) }}</div>
@@ -263,12 +276,17 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                     <div v-if="d.outcome"><span class="text-slate-600">Outcome</span> {{ d.outcome }}</div>
                     <div v-if="d.clv != null"><span class="text-slate-600">CLV</span> {{ pct(d.clv) }}</div>
                   </div>
-                  <p v-if="d.llm_rationale" class="text-slate-300 bg-surface/40 border border-border-subtle rounded-lg px-3 py-2 mt-1">
+                  <p v-if="d.llm_rationale" class="text-slate-300 bg-surface/60 border border-border-subtle rounded-lg px-3 py-2">
                     <span class="material-symbols-outlined text-primary text-[14px] align-middle mr-1">psychology</span>{{ d.llm_rationale }}
                   </p>
                   <p v-if="d.block_reason" class="text-red-400/80">Blocked: {{ d.block_reason }}</p>
                 </div>
               </div>
+            </div>
+            <div v-if="decPages > 1" class="flex items-center justify-between pt-3 shrink-0">
+              <button @click="decPage = Math.max(0, decPage - 1)" :disabled="decPage === 0" class="flex items-center justify-center w-8 h-8 rounded-lg border border-border-subtle text-slate-400 hover:text-slate-200 hover:border-primary/50 disabled:opacity-30 transition-colors"><span class="material-symbols-outlined text-[18px]">chevron_left</span></button>
+              <span class="text-xs text-slate-500">Page {{ decPage + 1 }} / {{ decPages }}</span>
+              <button @click="decPage = Math.min(decPages - 1, decPage + 1)" :disabled="decPage >= decPages - 1" class="flex items-center justify-center w-8 h-8 rounded-lg border border-border-subtle text-slate-400 hover:text-slate-200 hover:border-primary/50 disabled:opacity-30 transition-colors"><span class="material-symbols-outlined text-[18px]">chevron_right</span></button>
             </div>
           </div>
 
