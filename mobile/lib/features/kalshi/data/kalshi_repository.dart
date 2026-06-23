@@ -108,6 +108,12 @@ class KalshiRepository {
 
   Future<void> startInstance(String id) => _client.post('/instances/$id/start');
   Future<void> stopInstance(String id) => _client.post('/instances/$id/stop');
+
+  Future<Map<String, dynamic>> instanceDetail(String id) =>
+      _client.get<Map<String, dynamic>>('/instances/$id/kalshi/detail');
+
+  Future<Map<String, dynamic>> instanceDecisions(String id) =>
+      _client.get<Map<String, dynamic>>('/instances/$id/kalshi/decisions', query: {'limit': 200});
 }
 
 final kalshiRepositoryProvider = Provider<KalshiRepository>(
@@ -135,4 +141,14 @@ final kalshiPositionsProvider =
 final kalshiInstancesProvider =
     FutureProvider.autoDispose.family<List<KalshiInstance>, String>((ref, bid) {
   return ref.watch(kalshiRepositoryProvider).instances(bid);
+});
+
+final kalshiInstanceDetailProvider =
+    FutureProvider.autoDispose.family<Map<String, dynamic>, String>((ref, id) {
+  return ref.watch(kalshiRepositoryProvider).instanceDetail(id);
+});
+
+final kalshiInstanceDecisionsProvider =
+    FutureProvider.autoDispose.family<Map<String, dynamic>, String>((ref, id) {
+  return ref.watch(kalshiRepositoryProvider).instanceDecisions(id);
 });

@@ -188,13 +188,15 @@ onMounted(loadAccounts)
 
       <!-- Instance exists -> data -->
       <template v-else>
-        <!-- instance status strip -->
-        <div class="glass-card rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap">
+        <!-- instance status strip (click → detail) -->
+        <div @click="$router.push(`/kalshi/instances/${instance.id}`)"
+             class="glass-card card-hover rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap cursor-pointer">
           <span class="size-2 rounded-full" :class="running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
           <span class="text-sm font-semibold text-slate-200">{{ instance.name }}</span>
           <span class="text-xs font-medium px-2 py-0.5 rounded-md" :class="running ? 'bg-emerald-500/15 text-emerald-400' : 'bg-slate-500/15 text-slate-400'">{{ running ? 'Running' : 'Stopped' }}</span>
           <span v-if="instance.live_enabled" class="text-xs font-medium px-2 py-0.5 rounded-md bg-red-500/15 text-red-400">Live · real money</span>
           <span v-else class="text-xs font-medium px-2 py-0.5 rounded-md bg-primary/15 text-primary">Paper</span>
+          <span class="ml-auto flex items-center gap-1 text-xs text-primary font-medium">Details <span class="material-symbols-outlined text-[14px]">arrow_forward</span></span>
         </div>
 
         <!-- Chart + summary -->

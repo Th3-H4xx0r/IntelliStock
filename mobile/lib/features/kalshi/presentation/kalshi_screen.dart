@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
@@ -491,6 +492,7 @@ class _InstanceStatus extends StatelessWidget {
   Widget build(BuildContext context) {
     final running = instance.running;
     return GlassCard(
+      onTap: () => context.push('/kalshi/instances/${instance.id}'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: Row(
         children: [
@@ -501,6 +503,8 @@ class _InstanceStatus extends StatelessWidget {
           _pill(running ? 'Running' : 'Stopped', running ? AppColors.success : AppColors.textDim),
           const SizedBox(width: 6),
           _pill(instance.liveEnabled ? 'Live' : 'Paper', instance.liveEnabled ? AppColors.danger : AppColors.primary),
+          const SizedBox(width: 8),
+          Icon(Icons.chevron_right, size: 16, color: AppColors.textDim),
         ],
       ),
     );
