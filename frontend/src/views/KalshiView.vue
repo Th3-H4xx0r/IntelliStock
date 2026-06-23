@@ -59,7 +59,12 @@ async function loadAll() {
   scanBudget.value = b
 }
 
-function selectAccount() { loadAll() }
+const dropdownOpen = ref(false)
+function pickAccount(id) {
+  selectedId.value = id
+  dropdownOpen.value = false
+  loadAll()
+}
 
 async function kill() {
   if (!selectedId.value || killing.value) return
@@ -91,14 +96,29 @@ onMounted(loadAccounts)
           <p class="text-slate-500 mt-1.5 text-sm">Autonomous soccer event-contract trading.</p>
         </div>
         <div class="flex items-center gap-2">
-          <div v-if="accounts.length" class="relative">
-            <select
-              v-model="selectedId" @change="selectAccount"
-              class="appearance-none bg-surface border border-border-subtle rounded-lg text-sm text-slate-200 pl-3 pr-9 py-2 focus:outline-none focus:border-primary transition-colors"
-            >
-              <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.account_name }}</option>
-            </select>
-            <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
+          <!-- Single account: static chip. Multiple: themed custom dropdown
+               (a native <select> can't theme its OS-rendered option list). -->
+          <div v-if="accounts.length === 1"
+               class="flex items-center gap-2 bg-surface border border-border-subtle rounded-lg text-sm text-slate-300 px-3 py-2">
+            <span class="material-symbols-outlined text-primary text-[16px]">account_circle</span>
+            {{ selected?.account_name }}
+          </div>
+          <div v-else-if="accounts.length" class="relative">
+            <button @click="dropdownOpen = !dropdownOpen"
+                    class="flex items-center gap-2 bg-surface border border-border-subtle rounded-lg text-sm text-slate-200 pl-3 pr-2 py-2 hover:border-primary/50 transition-colors">
+              <span class="material-symbols-outlined text-primary text-[16px]">account_circle</span>
+              <span class="max-w-[160px] truncate">{{ selected?.account_name }}</span>
+              <span class="material-symbols-outlined text-slate-500 text-[18px] transition-transform" :class="{ 'rotate-180': dropdownOpen }">expand_more</span>
+            </button>
+            <div v-if="dropdownOpen" @click="dropdownOpen = false" class="fixed inset-0 z-40"></div>
+            <div v-if="dropdownOpen" class="absolute right-0 mt-1.5 w-60 z-50 glass-card rounded-xl overflow-hidden py-1 shadow-xl shadow-black/40">
+              <button v-for="a in accounts" :key="a.id" @click="pickAccount(a.id)"
+                      class="w-full text-left px-3 py-2.5 text-sm flex items-center gap-2 hover:bg-primary/10 transition-colors"
+                      :class="a.id === selectedId ? 'text-primary' : 'text-slate-300'">
+                <span class="material-symbols-outlined text-[16px]" :class="a.id === selectedId ? 'text-primary' : 'text-transparent'">check</span>
+                {{ a.account_name }}
+              </button>
+            </div>
           </div>
           <button
             v-if="selectedId" @click="kill" :disabled="killing"
