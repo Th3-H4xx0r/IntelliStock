@@ -381,3 +381,30 @@ def alert_crash_loop(*, instance_id: str, restarts: int, window_sec: int) -> Non
         discord_channel=_channel("notifications"), discord_embed=embed,
         push_body=f"{restarts} restarts in {window_sec}s; broker NOT auto-restarted",
     )
+
+
+def alert_instance_crash(*, instance_id: str, reason: str, detail: str = "") -> None:
+    """The instance process died for a reason other than an operator Stop and was
+    held open (blocking) so its logs stay viewable in logs-history. Best-effort:
+    this fires from inside a crash handler (often while the DB is flaky), so it
+    must never raise."""
+    content = f"INSTANCE CRASH [{instance_id}] {reason}"
+    fields = [{"name": "instance", "value": str(instance_id), "inline": True}]
+    if detail:
+        fields.append({"name": "detail", "value": str(detail)[:900], "inline": False})
+    embed = {
+        "title": "Instance crashed",
+        "color": 0x992D22,
+        "fields": fields,
+    }
+    try:
+        notify(
+            category="instance_crash", instance_id=instance_id,
+            title="Instance crashed", body=content,
+            discord_channel=_channel("notifications"), discord_embed=embed,
+            push_body=str(reason)[:180],
+        )
+    except Exception as exc:  # an alert failure must never mask the crash
+        intellistock_logger.log(
+            f"alert_instance_crash failed: {exc}", "yellow", service="INSTANCE",
+        )

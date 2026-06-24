@@ -1087,6 +1087,7 @@ def action_instances(conn):
             "created_by",
             "brokerage_id",
             "max_usage",
+            "crashed",
         )
         .run(conn)
     )
@@ -1102,6 +1103,9 @@ def action_instances(conn):
             "created_by": row.get("created_by", "user"),
             "brokerage_id": row.get("brokerage_id"),
             "max_usage": row.get("max_usage"),
+            # True when the instance process died (not an operator Stop) and is
+            # being held open for log capture — the UI shows a 'crashed' badge.
+            "crashed": bool(row.get("crashed", False)),
         })
     return {"instances": instances}
 
@@ -1440,6 +1444,9 @@ def action_get_instance(conn, instance_id):
         "id": doc.get("id"),
         "name": doc.get("name"),
         "runCommand": doc.get("runCommand", False),
+        # True when the process died (not an operator Stop) and is held open for
+        # log capture; the UI shows a 'crashed' badge.
+        "crashed": bool(doc.get("crashed", False)),
         "stocks": doc.get("stocks") or [],
         "strategy_id": sid,
         "strategy": strategy,
