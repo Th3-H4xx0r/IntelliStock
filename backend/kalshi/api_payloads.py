@@ -59,8 +59,12 @@ def positions_payload(position_rows: list[dict], info_fn=None) -> dict:
         cur = p.get("current_price_cents")
         avg = p.get("avg_price_cents", 0.0)
         qty = p.get("contracts", 0)
+        # unrealized_cents stays in CENTS (matches kalshi.telemetry + the web view,
+        # which divides by 100). 12¢ gain x 40 contracts -> 480¢ = $4.80.
         unreal = None if cur is None else round((cur - avg) * qty, 2)
         info = ((info_fn(p.get("market_ticker")) if info_fn else None) or {})
+        # Each YES contract settles to $1 -> max payout = qty * $1. Cost basis,
+        # current value, and the live odds (current YES price %) — the Kalshi view.
         out.append(
             {
                 "market_ticker": p.get("market_ticker"),
@@ -70,6 +74,10 @@ def positions_payload(position_rows: list[dict], info_fn=None) -> dict:
                 "current_price_cents": cur,
                 "unrealized_cents": unreal,
                 "settlement_eta": p.get("settlement_eta"),
+                "max_payout": round(qty * 1.0, 2),
+                "cost": round(qty * avg / 100.0, 2),
+                "current_value": None if cur is None else round(qty * cur / 100.0, 2),
+                "odds_pct": None if cur is None else round(cur, 0),
                 "match": info.get("match", ""),
                 "pick_label": info.get("pick_label", ""),
                 "pick_logo": info.get("pick_logo", ""),

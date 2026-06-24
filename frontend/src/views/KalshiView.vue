@@ -106,6 +106,11 @@ function onCreated(bid) {
 
 function pct(v) { return `${(v * 100).toFixed(1)}%` }
 function clvLeagues() { return Object.entries(clv.value.by_league || {}) }
+function posPick(p) { return (p.pick_label || p.side || '').replace(' to win', '') }
+function posInitials(p) {
+  const name = posPick(p) || p.market_ticker || ''
+  return name.replace(/[^A-Za-z ]/g, '').split(' ').filter(Boolean).map((w) => w[0]).slice(0, 2).join('').toUpperCase()
+}
 
 onMounted(loadAccounts)
 </script>
@@ -225,7 +230,27 @@ onMounted(loadAccounts)
         <div class="glass-card rounded-2xl p-4 sm:p-5">
           <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">receipt_long</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Open positions</span></div>
           <p v-if="!positions.length" class="text-sm text-slate-500">No open positions.</p>
-          <div v-for="p in positions" :key="p.market_ticker" class="flex items-center justify-between text-sm py-2 border-b border-border-subtle/60 last:border-0"><span class="text-slate-300">{{ p.market_ticker }} <span class="text-slate-500">{{ p.side }} ×{{ p.contracts }}</span></span><span class="font-bold tabular-nums" :class="(p.unrealized_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ p.unrealized_cents == null ? '—' : (p.unrealized_cents >= 0 ? '+' : '') + '$' + (p.unrealized_cents / 100).toFixed(2) }}</span></div>
+          <div class="space-y-2.5">
+            <div v-for="p in positions" :key="p.market_ticker" class="rounded-xl border border-border-subtle bg-surface/40 p-3">
+              <div class="flex items-start gap-3">
+                <img v-if="p.pick_logo" :src="p.pick_logo" class="w-9 h-9 rounded-full object-contain bg-surface shrink-0" @error="(e) => e.target.style.display='none'" />
+                <div v-else class="w-9 h-9 rounded-full bg-surface flex items-center justify-center text-[11px] font-bold text-slate-400 shrink-0">{{ posInitials(p) }}</div>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-semibold text-slate-100 truncate">{{ p.match || p.market_ticker }}</div>
+                  <div class="text-xs text-primary font-medium truncate">Yes · {{ posPick(p) }}</div>
+                </div>
+                <div class="text-right shrink-0">
+                  <div class="text-sm font-bold text-slate-100 tabular-nums">{{ p.current_value == null ? '—' : '$' + p.current_value.toFixed(2) }}</div>
+                  <div class="text-xs font-semibold tabular-nums" :class="(p.unrealized_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ p.unrealized_cents == null ? '' : (p.unrealized_cents >= 0 ? '+' : '') + '$' + (p.unrealized_cents / 100).toFixed(2) }}</div>
+                </div>
+              </div>
+              <div class="flex items-center gap-2 mt-2.5">
+                <span class="px-2 py-0.5 rounded-md bg-primary/10 text-primary text-[11px] font-semibold tabular-nums">{{ p.contracts }}×</span>
+                <span class="px-2 py-0.5 rounded-md bg-primary/10 text-primary text-[11px] font-semibold tabular-nums">Buy {{ p.odds_pct == null ? '—' : p.odds_pct.toFixed(0) + '%' }}</span>
+                <span class="ml-auto text-[11px] text-slate-500 tabular-nums">${{ (p.max_payout || 0).toFixed(0) }} max payout</span>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">

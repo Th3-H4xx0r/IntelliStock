@@ -52,6 +52,10 @@ class KalshiPosition {
     this.match = '',
     this.pickLabel = '',
     this.pickLogo = '',
+    this.maxPayout = 0,
+    this.cost = 0,
+    this.currentValue,
+    this.oddsPct,
   });
   final String marketTicker;
   final String side;
@@ -60,6 +64,10 @@ class KalshiPosition {
   final String match;
   final String pickLabel;
   final String pickLogo;
+  final double maxPayout;
+  final double cost;
+  final double? currentValue;
+  final double? oddsPct;
 
   factory KalshiPosition.fromJson(Map<String, dynamic> j) => KalshiPosition(
         marketTicker: (j['market_ticker'] ?? '').toString(),
@@ -69,6 +77,10 @@ class KalshiPosition {
         match: (j['match'] ?? '').toString(),
         pickLabel: (j['pick_label'] ?? '').toString(),
         pickLogo: (j['pick_logo'] ?? '').toString(),
+        maxPayout: (j['max_payout'] as num?)?.toDouble() ?? 0,
+        cost: (j['cost'] as num?)?.toDouble() ?? 0,
+        currentValue: (j['current_value'] as num?)?.toDouble(),
+        oddsPct: (j['odds_pct'] as num?)?.toDouble(),
       );
 }
 

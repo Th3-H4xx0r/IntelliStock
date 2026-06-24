@@ -112,7 +112,22 @@ class KalshiClient:
             portfolio_value_cents=int(d.get("portfolio_value", cash)),
         )
 
-    def get_positions(self) -> list[KalshiContractPosition]:
+    def market_price_cents(self, ticker: str):  # pragma: no cover - integration
+        """Current YES price for a market in cents (mid of bid/ask, else last
+        trade). None on failure. Used to mark positions to market."""
+        try:
+            d = self._request("GET", f"/markets/{ticker}")
+            m = d.get("market", d) or {}
+            bid = _dollars_cents(m.get("yes_bid_dollars", m.get("yes_bid", 0)))
+            ask = _dollars_cents(m.get("yes_ask_dollars", m.get("yes_ask", 0)))
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2.0
+            last = _dollars_cents(m.get("last_price_dollars", m.get("last_price", 0)))
+            return last or (bid or ask) or None
+        except Exception:
+            return None
+
+    def get_positions(self, *, with_price: bool = True) -> list[KalshiContractPosition]:
         d = self._request("GET", "/portfolio/positions")
         out = []
         for p in d.get("market_positions", []) or []:
@@ -122,12 +137,20 @@ class KalshiClient:
             if qty == 0:
                 continue
             exposure_cents = _dollars_cents(p.get("market_exposure_dollars", p.get("market_exposure", 0)))
+            ticker = p.get("ticker", "")
+            cur = self.market_price_cents(ticker) if with_price else None
+            # market_price_cents is the YES mark; a NO contract marks at (100 - YES).
+            # The bot trades YES-only, but a manual NO holding must price against its
+            # own side or its value/odds/P&L would invert.
+            if cur is not None and qty < 0:
+                cur = 100.0 - cur
             out.append(
                 KalshiContractPosition(
-                    market_ticker=p.get("ticker", ""),
+                    market_ticker=ticker,
                     side="YES" if qty > 0 else "NO",
                     contracts=abs(qty),
                     avg_price_cents=exposure_cents / max(abs(qty), 1),
+                    current_price_cents=cur,
                 )
             )
         return out

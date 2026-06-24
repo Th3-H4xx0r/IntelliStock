@@ -75,6 +75,11 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
   @override
   Widget build(BuildContext context) {
     final accounts = _kalshiAccounts();
+    // Drop a stale selection (account unlinked elsewhere) before it reaches the
+    // DropdownButton — a `value` with no matching item asserts in debug.
+    if (_selectedId != null && !accounts.any((a) => a.id == _selectedId)) {
+      _selectedId = null;
+    }
     _selectedId ??= accounts.isNotEmpty ? accounts.first.id : null;
     final selectedId = _selectedId;
 
@@ -83,8 +88,10 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
     final instance = instances.isNotEmpty ? instances.first : null;
     final running = instance?.running ?? false;
 
+    final topInset = MediaQuery.paddingOf(context).top + kToolbarHeight;
     return Scaffold(
       backgroundColor: Colors.transparent,
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -111,18 +118,20 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
       ),
       body: selectedId == null
           ? Padding(
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.fromLTRB(16, topInset + 16, 16, 16),
               child: EmptyState(
                 icon: symbol('sports_soccer'),
                 title: 'No Kalshi account linked',
                 subtitle: 'Link a Kalshi brokerage (demo or live) to create a trading instance.',
               ),
             )
-          : RefreshIndicator(
+          : Stack(children: [
+              Positioned(top: 0, left: 0, right: 0, child: const KalshiCrown()),
+              RefreshIndicator(
               color: AppColors.primary,
               onRefresh: _refresh,
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                padding: EdgeInsets.fromLTRB(16, topInset + 4, 16, 24),
                 children: [
                   if (accounts.length > 1) ...[
                     _AccountSelector(
@@ -160,6 +169,7 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
                 ],
               ),
             ),
+            ]),
     );
   }
 
@@ -266,7 +276,7 @@ class _KCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GlassCard(
-      liquid: true,
+      frosted: true,
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -295,20 +305,6 @@ Widget _rowItem(String left, Widget right) => Padding(
         ],
       ),
     );
-
-Widget _posCrest(String url, String fallbackName) {
-  final init = fallbackName.replaceAll(RegExp(r'[^A-Za-z ]'), '').split(' ')
-      .where((w) => w.isNotEmpty).map((w) => w[0]).take(2).join();
-  final fb = Container(
-    width: 32, height: 32, color: AppColors.surface, alignment: Alignment.center,
-    child: Text(init, style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
-  );
-  return ClipOval(
-    child: url.isNotEmpty
-        ? Image.network(url, width: 32, height: 32, fit: BoxFit.contain, errorBuilder: (_, __, ___) => fb)
-        : fb,
-  );
-}
 
 // ── Cards ────────────────────────────────────────────────────────────────────
 
@@ -383,34 +379,7 @@ class _PositionsCard extends ConsumerWidget {
         error: (e, _) => ErrorBanner(message: '$e', onRetry: () => ref.invalidate(kalshiPositionsProvider(brokerageId))),
         data: (positions) => positions.isEmpty
             ? Text('No open positions.', style: AppTextStyles.body.copyWith(color: AppColors.textDim))
-            : Column(
-                children: positions.map((p) {
-                  final u = p.unrealizedCents;
-                  final positive = (u ?? 0) >= 0;
-                  final title = p.match.isNotEmpty ? p.match : p.marketTicker;
-                  final sub = p.pickLabel.isNotEmpty ? p.pickLabel : p.side;
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Row(children: [
-                      _posCrest(p.pickLogo, sub.replaceAll(' to win', '')),
-                      const SizedBox(width: 10),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600)),
-                        Text('$sub · ${p.contracts}×', maxLines: 1, overflow: TextOverflow.ellipsis,
-                            style: AppTextStyles.nano.copyWith(color: AppColors.primary)),
-                      ])),
-                      Text(
-                        u == null ? '—' : '${positive ? '+' : ''}\$${(u / 100).toStringAsFixed(2)}',
-                        style: AppTextStyles.value.copyWith(
-                          color: u == null ? AppColors.textDim : (positive ? AppColors.success : AppColors.danger),
-                          fontSize: 14,
-                        ),
-                      ),
-                    ]),
-                  );
-                }).toList(),
-              ),
+            : Column(children: positions.map(kalshiPositionTile).toList()),
       ),
     );
   }
@@ -458,7 +427,7 @@ class _InstanceStatus extends StatelessWidget {
   Widget build(BuildContext context) {
     final running = instance.running;
     return GlassCard(
-      liquid: true,
+      frosted: true,
       onTap: () => context.push('/kalshi/instances/${instance.id}'),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: Row(

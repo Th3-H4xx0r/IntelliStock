@@ -53,6 +53,8 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     ref.invalidate(kalshiInstanceDecisionsProvider(widget.instanceId));
     ref.invalidate(kalshiInstanceLiveProvider(widget.instanceId));
     ref.invalidate(kalshiInstanceOrdersProvider(widget.instanceId));
+    final bid = ref.read(kalshiInstanceDetailProvider(widget.instanceId)).value?['brokerage_id']?.toString();
+    if (bid != null && bid.isNotEmpty) ref.invalidate(kalshiPositionsProvider(bid));
   }
 
   Future<void> _startStop(bool start) async {
@@ -107,8 +109,10 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final detail = detailAsync.value;
     final running = detail?['running'] == true;
 
+    final topInset = MediaQuery.paddingOf(context).top + kToolbarHeight;
     return Scaffold(
       backgroundColor: Colors.transparent,
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -147,11 +151,13 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
       ),
       body: detail == null
           ? const Padding(padding: EdgeInsets.all(24), child: LoadingState())
-          : RefreshIndicator(
+          : Stack(children: [
+              Positioned(top: 0, left: 0, right: 0, child: const KalshiCrown(height: 420)),
+              RefreshIndicator(
               color: AppColors.primary,
               onRefresh: _refresh,
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                padding: EdgeInsets.fromLTRB(16, topInset + 4, 16, 24),
                 children: [
                   Row(children: [
                     _badge(running ? 'Running' : 'Stopped', running ? AppColors.success : AppColors.textDim),
@@ -165,12 +171,13 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   _portfolioChart(detail['brokerage_id']?.toString() ?? ''),
                   const SizedBox(height: 12),
                   _liveCards(liveAsync),
+                  _positionsCard(detail['brokerage_id']?.toString() ?? ''),
                   _ordersCard(ordersAsync),
                   const SizedBox(height: 12),
                   _decisionLog(decAsync),
                   const SizedBox(height: 12),
                   GlassCard(
-                    liquid: true,                    padding: const EdgeInsets.all(14),
+                    frosted: true,                    padding: const EdgeInsets.all(14),
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Row(children: [
                         Icon(symbol('terminal'), color: AppColors.primary, size: 18),
@@ -184,6 +191,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                 ],
               ),
             ),
+            ]),
     );
   }
 
@@ -228,7 +236,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: GlassCard(
-   liquid: true,        padding: const EdgeInsets.all(14),
+   frosted: true,        padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Container(width: 8, height: 8, decoration: const BoxDecoration(color: Color(0xFFEF4444), shape: BoxShape.circle)),
@@ -421,12 +429,35 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     );
   }
 
+  Widget _positionsCard(String brokerageId) {
+    if (brokerageId.isEmpty) return const SizedBox.shrink();
+    final async = ref.watch(kalshiPositionsProvider(brokerageId));
+    final positions = async.value ?? const [];
+    if (positions.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassCard(
+        frosted: true,
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(symbol('account_balance_wallet'), color: AppColors.primary, size: 18),
+            const SizedBox(width: 8),
+            Text('OPEN POSITIONS · ${positions.length}', style: AppTextStyles.eyebrow),
+          ]),
+          const SizedBox(height: 10),
+          ...positions.map(kalshiPositionTile),
+        ]),
+      ),
+    );
+  }
+
   Widget _ordersCard(AsyncValue<Map<String, dynamic>> ordersAsync) {
     final data = ordersAsync.value ?? const <String, dynamic>{};
     final placed = (data['placed'] as List?) ?? const [];
     final fills = (data['fills'] as List?) ?? const [];
     return GlassCard(
-   liquid: true,      padding: const EdgeInsets.all(14),
+   frosted: true,      padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Icon(Icons.receipt_long_outlined, color: AppColors.primary, size: 18),
@@ -461,7 +492,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
 
   Widget _decisionLog(AsyncValue<Map<String, dynamic>> decAsync) {
     return GlassCard(
-   liquid: true,      padding: const EdgeInsets.all(14),
+   frosted: true,      padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Icon(symbol('hub'), color: AppColors.primary, size: 18),

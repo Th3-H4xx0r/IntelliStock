@@ -3947,7 +3947,7 @@ def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), curre
 
 
 @app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse)
-def api_kalshi_positions(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_positions(brokerage_id: str, request: Request, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     from kalshi.api_payloads import positions_payload
     from kalshi.data.ticker_names import parse_market_ticker
     row = _kalshi_brokerage_row(conn, brokerage_id)
@@ -3976,7 +3976,7 @@ def api_kalshi_positions(brokerage_id: str, conn=Depends(conn_dependency), curre
         p = parse_market_ticker(mt or "")
         return {"match": p["match"], "pick_label": p["pick_label"], "pick_logo": p["pick_flag"]}
 
-    return positions_payload(positions, info_fn=_pinfo)
+    return _proxy_logos(positions_payload(positions, info_fn=_pinfo), _public_base_url(request))
 
 
 @app.get("/brokerages/{brokerage_id}/kalshi/edges", response_class=JSONResponse)
@@ -4183,7 +4183,7 @@ def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), 
 
 
 @app.get("/instances/{instance_id}/kalshi/decisions", response_class=JSONResponse)
-def api_kalshi_instance_decisions(instance_id: str, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The LLM-reasoned decision log for this instance (newest first), enriched
     with readable team names + crests (league-agnostic)."""
     from kalshi.decisions import summarize_decisions
@@ -4205,11 +4205,93 @@ def api_kalshi_instance_decisions(instance_id: str, limit: int = 100, conn=Depen
         r["match"] = (f"{r.get('home')} vs {r.get('away')}" if (r.get("home") or r.get("away")) else pk["match"])
         r["pick_label"] = pk["pick_label"]
         r["pick_logo"] = (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", "")
-    return {"decisions": out, "summary": summarize_decisions(rows), "count": len(rows)}
+    return _proxy_logos({"decisions": out, "summary": summarize_decisions(rows), "count": len(rows)}, _public_base_url(request))
+
+
+_IMG_PROXY_HOSTS = ("flagcdn.com", "a.espncdn.com", "a1.espncdn.com", "a2.espncdn.com",
+                    "a3.espncdn.com", "a4.espncdn.com", "secure.espncdn.com")
+
+
+_IMG_PROXY_MAX_BYTES = 5 * 1024 * 1024  # 5 MB cap — these are tiny crests/flags
+
+
+@app.get("/kalshi/img")
+def api_kalshi_img_proxy(u: str):
+    """Server-side image proxy for team crests/flags so the CLIENT never hits an
+    external host directly — everything routes through IntelliStock (works abroad,
+    one origin). Restricted to an allowlist of image CDNs.
+
+    Deliberately UNAUTHENTICATED: <img>/Image.network can't attach the JWT. Safe
+    because it is hardened against being an open proxy / SSRF / abuse relay:
+      - host allowlist (parsed .hostname, not substring),
+      - redirects DISABLED + re-validated (a CDN 3xx can't escape the allowlist),
+      - response forced to image/* (no HTML/SVG served from our origin),
+      - hard size cap (no OOM relay)."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(u or "")
+        if p.scheme not in ("http", "https") or p.hostname not in _IMG_PROXY_HOSTS:
+            raise HTTPException(status_code=400, detail="host not allowed")
+        import requests as _rq
+        # allow_redirects=False: the allowlist only vetted THIS url; following a
+        # 3xx (which the CDN controls) could land on 169.254.169.254 / a LAN host.
+        r = _rq.get(u, timeout=8, stream=True, allow_redirects=False,
+                    headers={"User-Agent": "IntelliStock/1.0"})
+        if r.status_code in (301, 302, 303, 307, 308):
+            raise HTTPException(status_code=502, detail="image fetch failed")
+        r.raise_for_status()
+        # Only ever serve an image — never text/html or svg (active content) from
+        # our own origin (would be stored XSS + a poisoned shared cache).
+        ct = r.headers.get("Content-Type", "image/png").split(";")[0].strip().lower()
+        if not ct.startswith("image/") or ct == "image/svg+xml":
+            raise HTTPException(status_code=502, detail="not an image")
+        body = r.raw.read(_IMG_PROXY_MAX_BYTES + 1, decode_content=True)
+        if len(body) > _IMG_PROXY_MAX_BYTES:
+            raise HTTPException(status_code=502, detail="image too large")
+        return Response(content=body, media_type=ct,
+                        headers={"Cache-Control": "public, max-age=86400",
+                                 "X-Content-Type-Options": "nosniff"})
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="image fetch failed")
+
+
+def _public_base_url(request: Request) -> str:
+    """request.base_url, but honoring the reverse proxy's X-Forwarded-Proto so the
+    rewritten image URLs come back as https:// (uvicorn behind TLS-terminating
+    nginx otherwise reports http://, and an https/iOS-ATS client mixed-content
+    blocks every logo). Ends with '/'."""
+    base = str(request.base_url)
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if proto == "https" and base.startswith("http://"):
+        base = "https://" + base[len("http://"):]
+    return base
+
+
+def _proxy_logos(obj, base_url: str):
+    """Rewrite crest/flag URL fields to route through /kalshi/img (so the client
+    loads them from IntelliStock, not the CDN). Mutates dicts in place, recursing
+    into lists/dicts. base_url is _public_base_url(request) (ends with '/')."""
+    from urllib.parse import quote
+    keys = ("pick_logo", "home_logo", "away_logo")
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            # Skip already-proxied URLs so a re-serve can't double-wrap (which would
+            # point the proxy at its own host -> not in the allowlist -> 400).
+            if (k in keys and isinstance(v, str) and v.startswith("http")
+                    and "/kalshi/img?u=" not in v):
+                obj[k] = f"{base_url}kalshi/img?u={quote(v, safe='')}"
+            else:
+                _proxy_logos(v, base_url)
+    elif isinstance(obj, list):
+        for it in obj:
+            _proxy_logos(it, base_url)
+    return obj
 
 
 @app.get("/instances/{instance_id}/kalshi/live", response_class=JSONResponse)
-def api_kalshi_instance_live(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_instance_live(instance_id: str, request: Request, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Live in-match cards for this instance — current score (when matchable),
     market-implied probabilities, the latest detected event, a news snippet, and the
     monitor's recent in-play decisions. Empty when no matches are live."""
@@ -4246,7 +4328,7 @@ def api_kalshi_instance_live(instance_id: str, conn=Depends(conn_dependency), cu
             rows = fresh
     except Exception:
         pass
-    return {"matches": rows, "count": len(rows)}
+    return _proxy_logos({"matches": rows, "count": len(rows)}, _public_base_url(request))
 
 
 _ESPN_BOARD_CACHE = {"ts": 0.0, "board": []}
@@ -4268,7 +4350,7 @@ def _espn_live_board():
 
 
 @app.get("/instances/{instance_id}/kalshi/orders", response_class=JSONResponse)
-def api_kalshi_instance_orders(instance_id: str, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Orders for this instance — placed/pending (from the decision log) + filled
     (from the broker). Drives the pending/past-orders cards."""
     from kalshi.data.ticker_names import parse_market_ticker
@@ -4336,7 +4418,7 @@ def api_kalshi_instance_orders(instance_id: str, limit: int = 50, conn=Depends(c
                               "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts, **inf})
         except Exception:
             fills = []
-    return {"placed": pending[:n], "fills": fills[:n]}
+    return _proxy_logos({"placed": pending[:n], "fills": fills[:n]}, _public_base_url(request))
 
 
 @app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)
