@@ -373,6 +373,7 @@ class _PageHeader extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
     final isRunning = inst.runCommand;
+    final isCrashed = inst.crashed;
     final isAi = inst.createdBy == 'ai';
 
     return Column(
@@ -418,9 +419,13 @@ class _PageHeader extends ConsumerWidget {
         Row(
           children: [
             StatusPill(
-              label: isRunning ? 'Running' : 'Stopped',
-              color: isRunning ? AppColors.success : AppColors.textDim,
-              pulsing: isRunning,
+              label: isCrashed
+                  ? 'Crashed'
+                  : (isRunning ? 'Running' : 'Stopped'),
+              color: isCrashed
+                  ? AppColors.danger
+                  : (isRunning ? AppColors.success : AppColors.textDim),
+              pulsing: isRunning && !isCrashed,
             ),
             const SizedBox(width: 8),
             AppButton.semantic(

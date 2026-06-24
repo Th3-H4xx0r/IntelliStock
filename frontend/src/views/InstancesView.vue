@@ -1049,15 +1049,17 @@ onMounted(async () => {
               >
                 {{ (inst.created_by || 'user') === 'ai' ? 'AI' : 'User' }}
               </span>
-              <!-- Running status -->
+              <!-- Running status (crashed = held open for log capture) -->
               <div
                 class="flex items-center gap-1.5 text-xs font-semibold px-2 py-1 rounded-full"
-                :class="inst.runCommand
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                  : 'bg-slate-500/10 text-slate-500 border border-slate-700'"
+                :class="inst.crashed
+                  ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                  : inst.runCommand
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                    : 'bg-slate-500/10 text-slate-500 border border-slate-700'"
               >
-                <div class="size-1.5 rounded-full" :class="inst.runCommand ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></div>
-                {{ inst.runCommand ? 'Running' : 'Stopped' }}
+                <div class="size-1.5 rounded-full" :class="inst.crashed ? 'bg-red-400' : inst.runCommand ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></div>
+                {{ inst.crashed ? 'Crashed' : inst.runCommand ? 'Running' : 'Stopped' }}
               </div>
             </div>
           </div>

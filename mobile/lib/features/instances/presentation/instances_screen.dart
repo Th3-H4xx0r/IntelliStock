@@ -405,6 +405,7 @@ class _InstanceCard extends ConsumerWidget {
         : (inst.brokerageId ?? '');
 
     final isAi = inst.createdBy == 'ai';
+    final isCrashed = inst.crashed;
     final isRunning = inst.runCommand;
 
     return GlassCard(
@@ -445,9 +446,13 @@ class _InstanceCard extends ConsumerWidget {
                   ),
                   const SizedBox(height: 6),
                   StatusPill(
-                    label: isRunning ? 'Running' : 'Stopped',
-                    color: isRunning ? AppColors.success : AppColors.textDim,
-                    pulsing: isRunning,
+                    label: isCrashed
+                        ? 'Crashed'
+                        : (isRunning ? 'Running' : 'Stopped'),
+                    color: isCrashed
+                        ? AppColors.danger
+                        : (isRunning ? AppColors.success : AppColors.textDim),
+                    pulsing: isRunning && !isCrashed,
                   ),
                 ],
               ),

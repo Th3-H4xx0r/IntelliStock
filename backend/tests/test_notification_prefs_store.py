@@ -8,18 +8,22 @@ from __future__ import annotations
 import pytest
 
 
-def test_default_categories_cover_all_types_discord_only():
+def test_default_categories_cover_all_types_discord_on_push_opt_in():
     from interactive_utils import (
         NOTIFICATION_CATEGORIES,
         _default_notification_categories,
     )
+    from notification_types import _PUSH_ON_BY_DEFAULT
     cats = _default_notification_categories()
     assert set(cats.keys()) == set(NOTIFICATION_CATEGORIES)
     # the 9 live-alert categories plus the broader taxonomy
     assert len(NOTIFICATION_CATEGORIES) >= 9
     assert "order_fill" in cats and "broker_boot" in cats
-    for v in cats.values():
-        assert v == {"discord": True, "push": False}
+    # Discord on for all; push opt-in for all EXCEPT the curated push-on set.
+    for key, v in cats.items():
+        assert v["discord"] is True
+        assert v["push"] is (key in _PUSH_ON_BY_DEFAULT)
+    assert cats["instance_crash"] == {"discord": True, "push": True}
 
 
 def test_merge_fills_missing_and_ignores_unknown_stored_keys():

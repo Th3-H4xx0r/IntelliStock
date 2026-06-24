@@ -38,12 +38,30 @@ def test_unclassified_falls_back_to_other():
     assert classify(content=None, embed=None) == "other"
 
 
-def test_default_routing_covers_all_keys_discord_on_push_off():
-    from notification_types import default_routing, NOTIFICATION_TYPE_KEYS
+def test_default_routing_discord_on_push_off_except_critical():
+    # Discord defaults ON for every type; push defaults OFF for every type EXCEPT
+    # the curated push-on-by-default set (instance_crash) — a real-money instance
+    # going dark warrants a phone push out of the box.
+    from notification_types import (
+        default_routing, NOTIFICATION_TYPE_KEYS, _PUSH_ON_BY_DEFAULT,
+    )
     r = default_routing()
     assert set(r.keys()) == set(NOTIFICATION_TYPE_KEYS)
-    for v in r.values():
-        assert v["discord"] is True and v["push"] is False
+    for key, v in r.items():
+        assert v["discord"] is True
+        assert v["push"] is (key in _PUSH_ON_BY_DEFAULT)
+    # the only push-on-by-default key today
+    assert _PUSH_ON_BY_DEFAULT == {"instance_crash"}
+    assert r["instance_crash"]["push"] is True
+
+
+def test_instance_crash_type_present_and_classifies():
+    from notification_types import NOTIFICATION_TYPE_KEYS, classify, type_for_key
+    assert "instance_crash" in NOTIFICATION_TYPE_KEYS
+    meta = type_for_key("instance_crash")
+    assert meta["group"] == "Risk & Halts"
+    assert meta["channel"] == "notifications"
+    assert classify(content="INSTANCE CRASH [alpaca-main] supervisor died") == "instance_crash"
 
 
 def test_groups_exclude_other_and_are_ordered():

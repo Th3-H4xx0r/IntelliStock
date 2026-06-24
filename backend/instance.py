@@ -17,6 +17,7 @@ import sys
 import os
 import subprocess
 import threading
+import traceback
 from collections import deque
 from datetime import datetime
 from os import system
@@ -33,6 +34,16 @@ CRASH_LOOP_WINDOW_SEC = int(os.environ.get("BROKER_CRASH_LOOP_WINDOW_SEC", "60")
 CRASH_LOOP_MAX_RESTARTS = int(os.environ.get("BROKER_CRASH_LOOP_MAX_RESTARTS", "5"))
 _broker_restart_times: deque = deque(maxlen=CRASH_LOOP_MAX_RESTARTS + 1)
 _crash_loop_latched = False
+
+# Crash keep-alive: when an equities instance dies for any reason OTHER than an
+# operator Stop, hold the container open (block indefinitely) instead of exiting,
+# so the live-trading log stays viewable in logs-history and the operator gets a
+# notification. Operator Stop (runCommand=False) still exits cleanly. Gated to
+# equities — Kalshi keeps its own kalshi/runner.py crash handling.
+CHANGEFEED_RETRY_MAX = int(os.environ.get("INSTANCE_CHANGEFEED_RETRY_MAX", "3"))
+_KEEPALIVE_ENABLED = True   # set from the Instances row 'kind' at startup
+_crash_lock = threading.Lock()
+_crash_entered = False
 
 ###########################
 # GLOBAL VARIABLES
@@ -69,29 +80,208 @@ def safe_close(conn):
         pass  # Socket may already be None or closed when RethinkDB server shuts down first
 
 
+# ---------------------------------------------------------------------------
+# Crash keep-alive
+# ---------------------------------------------------------------------------
+
+def _keepalive_enabled_for_kind(kind) -> bool:
+    """Crash keep-alive applies to equities instances only. Kalshi instances keep
+    today's behavior (exit on changefeed loss / propagate exceptions) because the
+    Kalshi engine has its own kalshi/runner.py crash handling."""
+    return str(kind or "").strip().lower() != "kalshi"
+
+
+def _changefeed_backoff(attempt):
+    """Seconds to wait before the next changefeed reconnect attempt (capped)."""
+    return min(2.0 * max(1, attempt), 10.0)
+
+
+def _operator_stop_requested(conn, instance_id):
+    """True iff the operator pressed Stop (runCommand is False) — the one signal
+    that may end a crash keep-alive block. DB errors read as 'no stop' so a flaky
+    DB never ends the block prematurely."""
+    try:
+        doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
+        return bool(doc) and doc.get('runCommand', True) is False
+    except Exception:
+        return False
+
+
+def _write_crash_to_logfile(instance_id, text):
+    """Append a crash banner to the instance's CURRENT live-trading log file
+    (append mode — NO rotation, so the crash tail is preserved) so the reason
+    shows up in the logs-history UI. Best-effort."""
+    try:
+        import live_state as _ls_mod
+        path = _ls_mod.log_file_path_for(str(instance_id))
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text if text.endswith("\n") else text + "\n")
+    except Exception:
+        pass
+
+
+def _mark_instance_crashed(instance_id, reason):
+    """Flag the Instances row crashed (running stays True so the container is not
+    reaped and the dashboard can show a 'crashed' badge). Best-effort."""
+    try:
+        conn = get_conn()
+        try:
+            r.db(DB_NAME).table('Instances').get(str(instance_id)).update({
+                'crashed': True,
+                'crashed_at': r.now(),
+                'running': True,
+                'status': 'crashed',
+            }).run(conn)
+        finally:
+            safe_close(conn)
+    except Exception as e:
+        intellistock_logger.log(f"Failed to record crashed status: {e}", "yellow", service="INSTANCE")
+
+
+def _block_until_operator_stop(poll_sec=2.0, max_iterations=None):
+    """Block the process indefinitely. The ONLY thing that ends the block is an
+    operator Stop (runCommand=False), which exits cleanly via os._exit(0). Nothing
+    automatic or accidental reaps the container while this loop runs.
+
+    ``max_iterations`` is a test seam (None = forever)."""
+    instance_id = str(args_list[1]) if len(args_list) > 1 else ''
+    i = 0
+    while max_iterations is None or i < max_iterations:
+        i += 1
+        time.sleep(poll_sec)
+        conn = None
+        try:
+            conn = get_conn()
+            if _operator_stop_requested(conn, instance_id):
+                intellistock_logger.log(
+                    "Operator Stop during crash keep-alive; exiting.", "green", service="STATUS",
+                )
+                safe_close(conn)
+                os._exit(0)
+        except Exception:
+            pass  # DB unreachable → keep blocking
+        finally:
+            safe_close(conn)
+
+
+def trip_crash(reason, exc=None):
+    """Convert a non-operator death into a halted, notified, held-open instance.
+    Runs the side effects exactly once (idempotent across threads): terminate the
+    broker, write the crash to the log file + flag the row, and notify. Does NOT
+    block — the main thread owns the indefinite block (see enter_crash_keepalive /
+    the supervisor loop). Safe to call from any thread; never raises."""
+    global _crash_entered, broker_process
+    with _crash_lock:
+        if _crash_entered:
+            return
+        _crash_entered = True
+
+    instance_id = str(args_list[1]) if len(args_list) > 1 else ''
+
+    # 1. Halt trading: stop the broker subprocess if it is still alive.
+    try:
+        if broker_process is not None and broker_process.poll() is None:
+            broker_process.terminate()
+    except Exception:
+        pass
+
+    # 2. Capture a traceback if we have one.
+    detail = ""
+    try:
+        if exc is not None:
+            detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        else:
+            tb = traceback.format_exc()
+            detail = "" if tb.strip() == "NoneType: None" else tb
+    except Exception:
+        detail = ""
+
+    intellistock_logger.log(f"INSTANCE CRASH [{instance_id}] {reason}", "red", service="INSTANCE")
+    intellistock_logger.log(
+        "Holding container open (blocking); logs preserved. Only an operator Stop will exit.",
+        "yellow", service="INSTANCE",
+    )
+    if detail:
+        for line in detail.rstrip().splitlines():
+            intellistock_logger.log(line, "red", service="INSTANCE")
+
+    # 3. Persist the crash to the live-trading log file + flag the row.
+    log_text = f"\n# ---\n# INSTANCE CRASH\n# reason: {reason}\n"
+    if detail:
+        log_text += detail.rstrip() + "\n"
+    log_text += "# held open (blocking) for log capture; operator Stop will exit\n"
+    _write_crash_to_logfile(instance_id, log_text)
+    _mark_instance_crashed(instance_id, reason)
+
+    # 4. Notify (best-effort).
+    try:
+        from live_alerts import alert_instance_crash
+        alert_instance_crash(
+            instance_id=instance_id, reason=reason,
+            detail=(detail[-900:] if detail else ""),
+        )
+    except Exception:
+        pass
+
+
+def enter_crash_keepalive(reason, exc=None):
+    """trip_crash() then block the CURRENT thread indefinitely. Call this from the
+    MAIN thread (setup failure / outermost wrapper). Daemon threads call trip_crash
+    instead and let the main supervisor loop run the block."""
+    trip_crash(reason, exc)
+    _block_until_operator_stop()
+
+
 def terminate_thread_on_command(conn):
-    """Watch this instance's document in Instances; exit when runCommand becomes False."""
+    """Watch this instance's document in Instances; exit when runCommand becomes False.
+
+    On a changefeed error, reconnect up to CHANGEFEED_RETRY_MAX times with backoff
+    so a transient RethinkDB blip self-heals. A persistent failure trips crash
+    keep-alive (equities) instead of silently stopping the container. Kalshi keeps
+    the original behavior (exit on the first error)."""
     global args_list, broker_process
     instance_id = args_list[1]
-    try:
-        for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn):
-            new_val = change.get('new_val')
-            if new_val is None:
-                continue
-            run_cmd = new_val.get('runCommand', True)
-            if run_cmd is False:
-                intellistock_logger.log("Exiting program (runCommand=False)", "yellow", service="INSTANCE")
-                r.db(DB_NAME).table('Instances').get(instance_id).update({'running': False}).run(conn)
-                if broker_process and broker_process.poll() is None:
-                    broker_process.terminate()
-                intellistock_logger.log("Instance stopped by command", "green", service="STATUS")
+    attempts = 0
+    while True:
+        try:
+            for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn):
+                attempts = 0  # a healthy feed resets the retry budget
+                new_val = change.get('new_val')
+                if new_val is None:
+                    continue
+                run_cmd = new_val.get('runCommand', True)
+                if run_cmd is False:
+                    intellistock_logger.log("Exiting program (runCommand=False)", "yellow", service="INSTANCE")
+                    try:
+                        r.db(DB_NAME).table('Instances').get(instance_id).update({'running': False}).run(conn)
+                    except Exception:
+                        pass
+                    if broker_process and broker_process.poll() is None:
+                        broker_process.terminate()
+                    intellistock_logger.log("Instance stopped by command", "green", service="STATUS")
+                    safe_close(conn)
+                    os._exit(0)
+            # Changefeed ended without raising (server closed the cursor).
+            if not _KEEPALIVE_ENABLED:
+                # Original behavior: the daemon thread ends quietly; process continues.
+                safe_close(conn)
+                return
+            raise RuntimeError("Instances changefeed closed")
+        except Exception as e:
+            safe_close(conn)
+            intellistock_logger.log(f"Instances changefeed error: {e}", "red", service="RethinkDB")
+            if not _KEEPALIVE_ENABLED:
+                # Original behavior: RethinkDB likely shut down; exit so container stops.
                 os._exit(0)
-    except Exception as e:
-        intellistock_logger.log(f"Instances changefeed error: {e}", "red", service="RethinkDB")
-        # RethinkDB server likely shut down (e.g. docker-compose down); exit so container stops
-        os._exit(0)
-    finally:
-        safe_close(conn)
+            attempts += 1
+            if attempts > CHANGEFEED_RETRY_MAX:
+                trip_crash(f"Instances changefeed lost after {attempts} attempts: {e}", e)
+                return
+            time.sleep(_changefeed_backoff(attempts))
+            try:
+                conn = get_conn()
+            except Exception:
+                conn = None  # next iteration's query will raise and re-enter retry
 
 
 def get_symbols_for_instance(conn, instance_id):
@@ -120,6 +310,10 @@ def start_broker(symbols):
     """
     global broker_process, args_list, current_granularity_time_increment
     global _broker_restart_times, _crash_loop_latched
+    if _crash_entered:
+        # Instance is in crash keep-alive — never resurrect the broker (e.g. from a
+        # late stocks-changefeed event).
+        return
     if broker_process is not None and broker_process.poll() is None:
         broker_process.terminate()
         broker_process.wait()
@@ -161,6 +355,13 @@ def start_broker(symbols):
             alert_crash_loop(instance_id=str(args_list[1]), restarts=len(recent), window_sec=CRASH_LOOP_WINDOW_SEC)
         except Exception:
             pass
+        if _KEEPALIVE_ENABLED:
+            # Stop spinning/relogging every 2s — halt cleanly and hold the
+            # container open so logs stay viewable. trip_crash sets _crash_entered;
+            # the main supervisor loop then runs the indefinite block.
+            trip_crash(
+                f"broker crash-loop latched ({len(recent)} restarts in {CRASH_LOOP_WINDOW_SEC}s)"
+            )
         return
 
     instance_id = str(args_list[1])
@@ -247,22 +448,42 @@ def run_instance_change(change):
 
 
 def run_instance_stocks_changefeed():
-    """Watch this instance's document in Instances; restart broker when stocks list changes."""
+    """Watch this instance's document in Instances; restart broker when stocks list
+    changes. Same retry-then-keep-alive policy as terminate_thread_on_command."""
     conn = get_conn()
     instance_id = args_list[1]
-    try:
-        for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn):
-            run_instance_change(change)
-    except Exception as e:
-        intellistock_logger.log(f"Instances (stocks) changefeed error: {e}", "red", service="RethinkDB")
-        # RethinkDB server likely shut down (e.g. docker-compose down); exit so container stops
-        os._exit(0)
-    finally:
-        safe_close(conn)
+    attempts = 0
+    while True:
+        try:
+            for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn):
+                attempts = 0  # a healthy feed resets the retry budget
+                run_instance_change(change)
+            # Changefeed ended without raising (server closed the cursor).
+            if not _KEEPALIVE_ENABLED:
+                # Original behavior: the daemon thread ends quietly; process continues.
+                safe_close(conn)
+                return
+            raise RuntimeError("Instances (stocks) changefeed closed")
+        except Exception as e:
+            safe_close(conn)
+            intellistock_logger.log(f"Instances (stocks) changefeed error: {e}", "red", service="RethinkDB")
+            if not _KEEPALIVE_ENABLED:
+                # Original behavior: RethinkDB likely shut down; exit so container stops.
+                os._exit(0)
+            attempts += 1
+            if attempts > CHANGEFEED_RETRY_MAX:
+                trip_crash(f"Instances (stocks) changefeed lost after {attempts} attempts: {e}", e)
+                return
+            time.sleep(_changefeed_backoff(attempts))
+            try:
+                conn = get_conn()
+            except Exception:
+                conn = None  # next iteration's query will raise and re-enter retry
 
 
 def run():
     global current_symbols, current_granularity_time_increment, instance_key, instance_secret
+    global _KEEPALIVE_ENABLED
     if not os.environ.get('TERM'):
         os.environ['TERM'] = 'dumb'
     try:
@@ -282,9 +503,12 @@ def run():
     conn = None
     try:
         conn = get_conn()
+        # Fresh start clears any prior crash flags (crashed badge) too.
         r.db(DB_NAME).table('Instances').get(instance_id).update({
             'uptimeStart': r.now(),
             'running': True,
+            'crashed': False,
+            'crashed_at': None,
         }).run(conn)
         current_symbols = get_symbols_for_instance(conn, instance_id)
         doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
@@ -293,9 +517,15 @@ def run():
             instance_secret = (doc.get('secret') or '') if isinstance(doc.get('secret'), str) else str(doc.get('secret') or '')
         g = doc.get('granularity_time_increment') if doc else None
         current_granularity_time_increment = (str(g).strip() or '60') if g is not None and str(g).strip() else '60'
+        # Crash keep-alive is for equities instances only (Kalshi has its own runner).
+        _KEEPALIVE_ENABLED = _keepalive_enabled_for_kind(doc.get('kind') if doc else None)
     except Exception as e:
-        intellistock_logger.log(f"Cannot connect to RethinkDB or failed to load instance (exiting): {e}", "red", service="RethinkDB")
+        intellistock_logger.log(f"Cannot connect to RethinkDB or failed to load instance: {e}", "red", service="RethinkDB")
         safe_close(conn)
+        if _KEEPALIVE_ENABLED:
+            # Hold the container open + notify instead of vanishing on a startup DB blip.
+            enter_crash_keepalive(f"startup DB connect/load failed: {e}", e)
+            return
         os._exit(1)
     finally:
         safe_close(conn)
@@ -379,10 +609,14 @@ def run():
 
     # Keep main thread alive; restart broker if it exited (e.g. after strategy reload).
     # Auto-restart even when current_symbols is empty because self-discovering
-    # strategies treat that as a valid universe.
+    # strategies treat that as a valid universe. If a crash trips keep-alive (here
+    # or in a daemon thread), stop supervising and block indefinitely so the
+    # container stays up and logs stay viewable.
     try:
-        while True:
+        while not _crash_entered:
             time.sleep(2)
+            if _crash_entered:
+                break
             if broker_process is not None and broker_process.poll() is not None:
                 intellistock_logger.log(
                     f"Broker exited, restarting with {len(current_symbols)} seed ticker(s)...",
@@ -390,13 +624,31 @@ def run():
                 )
                 start_broker(current_symbols)
     except KeyboardInterrupt:
-        pass
+        return
+    except BaseException as e:
+        if _KEEPALIVE_ENABLED:
+            trip_crash(f"supervisor loop crashed: {e}", e)
+        else:
+            raise
+
+    # A crash tripped keep-alive (by us or a daemon thread): block here on the MAIN
+    # thread so the broker stays terminated process-wide and the container persists.
+    if _crash_entered:
+        _block_until_operator_stop()
 
 
 if __name__ == '__main__':
     if len(args_list) > 1:
         if os.name == 'nt':
             system("title " + " Instance " + str(args_list[1]))
-        run()
+        try:
+            run()
+        except BaseException as e:
+            # Backstop for anything run()'s inner handlers didn't catch (e.g. a
+            # failure during thread/socket setup before the supervisor loop).
+            if _KEEPALIVE_ENABLED:
+                enter_crash_keepalive(f"instance crashed: {e}", e)
+            else:
+                raise
     else:
         intellistock_logger.log("Did not provide proper parameters (need instance id only; key/secret are read from DB)", "red", service="ERROR")

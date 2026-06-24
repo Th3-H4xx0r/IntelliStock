@@ -103,6 +103,9 @@ def test_drawdown_halt_routes_to_trades_channel(default_prefs, monkeypatch):
     ("alert_crash_loop",
      dict(instance_id="i", restarts=3, window_sec=60),
      "crash_loop", "notifications"),
+    ("alert_instance_crash",
+     dict(instance_id="i", reason="supervisor died", detail="Traceback ..."),
+     "instance_crash", "notifications"),
 ])
 def test_each_alert_maps_to_category_and_channel(monkeypatch, fn_name, kwargs, category, channel):
     import live_alerts
@@ -113,3 +116,19 @@ def test_each_alert_maps_to_category_and_channel(monkeypatch, fn_name, kwargs, c
     assert calls[0]["category"] == category
     assert calls[0]["discord_channel"] == channel
     assert calls[0]["instance_id"] == "i"
+
+
+def test_instance_crash_content_and_never_raises(monkeypatch):
+    import live_alerts
+    calls = []
+    monkeypatch.setattr(live_alerts, "notify", lambda **kw: calls.append(kw))
+    live_alerts.alert_instance_crash(instance_id="alpaca-main", reason="changefeed lost")
+    assert len(calls) == 1
+    assert calls[0]["body"] == "INSTANCE CRASH [alpaca-main] changefeed lost"
+    assert calls[0]["push_body"] == "changefeed lost"
+
+    # an alert backend failure must be swallowed, not propagated out of the crash path
+    def _boom(**kw):
+        raise RuntimeError("discord down")
+    monkeypatch.setattr(live_alerts, "notify", _boom)
+    live_alerts.alert_instance_crash(instance_id="i", reason="boom")  # must not raise

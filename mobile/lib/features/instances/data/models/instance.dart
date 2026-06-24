@@ -5,6 +5,7 @@ class Instance {
     required this.name,
     required this.createdBy,
     required this.runCommand,
+    this.crashed = false,
     this.strategyId,
     this.brokerageId,
     this.granularityTimeIncrement,
@@ -22,6 +23,10 @@ class Instance {
   /// 'user' | 'ai'
   final String createdBy;
   final bool runCommand;
+
+  /// True when the instance process died (not an operator Stop) and is held open
+  /// for log capture — surfaced as a 'Crashed' badge.
+  final bool crashed;
   final String? strategyId;
   final String? brokerageId;
   final String? alpacaDataBrokerageId;
@@ -54,6 +59,7 @@ class Instance {
       createdBy: (j['created_by'] ?? 'user').toString(),
       runCommand: j['run_command'] == true ||
           j['runCommand'] == true,
+      crashed: j['crashed'] == true,
       strategyId: j['strategy_id']?.toString(),
       brokerageId: j['brokerage_id']?.toString(),
       alpacaDataBrokerageId: j['alpaca_data_brokerage_id']?.toString(),
@@ -75,6 +81,7 @@ class Instance {
     String? name,
     String? createdBy,
     bool? runCommand,
+    bool? crashed,
     Object? strategyId = _sentinel,
     Object? brokerageId = _sentinel,
     Object? alpacaDataBrokerageId = _sentinel,
@@ -90,6 +97,7 @@ class Instance {
         name: name ?? this.name,
         createdBy: createdBy ?? this.createdBy,
         runCommand: runCommand ?? this.runCommand,
+        crashed: crashed ?? this.crashed,
         strategyId:
             strategyId == _sentinel ? this.strategyId : strategyId as String?,
         brokerageId:

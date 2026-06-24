@@ -70,6 +70,10 @@ NOTIFICATION_TYPES = [
     {"key": "crash_loop", "group": "Risk & Halts", "label": "Crash loop",
      "desc": "The broker subprocess entered a crash loop", "channel": "notifications",
      "discord": True, "push": True, "prefixes": ["CRASH LOOP ["]},
+    {"key": "instance_crash", "group": "Risk & Halts", "label": "Instance crashed",
+     "desc": "An instance process died (not an operator Stop) and was held open so its "
+             "logs stay viewable", "channel": "notifications",
+     "discord": True, "push": True, "prefixes": ["INSTANCE CRASH ["]},
 
     # --- Broker Health ---
     {"key": "broker_boot", "group": "Broker Health", "label": "Broker boot",
@@ -119,10 +123,17 @@ def type_for_key(key):
     return _TYPE_BY_KEY.get(key)
 
 
+# Push is opt-in by default for everything EXCEPT these curated high-signal keys.
+# A trading instance going dark is the one alert worth a phone push out of the box;
+# the operator can still toggle it off per-channel in the settings screen.
+_PUSH_ON_BY_DEFAULT = {"instance_crash"}
+
+
 def default_routing():
-    """The behavior-preserving default matrix: every type's Discord ON, push as
-    specified per type (only a few sensible push defaults; all opt-in really)."""
-    return {t["key"]: {"discord": bool(t["discord"]), "push": False}
+    """The default routing matrix: every type's Discord ON, push OFF except the
+    curated ``_PUSH_ON_BY_DEFAULT`` set (push on out of the box)."""
+    return {t["key"]: {"discord": bool(t["discord"]),
+                       "push": t["key"] in _PUSH_ON_BY_DEFAULT}
             for t in NOTIFICATION_TYPES}
 
 

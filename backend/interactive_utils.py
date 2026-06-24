@@ -1088,6 +1088,7 @@ def action_instances(conn):
             "brokerage_id",
             "max_usage",
             "kind",
+            "crashed",
         )
         .run(conn)
     )
@@ -1107,6 +1108,9 @@ def action_instances(conn):
             # bots (which have their own Kalshi-tab workflow). Stock instances
             # have no 'kind', so this is None for them.
             "kind": row.get("kind"),
+            # True when the instance process died (not an operator Stop) and is
+            # being held open for log capture — the UI shows a 'crashed' badge.
+            "crashed": bool(row.get("crashed", False)),
         })
     return {"instances": instances}
 
@@ -1445,6 +1449,9 @@ def action_get_instance(conn, instance_id):
         "id": doc.get("id"),
         "name": doc.get("name"),
         "runCommand": doc.get("runCommand", False),
+        # True when the process died (not an operator Stop) and is held open for
+        # log capture; the UI shows a 'crashed' badge.
+        "crashed": bool(doc.get("crashed", False)),
         "stocks": doc.get("stocks") or [],
         "strategy_id": sid,
         "strategy": strategy,
