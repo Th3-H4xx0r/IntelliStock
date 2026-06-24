@@ -80,8 +80,12 @@ def kickoff_from_market(market: dict):
 
 def phase_for_market(*, kickoff_ts, ticker, now_ts, regulation_min: float = 115.0):
     """Combined phase: a precise kickoff timestamp wins; otherwise fall back to the
-    ticker date (future -> PREGAME, today -> LIVE with unknown minute, past ->
-    ENDED). No date and no kickoff -> UNKNOWN. Returns (phase, elapsed_min)."""
+    ticker date (future -> PREGAME, past -> ENDED). A match dated TODAY but with no
+    precise kickoff is PREGAME, NOT live: the date alone can't tell a 3pm kickoff
+    from one that's still 10 hours away. Promotion to LIVE requires either a real
+    kickoff_ts that puts `now` inside the match window (the branch above) or ESPN's
+    scoreboard confirming state == in (the engine overlays that). No date and no
+    kickoff -> UNKNOWN. Returns (phase, elapsed_min)."""
     if kickoff_ts:
         return match_phase(kickoff_ts, now_ts, regulation_min=regulation_min)
     d = match_date_from_ticker(ticker)
@@ -89,8 +93,7 @@ def phase_for_market(*, kickoff_ts, ticker, now_ts, regulation_min: float = 115.
         return (UNKNOWN, None)
     today = datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc).date() \
         if now_ts else datetime.date.today()
-    if d > today:
-        return (PREGAME, None)
     if d < today:
         return (ENDED, None)
-    return (LIVE, None)
+    # d >= today: future OR today-with-unknown-kickoff -> not confidently live.
+    return (PREGAME, None)

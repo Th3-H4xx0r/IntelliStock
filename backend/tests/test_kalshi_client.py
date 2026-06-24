@@ -146,3 +146,21 @@ def test_cancel_all_open_orders_cancels_each():
     assert n == 2
     assert any(u.endswith("/portfolio/orders/o1") for u in sess.deletes)
     assert any(u.endswith("/portfolio/orders/o2") for u in sess.deletes)
+
+
+def test_get_resting_orders_excludes_filled():
+    # The ?status=resting param isn't always honored on V2 — a FILLED order can
+    # come back in the list. It must NOT surface as pending (it's an open position),
+    # even when it has no remaining_count field (so the old code fell back to the
+    # original `count` and leaked it).
+    _, pem = _pem()
+    sess = _FakeSession({"orders": [
+        {"ticker": "MKT-A", "side": "yes", "status": "filled", "count": 25},          # filled, no remaining -> drop
+        {"ticker": "MKT-B", "side": "yes", "status": "resting", "remaining_count": 0, "count": 10},  # 0 left -> drop
+        {"ticker": "MKT-C", "side": "yes", "status": "resting", "remaining_count": 7, "count": 10,
+         "yes_price_dollars": "0.40"},                                                 # genuinely resting -> keep
+    ]})
+    c = KalshiClient(key_id="abc", private_key_pem=pem, environment="demo", session=sess)
+    out = c.get_resting_orders()
+    assert [o["market_ticker"] for o in out] == ["MKT-C"]
+    assert out[0]["contracts"] == 7 and out[0]["price_cents"] == 40

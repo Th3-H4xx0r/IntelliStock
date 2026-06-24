@@ -26,7 +26,6 @@ class KalshiScreen extends ConsumerStatefulWidget {
 
 class _KalshiScreenState extends ConsumerState<KalshiScreen> {
   String? _selectedId;
-  bool _killing = false;
 
   List<BrokerageAccount> _kalshiAccounts() {
     final accts = ref.watch(brokeragesProvider).value ?? const <BrokerageAccount>[];
@@ -40,36 +39,6 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
     ref.invalidate(kalshiPortfolioProvider(id));
     ref.invalidate(kalshiEdgesProvider(id));
     ref.invalidate(kalshiPositionsProvider(id));
-  }
-
-  Future<void> _kill(String bid) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        backgroundColor: AppColors.panel,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text('Stop Kalshi instance?', style: AppTextStyles.cardTitle),
-        content: Text(
-          'This halts the linked instance and cancels all resting orders on this account.',
-          style: AppTextStyles.body.copyWith(color: AppColors.textMuted),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(c, true),
-            child: Text('KILL', style: AppTextStyles.body.copyWith(color: AppColors.danger, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    setState(() => _killing = true);
-    try {
-      await ref.read(kalshiRepositoryProvider).kill(bid);
-      await _refresh();
-    } finally {
-      if (mounted) setState(() => _killing = false);
-    }
   }
 
   @override
@@ -86,103 +55,87 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
     final instancesAsync = selectedId == null ? null : ref.watch(kalshiInstancesProvider(selectedId));
     final instances = instancesAsync?.value ?? const <KalshiInstance>[];
     final instance = instances.isNotEmpty ? instances.first : null;
-    final running = instance?.running ?? false;
 
-    final topInset = MediaQuery.paddingOf(context).top + kToolbarHeight;
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      extendBodyBehindAppBar: true,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        titleSpacing: 16,
-        title: Row(
-          children: [
-            Icon(symbol('sports_soccer'), color: AppColors.primary, size: 22),
+    // The shell drops this tab's top safe-area inset so the gradient crown bleeds
+    // under the status bar / dynamic island (matches the dashboard) — re-add it as
+    // content padding. No AppBar: the header scrolls with the content, so nothing
+    // pins over the chart. Start/Stop/KILL live on the instance screen, not here.
+    final topInset = MediaQuery.viewPaddingOf(context).top;
+
+    Widget header() => Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Row(children: [
+            Icon(symbol('sports_soccer'), color: AppColors.primary, size: 24),
             const SizedBox(width: 8),
             Text('Kalshi', style: AppTextStyles.h2),
+          ]),
+        );
+
+    if (selectedId == null) {
+      return Stack(children: [
+        Positioned(top: 0, left: 0, right: 0, child: const KalshiCrown()),
+        ListView(
+          padding: EdgeInsets.fromLTRB(16, topInset + 12, 16, 24),
+          children: [
+            header(),
+            const SizedBox(height: 16),
+            EmptyState(
+              icon: symbol('sports_soccer'),
+              title: 'No Kalshi account linked',
+              subtitle: 'Link a Kalshi brokerage (demo or live) to create a trading instance.',
+            ),
           ],
         ),
-        actions: [
-          if (instance != null) ...[
-            _StartStopButton(running: running, busy: _killing, onTap: () => _startStop(!running, instance.id)),
-            if (running)
-              Padding(
-                padding: const EdgeInsets.only(left: 8, right: 12),
-                child: _KillButton(busy: _killing, onTap: () => _kill(selectedId!)),
-              )
-            else
-              const SizedBox(width: 12),
-          ],
-        ],
-      ),
-      body: selectedId == null
-          ? Padding(
-              padding: EdgeInsets.fromLTRB(16, topInset + 16, 16, 16),
-              child: EmptyState(
-                icon: symbol('sports_soccer'),
-                title: 'No Kalshi account linked',
-                subtitle: 'Link a Kalshi brokerage (demo or live) to create a trading instance.',
-              ),
-            )
-          : Stack(children: [
-              Positioned(top: 0, left: 0, right: 0, child: const KalshiCrown()),
-              RefreshIndicator(
-              color: AppColors.primary,
-              onRefresh: _refresh,
-              child: ListView(
-                padding: EdgeInsets.fromLTRB(16, topInset + 4, 16, 24),
-                children: [
-                  if (accounts.length > 1) ...[
-                    _AccountSelector(
-                      accounts: accounts,
-                      selectedId: selectedId,
-                      onChanged: (v) => setState(() => _selectedId = v),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                  if (instancesAsync != null && instancesAsync.isLoading)
-                    const Padding(padding: EdgeInsets.only(top: 40), child: LoadingState())
-                  else if (instance == null)
-                    EmptyState(
-                      icon: symbol('smart_toy'),
-                      title: 'No trading instance yet',
-                      subtitle: 'Create a Kalshi instance to scan soccer markets, flag edge, and (when started) trade.',
-                      actionLabel: 'Create instance',
-                      onAction: () => _showCreateSheet(accounts, selectedId),
-                    )
-                  else ...[
-                    _InstanceStatus(instance: instance),
-                    const SizedBox(height: 12),
-                    _PortfolioCard(brokerageId: selectedId),
-                    const SizedBox(height: 12),
-                    _EdgeRadarCard(brokerageId: selectedId),
-                    const SizedBox(height: 12),
-                    _PositionsCard(brokerageId: selectedId),
-                    const SizedBox(height: 12),
-                    _KCard(
-                      icon: 'terminal',
-                      title: 'Live logs',
-                      child: SizedBox(height: 300, child: LiveLogsPanel(key: ValueKey(instance.id), instanceId: instance.id)),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            ]),
-    );
-  }
-
-  Future<void> _startStop(bool start, String instanceId) async {
-    if (_killing) return;
-    setState(() => _killing = true);
-    try {
-      final repo = ref.read(kalshiRepositoryProvider);
-      start ? await repo.startInstance(instanceId) : await repo.stopInstance(instanceId);
-      if (_selectedId != null) ref.invalidate(kalshiInstancesProvider(_selectedId!));
-    } finally {
-      if (mounted) setState(() => _killing = false);
+      ]);
     }
+
+    return Stack(children: [
+      Positioned(top: 0, left: 0, right: 0, child: const KalshiCrown()),
+      RefreshIndicator(
+        color: AppColors.primary,
+        onRefresh: _refresh,
+        child: ListView(
+          padding: EdgeInsets.fromLTRB(16, topInset + 12, 16, 24),
+          children: [
+            header(),
+            const SizedBox(height: 16),
+            if (accounts.length > 1) ...[
+              _AccountSelector(
+                accounts: accounts,
+                selectedId: selectedId,
+                onChanged: (v) => setState(() => _selectedId = v),
+              ),
+              const SizedBox(height: 12),
+            ],
+            if (instancesAsync != null && instancesAsync.isLoading)
+              const Padding(padding: EdgeInsets.only(top: 40), child: LoadingState())
+            else if (instance == null)
+              EmptyState(
+                icon: symbol('smart_toy'),
+                title: 'No trading instance yet',
+                subtitle: 'Create a Kalshi instance to scan soccer markets, flag edge, and (when started) trade.',
+                actionLabel: 'Create instance',
+                onAction: () => _showCreateSheet(accounts, selectedId),
+              )
+            else ...[
+              _InstanceStatus(instance: instance),
+              const SizedBox(height: 12),
+              _PortfolioCard(brokerageId: selectedId),
+              const SizedBox(height: 12),
+              _EdgeRadarCard(brokerageId: selectedId),
+              const SizedBox(height: 12),
+              _PositionsCard(brokerageId: selectedId),
+              const SizedBox(height: 12),
+              _KCard(
+                icon: 'terminal',
+                title: 'Live logs',
+                child: SizedBox(height: 300, child: LiveLogsPanel(key: ValueKey(instance.id), instanceId: instance.id)),
+              ),
+            ],
+          ],
+        ),
+      ),
+    ]);
   }
 
   void _showCreateSheet(List<BrokerageAccount> accounts, String brokerageId) {
@@ -202,36 +155,6 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
 }
 
 // ── Shared bits ──────────────────────────────────────────────────────────────
-
-class _KillButton extends StatelessWidget {
-  const _KillButton({required this.busy, required this.onTap});
-  final bool busy;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: busy ? null : onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: AppColors.fill(AppColors.danger),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.stroke(AppColors.danger)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.stop_circle_outlined, size: 16, color: AppColors.danger),
-            const SizedBox(width: 6),
-            Text(busy ? 'Killing…' : 'Kill',
-                style: AppTextStyles.meta.copyWith(color: AppColors.danger, fontWeight: FontWeight.bold)),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 class _AccountSelector extends StatelessWidget {
   const _AccountSelector({required this.accounts, required this.selectedId, required this.onChanged});
@@ -386,38 +309,6 @@ class _PositionsCard extends ConsumerWidget {
 }
 
 // ── Lifecycle bits ───────────────────────────────────────────────────────────
-
-class _StartStopButton extends StatelessWidget {
-  const _StartStopButton({required this.running, required this.busy, required this.onTap});
-  final bool running;
-  final bool busy;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = running ? AppColors.warning : AppColors.primary;
-    return GestureDetector(
-      onTap: busy ? null : onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: AppColors.fill(color),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.stroke(color)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(running ? Icons.pause : Icons.play_arrow, size: 16, color: color),
-            const SizedBox(width: 6),
-            Text(running ? 'Stop' : 'Start',
-                style: AppTextStyles.meta.copyWith(color: color, fontWeight: FontWeight.bold)),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 class _InstanceStatus extends StatelessWidget {
   const _InstanceStatus({required this.instance});

@@ -4315,8 +4315,11 @@ def api_kalshi_instance_live(instance_id: str, request: Request, conn=Depends(co
             for r in rows:
                 sc = _sb.match_score(board, r.get("home", ""), r.get("away", ""))
                 if sc:
-                    if (sc.get("state") or "") == "post":
-                        continue  # match ended -> drop from the live list
+                    # Only a match ESPN says is actually in-play stays. "post" (ended)
+                    # AND "pre" (scheduled, hasn't kicked off) are both dropped — a
+                    # future game on today's date is NOT live.
+                    if (sc.get("state") or "") in ("post", "pre"):
+                        continue
                     r["score"] = {"home": sc.get("home_score"), "away": sc.get("away_score"),
                                   "clock": sc.get("clock"), "detail": sc.get("detail"),
                                   "state": sc.get("state")}

@@ -271,7 +271,18 @@ class KalshiClient:
             return []
         out = []
         for o in (d.get("orders", []) or []):
-            remaining = _fp(o.get("remaining_count_fp", o.get("remaining_count", o.get("count", 0))))
+            # Defense in depth: the ?status=resting param isn't always honored on
+            # V2, so a FILLED order can come back in this list and wrongly show as
+            # "pending" while it's actually an open position. Drop anything the
+            # order itself doesn't call resting.
+            st = str(o.get("status", "")).lower()
+            if st and st != "resting":
+                continue
+            # Prefer the live remaining count; only fall back to the original size
+            # when the API omits remaining entirely (a present-but-0 remaining means
+            # the order filled — never resurrect it from `count`).
+            rem = o.get("remaining_count_fp", o.get("remaining_count"))
+            remaining = _fp(rem) if rem is not None else _fp(o.get("count", 0))
             if remaining <= 0:
                 continue
             out.append({

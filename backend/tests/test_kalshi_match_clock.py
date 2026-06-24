@@ -36,7 +36,9 @@ def test_match_date_from_ticker():
 def test_phase_for_market_falls_back_to_ticker_date():
     today = _ts(2026, 6, 23)
     assert phase_for_market(kickoff_ts=None, ticker="X-26JUN24ABCDEF", now_ts=today)[0] == PREGAME
-    assert phase_for_market(kickoff_ts=None, ticker="X-26JUN23ABCDEF", now_ts=today)[0] == LIVE
+    # today's date but NO precise kickoff -> NOT assumed live (could be hours away);
+    # only a real kickoff_ts or ESPN state==in promotes to LIVE.
+    assert phase_for_market(kickoff_ts=None, ticker="X-26JUN23ABCDEF", now_ts=today)[0] == PREGAME
     assert phase_for_market(kickoff_ts=None, ticker="X-26JUN22ABCDEF", now_ts=today)[0] == ENDED
     assert phase_for_market(kickoff_ts=None, ticker="no-date", now_ts=today)[0] == UNKNOWN
     # a precise kickoff wins over the date heuristic
