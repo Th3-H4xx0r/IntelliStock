@@ -1291,12 +1291,14 @@ async function submitCreateBacktest() {
           <div class="flex items-center gap-3 shrink-0">
             <div
               class="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border"
-              :class="inst.runCommand
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                : 'bg-slate-500/10 text-slate-500 border-slate-700'"
+              :class="inst.crashed
+                ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                : inst.runCommand
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  : 'bg-slate-500/10 text-slate-500 border-slate-700'"
             >
-              <div class="size-1.5 rounded-full" :class="inst.runCommand ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></div>
-              {{ inst.runCommand ? 'Running' : 'Stopped' }}
+              <div class="size-1.5 rounded-full" :class="inst.crashed ? 'bg-red-400' : inst.runCommand ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></div>
+              {{ inst.crashed ? 'Crashed' : inst.runCommand ? 'Running' : 'Stopped' }}
             </div>
             <button
               @click="toggleRun"

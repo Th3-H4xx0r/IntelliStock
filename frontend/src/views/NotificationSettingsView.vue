@@ -13,6 +13,7 @@ const FALLBACK_TYPES = [
   { key: 'order_reject',   group: 'Notifications', label: 'Order rejected',  desc: 'The broker rejected an order' },
   { key: 'halt',           group: 'Notifications', label: 'Halt',            desc: 'Live trading was halted' },
   { key: 'crash_loop',     group: 'Notifications', label: 'Crash loop',      desc: 'The broker subprocess entered a crash loop' },
+  { key: 'instance_crash', group: 'Notifications', label: 'Instance crashed', desc: 'An instance process died (not a Stop) and was held open for log capture' },
 ]
 
 // The taxonomy (key/group/label/desc) supplied by the backend.
