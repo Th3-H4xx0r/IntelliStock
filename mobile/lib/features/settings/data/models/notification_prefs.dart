@@ -119,4 +119,5 @@ const kNotificationCategories = <NotificationCategoryMeta>[
   NotificationCategoryMeta('halt', 'Halt', 'Live trading was halted'),
   NotificationCategoryMeta('drawdown_halt', 'Drawdown halt', 'A drawdown risk-off guard tripped'),
   NotificationCategoryMeta('crash_loop', 'Crash loop', 'The broker subprocess entered a crash loop'),
+  NotificationCategoryMeta('instance_crash', 'Instance crashed', 'An instance process died (not a Stop) and was held open for log capture'),
 ];
