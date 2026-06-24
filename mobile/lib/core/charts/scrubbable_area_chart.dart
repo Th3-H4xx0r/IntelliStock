@@ -26,6 +26,7 @@ class ScrubbableAreaChart extends StatefulWidget {
     this.onScrub,
     this.animate = true,
     this.indexed = false,
+    this.pulsingEndDot = false,
   });
 
   final List<DateTime> timestamps;
@@ -51,6 +52,10 @@ class ScrubbableAreaChart extends StatefulWidget {
   /// scrub + date labels are already index-positioned, so this also makes them
   /// line up with the curve.
   final bool indexed;
+
+  /// When true, a live "ping" dot pulses at the end of the line (the latest
+  /// value) while not scrubbing — the dashboard's live-updating marker.
+  final bool pulsingEndDot;
 
   @override
   State<ScrubbableAreaChart> createState() => _ScrubbableAreaChartState();
@@ -124,7 +129,19 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
                               if (sample == null ||
                                   sample.index < 0 ||
                                   sample.index >= n) {
-                                return const SizedBox.shrink();
+                                // Not scrubbing → a live pulse at the latest point.
+                                if (!widget.pulsingEndDot) {
+                                  return const SizedBox.shrink();
+                                }
+                                final endFrac = widget.indexed
+                                    ? 1.0
+                                    : indexToFraction(n - 1, n);
+                                return _PulsingEndDot(
+                                  fraction: endFrac.clamp(0.0, 1.0),
+                                  dotY: valueToY(widget.values[n - 1],
+                                      bounds.min, bounds.max, plotHeight),
+                                  color: widget.lineColor,
+                                );
                               }
                               final dotY = valueToY(
                                 widget.values[sample.index],
@@ -279,4 +296,64 @@ class _TVPoint {
   const _TVPoint(this.t, this.v);
   final DateTime t;
   final double v;
+}
+
+/// The end-of-line "current value" dot with a soft halo that continuously
+/// expands and fades — a live pulse. In its own RepaintBoundary so the 60 fps
+/// pulse never repaints the chart underneath.
+class _PulsingEndDot extends StatefulWidget {
+  const _PulsingEndDot({required this.fraction, required this.dotY, required this.color});
+  final double fraction;
+  final double dotY;
+  final Color color;
+  @override
+  State<_PulsingEndDot> createState() => _PulsingEndDotState();
+}
+
+class _PulsingEndDotState extends State<_PulsingEndDot> with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 1600))..repeat();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (_, _) => CustomPaint(
+          painter: _PulsingDotPainter(
+              fraction: widget.fraction, dotY: widget.dotY, color: widget.color, t: _ctrl.value),
+        ),
+      ),
+    );
+  }
+}
+
+class _PulsingDotPainter extends CustomPainter {
+  _PulsingDotPainter({required this.fraction, required this.dotY, required this.color, required this.t});
+  final double fraction;
+  final double dotY;
+  final Color color;
+  final double t;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final x = (size.width * fraction).clamp(0.0, size.width);
+    final y = dotY.clamp(0.0, size.height);
+    final center = Offset(x, y);
+    canvas.drawCircle(center, 4 + t * 12, Paint()..color = color.withValues(alpha: (1 - t) * 0.45));
+    canvas.drawCircle(center, 7, Paint()..color = color.withValues(alpha: 0.18));
+    canvas.drawCircle(center, 4, Paint()..color = color);
+    canvas.drawCircle(center, 4,
+        Paint()..color = Colors.white.withValues(alpha: 0.9)..style = PaintingStyle.stroke..strokeWidth = 1.5);
+  }
+
+  @override
+  bool shouldRepaint(_PulsingDotPainter old) =>
+      old.t != t || old.fraction != fraction || old.dotY != dotY || old.color != color;
 }

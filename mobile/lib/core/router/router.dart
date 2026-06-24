@@ -20,6 +20,8 @@ import '../../features/strategies/presentation/strategy_detail_screen.dart';
 import '../../features/brokerages/presentation/brokerages_screen.dart';
 import '../../features/agent_runs/presentation/agent_runs_screen.dart';
 import '../../features/nexus/presentation/nexus_screen.dart';
+import '../../features/kalshi/presentation/kalshi_screen.dart';
+import '../../features/kalshi/presentation/kalshi_instance_detail_screen.dart';
 import '../../features/models/presentation/models_screen.dart';
 import '../../features/token_usage/presentation/token_usage_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
@@ -97,15 +99,27 @@ final goRouterProvider = Provider<GoRouter>((ref) {
             GoRoute(path: '/dashboard', builder: (_, _) => const DashboardScreen()),
           ]),
           StatefulShellBranch(routes: [
-            GoRoute(path: '/instances', builder: (_, _) => const InstancesScreen()),
+            GoRoute(path: '/kalshi', builder: (_, _) => const KalshiScreen()),
           ]),
           StatefulShellBranch(routes: [
-            GoRoute(path: '/backtests', builder: (_, _) => const BacktestsScreen()),
+            GoRoute(path: '/instances', builder: (_, _) => const InstancesScreen()),
           ]),
           StatefulShellBranch(routes: [
             GoRoute(path: '/strategies', builder: (_, _) => const StrategiesScreen()),
           ]),
         ],
+      ),
+      // Backtests moved off the bottom bar (Kalshi took its slot); reached from
+      // the More sheet, pushed over the shell like the other More destinations.
+      GoRoute(
+        path: '/backtests',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const BacktestsScreen(),
+      ),
+      GoRoute(
+        path: '/kalshi/instances/:id',
+        parentNavigatorKey: _rootKey,
+        builder: (_, s) => KalshiInstanceDetailScreen(instanceId: s.pathParameters['id']!),
       ),
       // Detail / fullscreen routes pushed over the shell.
       GoRoute(

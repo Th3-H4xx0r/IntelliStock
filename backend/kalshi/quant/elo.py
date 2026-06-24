@@ -1,0 +1,23 @@
+"""Elo -> expected goals (pure). Gives the Dixon-Coles model a fair value from
+free ClubElo ratings (no API key, no odds feed needed), so the engine can price
+markets and trade on demo without OddsPapi. Tunable; the CLV gate is what
+decides whether the mapping is good enough to scale."""
+from __future__ import annotations
+
+HOME_FIELD_ADVANTAGE = 65.0   # Elo points
+BASE_TOTAL_GOALS = 2.7        # league-ish average total
+SUPREMACY_PER_100 = 0.45      # goal supremacy per 100 Elo of (adjusted) diff
+
+
+def win_prob(home_elo: float, away_elo: float, hfa: float = HOME_FIELD_ADVANTAGE) -> float:
+    """Elo win probability for the home side (excl. draws)."""
+    return 1.0 / (1.0 + 10 ** (-((home_elo + hfa - away_elo) / 400.0)))
+
+
+def elo_to_expected_goals(home_elo: float, away_elo: float, *, base_total: float = BASE_TOTAL_GOALS, hfa: float = HOME_FIELD_ADVANTAGE):
+    """(home_xg, away_xg) from the two Elo ratings + home advantage."""
+    diff = home_elo + hfa - away_elo
+    supremacy = (diff / 100.0) * SUPREMACY_PER_100
+    home_xg = max(0.2, (base_total + supremacy) / 2.0)
+    away_xg = max(0.2, (base_total - supremacy) / 2.0)
+    return (home_xg, away_xg)

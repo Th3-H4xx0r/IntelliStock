@@ -26,6 +26,9 @@ const editId      = ref(null)
 // Alpaca form
 const alpacaForm  = ref({ account_name: '', key: '', secret: '', paper: true, data_feed: 'iex' })
 
+// Kalshi form (RSA-PSS v2): key id + PEM private key + demo/live environment.
+const kalshiForm  = ref({ account_name: '', key_id: '', private_key: '', environment: 'demo' })
+
 // R16: Alpaca diagnostic test-suite popup state. Catches credential
 // mistakes at config time instead of surfacing as 401s mid-run.
 const testRunning = ref(false)
@@ -293,6 +296,18 @@ async function submitLink(opts = {}) {
             paper:          f.paper,
             alpaca_data_feed: f.data_feed || 'iex',
           }
+    } else if (activeTab.value === 'kalshi') {
+      const f = kalshiForm.value
+      if (!f.account_name.trim()) throw new Error('Account name is required')
+      if (!editMode.value && !f.key_id.trim()) throw new Error('Kalshi API key ID is required')
+      if (!editMode.value && !f.private_key.trim()) throw new Error('Kalshi RSA private key (PEM) is required')
+      body = {
+        brokerage_type: 'kalshi',
+        account_name: f.account_name.trim(),
+        kalshi_key_id: f.key_id.trim(),
+        kalshi_private_key: f.private_key,
+        kalshi_environment: f.environment || 'demo',
+      }
     } else {
       const f = rhForm.value
       if (!editMode.value && !rhSelected.value) throw new Error('Please select an account')
@@ -629,6 +644,15 @@ onMounted(fetchAccounts)
               >
                 Robinhood
               </button>
+              <button
+                @click="setTab('kalshi')"
+                class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
+                :class="activeTab === 'kalshi'
+                  ? 'bg-primary text-background-dark'
+                  : 'text-slate-400 hover:text-slate-200'"
+              >
+                Kalshi
+              </button>
             </div>
           </div>
 
@@ -681,6 +705,35 @@ onMounted(fetchAccounts)
                   "Algo Trader Plus" ($99/mo) for SIP. Save fails with a clear error if the
                   chosen feed isn't authorized.
                 </p>
+              </div>
+            </template>
+
+            <!-- ── Kalshi fields ── -->
+            <template v-else-if="activeTab === 'kalshi'">
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Account Name</label>
+                <input v-model="kalshiForm.account_name" type="text" placeholder="e.g. Kalshi Live"
+                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">API Key ID</label>
+                <input v-model="kalshiForm.key_id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">RSA Private Key (PEM)</label>
+                <textarea v-model="kalshiForm.private_key" rows="5" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
+                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono"></textarea>
+                <p class="text-[11px] text-slate-500 mt-1">Stored encrypted at rest. Used only for RSA-PSS request signing.</p>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Environment</label>
+                <select v-model="kalshiForm.environment"
+                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors">
+                  <option value="demo">Demo (paper · demo-api.kalshi.co)</option>
+                  <option value="live">Live (real money)</option>
+                </select>
+                <p v-if="kalshiForm.environment === 'live'" class="text-[11px] text-yellow-400 mt-1">⚠ Live account — instances bound here trade real money.</p>
               </div>
             </template>
 
@@ -820,9 +873,9 @@ onMounted(fetchAccounts)
               {{ testRunning ? 'Testing...' : 'Test' }}
             </button>
 
-            <!-- Alpaca: Link / Save Account -->
+            <!-- Alpaca / Kalshi: Link / Save Account -->
             <button
-              v-if="activeTab === 'alpaca'"
+              v-if="activeTab === 'alpaca' || activeTab === 'kalshi'"
               @click="submitLink"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2"

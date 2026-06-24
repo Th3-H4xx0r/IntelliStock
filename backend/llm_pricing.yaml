@@ -38,6 +38,13 @@ gpt-oss-120b:
   input_per_1m: 0.0
   output_per_1m: 0.0
 
+# Bedrock Moonshot Kimi-K2.5 (Kalshi analyst). Estimate — adjust to your contract;
+# a per-model override in the Models table takes precedence over this.
+moonshotai.kimi-k2.5:
+  provider: bedrock
+  input_per_1m: 0.60
+  output_per_1m: 2.50
+
 gemini-2-5-pro:
   provider: gemini
   input_per_1m: 1.25

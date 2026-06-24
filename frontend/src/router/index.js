@@ -76,6 +76,18 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/kalshi',
+    name: 'kalshi',
+    component: () => import('../views/KalshiView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/kalshi/instances/:id',
+    name: 'kalshi-instance-detail',
+    component: () => import('../views/KalshiInstanceDetailView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/strategies',
     name: 'strategies',
     component: () => import('../views/StrategiesView.vue'),

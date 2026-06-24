@@ -768,8 +768,12 @@ class FetchRobinhoodAccountsBody(BaseModel):
 
 
 class LinkBrokerageBody(BaseModel):
-    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood)$")
+    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood|kalshi)$")
     account_name: str = Field(..., min_length=1)
+    # Kalshi (RSA-PSS v2): API key id + PEM private key + demo/live environment.
+    kalshi_key_id: Optional[str] = None
+    kalshi_private_key: Optional[str] = None
+    kalshi_environment: Optional[str] = Field(default="demo", pattern="^(demo|live)$")
     # Alpaca
     key: Optional[str] = None
     secret: Optional[str] = None
@@ -3317,7 +3321,7 @@ def api_fetch_robinhood_accounts(body: FetchRobinhoodAccountsBody, current_user:
 
 @app.post("/brokerages", response_class=JSONResponse)
 def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    """Link a new brokerage account (Alpaca or Robinhood). Validates credentials before saving."""
+    """Link a new brokerage account (Alpaca, Robinhood, or Kalshi). Validates credentials before saving."""
     if body.brokerage_type == "alpaca":
         if not body.key or not body.secret:
             raise HTTPException(status_code=400, detail="key and secret are required for Alpaca")
@@ -3326,6 +3330,34 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
             body.paper if body.paper is not None else True,
             (body.alpaca_data_feed or "iex"),
         )
+    elif body.brokerage_type == "kalshi":
+        if not body.kalshi_key_id or not body.kalshi_private_key:
+            raise HTTPException(status_code=400, detail="kalshi_key_id and kalshi_private_key are required for Kalshi")
+        import uuid as _uuid
+        from secret_store import encrypt as _encrypt
+        from kalshi.signing import load_private_key as _load_pk
+        # Validate the PEM parses as an RSA private key before persisting it.
+        try:
+            _load_pk(body.kalshi_private_key)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"invalid Kalshi RSA private key: {e}")
+        bid = str(_uuid.uuid4())
+        row = {
+            "id": bid,
+            "brokerage_type": "kalshi",
+            "account_name": body.account_name,
+            "kalshi_key_id": body.kalshi_key_id.strip(),
+            "kalshi_private_key": _encrypt(body.kalshi_private_key),  # Fernet at rest
+            "kalshi_environment": (body.kalshi_environment or "demo"),
+            "created_at": _r_auth.now(),
+        }
+        _r_auth.db("IntelliStock").table("BrokerageAccounts").insert(row).run(conn)
+        try:
+            from kalshi.db import ensure_tables as _ensure_kalshi_tables
+            _ensure_kalshi_tables(conn)
+        except Exception:
+            pass
+        return {"ok": True, "id": bid, "brokerage_type": "kalshi", "environment": row["kalshi_environment"]}
     else:
         if not body.access_token or not body.refresh_token:
             raise HTTPException(status_code=400, detail="access_token and refresh_token are required for Robinhood")
@@ -3850,6 +3882,593 @@ def api_brokerage_trends(brokerage_id: str, status: str = "active", limit: int =
     n = max(1, min(int(limit or 50), 100))
     trends = trends[:n]
     return {"trends": trends, "count": len(trends)}
+
+
+# ---------------------------------------------------------------------------
+# Kalshi prediction-markets read endpoints (brokerage-scoped, read-only).
+# The lean Kalshi instance engine populates kalshi_* tables; these surface them
+# to the web Kalshi tab, the dashboard card, and the mobile Kalshi screen. Live
+# balance/positions/fills come straight off the Kalshi API; edges/clv/budget
+# come from the DB. Every path degrades to an empty shape on error (mirrors the
+# nexus endpoints) so the UI never hard-fails.
+# ---------------------------------------------------------------------------
+
+def _kalshi_brokerage_row(conn, brokerage_id: str) -> dict:
+    row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Brokerage {brokerage_id!r} not found")
+    if str(row.get("brokerage_type") or "").strip().lower() != "kalshi":
+        raise HTTPException(status_code=400, detail=f"Brokerage {brokerage_id!r} is not a Kalshi account")
+    return row
+
+
+def _kalshi_client_from_row(row: dict):
+    from secret_store import decrypt as _decrypt
+    from kalshi.client import KalshiClient
+    return KalshiClient(
+        key_id=(row.get("kalshi_key_id") or "").strip(),
+        private_key_pem=_decrypt(row.get("kalshi_private_key")) or "",
+        environment=(row.get("kalshi_environment") or "demo"),
+    )
+
+
+def _kalshi_rows(conn, table: str, brokerage_id: str) -> list:
+    try:
+        return list(
+            _r_auth.db("IntelliStock").table(table).filter({"brokerage_id": brokerage_id}).run(conn)
+        )
+    except Exception:
+        return []  # table may not exist yet / transient outage -> empty
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/portfolio", response_class=JSONResponse)
+def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Account value + equity curve for a Kalshi brokerage. Live balance + DB
+    snapshot series. Read-only."""
+    from kalshi.api_payloads import portfolio_payload
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    value_cents = cash_cents = 0
+    try:
+        bal = _kalshi_client_from_row(row).get_balance()
+        value_cents, cash_cents = bal.portfolio_value_cents, bal.cash_cents
+    except Exception:
+        pass
+    snaps = sorted(_kalshi_rows(conn, "kalshi_portfolio_snapshots", brokerage_id), key=lambda s: s.get("ts", ""))
+    # Baseline for a true "day change": value of the latest snapshot at or
+    # before 24h ago (falls back to the window delta inside portfolio_payload
+    # when there's no older snapshot).
+    import datetime as _dt
+    cutoff = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=24)).isoformat()
+    prev_value_cents = None
+    for s in snaps:
+        if s.get("ts", "") <= cutoff:
+            prev_value_cents = int(s.get("value_cents", 0))
+    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents, prev_value_cents=prev_value_cents)
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse)
+def api_kalshi_positions(brokerage_id: str, request: Request, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import positions_payload
+    from kalshi.data.ticker_names import parse_market_ticker
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        positions = [p.__dict__ for p in _kalshi_client_from_row(row).get_positions()]
+    except Exception:
+        positions = _kalshi_rows(conn, "kalshi_positions", brokerage_id)
+    # Readable names + crests: prefer the names/logos the engine stamped on decision
+    # rows (any league/club); fall back to the ticker parser (national-team flags).
+    names = {}
+    try:
+        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
+                      .filter({"brokerage_id": str(brokerage_id)}).run(conn)):
+            mt = r.get("market_ticker")
+            if mt and (r.get("home") or r.get("away")):
+                pk = parse_market_ticker(mt, r.get("side"))
+                names[mt] = {"match": f"{r.get('home')} vs {r.get('away')}",
+                             "pick_label": pk["pick_label"],
+                             "pick_logo": (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", "")}
+    except Exception:
+        pass
+
+    def _pinfo(mt):
+        if mt in names:
+            return names[mt]
+        p = parse_market_ticker(mt or "")
+        return {"match": p["match"], "pick_label": p["pick_label"], "pick_logo": p["pick_flag"]}
+
+    return _proxy_logos(positions_payload(positions, info_fn=_pinfo), _public_base_url(request))
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/edges", response_class=JSONResponse)
+def api_kalshi_edges(brokerage_id: str, limit: int = 10, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import edges_payload
+    _kalshi_brokerage_row(conn, brokerage_id)
+    return edges_payload(_kalshi_rows(conn, "kalshi_edges", brokerage_id), limit=max(1, min(int(limit or 10), 50)))
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/clv", response_class=JSONResponse)
+def api_kalshi_clv(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import clv_payload
+    _kalshi_brokerage_row(conn, brokerage_id)
+    return clv_payload(_kalshi_rows(conn, "kalshi_clv_log", brokerage_id))
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/settlement", response_class=JSONResponse)
+def api_kalshi_settlement(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi.api_payloads import positions_payload
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        positions = [p.__dict__ for p in _kalshi_client_from_row(row).get_positions()]
+    except Exception:
+        positions = _kalshi_rows(conn, "kalshi_positions", brokerage_id)
+    return positions_payload(positions)
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/fills", response_class=JSONResponse)
+def api_kalshi_fills(brokerage_id: str, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        fills = [f.__dict__ for f in _kalshi_client_from_row(row).get_fills(limit=max(1, min(int(limit or 50), 200)))]
+    except Exception:
+        fills = []
+    return {"fills": fills, "count": len(fills)}
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/scan-budget", response_class=JSONResponse)
+def api_kalshi_scan_budget(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    import datetime, calendar
+    from kalshi.api_payloads import scan_budget_payload
+    from kalshi.db import scan_budget_window
+    _kalshi_brokerage_row(conn, brokerage_id)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    window = scan_budget_window(now.isoformat())
+    used = 0
+    try:
+        r0 = _r_auth.db("IntelliStock").table("kalshi_scan_budget").get(window).run(conn)
+        used = int((r0 or {}).get("used", 0))
+    except Exception:
+        pass
+    days_left = calendar.monthrange(now.year, now.month)[1] - now.day + 1
+    return scan_budget_payload(used, days_left_in_month=days_left)
+
+
+@app.post("/brokerages/{brokerage_id}/kalshi/kill", response_class=JSONResponse)
+def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """KILL: stop the instance bound to this Kalshi account and cancel its
+    resting orders. Scoped to the linked instance (fail-safe). If no instance is
+    linked, cancel resting orders on THIS account only — never touch others."""
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    iid = _resolve_instance_for_brokerage(conn, brokerage_id)
+    if iid:
+        from live_kill_switch import halt_live_trading
+        summary = halt_live_trading(reason="manual kalshi kill (UI)", cancel_open_orders=True, instance_id=iid)
+        return {"ok": True, "summary": summary}
+    # No linked instance: cancel resting orders on this Kalshi account only.
+    try:
+        canceled = _kalshi_client_from_row(row).cancel_all_open_orders()
+        return {"ok": True, "summary": {"orders_canceled": canceled, "instances_halted": 0, "scope": brokerage_id}}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# --- Kalshi instances (a Kalshi bot = an Instances row kind='kalshi') ---
+
+class CreateKalshiInstanceBody(BaseModel):
+    name: str = Field(..., min_length=1)
+    leagues: Optional[list[str]] = None
+    edge_threshold: Optional[float] = 0.03
+    kelly_fraction: Optional[float] = 0.25
+    max_contracts_per_market: Optional[int] = 50
+    max_open_exposure_frac: Optional[float] = 0.60
+    per_league_cap_frac: Optional[float] = 0.25
+    daily_loss_cap_dollars: Optional[float] = 0
+    bankroll_dollars: Optional[float] = 0
+    poll_seconds: Optional[int] = 60
+    bankroll_usage_pct: Optional[int] = 50
+    tier: Optional[str] = "medium"
+    model: Optional[str] = None          # LLM model id for the analyst panel
+    # Live in-match monitoring (two-way in-play; Kalshi-price-only).
+    live_monitoring: Optional[bool] = True
+    live_poll_seconds: Optional[int] = 30
+    inplay_exposure_frac: Optional[float] = 0.25
+    max_adds_per_match: Optional[int] = 3
+    no_add_after_min: Optional[float] = 80.0
+    stop_loss_frac: Optional[float] = 0.5
+    # Sharp-odds anchor (fair value from de-vig'd bookmaker odds; edge vs Kalshi).
+    odds_api_key: Optional[str] = None
+    sharp_weight: Optional[float] = 0.7
+    devig_method: Optional[str] = "power"
+    odds_refresh_secs: Optional[int] = 3600
+    odds_regions: Optional[str] = "eu,uk,us"
+
+
+class UpdateKalshiInstanceBody(CreateKalshiInstanceBody):
+    """Same fields as create; edits an existing instance's name + kalshi_config."""
+    pass
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
+def api_kalshi_list_instances(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Kalshi bots bound to this brokerage (kind='kalshi'). Powers the Kalshi
+    tab's instance-awareness: no rows -> prompt to create one."""
+    _kalshi_brokerage_row(conn, brokerage_id)
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("Instances")
+            .filter({"brokerage_id": brokerage_id, "kind": "kalshi"})
+            .run(conn)
+        )
+    except Exception:
+        rows = []
+    out = [
+        {
+            "id": r0.get("id"),
+            "name": r0.get("name"),
+            "running": bool(r0.get("runCommand", False)),
+            "live_enabled": bool((r0.get("kalshi_config") or {}).get("live_enabled", False)),
+            "config": r0.get("kalshi_config") or {},
+        }
+        for r0 in rows
+    ]
+    return {"instances": out, "count": len(out)}
+
+
+@app.post("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
+def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Create a Kalshi trading instance bound to this brokerage. live execution
+    is ON at creation when the brokerage is a LIVE account (user choice)."""
+    row = _kalshi_brokerage_row(conn, brokerage_id)
+    import uuid as _uuid
+    from kalshi.instance_config import normalize_config, build_kalshi_instance_doc
+    from kalshi.db import ensure_tables as _ensure_kalshi_tables
+
+    live = (row.get("kalshi_environment") or "demo") == "live"
+    config = normalize_config(body.model_dump(), live_enabled=live)
+    iid = str(_uuid.uuid4())
+    doc = build_kalshi_instance_doc(iid, brokerage_id=brokerage_id, name=body.name.strip(), config=config)
+    _r_auth.db("IntelliStock").table("Instances").insert(doc, conflict="replace").run(conn)
+    try:
+        _ensure_kalshi_tables(conn)
+    except Exception:
+        pass
+    return {"ok": True, "id": iid, "name": doc["name"], "live_enabled": live, "running": False}
+
+
+@app.patch("/instances/{instance_id}/kalshi/config", response_class=JSONResponse)
+def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Edit a Kalshi instance's name + config (risk tier, leagues, caps, model).
+    live_enabled is re-derived from the linked brokerage's environment."""
+    from kalshi.instance_config import normalize_config
+    row = _kalshi_instance_row(conn, instance_id)
+    bid = row.get("brokerage_id")
+    live = False
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        live = (bk.get("kalshi_environment") or "demo") == "live"
+    except Exception:
+        pass
+    config = normalize_config(body.model_dump(), live_enabled=live)
+    _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).update(
+        {"name": body.name.strip(), "kalshi_config": config}
+    ).run(conn)
+    return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config}
+
+
+def _kalshi_instance_row(conn, instance_id: str) -> dict:
+    row = _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).run(conn)
+    if not row or row.get("kind") != "kalshi":
+        raise HTTPException(status_code=404, detail=f"Kalshi instance {instance_id!r} not found")
+    return row
+
+
+@app.get("/instances/{instance_id}/kalshi/detail", response_class=JSONResponse)
+def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Kalshi instance summary: config, run state, linked brokerage env."""
+    row = _kalshi_instance_row(conn, instance_id)
+    bid = row.get("brokerage_id")
+    env = "demo"
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        env = bk.get("kalshi_environment") or "demo"
+    except Exception:
+        pass
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "running": bool(row.get("runCommand", False)),
+        "brokerage_id": bid,
+        "environment": env,
+        "config": row.get("kalshi_config") or {},
+    }
+
+
+@app.get("/instances/{instance_id}/kalshi/decisions", response_class=JSONResponse)
+def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The LLM-reasoned decision log for this instance (newest first), enriched
+    with readable team names + crests (league-agnostic)."""
+    from kalshi.decisions import summarize_decisions
+    from kalshi.data.ticker_names import parse_market_ticker
+    _kalshi_instance_row(conn, instance_id)
+    rows = []
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("kalshi_decisions")
+            .filter({"instance_id": str(instance_id)}).run(conn)
+        )
+    except Exception:
+        rows = []
+    rows.sort(key=lambda d: d.get("ts", ""), reverse=True)
+    n = max(1, min(int(limit or 100), 500))
+    out = rows[:n]
+    for r in out:
+        pk = parse_market_ticker(r.get("market_ticker", ""), r.get("side"))
+        r["match"] = (f"{r.get('home')} vs {r.get('away')}" if (r.get("home") or r.get("away")) else pk["match"])
+        r["pick_label"] = pk["pick_label"]
+        r["pick_logo"] = (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", "")
+    return _proxy_logos({"decisions": out, "summary": summarize_decisions(rows), "count": len(rows)}, _public_base_url(request))
+
+
+_IMG_PROXY_HOSTS = ("flagcdn.com", "a.espncdn.com", "a1.espncdn.com", "a2.espncdn.com",
+                    "a3.espncdn.com", "a4.espncdn.com", "secure.espncdn.com")
+
+
+_IMG_PROXY_MAX_BYTES = 5 * 1024 * 1024  # 5 MB cap — these are tiny crests/flags
+
+
+@app.get("/kalshi/img")
+def api_kalshi_img_proxy(u: str):
+    """Server-side image proxy for team crests/flags so the CLIENT never hits an
+    external host directly — everything routes through IntelliStock (works abroad,
+    one origin). Restricted to an allowlist of image CDNs.
+
+    Deliberately UNAUTHENTICATED: <img>/Image.network can't attach the JWT. Safe
+    because it is hardened against being an open proxy / SSRF / abuse relay:
+      - host allowlist (parsed .hostname, not substring),
+      - redirects DISABLED + re-validated (a CDN 3xx can't escape the allowlist),
+      - response forced to image/* (no HTML/SVG served from our origin),
+      - hard size cap (no OOM relay)."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(u or "")
+        if p.scheme not in ("http", "https") or p.hostname not in _IMG_PROXY_HOSTS:
+            raise HTTPException(status_code=400, detail="host not allowed")
+        import requests as _rq
+        # allow_redirects=False: the allowlist only vetted THIS url; following a
+        # 3xx (which the CDN controls) could land on 169.254.169.254 / a LAN host.
+        r = _rq.get(u, timeout=8, stream=True, allow_redirects=False,
+                    headers={"User-Agent": "IntelliStock/1.0"})
+        if r.status_code in (301, 302, 303, 307, 308):
+            raise HTTPException(status_code=502, detail="image fetch failed")
+        r.raise_for_status()
+        # Only ever serve an image — never text/html or svg (active content) from
+        # our own origin (would be stored XSS + a poisoned shared cache).
+        ct = r.headers.get("Content-Type", "image/png").split(";")[0].strip().lower()
+        if not ct.startswith("image/") or ct == "image/svg+xml":
+            raise HTTPException(status_code=502, detail="not an image")
+        body = r.raw.read(_IMG_PROXY_MAX_BYTES + 1, decode_content=True)
+        if len(body) > _IMG_PROXY_MAX_BYTES:
+            raise HTTPException(status_code=502, detail="image too large")
+        return Response(content=body, media_type=ct,
+                        headers={"Cache-Control": "public, max-age=86400",
+                                 "X-Content-Type-Options": "nosniff"})
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="image fetch failed")
+
+
+def _public_base_url(request: Request) -> str:
+    """request.base_url, but honoring the reverse proxy's X-Forwarded-Proto so the
+    rewritten image URLs come back as https:// (uvicorn behind TLS-terminating
+    nginx otherwise reports http://, and an https/iOS-ATS client mixed-content
+    blocks every logo). Ends with '/'."""
+    base = str(request.base_url)
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if proto == "https" and base.startswith("http://"):
+        base = "https://" + base[len("http://"):]
+    return base
+
+
+def _proxy_logos(obj, base_url: str):
+    """Rewrite crest/flag URL fields to route through /kalshi/img (so the client
+    loads them from IntelliStock, not the CDN). Mutates dicts in place, recursing
+    into lists/dicts. base_url is _public_base_url(request) (ends with '/')."""
+    from urllib.parse import quote
+    keys = ("pick_logo", "home_logo", "away_logo")
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            # Skip already-proxied URLs so a re-serve can't double-wrap (which would
+            # point the proxy at its own host -> not in the allowlist -> 400).
+            if (k in keys and isinstance(v, str) and v.startswith("http")
+                    and "/kalshi/img?u=" not in v):
+                obj[k] = f"{base_url}kalshi/img?u={quote(v, safe='')}"
+            else:
+                _proxy_logos(v, base_url)
+    elif isinstance(obj, list):
+        for it in obj:
+            _proxy_logos(it, base_url)
+    return obj
+
+
+@app.get("/instances/{instance_id}/kalshi/live", response_class=JSONResponse)
+def api_kalshi_instance_live(instance_id: str, request: Request, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Live in-match cards for this instance — current score (when matchable),
+    market-implied probabilities, the latest detected event, a news snippet, and the
+    monitor's recent in-play decisions. Empty when no matches are live."""
+    _kalshi_instance_row(conn, instance_id)
+    rows = []
+    try:
+        rows = list(
+            _r_auth.db("IntelliStock").table("kalshi_live")
+            .filter({"instance_id": str(instance_id)}).run(conn)
+        )
+    except Exception:
+        rows = []
+    rows.sort(key=lambda d: d.get("updated_at", ""), reverse=True)
+    # Refresh score/clock/flags from ESPN at read time so the live card stays live
+    # (every poll) regardless of the engine tick cadence or whether it's running.
+    try:
+        board = _espn_live_board()
+        if board:
+            from kalshi.live import scoreboard as _sb
+            fresh = []
+            for r in rows:
+                sc = _sb.match_score(board, r.get("home", ""), r.get("away", ""))
+                if sc:
+                    # Only a match ESPN says is actually in-play stays. "post" (ended)
+                    # AND "pre" (scheduled, hasn't kicked off) are both dropped — a
+                    # future game on today's date is NOT live.
+                    if (sc.get("state") or "") in ("post", "pre"):
+                        continue
+                    r["score"] = {"home": sc.get("home_score"), "away": sc.get("away_score"),
+                                  "clock": sc.get("clock"), "detail": sc.get("detail"),
+                                  "state": sc.get("state")}
+                    if sc.get("home_logo"):
+                        r["home_logo"] = sc["home_logo"]
+                    if sc.get("away_logo"):
+                        r["away_logo"] = sc["away_logo"]
+                fresh.append(r)
+            rows = fresh
+    except Exception:
+        pass
+    return _proxy_logos({"matches": rows, "count": len(rows)}, _public_base_url(request))
+
+
+_ESPN_BOARD_CACHE = {"ts": 0.0, "board": []}
+
+
+def _espn_live_board():
+    """Process-wide ESPN scoreboard cache (~15s) so live-card reads stay fresh
+    without hammering ESPN per request."""
+    import time as _t
+    now = _t.time()
+    if now - _ESPN_BOARD_CACHE["ts"] > 15:
+        try:
+            from kalshi.live import scoreboard as _sb
+            _ESPN_BOARD_CACHE["board"] = _sb.fetch_scoreboard()
+        except Exception:
+            pass
+        _ESPN_BOARD_CACHE["ts"] = now
+    return _ESPN_BOARD_CACHE["board"]
+
+
+@app.get("/instances/{instance_id}/kalshi/orders", response_class=JSONResponse)
+def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Orders for this instance — placed/pending (from the decision log) + filled
+    (from the broker). Drives the pending/past-orders cards."""
+    from kalshi.data.ticker_names import parse_market_ticker
+    row = _kalshi_instance_row(conn, instance_id)
+    n = max(1, min(int(limit or 50), 200))
+
+    # Lookup: market_ticker -> readable info stamped on the decision rows (real team
+    # NAMES + crests from the engine, league-agnostic). Parser is only a fallback.
+    info_by_ticker: dict = {}
+    edge_by_ticker: dict = {}
+    try:
+        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
+                      .filter({"instance_id": str(instance_id)}).run(conn)):
+            mt = r.get("market_ticker")
+            if not mt:
+                continue
+            if r.get("home") or r.get("away"):
+                pk = parse_market_ticker(mt, r.get("side"))
+                info_by_ticker[mt] = {
+                    "match": f"{r.get('home')} vs {r.get('away')}",
+                    "home": r.get("home", ""), "away": r.get("away", ""),
+                    "home_logo": r.get("home_logo", "") or pk.get("home_flag", ""),
+                    "away_logo": r.get("away_logo", "") or pk.get("away_flag", ""),
+                    "pick_label": pk["pick_label"],
+                    "pick_logo": (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", ""),
+                }
+            if r.get("edge") is not None and r.get("decision") == "placed":
+                edge_by_ticker[mt] = r.get("edge")
+    except Exception:
+        pass
+
+    def _info(ticker, side=None):
+        i = info_by_ticker.get(ticker)
+        if i:
+            return i
+        p = parse_market_ticker(ticker or "", side)
+        return {"match": p["match"], "home": p["home"], "away": p["away"],
+                "home_logo": p["home_flag"], "away_logo": p["away_flag"],
+                "pick_label": p["pick_label"], "pick_logo": p["pick_flag"]}
+
+    bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(row.get("brokerage_id")).run(conn) or {}
+    client = None
+    try:
+        client = _kalshi_client_from_row(bk)
+    except Exception:
+        client = None
+
+    # PENDING = the broker's truly-resting orders (empty when everything filled),
+    # NOT the bot's placed decisions (which fill instantly and would double-show).
+    pending = []
+    if client is not None:
+        try:
+            for o in client.get_resting_orders():
+                inf = _info(o.get("market_ticker"), o.get("side"))
+                pending.append({**o, **inf, "edge": edge_by_ticker.get(o.get("market_ticker"))})
+        except Exception:
+            pending = []
+
+    fills = []
+    if client is not None:
+        try:
+            for f in client.get_fills(limit=n):
+                inf = _info(f.market_ticker)
+                fills.append({"market_ticker": f.market_ticker, "side": f.side, "action": f.action,
+                              "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts, **inf})
+        except Exception:
+            fills = []
+    return _proxy_logos({"placed": pending[:n], "fills": fills[:n]}, _public_base_url(request))
+
+
+@app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)
+def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Equity curve for the instance's brokerage (reuses portfolio snapshots)."""
+    from kalshi.api_payloads import portfolio_payload
+    row = _kalshi_instance_row(conn, instance_id)
+    bid = row.get("brokerage_id")
+    value_cents = cash_cents = 0
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        bal = _kalshi_client_from_row(bk).get_balance()
+        value_cents, cash_cents = bal.portfolio_value_cents, bal.cash_cents
+    except Exception:
+        pass
+    snaps = sorted(_kalshi_rows(conn, "kalshi_portfolio_snapshots", bid), key=lambda s: s.get("ts", ""))
+    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents)
+
+
+class TestKalshiBody(BaseModel):
+    kalshi_key_id: Optional[str] = ""
+    kalshi_private_key: Optional[str] = ""
+    kalshi_environment: Optional[str] = Field(default="demo", pattern="^(demo|live)$")
+    brokerage_id: Optional[str] = None
+
+
+@app.post("/brokerages/test-kalshi", response_class=JSONResponse)
+def api_test_kalshi_brokerage(body: TestKalshiBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Probe Kalshi creds against /portfolio/balance. Accepts raw creds (add
+    mode) or a brokerage_id (edit mode, decrypts stored creds). Saves nothing."""
+    from kalshi.client import KalshiClient
+    key_id = (body.kalshi_key_id or "").strip()
+    pem = body.kalshi_private_key or ""
+    env = body.kalshi_environment or "demo"
+    if (not key_id or not pem) and body.brokerage_id:
+        row = _kalshi_brokerage_row(conn, body.brokerage_id)
+        from secret_store import decrypt as _decrypt
+        key_id = (row.get("kalshi_key_id") or "").strip()
+        pem = _decrypt(row.get("kalshi_private_key")) or ""
+        env = row.get("kalshi_environment") or "demo"
+    if not key_id or not pem:
+        raise HTTPException(status_code=400, detail="kalshi_key_id and kalshi_private_key are required")
+    try:
+        bal = KalshiClient(key_id=key_id, private_key_pem=pem, environment=env).get_balance()
+        return {"ok": True, "environment": env, "balance_cents": bal.cash_cents}
+    except Exception as e:
+        return {"ok": False, "environment": env, "error": f"{type(e).__name__}: {e}"}
 
 
 @app.get("/market/news", response_class=JSONResponse)

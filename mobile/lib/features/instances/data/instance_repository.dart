@@ -15,6 +15,8 @@ class InstanceRepository {
     final list = data['instances'] as List? ?? const [];
     return list
         .whereType<Map<String, dynamic>>()
+        // Kalshi bots have their own dedicated workflow on the Kalshi tab.
+        .where((j) => j['kind'] != 'kalshi')
         .map(Instance.fromJson)
         .toList();
   }

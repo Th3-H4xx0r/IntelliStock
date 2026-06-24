@@ -20,10 +20,13 @@ class AppShell extends ConsumerStatefulWidget {
 }
 
 class _AppShellState extends ConsumerState<AppShell> {
+  // Kalshi promoted to a first-class tab right after Dashboard; Backtests moved
+  // into the More sheet. Branch order in router.dart matches: dashboard(0),
+  // kalshi(1), instances(2), strategies(3).
   static const _destinations = [
     (_DestKind.branch, 'dashboard', 'Dashboard', 0),
-    (_DestKind.branch, 'memory', 'Instances', 1),
-    (_DestKind.branch, 'analytics', 'Backtests', 2),
+    (_DestKind.branch, 'sports_soccer', 'Kalshi', 1),
+    (_DestKind.branch, 'memory', 'Instances', 2),
     (_DestKind.branch, 'schema', 'Strategies', 3),
     (_DestKind.more, 'menu', 'More', 4),
   ];
@@ -54,11 +57,12 @@ class _AppShellState extends ConsumerState<AppShell> {
       backgroundColor: AppColors.canvas,
       extendBody: true,
       body: AppBackground(
-        // The dashboard (branch 0) paints a full-bleed gradient up under the
-        // status bar / dynamic island, so it opts out of the top safe-area
-        // inset and adds its own top padding. Every other tab keeps the inset.
+        // Dashboard (branch 0) AND Kalshi (branch 1) paint a full-bleed gradient
+        // crown up under the status bar / dynamic island, so they opt out of the
+        // top safe-area inset and add their own top padding. Other tabs keep it.
         child: SafeArea(
-          top: widget.navigationShell.currentIndex != 0,
+          top: widget.navigationShell.currentIndex != 0 &&
+              widget.navigationShell.currentIndex != 1,
           bottom: false,
           child: widget.navigationShell,
         ),

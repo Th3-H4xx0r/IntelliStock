@@ -134,7 +134,9 @@ async function fetchInstances() {
     const res = await fetchWithTimeout(`${API_BASE}/instances`, { headers: authHeaders() })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    instances.value = data.instances || []
+    // Kalshi bots have their own dedicated workflow on the Kalshi tab; keep them
+    // out of the equities instances list.
+    instances.value = (data.instances || []).filter((i) => i.kind !== 'kalshi')
   } catch (e) {
     loadError.value = e?.name === 'AbortError'
       ? 'Instances took too long to load. Try again after the server catches up.'
