@@ -9,8 +9,22 @@ import re
 
 from kalshi.normalize import normalize_team
 
-# ESPN soccer league slugs to poll for live scores. World Cup = fifa.world.
-DEFAULT_SCOREBOARD_LEAGUES = ("fifa.world",)
+# ESPN soccer league slugs to poll for live scores. Add slugs here to cover
+# any competition that may have active Kalshi markets. The fetch is a single
+# HTTP call per slug; adding more only costs a few extra ms per scoreboard refresh.
+DEFAULT_SCOREBOARD_LEAGUES = (
+    "fifa.world",       # FIFA World Cup (main tournament)
+    "fifa.cwc",         # FIFA Club World Cup
+    "concacaf.gold",    # CONCACAF Gold Cup
+    "conmebol.copa",    # Copa America
+    "uefa.euro",        # UEFA European Championship
+    "concacaf.nations.league",  # CONCACAF Nations League
+    "uefa.nations",     # UEFA Nations League
+    "afc.asian.cup",    # AFC Asian Cup
+    "caf.africa_cup_of_nations",  # Africa Cup of Nations
+    "conmebol.world.qualifier",   # CONMEBOL World Cup Qualifiers
+    "fifa.friendly",    # International Friendlies
+)
 
 
 def _int(v):

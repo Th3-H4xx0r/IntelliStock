@@ -23,3 +23,20 @@ def test_crosswalk_extra_overrides():
     cw = TeamCrosswalk(extra={"the gunners": "Arsenal"})
     assert cw.normalize("The Gunners") == "Arsenal"
     assert cw.normalize("Man City") == "Manchester City"
+
+
+def test_national_team_ampersand_vs_and():
+    # ESPN uses "Bosnia & Herzegovina"; Kalshi/FIFA uses "Bosnia and Herzegovina".
+    # Both must normalize to the same canonical name so match_score can join them.
+    assert normalize_team("Bosnia & Herzegovina") == "Bosnia and Herzegovina"
+    assert normalize_team("Bosnia and Herzegovina") == "Bosnia and Herzegovina"
+
+
+def test_national_team_aliases():
+    assert normalize_team("USA") == "United States"
+    assert normalize_team("Korea Republic") == "South Korea"
+    assert normalize_team("Czechia") == "Czech Republic"
+    assert normalize_team("Czech Republic") == "Czech Republic"
+    assert normalize_team("Ivory Coast") == "Ivory Coast"
+    assert normalize_team("Cote d'Ivoire") == "Ivory Coast"
+    assert normalize_team("Trinidad and Tobago") == "Trinidad and Tobago"

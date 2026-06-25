@@ -118,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
             devig_method=str(cfg.get("devig_method", "power")),
             odds_refresh_secs=int(cfg.get("odds_refresh_secs", 3600)),
             odds_regions=str(cfg.get("odds_regions", "eu,uk,us")),
+            soccer_series=list(cfg.get("soccer_series") or []),
+            scoreboard_leagues=list(cfg.get("scoreboard_leagues") or []),
         )
     )
     return 0
