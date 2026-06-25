@@ -1,4 +1,6 @@
-from kalshi.live.scoreboard import clock_minutes, live_status, match_score, parse_scoreboard
+from kalshi.live.scoreboard import (
+    DEFAULT_SCOREBOARD_LEAGUES, clock_minutes, live_status, match_score, parse_scoreboard,
+)
 
 
 def test_clock_minutes():
@@ -63,3 +65,26 @@ def test_match_score_by_name_and_flipped_orientation():
     f = match_score(board, "Austria", "Argentina")
     assert f["home"] == "Austria" and f["home_score"] == 1 and f["away_score"] == 2
     assert match_score(board, "Brazil", "France") is None
+
+
+def test_match_score_bosnia_ampersand_vs_and():
+    # ESPN returns "Bosnia & Herzegovina"; Kalshi titles say "Bosnia and Herzegovina".
+    # After normalize_team both must resolve to the same canonical name.
+    espn_payload = {"events": [{"competitions": [{
+        "status": {"type": {"state": "in", "shortDetail": "59'"}},
+        "competitors": [
+            {"homeAway": "home", "score": "2", "team": {"displayName": "Bosnia & Herzegovina"}},
+            {"homeAway": "away", "score": "1", "team": {"displayName": "Qatar"}},
+        ],
+    }]}]}
+    board = parse_scoreboard(espn_payload)
+    # Kalshi title-extracted name uses "and"; must still match the ESPN "&" entry.
+    result = match_score(board, "Bosnia and Herzegovina", "Qatar")
+    assert result is not None, "Bosnia and Herzegovina should match ESPN's 'Bosnia & Herzegovina'"
+    assert result["home_score"] == 2 and result["away_score"] == 1
+
+
+def test_default_scoreboard_leagues_covers_multiple_competitions():
+    assert "fifa.world" in DEFAULT_SCOREBOARD_LEAGUES
+    assert "fifa.cwc" in DEFAULT_SCOREBOARD_LEAGUES
+    assert len(DEFAULT_SCOREBOARD_LEAGUES) > 1

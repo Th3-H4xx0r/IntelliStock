@@ -4339,13 +4339,14 @@ _ESPN_BOARD_CACHE = {"ts": 0.0, "board": []}
 
 def _espn_live_board():
     """Process-wide ESPN scoreboard cache (~15s) so live-card reads stay fresh
-    without hammering ESPN per request."""
+    without hammering ESPN per request. Uses the full DEFAULT_SCOREBOARD_LEAGUES
+    list so all active competitions are reflected, not just the World Cup."""
     import time as _t
     now = _t.time()
     if now - _ESPN_BOARD_CACHE["ts"] > 15:
         try:
             from kalshi.live import scoreboard as _sb
-            _ESPN_BOARD_CACHE["board"] = _sb.fetch_scoreboard()
+            _ESPN_BOARD_CACHE["board"] = _sb.fetch_scoreboard(_sb.DEFAULT_SCOREBOARD_LEAGUES)
         except Exception:
             pass
         _ESPN_BOARD_CACHE["ts"] = now

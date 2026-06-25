@@ -8,6 +8,7 @@ from __future__ import annotations
 # Canonical-name replacements, keyed by a normalized lookup form
 # (lowercase, collapsed whitespace, punctuation stripped).
 _REPLACEMENTS: dict[str, str] = {
+    # Club teams
     "man utd": "Manchester United",
     "man united": "Manchester United",
     "manchester utd": "Manchester United",
@@ -24,6 +25,32 @@ _REPLACEMENTS: dict[str, str] = {
     "psg": "Paris Saint-Germain",
     "inter": "Internazionale",
     "atletico": "Atletico Madrid",
+    # National teams — "&" vs "and" and other common variants that break
+    # substring matching between ESPN and Kalshi/FIFA spellings.
+    "bosnia herzegovina": "Bosnia and Herzegovina",
+    "bosnia and herzegovina": "Bosnia and Herzegovina",
+    "bosnia herzeg": "Bosnia and Herzegovina",
+    "czech republic": "Czech Republic",
+    "czechia": "Czech Republic",
+    "republic of ireland": "Republic of Ireland",
+    "north macedonia": "North Macedonia",
+    "north macedonia republic": "North Macedonia",
+    "ivory coast": "Ivory Coast",
+    "cote divoire": "Ivory Coast",
+    "cotedivoire": "Ivory Coast",
+    "united states": "United States",
+    "usa": "United States",
+    "us": "United States",
+    "korea republic": "South Korea",
+    "south korea": "South Korea",
+    "republic of korea": "South Korea",
+    "democratic republic of congo": "DR Congo",
+    "dr congo": "DR Congo",
+    "cape verde": "Cape Verde",
+    "trinidad tobago": "Trinidad and Tobago",
+    "trinidad and tobago": "Trinidad and Tobago",
+    "antigua barbuda": "Antigua and Barbuda",
+    "saint kitts nevis": "St. Kitts and Nevis",
 }
 
 

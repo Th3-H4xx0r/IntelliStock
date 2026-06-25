@@ -117,6 +117,10 @@ class EngineConfig:
     devig_method: str = "power"
     odds_refresh_secs: int = 3600
     odds_regions: str = "eu,uk,us"
+    # Kalshi series to scan (empty = use discovery.DEFAULT_SOCCER_SERIES).
+    soccer_series: list = field(default_factory=list)
+    # ESPN league slugs for live-score lookups (empty = use scoreboard.DEFAULT_SCOREBOARD_LEAGUES).
+    scoreboard_leagues: list = field(default_factory=list)
 
 
 def run_once(
@@ -261,8 +265,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     espn_cache: dict = {"ts": 0.0, "board": []}   # ESPN live scores+clock (timing only, ~30s)
     raw_dumped = False           # one-time raw-market field dump (price diagnostics)
     placed_markets: set = set()  # market_tickers already held/ordered — don't re-order
+    _soccer_series = config.soccer_series or discovery.DEFAULT_SOCCER_SERIES
+    _scoreboard_leagues = config.scoreboard_leagues or espn.DEFAULT_SCOREBOARD_LEAGUES
     odds_sport_keys = [k for k in (odds_api.sport_key_for_series(s)
-                                   for s in discovery.DEFAULT_SOCCER_SERIES) if k]
+                                   for s in _soccer_series) if k]
     if not config.odds_api_key:
         log("No odds API key — pricing model-only. Set odds_api_key (or ODDS_API_KEY env) "
             "to anchor fair value to sharp bookmaker odds and trade where Kalshi disagrees.", "yellow")
@@ -291,7 +297,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
             # 2) Discover open Kalshi soccer markets by series (World Cup = KXWCGAME).
             soccer, total_raw = [], 0
-            for series in discovery.DEFAULT_SOCCER_SERIES:
+            for series in _soccer_series:
                 try:
                     rs = (client.list_markets(status="open", series_ticker=series, limit=500) or {}).get("markets", []) or []
                 except Exception as e:
@@ -318,11 +324,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         p["kickoff_ts"] = match_clock.kickoff_from_market(m)
                         soccer.append(p)
             by_event = discovery.group_by_event(soccer)
-            log(f"tick {tick}: scanned series {discovery.DEFAULT_SOCCER_SERIES} → {total_raw} markets, "
+            log(f"tick {tick}: scanned series {_soccer_series} → {total_raw} markets, "
                 f"{len(soccer)} priceable, {len(by_event)} matches.", "cyan")
             if not by_event:
-                log(f"tick {tick}: no priceable soccer matches in {discovery.DEFAULT_SOCCER_SERIES}. "
-                    f"Add your leagues' series tickers to discovery.DEFAULT_SOCCER_SERIES.", "yellow")
+                log(f"tick {tick}: no priceable soccer matches in {_soccer_series}. "
+                    f"Add your leagues' series tickers to kalshi_config.soccer_series or "
+                    f"discovery.DEFAULT_SOCCER_SERIES.", "yellow")
                 time.sleep(config.poll_seconds)
                 continue
 
@@ -357,7 +364,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # act, instead of waiting on a price move. Cached ~30s.
             if now_wall - espn_cache["ts"] > 30:
                 try:
-                    espn_cache["board"] = espn.fetch_scoreboard()
+                    espn_cache["board"] = espn.fetch_scoreboard(_scoreboard_leagues)
                 except Exception:
                     espn_cache["board"] = espn_cache.get("board") or []
                 espn_cache["ts"] = now_wall
