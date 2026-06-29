@@ -1470,8 +1470,19 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
         )
 
     provider_config = _build_llm_test_provider_config(body)
-    _reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
-    _test_max_tokens = {"high": 2048, "medium": 1024, "low": 256}.get(_reasoning_effort, 64)
+    # Size the test's output budget to the EFFECTIVE reasoning effort. Reasoning
+    # lives in a provider-specific field (bedrock_reasoning / ollama_think), not
+    # always reasoning_effort — and reasoning models (e.g. gpt-oss) spend output
+    # tokens "thinking" before any answer, so the old 64-token cap could be
+    # exhausted before a reply was generated. Default floor is 256 (enough for the
+    # tiny {"ok":true} object even when a model emits a few reasoning tokens).
+    _raw_reasoning = (
+        body.bedrock_reasoning if provider == "bedrock"
+        else body.ollama_think if provider == "ollama"
+        else body.reasoning_effort
+    ) or body.reasoning_effort
+    _reasoning_effort = normalize_reasoning_effort(_raw_reasoning)
+    _test_max_tokens = {"high": 2048, "medium": 1024, "low": 256}.get(_reasoning_effort, 256)
 
     # Stage 1: structured connectivity check. Verifies auth + the
     # structured-output path the strategy uses for sentiment/event LLMs.
