@@ -64,6 +64,27 @@ def test_build_model_openrouter_base_url():
 
 
 @pytest.mark.skipif(not llm_utils._PYDANTIC_AI_AVAILABLE, reason="pydantic_ai not installed")
+def test_build_model_openrouter_always_prompted_json_profile():
+    # OpenRouter serves many open models (nvidia/nemotron, qwen, llama) whose
+    # native structured-output is unreliable, so — like NVIDIA NIM — every
+    # openrouter model must get the prompted-JSON profile, NOT only the
+    # gpt-oss/gpt-5/kimi "quirky" markers. Regression for a /llm/test failure
+    # ("Exceeded maximum output retries (0)") on nvidia/nemotron-3-ultra.
+    for model_name in ("nvidia/nemotron-3-ultra-550b-a55b", "anthropic/claude-3.5-sonnet"):
+        model = llm_utils._build_pydantic_ai_model(
+            "openrouter", "sk-or-x", model_name,
+            {"openrouter_base_url": "https://openrouter.ai/api/v1"},
+        )
+        assert model is not None
+        profile = getattr(model, "profile", None)
+        assert profile is not None, f"no profile for {model_name}"
+        # Prompted-JSON profile disables forced json-schema output.
+        assert getattr(profile, "supports_json_schema_output", True) is False, (
+            f"{model_name} did not get the prompted-JSON profile"
+        )
+
+
+@pytest.mark.skipif(not llm_utils._PYDANTIC_AI_AVAILABLE, reason="pydantic_ai not installed")
 def test_build_model_openrouter_with_headers():
     model = llm_utils._build_pydantic_ai_model(
         "openrouter", "sk-or-x", "anthropic/claude-3.5-sonnet",

@@ -36,10 +36,14 @@ export async function loadOpenRouterModels({ baseUrl, force = false } = {}) {
     }
   }
   try {
+    // NOTE: deliberately NOT `credentials: 'include'`. Auth is a JWT in the
+    // Authorization header, and the API's CORS is configured
+    // `allow_credentials=False`, so a credentialed request fails the preflight
+    // ("Access-Control-Allow-Credentials must be 'true'"). The main app's
+    // fetches (e.g. ModelsView) are non-credentialed for the same reason.
     const resp = await fetch(`${API_BASE}/openrouter/list-models`, {
       method: 'POST',
       headers: _authHeaders(),
-      credentials: 'include',
       body: JSON.stringify({ base_url: base }),
     })
     if (!resp.ok) {
