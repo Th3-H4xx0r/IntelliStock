@@ -8465,6 +8465,8 @@ def action_create_model(conn, name, provider, model, api_key=None,
                         ollama_base_url=None, ollama_keep_alive=None,
                         ollama_think=None,
                         bedrock_region=None, bedrock_reasoning=None,
+                        openrouter_base_url=None, openrouter_referer=None,
+                        openrouter_title=None,
                         model_cache_family=None,
                         input_cost_per_1m=None, output_cost_per_1m=None,
                         cache_creation_cost_per_1m=None,
@@ -8500,6 +8502,13 @@ def action_create_model(conn, name, provider, model, api_key=None,
         # time; reasoning is "off"/"low"/"medium"/"high".
         "bedrock_region": (bedrock_region or "").strip(),
         "bedrock_reasoning": (bedrock_reasoning or "").strip().lower(),
+        # OpenRouter-specific (empty for non-openrouter rows; the dispatcher
+        # only reads them when provider == "openrouter"). base_url defaults to
+        # the public API; referer/title are optional leaderboard-attribution
+        # headers (HTTP-Referer / X-Title).
+        "openrouter_base_url": (openrouter_base_url or "").strip(),
+        "openrouter_referer": (openrouter_referer or "").strip(),
+        "openrouter_title": (openrouter_title or "").strip(),
         # Cache-grouping tag (canonical_model_cache_key override).
         "model_cache_family": (model_cache_family or "").strip().lower(),
         # Optional per-model pricing override ($/1M tokens). None means
@@ -8574,7 +8583,9 @@ def action_edit_model(conn, model_id, **kwargs):
                   "azure_openai_api_version", "reasoning_effort",
                   "cli_path", "extra_args",
                   "ollama_base_url", "ollama_keep_alive", "ollama_think",
-                  "bedrock_region", "bedrock_reasoning", "model_cache_family",
+                  "bedrock_region", "bedrock_reasoning",
+                  "openrouter_base_url", "openrouter_referer", "openrouter_title",
+                  "model_cache_family",
                   "input_cost_per_1m", "output_cost_per_1m",
                   "cache_creation_cost_per_1m", "cache_read_cost_per_1m"):
         if field not in kwargs:

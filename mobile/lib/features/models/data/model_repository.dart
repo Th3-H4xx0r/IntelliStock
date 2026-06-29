@@ -33,6 +33,9 @@ class LlmModel {
     this.ollamaThink,
     this.bedrockRegion,
     this.bedrockReasoning,
+    this.openrouterBaseUrl,
+    this.openrouterReferer,
+    this.openrouterTitle,
     this.modelCacheFamily,
     this.inputCostPer1m,
     this.outputCostPer1m,
@@ -58,6 +61,9 @@ class LlmModel {
   final String? ollamaThink;
   final String? bedrockRegion;
   final String? bedrockReasoning;
+  final String? openrouterBaseUrl;
+  final String? openrouterReferer;
+  final String? openrouterTitle;
   final String? modelCacheFamily;
   final double? inputCostPer1m;
   final double? outputCostPer1m;
@@ -84,6 +90,9 @@ class LlmModel {
       ollamaThink: _asStr(j['ollama_think']),
       bedrockRegion: _asStr(j['bedrock_region']),
       bedrockReasoning: _asStr(j['bedrock_reasoning']),
+      openrouterBaseUrl: _asStr(j['openrouter_base_url']),
+      openrouterReferer: _asStr(j['openrouter_referer']),
+      openrouterTitle: _asStr(j['openrouter_title']),
       modelCacheFamily: _asStr(j['model_cache_family']),
       inputCostPer1m: (j['input_cost_per_1m'] as num?)?.toDouble(),
       outputCostPer1m: (j['output_cost_per_1m'] as num?)?.toDouble(),

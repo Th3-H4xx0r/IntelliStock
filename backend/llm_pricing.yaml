@@ -1,5 +1,10 @@
 # USD per 1M tokens. Per-model entries in the Models table override these.
 # Update when providers change pricing.
+#
+# OpenRouter models are NOT listed here: selecting a model in the Models UI
+# auto-fills its pricing into that row's per-model cost overrides (USD/token
+# from the catalog × 1e6 → USD/1M), which take precedence over this file.
+# See docs/openrouter-setup.md.
 
 claude-sonnet-4-6:
   provider: anthropic

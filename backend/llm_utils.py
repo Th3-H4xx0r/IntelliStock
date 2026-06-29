@@ -169,6 +169,7 @@ def _is_non_retryable_filter_response(
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _STRUCTURED_LLM_PROVIDER_LOCKS: dict[str, threading.Lock] = {
     "gemini": threading.Lock(),
+    "openrouter": threading.Lock(),
 }
 _LAST_STRUCTURED_LLM_CALL = threading.local()
 _LAST_PLAIN_LLM_CALL_ERROR = threading.local()  # stores last error from _call_openai/_call_azure_openai
@@ -234,6 +235,8 @@ def resolve_api_key_for_provider(provider: str, explicit_api_key: str | None = N
         return str(os.environ.get("OLLAMA_API_KEY") or "").strip()
     if p == "bedrock":
         return str(os.environ.get("BEDROCK_API_KEY") or "").strip()
+    if p == "openrouter":
+        return str(os.environ.get("OPENROUTER_API_KEY") or "").strip()
     return str(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
 
 
@@ -735,6 +738,36 @@ def _resolve_provider_config(provider: str, provider_config: dict[str, Any] | No
             resolved["reasoning_effort"] = reasoning_effort
         else:
             resolved.pop("reasoning_effort", None)
+    elif p == "openrouter":
+        base_url = str(
+            resolved.get("openrouter_base_url")
+            or os.environ.get("OPENROUTER_BASE_URL")
+            or "https://openrouter.ai/api/v1"
+        ).strip().rstrip("/")
+        resolved["openrouter_base_url"] = base_url
+        referer = str(
+            resolved.get("openrouter_referer")
+            or os.environ.get("OPENROUTER_HTTP_REFERER")
+            or ""
+        ).strip()
+        if referer:
+            resolved["openrouter_referer"] = referer
+        else:
+            resolved.pop("openrouter_referer", None)
+        title = str(
+            resolved.get("openrouter_title")
+            or os.environ.get("OPENROUTER_X_TITLE")
+            or ""
+        ).strip()
+        if title:
+            resolved["openrouter_title"] = title
+        else:
+            resolved.pop("openrouter_title", None)
+        reasoning_effort = normalize_reasoning_effort(resolved.get("reasoning_effort"))
+        if reasoning_effort:
+            resolved["reasoning_effort"] = reasoning_effort
+        else:
+            resolved.pop("reasoning_effort", None)
     elif p == "ollama":
         base = str(
             resolved.get("ollama_base_url")
@@ -813,6 +846,12 @@ def _safe_provider_meta(provider: str, provider_config: dict[str, Any] | None = 
         if reasoning and reasoning != "off":
             meta["bedrock_reasoning"] = reasoning
         return meta
+    if p == "openrouter":
+        meta = {"base_url": str(config.get("openrouter_base_url") or "https://openrouter.ai/api/v1")}
+        reasoning_effort = normalize_reasoning_effort(config.get("reasoning_effort"))
+        if reasoning_effort:
+            meta["reasoning_effort"] = reasoning_effort
+        return meta
     return {}
 
 
@@ -835,7 +874,7 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
         # without triggering the broken schema constraint.
         lowered_model = str(model_name or "").strip().lower()
         return (
-            provider_name in {"azure", "openai", "nvidia"}
+            provider_name in {"azure", "openai", "nvidia", "openrouter"}
             and _model_skips_json_object_format(lowered_model)
         )
 
@@ -960,6 +999,28 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
                 api_key=effective_key,
             ),
         )
+    if p == "openrouter":
+        base_url = str(resolved.get("openrouter_base_url") or "https://openrouter.ai/api/v1").strip().rstrip("/")
+        referer = str(resolved.get("openrouter_referer") or "").strip()
+        title = str(resolved.get("openrouter_title") or "").strip()
+        default_headers: dict[str, str] = {}
+        if referer:
+            default_headers["HTTP-Referer"] = referer
+        if title:
+            default_headers["X-Title"] = title
+        profile = _prompted_json_profile() if _prefers_prompted_structured_output(p, model) else None
+        if default_headers:
+            try:
+                from openai import AsyncOpenAI as _AsyncOpenAI
+                _client = _AsyncOpenAI(base_url=base_url, api_key=api_key, default_headers=default_headers)
+                return OpenAIChatModel(model, provider=OpenAIProvider(openai_client=_client), profile=profile)
+            except Exception:
+                pass  # fall through to header-less provider on any client-construction issue
+        return OpenAIChatModel(
+            model,
+            provider=OpenAIProvider(base_url=base_url, api_key=api_key),
+            profile=profile,
+        )
     return GoogleModel(
         model,
         provider=GoogleProvider(api_key=api_key),
@@ -1025,11 +1086,12 @@ def _is_terminal_provider_not_found(provider: str, exc: Exception) -> bool:
             or ("404" in lowered and "is not supported for generatecontent" in lowered)
             or "models/" in lowered and "is not found" in lowered
         )
-    if p in ("openai", "nvidia"):
+    if p in ("openai", "nvidia", "openrouter"):
         return (
             "model_not_found" in lowered
             or ("404" in lowered and "does not exist" in lowered)
             or ("404" in lowered and "the model" in lowered)
+            or ("404" in lowered and "no endpoints found" in lowered)
         )
     if p in ("anthropic", "claude"):
         return (
@@ -1095,6 +1157,11 @@ def _terminal_provider_not_found_hint(provider: str, model: str, provider_config
         cross_provider_hint = (
             f" The model name {name!r} doesn't belong to Anthropic — change "
             "provider to match (openai or gemini)."
+        )
+    elif p == "openrouter" and name and "/" not in name:
+        cross_provider_hint = (
+            f" OpenRouter model ids are 'vendor/model' (e.g. 'anthropic/claude-3.5-sonnet'); "
+            f"{name!r} has no '/' and is probably wrong."
         )
     if cross_provider_hint:
         return cross_provider_hint.strip()
@@ -2632,7 +2699,7 @@ def call_structured_llm_by_provider(
                 if http_attempt == 0:
                     _LAST_STRUCTURED_LLM_CALL.data["attempted_models"].append(structured_model)
                 _model_forces_raw = (
-                    (provider or "").strip().lower() in {"azure", "openai", "nvidia"}
+                    (provider or "").strip().lower() in {"azure", "openai", "nvidia", "openrouter"}
                     and _model_skips_json_object_format(structured_model)
                 )
                 force_raw_json = prefer_raw_json or _model_forces_raw
@@ -4443,6 +4510,153 @@ def _call_nvidia(
         return ""
 
 
+def _call_openrouter(
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_output_tokens: int = 256,
+    timeout_sec: int | None = None,
+    retries: int = 0,
+    base_url: str = "",
+    response_mime_type: str | None = None,
+    reasoning_effort: str = "",
+    referer: str = "",
+    title: str = "",
+) -> str:
+    """Call OpenRouter (OpenAI-compatible /chat/completions). Structural clone of
+    _call_nvidia without NVIDIA's RPM limiter, plus optional attribution headers
+    (HTTP-Referer / X-Title) and reasoning-effort passthrough."""
+    if not api_key:
+        return ""
+    try:
+        import requests as _requests
+        url = (base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if title:
+            headers["X-Title"] = title
+        body: dict = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "top_p": 0.95,
+        }
+        if not _omit_temperature(model):
+            body["temperature"] = 0.2
+        if max_output_tokens and max_output_tokens > 0:
+            body["max_tokens"] = max_output_tokens
+        effort = normalize_reasoning_effort(reasoning_effort)
+        if effort:
+            # OpenRouter accepts the OpenAI-style `reasoning_effort` alias AND its
+            # native `reasoning.effort` object — send both for max compatibility.
+            body["reasoning_effort"] = effort
+            body["reasoning"] = {"effort": effort}
+        if (
+            str(response_mime_type or "").strip().lower() == "application/json"
+            and not _model_skips_json_object_format(model)
+        ):
+            body["response_format"] = {"type": "json_object"}
+        timeout = _coerce_timeout_sec(timeout_sec)
+        max_retries = max(0, int(retries or 0))
+        retriable_status = {429, 500, 502, 503, 504}
+
+        for attempt in range(max_retries + 1):
+            attempt_timeout = timeout if attempt == 0 else timeout * 2
+            connect_timeout = min(15, attempt_timeout)
+            try:
+                r = _requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
+            except _requests.exceptions.Timeout as _to_e:
+                if attempt < max_retries:
+                    time.sleep(_backoff_sleep_seconds(attempt))
+                    continue
+                try:
+                    _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
+                except Exception:
+                    pass
+                return ""
+            except _requests.exceptions.RequestException as _req_e:
+                if attempt < max_retries:
+                    time.sleep(_backoff_sleep_seconds(attempt))
+                    continue
+                try:
+                    _resp = getattr(_req_e, "response", None)
+                    _stash_last_http(
+                        status=getattr(_resp, "status_code", None),
+                        body=(getattr(_resp, "text", "") if _resp is not None else str(_req_e))[:1000],
+                        exc=_req_e,
+                    )
+                except Exception:
+                    pass
+                return ""
+
+            if r.status_code in retriable_status and attempt < max_retries:
+                _nr_filter, _nr_tag = _is_non_retryable_filter_response(
+                    status=r.status_code, body=getattr(r, "text", "") or "",
+                )
+                if _nr_filter:
+                    import sys
+                    print(
+                        f"[llm_utils] OpenRouter {model!r}: non-retryable response ({_nr_tag}) at status {r.status_code}; skipping further retries.",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    wait = _retry_after_seconds(getattr(r, "headers", None)) or _http_retry_backoff_seconds(f"status_code: {r.status_code}", attempt)
+                    time.sleep(wait)
+                    continue
+
+            if r.status_code >= 400:
+                try:
+                    _err_body = r.json()
+                except Exception:
+                    _err_body = r.text[:500]
+                try:
+                    _stash_last_http(
+                        status=r.status_code,
+                        body=(r.text or "")[:1000] if hasattr(r, "text") else str(_err_body)[:1000],
+                        exc=None,
+                    )
+                except Exception:
+                    pass
+                raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
+            data = r.json()
+            _log_token_usage("openrouter", model, data)
+            choices = data.get("choices") or []
+            if not choices:
+                if attempt < max_retries:
+                    time.sleep(_backoff_sleep_seconds(attempt))
+                    continue
+                return ""
+            message = choices[0].get("message") or {}
+            text = _extract_chat_message_text(message)
+            if text:
+                try:
+                    _stash_last_http(status=200, body=None, exc=None)
+                except Exception:
+                    pass
+                return text
+            if attempt < max_retries:
+                time.sleep(_backoff_sleep_seconds(attempt))
+                continue
+            return ""
+        return ""
+    except Exception as _exc:
+        _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        try:
+            tid = threading.get_ident()
+            with _LAST_HTTP_LOCK:
+                _already = tid in _LAST_HTTP_PER_THREAD
+            if not _already:
+                _resp = getattr(_exc, "response", None)
+                _stash_last_http(
+                    status=getattr(_resp, "status_code", None),
+                    body=(getattr(_resp, "text", "") if _resp is not None else str(_exc))[:1000],
+                    exc=_exc,
+                )
+        except Exception:
+            pass
+        return ""
+
+
 def _call_azure_openai(
     api_key: str,
     deployment_name: str,
@@ -5532,6 +5746,20 @@ def call_llm_by_provider(
             base_url=str(resolved.get("base_url") or ""),
             response_mime_type=response_mime_type,
             reasoning_effort=str(resolved.get("reasoning_effort") or ""),
+        )
+    elif p == "openrouter":
+        _result = _call_openrouter(
+            api_key,
+            model,
+            prompt,
+            max_output_tokens=max_output_tokens,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            base_url=str(resolved.get("openrouter_base_url") or ""),
+            response_mime_type=response_mime_type,
+            reasoning_effort=str(resolved.get("reasoning_effort") or ""),
+            referer=str(resolved.get("openrouter_referer") or ""),
+            title=str(resolved.get("openrouter_title") or ""),
         )
     elif p == "deepseek":
         _result = _call_deepseek(api_key, model, prompt, max_output_tokens, timeout_sec=timeout_sec, retries=retries)

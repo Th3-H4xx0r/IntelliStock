@@ -86,6 +86,45 @@ void main() {
       expect(p['api_key'], 'bearer-token');
     });
 
+    test('openrouter sends base_url and attribution headers', () {
+      final d = LlmConfigDraft(
+        provider: 'openrouter',
+        model: 'anthropic/claude-3.5-sonnet',
+        openrouterBaseUrl: 'https://openrouter.ai/api/v1',
+        openrouterReferer: 'https://intellistock.app',
+        openrouterTitle: 'IntelliStock',
+        apiKey: 'sk-or-key',
+        reasoningEffort: 'high',
+      );
+      final p = d.toPayload();
+      expect(p['provider'], 'openrouter');
+      expect(p['openrouter_base_url'], 'https://openrouter.ai/api/v1');
+      expect(p['openrouter_referer'], 'https://intellistock.app');
+      expect(p['openrouter_title'], 'IntelliStock');
+      expect(p['api_key'], 'sk-or-key');
+      expect(p['reasoning_effort'], 'high');
+    });
+
+    test('openrouter falls back to default base URL and omits empty headers', () {
+      final d = LlmConfigDraft(
+        provider: 'openrouter',
+        model: 'openai/gpt-4o-mini',
+        openrouterBaseUrl: '',
+      );
+      final p = d.toPayload();
+      expect(p['openrouter_base_url'], 'https://openrouter.ai/api/v1');
+      expect(p.containsKey('openrouter_referer'), isFalse);
+      expect(p.containsKey('openrouter_title'), isFalse);
+    });
+
+    test('openrouter copyWith round-trips the new fields', () {
+      final d = LlmConfigDraft(provider: 'openrouter', model: 'x/y');
+      final d2 = d.copyWith(openrouterReferer: 'https://a', openrouterTitle: 'T');
+      expect(d2.openrouterReferer, 'https://a');
+      expect(d2.openrouterTitle, 'T');
+      expect(d2.openrouterBaseUrl, 'https://openrouter.ai/api/v1');
+    });
+
     test('azure sends endpoint and api_version', () {
       final d = LlmConfigDraft(
         provider: 'azure',

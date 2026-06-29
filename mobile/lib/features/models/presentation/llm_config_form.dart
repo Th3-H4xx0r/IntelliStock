@@ -26,6 +26,9 @@ class LlmConfigDraft {
     this.ollamaThink = '',
     this.bedrockRegion = 'us-east-1',
     this.bedrockReasoning = 'off',
+    this.openrouterBaseUrl = 'https://openrouter.ai/api/v1',
+    this.openrouterReferer = '',
+    this.openrouterTitle = '',
     this.modelCacheFamily = '',
   });
 
@@ -44,6 +47,9 @@ class LlmConfigDraft {
   String ollamaThink;
   String bedrockRegion;
   String bedrockReasoning;
+  String openrouterBaseUrl;
+  String openrouterReferer;
+  String openrouterTitle;
   String modelCacheFamily;
 
   LlmConfigDraft copyWith({
@@ -62,6 +68,9 @@ class LlmConfigDraft {
     String? ollamaThink,
     String? bedrockRegion,
     String? bedrockReasoning,
+    String? openrouterBaseUrl,
+    String? openrouterReferer,
+    String? openrouterTitle,
     String? modelCacheFamily,
   }) {
     return LlmConfigDraft(
@@ -80,6 +89,9 @@ class LlmConfigDraft {
       ollamaThink: ollamaThink ?? this.ollamaThink,
       bedrockRegion: bedrockRegion ?? this.bedrockRegion,
       bedrockReasoning: bedrockReasoning ?? this.bedrockReasoning,
+      openrouterBaseUrl: openrouterBaseUrl ?? this.openrouterBaseUrl,
+      openrouterReferer: openrouterReferer ?? this.openrouterReferer,
+      openrouterTitle: openrouterTitle ?? this.openrouterTitle,
       modelCacheFamily: modelCacheFamily ?? this.modelCacheFamily,
     );
   }
@@ -112,6 +124,13 @@ class LlmConfigDraft {
       if (bedrockRegion.isNotEmpty) m['bedrock_region'] = bedrockRegion.trim();
       if (bedrockReasoning.isNotEmpty) m['bedrock_reasoning'] = bedrockReasoning.trim().toLowerCase();
     }
+    if (provider == 'openrouter') {
+      m['openrouter_base_url'] = openrouterBaseUrl.isNotEmpty
+          ? openrouterBaseUrl.trim()
+          : 'https://openrouter.ai/api/v1';
+      if (openrouterReferer.isNotEmpty) m['openrouter_referer'] = openrouterReferer.trim();
+      if (openrouterTitle.isNotEmpty) m['openrouter_title'] = openrouterTitle.trim();
+    }
     return m;
   }
 
@@ -133,6 +152,7 @@ const _kProviders = [
   ('nvidia', 'NVIDIA NIM'),
   ('ollama', 'Ollama (local/cloud)'),
   ('bedrock', 'AWS Bedrock'),
+  ('openrouter', 'OpenRouter'),
   ('claude-cli', 'Claude Code CLI'),
   ('codex-cli', 'OpenAI Codex CLI'),
 ];
@@ -353,6 +373,13 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
     } else {
       next = next.copyWith(bedrockRegion: '', bedrockReasoning: '');
     }
+    if (value == 'openrouter') {
+      if (next.openrouterBaseUrl.isEmpty) {
+        next = next.copyWith(openrouterBaseUrl: 'https://openrouter.ai/api/v1');
+      }
+    } else {
+      next = next.copyWith(openrouterBaseUrl: '', openrouterReferer: '', openrouterTitle: '');
+    }
     _update(next);
   }
 
@@ -361,7 +388,7 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
     final d = widget.draft;
     final disabled = widget.disabled;
     final isCliProvider = d.provider == 'claude-cli' || d.provider == 'codex-cli';
-    final showReasoningEffort = ['azure', 'openai', 'nvidia', 'claude-cli', 'codex-cli'].contains(d.provider);
+    final showReasoningEffort = ['azure', 'openai', 'nvidia', 'openrouter', 'claude-cli', 'codex-cli'].contains(d.provider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -594,6 +621,39 @@ class _LlmConfigFormState extends ConsumerState<LlmConfigForm> {
             mono: true,
             disabled: disabled,
             onChanged: (v) => _update(d.copyWith(nvidiaBaseUrl: v)),
+          ),
+        ],
+
+        // OpenRouter
+        if (d.provider == 'openrouter') ...[
+          const SizedBox(height: 4),
+          _label('OpenRouter Base URL'),
+          _textField(
+            value: d.openrouterBaseUrl,
+            placeholder: 'https://openrouter.ai/api/v1',
+            mono: true,
+            disabled: disabled,
+            onChanged: (v) => _update(d.copyWith(openrouterBaseUrl: v)),
+          ),
+          const SizedBox(height: 8),
+          _infoBox('Model ids are vendor/model, e.g. anthropic/claude-3.5-sonnet.', AppColors.info),
+          const SizedBox(height: 12),
+          _label('HTTP-Referer (optional)'),
+          _textField(
+            value: d.openrouterReferer,
+            placeholder: 'https://your-site.example',
+            mono: true,
+            disabled: disabled,
+            onChanged: (v) => _update(d.copyWith(openrouterReferer: v)),
+          ),
+          const SizedBox(height: 12),
+          _label('X-Title (optional)'),
+          _textField(
+            value: d.openrouterTitle,
+            placeholder: 'IntelliStock',
+            mono: true,
+            disabled: disabled,
+            onChanged: (v) => _update(d.copyWith(openrouterTitle: v)),
           ),
         ],
 
