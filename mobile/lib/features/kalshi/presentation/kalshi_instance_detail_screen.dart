@@ -536,14 +536,40 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
               final key = (r['fixture_id'] ?? r['match'] ?? '').toString();
               (groups[key] ??= []).add(r);
             }
-            // One card per game, sorted by the game's best (max) edge desc.
-            final games = groups.values.toList()
+            // Candidate rows are keyed per-tick, so a side accumulates many rows.
+            // Collapse each game to ONE row per side (latest by ts; keep PLACED if
+            // it was ever placed so a held side isn't shown as a later skip).
+            final games = groups.values.map(_dedupeSides).toList()
               ..sort((a, b) => _bestEdge(b).compareTo(_bestEdge(a)));
             return Column(children: games.map(_pregameCard).toList());
           },
         ),
       ]),
     );
+  }
+
+  // Collapse a game's per-tick rows to one row per side (latest by ts), keeping
+  // a side marked PLACED if it was ever placed (so a held side isn't shown as a
+  // later 'already positioned' skip).
+  List<Map<String, dynamic>> _dedupeSides(List<Map<String, dynamic>> rs) {
+    const order = {'home': 0, 'draw': 1, 'away': 2};
+    final bySide = <String, Map<String, dynamic>>{};
+    final everPlaced = <String, bool>{};
+    for (final r in rs) {
+      final side = (r['side'] ?? '').toString();
+      everPlaced[side] = (everPlaced[side] ?? false) || r['decision'] == 'placed';
+      final prev = bySide[side];
+      final ts = (r['ts'] ?? '').toString();
+      final pts = (prev?['ts'] ?? '').toString();
+      if (prev == null || ts.compareTo(pts) >= 0) bySide[side] = r;
+    }
+    final out = bySide.entries.map((e) {
+      final m = Map<String, dynamic>.from(e.value);
+      if (everPlaced[e.key] == true) m['decision'] = 'placed';
+      return m;
+    }).toList()
+      ..sort((a, b) => (order[a['side']] ?? 9).compareTo(order[b['side']] ?? 9));
+    return out;
   }
 
   double _bestEdge(List<Map<String, dynamic>> sides) {

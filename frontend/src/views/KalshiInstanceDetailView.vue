@@ -182,7 +182,18 @@ const matchBoard = computed(() => {
   }
   const list = [...groups.values()]
   for (const g of list) {
-    g.sides.sort((a, b) => (SIDE_ORDER[a.side] ?? 9) - (SIDE_ORDER[b.side] ?? 9))
+    // Candidate rows are keyed per-tick, so a single side accumulates many rows.
+    // Collapse to ONE row per side (latest by ts) — but remember if it was EVER
+    // placed, so a held side shows PLACED, not a later 'already positioned' skip.
+    const bySide = new Map()
+    for (const s of g.sides) {
+      const prev = bySide.get(s.side)
+      const everPlaced = (prev?.everPlaced || false) || s.decision === 'placed'
+      if (!prev || (s.ts || '') >= (prev.ts || '')) bySide.set(s.side, { ...s, everPlaced })
+      else prev.everPlaced = everPlaced
+    }
+    g.sides = [...bySide.values()].sort((a, b) => (SIDE_ORDER[a.side] ?? 9) - (SIDE_ORDER[b.side] ?? 9))
+    for (const s of g.sides) if (s.everPlaced) s.decision = 'placed'
     const edges = g.sides.map(s => s.edge).filter(e => e != null)
     g.bestEdge = edges.length ? Math.max(...edges) : null
   }
@@ -331,7 +342,7 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
         <div class="glass-card rounded-2xl p-4 sm:p-5">
           <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">stadium</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Pregame analysis</span></div>
           <p v-if="!matchBoard.length" class="text-sm text-slate-500">No matches analyzed yet. Once the engine reviews a game's sides, the home / draw / away edges show together here.</p>
-          <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[520px] overflow-y-auto -mr-2 pr-2">
             <div v-for="g in matchBoard" :key="g.key" class="rounded-xl border border-border-subtle bg-surface/40 p-4">
               <!-- Game header: home crest · matchup · away crest + best-edge chip -->
               <div class="flex items-center gap-3">
