@@ -61,6 +61,10 @@ const poll = ref(60)
 const liveMonitoring = ref(true)
 const oddsApiKey = ref('')
 const sharpWeight = ref(85)
+// Price band + draw gate (favorite-longshot guard) — tunable; 15/90/10 are the safe defaults.
+const minPrice = ref(15)
+const maxPrice = ref(90)
+const drawMinEdge = ref(10)   // % min edge required to take a draw
 const risk = ref('medium')
 // Live brokerage: dry-run (read real prices, place NO real orders) by default. Toggle
 // OFF to place REAL orders. Demo ignores this (it sandbox-executes).
@@ -143,6 +147,9 @@ function prefillFromEdit() {
   if (c.live_monitoring != null) liveMonitoring.value = !!c.live_monitoring
   if (c.odds_api_key) oddsApiKey.value = c.odds_api_key
   if (c.sharp_weight != null) sharpWeight.value = Math.round(c.sharp_weight * 100)
+  if (c.min_price_cents != null) minPrice.value = c.min_price_cents
+  if (c.max_price_cents != null) maxPrice.value = c.max_price_cents
+  if (c.draw_min_edge != null) drawMinEdge.value = Math.round(c.draw_min_edge * 1000) / 10
   if (c.tier) risk.value = c.tier
   if (c.model) selectedModel.value = c.model
   if (c.paper_mode != null) paperMode.value = !!c.paper_mode
@@ -184,6 +191,9 @@ async function submit() {
       live_monitoring: liveMonitoring.value,
       odds_api_key: oddsApiKey.value.trim(),
       sharp_weight: Number(sharpWeight.value) / 100,
+      min_price_cents: Number(minPrice.value),
+      max_price_cents: Number(maxPrice.value),
+      draw_min_edge: Number(drawMinEdge.value) / 100,
       tier: risk.value,
       model: selectedModel.value || null,
       // live brokerage: send the paper toggle (default dry-run). demo always sandbox-executes.
@@ -339,6 +349,18 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
           <label class="block">
             <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Per-league cap (%) <InfoTip text="Cap on exposure to any one league — limits correlated risk." size="13px" /></span>
             <input v-model.number="leagueCapPct" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+          </label>
+          <label class="block">
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Min price (¢) <InfoTip text="Lowest YES price to buy. The 15¢ floor blocks cheap longshots that lost money; lower it to allow cheaper contracts." size="13px" /></span>
+            <input v-model.number="minPrice" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+          </label>
+          <label class="block">
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max price (¢) <InfoTip text="Highest YES price to buy. Above ~90¢ fees eat the thin upside." size="13px" /></span>
+            <input v-model.number="maxPrice" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+          </label>
+          <label class="block">
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Draw min edge (%) <InfoTip text="Draws are model-overconfident; they need at least this much edge to trade." size="13px" /></span>
+            <input v-model.number="drawMinEdge" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block">
             <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Scan cadence (s) <InfoTip text="How often it polls odds, respecting the OddsPapi monthly budget." size="13px" /></span>

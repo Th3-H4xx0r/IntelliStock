@@ -4084,6 +4084,10 @@ class CreateKalshiInstanceBody(BaseModel):
     max_contracts_per_market: Optional[int] = 50
     max_open_exposure_frac: Optional[float] = 0.15
     per_league_cap_frac: Optional[float] = 0.25
+    # Price band + draw gate (favorite-longshot guard) — operator-tunable.
+    min_price_cents: Optional[int] = 15
+    max_price_cents: Optional[int] = 90
+    draw_min_edge: Optional[float] = 0.10
     daily_loss_cap_dollars: Optional[float] = 0
     bankroll_dollars: Optional[float] = 0
     poll_seconds: Optional[int] = 60

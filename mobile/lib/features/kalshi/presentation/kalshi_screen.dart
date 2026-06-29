@@ -399,6 +399,9 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   final _maxContracts = TextEditingController(text: '50');
   final _exposure = TextEditingController(text: '15');
   final _leagueCap = TextEditingController(text: '25');
+  final _minPrice = TextEditingController(text: '15');
+  final _maxPrice = TextEditingController(text: '90');
+  final _drawMinEdge = TextEditingController(text: '10');
   final _dailyLoss = TextEditingController(text: '100');
   final _poll = TextEditingController(text: '60');
   final _manualBankroll = TextEditingController(text: '1000');
@@ -436,7 +439,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
 
   @override
   void dispose() {
-    for (final c in [_name, _edge, _kelly, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll, _manualBankroll]) {
+    for (final c in [_name, _edge, _kelly, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll, _manualBankroll, _minPrice, _maxPrice, _drawMinEdge]) {
       c.dispose();
     }
     super.dispose();
@@ -502,6 +505,9 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'max_contracts_per_market': _i(_maxContracts, 50),
         'max_open_exposure_frac': _d(_exposure, 60) / 100,
         'per_league_cap_frac': _d(_leagueCap, 25) / 100,
+        'min_price_cents': _i(_minPrice, 15),
+        'max_price_cents': _i(_maxPrice, 90),
+        'draw_min_edge': _d(_drawMinEdge, 10) / 100,
         'daily_loss_cap_dollars': _d(_dailyLoss, 100),
         'bankroll_dollars': _effectiveBankroll,
         'poll_seconds': _i(_poll, 60),
@@ -735,6 +741,13 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                     Expanded(child: _field(_leagueCap, 'Per-league cap (%)', number: true)),
                     const SizedBox(width: 12),
                     Expanded(child: _field(_poll, 'Scan cadence (s)', number: true)),
+                  ]),
+                  Row(children: [
+                    Expanded(child: _field(_minPrice, 'Min price (¢)', number: true)),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field(_maxPrice, 'Max price (¢)', number: true)),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field(_drawMinEdge, 'Draw min edge (%)', number: true)),
                   ]),
                   TextField(
                     controller: _dailyLoss,
