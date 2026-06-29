@@ -26,9 +26,13 @@ const dropdownOpen = ref(false)
 
 const selected = computed(() => accounts.value.find((a) => a.id === selectedId.value) || null)
 const isLive = computed(() => (selected.value?.kalshi_environment || 'demo') === 'live')
-const instance = computed(() => instances.value[0] || null)
-const hasInstance = computed(() => !!instance.value)
-const running = computed(() => !!instance.value?.running)
+const selectedInstanceId = ref('')
+// The "active" instance drives the per-instance panels (logs/context); ALL
+// instances are listed and individually manageable below.
+const instance = computed(() =>
+  instances.value.find((i) => i.id === selectedInstanceId.value) || instances.value[0] || null)
+const hasInstance = computed(() => instances.value.length > 0)
+const anyRunning = computed(() => instances.value.some((i) => i.running))
 
 async function getJson(path) {
   try {
@@ -54,6 +58,11 @@ async function loadAccounts() {
 async function loadInstances() {
   const d = await getJson('/kalshi/instances')
   instances.value = (d && d.instances) || []
+  // keep an active selection (prefer the running one) for the per-instance panels
+  if (!instances.value.find((i) => i.id === selectedInstanceId.value)) {
+    const run = instances.value.find((i) => i.running)
+    selectedInstanceId.value = (run || instances.value[0] || {}).id || ''
+  }
 }
 
 async function loadAll() {
@@ -76,12 +85,28 @@ async function loadAll() {
 
 function pickAccount(id) { selectedId.value = id; dropdownOpen.value = false; loadAll() }
 
-async function startStop(start) {
-  if (!instance.value || busy.value) return
+async function startStop(start, id) {
+  if (!id || busy.value) return
   busy.value = true
   try {
-    await fetch(`${API_BASE}/instances/${instance.value.id}/${start ? 'start' : 'stop'}`, { method: 'POST', headers: authHeaders() })
+    const res = await fetch(`${API_BASE}/instances/${id}/${start ? 'start' : 'stop'}`, { method: 'POST', headers: authHeaders() })
+    if (!res.ok) {
+      let msg = 'Action failed'
+      try { msg = (await res.json()).error || msg } catch { /* ignore */ }
+      alert(msg)   // e.g. backend's "one running instance per brokerage" guard
+    }
     await loadInstances()
+  } finally { busy.value = false }
+}
+
+async function removeInstance(inst) {
+  if (!inst || busy.value) return
+  if (!confirm(`Delete instance "${inst.name}"? This removes it permanently.`)) return
+  busy.value = true
+  try {
+    await fetch(`${API_BASE}/instances/${inst.id}?force=true`, { method: 'DELETE', headers: authHeaders() })
+    if (selectedInstanceId.value === inst.id) selectedInstanceId.value = ''
+    await loadAll()
   } finally { busy.value = false }
 }
 
@@ -150,13 +175,11 @@ onMounted(loadAccounts)
 
           <!-- Lifecycle controls (only when an instance exists) -->
           <template v-if="hasInstance">
-            <button @click="startStop(!running)" :disabled="busy"
-                    class="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-50"
-                    :class="running ? 'border border-amber-500/40 text-amber-400 hover:bg-amber-500/10' : 'bg-primary text-background-dark hover:brightness-110'">
-              <span class="material-symbols-outlined text-[18px]">{{ running ? 'pause' : 'play_arrow' }}</span>
-              {{ running ? 'Stop' : 'Start' }}
+            <button @click="openCreate"
+                    class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-background-dark text-sm font-semibold hover:brightness-110 transition-all">
+              <span class="material-symbols-outlined text-[18px]">add</span> New instance
             </button>
-            <button v-if="running" @click="kill" :disabled="busy"
+            <button v-if="anyRunning" @click="kill" :disabled="busy"
                     class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-red-500/40 text-red-400 text-sm font-semibold hover:bg-red-500/10 transition-all disabled:opacity-50">
               <span class="material-symbols-outlined text-[18px]">stop_circle</span> Kill
             </button>
@@ -193,15 +216,37 @@ onMounted(loadAccounts)
 
       <!-- Instance exists -> data -->
       <template v-else>
-        <!-- instance status strip (click → detail) -->
-        <div @click="$router.push(`/kalshi/instances/${instance.id}`)"
-             class="glass-card card-hover rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap cursor-pointer">
-          <span class="size-2 rounded-full" :class="running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
-          <span class="text-sm font-semibold text-slate-200">{{ instance.name }}</span>
-          <span class="text-xs font-medium px-2 py-0.5 rounded-md" :class="running ? 'bg-emerald-500/15 text-emerald-400' : 'bg-slate-500/15 text-slate-400'">{{ running ? 'Running' : 'Stopped' }}</span>
-          <span v-if="instance.live_enabled" class="text-xs font-medium px-2 py-0.5 rounded-md bg-red-500/15 text-red-400">Live · real money</span>
-          <span v-else class="text-xs font-medium px-2 py-0.5 rounded-md bg-primary/15 text-primary">Paper</span>
-          <span class="ml-auto flex items-center gap-1 text-xs text-primary font-medium">Details <span class="material-symbols-outlined text-[14px]">arrow_forward</span></span>
+        <!-- All instances — manage each (start/stop/details/delete). Only ONE may run
+             per brokerage, so Start is disabled on the others while one is running. -->
+        <div class="space-y-2">
+          <div v-for="inst in instances" :key="inst.id"
+               @click="selectedInstanceId = inst.id"
+               class="glass-card rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap cursor-pointer transition-all"
+               :class="instance && inst.id === instance.id ? 'ring-1 ring-primary/60' : 'hover:border-primary/30'">
+            <span class="size-2 rounded-full" :class="inst.running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
+            <span class="text-sm font-semibold text-slate-200">{{ inst.name }}</span>
+            <span class="text-xs font-medium px-2 py-0.5 rounded-md" :class="inst.running ? 'bg-emerald-500/15 text-emerald-400' : 'bg-slate-500/15 text-slate-400'">{{ inst.running ? 'Running' : 'Stopped' }}</span>
+            <span v-if="inst.live_enabled" class="text-xs font-medium px-2 py-0.5 rounded-md bg-red-500/15 text-red-400">Live · real money</span>
+            <span v-else class="text-xs font-medium px-2 py-0.5 rounded-md bg-primary/15 text-primary">Paper</span>
+            <div class="ml-auto flex items-center gap-1.5" @click.stop>
+              <button @click="startStop(!inst.running, inst.id)"
+                      :disabled="busy || (!inst.running && anyRunning)"
+                      :title="(!inst.running && anyRunning) ? 'Stop the running instance first — only one may run per brokerage' : ''"
+                      class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      :class="inst.running ? 'border border-amber-500/40 text-amber-400 hover:bg-amber-500/10' : 'bg-primary text-background-dark hover:brightness-110'">
+                <span class="material-symbols-outlined text-[16px]">{{ inst.running ? 'pause' : 'play_arrow' }}</span>{{ inst.running ? 'Stop' : 'Start' }}
+              </button>
+              <button @click="$router.push(`/kalshi/instances/${inst.id}`)"
+                      class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border-subtle text-slate-300 text-xs font-semibold hover:border-primary/50 transition-all">
+                Details <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
+              </button>
+              <button @click="removeInstance(inst)" :disabled="busy"
+                      class="flex items-center px-2 py-1.5 rounded-lg border border-red-500/30 text-red-400 text-xs font-semibold hover:bg-red-500/10 transition-all disabled:opacity-40"
+                      title="Delete instance">
+                <span class="material-symbols-outlined text-[16px]">delete</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- Chart + summary -->
@@ -275,8 +320,9 @@ onMounted(loadAccounts)
           <div class="flex items-center gap-2 mb-3">
             <span class="material-symbols-outlined text-primary text-[18px]">terminal</span>
             <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Live logs</span>
+            <span v-if="instance" class="text-[11px] text-slate-500 normal-case">· {{ instance.name }}</span>
           </div>
-          <InstanceLiveLogs :key="instance.id" :instance-id="instance.id" />
+          <InstanceLiveLogs v-if="instance" :key="instance.id" :instance-id="instance.id" />
         </div>
       </template>
     </main>

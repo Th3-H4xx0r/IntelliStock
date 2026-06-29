@@ -64,6 +64,12 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
       final repo = ref.read(kalshiRepositoryProvider);
       start ? await repo.startInstance(widget.instanceId) : await repo.stopInstance(widget.instanceId);
       await _refresh();
+    } catch (e) {
+      // surface the backend guard (e.g. "another instance is already running on
+      // this brokerage"); ApiError.toString() is the flattened server message.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }

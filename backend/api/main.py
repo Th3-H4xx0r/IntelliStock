@@ -1900,6 +1900,29 @@ def api_remove_stock(instance_id: str, symbol: str, conn=Depends(conn_dependency
 
 @app.post("/instances/{instance_id}/start", response_class=JSONResponse)
 def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    # One running instance per Kalshi brokerage: a single account can't have two
+    # bots trading it at once (they'd fight over balance/positions). Block the start
+    # if a sibling Kalshi instance on the same brokerage is already running.
+    try:
+        row = _r_auth.db("IntelliStock").table("Instances").get(instance_id).run(conn)
+    except Exception:
+        row = None
+    if row and str(row.get("kind")) == "kalshi":
+        bid = row.get("brokerage_id")
+        others = list(
+            _r_auth.db("IntelliStock").table("Instances")
+            .filter(lambda i: (i["kind"] == "kalshi")
+                    & (i["brokerage_id"] == bid)
+                    & (i["id"] != instance_id)
+                    & (i["runCommand"].default(False) == True))
+            .run(conn)
+        )
+        if others:
+            nm = others[0].get("name") or others[0].get("id")
+            msg = (f"Another Kalshi instance ('{nm}') is already running on this "
+                   f"brokerage. Stop it before starting this one.")
+            # both keys: web reads .error, mobile's ApiError reads .detail
+            return JSONResponse(status_code=409, content={"error": msg, "detail": msg})
     return _run(action_start_instance, conn, instance_id)
 
 

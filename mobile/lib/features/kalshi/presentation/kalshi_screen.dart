@@ -118,8 +118,23 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
                 onAction: () => _showCreateSheet(accounts, selectedId),
               )
             else ...[
-              _InstanceStatus(instance: instance),
-              const SizedBox(height: 12),
+              // All instances for this brokerage — tap any to manage it (start/stop/
+              // delete live on its detail screen). Only ONE may run per brokerage
+              // (enforced by the backend when you press Start).
+              for (final inst in instances) ...[
+                _InstanceStatus(instance: inst),
+                const SizedBox(height: 8),
+              ],
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => _showCreateSheet(accounts, selectedId),
+                  icon: Icon(symbol('add'), size: 18, color: AppColors.primary),
+                  label: Text('New instance',
+                      style: AppTextStyles.body.copyWith(color: AppColors.primary, fontWeight: FontWeight.w600)),
+                ),
+              ),
+              const SizedBox(height: 8),
               _PortfolioCard(brokerageId: selectedId),
               const SizedBox(height: 12),
               _EdgeRadarCard(brokerageId: selectedId),
