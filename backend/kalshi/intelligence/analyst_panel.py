@@ -119,6 +119,15 @@ def make_llm_call(model_doc: dict | None, log=None, instance_id: str | None = No
             return None
         api_key = (model_doc.get("api_key") or "").strip() or resolve_api_key_for_provider(provider)
         provider_config = _provider_config_from_doc(provider, model_doc)
+        # Output budget sized to the model's reasoning effort. The analyst's own
+        # output (adjustments + shortlist + rationales) is small, but reasoning
+        # models (e.g. gpt-oss at 'medium') spend output tokens THINKING first, so
+        # a flat 512 cap overflowed ('token limit exceeded before any response').
+        _reff = str(provider_config.get("bedrock_reasoning")
+                    or provider_config.get("ollama_think")
+                    or provider_config.get("reasoning_effort")
+                    or model_doc.get("reasoning_effort") or "").strip().lower()
+        _analyst_max_out = {"high": 2048, "medium": 1024, "low": 1024}.get(_reff, 1024)
         _log(f"Analyst LLM bound: provider={provider!r} model={model!r} "
              f"api_key={'set' if api_key else 'none(env)'}"
              + (f" config={provider_config}" if provider_config else "") + ".", "white")
@@ -139,7 +148,7 @@ def make_llm_call(model_doc: dict | None, log=None, instance_id: str | None = No
             # retries/http_retries are disabled here so THIS function owns retrying
             # (with backoff) — otherwise the two layers would nest and a slow
             # provider could block for minutes per attempt.
-            kw = dict(max_output_tokens=512, temperature=0.2,
+            kw = dict(max_output_tokens=_analyst_max_out, temperature=0.2,
                       provider_config=provider_config or None,
                       retries=0, http_retries=0)
             if _ANALYST_TIMEOUT_SEC:
