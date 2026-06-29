@@ -85,6 +85,10 @@ const formDraft = ref({
   // Bedrock provider config — only used when provider === 'bedrock'.
   bedrockRegion: 'us-east-1',
   bedrockReasoning: 'off',
+  // OpenRouter provider config — only used when provider === 'openrouter'.
+  openrouterBaseUrl: 'https://openrouter.ai/api/v1',
+  openrouterReferer: '',
+  openrouterTitle: '',
   // Cache-grouping tag — share LLM cache across same-model-different-name rows.
   modelCacheFamily: '',
   // Optional per-model pricing override ($/1M tokens). null = use
@@ -188,6 +192,10 @@ function openEditModal(m) {
     // Bedrock: hydrate region + reasoning; default region when blank.
     bedrockRegion: m.bedrock_region || 'us-east-1',
     bedrockReasoning: m.bedrock_reasoning || 'off',
+    // OpenRouter: hydrate base_url + attribution headers; default base when blank.
+    openrouterBaseUrl: m.openrouter_base_url || 'https://openrouter.ai/api/v1',
+    openrouterReferer: m.openrouter_referer || '',
+    openrouterTitle: m.openrouter_title || '',
     modelCacheFamily: m.model_cache_family || '',
     // Pricing override: row stores snake_case; null/undefined → blank input.
     inputCostPer1m: (m.input_cost_per_1m ?? null),
@@ -343,6 +351,13 @@ async function submitModel() {
     if (d.provider === 'bedrock') {
       payload.bedrock_region = (d.bedrockRegion || '').trim() || undefined
       payload.bedrock_reasoning = (d.bedrockReasoning || '').trim().toLowerCase() || undefined
+    }
+    // OpenRouter fields — base_url always sent (defaults to public API);
+    // referer/title are optional attribution headers.
+    if (d.provider === 'openrouter') {
+      payload.openrouter_base_url = (d.openrouterBaseUrl || '').trim() || 'https://openrouter.ai/api/v1'
+      payload.openrouter_referer = (d.openrouterReferer || '').trim() || undefined
+      payload.openrouter_title = (d.openrouterTitle || '').trim() || undefined
     }
     // Cache-grouping tag applies to every provider.
     payload.model_cache_family = (d.modelCacheFamily || '').trim().toLowerCase() || undefined

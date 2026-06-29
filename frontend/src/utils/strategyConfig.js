@@ -308,6 +308,7 @@ export const LLM_PROVIDER_OPTIONS = [
   { value: 'nvidia', label: 'NVIDIA NIM' },
   { value: 'ollama', label: 'Ollama (local / cloud)' },
   { value: 'bedrock', label: 'AWS Bedrock' },
+  { value: 'openrouter', label: 'OpenRouter' },
   { value: 'claude-cli', label: 'Claude Code CLI (subscription)' },
   { value: 'codex-cli', label: 'OpenAI Codex CLI (subscription)' },
 ]
@@ -435,6 +436,9 @@ function buildLlmGroup(prefix, keySet) {
     azureEndpointKey: `${prefix}azure_openai_endpoint`,
     azureApiVersionKey: `${prefix}azure_openai_api_version`,
     reasoningEffortKey: `${prefix}llm_reasoning_effort`,
+    openrouterBaseUrlKey: `${prefix}openrouter_base_url`,
+    openrouterRefererKey: `${prefix}openrouter_referer`,
+    openrouterTitleKey: `${prefix}openrouter_title`,
   }
 }
 
@@ -449,6 +453,9 @@ function allGroupKeys(group) {
     group.azureEndpointKey,
     group.azureApiVersionKey,
     group.reasoningEffortKey,
+    group.openrouterBaseUrlKey,
+    group.openrouterRefererKey,
+    group.openrouterTitleKey,
   ]
 }
 
@@ -622,6 +629,25 @@ export function buildStrategyLlmDraft(config, group) {
         prefix ? source.llm_reasoning_effort : '',
       )
     ).trim().toLowerCase(),
+    openrouterBaseUrl: String(
+      _pickFirstNonEmpty(
+        source[group.openrouterBaseUrlKey],
+        prefix ? source.openrouter_base_url : '',
+        'https://openrouter.ai/api/v1',
+      )
+    ).trim(),
+    openrouterReferer: String(
+      _pickFirstNonEmpty(
+        source[group.openrouterRefererKey],
+        prefix ? source.openrouter_referer : '',
+      )
+    ).trim(),
+    openrouterTitle: String(
+      _pickFirstNonEmpty(
+        source[group.openrouterTitleKey],
+        prefix ? source.openrouter_title : '',
+      )
+    ).trim(),
   }
 }
 
@@ -671,7 +697,15 @@ export function applyStrategyLlmDraft(config, group, draft) {
     const nvidiaBaseUrl = String(draft?.nvidiaBaseUrl || '').trim()
     if (nvidiaBaseUrl) next[`${String(group.prefix || '')}nvidia_base_url`] = nvidiaBaseUrl
   }
-  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia') {
+  if (provider === 'openrouter') {
+    const openrouterBaseUrl = String(draft?.openrouterBaseUrl || '').trim()
+    if (openrouterBaseUrl) next[group.openrouterBaseUrlKey] = openrouterBaseUrl
+    const openrouterReferer = String(draft?.openrouterReferer || '').trim()
+    if (openrouterReferer) next[group.openrouterRefererKey] = openrouterReferer
+    const openrouterTitle = String(draft?.openrouterTitle || '').trim()
+    if (openrouterTitle) next[group.openrouterTitleKey] = openrouterTitle
+  }
+  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'openrouter') {
     const reasoningEffort = String(draft?.reasoningEffort || '').trim().toLowerCase()
     if (reasoningEffort) next[group.reasoningEffortKey] = reasoningEffort
   }
@@ -710,7 +744,14 @@ export function buildStrategyLlmTestPayload(draft) {
     if (reasoning) payload.bedrock_reasoning = reasoning
     // api_key is the Bedrock bearer token, populated above.
   }
-  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'codex-cli') {
+  if (provider === 'openrouter') {
+    payload.openrouter_base_url = String(draft?.openrouterBaseUrl || 'https://openrouter.ai/api/v1').trim()
+    const referer = String(draft?.openrouterReferer || '').trim()
+    if (referer) payload.openrouter_referer = referer
+    const title = String(draft?.openrouterTitle || '').trim()
+    if (title) payload.openrouter_title = title
+  }
+  if (provider === 'openai' || provider === 'azure' || provider === 'nvidia' || provider === 'openrouter' || provider === 'codex-cli') {
     const reasoningEffort = String(draft?.reasoningEffort || '').trim().toLowerCase()
     if (reasoningEffort) payload.reasoning_effort = reasoningEffort
   }

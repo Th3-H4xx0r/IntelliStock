@@ -11,6 +11,7 @@ import {
 } from '../utils/strategyConfig.js'
 import { loadOllamaModels } from '../composables/useOllamaModels.js'
 import { loadBedrockModels } from '../composables/useBedrockModels.js'
+import { loadOpenRouterModels, openRouterPricingToPer1m } from '../composables/useOpenRouterModels.js'
 import { getToken } from '../utils/auth.js'
 import CodexCliSetupPanel from './CodexCliSetupPanel.vue'
 import ClaudeCliSetupPanel from './ClaudeCliSetupPanel.vue'
@@ -171,6 +172,73 @@ watch(
   { immediate: true },
 )
 
+// ── OpenRouter-specific state ────────────────────────────────────────────────
+const openrouterModels = ref([])
+const openrouterListLoading = ref(false)
+const openrouterListError = ref('')
+// True after a model-select auto-filled the per-row cost overrides — drives the
+// "auto-filled from OpenRouter" hint + the Clear button.
+const openrouterPricingAutofilled = ref(false)
+
+async function fetchOpenRouterModels({ force = false } = {}) {
+  const baseUrl = String(props.draft?.openrouterBaseUrl || '').trim()
+  openrouterListLoading.value = true
+  openrouterListError.value = ''
+  const { models, error } = await loadOpenRouterModels({ baseUrl, force })
+  openrouterModels.value = models || []
+  openrouterListError.value = error || ''
+  openrouterListLoading.value = false
+}
+
+function refreshOpenRouterModels() {
+  if (_openrouterDebounceHandle) { clearTimeout(_openrouterDebounceHandle); _openrouterDebounceHandle = null }
+  fetchOpenRouterModels({ force: true })
+}
+
+let _openrouterDebounceHandle = null
+
+watch(
+  () => [props.draft?.provider, props.draft?.openrouterBaseUrl],
+  ([provider]) => {
+    if (_openrouterDebounceHandle) clearTimeout(_openrouterDebounceHandle)
+    if (provider !== 'openrouter') {
+      openrouterModels.value = []
+      openrouterListError.value = ''
+      return
+    }
+    _openrouterDebounceHandle = setTimeout(() => {
+      _openrouterDebounceHandle = null
+      fetchOpenRouterModels()
+    }, FETCH_DEBOUNCE_MS)
+  },
+  { immediate: true },
+)
+
+// Selecting a model fills the Model field AND auto-fills the per-row cost
+// overrides from OpenRouter's catalog pricing (USD/token × 1e6 → USD/1M). The
+// values are editable afterwards — this is a prefill, not a lock.
+function onOpenRouterModelSelect(id) {
+  const row = openrouterModels.value.find((m) => m.id === id)
+  const next = { ...props.draft, model: id }
+  if (row) {
+    const costs = openRouterPricingToPer1m(row.pricing)
+    Object.assign(next, costs)
+    openrouterPricingAutofilled.value = Object.keys(costs).length > 0
+  }
+  emit('update:draft', next)
+}
+
+function clearOpenRouterCosts() {
+  openrouterPricingAutofilled.value = false
+  emit('update:draft', {
+    ...props.draft,
+    inputCostPer1m: null,
+    outputCostPer1m: null,
+    cacheCreationCostPer1m: null,
+    cacheReadCostPer1m: null,
+  })
+}
+
 function onProviderChange(value) {
   const next = { ...props.draft, provider: value }
   if (value === 'claude-cli' || value === 'codex-cli') {
@@ -209,6 +277,15 @@ function onProviderChange(value) {
   } else {
     next.bedrockRegion = ''
     next.bedrockReasoning = ''
+  }
+  if (value === 'openrouter') {
+    // Default the base URL so the public catalog dropdown can fire immediately.
+    if (!next.openrouterBaseUrl) next.openrouterBaseUrl = 'https://openrouter.ai/api/v1'
+  } else {
+    next.openrouterBaseUrl = ''
+    next.openrouterReferer = ''
+    next.openrouterTitle = ''
+    openrouterPricingAutofilled.value = false
   }
   emit('update:draft', next)
 }
@@ -667,7 +744,102 @@ onUnmounted(() => {
       </div>
     </template>
 
-    <div v-if="['azure', 'openai', 'nvidia', 'claude-cli', 'codex-cli'].includes(draft.provider)">
+    <!-- OpenRouter-specific configuration -->
+    <template v-if="draft.provider === 'openrouter'">
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">OpenRouter Base URL</label>
+        <input
+          :value="draft.openrouterBaseUrl"
+          @input="update('openrouterBaseUrl', $event.target.value)"
+          type="text"
+          :disabled="disabled || readOnly"
+          placeholder="https://openrouter.ai/api/v1"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Defaults to the public OpenRouter API. Only change this for a self-hosted proxy.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5 flex items-center justify-between">
+          <span>Pick from the OpenRouter catalog</span>
+          <button
+            type="button"
+            @click="refreshOpenRouterModels"
+            :disabled="disabled || readOnly || openrouterListLoading"
+            class="text-[11px] text-primary hover:underline disabled:opacity-50"
+          >{{ openrouterListLoading ? 'Loading…' : 'Refresh' }}</button>
+        </label>
+        <div v-if="openrouterListError" class="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-300 mb-2 space-y-1">
+          <div>Couldn't load the OpenRouter model catalog.</div>
+          <div class="text-amber-200/70 font-mono whitespace-pre-wrap break-words">{{ openrouterListError }}</div>
+          <div class="text-amber-200/70">
+            Enter the model id manually in the Model field above — OpenRouter ids are <span class="font-mono">vendor/model</span> (e.g. <span class="font-mono">anthropic/claude-3.5-sonnet</span>).
+          </div>
+        </div>
+        <select
+          v-else
+          :value="draft.model"
+          @change="onOpenRouterModelSelect($event.target.value)"
+          :disabled="disabled || readOnly || !openrouterModels.length"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+        >
+          <option value="" disabled>{{ openrouterModels.length ? 'Select a model' : 'No models — enter the model id manually above' }}</option>
+          <option v-for="m in openrouterModels" :key="m.id" :value="m.id">
+            {{ m.id }}<template v-if="m.context_length"> · ctx {{ m.context_length }}</template>
+          </option>
+        </select>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          The Model field above is the source of truth — picking from the catalog fills it in and auto-fills the per-model pricing below. Free-text entry works too.
+        </p>
+        <div v-if="openrouterPricingAutofilled" class="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[11px] leading-relaxed text-emerald-300/90 flex items-center justify-between gap-2">
+          <span>Pricing auto-filled from OpenRouter — editable below. Per-request / image surcharges aren't tracked.</span>
+          <button
+            type="button"
+            @click="clearOpenRouterCosts"
+            :disabled="disabled || readOnly"
+            class="shrink-0 text-[11px] text-emerald-300 hover:underline disabled:opacity-50"
+          >Clear cost fields</button>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">
+          HTTP-Referer <span class="text-slate-600">(optional)</span>
+        </label>
+        <input
+          :value="draft.openrouterReferer"
+          @input="update('openrouterReferer', $event.target.value)"
+          type="text"
+          :disabled="disabled || readOnly"
+          placeholder="https://your-site.example"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Sent as the <span class="font-mono">HTTP-Referer</span> header for OpenRouter leaderboard attribution. Optional — calls work without it.
+        </p>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">
+          X-Title <span class="text-slate-600">(optional)</span>
+        </label>
+        <input
+          :value="draft.openrouterTitle"
+          @input="update('openrouterTitle', $event.target.value)"
+          type="text"
+          :disabled="disabled || readOnly"
+          placeholder="IntelliStock"
+          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+        />
+        <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+          Sent as the <span class="font-mono">X-Title</span> header — your app name on the OpenRouter leaderboard.
+        </p>
+      </div>
+    </template>
+
+    <div v-if="['azure', 'openai', 'nvidia', 'openrouter', 'claude-cli', 'codex-cli'].includes(draft.provider)">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">Reasoning Effort</label>
       <select
         :value="draft.reasoningEffort"
