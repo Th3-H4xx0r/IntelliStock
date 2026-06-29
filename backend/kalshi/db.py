@@ -39,6 +39,7 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("kalshi_capital_plan", "instance_id"),
     ("kalshi_live", "id"),   # live in-match cards: id = "{instance_id}|{fixture_id}"
     ("kalshi_fills", "id"),  # actual fills — ground-truth entry price for reconcile
+    ("kalshi_edge_history", "id"),  # rolling per-side edge series for UI sparklines
 ]
 
 
@@ -148,6 +149,70 @@ def upsert_fills(conn, fills) -> int:
     if docs:
         _r.db(DB_NAME).table("kalshi_fills").insert(docs, conflict="replace").run(conn)
     return len(docs)
+
+
+def append_edge_history(conn, instance_id, decisions, ts, cap: int = 60) -> int:
+    """Append each evaluated side's current edge to a capped rolling series (one row
+    per instance|market_ticker) so the UI can draw a sparkline of how the edge moved
+    over time. Read-modify-write per market (small volume per tick)."""
+    n = 0
+    for d in (decisions or []):
+        mt = d.get("market_ticker")
+        e = d.get("edge")
+        if not mt or e is None:
+            continue
+        rid = f"{instance_id}|{mt}"
+        try:
+            existing = _r.db(DB_NAME).table("kalshi_edge_history").get(rid).run(conn)
+            hist = list((existing or {}).get("history") or [])
+            # de-dupe identical consecutive ts (re-runs of the same tick) by ts.
+            if not hist or hist[-1].get("ts") != ts:
+                hist.append({"ts": ts, "edge": e})
+            hist = hist[-cap:]
+            _r.db(DB_NAME).table("kalshi_edge_history").insert(
+                {"id": rid, "instance_id": str(instance_id), "market_ticker": mt,
+                 "side": d.get("side"), "history": hist}, conflict="replace").run(conn)
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def mark_paper_positions(conn, instance_id, price_map) -> dict:
+    """Mark open PAPER (mock) positions to the current Kalshi price so the UI can
+    show LIVE unrealized P&L (like Kalshi's live position P&L). price_map maps
+    market_ticker -> current YES mid in cents. For each placed, paper, not-yet-
+    settled decision, stamp mark_cents + unrealized_pnl_cents = (mark-entry)*size.
+    Returns {marked, unrealized_pnl_cents}. Measurement only — never trades."""
+    import datetime
+    try:
+        rows = list(
+            _r.db(DB_NAME).table("kalshi_decisions")
+            .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True})
+            .run(conn)
+        )
+    except Exception:
+        return {"marked": 0, "unrealized_pnl_cents": 0}
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    marked, total = 0, 0
+    for r in rows:
+        if r.get("outcome") is not None:   # already settled -> realized P&L, skip
+            continue
+        mark = (price_map or {}).get(r.get("market_ticker"))
+        entry = r.get("entry_avg_cents")
+        size = int(r.get("size") or 0)
+        if mark is None or entry is None or not size:
+            continue
+        upl = int(round((float(mark) - float(entry)) * size))
+        total += upl
+        try:
+            _r.db(DB_NAME).table("kalshi_decisions").get(r["id"]).update(
+                {"mark_cents": int(round(float(mark))),
+                 "unrealized_pnl_cents": upl, "mark_ts": now}).run(conn)
+            marked += 1
+        except Exception:
+            pass
+    return {"marked": marked, "unrealized_pnl_cents": total}
 
 
 def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> dict:

@@ -734,6 +734,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     # test against real prices with NO real order placed.
                     d["paper"] = True
                     d["entry_avg_cents"] = a["price_cents"]
+                    d["entry_edge"] = d.get("edge")   # edge AT placement (UI: "placed @ X%")
                     log(f"tick {tick}: PAPER would place {a['contracts']}x {d['market_ticker']} @ "
                         f"{a['price_cents']}c (edge {(d['edge'] or 0):.1%}).", "cyan")
                 try:
@@ -754,6 +755,20 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     log(f"tick {tick}: reconciled {_s['settled']} settled position(s).", "cyan")
             except Exception as e:
                 log(f"tick {tick}: settle_and_learn failed: {type(e).__name__}: {e}", "yellow")
+            # 7c) Mark open PAPER positions to the live Kalshi price (live unrealized
+            # P&L for the UI) + append each side's edge to the rolling sparkline series.
+            try:
+                _mark_map = {p["market_ticker"]: p["mid_cents"] for p in soccer if p.get("mid_cents")}
+                _m = kdb.mark_paper_positions(conn, config.instance_id, _mark_map)
+                if _m.get("marked"):
+                    log(f"tick {tick}: marked {_m['marked']} paper position(s) — "
+                        f"unrealized {_m['unrealized_pnl_cents'] / 100:+.2f}.", "white")
+            except Exception as e:
+                log(f"tick {tick}: mark_paper_positions failed: {type(e).__name__}: {e}", "yellow")
+            try:
+                kdb.append_edge_history(conn, config.instance_id, decisions, ts)
+            except Exception:
+                pass
 
             # 8) Live in-match monitoring (two-way) for in-play matches.
             if config.live_monitoring and live_matches:
