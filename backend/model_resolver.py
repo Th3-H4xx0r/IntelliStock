@@ -163,6 +163,13 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
             # non-bedrock row never injects empty bedrock keys.
             "bedrock_region": f"{prefix}bedrock_region",
             "bedrock_reasoning": f"{prefix}bedrock_reasoning",
+            # OpenRouter-specific propagation: base_url + optional attribution
+            # headers (HTTP-Referer / X-Title). Not in always_overwrite — only
+            # set when the row has them, so a non-openrouter row never injects
+            # empty openrouter keys.
+            "openrouter_base_url": f"{prefix}openrouter_base_url",
+            "openrouter_referer": f"{prefix}openrouter_referer",
+            "openrouter_title": f"{prefix}openrouter_title",
             # Cache-grouping override (canonical_model_cache_key).
             "model_cache_family": f"{prefix}model_cache_family",
         }
