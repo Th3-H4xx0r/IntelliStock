@@ -20,9 +20,9 @@ const id = route.params.id
 const detail = ref(null)
 const decisions = ref([])
 const live = ref([])
-const orders = ref({ placed: [], fills: [] })
+const orders = ref({ placed: [], fills: [], mock: [] })
 const summary = ref({ total: 0, placed: 0, skipped: 0, queued: 0, blocked: 0 })
-const paper = ref({ trades: 0, graded: 0, realized_pnl_cents: 0 })
+const paper = ref({ trades: 0, graded: 0, realized_pnl_cents: 0, unrealized_pnl_cents: 0, open_positions: 0 })
 const loading = ref(true)
 let liveTimer = null
 const busy = ref(false)
@@ -54,7 +54,7 @@ async function loadLive() {
     getJson(`/instances/${id}/kalshi/orders?limit=50`),
   ])
   if (l) live.value = l.matches || []
-  if (o) orders.value = { placed: o.placed || [], fills: o.fills || [] }
+  if (o) orders.value = { placed: o.placed || [], fills: o.fills || [], mock: o.mock || [] }
 }
 
 async function startStop(start) {
@@ -137,6 +137,28 @@ function fmtTs(ts) {
 }
 const SIDE_ORDER = { home: 0, draw: 1, away: 2 }
 
+// Build an SVG <polyline> "points" string for a side's edge-over-time series,
+// normalized into a ~60x16 box. Returns null if there are fewer than 2 points.
+const SPARK_W = 60, SPARK_H = 16, SPARK_PAD = 2
+function sparkPoints(history) {
+  const pts = (history || []).map(h => h && h.edge).filter(e => e != null)
+  if (pts.length < 2) return null
+  const min = Math.min(...pts), max = Math.max(...pts)
+  const span = max - min || 1
+  const innerW = SPARK_W - SPARK_PAD * 2
+  const innerH = SPARK_H - SPARK_PAD * 2
+  return pts.map((e, i) => {
+    const x = SPARK_PAD + (pts.length === 1 ? 0 : (i / (pts.length - 1)) * innerW)
+    // Higher edge => higher on screen (smaller y).
+    const y = SPARK_PAD + (1 - (e - min) / span) * innerH
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+}
+function sparkLast(history) {
+  const pts = (history || []).map(h => h && h.edge).filter(e => e != null)
+  return pts.length ? pts[pts.length - 1] : null
+}
+
 // Group the (read-only) decision rows by match so a game's three sides show
 // together. Sorted by each game's best (max) edge, descending.
 const matchBoard = computed(() => {
@@ -178,6 +200,8 @@ const matchBoard = computed(() => {
       paper: d.paper,
       price: priceCents(d),
       ts: d.ts,
+      edge_history: d.edge_history,
+      entry_edge: d.entry_edge,
     })
   }
   const list = [...groups.values()]
@@ -189,8 +213,11 @@ const matchBoard = computed(() => {
     for (const s of g.sides) {
       const prev = bySide.get(s.side)
       const everPlaced = (prev?.everPlaced || false) || s.decision === 'placed'
-      if (!prev || (s.ts || '') >= (prev.ts || '')) bySide.set(s.side, { ...s, everPlaced })
-      else prev.everPlaced = everPlaced
+      // Remember the edge the side was actually placed at (from a 'placed' row).
+      const placedEdge = s.decision === 'placed' && s.entry_edge != null
+        ? s.entry_edge : (prev?.placedEdge ?? null)
+      if (!prev || (s.ts || '') >= (prev.ts || '')) bySide.set(s.side, { ...s, everPlaced, placedEdge })
+      else { prev.everPlaced = everPlaced; prev.placedEdge = placedEdge }
     }
     g.sides = [...bySide.values()].sort((a, b) => (SIDE_ORDER[a.side] ?? 9) - (SIDE_ORDER[b.side] ?? 9))
     for (const s of g.sides) if (s.everPlaced) s.decision = 'placed'
@@ -281,9 +308,14 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-red-400 tabular-nums">{{ summary.blocked }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Blocked</div></div>
             </div>
             <!-- Paper (mock) hypothetical P&L — "what your profit would have been" -->
-            <div v-if="paper.trades" class="mt-3 flex items-center justify-between rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5">
+            <div v-if="paper.trades" class="mt-3 flex items-center justify-between gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5">
               <span class="text-[11px] uppercase tracking-wide text-amber-400/90 font-semibold flex items-center gap-1.5"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span>Paper P&amp;L · {{ paper.trades }} trade{{ paper.trades === 1 ? '' : 's' }}<span v-if="paper.graded" class="text-slate-500 normal-case">({{ paper.graded }} settled)</span></span>
-              <span class="text-base font-bold tabular-nums" :class="(paper.realized_pnl_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (paper.realized_pnl_cents >= 0 ? '+' : '') + '$' + ((paper.realized_pnl_cents || 0) / 100).toFixed(2) }}</span>
+              <span class="text-right shrink-0">
+                <span class="text-base font-bold tabular-nums" :class="(paper.realized_pnl_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">realized {{ (paper.realized_pnl_cents >= 0 ? '+' : '') + '$' + ((paper.realized_pnl_cents || 0) / 100).toFixed(2) }}</span>
+                <span v-if="paper.unrealized_pnl_cents != null" class="block text-[11px] tabular-nums text-slate-500">
+                  unrealized <span class="font-semibold" :class="(paper.unrealized_pnl_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (paper.unrealized_pnl_cents >= 0 ? '+' : '') + '$' + ((paper.unrealized_pnl_cents || 0) / 100).toFixed(2) }}</span> (live)<span v-if="paper.open_positions" class="text-slate-600"> · {{ paper.open_positions }} open</span>
+                </span>
+              </span>
             </div>
           </div>
         </div>
@@ -376,7 +408,12 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                       <span v-if="s.sharp_prob == null" class="shrink-0 text-[9px] uppercase tracking-wide text-slate-500/80 border border-border-subtle rounded px-1 py-px" title="No sharp line — model-only fair value">model-only</span>
                     </div>
                     <div class="text-[10px] text-slate-500 tabular-nums">Fair {{ pct(s.fused_fair) }} · {{ s.price == null ? '—' : s.price + '¢' }}<span v-if="s.ts" class="text-slate-600"> · updated {{ fmtTs(s.ts) }}</span></div>
+                    <div v-if="s.decision === 'placed' && s.placedEdge != null" class="text-[10px] text-emerald-400/80 tabular-nums">placed @ {{ (s.placedEdge >= 0 ? '+' : '') + pct(s.placedEdge) }}</div>
                   </div>
+                  <!-- Tiny inline edge-over-time sparkline -->
+                  <svg v-if="sparkPoints(s.edge_history)" :viewBox="`0 0 ${SPARK_W} ${SPARK_H}`" :width="SPARK_W" :height="SPARK_H" class="shrink-0" preserveAspectRatio="none" aria-hidden="true">
+                    <polyline :points="sparkPoints(s.edge_history)" fill="none" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" :class="(sparkLast(s.edge_history) ?? 0) >= 0 ? 'stroke-emerald-400' : 'stroke-red-400'" />
+                  </svg>
                   <span class="text-xs tabular-nums font-semibold shrink-0 w-14 text-right" :class="s.edge == null ? 'text-slate-500' : (s.edge > 0 ? 'text-emerald-400' : 'text-red-400')">{{ s.edge == null ? '—' : (s.edge >= 0 ? '+' : '') + pct(s.edge) }}</span>
                   <span class="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0" :class="decBadge(s.decision)">{{ s.decision }}</span>
                 </div>
@@ -454,6 +491,26 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                       <span class="text-slate-400 tabular-nums">{{ o.contracts || o.size }}×</span>
                       <span v-if="o.edge != null" class="tabular-nums font-semibold" :class="(o.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (o.edge >= 0 ? '+' : '') + pct(o.edge) }}</span>
                     </span>
+                  </div>
+                </div>
+              </div>
+              <!-- Mock (paper) positions — live unrealized P&L on the right -->
+              <div class="flex items-center gap-1.5 mt-4 mb-2"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Mock positions · {{ orders.mock.length }}</span></div>
+              <p v-if="!orders.mock.length" class="text-xs text-slate-500 mb-2">No open mock positions.</p>
+              <div v-for="(m, i) in orders.mock" :key="'m' + i" class="flex items-center gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 mb-2">
+                <img v-if="m.pick_logo" :src="m.pick_logo" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />
+                <div v-else class="w-8 h-8 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[10px] font-bold text-slate-400 shrink-0">{{ initials((m.pick_label || '').replace(' to win','')) }}</div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-sm font-semibold text-slate-100 truncate">{{ m.match || m.market_ticker }}</span>
+                    <span class="text-base font-bold tabular-nums shrink-0" :class="m.unrealized_pnl_cents == null ? 'text-slate-500' : (m.unrealized_pnl_cents > 0 ? 'text-emerald-400' : (m.unrealized_pnl_cents < 0 ? 'text-red-400' : 'text-slate-400'))">{{ m.unrealized_pnl_cents == null ? '—' : (m.unrealized_pnl_cents >= 0 ? '+' : '') + '$' + (m.unrealized_pnl_cents / 100).toFixed(2) }}</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-2 mt-0.5">
+                    <span class="flex items-center gap-1.5 min-w-0">
+                      <span class="text-xs text-primary font-medium truncate">{{ m.pick_label || m.side }}</span>
+                      <span class="shrink-0 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span>
+                    </span>
+                    <span class="text-[11px] text-slate-500 tabular-nums shrink-0">{{ m.contracts }} @ {{ m.entry_cents }}¢ → {{ m.mark_cents == null ? '—' : m.mark_cents + '¢' }}</span>
                   </div>
                 </div>
               </div>
