@@ -32,8 +32,9 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
     # loss driver). A per-bet CEILING (by tier) caps single-bet exposure instead.
     _per_bet_cap_by_tier = {"low": 0.03, "medium": 0.05, "high": 0.07, "max": 0.10}
     _bankroll = _dollars_to_cents(raw.get("bankroll_dollars"), 0)
-    # Daily loss cap auto-derives to 8% of bankroll when not set explicitly.
-    _daily_loss = _dollars_to_cents(raw.get("daily_loss_cap_dollars"), 0) or (round(0.08 * _bankroll) if _bankroll else 0)
+    # Daily loss cap auto-derives to daily_loss_cap_frac of bankroll when not set explicitly.
+    _daily_frac = float(raw.get("daily_loss_cap_frac", 0.08))
+    _daily_loss = _dollars_to_cents(raw.get("daily_loss_cap_dollars"), 0) or (round(_daily_frac * _bankroll) if _bankroll else 0)
     return {
         "leagues": [str(x) for x in leagues if str(x).strip()] or DEFAULT_LEAGUES,
         "edge_threshold": float(raw.get("edge_threshold", 0.04)),
@@ -49,6 +50,11 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "max_price_cents": int(raw.get("max_price_cents", 90)),
         "draw_min_edge": float(raw.get("draw_min_edge", 0.10)),
         "maker_first": bool(raw.get("maker_first", True)),
+        "maker_min_spread_cents": int(raw.get("maker_min_spread_cents", 3)),
+        "maker_min_book_depth": int(raw.get("maker_min_book_depth", 5)),
+        "maker_max_adverse_imbalance": float(raw.get("maker_max_adverse_imbalance", -0.5)),
+        "cash_buffer_frac": float(raw.get("cash_buffer_frac", 0.03)),
+        "daily_loss_cap_frac": _daily_frac,
         "daily_loss_cap_cents": _daily_loss,
         "bankroll_cents": _bankroll,
         "poll_seconds": max(15, int(raw.get("poll_seconds", 60))),
@@ -110,6 +116,10 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         max_price_cents=int(c.get("max_price_cents", 90)),
         draw_min_edge=float(c.get("draw_min_edge", 0.10)),
         maker_first=bool(c.get("maker_first", True)),
+        maker_min_spread_cents=int(c.get("maker_min_spread_cents", 3)),
+        maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),
+        maker_max_adverse_imbalance=float(c.get("maker_max_adverse_imbalance", -0.5)),
+        cash_buffer_frac=float(c.get("cash_buffer_frac", 0.03)),
     )
 
 

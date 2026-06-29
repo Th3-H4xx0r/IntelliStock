@@ -205,7 +205,7 @@ def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> d
         else:
             tb["buy_c"] += c
             tb["buy_cost"] += c * p
-    positions = _rec.aggregate_positions(rows)
+    positions = _rec.aggregate_positions(rows, fee_rate=fee_rate)
     settled = 0
     for pos in positions:
         res = result_by_ticker.get(pos["market_ticker"])

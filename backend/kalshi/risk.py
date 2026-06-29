@@ -42,6 +42,10 @@ class RiskCaps:
     max_price_cents: int = 90               # price-band ceiling (no near-cert favorites — fees eat the upside)
     draw_min_edge: float = 0.10             # draws require this much edge (model overstates draw prob)
     maker_first: bool = True                # rest post_only inside the spread vs paying the taker fee
+    maker_min_spread_cents: int = 3         # only make when the book spread is at least this wide
+    maker_min_book_depth: int = 5           # require this much resting depth before making
+    maker_max_adverse_imbalance: float = -0.5  # skip a maker buy when asks stack this heavily
+    cash_buffer_frac: float = 0.03          # keep this fraction of cash unspent (pre-trade balance gate)
 
 
 def size_order(*, edge: float, yes_ask_cents: float, caps: RiskCaps) -> int:

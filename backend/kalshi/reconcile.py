@@ -33,7 +33,7 @@ def validate_order(contracts, limit_cents, *, max_per_market: int = 100000) -> t
     return True, ""
 
 
-def _entry_cents(row) -> float | None:
+def _entry_cents(row, fee_rate: float) -> float | None:
     """Best available entry price for a placed row: a recorded fill avg if present,
     else reconstructed from fused_fair - edge (the ask the bot bought at)."""
     ev = row.get("entry_avg_cents")
@@ -48,11 +48,11 @@ def _entry_cents(row) -> float | None:
         # fee the edge already netted, else the reconstructed entry is overstated ~1-2c.
         from kalshi.fees import fee_as_prob
         ask0 = (float(ff) - float(e)) * 100.0
-        return round(ask0 - fee_as_prob(max(1.0, ask0), 0.07) * 100.0)
+        return round(ask0 - fee_as_prob(max(1.0, ask0), fee_rate) * 100.0)
     return None
 
 
-def aggregate_positions(decision_rows) -> list[dict]:
+def aggregate_positions(decision_rows, *, fee_rate: float = 0.07) -> list[dict]:
     """Collapse all PLACED rows per (instance_id, market_ticker) into ONE
     cost-weighted net position. Prevents the double-count where one settlement
     fans out across 6 placed rows for the same market."""
@@ -65,7 +65,7 @@ def aggregate_positions(decision_rows) -> list[dict]:
         if r.get("live_action") in ("exit", "reduce"):
             continue
         size = int(r.get("size") or 0)
-        entry = _entry_cents(r)
+        entry = _entry_cents(r, fee_rate)
         if size <= 0 or entry is None:
             continue
         key = (r.get("instance_id"), r.get("market_ticker"))

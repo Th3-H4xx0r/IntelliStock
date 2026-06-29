@@ -613,12 +613,13 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     log(f"tick {tick}: already positioned/ordered {d['market_ticker']} — skipping.", "white")
                     d["decision"], d["block_reason"] = "skipped", "already positioned"
                 elif a and not dry:
-                    _okv, _whyv = _validate_order(a["contracts"], a["price_cents"])
+                    _okv, _whyv = _validate_order(a["contracts"], a["price_cents"],
+                                                  max_per_market=int(getattr(config.caps, "max_contracts_per_market", 100000)))
                     _cost = a["contracts"] * a["price_cents"]
                     if not _okv:
                         d["decision"], d["block_reason"] = "blocked", f"invalid order: {_whyv}"
                         log(f"tick {tick}: order {d['market_ticker']} invalid: {_whyv}", "yellow")
-                    elif avail_cents and (spent_this_tick + _cost) > int(0.97 * avail_cents):
+                    elif avail_cents and (spent_this_tick + _cost) > int((1.0 - float(getattr(config.caps, "cash_buffer_frac", 0.03))) * avail_cents):
                         d["decision"], d["block_reason"] = "blocked", "insufficient_balance_guard"
                         log(f"tick {tick}: skip {d['market_ticker']} — balance guard "
                             f"(need {_cost}c, ~{avail_cents - spent_this_tick}c free).", "yellow")
@@ -635,8 +636,13 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                             try:
                                 from kalshi.live import orderbook as _ob
                                 _book = _ob.parse(client.get_orderbook(d["market_ticker"]))
-                                _mp = _ob.maker_buy_price(_book, fallback_ask=a["price_cents"])
-                                if _mp and _ob.allows_maker_buy(_book):
+                                _mp = _ob.maker_buy_price(
+                                    _book, fallback_ask=a["price_cents"],
+                                    min_spread=int(getattr(config.caps, "maker_min_spread_cents", 3)))
+                                if _mp and _ob.allows_maker_buy(
+                                    _book,
+                                    min_book_depth=int(getattr(config.caps, "maker_min_book_depth", 5)),
+                                    max_adverse_imbalance=float(getattr(config.caps, "maker_max_adverse_imbalance", -0.5))):
                                     _limit, _post_only = _mp, True
                             except Exception:
                                 pass
@@ -678,7 +684,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             except Exception:
                 pass
             try:
-                _s = kdb.settle_and_learn(conn, client, config.brokerage_id)
+                _s = kdb.settle_and_learn(conn, client, config.brokerage_id, fee_rate=config.fee_rate)
                 if _s.get("settled"):
                     log(f"tick {tick}: reconciled {_s['settled']} settled position(s).", "cyan")
             except Exception as e:
