@@ -3,6 +3,7 @@ from kalshi.data.discovery import (
     extract_teams,
     parse_kalshi_market,
     group_by_event,
+    winner_side,
 )
 
 
@@ -37,6 +38,50 @@ def test_extract_teams_strips_market_suffix_from_away():
     assert extract_teams("Japan vs Sweden Both Teams To Score") == ("Japan", "Sweden")
     # Multi-word names with no trailing market word are preserved.
     assert extract_teams("Bosnia and Herzegovina vs Qatar") == ("Bosnia and Herzegovina", "Qatar")
+
+
+def test_parse_knockout_reg_time_winner_sides():
+    # Knockout-stage winner markets prefix the side with "Reg Time:". The bot used
+    # to map only the draw (keyword) and silently drop both teams -> blind to every
+    # team-win bet in knockout games. Containment matching must recover home/away.
+    base = {"event_ticker": "KXWCGAME-26JUL03ARGCPV",
+            "title": "Argentina vs Cape Verde Winner", "yes_ask": 70}
+    home = parse_kalshi_market({**base, "ticker": "KXWCGAME-...-ARG", "yes_sub_title": "Reg Time: Argentina"})
+    away = parse_kalshi_market({**base, "ticker": "KXWCGAME-...-CPV", "yes_sub_title": "Reg Time: Cape Verde"})
+    tie = parse_kalshi_market({**base, "ticker": "KXWCGAME-...-TIE", "yes_sub_title": "Reg Time: Draw"})
+    assert (home["market_type"], home["side"]) == ("winner", "home")
+    assert (away["market_type"], away["side"]) == ("winner", "away")
+    assert (tie["market_type"], tie["side"]) == ("winner", "draw")
+
+
+def test_winner_side_tolerates_qualifier_forms_and_name_drift():
+    # Prefix and parenthetical qualifier forms both collapse to the team name.
+    assert winner_side("Reg Time: Argentina", "Argentina", "Austria") == "home"
+    assert winner_side("Argentina (Reg. Time)", "Argentina", "Austria") == "home"
+    assert winner_side("Austria (Regulation Time)", "Argentina", "Austria") == "away"
+    # Name drift between title and subtitle ("Cape Verde" vs "Cape Verde Islands").
+    assert winner_side("Cape Verde", "Argentina", "Cape Verde Islands") == "away"
+    assert winner_side("Draw", "Argentina", "Austria") == "draw"
+
+
+def test_winner_side_disambiguates_substring_country_names():
+    # Substring-overlapping names must not collide: exact match wins.
+    assert winner_side("Guinea", "Guinea", "Equatorial Guinea") == "home"
+    assert winner_side("Equatorial Guinea", "Guinea", "Equatorial Guinea") == "away"
+    assert winner_side("Reg Time: South Korea", "South Korea", "Japan") == "home"
+
+
+def test_winner_side_excludes_tournament_and_aggregate_markets():
+    # "to advance" / "to win the World Cup" contain a team name but are NOT a
+    # single-match 1X2 side — must not be mispriced with the match-winner prob.
+    assert winner_side("Argentina to advance", "Argentina", "Austria") is None
+    assert winner_side("Argentina to win the World Cup", "Argentina", "Austria") is None
+    # A real totals market keeps its non-winner classification (mt gate, not winner).
+    ou = parse_kalshi_market({
+        "ticker": "KXWCGAME-...-OV25", "event_ticker": "KXWCGAME-26JUL03ARGCPV",
+        "title": "Argentina vs Cape Verde Total Goals", "yes_sub_title": "Over 2.5", "yes_ask": 55,
+    })
+    assert ou["market_type"] != "winner"
 
 
 def test_parse_world_cup_away_side_maps_after_suffix_strip():

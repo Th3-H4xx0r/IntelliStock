@@ -56,11 +56,15 @@ def generate_candidates(
 
     for m in kalshi_markets:
         mt = m.get("market_type")
-        if mt not in allowed:
-            continue
         side = m.get("side")
+        if mt not in allowed:
+            _skip(m, side, None, int(m.get("yes_ask_cents", 0) or 0), None,
+                  f"market type '{mt}' not traded in this tier")
+            continue
         fair = (market_probs.get(mt) or {}).get(side)
         if fair is None:
+            _skip(m, side, None, int(m.get("yes_ask_cents", 0) or 0), None,
+                  f"no model price for {mt} side '{side}'")
             continue
         price = int(m.get("yes_ask_cents", 0))
         # Price-band gate (favorite-longshot tax): skip cheap longshots — in paper
