@@ -8350,6 +8350,16 @@ def action_get_model(conn, model_id):
     return _mask_model_doc(doc)
 
 
+def action_get_model_raw(conn, model_id):
+    """Return the UNMASKED model doc — internal use only (never serialized to a
+    client). Used by /llm/test so a saved key can be reused without re-entry."""
+    _ensure_models_table(conn)
+    doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    if doc is None:
+        raise ValueError(f"Model not found: {model_id}")
+    return doc
+
+
 def _validate_claude_cli_extra_args(extra_args):
     """Run the extra_args string through the provider's allowlist validator.
     Raised ValueError on disallowed flags so the API layer can return 400."""
@@ -8580,6 +8590,11 @@ def action_edit_model(conn, model_id, **kwargs):
             val = val.strip()
             if field == "provider":
                 val = val.lower()
+        # The secret is masked on read ("ABSK****xxxx"). If the form submits the
+        # masked value (unchanged) or a blank string, KEEP the stored key instead
+        # of overwriting it — otherwise editing any other field would wipe the key.
+        if field == "api_key" and (val == "" or _looks_masked(val)):
+            continue
         update[field] = val
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).update(update).run(conn)
     updated = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)

@@ -152,6 +152,8 @@ from interactive_utils import (
     action_list_bot_trade_decisions,
     action_list_models,
     action_get_model,
+    action_get_model_raw,
+    _looks_masked,
     action_create_model,
     action_edit_model,
     action_delete_model,
@@ -507,6 +509,10 @@ class LlmConfigTestBody(BaseModel):
     provider: str = Field(..., min_length=1)
     model: str = Field(..., min_length=1)
     api_key: Optional[str] = None
+    # When editing an existing model the form leaves the key blank (or shows the
+    # masked value) — pass the row id so the test can reuse the SAVED key instead
+    # of forcing the user to re-enter it just to run a test.
+    model_id: Optional[str] = None
     openai_base_url: Optional[str] = None
     nvidia_base_url: Optional[str] = None
     azure_openai_endpoint: Optional[str] = None
@@ -1434,7 +1440,7 @@ def api_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_c
 
 
 @app.post("/llm/test", response_class=JSONResponse)
-def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(get_current_user)):
+def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     provider = str(body.provider or "").strip().lower()
     model = str(body.model or "").strip()
     if not provider:
@@ -1442,7 +1448,19 @@ def api_test_llm_config(body: LlmConfigTestBody, current_user: dict = Depends(ge
     if not model:
         raise HTTPException(status_code=400, detail="LLM model or deployment name is required")
 
-    api_key = resolve_api_key_for_provider(provider, body.api_key)
+    # When editing a saved model, the key field is blank or shows the masked
+    # value ("ABSK****xxxx") — reuse the stored key so the user can test without
+    # re-entering it. The submitted key wins only when it's a real new value.
+    submitted_key = str(body.api_key or "").strip()
+    effective_key = submitted_key
+    if (not submitted_key or _looks_masked(submitted_key)) and body.model_id:
+        try:
+            _saved = action_get_model_raw(conn, str(body.model_id))
+            effective_key = str((_saved or {}).get("api_key") or "").strip()
+        except Exception:
+            effective_key = ""
+
+    api_key = resolve_api_key_for_provider(provider, effective_key)
     # Local Ollama legitimately has no api_key — only Ollama Cloud needs
     # a Bearer token. Every other provider still requires a key here.
     if not api_key and provider != "ollama":

@@ -30,6 +30,9 @@ const props = defineProps({
   draft: { type: Object, required: true },
   disabled: { type: Boolean, default: false },
   readOnly: { type: Boolean, default: false },
+  // True when editing an existing row that already has a saved API key — the
+  // key field becomes optional ("leave blank to keep") instead of required.
+  editing: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update:draft'])
@@ -129,7 +132,9 @@ const BEDROCK_COMMON_REGIONS = [
 async function fetchBedrockModels({ force = false } = {}) {
   const region = String(props.draft?.bedrockRegion || '').trim()
   const apiKey = String(props.draft?.apiKey || '').trim()
-  if (!region || !apiKey) {
+  // A masked key ("ABSK****xxxx") prefilled when editing can't list models —
+  // it's not a real credential. Skip silently until a real key is entered.
+  if (!region || !apiKey || apiKey.includes('****')) {
     bedrockModels.value = []
     bedrockListError.value = ''
     return
@@ -598,14 +603,16 @@ onUnmounted(() => {
 
       <div>
         <label class="block text-xs font-medium text-slate-400 mb-1.5">
-          API Key <span class="text-amber-400">(required — Bedrock API key / bearer token)</span>
+          API Key
+          <span v-if="editing" class="text-slate-500">(leave blank to keep the saved key)</span>
+          <span v-else class="text-amber-400">(required — Bedrock API key / bearer token)</span>
         </label>
         <input
           :value="draft.apiKey"
           @input="update('apiKey', $event.target.value)"
           type="password"
           :disabled="disabled || readOnly"
-          placeholder="Bedrock API key (bearer token)"
+          :placeholder="editing ? '•••••••• saved — leave blank to keep' : 'Bedrock API key (bearer token)'"
           class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
         />
       </div>
@@ -699,13 +706,14 @@ onUnmounted(() => {
     <div v-if="!isCliProvider && draft.provider !== 'ollama' && draft.provider !== 'bedrock'">
       <label class="block text-xs font-medium text-slate-400 mb-1.5">
         {{ draft.provider === 'azure' ? 'Azure API Key' : 'API Key' }}
+        <span v-if="editing" class="text-slate-500">(leave blank to keep the saved key)</span>
       </label>
       <input
         :value="draft.apiKey"
         @input="update('apiKey', $event.target.value)"
         type="password"
         :disabled="disabled || readOnly"
-        :placeholder="draft.provider === 'nvidia' ? 'NVIDIA API Key (nvapi-...)' : 'Optional if provided by environment'"
+        :placeholder="editing ? '•••••••• saved — leave blank to keep' : (draft.provider === 'nvidia' ? 'NVIDIA API Key (nvapi-...)' : 'Optional if provided by environment')"
         class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
       />
     </div>
