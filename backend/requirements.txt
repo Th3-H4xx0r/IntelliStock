@@ -35,7 +35,7 @@ fastapi
 uvicorn[standard]
 bcrypt
 pyjwt
-discord.py>=2.3.0
+discord.py>=2.7.1
 aiohttp>=3.13.5
 neo4j>=6.2.0
 sec-edgar-downloader>=5.1.0
@@ -44,7 +44,7 @@ beautifulsoup4>=4.14.3
 spacy>=3.0.0
 rapidfuzz>=3.14.5
 # After install, run: python -m spacy download en_core_web_lg
-lxml>=6.1.0
+lxml>=6.1.1
 TA-Lib
 # For Google News RSS fetching (graph nexus macro news):
 scrapling>=0.2.0
@@ -55,12 +55,12 @@ toon-format
 # PydanticAI slim install with only the providers used here:
 # - Gemini via Google provider
 # - DeepSeek via OpenAI-compatible provider
-pydantic-ai-slim[google,openai,bedrock]==1.106.0
+pydantic-ai-slim[google,openai,bedrock]==1.107.0
 # Live-mode trading (V32 Phase 5):
 # - alpaca-py: new TradingClient + TradingStream (supersedes alpaca_trade_api above for live order path)
 # - cryptography: Fernet-encrypted BrokerageAccounts credentials (secret_store.py)
 # - exchange_calendars: NYSE market calendar with holidays + early closes (live_calendar.py)
-alpaca-py>=0.43.0
+alpaca-py>=0.43.4
 cryptography>=41.0.0
 # httpx[http2]: direct APNs sender (apns_sender.py) needs HTTP/2, which Apple's
 # push endpoint requires. PyJWT (above) signs the ES256 provider token.
@@ -74,4 +74,4 @@ ollama>=0.4,<1
 # the control-plane bedrock client (discovery). The pydantic-ai bedrock extra
 # above also pulls boto3, but we pin an explicit floor because Bedrock API-key
 # (bearer-token) auth requires a recent botocore.
-boto3>=1.40.0
+boto3>=1.43.34

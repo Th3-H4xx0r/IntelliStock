@@ -72,6 +72,10 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
                          in ("power", "shin", "proportional") else "power"),
         "odds_refresh_secs": max(300, int(raw.get("odds_refresh_secs", 3600))),
         "odds_regions": str(raw.get("odds_regions") or "eu,uk,us").strip() or "eu,uk,us",
+        # Kalshi series tickers to scan ([] = engine uses DEFAULT_SOCCER_SERIES).
+        "soccer_series": [str(s).strip() for s in (raw.get("soccer_series") or []) if str(s).strip()],
+        # ESPN league slugs for live-score detection ([] = engine uses DEFAULT_SCOREBOARD_LEAGUES).
+        "scoreboard_leagues": [str(s).strip() for s in (raw.get("scoreboard_leagues") or []) if str(s).strip()],
     }
 
 
