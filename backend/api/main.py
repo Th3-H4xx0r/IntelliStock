@@ -2302,6 +2302,35 @@ def api_bedrock_list_models(
         )
 
 
+class OpenRouterListModelsBody(BaseModel):
+    base_url: Optional[str] = Field(default=None, max_length=512)
+
+
+# Imported lazily (like ollama_client / bedrock_client) so a missing dep at boot
+# never takes down the API; the endpoint surfaces errors as an empty list.
+import openrouter_client  # noqa: E402
+
+
+@app.post("/openrouter/list-models", response_class=JSONResponse)
+def api_openrouter_list_models(
+    body: OpenRouterListModelsBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Discovery endpoint: list the OpenRouter model catalog.
+
+    Body: ``{"base_url": str | null}`` (defaults to the public OpenRouter API).
+    No API key required — the catalog is public.
+
+    Returns: ``{"models": [{"id", "name", "context_length", "pricing"}, …],
+    "error": str | null}``. ``pricing`` is the raw OpenRouter object (USD per
+    token, string values) so the UI can auto-fill the per-row cost overrides.
+    On any failure ``models`` is ``[]`` and the UI falls back to manual entry.
+    """
+    base_url = str((body.base_url or openrouter_client.DEFAULT_BASE_URL)).strip()
+    models = openrouter_client.list_models(base_url)
+    return {"models": models, "error": None if models else "No models returned (discovery unavailable)"}
+
+
 @app.post("/models/{model_id}/test-cli", response_class=JSONResponse)
 async def api_test_claude_cli(
     model_id: str,
