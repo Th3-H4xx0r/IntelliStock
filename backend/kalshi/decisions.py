@@ -27,6 +27,10 @@ def decision_doc(
     league: str = "",
     sharp_close_prob: float | None = None,
     entry_avg_cents: int | None = None,
+    home_elo: float | None = None,
+    away_elo: float | None = None,
+    home_xg: float | None = None,
+    away_xg: float | None = None,
 ) -> dict:
     return {
         "id": f"{instance_id}|{market_ticker}|{ts}",
@@ -55,6 +59,12 @@ def decision_doc(
         "clv": None,
         "pre_settle_mid_cents": None,   # last observed Kalshi mid before settlement (CLV close)
         "sharp_close_prob": sharp_close_prob,  # sharp book's prob at entry (CLV reference)
+        # Pregame context for the UI's per-match analysis view (Elo strength + the
+        # model's expected goals that drive the scoreline probabilities).
+        "home_elo": home_elo,
+        "away_elo": away_elo,
+        "home_xg": home_xg,
+        "away_xg": away_xg,
     }
 
 

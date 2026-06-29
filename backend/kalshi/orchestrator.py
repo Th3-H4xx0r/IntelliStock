@@ -36,6 +36,11 @@ def plan_and_allocate(
 
     for fx in fixtures:
         eg = fx.get("expected_goals")
+        # Pregame context carried onto every decision row for the UI match view.
+        _hx = eg[0] if (eg and len(eg) > 0) else None
+        _ax = eg[1] if (eg and len(eg) > 1) else None
+        _ctx = dict(home_elo=fx.get("home_elo"), away_elo=fx.get("away_elo"),
+                    home_xg=_hx, away_xg=_ax)
         sharp = fx.get("sharp_probs") or {}
         analyst = fx.get("analyst") or {}
         adjustments = analyst.get("adjustments") or {}
@@ -67,6 +72,7 @@ def plan_and_allocate(
                 # LLM work it did, not just the numeric skip.
                 llm_adjustment=adjustments.get(s["market_type"]),
                 llm_rationale=rationales.get(s["market_type"], ""),
+                **_ctx,
             )
             srow["id"] = f"{instance_id}|{s['market_ticker']}"
             skip_decisions.append(srow)
@@ -93,6 +99,7 @@ def plan_and_allocate(
     decisions = []
     for cid, (c, fx, rationale, model_p, sharp_p, adj, opp) in meta.items():
         a = placed.get(cid)
+        _eg = fx.get("expected_goals")
         decisions.append(decision_doc(
             instance_id=instance_id, brokerage_id=brokerage_id, ts=ts,
             fixture_id=fx["fixture_id"], market_ticker=c.market_ticker, side=c.side,
@@ -104,5 +111,8 @@ def plan_and_allocate(
             # we bought below sharp fair (the only real, sharp-anchored CLV grade).
             sharp_close_prob=sharp_p,
             entry_avg_cents=(a["price_cents"] if a else None),
+            home_elo=fx.get("home_elo"), away_elo=fx.get("away_elo"),
+            home_xg=(_eg[0] if (_eg and len(_eg) > 0) else None),
+            away_xg=(_eg[1] if (_eg and len(_eg) > 1) else None),
         ))
     return {"allocations": allocations, "decisions": decisions + skip_decisions, "candidates": scored}
