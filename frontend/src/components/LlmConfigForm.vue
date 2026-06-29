@@ -285,6 +285,15 @@ function onProviderChange(value) {
     next.openrouterBaseUrl = ''
     next.openrouterReferer = ''
     next.openrouterTitle = ''
+    // If the cost fields were auto-filled from OpenRouter's catalog, clear them
+    // when leaving the provider — otherwise OpenRouter's per-1M pricing would
+    // be saved as the cost override for the newly-selected provider's model.
+    if (openrouterPricingAutofilled.value) {
+      next.inputCostPer1m = null
+      next.outputCostPer1m = null
+      next.cacheCreationCostPer1m = null
+      next.cacheReadCostPer1m = null
+    }
     openrouterPricingAutofilled.value = false
   }
   emit('update:draft', next)

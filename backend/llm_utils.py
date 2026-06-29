@@ -2699,7 +2699,7 @@ def call_structured_llm_by_provider(
                 if http_attempt == 0:
                     _LAST_STRUCTURED_LLM_CALL.data["attempted_models"].append(structured_model)
                 _model_forces_raw = (
-                    (provider or "").strip().lower() in {"azure", "openai", "nvidia"}
+                    (provider or "").strip().lower() in {"azure", "openai", "nvidia", "openrouter"}
                     and _model_skips_json_object_format(structured_model)
                 )
                 force_raw_json = prefer_raw_json or _model_forces_raw
