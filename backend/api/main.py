@@ -4079,10 +4079,10 @@ def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_us
 class CreateKalshiInstanceBody(BaseModel):
     name: str = Field(..., min_length=1)
     leagues: Optional[list[str]] = None
-    edge_threshold: Optional[float] = 0.03
-    kelly_fraction: Optional[float] = 0.25
+    edge_threshold: Optional[float] = 0.04
+    kelly_fraction: Optional[float] = 0.125
     max_contracts_per_market: Optional[int] = 50
-    max_open_exposure_frac: Optional[float] = 0.60
+    max_open_exposure_frac: Optional[float] = 0.15
     per_league_cap_frac: Optional[float] = 0.25
     daily_loss_cap_dollars: Optional[float] = 0
     bankroll_dollars: Optional[float] = 0
@@ -4093,16 +4093,20 @@ class CreateKalshiInstanceBody(BaseModel):
     # Live in-match monitoring (two-way in-play; Kalshi-price-only).
     live_monitoring: Optional[bool] = True
     live_poll_seconds: Optional[int] = 30
-    inplay_exposure_frac: Optional[float] = 0.25
-    max_adds_per_match: Optional[int] = 3
-    no_add_after_min: Optional[float] = 80.0
-    stop_loss_frac: Optional[float] = 0.5
+    inplay_exposure_frac: Optional[float] = 0.15
+    max_adds_per_match: Optional[int] = 2
+    no_add_after_min: Optional[float] = 75.0
+    stop_loss_frac: Optional[float] = 0.35
     # Sharp-odds anchor (fair value from de-vig'd bookmaker odds; edge vs Kalshi).
     odds_api_key: Optional[str] = None
-    sharp_weight: Optional[float] = 0.7
+    sharp_weight: Optional[float] = 0.85
     devig_method: Optional[str] = "power"
     odds_refresh_secs: Optional[int] = 3600
     odds_regions: Optional[str] = "eu,uk,us"
+    # HARD dry-run: read real prices, place NO real orders. None = safe default
+    # (paper for a live brokerage, off for demo). Set False on a live account to
+    # place REAL orders.
+    paper_mode: Optional[bool] = None
 
 
 class UpdateKalshiInstanceBody(CreateKalshiInstanceBody):
@@ -4146,7 +4150,12 @@ def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody
     from kalshi.db import ensure_tables as _ensure_kalshi_tables
 
     live = (row.get("kalshi_environment") or "demo") == "live"
-    config = normalize_config(body.model_dump(), live_enabled=live)
+    raw = body.model_dump()
+    # SAFETY: a LIVE (funded) brokerage defaults to PAPER mode (dry-run, no real
+    # orders). Real execution requires explicitly setting paper_mode=False.
+    paper = bool(raw.get("paper_mode")) if raw.get("paper_mode") is not None else live
+    live_enabled = live and not paper
+    config = normalize_config({**raw, "paper_mode": paper}, live_enabled=live_enabled)
     iid = str(_uuid.uuid4())
     doc = build_kalshi_instance_doc(iid, brokerage_id=brokerage_id, name=body.name.strip(), config=config)
     _r_auth.db("IntelliStock").table("Instances").insert(doc, conflict="replace").run(conn)
@@ -4154,7 +4163,7 @@ def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody
         _ensure_kalshi_tables(conn)
     except Exception:
         pass
-    return {"ok": True, "id": iid, "name": doc["name"], "live_enabled": live, "running": False}
+    return {"ok": True, "id": iid, "name": doc["name"], "live_enabled": live_enabled, "paper_mode": paper, "running": False}
 
 
 @app.patch("/instances/{instance_id}/kalshi/config", response_class=JSONResponse)
@@ -4170,7 +4179,14 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
         live = (bk.get("kalshi_environment") or "demo") == "live"
     except Exception:
         pass
-    config = normalize_config(body.model_dump(), live_enabled=live)
+    raw = body.model_dump()
+    prev = (row.get("kalshi_config") or {})
+    # paper_mode is the settings toggle: when None keep the instance's current setting
+    # (live brokerages default to paper). Turning it OFF on a live brokerage enables
+    # REAL orders (live_enabled True); ON keeps it dry-run.
+    paper = bool(raw.get("paper_mode")) if raw.get("paper_mode") is not None else bool(prev.get("paper_mode", live))
+    live_enabled = live and not paper
+    config = normalize_config({**raw, "paper_mode": paper}, live_enabled=live_enabled)
     _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).update(
         {"name": body.name.strip(), "kalshi_config": config}
     ).run(conn)

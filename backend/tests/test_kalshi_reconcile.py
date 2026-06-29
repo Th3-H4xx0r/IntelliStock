@@ -126,6 +126,15 @@ def test_orderbook_legacy_cents_shape():
     assert b.top_bid == 42 and b.top_ask == 45   # 1c level no longer misread as $1
 
 
+def test_paper_mode_hard_gate():
+    from kalshi.engine import should_execute
+    assert should_execute("demo", False) is True          # demo executes (sandbox)
+    assert should_execute("live", True) is True            # live + enabled -> real
+    assert should_execute("live", False) is False          # live, not enabled
+    assert should_execute("live", True, paper_mode=True) is False   # HARD gate wins
+    assert should_execute("demo", True, paper_mode=True) is False   # even on demo
+
+
 # --- calibration (data-blocked component, ready to activate) ---
 
 def test_calibration_shrink_and_isotonic():

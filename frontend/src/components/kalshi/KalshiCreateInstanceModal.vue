@@ -60,6 +60,9 @@ const liveMonitoring = ref(true)
 const oddsApiKey = ref('')
 const sharpWeight = ref(70)
 const risk = ref('medium')
+// Live brokerage: dry-run (read real prices, place NO real orders) by default. Toggle
+// OFF to place REAL orders. Demo ignores this (it sandbox-executes).
+const paperMode = ref(true)
 const riskBlurb = computed(() => RISK_PRESETS[risk.value]?.blurb || '')
 
 function applyPreset(level) {
@@ -140,6 +143,7 @@ function prefillFromEdit() {
   if (c.sharp_weight != null) sharpWeight.value = Math.round(c.sharp_weight * 100)
   if (c.tier) risk.value = c.tier
   if (c.model) selectedModel.value = c.model
+  if (c.paper_mode != null) paperMode.value = !!c.paper_mode
 }
 
 watch(brokerageId, loadBalance)
@@ -180,6 +184,8 @@ async function submit() {
       sharp_weight: Number(sharpWeight.value) / 100,
       tier: risk.value,
       model: selectedModel.value || null,
+      // live brokerage: send the paper toggle (default dry-run). demo always sandbox-executes.
+      paper_mode: isLive.value ? paperMode.value : false,
     }
     if (isEdit.value) {
       const res = await fetch(`${API_BASE}/instances/${props.editInstance.id}/kalshi/config`, {
@@ -368,7 +374,16 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
           </label>
         </div>
 
-        <p v-if="isLive" class="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">⚠ LIVE account — live execution is ON at creation. Starting this instance trades real money.</p>
+        <!-- LIVE account: paper-mode (dry-run) toggle. Default ON = read real prices, place NO real orders. -->
+        <div v-if="isLive" class="rounded-lg border px-3 py-2.5" :class="paperMode ? 'border-primary/20 bg-primary/5' : 'border-red-500/30 bg-red-500/10'">
+          <label class="flex items-center justify-between gap-3 cursor-pointer">
+            <span>
+              <span class="text-sm font-semibold" :class="paperMode ? 'text-primary' : 'text-red-400'">{{ paperMode ? 'Paper mode (dry-run)' : 'REAL orders' }}</span>
+              <span class="block text-[11px] text-slate-400 mt-0.5">{{ paperMode ? 'Reads real prices, places NO real orders — safe to test on a funded account.' : '⚠ Places REAL orders with REAL money when started.' }}</span>
+            </span>
+            <input type="checkbox" v-model="paperMode" class="size-5 accent-primary shrink-0" />
+          </label>
+        </div>
         <p v-if="err" class="text-xs text-red-400">{{ err }}</p>
       </div>
 

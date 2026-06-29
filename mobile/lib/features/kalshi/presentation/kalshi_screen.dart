@@ -410,6 +410,9 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   double _dailyLossPct = 0.10;
   String _risk = 'medium';
   bool _liveMonitoring = true;
+  // HARD dry-run: read real prices, place NO real orders. Safe default for a funded
+  // live account; toggle OFF to place REAL orders.
+  bool _paperMode = true;
   List<Map<String, dynamic>> _models = [];
   String? _selectedModel;
   bool _creating = false;
@@ -506,6 +509,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'sharp_weight': _sharpWeight / 100,
         'tier': _risk,
         'model': _selectedModel,
+        'paper_mode': _paperMode,   // dry-run by default; backend forces paper on live brokerages unless off
       });
       if (mounted) Navigator.pop(context);
       widget.onCreated(_brokerageId);
@@ -636,6 +640,20 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                       onChanged: (v) => setState(() => _liveMonitoring = v),
                       title: Text('Live in-match trading', style: AppTextStyles.body.copyWith(color: AppColors.textHi)),
                       subtitle: Text('Monitor live matches and trade two-way (open/add/reduce/exit) in-play.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Paper mode (dry-run) toggle — safe for funded live accounts
+                  Container(
+                    decoration: BoxDecoration(color: _paperMode ? AppColors.surface : AppColors.danger.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10), border: Border.all(color: _paperMode ? AppColors.border : AppColors.danger.withValues(alpha: 0.4))),
+                    child: SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                      activeColor: AppColors.primary,
+                      value: _paperMode,
+                      onChanged: (v) => setState(() => _paperMode = v),
+                      title: Text(_paperMode ? 'Paper mode (dry-run)' : 'REAL orders', style: AppTextStyles.body.copyWith(color: _paperMode ? AppColors.textHi : AppColors.danger, fontWeight: FontWeight.w600)),
+                      subtitle: Text(_paperMode ? 'Reads real prices, places NO real orders — safe to test a funded account.' : '⚠ Places REAL orders with REAL money when started.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
                     ),
                   ),
                   const SizedBox(height: 12),

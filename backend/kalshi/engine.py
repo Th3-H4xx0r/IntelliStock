@@ -35,8 +35,13 @@ class OrderIntent:
     reason: str
 
 
-def should_execute(environment: str, live_enabled: bool) -> bool:
-    """Demo/paper executes freely; live requires the explicit gate."""
+def should_execute(environment: str, live_enabled: bool, paper_mode: bool = False) -> bool:
+    """Demo/paper executes freely; live requires the explicit gate. paper_mode is a
+    HARD override: when True we NEVER place a real order, regardless of environment or
+    live_enabled — the safety gate for dry-running a FUNDED live account (read real
+    prices, record would-be trades, place nothing)."""
+    if paper_mode:
+        return False
     env = (environment or "").lower()
     if env == "demo":
         return True
@@ -103,6 +108,7 @@ class EngineConfig:
     environment: str          # 'demo' | 'live'
     live_enabled: bool
     caps: RiskCaps
+    paper_mode: bool = False   # HARD dry-run: read real prices, place NO real orders (funded-account safe)
     fee_rate: float = 0.07
     poll_seconds: int = 60
     tier: str = "medium"      # risk tier -> allowed market types
@@ -570,7 +576,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # 5) Execute (gated) + 6) write decision rows. Fetch current positions
             # first and skip markets we already hold or already ordered this run —
             # so we don't re-submit the same order every tick.
-            dry = not should_execute(config.environment, config.live_enabled)
+            dry = not should_execute(config.environment, config.live_enabled, config.paper_mode)
             try:
                 positions = client.get_positions()
             except Exception as e:
@@ -669,7 +675,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                             d["decision"], d["block_reason"] = "blocked", str(e)
                 elif a and dry:
                     placed_markets.add(d["market_ticker"])   # don't spam dry-run logs either
-                    log(f"tick {tick}: DRY-RUN would place {a['contracts']}x {d['market_ticker']} @ "
+                    # PAPER fill: tag the would-be trade + record the would-be entry so the
+                    # feedback loop grades it (CLV/P&L) against real settlements — the valid
+                    # test against real prices with NO real order placed.
+                    d["paper"] = True
+                    d["entry_avg_cents"] = a["price_cents"]
+                    log(f"tick {tick}: PAPER would place {a['contracts']}x {d['market_ticker']} @ "
                         f"{a['price_cents']}c (edge {(d['edge'] or 0):.1%}).", "cyan")
                 try:
                     kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(d, conflict="replace").run(conn)
@@ -714,7 +725,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         log(f"tick {tick}: live analyst failed: {type(e).__name__}: {e}", "yellow")
                         return 0.0
 
-                live_dry = not should_execute(config.environment, config.live_enabled)
+                live_dry = not should_execute(config.environment, config.live_enabled, config.paper_mode)
                 live_rows = live_monitor.run_live_step(
                     client=client, live_matches=live_matches, price_history=price_history,
                     adds_by_match=adds_by_match, positions_by_ticker=positions_by_ticker,
@@ -726,6 +737,9 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 log(f"tick {tick}: live monitor — {len(live_matches)} in-play match(es), "
                     f"{len(live_rows)} markets watched, {acted} order(s).", "magenta")
                 for r in live_rows:
+                    # paper-tag in-play would-be trades so the feedback loop grades them too
+                    if live_dry and r.get("decision") == "placed":
+                        r["paper"] = True
                     try:
                         kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(r, conflict="replace").run(conn)
                     except Exception:

@@ -62,6 +62,9 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "tier": tier,
         "model": (str(raw.get("model")).strip() or None) if raw.get("model") else None,
         "live_enabled": bool(live_enabled),
+        # HARD dry-run gate: when True the engine reads real prices but places NO real
+        # orders (paper-fill grading). Lets a FUNDED live account be tested safely.
+        "paper_mode": bool(raw.get("paper_mode", False)),
         # Live in-match monitoring (Kalshi-price-only, two-way in-play).
         "live_monitoring": bool(raw.get("live_monitoring", True)),
         "live_poll_seconds": max(10, int(raw.get("live_poll_seconds", 30))),

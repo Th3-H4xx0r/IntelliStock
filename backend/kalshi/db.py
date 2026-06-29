@@ -211,21 +211,26 @@ def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> d
         res = result_by_ticker.get(pos["market_ticker"])
         if res is None:
             continue
-        fb = fills_by_ticker.get(pos["market_ticker"])
-        if not fb or fb["buy_c"] <= 0:
-            # unfilled post_only rest — mark terminal, never count as a position
-            for did in pos["decision_ids"]:
-                _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
-                    {"realized_pnl_cents": 0, "outcome": "unfilled"}).run(conn)
-            continue
-        net_c = fb["buy_c"] - fb["sell_c"]
-        if net_c <= 0:                       # fully exited before settlement
-            for did in pos["decision_ids"]:
-                _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
-                    {"realized_pnl_cents": 0, "outcome": "closed"}).run(conn)
-            continue
-        # ground-truth contracts + cost-weighted entry from actual buy fills
-        pos = {**pos, "contracts": net_c, "avg_entry_cents": fb["buy_cost"] / fb["buy_c"]}
+        rows_for = [rows_by_id.get(did) or {} for did in pos["decision_ids"]]
+        is_paper = bool(rows_for) and all(r.get("paper") for r in rows_for)
+        if not is_paper:
+            # LIVE position: require real fills — never grade a phantom/unfilled order.
+            fb = fills_by_ticker.get(pos["market_ticker"])
+            if not fb or fb["buy_c"] <= 0:
+                for did in pos["decision_ids"]:
+                    _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
+                        {"realized_pnl_cents": 0, "outcome": "unfilled"}).run(conn)
+                continue
+            net_c = fb["buy_c"] - fb["sell_c"]
+            if net_c <= 0:                   # fully exited before settlement
+                for did in pos["decision_ids"]:
+                    _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
+                        {"realized_pnl_cents": 0, "outcome": "closed"}).run(conn)
+                continue
+            # ground-truth contracts + cost-weighted entry from actual buy fills
+            pos = {**pos, "contracts": net_c, "avg_entry_cents": fb["buy_cost"] / fb["buy_c"]}
+        # PAPER positions: grade at the modeled would-be entry (entry_avg_cents) — the
+        # valid dry-run-against-real-prices test, no real fill required.
         rep = rows_by_id.get(pos["decision_ids"][0], {}) if pos["decision_ids"] else {}
         rec = _rec.reconcile_position(
             pos, result=res,

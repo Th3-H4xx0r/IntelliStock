@@ -104,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             brokerage_id=brokerage_id,
             environment=environment,
             live_enabled=bool(cfg.get("live_enabled", False)),
+            paper_mode=bool(cfg.get("paper_mode", False)),
             caps=risk_caps_from_config(cfg),
             poll_seconds=int(cfg.get("poll_seconds", 60)),
             tier=str(cfg.get("tier", "medium")),
