@@ -265,3 +265,6 @@ frontend/.vite/
 
 # Superpowers brainstorm scratch
 .superpowers/
+
+# Local Kalshi data dump (regenerable, not source)
+kalshi_data_dump/
