@@ -568,6 +568,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
                 fixtures_in.append({
                     "fixture_id": meta["id"], "expected_goals": eg,
+                    "home_elo": he, "away_elo": ae,   # pregame context for the UI match view
                     "sharp_probs": meta["sharp_probs"],
                     "analyst": analyst_out,
                     "kalshi_markets": [

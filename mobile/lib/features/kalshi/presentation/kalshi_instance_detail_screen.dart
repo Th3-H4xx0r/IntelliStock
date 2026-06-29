@@ -183,6 +183,8 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   _positionsCard(detail['brokerage_id']?.toString() ?? ''),
                   _ordersCard(ordersAsync),
                   const SizedBox(height: 12),
+                  _pregameAnalysis(decAsync),
+                  const SizedBox(height: 12),
                   _decisionLog(decAsync),
                   const SizedBox(height: 12),
                   GlassCard(
@@ -496,6 +498,233 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
           ...fills.take(12).map((f) => _orderTile(f as Map<String, dynamic>, filled: true)),
         ],
       ]),
+    );
+  }
+
+  // ── Pregame analysis ──────────────────────────────────────────────────
+  // The flat Decision Log scatters a single match's three sides (home / draw /
+  // away). This section reuses the SAME already-fetched decisions list, groups
+  // it by fixture, and shows the pregame read + per-side edges together so each
+  // game reads as one card.
+
+  Widget _pregameAnalysis(AsyncValue<Map<String, dynamic>> decAsync) {
+    return GlassCard(
+      frosted: true,
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(symbol('sports_soccer'), color: AppColors.primary, size: 18),
+          const SizedBox(width: 8),
+          Text('PREGAME ANALYSIS', style: AppTextStyles.eyebrow),
+        ]),
+        const SizedBox(height: 12),
+        decAsync.when(
+          loading: () => const LoadingState(),
+          error: (e, _) => ErrorBanner(message: '$e', onRetry: _refresh),
+          data: (d) {
+            final rows = ((d['decisions'] as List?) ?? const [])
+                .whereType<Map>()
+                .map((r) => r.cast<String, dynamic>())
+                .toList();
+            if (rows.isEmpty) {
+              return Text('No games analyzed yet — picks will appear here once the bot scans the slate.',
+                  style: AppTextStyles.body.copyWith(color: AppColors.textDim));
+            }
+            // Group by fixture, preserving the first-seen order within a game.
+            final groups = <String, List<Map<String, dynamic>>>{};
+            for (final r in rows) {
+              final key = (r['fixture_id'] ?? r['match'] ?? '').toString();
+              (groups[key] ??= []).add(r);
+            }
+            // One card per game, sorted by the game's best (max) edge desc.
+            final games = groups.values.toList()
+              ..sort((a, b) => _bestEdge(b).compareTo(_bestEdge(a)));
+            return Column(children: games.map(_pregameCard).toList());
+          },
+        ),
+      ]),
+    );
+  }
+
+  double _bestEdge(List<Map<String, dynamic>> sides) {
+    double best = double.negativeInfinity;
+    for (final s in sides) {
+      final e = (s['edge'] as num?)?.toDouble();
+      if (e != null && e > best) best = e;
+    }
+    return best == double.negativeInfinity ? 0 : best;
+  }
+
+  // Kalshi price in cents: prefer the real fill avg, else back it out of the
+  // fair value and edge (fair − edge, both fractions → cents).
+  int? _priceCents(Map<String, dynamic> r) {
+    final entry = r['entry_avg_cents'];
+    if (entry is num) return entry.round();
+    final fair = (r['fused_fair'] as num?)?.toDouble();
+    final edge = (r['edge'] as num?)?.toDouble();
+    if (fair == null || edge == null) return null;
+    return ((fair - edge) * 100).round();
+  }
+
+  Widget _pregameCard(List<Map<String, dynamic>> sides) {
+    final head = sides.first;
+    final match = (head['match'] ?? '').toString();
+    final home = (head['home'] ?? '').toString();
+    final away = (head['away'] ?? '').toString();
+    final title = match.isNotEmpty
+        ? match
+        : (home.isNotEmpty || away.isNotEmpty ? '$home vs $away' : 'Match');
+    final best = _bestEdge(sides);
+    final bestPos = best > 0;
+
+    // Compact context line: "Elo h/a · xG h/a", each half omitted if null.
+    final elo = _pair(head['home_elo'], head['away_elo'], decimals: 0);
+    final xg = _pair(head['home_xg'], head['away_xg'], decimals: 2);
+    final parts = <String>[
+      if (elo != null) 'Elo $elo',
+      if (xg != null) 'xG $xg',
+    ];
+
+    // Order sides home → draw → away, keeping only those present.
+    Map<String, dynamic>? bySide(String s) {
+      for (final r in sides) {
+        if ((r['side'] ?? '').toString() == s) return r;
+      }
+      return null;
+    }
+    final ordered = [
+      for (final s in const ['home', 'draw', 'away'])
+        if (bySide(s) != null) bySide(s)!,
+    ];
+    // Fallback: if no side keys matched, just show whatever rows we have.
+    final shownSides = ordered.isNotEmpty ? ordered : sides;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.fill(AppColors.surface),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Header: flag/crest + "Home vs Away" + best-edge chip.
+        Row(children: [
+          _crest((head['pick_logo'] ?? '').toString(), home.isNotEmpty ? home : title),
+          const SizedBox(width: 10),
+          Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w700))),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+            decoration: BoxDecoration(
+              color: AppColors.fill(bestPos ? AppColors.success : AppColors.danger),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: AppColors.stroke(bestPos ? AppColors.success : AppColors.danger)),
+            ),
+            child: Text('${bestPos ? '+' : ''}${(best * 100).toStringAsFixed(1)}% edge',
+                style: AppTextStyles.nano.copyWith(
+                    color: bestPos ? AppColors.success : AppColors.danger, fontWeight: FontWeight.bold)),
+          ),
+        ]),
+        if (parts.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(parts.join('  ·  '),
+              style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+        ],
+        const SizedBox(height: 10),
+        ...shownSides.map(_pregameSideRow),
+      ]),
+    );
+  }
+
+  // "h/a" with each side omitted (→ blank) when null; null if both missing.
+  String? _pair(dynamic a, dynamic b, {required int decimals}) {
+    String fmt(dynamic v) => v is num ? v.toStringAsFixed(decimals) : '—';
+    if (a is! num && b is! num) return null;
+    return '${fmt(a)}/${fmt(b)}';
+  }
+
+  Widget _pregameSideRow(Map<String, dynamic> r) {
+    final pick = (r['pick_label'] ?? r['side'] ?? '').toString();
+    final fair = (r['fused_fair'] as num?)?.toDouble();
+    final edge = (r['edge'] as num?)?.toDouble();
+    final edgePos = (edge ?? 0) > 0;
+    final price = _priceCents(r);
+    final dec = (r['decision'] ?? '').toString();
+    final modelOnly = r['sharp_prob'] == null;
+    final updated = _fmtTs(r['ts']?.toString());
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Row(children: [
+            Flexible(child: Text(pick, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.nano.copyWith(color: AppColors.primary, fontWeight: FontWeight.w600))),
+            if (modelOnly) ...[
+              const SizedBox(width: 6),
+              Text('model-only', style: AppTextStyles.nano.copyWith(
+                  color: AppColors.textFaint, fontStyle: FontStyle.italic)),
+            ],
+          ])),
+          const SizedBox(width: 8),
+          _sidePill(dec),
+        ]),
+        const SizedBox(height: 4),
+        Row(children: [
+          _metric('fair', fair == null ? '—' : '${(fair * 100).toStringAsFixed(0)}%'),
+          const SizedBox(width: 14),
+          _metric('price', price == null ? '—' : '$price¢'),
+          const SizedBox(width: 14),
+          _metric(
+            'edge',
+            edge == null ? '—' : '${edgePos ? '+' : ''}${(edge * 100).toStringAsFixed(1)}%',
+            valueColor: edge == null ? null : (edgePos ? AppColors.success : AppColors.danger),
+          ),
+          if (updated.isNotEmpty) ...[
+            const Spacer(),
+            Text('updated $updated', style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+          ],
+        ]),
+      ]),
+    );
+  }
+
+  // "Updated" stamp per edge — relative if recent, else short date/time.
+  String _fmtTs(String? ts) {
+    if (ts == null || ts.isEmpty) return '';
+    final t = DateTime.tryParse(ts);
+    if (t == null) return '';
+    final secs = DateTime.now().toUtc().difference(t.toUtc()).inSeconds;
+    if (secs < 60) return 'just now';
+    if (secs < 3600) return '${secs ~/ 60}m ago';
+    if (secs < 86400) return '${secs ~/ 3600}h ago';
+    final l = t.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(l.month)}/${two(l.day)} ${two(l.hour)}:${two(l.minute)}';
+  }
+
+  Widget _metric(String label, String value, {Color? valueColor}) => RichText(
+        text: TextSpan(children: [
+          TextSpan(text: '$label ', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          TextSpan(text: value, style: AppTextStyles.nano.copyWith(
+              color: valueColor ?? AppColors.textMd, fontWeight: FontWeight.w600)),
+        ]),
+      );
+
+  // Status pill: PLACED emerald, SKIPPED muted, BLOCKED amber.
+  Widget _sidePill(String decision) {
+    final d = decision.toLowerCase();
+    final Color c = d == 'placed'
+        ? AppColors.success
+        : d == 'blocked'
+            ? AppColors.warning
+            : AppColors.textDim;
+    final label = decision.isEmpty ? '—' : decision.toUpperCase();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(color: AppColors.fill(c), borderRadius: BorderRadius.circular(4)),
+      child: Text(label, style: AppTextStyles.nano.copyWith(color: c, fontWeight: FontWeight.bold)),
     );
   }
 

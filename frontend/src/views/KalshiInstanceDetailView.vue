@@ -117,6 +117,79 @@ const decPages = computed(() => Math.max(1, Math.ceil(decisions.value.length / d
 const decStart = computed(() => Math.min(decPage.value, decPages.value - 1) * decPageSize)
 const pagedDecisions = computed(() => decisions.value.slice(decStart.value, decStart.value + decPageSize))
 
+// Kalshi price (cents) for a decision row: prefer the actual entry, else derive
+// it from the fair value minus the edge (price = fair - edge).
+function priceCents(d) {
+  if (d.entry_avg_cents != null) return d.entry_avg_cents
+  if (d.fused_fair == null || d.edge == null) return null
+  return Math.round((d.fused_fair - d.edge) * 100)
+}
+function fmtNum(v) { return v == null ? null : (Number.isInteger(v) ? String(v) : v.toFixed(1)) }
+// "Updated" stamp for each edge — relative if recent, else a short local date/time.
+function fmtTs(ts) {
+  if (!ts) return ''
+  const t = new Date(ts); if (isNaN(t)) return ''
+  const secs = Math.round((Date.now() - t.getTime()) / 1000)
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
+  return t.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+const SIDE_ORDER = { home: 0, draw: 1, away: 2 }
+
+// Group the (read-only) decision rows by match so a game's three sides show
+// together. Sorted by each game's best (max) edge, descending.
+const matchBoard = computed(() => {
+  const groups = new Map()
+  for (const d of decisions.value) {
+    const key = d.fixture_id || d.match || d.market_ticker || 'unknown'
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        match: d.match || d.market_ticker,
+        home: d.home,
+        away: d.away,
+        home_elo: d.home_elo, away_elo: d.away_elo,
+        home_xg: d.home_xg, away_xg: d.away_xg,
+        home_logo: null, away_logo: null,
+        sides: [],
+      })
+    }
+    const g = groups.get(key)
+    // Backfill context that may only be populated on some rows.
+    if (g.home == null) g.home = d.home
+    if (g.away == null) g.away = d.away
+    if (g.home_elo == null) g.home_elo = d.home_elo
+    if (g.away_elo == null) g.away_elo = d.away_elo
+    if (g.home_xg == null) g.home_xg = d.home_xg
+    if (g.away_xg == null) g.away_xg = d.away_xg
+    // The pick logo is the crest for that side — capture home/away crests.
+    if (d.side === 'home' && d.pick_logo && !g.home_logo) g.home_logo = d.pick_logo
+    if (d.side === 'away' && d.pick_logo && !g.away_logo) g.away_logo = d.pick_logo
+    g.sides.push({
+      side: d.side,
+      pick_label: d.pick_label,
+      pick_logo: d.pick_logo,
+      fused_fair: d.fused_fair,
+      sharp_prob: d.sharp_prob,
+      edge: d.edge,
+      decision: d.decision,
+      block_reason: d.block_reason,
+      paper: d.paper,
+      price: priceCents(d),
+      ts: d.ts,
+    })
+  }
+  const list = [...groups.values()]
+  for (const g of list) {
+    g.sides.sort((a, b) => (SIDE_ORDER[a.side] ?? 9) - (SIDE_ORDER[b.side] ?? 9))
+    const edges = g.sides.map(s => s.edge).filter(e => e != null)
+    g.bestEdge = edges.length ? Math.max(...edges) : null
+  }
+  list.sort((a, b) => (b.bestEdge ?? -Infinity) - (a.bestEdge ?? -Infinity))
+  return list
+})
+
 const ACTION_STYLE = {
   open: 'bg-emerald-500/15 text-emerald-400', add: 'bg-emerald-500/15 text-emerald-400',
   reduce: 'bg-amber-500/15 text-amber-400', exit: 'bg-red-500/15 text-red-400',
@@ -249,6 +322,53 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                 <span v-for="(d, di) in m.decisions.slice(0, 4)" :key="di" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase" :class="ACTION_STYLE[d.action] || 'bg-slate-500/15 text-slate-400'">
                   {{ d.action }}<span v-if="d.size" class="font-normal normal-case">{{ d.size }}</span>
                 </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pregame analysis — decisions grouped by match (read-only view of the fetched log) -->
+        <div class="glass-card rounded-2xl p-4 sm:p-5">
+          <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">stadium</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Pregame analysis</span></div>
+          <p v-if="!matchBoard.length" class="text-sm text-slate-500">No matches analyzed yet. Once the engine reviews a game's sides, the home / draw / away edges show together here.</p>
+          <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div v-for="g in matchBoard" :key="g.key" class="rounded-xl border border-border-subtle bg-surface/40 p-4">
+              <!-- Game header: home crest · matchup · away crest + best-edge chip -->
+              <div class="flex items-center gap-3">
+                <img v-if="g.home_logo" :src="g.home_logo" referrerpolicy="no-referrer" class="w-9 h-9 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" :alt="g.home" />
+                <div v-else class="w-9 h-9 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[11px] font-bold text-slate-400 shrink-0">{{ initials(g.home) }}</div>
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-semibold text-slate-100 truncate">{{ g.home || '—' }} <span class="text-slate-600">vs</span> {{ g.away || '—' }}</div>
+                  <div v-if="g.home_elo != null || g.away_elo != null || g.home_xg != null || g.away_xg != null" class="text-[11px] text-slate-500 truncate">
+                    <span v-if="g.home_elo != null || g.away_elo != null">Elo {{ fmtNum(g.home_elo) ?? '?' }}/{{ fmtNum(g.away_elo) ?? '?' }}</span>
+                    <span v-if="(g.home_elo != null || g.away_elo != null) && (g.home_xg != null || g.away_xg != null)" class="text-slate-700"> · </span>
+                    <span v-if="g.home_xg != null || g.away_xg != null">xG {{ fmtNum(g.home_xg) ?? '?' }}/{{ fmtNum(g.away_xg) ?? '?' }}</span>
+                  </div>
+                </div>
+                <img v-if="g.away_logo" :src="g.away_logo" referrerpolicy="no-referrer" class="w-9 h-9 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" :alt="g.away" />
+                <div v-else class="w-9 h-9 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[11px] font-bold text-slate-400 shrink-0">{{ initials(g.away) }}</div>
+              </div>
+              <div v-if="g.bestEdge != null" class="mt-2">
+                <span class="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" :class="g.bestEdge > 0 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'">
+                  Best edge {{ (g.bestEdge >= 0 ? '+' : '') + pct(g.bestEdge) }}
+                </span>
+              </div>
+
+              <!-- One row per side present (home · draw · away) -->
+              <div class="mt-3 space-y-1.5">
+                <div v-for="(s, si) in g.sides" :key="si" class="flex items-center gap-2">
+                  <img v-if="s.pick_logo" :src="s.pick_logo" referrerpolicy="no-referrer" class="w-6 h-6 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />
+                  <div v-else class="w-6 h-6 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[9px] font-bold text-slate-400 shrink-0">{{ initials((s.pick_label || s.side || '').replace(' to win','')) }}</div>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-xs text-slate-200 truncate flex items-center gap-1.5">
+                      <span class="truncate">{{ s.pick_label || s.side }}</span>
+                      <span v-if="s.sharp_prob == null" class="shrink-0 text-[9px] uppercase tracking-wide text-slate-500/80 border border-border-subtle rounded px-1 py-px" title="No sharp line — model-only fair value">model-only</span>
+                    </div>
+                    <div class="text-[10px] text-slate-500 tabular-nums">Fair {{ pct(s.fused_fair) }} · {{ s.price == null ? '—' : s.price + '¢' }}<span v-if="s.ts" class="text-slate-600"> · updated {{ fmtTs(s.ts) }}</span></div>
+                  </div>
+                  <span class="text-xs tabular-nums font-semibold shrink-0 w-14 text-right" :class="s.edge == null ? 'text-slate-500' : (s.edge > 0 ? 'text-emerald-400' : 'text-red-400')">{{ s.edge == null ? '—' : (s.edge >= 0 ? '+' : '') + pct(s.edge) }}</span>
+                  <span class="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0" :class="decBadge(s.decision)">{{ s.decision }}</span>
+                </div>
               </div>
             </div>
           </div>
