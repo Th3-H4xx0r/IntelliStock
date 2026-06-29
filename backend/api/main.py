@@ -438,12 +438,21 @@ def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]
         reasoning = str(body.bedrock_reasoning or "").strip().lower()
         if reasoning:
             config["bedrock_reasoning"] = reasoning
+    if provider == "openrouter":
+        base = str(body.openrouter_base_url or "").strip()
+        config["openrouter_base_url"] = base or "https://openrouter.ai/api/v1"
+        referer = str(body.openrouter_referer or "").strip()
+        if referer:
+            config["openrouter_referer"] = referer
+        title = str(body.openrouter_title or "").strip()
+        if title:
+            config["openrouter_title"] = title
     reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
     # claude-cli accepts ``--effort`` (low/medium/high/xhigh/max) too —
     # its session manager folds it into the spawn argv. Drop the value
     # only for providers where the LLM dispatcher doesn't actually
     # forward it (gemini/deepseek/anthropic-direct as of today).
-    if provider in {"openai", "azure", "nvidia", "claude-cli", "codex-cli"} and reasoning_effort:
+    if provider in {"openai", "azure", "nvidia", "openrouter", "claude-cli", "codex-cli"} and reasoning_effort:
         config["reasoning_effort"] = reasoning_effort
     return config
 
@@ -531,6 +540,12 @@ class LlmConfigTestBody(BaseModel):
     # bedrock_reasoning is "off"/"low"/"medium"/"high" (Claude 3.7+ only).
     bedrock_region: Optional[str] = Field(default=None, max_length=32)
     bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
+    # OpenRouter provider config — base_url defaults to the public API when
+    # omitted; referer/title are optional leaderboard-attribution headers
+    # (HTTP-Referer / X-Title).
+    openrouter_base_url: Optional[str] = Field(default=None, max_length=512)
+    openrouter_referer: Optional[str] = Field(default=None, max_length=512)
+    openrouter_title: Optional[str] = Field(default=None, max_length=128)
 
 
 class LlmConfigTestOutput(BaseModel):
@@ -571,6 +586,11 @@ class CreateModelBody(BaseModel):
     # equivalent of ollama_think ("off"/"low"/"medium"/"high", Claude 3.7+).
     bedrock_region: Optional[str] = Field(default=None, max_length=32)
     bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
+    # OpenRouter provider config — base_url defaults to the public API;
+    # referer/title are optional leaderboard-attribution headers.
+    openrouter_base_url: Optional[str] = Field(default=None, max_length=512)
+    openrouter_referer: Optional[str] = Field(default=None, max_length=512)
+    openrouter_title: Optional[str] = Field(default=None, max_length=128)
     # Optional cache-grouping tag: rows sharing this value share LLM cache (same
     # underlying model across providers/names). See canonical_model_cache_key.
     model_cache_family: Optional[str] = Field(default=None, max_length=64)
@@ -600,6 +620,9 @@ class EditModelBody(BaseModel):
     ollama_think: Optional[str] = Field(default=None, max_length=16)
     bedrock_region: Optional[str] = Field(default=None, max_length=32)
     bedrock_reasoning: Optional[str] = Field(default=None, max_length=16)
+    openrouter_base_url: Optional[str] = Field(default=None, max_length=512)
+    openrouter_referer: Optional[str] = Field(default=None, max_length=512)
+    openrouter_title: Optional[str] = Field(default=None, max_length=128)
     model_cache_family: Optional[str] = Field(default=None, max_length=64)
     input_cost_per_1m: Optional[float] = Field(default=None, ge=0)
     output_cost_per_1m: Optional[float] = Field(default=None, ge=0)
@@ -2147,6 +2170,9 @@ def api_create_model(body: CreateModelBody, conn=Depends(conn_dependency), curre
             ollama_think=body.ollama_think,
             bedrock_region=body.bedrock_region,
             bedrock_reasoning=body.bedrock_reasoning,
+            openrouter_base_url=body.openrouter_base_url,
+            openrouter_referer=body.openrouter_referer,
+            openrouter_title=body.openrouter_title,
             model_cache_family=body.model_cache_family,
             input_cost_per_1m=body.input_cost_per_1m,
             output_cost_per_1m=body.output_cost_per_1m,
