@@ -22,7 +22,7 @@ _NATIONAL_ELO = {
     "Saudi Arabia": 1620, "Qatar": 1600, "Iraq": 1560, "Greece": 1700, "Czechia": 1690,
     "Hungary": 1700, "Romania": 1670, "Slovakia": 1660, "Slovenia": 1650, "New Zealand": 1560,
     # Additional World-Cup-field sides seen in discovery.
-    "Congo Dr": 1645, "Bosnia And Herzegovina": 1660, "Uzbekistan": 1635, "Curacao": 1490,
+    "Congo Dr": 1645, "Bosnia and Herzegovina": 1660, "Uzbekistan": 1635, "Curacao": 1490,
     "Jordan": 1565, "Panama": 1605, "Haiti": 1500, "South Africa": 1625, "Cape Verde": 1590,
     "Uganda": 1520, "Bolivia": 1580, "Venezuela": 1640, "Honduras": 1580, "Jamaica": 1590,
     "Mali": 1660, "Burkina Faso": 1620, "Guinea": 1600, "Gabon": 1560, "Albania": 1640,
