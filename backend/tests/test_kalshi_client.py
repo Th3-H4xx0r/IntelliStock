@@ -130,7 +130,7 @@ class _RoutingSession:
         self.deletes = []
 
     def request(self, method, url, headers=None, params=None, json=None, timeout=None):
-        if method == "GET" and url.endswith("/portfolio/orders"):
+        if method == "GET" and url.endswith("/portfolio/events/orders"):
             return _Resp({"orders": [{"order_id": "o1"}, {"order_id": "o2"}]})
         if method == "DELETE":
             self.deletes.append(url)
@@ -144,8 +144,8 @@ def test_cancel_all_open_orders_cancels_each():
     c = KalshiClient(key_id="abc", private_key_pem=pem, environment="demo", session=sess)
     n = c.cancel_all_open_orders()
     assert n == 2
-    assert any(u.endswith("/portfolio/orders/o1") for u in sess.deletes)
-    assert any(u.endswith("/portfolio/orders/o2") for u in sess.deletes)
+    assert any(u.endswith("/portfolio/events/orders/o1") for u in sess.deletes)
+    assert any(u.endswith("/portfolio/events/orders/o2") for u in sess.deletes)
 
 
 def test_get_resting_orders_excludes_filled():

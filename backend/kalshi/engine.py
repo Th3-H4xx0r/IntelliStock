@@ -580,6 +580,25 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # it, it won't double-order. This is the source of truth.
             placed_markets = set(positions_by_ticker) | resting_tickers
 
+            # Pre-trade balance gate state — avoids the observed insufficient_balance
+            # loop (over-leverage). Validate params + cap cumulative spend per tick.
+            from kalshi.reconcile import validate_order as _validate_order
+            try:
+                avail_cents = int(getattr(client.get_balance(), "cash_cents", 0) or 0)
+            except Exception:
+                avail_cents = 0
+            spent_this_tick = 0
+            # Aggregate OPEN-EXPOSURE cap (B1): the live path previously enforced only
+            # per-bet Kelly — never a portfolio cap. Bound total deployed across all
+            # open positions + this tick's new orders to max_open_exposure_frac.
+            try:
+                _open_cost = sum(int(getattr(p, "contracts", 0) or 0) * int(getattr(p, "avg_price_cents", 0) or 0)
+                                 for p in positions)
+            except Exception:
+                _open_cost = 0
+            _max_exposure_cents = int(float(getattr(config.caps, "max_open_exposure_frac", 0.15))
+                                      * int(getattr(config.caps, "bankroll_cents", 0)))
+
             alloc_by_id = {a["id"]: a for a in allocations}
             for d in decisions:
                 a = alloc_by_id.get(f"{d['fixture_id']}|{d['market_ticker']}")
@@ -587,18 +606,54 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     log(f"tick {tick}: already positioned/ordered {d['market_ticker']} — skipping.", "white")
                     d["decision"], d["block_reason"] = "skipped", "already positioned"
                 elif a and not dry:
-                    try:
-                        client.submit_order(
-                            market_ticker=d["market_ticker"], side="yes", action="buy",
-                            contracts=a["contracts"], limit_cents=a["price_cents"],
-                            client_order_id=f"{config.instance_id}-{d['market_ticker']}-{ts}",
-                        )
-                        placed_markets.add(d["market_ticker"])
-                        log(f"tick {tick}: PLACED {a['contracts']}x {d['market_ticker']} @ {a['price_cents']}c "
-                            f"(edge {(d['edge'] or 0):.1%}).", "green")
-                    except Exception as e:
-                        log(f"tick {tick}: order {d['market_ticker']} failed: {e}", "red")
-                        d["decision"], d["block_reason"] = "blocked", str(e)
+                    _okv, _whyv = _validate_order(a["contracts"], a["price_cents"])
+                    _cost = a["contracts"] * a["price_cents"]
+                    if not _okv:
+                        d["decision"], d["block_reason"] = "blocked", f"invalid order: {_whyv}"
+                        log(f"tick {tick}: order {d['market_ticker']} invalid: {_whyv}", "yellow")
+                    elif avail_cents and (spent_this_tick + _cost) > int(0.97 * avail_cents):
+                        d["decision"], d["block_reason"] = "blocked", "insufficient_balance_guard"
+                        log(f"tick {tick}: skip {d['market_ticker']} — balance guard "
+                            f"(need {_cost}c, ~{avail_cents - spent_this_tick}c free).", "yellow")
+                    elif _max_exposure_cents and (_open_cost + spent_this_tick + _cost) > _max_exposure_cents:
+                        d["decision"], d["block_reason"] = "blocked", "max_open_exposure cap"
+                        log(f"tick {tick}: skip {d['market_ticker']} — open-exposure cap "
+                            f"({_open_cost + spent_this_tick + _cost}c > {_max_exposure_cents}c).", "yellow")
+                    else:
+                        # Maker-first: rest a post_only YES bid inside the spread rather
+                        # than paying taker (research: takers consistently lose; making
+                        # avoids that quadrant). post_only auto-cancels if it would cross.
+                        _limit, _post_only = a["price_cents"], False
+                        if bool(getattr(config.caps, "maker_first", True)):
+                            try:
+                                from kalshi.live import orderbook as _ob
+                                _book = _ob.parse(client.get_orderbook(d["market_ticker"]))
+                                _mp = _ob.maker_buy_price(_book, fallback_ask=a["price_cents"])
+                                if _mp and _ob.allows_maker_buy(_book):
+                                    _limit, _post_only = _mp, True
+                            except Exception:
+                                pass
+                        try:
+                            _ref = client.submit_order(
+                                market_ticker=d["market_ticker"], side="yes", action="buy",
+                                contracts=a["contracts"], limit_cents=_limit, post_only=_post_only,
+                                client_order_id=f"{config.instance_id}-{d['market_ticker']}-{ts}",
+                            )
+                            spent_this_tick += _cost
+                            d["entry_avg_cents"] = _limit   # actual submitted price (maker may be < ask)
+                            placed_markets.add(d["market_ticker"])
+                            try:
+                                kdb.write_order(conn, client_order_id=getattr(_ref, "client_order_id", ""),
+                                                decision_id=d["id"], market_ticker=d["market_ticker"],
+                                                status=getattr(_ref, "status", "pending"),
+                                                requested=a["contracts"], ts=ts)
+                            except Exception:
+                                pass
+                            log(f"tick {tick}: PLACED {a['contracts']}x {d['market_ticker']} @ {a['price_cents']}c "
+                                f"(edge {(d['edge'] or 0):.1%}).", "green")
+                        except Exception as e:
+                            log(f"tick {tick}: order {d['market_ticker']} failed: {e}", "red")
+                            d["decision"], d["block_reason"] = "blocked", str(e)
                 elif a and dry:
                     placed_markets.add(d["market_ticker"])   # don't spam dry-run logs either
                     log(f"tick {tick}: DRY-RUN would place {a['contracts']}x {d['market_ticker']} @ "
@@ -607,6 +662,20 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(d, conflict="replace").run(conn)
                 except Exception:
                     pass
+
+            # 7b) Feedback loop: persist fills (ground-truth entry price) + reconcile
+            # any newly-settled positions (measurement only — writes outcome/realized_pnl
+            # /clv back to decisions; never trades, never flips live_enabled).
+            try:
+                kdb.upsert_fills(conn, client.get_fills(limit=200))
+            except Exception:
+                pass
+            try:
+                _s = kdb.settle_and_learn(conn, client, config.brokerage_id)
+                if _s.get("settled"):
+                    log(f"tick {tick}: reconciled {_s['settled']} settled position(s).", "cyan")
+            except Exception as e:
+                log(f"tick {tick}: settle_and_learn failed: {type(e).__name__}: {e}", "yellow")
 
             # 8) Live in-match monitoring (two-way) for in-play matches.
             if config.live_monitoring and live_matches:

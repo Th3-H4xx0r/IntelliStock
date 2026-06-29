@@ -36,7 +36,12 @@ class RiskCaps:
     per_league_cap_frac: float = 0.25       # per correlated category
     daily_loss_cap_cents: int = 0           # 0 = disabled
     bankroll_cents: int = 0
-    min_stake_frac: float = 0.0             # floor: any +EV bet stakes >= this frac of bankroll
+    min_stake_frac: float = 0.0             # legacy floor (default 0 = disabled; the floor forced thin edges huge)
+    per_bet_cap_frac: float = 0.0           # ceiling: cap any single bet at this frac of bankroll (0 = disabled)
+    min_price_cents: int = 15               # price-band floor (no cheap-longshot YES — every sub-15c bet lost)
+    max_price_cents: int = 90               # price-band ceiling (no near-cert favorites — fees eat the upside)
+    draw_min_edge: float = 0.10             # draws require this much edge (model overstates draw prob)
+    maker_first: bool = True                # rest post_only inside the spread vs paying the taker fee
 
 
 def size_order(*, edge: float, yes_ask_cents: float, caps: RiskCaps) -> int:
@@ -46,7 +51,12 @@ def size_order(*, edge: float, yes_ask_cents: float, caps: RiskCaps) -> int:
     frac = quarter_kelly_fraction(edge=edge, price_cents=yes_ask_cents, kelly=caps.kelly_fraction)
     if frac <= 0.0 or caps.bankroll_cents <= 0 or yes_ask_cents <= 0:
         return 0
-    stake_cents = max(frac, max(0.0, caps.min_stake_frac)) * caps.bankroll_cents
+    eff = frac
+    if caps.min_stake_frac > 0.0:
+        eff = max(eff, caps.min_stake_frac)              # legacy floor (default 0 = off)
+    if getattr(caps, "per_bet_cap_frac", 0.0) > 0.0:
+        eff = min(eff, caps.per_bet_cap_frac)            # ceiling: cap single-bet exposure
+    stake_cents = eff * caps.bankroll_cents
     contracts = int(math.floor(stake_cents / yes_ask_cents))
     return max(0, min(contracts, caps.max_contracts_per_market))
 

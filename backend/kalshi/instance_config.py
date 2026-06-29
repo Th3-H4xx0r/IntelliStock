@@ -28,19 +28,29 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
     tier = str(raw.get("tier") or "medium").lower()
     if tier not in ("low", "medium", "high", "max"):
         tier = "medium"
-    # Per-bet minimum stake as a fraction of bankroll, scaled by risk tier — so a
-    # +EV bet isn't dust even on a thin edge (the user's risk choice sets how big).
-    _min_stake_by_tier = {"low": 0.04, "medium": 0.08, "high": 0.12, "max": 0.20}
+    # Legacy min-stake FLOOR disabled (it forced thin edges into huge bets — a top
+    # loss driver). A per-bet CEILING (by tier) caps single-bet exposure instead.
+    _per_bet_cap_by_tier = {"low": 0.03, "medium": 0.05, "high": 0.07, "max": 0.10}
+    _bankroll = _dollars_to_cents(raw.get("bankroll_dollars"), 0)
+    # Daily loss cap auto-derives to 8% of bankroll when not set explicitly.
+    _daily_loss = _dollars_to_cents(raw.get("daily_loss_cap_dollars"), 0) or (round(0.08 * _bankroll) if _bankroll else 0)
     return {
         "leagues": [str(x) for x in leagues if str(x).strip()] or DEFAULT_LEAGUES,
-        "edge_threshold": float(raw.get("edge_threshold", 0.03)),
-        "kelly_fraction": float(raw.get("kelly_fraction", 0.25)),
-        "min_stake_frac": float(raw.get("min_stake_frac", _min_stake_by_tier.get(tier, 0.08))),
+        "edge_threshold": float(raw.get("edge_threshold", 0.04)),
+        "kelly_fraction": float(raw.get("kelly_fraction", 0.125)),
+        "min_stake_frac": float(raw.get("min_stake_frac", 0.0)),
+        "per_bet_cap_frac": float(raw.get("per_bet_cap_frac", _per_bet_cap_by_tier.get(tier, 0.05))),
         "max_contracts_per_market": int(raw.get("max_contracts_per_market", 50)),
-        "max_open_exposure_frac": float(raw.get("max_open_exposure_frac", 0.60)),
+        "max_open_exposure_frac": float(raw.get("max_open_exposure_frac", 0.15)),
         "per_league_cap_frac": float(raw.get("per_league_cap_frac", 0.25)),
-        "daily_loss_cap_cents": _dollars_to_cents(raw.get("daily_loss_cap_dollars"), 0),
-        "bankroll_cents": _dollars_to_cents(raw.get("bankroll_dollars"), 0),
+        # Price band + draw gate (favorite-longshot tax): no cheap longshots, no
+        # near-certs, draws need a big edge. This is where 100% of the losses were.
+        "min_price_cents": int(raw.get("min_price_cents", 15)),
+        "max_price_cents": int(raw.get("max_price_cents", 90)),
+        "draw_min_edge": float(raw.get("draw_min_edge", 0.10)),
+        "maker_first": bool(raw.get("maker_first", True)),
+        "daily_loss_cap_cents": _daily_loss,
+        "bankroll_cents": _bankroll,
         "poll_seconds": max(15, int(raw.get("poll_seconds", 60))),
         "bankroll_usage_pct": min(100, max(0, int(raw.get("bankroll_usage_pct", 50)))),
         "tier": tier,
@@ -50,13 +60,13 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "live_monitoring": bool(raw.get("live_monitoring", True)),
         "live_poll_seconds": max(10, int(raw.get("live_poll_seconds", 30))),
         "analyst_max_calls": max(0, int(raw.get("analyst_max_calls", 10))),
-        "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", 0.25)),
-        "max_adds_per_match": int(raw.get("max_adds_per_match", 3)),
-        "no_add_after_min": float(raw.get("no_add_after_min", 80.0)),
-        "stop_loss_frac": float(raw.get("stop_loss_frac", 0.5)),
+        "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", 0.15)),
+        "max_adds_per_match": int(raw.get("max_adds_per_match", 2)),
+        "no_add_after_min": float(raw.get("no_add_after_min", 75.0)),
+        "stop_loss_frac": float(raw.get("stop_loss_frac", 0.35)),
         # Sharp-odds anchor (de-vig'd bookmaker odds -> fair value -> edge vs Kalshi).
         "odds_api_key": str(raw.get("odds_api_key") or "").strip(),
-        "sharp_weight": min(1.0, max(0.0, float(raw.get("sharp_weight", 0.7)))),
+        "sharp_weight": min(1.0, max(0.0, float(raw.get("sharp_weight", 0.85)))),
         "devig_method": (str(raw.get("devig_method") or "power").lower()
                          if str(raw.get("devig_method") or "power").lower()
                          in ("power", "shin", "proportional") else "power"),
@@ -83,14 +93,19 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
     """Build the engine's RiskCaps from a stored kalshi_config."""
     c = config or {}
     return RiskCaps(
-        edge_threshold=float(c.get("edge_threshold", 0.03)),
-        kelly_fraction=float(c.get("kelly_fraction", 0.25)),
+        edge_threshold=float(c.get("edge_threshold", 0.04)),
+        kelly_fraction=float(c.get("kelly_fraction", 0.125)),
         max_contracts_per_market=int(c.get("max_contracts_per_market", 50)),
-        max_open_exposure_frac=float(c.get("max_open_exposure_frac", 0.60)),
+        max_open_exposure_frac=float(c.get("max_open_exposure_frac", 0.15)),
         per_league_cap_frac=float(c.get("per_league_cap_frac", 0.25)),
         daily_loss_cap_cents=int(c.get("daily_loss_cap_cents", 0)),
         bankroll_cents=int(c.get("bankroll_cents", 0)),
-        min_stake_frac=float(c.get("min_stake_frac", 0.08)),
+        min_stake_frac=float(c.get("min_stake_frac", 0.0)),
+        per_bet_cap_frac=float(c.get("per_bet_cap_frac", 0.05)),
+        min_price_cents=int(c.get("min_price_cents", 15)),
+        max_price_cents=int(c.get("max_price_cents", 90)),
+        draw_min_edge=float(c.get("draw_min_edge", 0.10)),
+        maker_first=bool(c.get("maker_first", True)),
     )
 
 
@@ -99,12 +114,14 @@ def inplay_caps_from_config(config: dict) -> InPlayCaps:
     caps are intentionally tighter than the pre-match RiskCaps)."""
     c = config or {}
     return InPlayCaps(
-        edge_threshold=float(c.get("edge_threshold", 0.03)),
-        kelly_fraction=float(c.get("kelly_fraction", 0.25)),
+        edge_threshold=float(c.get("edge_threshold", 0.04)),
+        kelly_fraction=float(c.get("kelly_fraction", 0.125)),
         bankroll_cents=int(c.get("bankroll_cents", 0)),
         max_contracts_per_market=int(c.get("max_contracts_per_market", 50)),
-        inplay_exposure_frac=float(c.get("inplay_exposure_frac", 0.25)),
-        max_adds_per_match=int(c.get("max_adds_per_match", 3)),
-        no_add_after_min=float(c.get("no_add_after_min", 80.0)),
-        stop_loss_frac=float(c.get("stop_loss_frac", 0.5)),
+        inplay_exposure_frac=float(c.get("inplay_exposure_frac", 0.15)),
+        max_adds_per_match=int(c.get("max_adds_per_match", 2)),
+        no_add_after_min=float(c.get("no_add_after_min", 75.0)),
+        stop_loss_frac=float(c.get("stop_loss_frac", 0.35)),
+        take_profit_mult=float(c.get("take_profit_mult", 1.6)),
+        catastrophe_stop_frac=float(c.get("catastrophe_stop_frac", 0.6)),
     )
