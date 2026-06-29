@@ -25,8 +25,35 @@ class StrategyRepository {
   }
 
   /// PUT /strategies/:id
-  Future<Map<String, dynamic>> update(String id, Map<String, dynamic> body) async {
-    return _client.put<Map<String, dynamic>>('/strategies/$id', body: body);
+  ///
+  /// When [preserveHistory] is true, the backend re-stamps existing Nexus
+  /// saved-state to the new model identities so the next boot reuses it instead
+  /// of running a destructive lookback + cleanup. Set it only after the operator
+  /// confirms the preserve-history prompt (see [previewConfigChange]).
+  Future<Map<String, dynamic>> update(
+    String id,
+    Map<String, dynamic> body, {
+    bool preserveHistory = false,
+  }) async {
+    final payload = preserveHistory
+        ? {...body, 'preserve_history': true}
+        : body;
+    return _client.put<Map<String, dynamic>>('/strategies/$id', body: payload);
+  }
+
+  /// POST /strategies/:id/config-change-preview
+  ///
+  /// Read-only dry-run: returns `{needs_prompt, instances: [...]}` indicating
+  /// whether saving [strategies] would rebuild Nexus history for any linked
+  /// instance that has existing live state.
+  Future<Map<String, dynamic>> previewConfigChange(
+    String id,
+    List<dynamic> strategies,
+  ) async {
+    return _client.post<Map<String, dynamic>>(
+      '/strategies/$id/config-change-preview',
+      body: {'strategies': strategies},
+    );
   }
 
   /// GET /strategies/available → list of available strategy type names.

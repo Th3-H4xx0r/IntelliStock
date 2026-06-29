@@ -2847,84 +2847,15 @@ def _merged_strategy_settings(spec):
     return merged
 
 
-def _nexus_history_scope_doc(settings):
-    settings = settings if isinstance(settings, dict) else {}
-
-    def _role_provider(prefix):
-        return str(
-            settings.get(f"{prefix}llm_provider")
-            or settings.get("llm_provider")
-            or ""
-        ).strip().lower()
-
-    def _role_reasoning(prefix):
-        return normalize_reasoning_effort(
-            settings.get(f"{prefix}llm_reasoning_effort")
-            or settings.get("llm_reasoning_effort")
-            or ""
-        )
-
-    def _role_model(prefix):
-        model = str(
-            settings.get(f"{prefix}llm_model")
-            or settings.get("llm_model")
-            or ""
-        ).strip()
-        return llm_model_reference(model, _role_reasoning(prefix))
-
-    def _role_prompt(prefix):
-        if prefix:
-            return str(
-                settings.get(f"{prefix}llm_prompt_version")
-                or settings.get("llm_prompt_version")
-                or ""
-            ).strip()
-        return str(settings.get("llm_prompt_version") or "").strip()
-
-    return {
-        "scope_version": "nexus_history_model_scope_v3",
-        "root_provider": _role_provider(""),
-        "root_model": _role_model(""),
-        "root_prompt_version": _role_prompt(""),
-        "company_provider": _role_provider("company_article_"),
-        "company_model": _role_model("company_article_"),
-        "company_prompt_version": _role_prompt("company_article_"),
-        "macro_provider": _role_provider("macro_article_"),
-        "macro_model": _role_model("macro_article_"),
-        "macro_prompt_version": _role_prompt("macro_article_"),
-        "event_provider": _role_provider("event_maintenance_"),
-        "event_model": _role_model("event_maintenance_"),
-        "event_prompt_version": _role_prompt("event_maintenance_"),
-        "overlay_provider": _role_provider("overlay_"),
-        "overlay_model": _role_model("overlay_"),
-        "overlay_prompt_version": _role_prompt("overlay_"),
-        "azure_endpoint": str(settings.get("azure_openai_endpoint") or "").strip(),
-        "azure_api_version": str(settings.get("azure_openai_api_version") or "").strip(),
-        "openai_base_url": str(settings.get("openai_base_url") or "").strip(),
-        "use_toon_format": bool(settings.get("use_toon_format", True)),
-        "graph_feature_version": str(settings.get("graph_feature_version") or "nexus_hybrid_v1"),
-        "history_scope_salt": str(settings.get("history_scope_salt") or "").strip(),
-        "max_daily_alpaca_articles": int(settings.get("max_daily_alpaca_articles", 50)),
-        "max_daily_google_news_articles": int(settings.get("max_daily_google_news_articles", 50)),
-        "num_articles_for_llm": int(settings.get("num_articles_for_llm", 30)),
-        "min_articles": int(settings.get("min_articles", 20)),
-        "google_news_enabled": bool(settings.get("google_news_enabled", True)),
-        # NOTE: Trading-rule keys (buy_threshold, fast_loser_cut_pct, etc.) are NOT
-        # included here because changing them would change the instance_id and orphan
-        # all lookback data (forcing a 2-hour rebuild). Instead, trading-rule changes
-        # are detected in the cleanup marker's trading_config_hash (graph_nexus_analysis.py).
-    }
-
-
-def _nexus_history_scope_id(settings):
-    settings = settings if isinstance(settings, dict) else {}
-    explicit = str(settings.get("history_scope_id") or "").strip()
-    if explicit:
-        return explicit
-    scope_doc = _nexus_history_scope_doc(settings)
-    return hashlib.sha256(
-        json.dumps(scope_doc, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:24]
+# The history-scope identity now lives in the shared, broker-free
+# `nexus_config_identity` module so the "preserve history" re-stamp feature and
+# this boot path compute byte-identical hashes. These thin aliases keep the
+# existing in-module call sites (`_resolve_nexus_runtime_identity`, etc.) working.
+from nexus_config_identity import (
+    history_scope_doc as _nexus_history_scope_doc,
+    history_scope_id as _nexus_history_scope_id,
+    live_config_hash as _nexus_live_config_hash,
+)
 
 
 def _resolve_nexus_runtime_identity(base_instance_id, settings):
@@ -5656,13 +5587,8 @@ elif mode == MODE_LIVE:
                         except Exception as _ehp_e:
                             _log(f"[snapshot] config-hash spec preload failed (non-fatal): {_ehp_e}", "yellow")
                     _bt_cfg_load = (_nexus_spec_for_load or {}).get("config") or {}
-                    _current_config_hash = _compute_config_hash({
-                        "strategy_name": _nexus_name,
-                        "prompt_versions": _collect_prompt_versions(_bt_cfg_load),
-                        "llm_stages": _collect_llm_stages(_bt_cfg_load),
-                        "history_scope_id_inputs": _collect_history_scope_inputs(_bt_cfg_load),
-                        "lookback_learning_days": int(_bt_cfg_load.get("lookback_learning_days", 120) or 120),
-                    })
+                    # Shared identity (matches the re-stamp feature byte-for-byte).
+                    _current_config_hash = _nexus_live_config_hash(_bt_cfg_load, strategy_name=_nexus_name)
                     _nexus_module_path = _resolve_nexus_module_path() or ""
                     _current_module_hash = _compute_module_hash(_nexus_module_path) if _nexus_module_path else "missing"
                     _snap_cache, _snap_reason, _gap_dates, _snap_origin = _invoke_load_snapshot_with_gap(

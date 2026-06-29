@@ -755,6 +755,16 @@ const editStrategyOk      = ref(false)
 const editStrategyData    = ref(null)
 const editStrategyPickName = ref('')
 const availableStrategies = ref([])
+// Preserve-history popup: shown when a save would change the Nexus model
+// identity for an instance that has existing live state.
+const showPreserveHistory = ref(false)
+const preserveHistoryInfo = ref(null)  // { instances: [{ base_instance_id, ... }] }
+const preserveHistoryAffectedNames = computed(() => {
+  const list = (preserveHistoryInfo.value?.instances || [])
+    .filter(i => i.would_rebuild && i.snapshot_exists)
+    .map(i => i.base_instance_id)
+  return list.length ? list.join(', ') : 'this instance'
+})
 const configJsonDrafts = ref({})
 const configJsonErrors = ref({})
 
@@ -1147,26 +1157,67 @@ async function submitEditStrategy() {
   if (!d.name?.trim()) { editStrategyMsg.value = 'Strategy name is required'; editStrategyOk.value = false; return }
   if (hasConfigEditorErrors()) { editStrategyMsg.value = 'Fix invalid JSON config fields before saving'; editStrategyOk.value = false; return }
   editStrategySaving.value = true
+  editStrategyMsg.value    = 'Checking for model changes...'
+  editStrategyOk.value     = false
+  // Ask the backend whether this save would rebuild Nexus history. If so, let
+  // the operator choose to preserve it; otherwise save straight through.
+  try {
+    const pres = await fetch(`${API_BASE}/strategies/${d.id}/config-change-preview`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ strategies: d.strategies }),
+    })
+    const presBody = await pres.json().catch(() => ({}))
+    if (pres.ok && presBody.needs_prompt) {
+      preserveHistoryInfo.value = presBody
+      showPreserveHistory.value = true
+      editStrategySaving.value  = false
+      editStrategyMsg.value     = ''
+      return
+    }
+  } catch { /* preview is advisory — fall through to a normal save */ }
+  await doSaveStrategy(false)
+}
+
+async function doSaveStrategy(preserveHistory) {
+  const d = editStrategyData.value
+  showPreserveHistory.value = false
+  editStrategySaving.value = true
   editStrategyMsg.value    = 'Saving...'
   editStrategyOk.value     = false
   try {
     const res = await fetch(`${API_BASE}/strategies/${d.id}`, {
       method: 'PUT',
       headers: authHeaders(),
-      body: JSON.stringify({ name: d.name.trim(), strategies: d.strategies }),
+      body: JSON.stringify({ name: d.name.trim(), strategies: d.strategies, preserve_history: !!preserveHistory }),
     })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`)
+    if (preserveHistory && body.restamp_error) {
+      // Config saved, but the re-stamp failed — history was NOT preserved, so
+      // the next boot will rebuild. Surface it instead of a false success.
+      editStrategyOk.value  = false
+      editStrategyMsg.value = `Saved, but preserving history failed: ${body.restamp_error}. Next start will rebuild.`
+      await fetchInstance()
+      return
+    }
     editStrategyOk.value  = true
-    editStrategyMsg.value = 'Strategy saved.'
+    editStrategyMsg.value = preserveHistory
+      ? 'Saved. History preserved — takes effect on next Stop→Start.'
+      : 'Strategy saved.'
     await fetchInstance()
-    setTimeout(() => { showEditStrategy.value = false }, 1200)
+    setTimeout(() => { showEditStrategy.value = false }, 1400)
   } catch (e) {
     editStrategyOk.value  = false
     editStrategyMsg.value = e.message || 'Something went wrong'
   } finally {
     editStrategySaving.value = false
   }
+}
+
+function cancelPreserveHistory() {
+  showPreserveHistory.value = false
+  editStrategyMsg.value = 'Save cancelled.'
 }
 
 // ── Create Backtest modal ─────────────────────────────────────────────────────
@@ -2264,6 +2315,53 @@ async function submitCreateBacktest() {
               class="flex-1 py-2.5 rounded-lg bg-amber-500 text-black text-sm font-bold hover:bg-amber-400 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
               <span v-if="editStrategySaving" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
               {{ editStrategySaving ? 'Saving...' : 'Save Changes' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+
+  <!-- ── Preserve History confirmation (model/identity change) ────────────── -->
+  <Teleport to="body">
+    <Transition name="fade">
+      <div
+        v-if="showPreserveHistory"
+        class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+        @click.self="cancelPreserveHistory"
+      >
+        <div class="relative w-full max-w-lg bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col">
+          <div class="flex items-center gap-3 px-6 py-5 border-b border-border-subtle">
+            <div class="size-9 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-violet-400 text-lg">history</span>
+            </div>
+            <h2 class="text-base font-bold">Analysis model changed</h2>
+          </div>
+          <div class="px-6 py-5 space-y-4 text-sm text-slate-300">
+            <p>
+              This change would otherwise rebuild Nexus analytical history for
+              <span class="font-semibold text-slate-100">{{ preserveHistoryAffectedNames }}</span>
+              (a full historic lookback + cleanup on next boot).
+            </p>
+            <p class="text-slate-400 leading-relaxed">
+              Preserve existing history and apply the new model only going forward?
+              Broker positions &amp; P&amp;L are unaffected either way. Takes effect on the
+              next Stop→Start. Preserved learned state was trained on the prior model and
+              the new model inherits it.
+            </p>
+          </div>
+          <div class="px-6 pb-6 pt-2 flex flex-col gap-2">
+            <button @click="doSaveStrategy(true)"
+              class="w-full py-2.5 rounded-lg bg-violet-500 text-white text-sm font-bold hover:bg-violet-400 transition-all">
+              Preserve &amp; apply forward
+            </button>
+            <button @click="doSaveStrategy(false)"
+              class="w-full py-2.5 rounded-lg border border-amber-500/40 text-amber-300 text-sm font-semibold hover:bg-amber-500/10 transition-colors">
+              Full rebuild (re-run lookback)
+            </button>
+            <button @click="cancelPreserveHistory"
+              class="w-full py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors">
+              Cancel
             </button>
           </div>
         </div>
