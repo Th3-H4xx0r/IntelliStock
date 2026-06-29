@@ -61,7 +61,8 @@ class ScrubbableAreaChart extends StatefulWidget {
   State<ScrubbableAreaChart> createState() => _ScrubbableAreaChartState();
 }
 
-class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
+class _ScrubbableAreaChartState extends State<ScrubbableAreaChart>
+    with AutomaticKeepAliveClientMixin {
   final ScrubController _scrub = ScrubController();
 
   // Cache the Syncfusion chart so an incidental rebuild never re-runs it.
@@ -69,6 +70,14 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
   List<DateTime>? _cacheTs;
   List<double>? _cacheVals;
   double? _cacheHeight;
+  // The Syncfusion entry animation must run AT MOST ONCE. Keep-alive stops the
+  // State (and _cachedChart) from being disposed when scrolled out of view, so
+  // scrolling back doesn't rebuild+replay; this flag additionally stops a data
+  // refresh from re-animating within a live State.
+  bool _animatedOnce = false;
+
+  @override
+  bool get wantKeepAlive => true;
 
   static const double _labelRowHeight = 20;
 
@@ -80,6 +89,7 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // required by AutomaticKeepAliveClientMixin
     final n = widget.values.length;
     if (n == 0 || widget.timestamps.length != n) {
       return SizedBox(height: widget.height);
@@ -183,6 +193,11 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
     _cacheVals = widget.values;
     _cacheHeight = widget.height;
 
+    // Animate only the first build in this State's lifetime (keep-alive makes
+    // that "once per screen visit", not "once per scroll").
+    final animate = widget.animate && !_animatedOnce;
+    _animatedOnce = true;
+
     final pts = [
       for (var i = 0; i < widget.values.length; i++)
         _TVPoint(widget.timestamps[i], widget.values[i]),
@@ -218,7 +233,7 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
         ? SplineAreaSeries<_TVPoint, num>(
             dataSource: pts,
             splineType: SplineType.monotonic,
-            animationDuration: widget.animate ? 700 : 0,
+            animationDuration: animate ? 700 : 0,
             xValueMapper: (p, i) => i,
             yValueMapper: (p, _) => p.v,
             color: c.withValues(alpha: 0.18),
@@ -229,7 +244,7 @@ class _ScrubbableAreaChartState extends State<ScrubbableAreaChart> {
         : SplineAreaSeries<_TVPoint, DateTime>(
             dataSource: pts,
             splineType: SplineType.monotonic,
-            animationDuration: widget.animate ? 700 : 0,
+            animationDuration: animate ? 700 : 0,
             xValueMapper: (p, _) => p.t,
             yValueMapper: (p, _) => p.v,
             color: c.withValues(alpha: 0.18),

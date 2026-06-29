@@ -193,9 +193,16 @@ class _AccountSelector extends StatelessWidget {
           dropdownColor: AppColors.panel,
           borderRadius: BorderRadius.circular(12),
           icon: Icon(Icons.expand_more, color: AppColors.textDim),
-          style: AppTextStyles.body.copyWith(color: AppColors.textMd),
+          // Theme the closed value AND each menu item explicitly — unstyled
+          // DropdownMenuItem text falls back to the system grey, which is what
+          // made the open menu look native. Matches the create-sheet dropdowns.
+          style: AppTextStyles.body.copyWith(color: AppColors.textHi),
           items: accounts
-              .map((a) => DropdownMenuItem(value: a.id, child: Text(a.accountName)))
+              .map((a) => DropdownMenuItem(
+                    value: a.id,
+                    child: Text(a.accountName,
+                        style: AppTextStyles.body.copyWith(color: AppColors.textHi)),
+                  ))
               .toList(),
           onChanged: onChanged,
         ),
