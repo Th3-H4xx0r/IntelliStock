@@ -424,6 +424,7 @@ const llmProviderOptions = [
   SelectOption(value: 'nvidia', label: 'NVIDIA NIM'),
   SelectOption(value: 'ollama', label: 'Ollama (local / cloud)'),
   SelectOption(value: 'bedrock', label: 'AWS Bedrock'),
+  SelectOption(value: 'openrouter', label: 'OpenRouter'),
   SelectOption(value: 'claude-cli', label: 'Claude Code CLI (subscription)'),
   SelectOption(value: 'codex-cli', label: 'OpenAI Codex CLI (subscription)'),
 ];

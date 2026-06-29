@@ -25,6 +25,7 @@ String _providerLabel(String p) {
     'nvidia': 'NVIDIA NIM',
     'ollama': 'Ollama (local/cloud)',
     'bedrock': 'AWS Bedrock',
+    'openrouter': 'OpenRouter',
     'claude-cli': 'Claude Code CLI',
     'codex-cli': 'OpenAI Codex CLI',
   };
@@ -508,6 +509,11 @@ class _AddEditSheetState extends ConsumerState<_AddEditSheet> {
         ollamaThink: e.ollamaThink ?? '',
         bedrockRegion: e.bedrockRegion?.isNotEmpty == true ? e.bedrockRegion! : 'us-east-1',
         bedrockReasoning: e.bedrockReasoning ?? 'off',
+        openrouterBaseUrl: e.openrouterBaseUrl?.isNotEmpty == true
+            ? e.openrouterBaseUrl!
+            : 'https://openrouter.ai/api/v1',
+        openrouterReferer: e.openrouterReferer ?? '',
+        openrouterTitle: e.openrouterTitle ?? '',
         modelCacheFamily: e.modelCacheFamily ?? '',
       );
       if (e.inputCostPer1m != null) _inputCostCtrl.text = e.inputCostPer1m!.toString();
