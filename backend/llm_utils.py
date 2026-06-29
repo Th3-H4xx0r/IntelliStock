@@ -1008,7 +1008,15 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
             default_headers["HTTP-Referer"] = referer
         if title:
             default_headers["X-Title"] = title
-        profile = _prompted_json_profile() if _prefers_prompted_structured_output(p, model) else None
+        # OpenRouter is a gateway to hundreds of open models (nvidia/nemotron,
+        # qwen, llama, mistral, …) whose native structured-output support
+        # (tool-calling / json_schema) is unreliable — exactly like NVIDIA NIM,
+        # which always uses prompted-JSON above. Default to the prompted-JSON
+        # profile for ALL openrouter models (not just the gpt-oss/gpt-5/kimi
+        # "quirky" markers) so single-shot structured calls don't fail on a
+        # model that can't honour a forced schema. Models that DO support
+        # native schema still work fine under prompted mode.
+        profile = _prompted_json_profile()
         if default_headers:
             try:
                 from openai import AsyncOpenAI as _AsyncOpenAI
