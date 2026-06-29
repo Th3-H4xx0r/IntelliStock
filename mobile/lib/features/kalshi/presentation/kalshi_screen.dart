@@ -368,15 +368,17 @@ const _kLeagues = [
 
 // Risk presets tune every config value; dlpct = daily-loss cap as a fraction of
 // the effective bankroll. Mirrors the web KalshiCreateInstanceModal presets.
+// Survival-first presets: fractional Kelly + small exposure caps + cash reserve
+// (all far below the old kelly 0.25-0.60 / exposure 60-100%). Mirrors the web modal.
 const _kRiskPresets = <String, Map<String, dynamic>>{
-  'low': {'label': 'Low', 'edge': 5.0, 'kelly': 0.15, 'maxC': 25, 'exp': 30.0, 'lcap': 12.0, 'usage': 25.0, 'poll': 90, 'dlpct': 0.05,
+  'low': {'label': 'Low', 'edge': 5.0, 'kelly': 0.10, 'maxC': 25, 'exp': 10.0, 'lcap': 12.0, 'usage': 40.0, 'poll': 90, 'dlpct': 0.05,
     'blurb': 'Conservative — fewer, higher-confidence trades; small stakes, tight daily-loss cap.'},
-  'medium': {'label': 'Medium', 'edge': 3.0, 'kelly': 0.25, 'maxC': 50, 'exp': 60.0, 'lcap': 25.0, 'usage': 50.0, 'poll': 60, 'dlpct': 0.10,
-    'blurb': 'Balanced — the default. Quarter-Kelly with moderate exposure.'},
-  'high': {'label': 'High', 'edge': 2.0, 'kelly': 0.40, 'maxC': 100, 'exp': 80.0, 'lcap': 40.0, 'usage': 75.0, 'poll': 45, 'dlpct': 0.20,
-    'blurb': 'Aggressive — lower edge bar, bigger Kelly and exposure. More variance.'},
-  'max': {'label': 'Max', 'edge': 1.0, 'kelly': 0.60, 'maxC': 200, 'exp': 100.0, 'lcap': 60.0, 'usage': 100.0, 'poll': 30, 'dlpct': 0.35,
-    'blurb': 'Maximum — trades nearly everything +EV at full size. Highest drawdown risk.'},
+  'medium': {'label': 'Medium', 'edge': 4.0, 'kelly': 0.125, 'maxC': 50, 'exp': 15.0, 'lcap': 25.0, 'usage': 50.0, 'poll': 60, 'dlpct': 0.08,
+    'blurb': 'Balanced — the default. Fractional-Kelly with a small exposure cap and cash reserve.'},
+  'high': {'label': 'High', 'edge': 3.0, 'kelly': 0.15, 'maxC': 75, 'exp': 25.0, 'lcap': 30.0, 'usage': 60.0, 'poll': 45, 'dlpct': 0.10,
+    'blurb': 'More active — lower edge bar, slightly bigger Kelly and exposure. More variance.'},
+  'max': {'label': 'Max', 'edge': 2.0, 'kelly': 0.20, 'maxC': 100, 'exp': 40.0, 'lcap': 40.0, 'usage': 70.0, 'poll': 30, 'dlpct': 0.15,
+    'blurb': 'Aggressive — more +EV spots at larger size. Highest variance, but capped well below the old defaults.'},
 };
 
 class _CreateInstanceSheet extends ConsumerStatefulWidget {
@@ -392,16 +394,16 @@ class _CreateInstanceSheet extends ConsumerStatefulWidget {
 class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   late String _brokerageId = widget.initialBrokerageId;
   final _name = TextEditingController();
-  final _edge = TextEditingController(text: '3');
-  final _kelly = TextEditingController(text: '0.25');
+  final _edge = TextEditingController(text: '4');
+  final _kelly = TextEditingController(text: '0.125');
   final _maxContracts = TextEditingController(text: '50');
-  final _exposure = TextEditingController(text: '60');
+  final _exposure = TextEditingController(text: '15');
   final _leagueCap = TextEditingController(text: '25');
   final _dailyLoss = TextEditingController(text: '100');
   final _poll = TextEditingController(text: '60');
   final _manualBankroll = TextEditingController(text: '1000');
   final _oddsKey = TextEditingController();
-  double _sharpWeight = 70;
+  double _sharpWeight = 85;
   final Set<String> _leagues = {'EPL', 'Serie B', 'Ligue 2'};
   double _usagePct = 50;
   double _balance = 0;

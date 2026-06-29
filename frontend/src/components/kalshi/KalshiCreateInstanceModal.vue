@@ -27,15 +27,17 @@ const LEAGUES = [
 
 // Risk presets tune every config value. dailyLossPct = daily-loss cap as a
 // fraction of the effective bankroll. Users can still tweak any value after.
+// Survival-first presets: fractional Kelly + small exposure caps + cash reserve.
+// (All far below the old defaults — kelly was 0.25-0.60, exposure 60-100%.)
 const RISK_PRESETS = {
-  low:    { label: 'Low',    edgePct: 5, kelly: 0.15, maxContracts: 25,  exposurePct: 30,  leagueCapPct: 12, usagePct: 25,  poll: 90, dailyLossPct: 0.05,
+  low:    { label: 'Low',    edgePct: 5, kelly: 0.10,  maxContracts: 25,  exposurePct: 10, leagueCapPct: 12, usagePct: 40, poll: 90, dailyLossPct: 0.05,
             blurb: 'Conservative — fewer, higher-confidence trades; small stakes and a tight daily-loss cap.' },
-  medium: { label: 'Medium', edgePct: 3, kelly: 0.25, maxContracts: 50,  exposurePct: 60,  leagueCapPct: 25, usagePct: 50,  poll: 60, dailyLossPct: 0.10,
-            blurb: 'Balanced — the default. Quarter-Kelly with moderate exposure.' },
-  high:   { label: 'High',   edgePct: 2, kelly: 0.40, maxContracts: 100, exposurePct: 80,  leagueCapPct: 40, usagePct: 75,  poll: 45, dailyLossPct: 0.20,
-            blurb: 'Aggressive — lower edge bar, bigger Kelly and exposure. More trades, more variance.' },
-  max:    { label: 'Max',    edgePct: 1, kelly: 0.60, maxContracts: 200, exposurePct: 100, leagueCapPct: 60, usagePct: 100, poll: 30, dailyLossPct: 0.35,
-            blurb: 'Maximum — trades nearly everything +EV at full size. Highest variance and drawdown risk.' },
+  medium: { label: 'Medium', edgePct: 4, kelly: 0.125, maxContracts: 50,  exposurePct: 15, leagueCapPct: 25, usagePct: 50, poll: 60, dailyLossPct: 0.08,
+            blurb: 'Balanced — the default. Fractional-Kelly with a small exposure cap and a cash reserve.' },
+  high:   { label: 'High',   edgePct: 3, kelly: 0.15,  maxContracts: 75,  exposurePct: 25, leagueCapPct: 30, usagePct: 60, poll: 45, dailyLossPct: 0.10,
+            blurb: 'More active — lower edge bar, slightly bigger Kelly and exposure. More trades, more variance.' },
+  max:    { label: 'Max',    edgePct: 2, kelly: 0.20,  maxContracts: 100, exposurePct: 40, leagueCapPct: 40, usagePct: 70, poll: 30, dailyLossPct: 0.15,
+            blurb: 'Aggressive — more +EV spots at larger size. Highest variance, but still capped well below the old defaults.' },
 }
 
 const brokerageId = ref(props.initialBrokerageId || (props.brokerages[0]?.id ?? ''))
@@ -45,20 +47,20 @@ const balanceErr = ref('')
 
 const name = ref('')
 const leagues = ref(['EPL', 'Serie B', 'Ligue 2'])
-const edgePct = ref(3)
-const kelly = ref(0.25)
+const edgePct = ref(4)
+const kelly = ref(0.125)
 const maxContracts = ref(50)
-const exposurePct = ref(60)
+const exposurePct = ref(15)
 const leagueCapPct = ref(25)
 const usagePct = ref(50)
 const manualBankroll = ref(1000)
 const dailyLoss = ref(0)
 const dailyLossTouched = ref(false)
-const dailyLossPct = ref(0.10)
+const dailyLossPct = ref(0.08)
 const poll = ref(60)
 const liveMonitoring = ref(true)
 const oddsApiKey = ref('')
-const sharpWeight = ref(70)
+const sharpWeight = ref(85)
 const risk = ref('medium')
 // Live brokerage: dry-run (read real prices, place NO real orders) by default. Toggle
 // OFF to place REAL orders. Demo ignores this (it sandbox-executes).
