@@ -217,15 +217,63 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final skipped = (s?['skipped'] ?? 0).toString();
     final queued = (s?['queued'] ?? 0).toString();
     final blocked = (s?['blocked'] ?? 0).toString();
-    return Row(children: [
-      Expanded(child: StatTile(label: 'Placed', value: placed, valueColor: AppColors.success)),
-      const SizedBox(width: 8),
-      Expanded(child: StatTile(label: 'Skipped', value: skipped)),
-      const SizedBox(width: 8),
-      Expanded(child: StatTile(label: 'Queued', value: queued, valueColor: AppColors.warning)),
-      const SizedBox(width: 8),
-      Expanded(child: StatTile(label: 'Blocked', value: blocked, valueColor: AppColors.danger)),
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Expanded(child: StatTile(label: 'Placed', value: placed, valueColor: AppColors.success)),
+        const SizedBox(width: 8),
+        Expanded(child: StatTile(label: 'Skipped', value: skipped)),
+        const SizedBox(width: 8),
+        Expanded(child: StatTile(label: 'Queued', value: queued, valueColor: AppColors.warning)),
+        const SizedBox(width: 8),
+        Expanded(child: StatTile(label: 'Blocked', value: blocked, valueColor: AppColors.danger)),
+      ]),
+      _paperPnl(s),
     ]);
+  }
+
+  // Paper P&L line: realized (closed) + live unrealized (open), each green/red.
+  Widget _paperPnl(Map<String, dynamic>? s) {
+    final realC = (s?['realized_pnl_cents'] as num?)?.toDouble();
+    final unrealC = (s?['unrealized_pnl_cents'] as num?)?.toDouble();
+    final openPos = (s?['open_positions'] as num?)?.toInt();
+    if (realC == null && unrealC == null) return const SizedBox.shrink();
+    final realPos = (realC ?? 0) >= 0;
+    final unrealPos = (unrealC ?? 0) >= 0;
+    String dollars(double cents) =>
+        '${cents >= 0 ? '+' : '-'}\$${(cents.abs() / 100).toStringAsFixed(2)}';
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(children: [
+        Icon(Icons.science_outlined, color: AppColors.warning, size: 14),
+        const SizedBox(width: 6),
+        Text('Paper P&L', style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: RichText(
+            overflow: TextOverflow.ellipsis,
+            text: TextSpan(children: [
+              TextSpan(
+                text: 'realized ${realC == null ? '—' : dollars(realC)}',
+                style: AppTextStyles.nano.copyWith(
+                    color: realC == null ? AppColors.textDim : (realPos ? AppColors.success : AppColors.danger),
+                    fontWeight: FontWeight.w600),
+              ),
+              TextSpan(text: '  ·  ', style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+              TextSpan(
+                text: 'unrealized ${unrealC == null ? '—' : dollars(unrealC)}',
+                style: AppTextStyles.nano.copyWith(
+                    color: unrealC == null ? AppColors.textDim : (unrealPos ? AppColors.success : AppColors.danger),
+                    fontWeight: FontWeight.w600),
+              ),
+              TextSpan(
+                text: openPos == null ? ' (live)' : ' (live · $openPos open)',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+              ),
+            ]),
+          ),
+        ),
+      ]),
+    );
   }
 
   final ValueNotifier<int?> _scrubIdx = ValueNotifier<int?>(null);
@@ -467,6 +515,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final data = ordersAsync.value ?? const <String, dynamic>{};
     final placed = (data['placed'] as List?) ?? const [];
     final fills = (data['fills'] as List?) ?? const [];
+    final mock = (data['mock'] as List?) ?? const [];
     return GlassCard(
    frosted: true,      padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -497,6 +546,69 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
           const SizedBox(height: 6),
           ...fills.take(12).map((f) => _orderTile(f as Map<String, dynamic>, filled: true)),
         ],
+        const SizedBox(height: 12),
+        Row(children: [
+          Icon(Icons.science_outlined, color: AppColors.warning, size: 14),
+          const SizedBox(width: 5),
+          Text('MOCK POSITIONS · ${mock.length}',
+              style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+        ]),
+        const SizedBox(height: 6),
+        if (mock.isEmpty)
+          Text('No mock (paper) positions.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+        ...mock.take(12).map((m) => _mockTile(m as Map<String, dynamic>)),
+      ]),
+    );
+  }
+
+  // Paper "mock" position: live unrealized P&L plus the entry→mark cents trail.
+  Widget _mockTile(Map<String, dynamic> m) {
+    final match = (m['match'] ?? m['market_ticker'] ?? '').toString();
+    final pick = (m['pick_label'] ?? m['side'] ?? '').toString();
+    final contracts = (m['contracts'] as num?)?.toInt() ?? 0;
+    final entryCents = (m['entry_cents'] as num?)?.toInt();
+    final markCents = (m['mark_cents'] as num?)?.toInt();
+    final upCents = (m['unrealized_pnl_cents'] as num?)?.toDouble();
+    final upPos = (upCents ?? 0) > 0;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: AppColors.fill(AppColors.surface),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(children: [
+        _crest((m['pick_logo'] ?? '').toString(), pick.replaceAll(' to win', '')),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: Text(match, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600))),
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(color: AppColors.fill(AppColors.warning), borderRadius: BorderRadius.circular(4)),
+              child: Text('MOCK', style: AppTextStyles.nano.copyWith(color: AppColors.warning, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              upCents == null ? '—' : '${upPos ? '+' : '-'}\$${(upCents.abs() / 100).toStringAsFixed(2)}',
+              style: AppTextStyles.nano.copyWith(
+                  color: upCents == null
+                      ? AppColors.textDim
+                      : (upPos ? AppColors.success : AppColors.danger),
+                  fontWeight: FontWeight.bold),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Row(children: [
+            Expanded(child: Text(pick, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.nano.copyWith(color: AppColors.primary, fontWeight: FontWeight.w500))),
+            Text('$contracts @ ${entryCents ?? '—'}¢ → ${markCents ?? '—'}¢',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          ]),
+        ])),
       ]),
     );
   }
@@ -555,17 +667,28 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     const order = {'home': 0, 'draw': 1, 'away': 2};
     final bySide = <String, Map<String, dynamic>>{};
     final everPlaced = <String, bool>{};
+    // The edge at which the side actually placed (from the 'placed' row), so a
+    // held side can show "placed @ +6.0%" alongside its now-decayed live edge.
+    final placedEdge = <String, double>{};
     for (final r in rs) {
       final side = (r['side'] ?? '').toString();
-      everPlaced[side] = (everPlaced[side] ?? false) || r['decision'] == 'placed';
+      if (r['decision'] == 'placed') {
+        everPlaced[side] = true;
+        final pe = (r['entry_edge'] as num?)?.toDouble();
+        if (pe != null) placedEdge[side] = pe;
+      } else {
+        everPlaced[side] = everPlaced[side] ?? false;
+      }
       final prev = bySide[side];
       final ts = (r['ts'] ?? '').toString();
       final pts = (prev?['ts'] ?? '').toString();
       if (prev == null || ts.compareTo(pts) >= 0) bySide[side] = r;
     }
     final out = bySide.entries.map((e) {
+      // The kept row already carries 'edge_history' (it's the latest row map).
       final m = Map<String, dynamic>.from(e.value);
       if (everPlaced[e.key] == true) m['decision'] = 'placed';
+      if (placedEdge.containsKey(e.key)) m['entry_edge'] = placedEdge[e.key];
       return m;
     }).toList()
       ..sort((a, b) => (order[a['side']] ?? 9).compareTo(order[b['side']] ?? 9));
@@ -680,6 +803,11 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final dec = (r['decision'] ?? '').toString();
     final modelOnly = r['sharp_prob'] == null;
     final updated = _fmtTs(r['ts']?.toString());
+    // Edge-over-time sparkline points (carried through _dedupeSides).
+    final spark = _edgeSeries(r['edge_history']);
+    // Entry edge captured from the 'placed' row (e.g. placed @ +6.0%).
+    final placed = dec.toLowerCase() == 'placed';
+    final entryEdge = (r['entry_edge'] as num?)?.toDouble();
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -693,6 +821,13 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   color: AppColors.textFaint, fontStyle: FontStyle.italic)),
             ],
           ])),
+          if (spark.length >= 2) ...[
+            const SizedBox(width: 8),
+            SizedBox(
+              width: 60, height: 16,
+              child: CustomPaint(painter: _EdgeSparkPainter(spark)),
+            ),
+          ],
           const SizedBox(width: 8),
           _sidePill(dec),
         ]),
@@ -712,8 +847,26 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
             Text('updated $updated', style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
           ],
         ]),
+        if (placed && entryEdge != null) ...[
+          const SizedBox(height: 3),
+          Text('placed @ ${entryEdge >= 0 ? '+' : ''}${(entryEdge * 100).toStringAsFixed(1)}%',
+              style: AppTextStyles.nano.copyWith(color: AppColors.success, fontStyle: FontStyle.italic)),
+        ],
       ]),
     );
+  }
+
+  // Parse an 'edge_history' list of {'ts','edge'} into ordered edge values.
+  List<double> _edgeSeries(dynamic raw) {
+    if (raw is! List) return const [];
+    final out = <double>[];
+    for (final p in raw) {
+      if (p is Map) {
+        final e = (p['edge'] as num?)?.toDouble();
+        if (e != null) out.add(e);
+      }
+    }
+    return out;
   }
 
   // "Updated" stamp per edge — relative if recent, else short date/time.
@@ -905,4 +1058,50 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
           TextSpan(text: v, style: AppTextStyles.nano.copyWith(color: AppColors.textMd, fontWeight: FontWeight.w600)),
         ]),
       );
+}
+
+/// Tiny edge-over-time sparkline: a normalized polyline of one side's edge
+/// history, stroked emerald if the latest edge is >= 0, else red.
+class _EdgeSparkPainter extends CustomPainter {
+  _EdgeSparkPainter(this.values);
+  final List<double> values;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (values.length < 2) return;
+    var lo = values.first, hi = values.first;
+    for (final v in values) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    final span = (hi - lo).abs();
+    const pad = 1.5;
+    final w = size.width;
+    final h = size.height - pad * 2;
+    final dx = w / (values.length - 1);
+    final path = Path();
+    for (var i = 0; i < values.length; i++) {
+      final x = i * dx;
+      // Flat series → center line; else normalize min..max into the box (top=hi).
+      final norm = span == 0 ? 0.5 : (values[i] - lo) / span;
+      final y = pad + (1 - norm) * h;
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+    final color = values.last >= 0 ? AppColors.success : AppColors.danger;
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.4
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _EdgeSparkPainter old) => old.values != values;
 }
