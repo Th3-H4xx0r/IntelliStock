@@ -626,6 +626,7 @@ _NEXUS_MACRO_PROMPT_BUDGET_CHARS = 8000
 _NEXUS_VALID_PROVIDERS = {
     "gemini", "deepseek", "openai", "azure", "nvidia",
     "claude-cli", "codex-cli", "anthropic", "ollama", "bedrock",
+    "openrouter",
 }
 # Module-level dedup cache for `LLM key source for role=...` diagnostic
 # log. Each (role, source_tag, masked_key) tuple is logged at most once
@@ -769,6 +770,9 @@ def _default_model_for_provider(provider: str) -> str:
             os.environ.get("GRAPH_NEXUS_BEDROCK_MODEL")
             or "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
         ).strip() or "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+    if provider == "openrouter":
+        # No single canonical default; OpenRouter ids are "vendor/name".
+        return os.environ.get("GRAPH_NEXUS_OPENROUTER_MODEL", "").strip()
     return "gemini-3-flash-preview"
 
 
@@ -798,6 +802,8 @@ def _default_api_key_for_provider(provider: str) -> str:
         return "codex-cli-no-api-key"
     if provider == "bedrock":
         return os.environ.get("BEDROCK_API_KEY", "").strip()
+    if provider == "openrouter":
+        return os.environ.get("OPENROUTER_API_KEY", "").strip()
     return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
@@ -876,6 +882,37 @@ def _resolve_role_llm_provider_config_fields(config: dict, role: str) -> dict[st
             or "https://integrate.api.nvidia.com/v1"
         )
         out: dict[str, Any] = {"base_url": base_url}
+        if reasoning_effort:
+            out["reasoning_effort"] = reasoning_effort
+        return out
+    if provider == "openrouter":
+        # Forward the openrouter_* fields the model_resolver injects so the
+        # dispatcher's _resolve_provider_config receives them. base_url has a
+        # sane default in llm_utils (https://openrouter.ai/api/v1); referer/title
+        # are optional OpenRouter attribution headers.
+        out: dict[str, Any] = {}
+        base_url = (
+            _lb_cfg("openrouter_base_url")
+            or (config.get(f"{prefix}openrouter_base_url") or "").strip()
+            or (config.get("openrouter_base_url") or "").strip()
+            or os.environ.get("OPENROUTER_BASE_URL", "").strip()
+        )
+        if base_url:
+            out["openrouter_base_url"] = base_url
+        referer = (
+            _lb_cfg("openrouter_referer")
+            or (config.get(f"{prefix}openrouter_referer") or "").strip()
+            or (config.get("openrouter_referer") or "").strip()
+        )
+        if referer:
+            out["openrouter_referer"] = referer
+        title = (
+            _lb_cfg("openrouter_title")
+            or (config.get(f"{prefix}openrouter_title") or "").strip()
+            or (config.get("openrouter_title") or "").strip()
+        )
+        if title:
+            out["openrouter_title"] = title
         if reasoning_effort:
             out["reasoning_effort"] = reasoning_effort
         return out
