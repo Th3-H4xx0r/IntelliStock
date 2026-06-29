@@ -84,6 +84,7 @@ from interactive_utils import (
     action_get_strategy,
     action_create_strategy,
     action_edit_strategy,
+    action_preview_strategy_config_change,
     action_delete_strategy,
     action_link_strategy,
     action_unlink_strategy,
@@ -500,6 +501,15 @@ class CreateStrategyBody(BaseModel):
 class EditStrategyBody(BaseModel):
     name: Optional[str] = None
     strategies: Optional[List[dict]] = None
+    # When true, re-stamp existing Nexus saved-state to the new model identities
+    # so the next boot reuses it (no destructive lookback + cleanup). The web /
+    # mobile editors set this after the operator confirms the preserve-history
+    # popup that fires on a hash-changing edit.
+    preserve_history: bool = False
+
+
+class ConfigChangePreviewBody(BaseModel):
+    strategies: List[dict] = Field(default_factory=list)
 
 
 class DeleteStrategyBody(BaseModel):
@@ -2092,7 +2102,17 @@ def api_create_strategy(body: CreateStrategyBody, conn=Depends(conn_dependency),
 
 @app.put("/strategies/{strategy_id}", response_class=JSONResponse)
 def api_edit_strategy(strategy_id: int, body: EditStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    return _run(action_edit_strategy, conn, strategy_id, name=body.name, strategies=body.strategies)
+    return _run(action_edit_strategy, conn, strategy_id, name=body.name, strategies=body.strategies, preserve_history=body.preserve_history)
+
+
+@app.post("/strategies/{strategy_id}/config-change-preview", response_class=JSONResponse)
+def api_preview_strategy_config_change(strategy_id: int, body: ConfigChangePreviewBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Read-only dry-run: would saving these strategies trigger a Nexus rebuild?
+
+    Drives the save-time "preserve history" popup. Returns ``needs_prompt`` and a
+    per-linked-instance ``would_rebuild`` / ``snapshot_exists`` breakdown.
+    """
+    return _run(action_preview_strategy_config_change, conn, strategy_id, body.strategies)
 
 
 @app.delete("/strategies/{strategy_id}", response_class=JSONResponse)

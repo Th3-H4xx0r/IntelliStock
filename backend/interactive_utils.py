@@ -4910,7 +4910,7 @@ def action_create_strategy(conn, name, strategies):
     raise RuntimeError("Could not generate unique strategy id after %d attempts" % max_attempts)
 
 
-def action_edit_strategy(conn, strategy_id, name=None, strategies=None):
+def action_edit_strategy(conn, strategy_id, name=None, strategies=None, preserve_history=False):
     try:
         sid = int(strategy_id)
     except (TypeError, ValueError):
@@ -4922,6 +4922,7 @@ def action_edit_strategy(conn, strategy_id, name=None, strategies=None):
     update = {}
     if name is not None:
         update["name"] = str(name).strip()
+    normalized = None
     if strategies is not None:
         if not isinstance(strategies, list):
             raise ValueError("strategies must be a list")
@@ -4934,7 +4935,49 @@ def action_edit_strategy(conn, strategy_id, name=None, strategies=None):
     if not update:
         return {"updated": True, "id": sid}
     r.db(DB_NAME).table("Strategies").get(sid).update(update).run(conn)
-    return {"updated": True, "id": sid}
+    result = {"updated": True, "id": sid}
+    # "Preserve history": re-stamp existing Nexus saved-state to the new model
+    # identities so the next boot reuses it instead of running a destructive
+    # lookback + cleanup. Best-effort — a re-stamp failure must not fail the save.
+    if preserve_history and normalized is not None:
+        result.update(_apply_preserve_history(conn, sid, normalized))
+    return result
+
+
+def _apply_preserve_history(conn, sid, normalized):
+    """Re-stamp every instance linked to strategy ``sid`` to the new identities.
+
+    Returns ``{"restamp": [...]}`` on success or ``{"restamp_error": str}`` on
+    failure — never raises, so a re-stamp problem cannot fail an otherwise-good
+    config save.
+    """
+    try:
+        import nexus_restamp as _nr
+        nexus_cfg = _nr._nexus_config_from_strategies(normalized)
+        resolved = _nr.resolve_for_identity(conn, nexus_cfg)
+        restamps = [
+            _nr.restamp_instance(conn, r, base_id, resolved)
+            for base_id in _nr.linked_base_instance_ids(conn, r, sid)
+        ]
+        return {"restamp": restamps}
+    except Exception as e:  # surface but never block the save
+        return {"restamp_error": str(e)}
+
+
+def action_preview_strategy_config_change(conn, strategy_id, strategies):
+    """Read-only: would the proposed config change trigger a Nexus rebuild?
+
+    Returns ``nexus_restamp.preview_change`` output: ``needs_prompt`` plus a
+    per-linked-instance ``would_rebuild`` / ``snapshot_exists`` breakdown.
+    """
+    try:
+        sid = int(strategy_id)
+    except (TypeError, ValueError):
+        raise ValueError("Strategy ID must be an integer")
+    if strategies is not None and not isinstance(strategies, list):
+        raise ValueError("strategies must be a list")
+    import nexus_restamp as _nr
+    return _nr.preview_change(conn, r, sid, strategies or [])
 
 
 def action_delete_strategy(conn, strategy_id, force=False):
