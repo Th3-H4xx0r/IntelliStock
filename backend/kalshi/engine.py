@@ -621,6 +621,17 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # the position vanishes here, so the bot can re-buy it; if you still hold
             # it, it won't double-order. This is the source of truth.
             placed_markets = set(positions_by_ticker) | resting_tickers
+            # PAPER mode has NO broker position to dedup against, so a paper "fill"
+            # would be re-placed every tick (duplicate buys). Treat markets already
+            # paper-placed for THIS instance (recorded in kalshi_decisions) as held.
+            if dry:
+                try:
+                    _pp = (kdb._r.db(kdb.DB_NAME).table("kalshi_decisions")
+                           .filter({"instance_id": config.instance_id, "decision": "placed"})
+                           .pluck("market_ticker").run(conn))
+                    placed_markets |= {row.get("market_ticker") for row in _pp if row.get("market_ticker")}
+                except Exception as e:
+                    log(f"tick {tick}: paper position dedup query failed: {type(e).__name__}: {e}", "yellow")
 
             # Pre-trade balance gate state — avoids the observed insufficient_balance
             # loop (over-leverage). Validate params + cap cumulative spend per tick.
@@ -649,8 +660,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             for d in decisions:
                 a = alloc_by_id.get(f"{d['fixture_id']}|{d['market_ticker']}")
                 if a and d["market_ticker"] in placed_markets:
+                    # Already held/ordered (real position, resting order, or a prior
+                    # paper fill). Don't re-buy AND don't write a fresh per-tick row —
+                    # the original 'placed' row already records the position, so this
+                    # avoids both duplicate buys and decision-log spam.
                     log(f"tick {tick}: already positioned/ordered {d['market_ticker']} — skipping.", "white")
-                    d["decision"], d["block_reason"] = "skipped", "already positioned"
+                    continue
                 elif a and not dry:
                     _okv, _whyv = _validate_order(a["contracts"], a["price_cents"],
                                                   max_per_market=int(getattr(config.caps, "max_contracts_per_market", 100000)))
