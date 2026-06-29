@@ -60,6 +60,31 @@ def test_match_event_does_not_substring_match_wrong_team():
     assert match_event(evs, "Guinea", "Spain") is not None
 
 
+def test_match_event_dynamic_variant_without_alias():
+    # Spelling variants must join WITHOUT a hand-maintained alias per team — the
+    # dynamic token match handles them (DR Congo / Congo DR, Cape Verde / + Islands).
+    evs = [{"home": "England", "away": "DR Congo",
+            "books": {"pinnacle": {"home": 1.28, "draw": 5.6, "away": 12.5}}}]
+    assert match_event(evs, "England", "Congo DR") is not None
+    evs2 = [{"home": "Argentina", "away": "Cape Verde Islands",
+             "books": {"pinnacle": {"home": 1.1, "draw": 8.0, "away": 20.0}}}]
+    assert match_event(evs2, "Argentina", "Cape Verde") is not None
+
+
+def test_match_event_dynamic_requires_pair_and_uniqueness():
+    # A near-miss on ONE name cannot bind — the OTHER team must match too, and the
+    # event must be unambiguous (two-Congos / Guinea safety, kept without aliases).
+    evs = [
+        {"home": "DR Congo", "away": "England", "books": {"pinnacle": {"home": 9.0, "draw": 5.0, "away": 1.3}}},
+        {"home": "Congo", "away": "France", "books": {"pinnacle": {"home": 8.0, "draw": 5.0, "away": 1.3}}},
+    ]
+    m = match_event(evs, "England", "Congo DR")    # England pins it to the DR Congo event
+    assert m is not None and m["home"] == "England"
+    # Guinea-Bissau is only 0.5 similar to Guinea AND Brazil matches neither -> safe miss.
+    evs2 = [{"home": "Guinea", "away": "Spain", "books": {"pinnacle": {"home": 5.0, "draw": 3.8, "away": 1.7}}}]
+    assert match_event(evs2, "Guinea-Bissau", "Brazil") is None
+
+
 def test_match_event_folds_national_aliases():
     evs = [{"home": "United States", "away": "Iran", "books": {"pinnacle": {"home": 2.0, "draw": 3.3, "away": 3.6}}}]
     assert match_event(evs, "USA", "IR Iran") is not None   # aliases fold to canonical

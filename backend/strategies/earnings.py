@@ -317,7 +317,7 @@ def _to_bool(value, default: bool = False) -> bool:
 
 def _normalize_llm_provider(provider: str) -> str:
     name = (provider or "gemini").strip().lower()
-    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "codex-cli", "anthropic") else "gemini"
+    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "codex-cli", "anthropic", "openrouter") else "gemini"
 
 
 def _default_model_for_provider(provider: str) -> str:
@@ -336,11 +336,15 @@ def _default_model_for_provider(provider: str) -> str:
         return "claude-sonnet-4-6"
     if provider == "codex-cli":
         return "gpt-5-codex"
+    if provider == "openrouter":
+        return os.environ.get("OPENROUTER_MODEL", "").strip()
     return "gemini-2.0-flash-exp"
 
 
 def _default_api_key_for_provider(provider: str) -> str:
     provider = _normalize_llm_provider(provider)
+    if provider == "openrouter":
+        return os.environ.get("OPENROUTER_API_KEY", "").strip()
     if provider == "deepseek":
         return os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if provider == "openai":
@@ -401,6 +405,23 @@ def _resolve_provider_config(config: dict, provider: str) -> dict:
         out = {"cli_path": cli_path}
         if extra_args:
             out["extra_args"] = extra_args
+        reasoning = (config.get("llm_reasoning_effort") or "").strip()
+        if reasoning:
+            out["reasoning_effort"] = reasoning
+        return out
+    if provider == "openrouter":
+        # base_url has a sane default in llm_utils; forward overrides +
+        # optional attribution headers when present.
+        out: dict = {}
+        base_url = (config.get("openrouter_base_url") or "").strip() or os.environ.get("OPENROUTER_BASE_URL", "").strip()
+        if base_url:
+            out["openrouter_base_url"] = base_url
+        referer = (config.get("openrouter_referer") or "").strip()
+        if referer:
+            out["openrouter_referer"] = referer
+        title = (config.get("openrouter_title") or "").strip()
+        if title:
+            out["openrouter_title"] = title
         reasoning = (config.get("llm_reasoning_effort") or "").strip()
         if reasoning:
             out["reasoning_effort"] = reasoning
