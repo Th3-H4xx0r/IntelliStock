@@ -4243,7 +4243,16 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
         pk = parse_market_ticker(r.get("market_ticker", ""), r.get("side"))
         r["match"] = (f"{r.get('home')} vs {r.get('away')}" if (r.get("home") or r.get("away")) else pk["match"])
         r["pick_label"] = pk["pick_label"]
-        r["pick_logo"] = (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", "")
+        # Crest with a country-flag fallback (flagcdn by code) so EVERY row shows an
+        # image — incl. games ESPN doesn't list yet and draws (no single team -> use
+        # whichever crest/flag is available).
+        if pk["pick"] == "home":
+            r["pick_logo"] = r.get("home_logo") or pk.get("home_flag", "")
+        elif pk["pick"] == "away":
+            r["pick_logo"] = r.get("away_logo") or pk.get("away_flag", "")
+        else:
+            r["pick_logo"] = (r.get("home_logo") or r.get("away_logo")
+                              or pk.get("home_flag", "") or pk.get("away_flag", ""))
     # Paper (MOCK) summary: would-be trades + the hypothetical realized P&L, so the
     # UI can show "what your profit would have been" while live_enabled stays off.
     paper = {

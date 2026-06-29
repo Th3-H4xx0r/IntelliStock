@@ -292,7 +292,7 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                   <p v-if="d.llm_rationale" class="text-slate-300 bg-surface/60 border border-border-subtle rounded-lg px-3 py-2">
                     <span class="material-symbols-outlined text-primary text-[14px] align-middle mr-1">psychology</span>{{ d.llm_rationale }}
                   </p>
-                  <p v-if="d.block_reason" class="text-red-400/80">Blocked: {{ d.block_reason }}</p>
+                  <p v-if="d.block_reason" :class="d.decision === 'blocked' ? 'text-red-400/80' : 'text-slate-500'">{{ d.decision === 'blocked' ? 'Blocked: ' : 'Skipped — ' }}{{ d.block_reason }}</p>
                 </div>
               </div>
             </div>

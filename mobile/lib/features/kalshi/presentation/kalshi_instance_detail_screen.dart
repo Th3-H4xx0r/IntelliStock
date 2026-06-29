@@ -632,7 +632,8 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
             ],
             if (r['block_reason'] != null && (r['block_reason'] as String).isNotEmpty) ...[
               const SizedBox(height: 6),
-              Text('Blocked: ${r['block_reason']}', style: AppTextStyles.nano.copyWith(color: AppColors.danger.withValues(alpha: 0.85))),
+              Text('${dec == 'blocked' ? 'Blocked: ' : 'Skipped — '}${r['block_reason']}',
+                  style: AppTextStyles.nano.copyWith(color: dec == 'blocked' ? AppColors.danger.withValues(alpha: 0.85) : AppColors.textDim)),
             ],
           ],
         ]),
