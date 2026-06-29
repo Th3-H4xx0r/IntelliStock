@@ -4363,11 +4363,25 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
                               or pk.get("home_flag", "") or pk.get("away_flag", ""))
     # Paper (MOCK) summary: would-be trades + the hypothetical realized P&L, so the
     # UI can show "what your profit would have been" while live_enabled stays off.
+    _open_paper = [r for r in rows if r.get("paper") and r.get("decision") == "placed" and r.get("outcome") is None]
     paper = {
         "trades": sum(1 for r in rows if r.get("paper") and r.get("decision") == "placed"),
         "graded": sum(1 for r in rows if r.get("paper") and r.get("realized_pnl_cents") is not None),
         "realized_pnl_cents": sum(int(r.get("realized_pnl_cents") or 0) for r in rows if r.get("paper")),
+        # live mark-to-market on still-open paper positions (engine-stamped each tick).
+        "open_positions": len(_open_paper),
+        "unrealized_pnl_cents": sum(int(r.get("unrealized_pnl_cents") or 0) for r in _open_paper),
     }
+    # Per-side edge sparkline series (instance|market_ticker -> [{ts, edge}, ...]).
+    hist_by_ticker: dict = {}
+    try:
+        for h in list(_r_auth.db("IntelliStock").table("kalshi_edge_history")
+                      .filter({"instance_id": str(instance_id)}).run(conn)):
+            hist_by_ticker[h.get("market_ticker")] = h.get("history") or []
+    except Exception:
+        hist_by_ticker = {}
+    for r in out:
+        r["edge_history"] = hist_by_ticker.get(r.get("market_ticker"), [])
     return _proxy_logos({"decisions": out, "summary": summarize_decisions(rows),
                          "paper": paper, "count": len(rows)}, _public_base_url(request))
 
@@ -4586,7 +4600,29 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
                               "contracts": f.contracts, "price_cents": f.price_cents, "ts": f.ts, **inf})
         except Exception:
             fills = []
-    return _proxy_logos({"placed": pending[:n], "fills": fills[:n]}, _public_base_url(request))
+
+    # MOCK (paper) positions — placed paper trades, marked to the live price by the
+    # engine, so the UI shows them in Orders with a MOCK tag + live unrealized P&L.
+    mock: dict = {}
+    try:
+        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
+                      .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True}).run(conn)):
+            mt = r.get("market_ticker")
+            size = int(r.get("size") or 0)
+            entry = r.get("entry_avg_cents")
+            if not mt or r.get("outcome") is not None or not size or entry is None:
+                continue
+            cur = mock.get(mt)
+            if cur and r.get("ts", "") < cur.get("_ts", ""):
+                continue
+            mock[mt] = {"_ts": r.get("ts", ""), "market_ticker": mt, "side": r.get("side"),
+                        "contracts": size, "entry_cents": int(entry), "entry_edge": r.get("entry_edge"),
+                        "mark_cents": r.get("mark_cents"), "unrealized_pnl_cents": r.get("unrealized_pnl_cents"),
+                        "ts": r.get("mark_ts") or r.get("ts"), "paper": True, **_info(mt, r.get("side"))}
+    except Exception:
+        mock = {}
+    mock_list = [{k: v for k, v in m.items() if k != "_ts"} for m in mock.values()]
+    return _proxy_logos({"placed": pending[:n], "fills": fills[:n], "mock": mock_list}, _public_base_url(request))
 
 
 @app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)
