@@ -13,7 +13,13 @@ def allocate(candidates, *, bankroll_cents, caps, reserve_frac, expected_better_
     """candidates: [{id, score, edge, price_cents, ...}]. Returns a list of
     allocations [{id, stake_cents, contracts, price_cents}], highest-score first,
     fitting within (bankroll - reserve)."""
-    reserve = int(bankroll_cents * max(0.0, min(1.0, reserve_frac))) if expected_better_soon else 0
+    # Always hold back a cash reserve (survival buffer), not only when a better
+    # opportunity is expected — the live path passes expected_better_soon=False, so the
+    # old conditional left it with ZERO reserve. expected_better_soon can still hold
+    # back MORE on top.
+    base = max(0.0, min(1.0, reserve_frac))
+    frac_reserve = min(1.0, base + (base if expected_better_soon else 0.0))
+    reserve = int(bankroll_cents * frac_reserve)
     deployable = max(0, bankroll_cents - reserve)
     per_market_cap = int(getattr(caps, "max_contracts_per_market", 50))
     kelly = float(getattr(caps, "kelly_fraction", 0.25))           # tier aggression

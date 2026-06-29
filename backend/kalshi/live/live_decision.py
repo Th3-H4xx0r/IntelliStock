@@ -22,8 +22,12 @@ class InPlayCaps:
     max_adds_per_match: int = 2
     no_add_after_min: float = 75.0
     stop_loss_frac: float = 0.35           # DEPRECATED flat stop (kept for back-compat; no longer primary)
-    take_profit_mult: float = 1.6          # scale out half when mark >= entry * this ("sell as it moves")
+    take_profit_mult: float = 1.6          # DEPRECATED (replaced by fair-gated tp_overshoot_cents)
     catastrophe_stop_frac: float = 0.6     # last-resort exit if mark <= entry * (1 - this)
+    tp_overshoot_cents: float = 8.0        # take-profit: bank half when the MARK overshoots live fair by this
+    maker_min_spread_cents: int = 3        # in-play maker-or-skip: only rest a maker when spread >= this
+    maker_min_book_depth: int = 5          # require this much resting depth before making
+    maker_max_adverse_imbalance: float = -0.5
 
 
 @dataclass(frozen=True)
@@ -66,14 +70,18 @@ def decide(*, position, live_fair: float, yes_ask_cents: float, yes_bid_cents: f
     if held > 0:
         entry = float(getattr(position, "avg_price_cents", 0.0) or 0.0)
         mark = float(getattr(position, "current_price_cents", None) or yes_bid_cents or 0.0)
-        # PRIMARY exit: thesis broke — live fair now below what we'd need to hold (the bid).
+        # FAIR-GATED partial take-profit: thesis still INTACT (live fair >= our entry) but
+        # the market OVERSHOT fair by tp_overshoot_cents -> bank half, keep the rest (side
+        # still strong). Routed maker by the monitor so the partial clears round-trip cost.
+        # If the thesis WEAKENED (fair < entry) we fall through to a full thesis-break exit
+        # instead of scaling out of a deteriorating position.
+        if (held >= 2 and entry > 0 and fair >= entry / 100.0
+                and _implied(mark) >= fair + (caps.tp_overshoot_cents / 100.0)):
+            return LiveAction("reduce", max(1, held // 2),
+                              f"take-profit: mark {mark:.0f}c overshoots fair {fair:.2f} (thesis intact)")
+        # PRIMARY exit: thesis broke — live fair now below what the bid implies.
         if fair + caps.edge_threshold < _implied(yes_bid_cents):
             return LiveAction("exit", held, f"thesis break: live fair {fair:.2f} << bid {_implied(yes_bid_cents):.2f}")
-        # TAKE-PROFIT scale-out ("sell as it moves"): bank half once the mark runs
-        # well in our favour (wide multiple so the partial clears round-trip fees).
-        if entry > 0 and caps.take_profit_mult > 1.0 and mark >= entry * caps.take_profit_mult and held >= 2:
-            return LiveAction("reduce", max(1, held // 2),
-                              f"take-profit: mark {mark:.0f}c >= entry {entry:.0f}c x{caps.take_profit_mult:.2f}")
         # CATASTROPHE backstop only — NOT a flat % stop. Soccer prices gap on goals and a
         # tight flat stop crystallises recoverable noise; this is a last-resort floor.
         if entry > 0 and mark <= entry * (1.0 - caps.catastrophe_stop_frac):

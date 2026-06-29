@@ -265,6 +265,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     analyst_cache: dict = {}    # event_ticker -> {"ts": wall, "out": dict}; news+LLM TTL (wall-clock)
     price_history: dict = {}    # market_ticker -> [mid_cents...]; live event detection
     adds_by_match: dict = {}    # fixture_id -> in-play add count
+    score_by_fixture: dict = {} # fixture_id -> (home_score, away_score) last tick; goal detection
     live_llm_cd: dict = {}      # fixture_id -> wall ts of last in-play LLM read (cooldown)
     live_news_cache: dict = {}  # fixture_id -> {"ts": wall, "snip": str}; live-card news (5 min)
     odds_cache: dict = {}       # sport_key -> {"ts": wall, "events": [...], "quota": int|None}
@@ -438,6 +439,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     "fused": fused, "sharp_probs": sharp, "sharp_matched": bool(sharp),
                     "he": he, "ae": ae, "phase": phase, "elapsed": elapsed,
                     "home_logo": home_logo, "away_logo": away_logo,
+                    "home_score": (_sc or {}).get("home_score"), "away_score": (_sc or {}).get("away_score"),
                     "mtypes": sorted({m["market_type"] for m in mkts}), "best_edge": best_edge,
                 })
 
@@ -497,10 +499,21 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                             "market_type": m["market_type"], "yes_ask_cents": m["yes_ask_cents"],
                             "yes_bid_cents": m.get("yes_bid_cents", 0), "mid_cents": m.get("mid_cents"),
                         })
+                    # Goal detection: compare this tick's score to last tick's. A changed
+                    # score = INFO SHOCK (real, persistent repricing — never chase/fade).
+                    cur_h, cur_a = meta.get("home_score"), meta.get("away_score")
+                    fid = meta["id"]
+                    score_known = cur_h is not None and cur_a is not None
+                    prev = score_by_fixture.get(fid)
+                    score_changed = bool(score_known and prev is not None and (cur_h, cur_a) != prev)
+                    if score_known:
+                        score_by_fixture[fid] = (cur_h, cur_a)
                     live_matches.append({
-                        "fixture_id": meta["id"], "home": home, "away": away,
+                        "fixture_id": fid, "home": home, "away": away,
                         "phase": phase, "elapsed_min": elapsed,
                         "model_probs": model_probs, "markets": mk_list,
+                        "home_score": cur_h, "away_score": cur_a,
+                        "score_known": score_known, "score_changed": score_changed,
                     })
                     continue
 
@@ -611,6 +624,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 _open_cost = 0
             _max_exposure_cents = int(float(getattr(config.caps, "max_open_exposure_frac", 0.15))
                                       * int(getattr(config.caps, "bankroll_cents", 0)))
+            # Concurrent-position cap (count): bound how many distinct positions are open.
+            _open_count = len(positions)
+            _opened_this_tick = 0
+            _max_concurrent = int(getattr(config.caps, "max_concurrent_positions", 8))
 
             alloc_by_id = {a["id"]: a for a in allocations}
             for d in decisions:
@@ -633,6 +650,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         d["decision"], d["block_reason"] = "blocked", "max_open_exposure cap"
                         log(f"tick {tick}: skip {d['market_ticker']} — open-exposure cap "
                             f"({_open_cost + spent_this_tick + _cost}c > {_max_exposure_cents}c).", "yellow")
+                    elif _max_concurrent and (_open_count + _opened_this_tick) >= _max_concurrent:
+                        d["decision"], d["block_reason"] = "blocked", "max_concurrent_positions cap"
+                        log(f"tick {tick}: skip {d['market_ticker']} — max concurrent positions "
+                            f"({_open_count + _opened_this_tick}/{_max_concurrent}).", "yellow")
                     else:
                         # Maker-first: rest a post_only YES bid inside the spread rather
                         # than paying taker (research: takers consistently lose; making
@@ -659,6 +680,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                                 client_order_id=f"{config.instance_id}-{d['market_ticker']}-{ts}",
                             )
                             spent_this_tick += _cost
+                            _opened_this_tick += 1
                             d["entry_avg_cents"] = _limit   # actual submitted price (maker may be < ask)
                             placed_markets.add(d["market_ticker"])
                             try:

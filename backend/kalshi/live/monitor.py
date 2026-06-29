@@ -69,11 +69,15 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
             fair = live_fair(mkt_prob, prematch, elapsed, tilt)
 
             pos = positions_by_ticker.get(ticker)
-            # Open/add freely only when the clock CONFIRMS live (precise kickoff).
-            # When the clock is unknown (same-day, no kickoff time), a material
-            # price move is the only Kalshi-price-only evidence the match is
-            # actually in play — so opens require a move. Exits are always allowed.
-            allow_open = (phase == LIVE and elapsed is not None) or move.moved
+            # Open/add only when the clock CONFIRMS live, OR on a NARRATIVE move: a
+            # price move with the score KNOWN and UNCHANGED. A move that coincides with
+            # a goal (score_changed) is an INFO SHOCK — a real, persistent repricing we
+            # must NOT chase/fade; an unknown/stale score is treated as not-openable
+            # (UNKNOWN-pending). Defensive exits / take-profit are always allowed.
+            score_known = match.get("score_known", True)   # absent (tests) -> assume known
+            score_changed = bool(match.get("score_changed", False))
+            narrative_move = move.moved and score_known and not score_changed
+            allow_open = (phase == LIVE and elapsed is not None) or narrative_move
             action = decide(
                 position=pos, live_fair=fair,
                 yes_ask_cents=mk.get("yes_ask_cents") or 0,
@@ -93,19 +97,45 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
                         f"fair {fair:.2f} ({action.reason}).", "cyan")
                 else:
                     is_buy = action.kind in ("open", "add")
-                    # Guard BOTH sides: never buy with no ask / never sell into no bid
-                    # (a 0c limit sell would dump the whole position for nothing).
-                    price = int(mk.get("yes_ask_cents") or 0) if is_buy else int(mk.get("yes_bid_cents") or 0)
+                    defensive = action.kind == "exit"   # stop / thesis-break / catastrophe -> immediacy
+                    # Defensive exits TAKE immediately (sell into the bid). Opens/adds and
+                    # take-profit REDUCES are MAKER-OR-SKIP: rest post_only inside the spread
+                    # and SKIP rather than pay the taker fee (takers consistently lose).
+                    price, post_only = 0, False
+                    if defensive:
+                        price = int(mk.get("yes_bid_cents") or 0)
+                    else:
+                        from kalshi.live import orderbook as _ob
+                        try:
+                            book = _ob.parse(client.get_orderbook(ticker))
+                        except Exception:
+                            book = None
+                        if book is None:
+                            pass
+                        elif is_buy:
+                            mp = _ob.maker_buy_price(
+                                book, fallback_ask=int(mk.get("yes_ask_cents") or 0),
+                                min_spread=int(getattr(caps, "maker_min_spread_cents", 3)))
+                            if mp and _ob.allows_maker_buy(
+                                    book,
+                                    min_book_depth=int(getattr(caps, "maker_min_book_depth", 5)),
+                                    max_adverse_imbalance=float(getattr(caps, "maker_max_adverse_imbalance", -0.5))):
+                                price, post_only = mp, True
+                        else:   # take-profit reduce -> rest a maker sell
+                            mp = _ob.maker_sell_price(book, fallback_bid=int(mk.get("yes_bid_cents") or 0))
+                            if mp:
+                                price, post_only = mp, True
                     if price <= 0:
                         executed = "blocked"
-                        log(f"live {action.kind} {ticker}: no {'ask' if is_buy else 'bid'} to "
-                            f"{'buy' if is_buy else 'sell'} into; skipping.", "yellow")
+                        log(f"live {action.kind} {ticker}: "
+                            + ("no bid to sell into" if defensive else "no maker fill available — skip")
+                            + "; skipping.", "yellow")
                     else:
                         try:
                             client.submit_order(
                                 market_ticker=ticker, side="yes",
                                 action="buy" if is_buy else "sell",
-                                contracts=action.contracts, limit_cents=price,
+                                contracts=action.contracts, limit_cents=price, post_only=post_only,
                                 client_order_id=f"{instance_id}-live{action.kind}-{ticker}-{ts}",
                             )
                             executed = "placed"
@@ -114,7 +144,7 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
                             if action.kind == "add":
                                 adds_by_match[fixture_id] = int(adds_by_match.get(fixture_id, 0)) + 1
                             log(f"live {action.kind.upper()} {action.contracts}x {ticker} @ {price}c "
-                                f"({action.reason}).", "green")
+                                f"({'maker' if post_only else 'taker'}; {action.reason}).", "green")
                         except Exception as e:
                             executed = "blocked"
                             log(f"live {action.kind} {ticker} failed: {type(e).__name__}: {e}", "red")
@@ -134,5 +164,6 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
             row["live_action"] = action.kind
             row["elapsed_min"] = elapsed
             row["event"] = move.direction if move.moved else ""
+            row["score_event"] = "goal" if score_changed else ("narrative" if move.moved else "")
             rows.append(row)
     return rows

@@ -54,6 +54,7 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "maker_min_book_depth": int(raw.get("maker_min_book_depth", 5)),
         "maker_max_adverse_imbalance": float(raw.get("maker_max_adverse_imbalance", -0.5)),
         "cash_buffer_frac": float(raw.get("cash_buffer_frac", 0.03)),
+        "max_concurrent_positions": int(raw.get("max_concurrent_positions", 8)),
         "daily_loss_cap_frac": _daily_frac,
         "daily_loss_cap_cents": _daily_loss,
         "bankroll_cents": _bankroll,
@@ -123,6 +124,7 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),
         maker_max_adverse_imbalance=float(c.get("maker_max_adverse_imbalance", -0.5)),
         cash_buffer_frac=float(c.get("cash_buffer_frac", 0.03)),
+        max_concurrent_positions=int(c.get("max_concurrent_positions", 8)),
     )
 
 
@@ -141,4 +143,8 @@ def inplay_caps_from_config(config: dict) -> InPlayCaps:
         stop_loss_frac=float(c.get("stop_loss_frac", 0.35)),
         take_profit_mult=float(c.get("take_profit_mult", 1.6)),
         catastrophe_stop_frac=float(c.get("catastrophe_stop_frac", 0.6)),
+        tp_overshoot_cents=float(c.get("tp_overshoot_cents", 8.0)),
+        maker_min_spread_cents=int(c.get("maker_min_spread_cents", 3)),
+        maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),
+        maker_max_adverse_imbalance=float(c.get("maker_max_adverse_imbalance", -0.5)),
     )

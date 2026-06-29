@@ -11,6 +11,10 @@ class FakeClient:
         self.orders.append(kw)
         return {"order_id": "x"}
 
+    def get_orderbook(self, ticker):
+        # bid 58 / ask 62 (top NO bid 38) — spread 4, makeable; depth on both sides
+        return {"orderbook_fp": {"yes_dollars": [["0.58", "10"]], "no_dollars": [["0.38", "10"]]}}
+
 
 CAPS = InPlayCaps(bankroll_cents=100_000)
 
@@ -18,24 +22,42 @@ CAPS = InPlayCaps(bankroll_cents=100_000)
 def _live_match():
     return [{
         "fixture_id": "E1", "home": "A", "away": "B", "phase": LIVE, "elapsed_min": None,
-        "model_probs": {"M1": 0.80},
+        "model_probs": {"M1": 0.85},
         "markets": [{"market_ticker": "M1", "side": "home", "market_type": "winner",
-                     "yes_ask_cents": 64, "yes_bid_cents": 63, "mid_cents": 64}],
+                     "yes_ask_cents": 62, "yes_bid_cents": 58, "mid_cents": 60}],
     }]
 
 
-def test_material_move_triggers_a_live_open_and_persists_row():
+def test_material_move_triggers_a_live_maker_open_and_persists_row():
     fc = FakeClient()
     rows = run_live_step(
         client=fc, live_matches=_live_match(),
-        price_history={"M1": [50, 50]},   # +14c move when 64 appended -> material
+        price_history={"M1": [50, 50]},   # +10c move when 60 appended -> material
         adds_by_match={}, positions_by_ticker={}, caps=CAPS, dry_run=False,
         instance_id="i", brokerage_id="b", ts="t", llm=None,
     )
     assert len(fc.orders) == 1
-    assert fc.orders[0]["action"] == "buy" and fc.orders[0]["contracts"] == 50
+    o = fc.orders[0]
+    assert o["action"] == "buy" and o["contracts"] > 0
+    assert o["post_only"] is True and o["limit_cents"] == 59   # maker bid INSIDE the spread (skip if not makeable)
     assert rows[0]["decision"] == "placed" and rows[0]["in_play"] is True
     assert rows[0]["live_action"] == "open" and rows[0]["event"] == "up"
+
+
+def test_goal_driven_move_does_not_open():
+    # A material move that coincides with a GOAL (score_changed) is an info shock —
+    # the monitor must NOT chase/fade it (only confirmed-clock or narrative moves open).
+    fc = FakeClient()
+    m = _live_match()
+    m[0]["score_known"] = True
+    m[0]["score_changed"] = True
+    rows = run_live_step(
+        client=fc, live_matches=m, price_history={"M1": [50, 50]},  # +10c move
+        adds_by_match={}, positions_by_ticker={}, caps=CAPS, dry_run=False,
+        instance_id="i", brokerage_id="b", ts="t", llm=None,
+    )
+    assert fc.orders == []
+    assert rows[0]["live_action"] == "hold"
 
 
 def test_dry_run_records_but_does_not_submit():

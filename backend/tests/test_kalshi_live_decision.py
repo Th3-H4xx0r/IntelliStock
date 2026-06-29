@@ -41,6 +41,15 @@ def test_thesis_break_exit():
     assert a.kind == "exit" and "thesis break" in a.reason
 
 
+def test_take_profit_scales_out_on_overshoot_with_thesis_intact():
+    # In profit, thesis INTACT (fair 0.55 >= entry 0.40), market overshot fair by >8c
+    # -> scale out HALF (not a full thesis-break exit).
+    pos = Pos(contracts=10, avg_price_cents=40, current_price_cents=68)
+    a = decide(position=pos, live_fair=0.55, yes_ask_cents=70, yes_bid_cents=67,
+               caps=CAPS, phase=LIVE, elapsed_min=60)
+    assert a.kind == "reduce" and a.contracts == 5 and "take-profit" in a.reason
+
+
 def test_no_open_or_add_past_cutoff_minute():
     a = decide(position=None, live_fair=0.70, yes_ask_cents=50, yes_bid_cents=49,
                caps=CAPS, phase=LIVE, elapsed_min=85, allow_open=True)
