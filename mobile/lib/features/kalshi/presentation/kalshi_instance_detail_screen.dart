@@ -117,7 +117,10 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
 
     final topInset = MediaQuery.paddingOf(context).top + kToolbarHeight;
     return Scaffold(
-      backgroundColor: Colors.transparent,
+      // Opaque canvas: a transparent Scaffold let the previous screen bleed
+      // through during the push-in transition and the iOS edge-swipe-back. The
+      // KalshiCrown gradient still sits on top for the purple header look.
+      backgroundColor: AppColors.canvas,
       extendBodyBehindAppBar: true,
       appBar: AppBar(
         backgroundColor: Colors.transparent,

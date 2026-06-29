@@ -121,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
             odds_regions=str(cfg.get("odds_regions", "eu,uk,us")),
             soccer_series=list(cfg.get("soccer_series") or []),
             scoreboard_leagues=list(cfg.get("scoreboard_leagues") or []),
+            national_elo_live=bool(cfg.get("national_elo_live", True)),
+            national_elo_url=(str(cfg.get("national_elo_url") or "").strip()
+                              or __import__("os").environ.get("NATIONAL_ELO_URL", "").strip()
+                              or "https://www.eloratings.net"),
+            national_elo_refresh_ticks=int(cfg.get("national_elo_refresh_ticks", 60)),
         )
     )
     return 0
