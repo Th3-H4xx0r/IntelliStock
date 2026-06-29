@@ -228,6 +228,24 @@ function onOpenRouterModelSelect(id) {
   emit('update:draft', next)
 }
 
+// The catalog row matching the CURRENT model (whether it was typed, hydrated
+// from a saved row, or already the selected dropdown option). Drives the
+// explicit "fill pricing" button below — re-selecting an already-selected
+// dropdown option doesn't fire @change, so editing an existing row needs a
+// non-change path to (re)apply pricing.
+const openrouterCurrentCatalogRow = computed(() =>
+  openrouterModels.value.find((m) => m.id === (props.draft.model || '')) || null
+)
+
+function fillOpenRouterPricingFromCatalog() {
+  const row = openrouterCurrentCatalogRow.value
+  if (!row) return
+  const costs = openRouterPricingToPer1m(row.pricing)
+  if (!Object.keys(costs).length) return
+  openrouterPricingAutofilled.value = true
+  emit('update:draft', { ...props.draft, ...costs })
+}
+
 function clearOpenRouterCosts() {
   openrouterPricingAutofilled.value = false
   emit('update:draft', {
@@ -802,6 +820,16 @@ onUnmounted(() => {
         <p class="mt-1.5 text-[11px] leading-relaxed text-slate-500">
           The Model field above is the source of truth — picking from the catalog fills it in and auto-fills the per-model pricing below. Free-text entry works too.
         </p>
+        <!-- Explicit fill button for an already-selected/typed model: re-picking
+             the same dropdown option doesn't fire @change, so editing a saved
+             row (or a typed id) needs this to (re)apply catalog pricing. -->
+        <button
+          v-if="openrouterCurrentCatalogRow && !openrouterPricingAutofilled"
+          type="button"
+          @click="fillOpenRouterPricingFromCatalog"
+          :disabled="disabled || readOnly"
+          class="mt-2 text-[11px] text-primary hover:underline disabled:opacity-50"
+        >Fill pricing from catalog for <span class="font-mono">{{ draft.model }}</span></button>
         <div v-if="openrouterPricingAutofilled" class="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[11px] leading-relaxed text-emerald-300/90 flex items-center justify-between gap-2">
           <span>Pricing auto-filled from OpenRouter — editable below. Per-request / image surcharges aren't tracked.</span>
           <button

@@ -130,7 +130,7 @@ def _resolve_model(conn, model_id: Optional[str]) -> Dict[str, Any]:
         "model": doc.get("model") or "",
         "model_name": doc.get("name") or "",
         "api_key": api_key,
-        "base_url": doc.get("openai_base_url") or doc.get("nvidia_base_url"),
+        "base_url": doc.get("openai_base_url") or doc.get("nvidia_base_url") or doc.get("openrouter_base_url"),
         "azure_endpoint": doc.get("azure_openai_endpoint"),
         "azure_api_version": doc.get("azure_openai_api_version"),
         "reasoning_effort": doc.get("reasoning_effort"),
