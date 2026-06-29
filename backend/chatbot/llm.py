@@ -122,6 +122,9 @@ def _openai_compat_url(provider: str, base_url: Optional[str], azure_endpoint: O
         if not base.endswith("/v1"):
             base = base + "/v1"
         return f"{base}/chat/completions", {"Content-Type": "application/json"}
+    if p == "openrouter":
+        base = (base_url or "https://openrouter.ai/api/v1").strip().rstrip("/")
+        return f"{base}/chat/completions", {"Content-Type": "application/json"}
     raise ValueError(f"unsupported provider for openai-compat: {provider!r}")
 
 
@@ -151,7 +154,7 @@ def _call_openai_compat(
     # OpenAI deployments. DeepSeek (auto-reasons) and NVIDIA NIM use other
     # control surfaces, so passing it through there can 400.
     eff = ""
-    if p in ("openai", "azure") and reasoning_effort:
+    if p in ("openai", "azure", "openrouter") and reasoning_effort:
         eff_candidate = str(reasoning_effort).strip().lower()
         if eff_candidate in ("low", "medium", "high"):
             eff = eff_candidate
@@ -332,7 +335,7 @@ def call_chat_with_tools(
     if not model:
         raise ValueError("model required")
     try:
-        if p in ("openai", "azure", "deepseek", "nvidia"):
+        if p in ("openai", "azure", "deepseek", "nvidia", "openrouter"):
             return _call_openai_compat(
                 provider=p,
                 api_key=api_key,
