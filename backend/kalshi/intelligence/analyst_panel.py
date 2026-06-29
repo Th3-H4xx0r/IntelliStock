@@ -11,10 +11,23 @@ unit-testable with a fake LLM (no network / no cost in tests).
 from __future__ import annotations
 
 import math
+import os
+import time
 
 from kalshi.intelligence.fusion import clamp_adjustment
 
 DEFAULT_ADJ_CAP = 0.05
+
+# Analyst LLM resilience. Providers (notably Bedrock) intermittently read-timeout;
+# llm_utils does NOT classify a read timeout as transient, so a single slow call
+# fails the whole match to model-only. Retry the analyst call a few times with
+# exponential backoff. All tunable via env so it's not baked in (engine reads at
+# startup). Each attempt can take the full provider timeout, so keep attempts low.
+_ANALYST_MAX_ATTEMPTS = max(1, int(os.environ.get("KALSHI_ANALYST_LLM_ATTEMPTS", "3")))
+_ANALYST_BACKOFF_BASE_SEC = max(0.0, float(os.environ.get("KALSHI_ANALYST_LLM_BACKOFF_SEC", "2")))
+_ANALYST_BACKOFF_CAP_SEC = max(0.0, float(os.environ.get("KALSHI_ANALYST_LLM_BACKOFF_CAP_SEC", "20")))
+# Optional per-attempt timeout override (seconds); blank -> inherit llm_utils default.
+_ANALYST_TIMEOUT_SEC = os.environ.get("KALSHI_ANALYST_LLM_TIMEOUT_SEC", "").strip()
 
 
 def build_prompt(features, markets: list[str], news: str = "") -> str:
@@ -118,39 +131,63 @@ def make_llm_call(model_doc: dict | None, log=None, instance_id: str | None = No
             shortlist: list = Field(default_factory=list)
             rationales: dict = Field(default_factory=dict)
 
-        def _call(prompt: str) -> dict:
-            try:
-                # Tag the call so its token usage is attributed to this instance on
-                # the Token Usage page. The structured path does NOT auto-record
-                # telemetry, so we read the usage it stashes and record it ourselves
-                # while still inside the context (which carries the instance_id).
-                with _llm_ctx(instance_id=instance_id, strategy="KalshiAnalyst", call_site="analyst"):
-                    res = call_structured_llm_by_provider(
-                        provider, api_key, model, prompt, _AnalystOut,
-                        max_output_tokens=512, temperature=0.2,
-                        provider_config=provider_config or None,
-                    )
-                    try:
-                        import llm_utils as _lu
-                        from llm_telemetry import record_llm_call as _rec
-                        _usage = (getattr(_lu._LAST_STRUCTURED_LLM_CALL, "data", {}) or {}).get("usage") or {}
-                        if _usage:
-                            _rec(provider=provider, model=model, usage=_usage, ok=True)
-                    except Exception:
-                        pass
-            except Exception as e:
-                _log(f"Analyst LLM call FAILED: {type(e).__name__}: {e}", "red")
-                return {}
+        def _one_call(prompt: str):
+            # Tag the call so its token usage is attributed to this instance on
+            # the Token Usage page. The structured path does NOT auto-record
+            # telemetry, so we read the usage it stashes and record it ourselves
+            # while still inside the context (which carries the instance_id).
+            # retries/http_retries are disabled here so THIS function owns retrying
+            # (with backoff) — otherwise the two layers would nest and a slow
+            # provider could block for minutes per attempt.
+            kw = dict(max_output_tokens=512, temperature=0.2,
+                      provider_config=provider_config or None,
+                      retries=0, http_retries=0)
+            if _ANALYST_TIMEOUT_SEC:
+                try:
+                    kw["timeout_sec"] = int(_ANALYST_TIMEOUT_SEC)
+                except ValueError:
+                    pass
+            with _llm_ctx(instance_id=instance_id, strategy="KalshiAnalyst", call_site="analyst"):
+                res = call_structured_llm_by_provider(provider, api_key, model, prompt, _AnalystOut, **kw)
+                try:
+                    import llm_utils as _lu
+                    from llm_telemetry import record_llm_call as _rec
+                    _usage = (getattr(_lu._LAST_STRUCTURED_LLM_CALL, "data", {}) or {}).get("usage") or {}
+                    if _usage:
+                        _rec(provider=provider, model=model, usage=_usage, ok=True)
+                except Exception:
+                    pass
             if isinstance(res, tuple):
                 res = res[0]
-            if res is None:
-                _log("Analyst LLM returned None (provider call failed or unsupported "
-                     f"provider {provider!r}) — match priced model-only.", "red")
-                return {}
-            out = res.model_dump() if hasattr(res, "model_dump") else (res if isinstance(res, dict) else {})
-            _log(f"Analyst LLM ok: adjustments={out.get('adjustments')} "
-                 f"shortlist={out.get('shortlist')}.", "cyan")
-            return out
+            return res
+
+        def _call(prompt: str) -> dict:
+            last = ""
+            for attempt in range(1, _ANALYST_MAX_ATTEMPTS + 1):
+                res = None
+                try:
+                    res = _one_call(prompt)
+                    if res is None:
+                        last = f"provider {provider!r} returned None (call failed or unsupported)"
+                except Exception as e:
+                    last = f"{type(e).__name__}: {e}"
+                if res is not None:
+                    out = res.model_dump() if hasattr(res, "model_dump") else (res if isinstance(res, dict) else {})
+                    if attempt > 1:
+                        _log(f"Analyst LLM recovered on attempt {attempt}/{_ANALYST_MAX_ATTEMPTS}.", "white")
+                    _log(f"Analyst LLM ok: adjustments={out.get('adjustments')} "
+                         f"shortlist={out.get('shortlist')}.", "cyan")
+                    return out
+                if attempt < _ANALYST_MAX_ATTEMPTS:
+                    delay = min(_ANALYST_BACKOFF_CAP_SEC,
+                                _ANALYST_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+                    _log(f"Analyst LLM attempt {attempt}/{_ANALYST_MAX_ATTEMPTS} failed "
+                         f"({last}) — retrying in {delay:.0f}s.", "yellow")
+                    if delay > 0:
+                        time.sleep(delay)
+            _log(f"Analyst LLM failed after {_ANALYST_MAX_ATTEMPTS} attempts ({last}) "
+                 "— match priced model-only.", "red")
+            return {}
 
         return _call
     except Exception as e:
