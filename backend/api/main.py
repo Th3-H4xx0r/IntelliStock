@@ -4244,7 +4244,15 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
         r["match"] = (f"{r.get('home')} vs {r.get('away')}" if (r.get("home") or r.get("away")) else pk["match"])
         r["pick_label"] = pk["pick_label"]
         r["pick_logo"] = (r.get("home_logo") if pk["pick"] == "home" else r.get("away_logo")) or pk.get("pick_flag", "")
-    return _proxy_logos({"decisions": out, "summary": summarize_decisions(rows), "count": len(rows)}, _public_base_url(request))
+    # Paper (MOCK) summary: would-be trades + the hypothetical realized P&L, so the
+    # UI can show "what your profit would have been" while live_enabled stays off.
+    paper = {
+        "trades": sum(1 for r in rows if r.get("paper") and r.get("decision") == "placed"),
+        "graded": sum(1 for r in rows if r.get("paper") and r.get("realized_pnl_cents") is not None),
+        "realized_pnl_cents": sum(int(r.get("realized_pnl_cents") or 0) for r in rows if r.get("paper")),
+    }
+    return _proxy_logos({"decisions": out, "summary": summarize_decisions(rows),
+                         "paper": paper, "count": len(rows)}, _public_base_url(request))
 
 
 _IMG_PROXY_HOSTS = ("flagcdn.com", "a.espncdn.com", "a1.espncdn.com", "a2.espncdn.com",

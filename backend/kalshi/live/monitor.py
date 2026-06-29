@@ -92,8 +92,8 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
                 action = LiveAction("hold", 0, "already positioned/ordered")
             if action.contracts > 0 and action.kind in ("open", "add", "exit", "reduce"):
                 if dry_run:
-                    executed = "skipped"
-                    log(f"live DRY-RUN {action.kind} {action.contracts}x {ticker} @ "
+                    executed = "paper"   # would-be trade -> recorded as a MOCK placed row
+                    log(f"live PAPER would {action.kind} {action.contracts}x {ticker} @ "
                         f"fair {fair:.2f} ({action.reason}).", "cyan")
                 else:
                     is_buy = action.kind in ("open", "add")
@@ -156,7 +156,7 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
                 llm_adjustment=(tilt or None),
                 llm_rationale=action.reason,
                 size=action.contracts,
-                decision=("placed" if executed == "placed"
+                decision=("placed" if executed in ("placed", "paper")
                           else ("blocked" if executed == "blocked" else "skipped")),
                 block_reason=(action.reason if action.kind == "hold" else ""),
             )
@@ -165,5 +165,10 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
             row["elapsed_min"] = elapsed
             row["event"] = move.direction if move.moved else ""
             row["score_event"] = "goal" if score_changed else ("narrative" if move.moved else "")
+            if executed == "paper":
+                row["paper"] = True   # MOCK trade: recorded + graded, no real order placed
+                if action.kind in ("open", "add"):
+                    row["entry_avg_cents"] = int(mk.get("yes_ask_cents") or 0)
+                    already_placed.add(ticker)   # don't re-log the same mock every tick
             rows.append(row)
     return rows

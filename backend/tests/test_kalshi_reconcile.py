@@ -71,6 +71,16 @@ def test_price_band_rejects_cheap_longshots():
     assert cands == []                                  # < 15c -> rejected despite big edge
 
 
+def test_collect_skips_records_rejections():
+    # a market below the edge bar is returned as a skip WITH a reason -> decision log
+    probs = {"winner": {"home": 0.55}}
+    markets = [{"market_ticker": "KX-HOME", "market_type": "winner", "side": "home", "yes_ask_cents": 54}]
+    cands, skips = generate_candidates("f1", "low", probs, markets,
+                                       fee_rate=0.07, edge_threshold=0.04, collect_skips=True)
+    assert cands == []
+    assert len(skips) == 1 and skips[0]["market_ticker"] == "KX-HOME" and "edge" in skips[0]["reason"]
+
+
 def test_cheap_side_cap_curbs_overconfidence():
     from kalshi.intelligence.fusion import fuse, cheap_side_cap
     # model wildly overconfident (0.40) on a cheap 0.05 sharp longshot -> no overshoot

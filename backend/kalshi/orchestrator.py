@@ -32,6 +32,7 @@ def plan_and_allocate(
     Returns {allocations, decisions, candidates}."""
     scored: list[dict] = []
     meta: dict = {}  # cid -> (candidate, fixture, rationale, model_probs, opp_score)
+    skip_decisions: list = []  # considered-but-rejected markets (stable id -> latest eval)
 
     for fx in fixtures:
         eg = fx.get("expected_goals")
@@ -43,13 +44,32 @@ def plan_and_allocate(
         player_probs = fx.get("player_probs")
         fused = build_market_probs(eg, sharp, adjustments, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
         model_only = build_market_probs(eg, {}, {}, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
-        cands = generate_candidates(
+        cands, skips = generate_candidates(
             fx["fixture_id"], tier, fused, fx.get("kalshi_markets", []),
             fee_rate=fee_rate, edge_threshold=edge_threshold,
             min_price_cents=getattr(caps, "min_price_cents", 15),
             max_price_cents=getattr(caps, "max_price_cents", 90),
             draw_min_edge=getattr(caps, "draw_min_edge", 0.10),
+            collect_skips=True,
         )
+        for s in skips:
+            # Log what the bot evaluated and why it passed. Stable id (no ts) upserts
+            # to ONE row per market = its latest evaluation -> the decision log shows
+            # every match watched + its edge, without unbounded per-tick growth.
+            srow = decision_doc(
+                instance_id=instance_id, brokerage_id=brokerage_id, ts=ts,
+                fixture_id=fx["fixture_id"], market_ticker=s["market_ticker"], side=s["side"],
+                model_prob=(model_only.get(s["market_type"], {}) or {}).get(s["side"]),
+                sharp_prob=(sharp.get(s["market_type"], {}) or {}).get(s["side"]),
+                fused_fair=s["fair"], edge=s["edge"], decision="skipped",
+                block_reason=s["reason"], league=fx.get("league", ""),
+                # carry the analyst's per-match reasoning so the decision log shows the
+                # LLM work it did, not just the numeric skip.
+                llm_adjustment=adjustments.get(s["market_type"]),
+                llm_rationale=rationales.get(s["market_type"], ""),
+            )
+            srow["id"] = f"{instance_id}|{s['market_ticker']}"
+            skip_decisions.append(srow)
         for c in cands:
             cid = f"{fx['fixture_id']}|{c.market_ticker}"
             opp = opportunity_score(
@@ -85,4 +105,4 @@ def plan_and_allocate(
             sharp_close_prob=sharp_p,
             entry_avg_cents=(a["price_cents"] if a else None),
         ))
-    return {"allocations": allocations, "decisions": decisions, "candidates": scored}
+    return {"allocations": allocations, "decisions": decisions + skip_decisions, "candidates": scored}

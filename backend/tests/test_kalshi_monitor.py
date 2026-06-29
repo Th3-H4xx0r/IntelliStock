@@ -67,8 +67,8 @@ def test_dry_run_records_but_does_not_submit():
         adds_by_match={}, positions_by_ticker={}, caps=CAPS, dry_run=True,
         instance_id="i", brokerage_id="b", ts="t", llm=None,
     )
-    assert fc.orders == []
-    assert rows[0]["decision"] == "skipped" and rows[0]["in_play"] is True
+    assert fc.orders == []   # paper: nothing submitted
+    assert rows[0]["decision"] == "placed" and rows[0]["paper"] is True and rows[0]["in_play"] is True
 
 
 def test_no_open_without_move_when_clock_unknown():

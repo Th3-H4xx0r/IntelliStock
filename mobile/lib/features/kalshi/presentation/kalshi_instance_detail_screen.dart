@@ -582,11 +582,21 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                     style: AppTextStyles.meta.copyWith(
                         color: edge >= 0 ? AppColors.success : AppColors.danger, fontWeight: FontWeight.bold)),
               const SizedBox(height: 2),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(color: AppColors.fill(_decColor(dec)), borderRadius: BorderRadius.circular(4)),
-                child: Text(dec.toUpperCase(), style: AppTextStyles.nano.copyWith(color: _decColor(dec), fontWeight: FontWeight.bold)),
-              ),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                if (r['paper'] == true) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(color: const Color(0x26F59E0B), borderRadius: BorderRadius.circular(4)),
+                    child: Text('MOCK', style: AppTextStyles.nano.copyWith(color: const Color(0xFFF59E0B), fontWeight: FontWeight.bold)),
+                  ),
+                  const SizedBox(width: 4),
+                ],
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(color: AppColors.fill(_decColor(dec)), borderRadius: BorderRadius.circular(4)),
+                  child: Text(dec.toUpperCase(), style: AppTextStyles.nano.copyWith(color: _decColor(dec), fontWeight: FontWeight.bold)),
+                ),
+              ]),
             ]),
             const SizedBox(width: 4),
             Icon(open ? Icons.expand_less : Icons.expand_more, size: 18, color: AppColors.textDim),
@@ -599,6 +609,8 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
               _kv('LLM', _pct(r['llm_adjustment'])),
               _kv('Fair', _pct(r['fused_fair'])),
               _kv('Size', '${r['size'] ?? 0}'),
+              if (r['paper'] == true && r['realized_pnl_cents'] != null)
+                _kv('Paper P&L', '\$${((r['realized_pnl_cents'] as num) / 100).toStringAsFixed(2)}'),
             ]),
             if (r['llm_rationale'] != null && (r['llm_rationale'] as String).isNotEmpty) ...[
               const SizedBox(height: 8),

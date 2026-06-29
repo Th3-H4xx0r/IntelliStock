@@ -39,9 +39,21 @@ def generate_candidates(
     min_price_cents: int = 15,
     max_price_cents: int = 90,
     draw_min_edge: float = 0.10,
-) -> list[Candidate]:
+    collect_skips: bool = False,
+):
+    """Returns the candidate list. When collect_skips=True, returns
+    (candidates, skips) where skips records every CONSIDERED-but-rejected market with
+    a reason — so the decision log can show what the bot evaluated and why it passed."""
     allowed = allowed_markets(tier)
     cands: list[Candidate] = []
+    skips: list[dict] = []
+
+    def _skip(m, side, fair, price, edge, reason):
+        if collect_skips:
+            skips.append({"market_ticker": m.get("market_ticker", ""), "side": side,
+                          "market_type": m.get("market_type"), "fair": fair,
+                          "price_cents": price, "edge": edge, "reason": reason})
+
     for m in kalshi_markets:
         mt = m.get("market_type")
         if mt not in allowed:
@@ -55,6 +67,7 @@ def generate_candidates(
         # EVERY sub-15c bet lost (0/9, -$33) — and near-certain favorites where
         # fees eat the thin upside. The losses were 100% concentrated below this band.
         if price < min_price_cents or price > max_price_cents:
+            _skip(m, side, fair, price, None, f"price {price}c outside band [{min_price_cents},{max_price_cents}]")
             continue
         fee = fee_as_prob(price, fee_rate)
         e = compute_edge(fair_prob=fair, yes_ask_cents=price, fee=fee)
@@ -63,6 +76,7 @@ def generate_candidates(
         # larger edge so we only take a draw when the disagreement is big.
         gate = max(edge_threshold, draw_min_edge) if side == "draw" else edge_threshold
         if e <= gate:
+            _skip(m, side, fair, price, e, f"edge {e * 100:.1f}% <= bar {gate * 100:.1f}%")
             continue
         cands.append(Candidate(fixture_id, m.get("market_ticker", ""), mt, side, fair, price, e))
 
@@ -78,4 +92,5 @@ def generate_candidates(
             seen_me.add(c.market_type)
         filtered.append(c)
 
-    return filtered[: max_bets_per_game(tier)]
+    result = filtered[: max_bets_per_game(tier)]
+    return (result, skips) if collect_skips else result

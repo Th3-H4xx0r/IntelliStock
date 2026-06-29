@@ -22,6 +22,7 @@ const decisions = ref([])
 const live = ref([])
 const orders = ref({ placed: [], fills: [] })
 const summary = ref({ total: 0, placed: 0, skipped: 0, queued: 0, blocked: 0 })
+const paper = ref({ trades: 0, graded: 0, realized_pnl_cents: 0 })
 const loading = ref(true)
 let liveTimer = null
 const busy = ref(false)
@@ -42,7 +43,7 @@ async function load() {
     getJson(`/instances/${id}/kalshi/decisions?limit=200`),
   ])
   detail.value = d
-  if (dec) { decisions.value = dec.decisions || []; summary.value = dec.summary || summary.value }
+  if (dec) { decisions.value = dec.decisions || []; summary.value = dec.summary || summary.value; paper.value = dec.paper || paper.value }
   loading.value = false
   loadLive()
 }
@@ -80,6 +81,9 @@ function toggle(i) {
   expanded.value = s
 }
 const running = computed(() => !!detail.value?.running)
+// Real money ONLY when a live brokerage has live_enabled AND paper_mode off.
+const liveReal = computed(() => detail.value?.environment === 'live'
+  && !!(detail.value?.config || {}).live_enabled && !(detail.value?.config || {}).paper_mode)
 
 // Edit / delete
 const showEdit = ref(false)
@@ -161,7 +165,7 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
             <h1 class="text-2xl sm:text-3xl font-bold text-slate-100">{{ detail.name }}</h1>
             <div class="flex items-center gap-2 mt-2 text-xs">
               <span class="px-2 py-0.5 rounded-md font-medium" :class="running ? 'bg-emerald-500/15 text-emerald-400' : 'bg-slate-500/15 text-slate-400'">{{ running ? 'Running' : 'Stopped' }}</span>
-              <span class="px-2 py-0.5 rounded-md font-medium" :class="detail.environment === 'live' ? 'bg-red-500/15 text-red-400' : 'bg-primary/15 text-primary'">{{ detail.environment === 'live' ? 'Live · real money' : 'Paper' }}</span>
+              <span class="px-2 py-0.5 rounded-md font-medium" :class="liveReal ? 'bg-red-500/15 text-red-400' : 'bg-amber-500/15 text-amber-400'">{{ liveReal ? 'Live · real money' : (detail.environment === 'live' ? 'Paper (mock) · live data' : 'Paper') }}</span>
             </div>
           </div>
           <div class="flex items-center gap-2">
@@ -191,6 +195,11 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-slate-100 tabular-nums">{{ summary.skipped }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Skipped</div></div>
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-amber-400 tabular-nums">{{ summary.queued }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Queued</div></div>
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-red-400 tabular-nums">{{ summary.blocked }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Blocked</div></div>
+            </div>
+            <!-- Paper (mock) hypothetical P&L — "what your profit would have been" -->
+            <div v-if="paper.trades" class="mt-3 flex items-center justify-between rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5">
+              <span class="text-[11px] uppercase tracking-wide text-amber-400/90 font-semibold flex items-center gap-1.5"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span>Paper P&amp;L · {{ paper.trades }} trade{{ paper.trades === 1 ? '' : 's' }}<span v-if="paper.graded" class="text-slate-500 normal-case">({{ paper.graded }} settled)</span></span>
+              <span class="text-base font-bold tabular-nums" :class="(paper.realized_pnl_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (paper.realized_pnl_cents >= 0 ? '+' : '') + '$' + ((paper.realized_pnl_cents || 0) / 100).toFixed(2) }}</span>
             </div>
           </div>
         </div>
@@ -261,7 +270,10 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                   </div>
                   <div class="flex flex-col items-end gap-1 shrink-0">
                     <span class="text-xs tabular-nums font-semibold" :class="(d.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ d.edge == null ? '' : (d.edge >= 0 ? '+' : '') + pct(d.edge) }}</span>
-                    <span class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded" :class="decBadge(d.decision)">{{ d.decision }}</span>
+                    <span class="flex items-center gap-1">
+                      <span v-if="d.paper" class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400" title="Paper / mock — no real order placed">MOCK</span>
+                      <span class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded" :class="decBadge(d.decision)">{{ d.decision }}</span>
+                    </span>
                   </div>
                   <span class="material-symbols-outlined text-slate-500 text-[18px] transition-transform shrink-0" :class="{ 'rotate-180': expanded.has(decStart + i) }">expand_more</span>
                 </button>
@@ -275,6 +287,7 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                     <div><span class="text-slate-600">Opp score</span> {{ d.opportunity_score == null ? '—' : d.opportunity_score.toFixed(2) }}</div>
                     <div v-if="d.outcome"><span class="text-slate-600">Outcome</span> {{ d.outcome }}</div>
                     <div v-if="d.clv != null"><span class="text-slate-600">CLV</span> {{ pct(d.clv) }}</div>
+                    <div v-if="d.paper && d.realized_pnl_cents != null"><span class="text-slate-600">Paper P&amp;L</span> <span :class="d.realized_pnl_cents >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (d.realized_pnl_cents >= 0 ? '+' : '') + '$' + (d.realized_pnl_cents / 100).toFixed(2) }}</span></div>
                   </div>
                   <p v-if="d.llm_rationale" class="text-slate-300 bg-surface/60 border border-border-subtle rounded-lg px-3 py-2">
                     <span class="material-symbols-outlined text-primary text-[14px] align-middle mr-1">psychology</span>{{ d.llm_rationale }}
