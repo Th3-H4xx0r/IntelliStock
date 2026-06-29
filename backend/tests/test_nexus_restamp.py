@@ -40,11 +40,12 @@ def _install_fake_db(monkeypatch, *, instances, snapshots, markers):
     monkeypatch.setattr(nr, "_fetch_linked_base_instance_ids",
                         lambda conn, r, sid: list(instances))
 
-    def _fetch_live(conn, r, base):
+    def _fetch_snaps(conn, r, base):
         return [dict(s) for s in state["snapshots"]
-                if s["instance_id"] == base and s.get("origin") == "live"
+                if s["instance_id"] == base
+                and s.get("origin") in ("live", "backtest")
                 and s.get("config_hash") and s.get("end_date")]
-    monkeypatch.setattr(nr, "_fetch_live_snapshot_rows", _fetch_live)
+    monkeypatch.setattr(nr, "_fetch_snapshot_rows", _fetch_snaps)
 
     def _write(conn, r, row):
         state["snapshots"] = [s for s in state["snapshots"] if s["id"] != row["id"]]
@@ -69,10 +70,10 @@ def _install_fake_db(monkeypatch, *, instances, snapshots, markers):
     return state
 
 
-def _snap(base, config_hash, end_date="2026-06-28"):
+def _snap(base, config_hash, end_date="2026-06-28", origin="live"):
     return {
-        "id": f"{base}|{NEXUS}|{config_hash}|live|{end_date}",
-        "instance_id": base, "strategy_name": NEXUS, "origin": "live",
+        "id": f"{base}|{NEXUS}|{config_hash}|{origin}|{end_date}",
+        "instance_id": base, "strategy_name": NEXUS, "origin": origin,
         "config_hash": config_hash, "nexus_module_hash": "modabc",
         "end_date": end_date, "cache_json": "{}", "updated_at_epoch": 1.0,
     }
@@ -104,6 +105,24 @@ def test_restamp_rewrites_snapshot_under_base_id(monkeypatch):
     assert new_row["nexus_module_hash"] == "modabc"  # other fields preserved
     # marker now carries the new history_scope_id (keyed by scoped id)
     assert state["markers"][0]["config_hash"] == new_scope
+
+
+def test_restamp_preserves_backtest_origin_in_id(monkeypatch):
+    # A backtest-origin snapshot is loadable by boot, so it must be re-stamped
+    # too -- and keep its `backtest` PK segment (not be rewritten as `live`).
+    old_hash = nci.live_config_hash(OLD_CFG)
+    new_hash = nci.live_config_hash(NEW_CFG)
+    state = _install_fake_db(
+        monkeypatch,
+        instances=["alpaca-main"],
+        snapshots=[_snap("alpaca-main", old_hash, origin="backtest")],
+        markers=[],
+    )
+    out = nr.restamp_instance(None, _FakeR(), "alpaca-main", NEW_CFG)
+    assert out["snapshots_restamped"] == 1
+    new_row = next(s for s in state["snapshots"] if s["config_hash"] == new_hash)
+    assert new_row["id"] == f"alpaca-main|{NEXUS}|{new_hash}|backtest|2026-06-28"
+    assert new_row["origin"] == "backtest"
 
 
 def test_restamp_is_idempotent(monkeypatch):

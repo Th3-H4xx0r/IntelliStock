@@ -49,14 +49,18 @@ def resolve_for_identity(conn, raw_cfg: dict) -> dict:
     ``resolve_model_refs_in_config(force_refresh=True)`` expands ``*_llm_model_id``
     refs into inline provider/model, then live overrides are applied. The result
     is what the identity hashes must be computed from.
+
+    A resolver FAILURE is propagated (NOT swallowed): if we silently fell back to
+    the unresolved config, we would write an identity hash that boot — which
+    resolves successfully later — will not reproduce, silently triggering the
+    exact destructive rebuild this feature prevents. Letting it raise records a
+    ``restamp_error`` instead (``_apply_preserve_history``), so the save is kept
+    but the operator is told preserve did not take. Note: a deleted/missing
+    ``model_id`` is NOT a failure here — ``resolve_model_refs_in_config`` skips it
+    and falls through to env/provider defaults, exactly as boot does.
     """
     cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
-    try:
-        cfg = resolve_model_refs_in_config(conn, cfg, force_refresh=True)
-    except Exception:
-        # If the Models lookup fails, fall back to the raw cfg rather than
-        # blocking the save; identities will still be internally consistent.
-        pass
+    cfg = resolve_model_refs_in_config(conn, cfg, force_refresh=True)
     return _apply_live_overrides(cfg)
 
 
@@ -69,7 +73,16 @@ def _identities_for(resolved_cfg: dict) -> tuple[str, str]:
 
 
 def _nexus_config_from_strategies(strategies) -> dict:
-    """Pluck the ``graph_nexus_analysis`` sub-strategy config from a payload list."""
+    """Pluck the ``graph_nexus_analysis`` sub-strategy config from a payload list.
+
+    Reads ``config`` only (not ``conditions``). This matches boot's snapshot
+    ``live_config_hash`` (config-only) and is also correct for the cleanup
+    ``history_scope_id`` (merged conditions+config) because every strategy saved
+    through ``action_edit_strategy`` is run through
+    ``_normalize_strategy_payload_item``, which folds ``conditions`` into
+    ``config`` and emits ``conditions: {}``. So for the only path that triggers a
+    re-stamp, ``config`` already holds the merged keys.
+    """
     for s in (strategies or []):
         if not isinstance(s, dict):
             continue
@@ -92,13 +105,20 @@ def _fetch_linked_base_instance_ids(conn, r, strategy_id) -> list[str]:
     return [str(row.get("id")) for row in rows if row.get("id") is not None]
 
 
-def _fetch_live_snapshot_rows(conn, r, base_instance_id: str) -> list[dict]:
-    """All new-schema *live* snapshot rows for an instance (have config_hash)."""
+def _fetch_snapshot_rows(conn, r, base_instance_id: str) -> list[dict]:
+    """All new-schema snapshot rows for an instance that boot could load.
+
+    ``load_with_fallback`` keys purely on ``[instance_id, config_hash]`` and does
+    NOT filter on ``origin`` -- it will hydrate a ``backtest``-origin row just as
+    readily as a ``live`` one (common right after a rebuild, before a full live
+    day has been saved). So we must re-stamp every row the loader can consume,
+    not just live ones, or boot finds a stale-hash backtest row and rebuilds.
+    """
     rows = list(
         r.db(DB_NAME).table(SNAPSHOT_TABLE)
         .filter(lambda d: (d["instance_id"] == base_instance_id)
                 & (d["strategy_name"] == NEXUS_STRATEGY_NAME)
-                & (d["origin"] == "live"))
+                & ((d["origin"] == "live") | (d["origin"] == "backtest")))
         .run(conn)
     )
     return [row for row in rows if row.get("config_hash") and row.get("end_date")]
@@ -147,13 +167,18 @@ def restamp_instance(conn, r, base_instance_id: str, resolved_cfg: dict) -> dict
     snapshots_restamped = 0
     markers_restamped = 0
 
-    for row in _fetch_live_snapshot_rows(conn, r, base_instance_id):
+    for row in _fetch_snapshot_rows(conn, r, base_instance_id):
         if str(row.get("config_hash")) == new_hash:
             continue  # already current -> idempotent no-op
         end_date = row.get("end_date")
+        # Preserve the row's own origin segment ("live" / "backtest") -- the PK
+        # format is `{base}|{strategy}|{hash}|{origin}|{end_date}` and the
+        # respective writers (save_strategy_cache_to_db / persist_backtest_snapshot)
+        # expect it to match `origin`, or the next write inserts a duplicate.
+        seg = str(row.get("origin") or "live")
         new_row = dict(row)
         new_row["config_hash"] = new_hash
-        new_row["id"] = f"{base_instance_id}|{NEXUS_STRATEGY_NAME}|{new_hash}|live|{end_date}"
+        new_row["id"] = f"{base_instance_id}|{NEXUS_STRATEGY_NAME}|{new_hash}|{seg}|{end_date}"
         new_row["updated_at"] = r.now()
         new_row["updated_at_epoch"] = time.time()
         _write_snapshot_row(conn, r, new_row)
@@ -187,7 +212,7 @@ def preview_change(conn, r, strategy_id, proposed_strategies) -> dict:
     instances = []
     needs_prompt = False
     for base in _fetch_linked_base_instance_ids(conn, r, strategy_id):
-        snap_rows = _fetch_live_snapshot_rows(conn, r, base)
+        snap_rows = _fetch_snapshot_rows(conn, r, base)
         snapshot_exists = bool(snap_rows)
         snap_hash_match = any(str(s.get("config_hash")) == new_hash for s in snap_rows)
 

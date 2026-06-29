@@ -1193,6 +1193,14 @@ async function doSaveStrategy(preserveHistory) {
     })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`)
+    if (preserveHistory && body.restamp_error) {
+      // Config saved, but the re-stamp failed — history was NOT preserved, so
+      // the next boot will rebuild. Surface it instead of a false success.
+      editStrategyOk.value  = false
+      editStrategyMsg.value = `Saved, but preserving history failed: ${body.restamp_error}. Next start will rebuild.`
+      await fetchInstance()
+      return
+    }
     editStrategyOk.value  = true
     editStrategyMsg.value = preserveHistory
       ? 'Saved. History preserved — takes effect on next Stop→Start.'
