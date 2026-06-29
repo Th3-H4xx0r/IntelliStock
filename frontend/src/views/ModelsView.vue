@@ -219,7 +219,12 @@ function closeModal(force = false) {
 // any follow-up state. Sets ``testResult`` directly so the response
 // panel below the form populates immediately.
 async function _runLlmTest(d) {
-  const testPayload = buildStrategyLlmTestPayload(d)
+  // When editing, pass the row id so the backend reuses the SAVED key if the
+  // key field was left blank (the user shouldn't have to re-enter it to test).
+  const testPayload = {
+    ...buildStrategyLlmTestPayload(d),
+    model_id: editMode.value ? editId.value : undefined,
+  }
   const testRes = await fetch(`${API_BASE}/llm/test`, {
     method: 'POST',
     headers: authHeaders(),
@@ -277,8 +282,10 @@ async function submitModel() {
   // (local Ollama legitimately has no api_key and we still want
   // "Test & Save" to actually probe the host).
   const hasKey = !!d.apiKey.trim()
+  // On edit we can test even with a blank key field — the backend falls back to
+  // the saved key via model_id (see _runLlmTest). So always test when editing.
   const shouldTest = !skipTest && (
-    d.provider === 'codex-cli' || d.provider === 'ollama' || hasKey
+    d.provider === 'codex-cli' || d.provider === 'ollama' || hasKey || editMode.value
   )
   if (shouldTest) {
     try {
@@ -659,6 +666,7 @@ onMounted(fetchModels)
               :draft="formDraft"
               @update:draft="formDraft = $event"
               :disabled="submitting"
+              :editing="editMode"
             />
 
             <!-- Pricing override (optional). When any of these are set,
