@@ -11,7 +11,7 @@ def test_normalize_converts_dollars_to_cents_and_defaults():
     assert c["bankroll_cents"] == 482014
     assert c["daily_loss_cap_cents"] == 40000
     assert c["edge_threshold"] == 0.04
-    assert c["kelly_fraction"] == 0.25          # default
+    assert c["kelly_fraction"] == 0.125         # default (fractional Kelly; was 0.25, instance ran 0.40)
     assert c["leagues"] == DEFAULT_LEAGUES       # default
     assert c["poll_seconds"] == 60
     assert c["live_enabled"] is True
@@ -40,4 +40,4 @@ def test_risk_caps_from_config():
     caps = risk_caps_from_config(cfg)
     assert caps.bankroll_cents == 100000
     assert caps.max_contracts_per_market == 25
-    assert caps.edge_threshold == 0.03
+    assert caps.edge_threshold == 0.04

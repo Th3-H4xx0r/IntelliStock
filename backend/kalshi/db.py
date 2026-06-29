@@ -38,6 +38,7 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("kalshi_market_listings", "fixture_id"),
     ("kalshi_capital_plan", "instance_id"),
     ("kalshi_live", "id"),   # live in-match cards: id = "{instance_id}|{fixture_id}"
+    ("kalshi_fills", "id"),  # actual fills — ground-truth entry price for reconcile
 ]
 
 
@@ -111,3 +112,153 @@ def bump_scan_budget(conn, ts_iso: str, n: int = 1) -> int:
     used = int((row or {}).get("used", 0)) + n
     tbl.insert({"window": window, "used": used}, conflict="replace").run(conn)
     return used
+
+
+# --- feedback loop: persist fills/orders + reconcile settlements (the loop the bot lacked) ---
+
+def write_order(conn, *, client_order_id, decision_id, market_ticker, status,
+                requested, filled=0, ts="") -> None:
+    """Persist a submitted order so fills can be joined back to the decision."""
+    _r.db(DB_NAME).table("kalshi_orders").insert({
+        "client_order_id": client_order_id,
+        "decision_id": decision_id,
+        "market_ticker": market_ticker,
+        "status": status,
+        "requested": int(requested),
+        "filled": int(filled),
+        "ts": ts,
+    }, conflict="replace").run(conn)
+
+
+def upsert_fills(conn, fills) -> int:
+    """Upsert fills (ground-truth entry price). Accepts KalshiFill dataclasses OR
+    raw dicts. Stable id dedupes re-pulls."""
+    docs = []
+    for f in (fills or []):
+        if not isinstance(f, dict):
+            f = getattr(f, "__dict__", {})
+        tk = f.get("market_ticker") or f.get("ticker") or ""
+        ts = f.get("ts") or f.get("created_time") or ""
+        price = f.get("price_cents", f.get("yes_price", f.get("price", 0)))
+        cnt = f.get("contracts", f.get("count", 0))
+        fid = f"{tk}|{ts}|{price}|{cnt}"
+        docs.append({"id": fid, "market_ticker": tk, "ts": ts,
+                     "price_cents": price, "contracts": cnt,
+                     "action": f.get("action", ""), "side": f.get("side", "")})
+    if docs:
+        _r.db(DB_NAME).table("kalshi_fills").insert(docs, conflict="replace").run(conn)
+    return len(docs)
+
+
+def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> dict:
+    """Pull settlements, reconcile un-settled PLACED decisions at the POSITION level
+    (cost-weighted, one settlement counted once), write back outcome/realized_pnl/clv,
+    and append clv_log rows. Idempotent: rows already reconciled are skipped. This is
+    the measurement loop — it does NOT trade and NEVER flips live_enabled."""
+    from kalshi import reconcile as _rec
+    try:
+        settlements = client.get_settlements(limit=500)
+    except Exception:
+        return {"settled": 0, "error": "get_settlements failed"}
+    result_by_ticker = {}
+    for s in (settlements or []):
+        tk = s.get("ticker") or s.get("market_ticker")
+        res = s.get("market_result") or s.get("result")
+        if tk and res in ("yes", "no"):
+            result_by_ticker[tk] = res
+    if not result_by_ticker:
+        return {"settled": 0}
+    rows = list(
+        _r.db(DB_NAME).table("kalshi_decisions")
+        .filter(lambda d: (d["brokerage_id"] == brokerage_id)
+                & (d["decision"] == "placed")
+                & (d["realized_pnl_cents"].default(None).eq(None)))
+        .run(conn)
+    )
+    rows = [r for r in rows if r.get("market_ticker") in result_by_ticker]
+    if not rows:
+        return {"settled": 0}
+    rows_by_id = {r["id"]: r for r in rows}
+    # Terminal-mark live exit/reduce SELL rows so they stop re-pulling every tick
+    # (they aren't positions; P&L is captured at the net-position level).
+    for r in rows:
+        if r.get("live_action") in ("exit", "reduce"):
+            _r.db(DB_NAME).table("kalshi_decisions").get(r["id"]).update(
+                {"realized_pnl_cents": 0, "outcome": "exit"}).run(conn)
+    # Ground-truth fills per settled ticker — ONLY positions that actually FILLED get
+    # reconciled (a maker post_only rest can stay unfilled; never grade a phantom fill).
+    settled_tickers = list({r.get("market_ticker") for r in rows})
+    fills_by_ticker: dict = {}
+    try:
+        fl = list(_r.db(DB_NAME).table("kalshi_fills")
+                  .filter(lambda f: _r.expr(settled_tickers).contains(f["market_ticker"]))
+                  .run(conn))
+    except Exception:
+        fl = []
+    for f in fl:
+        tb = fills_by_ticker.setdefault(f.get("market_ticker"),
+                                        {"buy_c": 0, "buy_cost": 0.0, "sell_c": 0})
+        c = int(f.get("contracts") or 0)
+        p = float(f.get("price_cents") or 0)
+        if str(f.get("action")).lower() == "sell":
+            tb["sell_c"] += c
+        else:
+            tb["buy_c"] += c
+            tb["buy_cost"] += c * p
+    positions = _rec.aggregate_positions(rows)
+    settled = 0
+    for pos in positions:
+        res = result_by_ticker.get(pos["market_ticker"])
+        if res is None:
+            continue
+        fb = fills_by_ticker.get(pos["market_ticker"])
+        if not fb or fb["buy_c"] <= 0:
+            # unfilled post_only rest — mark terminal, never count as a position
+            for did in pos["decision_ids"]:
+                _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
+                    {"realized_pnl_cents": 0, "outcome": "unfilled"}).run(conn)
+            continue
+        net_c = fb["buy_c"] - fb["sell_c"]
+        if net_c <= 0:                       # fully exited before settlement
+            for did in pos["decision_ids"]:
+                _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
+                    {"realized_pnl_cents": 0, "outcome": "closed"}).run(conn)
+            continue
+        # ground-truth contracts + cost-weighted entry from actual buy fills
+        pos = {**pos, "contracts": net_c, "avg_entry_cents": fb["buy_cost"] / fb["buy_c"]}
+        rep = rows_by_id.get(pos["decision_ids"][0], {}) if pos["decision_ids"] else {}
+        rec = _rec.reconcile_position(
+            pos, result=res,
+            close_cents=rep.get("pre_settle_mid_cents"),
+            sharp_close_prob=rep.get("sharp_close_prob"),
+            fee_rate=fee_rate,
+        )
+        total = pos["contracts"] or 1
+        full_pnl = int(rec["realized_pnl_cents"])
+        ids = pos["decision_ids"]
+        allocated = 0
+        for i, did in enumerate(ids):
+            row = rows_by_id.get(did) or {}
+            # running-residual split so the per-row parts sum EXACTLY to the position
+            # P&L (independent rounding would drift by up to len(ids)-1 cents).
+            if i == len(ids) - 1:
+                part = full_pnl - allocated
+            else:
+                part = int(round(full_pnl * (int(row.get("size") or 0) / total)))
+                allocated += part
+            _r.db(DB_NAME).table("kalshi_decisions").get(did).update({
+                "outcome": rec["outcome"],
+                "clv": rec["clv"],
+                "realized_pnl_cents": part,
+            }).run(conn)
+        if rec.get("clv_graded"):
+            _r.db(DB_NAME).table("kalshi_clv_log").insert({
+                "id": f"{brokerage_id}|{pos['market_ticker']}",
+                "brokerage_id": brokerage_id,
+                "league": rep.get("league", ""),
+                "market_ticker": pos["market_ticker"],
+                "clv": rec["clv"],
+                "ts": rep.get("ts", ""),
+            }, conflict="replace").run(conn)
+        settled += 1
+    return {"settled": settled}

@@ -52,6 +52,18 @@ def _dollars_cents(v) -> float:
     return _fp(v) * 100.0
 
 
+class KalshiHTTPError(RuntimeError):
+    """Typed Kalshi API error. Subclasses RuntimeError so existing callers that
+    `except RuntimeError` / `except Exception` keep working. `status` lets callers
+    branch (e.g. 422 insufficient_balance is terminal, 503 is retryable)."""
+    RETRYABLE = {429, 500, 502, 503, 504}
+
+    def __init__(self, status: int, detail: str = "", message: str = ""):
+        super().__init__(message or f"Kalshi HTTP {status}: {detail}")
+        self.status = int(status)
+        self.detail = detail
+
+
 class KalshiClient:
     def __init__(
         self,
@@ -86,22 +98,32 @@ class KalshiClient:
         )
         headers["Content-Type"] = "application/json"
         url = self.host + full_path
-        resp = self._session.request(
-            method, url, headers=headers, params=params, json=body, timeout=self.timeout
-        )
-        # Surface the response body on 4xx/5xx — Kalshi returns a JSON {error/message}
-        # that names the offending field; raise_for_status alone discards it.
-        status = getattr(resp, "status_code", 200)
-        if status >= 400:
+        # Retry transient failures (429/5xx, exchange paused) with exponential
+        # backoff; terminal errors (400/401/403/404/410/422 incl. insufficient_balance)
+        # raise immediately — retrying them just wastes time and hammers the API.
+        import time as _time
+        for attempt in range(3):
+            resp = self._session.request(
+                method, url, headers=headers, params=params, json=body, timeout=self.timeout
+            )
+            status = getattr(resp, "status_code", 200)
+            if status < 400:
+                if getattr(resp, "content", None):
+                    return resp.json()
+                return {}
             detail = ""
             try:
                 detail = resp.text[:400]
             except Exception:
                 detail = ""
-            raise RuntimeError(f"Kalshi {method} {path} -> HTTP {status}: {detail}")
-        if getattr(resp, "content", None):
-            return resp.json()
-        return {}
+            retryable = (status in KalshiHTTPError.RETRYABLE
+                         or "exchange_is_paused" in detail
+                         or "temporarily" in detail.lower())
+            if retryable and attempt < 2:
+                _time.sleep(0.5 * (2 ** attempt))
+                continue
+            raise KalshiHTTPError(status, detail, f"Kalshi {method} {path} -> HTTP {status}: {detail}")
+        raise KalshiHTTPError(0, "", f"Kalshi {method} {path} -> retries exhausted")
 
     # --- portfolio ---
     def get_balance(self) -> KalshiBalance:
@@ -218,6 +240,7 @@ class KalshiClient:
         contracts: int,
         limit_cents: int,
         client_order_id: str,
+        post_only: bool = False,
     ) -> KalshiOrderRef:
         # V2 create-order (POST /portfolio/events/orders): the legacy
         # /portfolio/orders is deprecated and 410s on this API. V2 uses a single
@@ -238,6 +261,7 @@ class KalshiClient:
             "price": f"{int(limit_cents) / 100:.4f}",  # FixedPointDollars
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
+            "post_only": bool(post_only),   # maker-only: exchange cancels instead of crossing the spread
             "client_order_id": cid,
         }
         d = self._request("POST", "/portfolio/events/orders", body=body)
@@ -254,11 +278,23 @@ class KalshiClient:
         )
 
     def cancel_order(self, order_id: str) -> bool:
-        self._request("DELETE", f"/portfolio/orders/{order_id}")
+        # V2 family: the legacy /portfolio/orders 410s (it silently broke the
+        # kill-switch). Use the same /portfolio/events/orders root as create.
+        self._request("DELETE", f"/portfolio/events/orders/{order_id}")
         return True
 
+    def get_settlements(self, limit: int = 200) -> list[dict]:
+        """Settled markets (ground truth for reconcile): ticker, market_result,
+        revenue, yes/no cost, settled_time. Empty list on any error."""
+        try:
+            d = self._request("GET", "/portfolio/settlements",
+                              params={"limit": max(1, min(int(limit), 1000))})
+        except Exception:
+            return []
+        return d.get("settlements", []) or []
+
     def list_open_orders(self) -> list[str]:
-        d = self._request("GET", "/portfolio/orders", params={"status": "resting"})
+        d = self._request("GET", "/portfolio/events/orders", params={"status": "resting"})
         return [o.get("order_id") for o in (d.get("orders", []) or []) if o.get("order_id")]
 
     def get_resting_orders(self) -> list[dict]:
@@ -266,7 +302,7 @@ class KalshiClient:
         set. New-API fields are *_dollars / *_fp (with legacy fallbacks). Empty when
         nothing is resting."""
         try:
-            d = self._request("GET", "/portfolio/orders", params={"status": "resting"})
+            d = self._request("GET", "/portfolio/events/orders", params={"status": "resting"})
         except Exception:
             return []
         out = []

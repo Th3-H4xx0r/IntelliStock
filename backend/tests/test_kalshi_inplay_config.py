@@ -28,4 +28,4 @@ def test_inplay_caps_from_config_maps_fields():
     assert caps.bankroll_cents == 5000
     assert caps.max_contracts_per_market == 25
     assert caps.inplay_exposure_frac == 0.3
-    assert caps.stop_loss_frac == 0.5   # default
+    assert caps.stop_loss_frac == 0.35   # default (thesis-break is now the primary exit)

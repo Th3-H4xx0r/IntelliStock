@@ -46,6 +46,9 @@ def plan_and_allocate(
         cands = generate_candidates(
             fx["fixture_id"], tier, fused, fx.get("kalshi_markets", []),
             fee_rate=fee_rate, edge_threshold=edge_threshold,
+            min_price_cents=getattr(caps, "min_price_cents", 15),
+            max_price_cents=getattr(caps, "max_price_cents", 90),
+            draw_min_edge=getattr(caps, "draw_min_edge", 0.10),
         )
         for c in cands:
             cid = f"{fx['fixture_id']}|{c.market_ticker}"
@@ -76,5 +79,10 @@ def plan_and_allocate(
             model_prob=model_p, sharp_prob=sharp_p, llm_adjustment=adj, llm_rationale=rationale,
             fused_fair=c.fair, edge=c.edge, size=(a["contracts"] if a else 0),
             opportunity_score=opp, decision=("placed" if a else "skipped"),
+            league=fx.get("league", ""),
+            # CLV reference: the sharp book's prob at entry — reconcile grades whether
+            # we bought below sharp fair (the only real, sharp-anchored CLV grade).
+            sharp_close_prob=sharp_p,
+            entry_avg_cents=(a["price_cents"] if a else None),
         ))
     return {"allocations": allocations, "decisions": decisions, "candidates": scored}

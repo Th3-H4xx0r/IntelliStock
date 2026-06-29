@@ -36,6 +36,9 @@ def generate_candidates(
     *,
     fee_rate: float,
     edge_threshold: float,
+    min_price_cents: int = 15,
+    max_price_cents: int = 90,
+    draw_min_edge: float = 0.10,
 ) -> list[Candidate]:
     allowed = allowed_markets(tier)
     cands: list[Candidate] = []
@@ -48,9 +51,18 @@ def generate_candidates(
         if fair is None:
             continue
         price = int(m.get("yes_ask_cents", 0))
+        # Price-band gate (favorite-longshot tax): skip cheap longshots — in paper
+        # EVERY sub-15c bet lost (0/9, -$33) — and near-certain favorites where
+        # fees eat the thin upside. The losses were 100% concentrated below this band.
+        if price < min_price_cents or price > max_price_cents:
+            continue
         fee = fee_as_prob(price, fee_rate)
         e = compute_edge(fair_prob=fair, yes_ask_cents=price, fee=fee)
-        if e <= edge_threshold:
+        # Draws were model-overconfident (0/12, -$58). Don't hard-ban (research:
+        # that's model miscalibration, not market overpricing) but demand a much
+        # larger edge so we only take a draw when the disagreement is big.
+        gate = max(edge_threshold, draw_min_edge) if side == "draw" else edge_threshold
+        if e <= gate:
             continue
         cands.append(Candidate(fixture_id, m.get("market_ticker", ""), mt, side, fair, price, e))
 

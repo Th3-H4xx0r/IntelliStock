@@ -24,6 +24,9 @@ def decision_doc(
     opportunity_score: float | None = None,
     decision: str = "skipped",   # placed | skipped | queued | blocked
     block_reason: str = "",
+    league: str = "",
+    sharp_close_prob: float | None = None,
+    entry_avg_cents: int | None = None,
 ) -> dict:
     return {
         "id": f"{instance_id}|{market_ticker}|{ts}",
@@ -41,13 +44,17 @@ def decision_doc(
         "edge": edge,
         "fee": fee,
         "size": size,
+        "entry_avg_cents": entry_avg_cents,   # actual ask paid — ground-truth entry for reconcile
         "opportunity_score": opportunity_score,
         "decision": decision,
         "block_reason": block_reason,
-        # filled on settlement
+        "league": league,
+        # filled on settlement by reconcile.settle_decisions (the feedback loop)
         "outcome": None,
         "realized_pnl_cents": None,
         "clv": None,
+        "pre_settle_mid_cents": None,   # last observed Kalshi mid before settlement (CLV close)
+        "sharp_close_prob": sharp_close_prob,  # sharp book's prob at entry (CLV reference)
     }
 
 

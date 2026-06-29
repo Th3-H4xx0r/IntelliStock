@@ -18,6 +18,7 @@ def allocate(candidates, *, bankroll_cents, caps, reserve_frac, expected_better_
     per_market_cap = int(getattr(caps, "max_contracts_per_market", 50))
     kelly = float(getattr(caps, "kelly_fraction", 0.25))           # tier aggression
     min_stake_frac = max(0.0, float(getattr(caps, "min_stake_frac", 0.0)))
+    per_bet_cap_frac = max(0.0, float(getattr(caps, "per_bet_cap_frac", 0.0)))  # ceiling (0 = off)
 
     allocations = []
     spent = 0
@@ -30,7 +31,10 @@ def allocate(candidates, *, bankroll_cents, caps, reserve_frac, expected_better_
             continue
         # Floor any +EV bet at min_stake_frac of bankroll so small-edge bets aren't
         # dust (the risk tier controls how big). Still bounded by per-market + deployable.
-        stake = int(max(frac, min_stake_frac) * bankroll_cents)
+        eff = max(frac, min_stake_frac)
+        if per_bet_cap_frac > 0.0:
+            eff = min(eff, per_bet_cap_frac)             # cap single-bet exposure
+        stake = int(eff * bankroll_cents)
         contracts = min(stake // price, per_market_cap)
         if contracts <= 0:
             continue
