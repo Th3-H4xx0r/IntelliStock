@@ -64,3 +64,19 @@ def is_national_team(name: str) -> bool:
 
 def national_elo(name: str, default: float = DEFAULT_NATIONAL_ELO) -> float:
     return _NATIONAL_ELO.get(_canon(name), default)
+
+
+def national_elo_from(table: dict | None, name: str, default: float = DEFAULT_NATIONAL_ELO) -> float:
+    """Elo preferring a LIVE table (e.g. eloratings.net via data.sources.natelo),
+    then the built-in static table, then the default. `table` keys must be
+    canonical_team() names. Pass {} / None (feed off or down) for the original
+    static-only behavior — so this is a safe drop-in for national_elo()."""
+    c = _canon(name)
+    if table:
+        v = table.get(c)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return _NATIONAL_ELO.get(c, default)

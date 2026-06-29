@@ -127,6 +127,11 @@ class EngineConfig:
     soccer_series: list = field(default_factory=list)
     # ESPN league slugs for live-score lookups (empty = use scoreboard.DEFAULT_SCOREBOARD_LEAGUES).
     scoreboard_leagues: list = field(default_factory=list)
+    # National-team Elo: fetch the live World Football Elo (eloratings.net) so the
+    # model anchor isn't a frozen table. Falls back to the static table if off/down.
+    national_elo_live: bool = True
+    national_elo_url: str = "https://www.eloratings.net"
+    national_elo_refresh_ticks: int = 60
 
 
 def run_once(
@@ -229,8 +234,9 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         f"¼-Kelly {config.caps.kelly_fraction}", "white")
 
     from kalshi.quant.elo import elo_to_expected_goals
-    from kalshi.quant.national_elo import is_national_team, national_elo
+    from kalshi.quant.national_elo import is_national_team, national_elo, national_elo_from
     from kalshi.data.sources.clubelo import fetch_elo_table, elo_for
+    from kalshi.data.sources.natelo import fetch_national_elo_table
     from kalshi.data.sources.news import fetch_match_news, summarize_news_items
     from kalshi.data import discovery
     from kalshi.feature_models import MatchFeatures, TeamForm
@@ -262,6 +268,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         log(f"Analyst LLM resolution failed ({type(e).__name__}: {e}); trading model-only.", "yellow")
 
     elo_table: dict = {}
+    nat_elo_table: dict = {}    # live national-team Elo (eloratings.net); {} -> static fallback
     analyst_cache: dict = {}    # event_ticker -> {"ts": wall, "out": dict}; news+LLM TTL (wall-clock)
     price_history: dict = {}    # market_ticker -> [mid_cents...]; live event detection
     adds_by_match: dict = {}    # fixture_id -> in-play add count
@@ -301,6 +308,15 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 elo_table = fetch_elo_table() or {}
                 log(f"tick {tick}: loaded {len(elo_table)} club Elo ratings.",
                     "white" if elo_table else "yellow")
+            # 1b) Live national-team Elo (eloratings.net) for World Cup / international
+            # markets — replaces the frozen static table when reachable. Degrade-safe:
+            # {} keeps the static fallback (national_elo_from), so a feed outage is a no-op.
+            if config.national_elo_live and (not nat_elo_table
+                                             or tick % max(1, config.national_elo_refresh_ticks) == 1):
+                nat_elo_table = fetch_national_elo_table(config.national_elo_url) or {}
+                log(f"tick {tick}: loaded {len(nat_elo_table)} live national Elo ratings"
+                    + ("." if nat_elo_table else " — using built-in table (feed unreachable)."),
+                    "white" if nat_elo_table else "yellow")
 
             # 2) Discover open Kalshi soccer markets by series (World Cup = KXWCGAME).
             soccer, total_raw = [], 0
@@ -411,7 +427,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
                 def _team_elo(name, _ns=national_series):
                     if _ns or is_national_team(name):
-                        return national_elo(name)
+                        return national_elo_from(nat_elo_table, name)
                     return elo_for(elo_table, name)
 
                 he, ae = _team_elo(home), _team_elo(away)
