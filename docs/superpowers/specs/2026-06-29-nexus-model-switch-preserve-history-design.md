@@ -196,6 +196,27 @@ edit models → Save
 - **Mobile:** widget test for the confirm dialog + `preserveHistory` passthrough; `flutter analyze` clean.
 - No test touches prod RethinkDB; use a local/ephemeral DB or fakes.
 
+## Implementation notes (discovered during build)
+
+- **Two disjoint identity namespaces.** `live_config_hash` reads the *stage*
+  keys (`discovery/sentiment/macro/company/analyst_llm_model`) while
+  `history_scope_id` reads *root + article-role* keys (`llm_model`,
+  `company_article_*`, `macro_article_*`, `event_maintenance_*`, `overlay_*`).
+  They are disjoint, so a given model edit may move one identity, the other, or
+  both. `preview_change` checks each independently and `restamp_instance` always
+  updates both targets, so any combination is handled.
+- **Mobile has no model-selection editor.** `strategy_detail_screen` is
+  read-only for strategy config (its form creates backtests). The mobile
+  deliverable is therefore the repository plumbing (`previewConfigChange` +
+  `update(preserveHistory:)`) with tests; the confirmation dialog will attach
+  when a mobile strategy-config editor exists. The web editor is the live path.
+- **Known gap — editing the Models-table row.** Changing a `Models` row's
+  underlying `model` (via the models screen) also changes the resolved
+  provider/model for every instance referencing that `model_id`, so it changes
+  the boot identities too — but it goes through `PUT /models`, not
+  `PUT /strategies`, so it bypasses this popup. Out of scope here; flagged for a
+  follow-up (the same `nexus_restamp` functions can back it).
+
 ## Out of scope
 
 - Backtest cleanup/lookback semantics.
