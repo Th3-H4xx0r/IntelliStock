@@ -376,7 +376,7 @@ def _env(key: str, default: str = "") -> str:
 
 def _normalize_llm_provider(provider: str) -> str:
     name = (provider or "gemini").strip().lower()
-    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic") else "gemini"
+    return name if name in ("gemini", "deepseek", "openai", "azure", "nvidia", "claude-cli", "anthropic", "openrouter") else "gemini"
 
 
 def _default_model_for_provider(provider: str) -> str:
@@ -391,6 +391,8 @@ def _default_model_for_provider(provider: str) -> str:
         return "nvidia/nemotron-3-super-120b-a12b"
     if provider in ("claude-cli", "anthropic"):
         return "claude-sonnet-4-6"
+    if provider == "openrouter":
+        return _env("AI_BACKTESTING_AGENT_OPENROUTER_MODEL") or _env("OPENROUTER_MODEL")
     return "gemini-3-flash-preview"
 
 
@@ -410,6 +412,8 @@ def _default_api_key_for_provider(provider: str) -> str:
         # Sentinel so ``if not api_key`` short-circuits don't skip the
         # whole pipeline — claude-cli authenticates via the local binary.
         return "claude-cli-no-api-key"
+    if provider == "openrouter":
+        return _env("OPENROUTER_API_KEY")
     return _env("GEMINI_API_KEY")
 
 
@@ -445,6 +449,13 @@ def _provider_config_from_env(prefix: str, provider: str) -> dict[str, str]:
             or "https://integrate.api.nvidia.com/v1"
         )
         return {"base_url": base_url.strip()}
+    if provider == "openrouter":
+        # base_url has a sane default in llm_utils; forward an env override if set.
+        base_url = (
+            _env(f"{prefix}_OPENROUTER_BASE_URL")
+            or _env("OPENROUTER_BASE_URL")
+        )
+        return {"openrouter_base_url": base_url.strip()} if base_url.strip() else {}
     return {}
 
 
