@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import VueApexCharts from 'vue3-apexcharts'
 import { getToken } from '../../utils/auth.js'
 
@@ -45,7 +45,9 @@ async function load() {
   }
 }
 
-onMounted(load)
+let timer = null
+onMounted(() => { load(); timer = setInterval(load, 10000) })   // auto-refresh every 10s
+onUnmounted(() => { if (timer) clearInterval(timer) })
 watch(() => props.brokerageId, load)
 
 // Paper instances have a static demo broker balance, so when paper P&L history exists
