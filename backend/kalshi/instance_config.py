@@ -21,19 +21,23 @@ _TIER_DEFAULTS = {
     "low":    {"edge_threshold": 0.04,  "kelly_fraction": 0.125, "per_bet_cap_frac": 0.03,
                "max_open_exposure_frac": 0.10, "no_sharp_edge_threshold": 0.10,
                "model_only_size_mult": 0.40, "max_concurrent_positions": 4,
-               "max_contracts_per_market": 50,  "inplay_exposure_frac": 0.10, "max_adds_per_match": 1},
+               "max_contracts_per_market": 50,  "inplay_exposure_frac": 0.10, "max_adds_per_match": 1,
+               "order_size_min_cents": 100, "order_size_max_cents": 300},
     "medium": {"edge_threshold": 0.035, "kelly_fraction": 0.15,  "per_bet_cap_frac": 0.05,
                "max_open_exposure_frac": 0.15, "no_sharp_edge_threshold": 0.08,
                "model_only_size_mult": 0.50, "max_concurrent_positions": 6,
-               "max_contracts_per_market": 50,  "inplay_exposure_frac": 0.12, "max_adds_per_match": 2},
+               "max_contracts_per_market": 50,  "inplay_exposure_frac": 0.12, "max_adds_per_match": 2,
+               "order_size_min_cents": 200, "order_size_max_cents": 500},
     "high":   {"edge_threshold": 0.03,  "kelly_fraction": 0.20,  "per_bet_cap_frac": 0.07,
                "max_open_exposure_frac": 0.25, "no_sharp_edge_threshold": 0.05,
                "model_only_size_mult": 0.50, "max_concurrent_positions": 8,
-               "max_contracts_per_market": 75,  "inplay_exposure_frac": 0.15, "max_adds_per_match": 2},
+               "max_contracts_per_market": 75,  "inplay_exposure_frac": 0.15, "max_adds_per_match": 2,
+               "order_size_min_cents": 500, "order_size_max_cents": 1000},
     "max":    {"edge_threshold": 0.025, "kelly_fraction": 0.25,  "per_bet_cap_frac": 0.10,
                "max_open_exposure_frac": 0.40, "no_sharp_edge_threshold": 0.03,
                "model_only_size_mult": 0.60, "max_concurrent_positions": 12,
-               "max_contracts_per_market": 100, "inplay_exposure_frac": 0.20, "max_adds_per_match": 3},
+               "max_contracts_per_market": 100, "inplay_exposure_frac": 0.20, "max_adds_per_match": 3,
+               "order_size_min_cents": 800, "order_size_max_cents": 1500},
 }
 
 
@@ -87,8 +91,11 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         # Order-size RANGE ($/trade): when set, the bot sizes each trade within [min,max]
         # by edge conviction (decoupled from Kelly) — meaningful trades even on a tiny
         # account. 0/0 = auto (Kelly-sized).
-        "order_size_min_cents": _dollars_to_cents(raw.get("order_size_min_dollars"), 0),
-        "order_size_max_cents": _dollars_to_cents(raw.get("order_size_max_dollars"), 0),
+        # order-size range: explicit dollars if provided, else the tier's suggested range.
+        "order_size_min_cents": (_dollars_to_cents(raw["order_size_min_dollars"])
+                                 if raw.get("order_size_min_dollars") is not None else td["order_size_min_cents"]),
+        "order_size_max_cents": (_dollars_to_cents(raw["order_size_max_dollars"])
+                                 if raw.get("order_size_max_dollars") is not None else td["order_size_max_cents"]),
         "maker_first": bool(raw.get("maker_first", True)),
         "maker_min_spread_cents": int(raw.get("maker_min_spread_cents", 3)),
         "maker_min_book_depth": int(raw.get("maker_min_book_depth", 5)),

@@ -30,13 +30,13 @@ const LEAGUES = [
 // Survival-first presets: fractional Kelly + small exposure caps + cash reserve.
 // (All far below the old defaults — kelly was 0.25-0.60, exposure 60-100%.)
 const RISK_PRESETS = {
-  low:    { label: 'Low',    edgePct: 5, kelly: 0.10,  maxContracts: 25,  exposurePct: 10, leagueCapPct: 12, usagePct: 40, poll: 90, dailyLossPct: 0.05,
+  low:    { label: 'Low',    edgePct: 5, kelly: 0.10,  maxContracts: 25,  exposurePct: 10, leagueCapPct: 12, usagePct: 40, poll: 90, dailyLossPct: 0.05, orderSizeMin: 1, orderSizeMax: 3,
             blurb: 'Conservative — fewer, higher-confidence trades; small stakes and a tight daily-loss cap.' },
-  medium: { label: 'Medium', edgePct: 4, kelly: 0.125, maxContracts: 50,  exposurePct: 15, leagueCapPct: 25, usagePct: 50, poll: 60, dailyLossPct: 0.08,
+  medium: { label: 'Medium', edgePct: 4, kelly: 0.125, maxContracts: 50,  exposurePct: 15, leagueCapPct: 25, usagePct: 50, poll: 60, dailyLossPct: 0.08, orderSizeMin: 2, orderSizeMax: 5,
             blurb: 'Balanced — the default. Fractional-Kelly with a small exposure cap and a cash reserve.' },
-  high:   { label: 'High',   edgePct: 3, kelly: 0.15,  maxContracts: 75,  exposurePct: 25, leagueCapPct: 30, usagePct: 60, poll: 45, dailyLossPct: 0.10,
+  high:   { label: 'High',   edgePct: 3, kelly: 0.15,  maxContracts: 75,  exposurePct: 25, leagueCapPct: 30, usagePct: 60, poll: 45, dailyLossPct: 0.10, orderSizeMin: 5, orderSizeMax: 10,
             blurb: 'More active — lower edge bar, slightly bigger Kelly and exposure. More trades, more variance.' },
-  max:    { label: 'Max',    edgePct: 2, kelly: 0.20,  maxContracts: 100, exposurePct: 40, leagueCapPct: 40, usagePct: 70, poll: 30, dailyLossPct: 0.15,
+  max:    { label: 'Max',    edgePct: 2, kelly: 0.20,  maxContracts: 100, exposurePct: 40, leagueCapPct: 40, usagePct: 70, poll: 30, dailyLossPct: 0.15, orderSizeMin: 8, orderSizeMax: 15,
             blurb: 'Aggressive — more +EV spots at larger size. Highest variance, but still capped well below the old defaults.' },
 }
 
@@ -84,6 +84,8 @@ function applyPreset(level) {
   leagueCapPct.value = p.leagueCapPct
   usagePct.value = p.usagePct
   poll.value = p.poll
+  orderSizeMin.value = p.orderSizeMin
+  orderSizeMax.value = p.orderSizeMax
   dailyLossPct.value = p.dailyLossPct
   dailyLossTouched.value = false
   dailyLoss.value = Math.max(1, Math.round(effectiveBankroll.value * p.dailyLossPct))
