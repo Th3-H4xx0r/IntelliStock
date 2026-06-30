@@ -12,6 +12,34 @@ from kalshi.risk import RiskCaps
 
 DEFAULT_LEAGUES = ["EPL", "Serie B", "Ligue 2"]
 
+# Per-tier RISK defaults (low -> max = increasing aggression). Picking a tier gives a
+# coherent profile so a UI edit can't reset a knob to a mismatched flat default. NOTE:
+# bankroll is deliberately NOT here — it is the user's real capital, never a hardcoded
+# default. Higher tiers: bigger Kelly + per-bet cap + exposure, lower edge bar, and a
+# lower no-sharp bar (take more model-only) with a lighter size haircut.
+_TIER_DEFAULTS = {
+    "low":    {"edge_threshold": 0.04,  "kelly_fraction": 0.125, "per_bet_cap_frac": 0.03,
+               "max_open_exposure_frac": 0.10, "no_sharp_edge_threshold": 0.10,
+               "model_only_size_mult": 0.40, "max_concurrent_positions": 4,
+               "max_contracts_per_market": 50,  "inplay_exposure_frac": 0.10, "max_adds_per_match": 1},
+    "medium": {"edge_threshold": 0.035, "kelly_fraction": 0.15,  "per_bet_cap_frac": 0.05,
+               "max_open_exposure_frac": 0.15, "no_sharp_edge_threshold": 0.08,
+               "model_only_size_mult": 0.50, "max_concurrent_positions": 6,
+               "max_contracts_per_market": 50,  "inplay_exposure_frac": 0.12, "max_adds_per_match": 2},
+    "high":   {"edge_threshold": 0.03,  "kelly_fraction": 0.20,  "per_bet_cap_frac": 0.07,
+               "max_open_exposure_frac": 0.25, "no_sharp_edge_threshold": 0.05,
+               "model_only_size_mult": 0.50, "max_concurrent_positions": 8,
+               "max_contracts_per_market": 75,  "inplay_exposure_frac": 0.15, "max_adds_per_match": 2},
+    "max":    {"edge_threshold": 0.025, "kelly_fraction": 0.25,  "per_bet_cap_frac": 0.10,
+               "max_open_exposure_frac": 0.40, "no_sharp_edge_threshold": 0.03,
+               "model_only_size_mult": 0.60, "max_concurrent_positions": 12,
+               "max_contracts_per_market": 100, "inplay_exposure_frac": 0.20, "max_adds_per_match": 3},
+}
+
+
+def tier_defaults(tier: str) -> dict:
+    return _TIER_DEFAULTS.get((tier or "medium").lower(), _TIER_DEFAULTS["medium"])
+
 
 def _dollars_to_cents(v, default=0) -> int:
     try:
@@ -28,21 +56,21 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
     tier = str(raw.get("tier") or "medium").lower()
     if tier not in ("low", "medium", "high", "max"):
         tier = "medium"
-    # Legacy min-stake FLOOR disabled (it forced thin edges into huge bets — a top
-    # loss driver). A per-bet CEILING (by tier) caps single-bet exposure instead.
-    _per_bet_cap_by_tier = {"low": 0.03, "medium": 0.05, "high": 0.07, "max": 0.10}
+    # Per-tier risk defaults (low -> max). Legacy min-stake FLOOR disabled (it forced
+    # thin edges into huge bets); a per-bet CEILING (by tier) caps single-bet exposure.
+    td = tier_defaults(tier)
     _bankroll = _dollars_to_cents(raw.get("bankroll_dollars"), 0)
     # Daily loss cap auto-derives to daily_loss_cap_frac of bankroll when not set explicitly.
     _daily_frac = float(raw.get("daily_loss_cap_frac", 0.08))
     _daily_loss = _dollars_to_cents(raw.get("daily_loss_cap_dollars"), 0) or (round(_daily_frac * _bankroll) if _bankroll else 0)
     return {
         "leagues": [str(x) for x in leagues if str(x).strip()] or DEFAULT_LEAGUES,
-        "edge_threshold": float(raw.get("edge_threshold", 0.04)),
-        "kelly_fraction": float(raw.get("kelly_fraction", 0.125)),
+        "edge_threshold": float(raw.get("edge_threshold", td["edge_threshold"])),
+        "kelly_fraction": float(raw.get("kelly_fraction", td["kelly_fraction"])),
         "min_stake_frac": float(raw.get("min_stake_frac", 0.0)),
-        "per_bet_cap_frac": float(raw.get("per_bet_cap_frac", _per_bet_cap_by_tier.get(tier, 0.05))),
-        "max_contracts_per_market": int(raw.get("max_contracts_per_market", 50)),
-        "max_open_exposure_frac": float(raw.get("max_open_exposure_frac", 0.15)),
+        "per_bet_cap_frac": float(raw.get("per_bet_cap_frac", td["per_bet_cap_frac"])),
+        "max_contracts_per_market": int(raw.get("max_contracts_per_market", td["max_contracts_per_market"])),
+        "max_open_exposure_frac": float(raw.get("max_open_exposure_frac", td["max_open_exposure_frac"])),
         "per_league_cap_frac": float(raw.get("per_league_cap_frac", 0.25)),
         # Price band + draw gate (favorite-longshot tax): no cheap longshots, no
         # near-certs, draws need a big edge. This is where 100% of the losses were.
@@ -52,16 +80,16 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         # No-sharp-line gate: model-only fairs overrate favorites, so demand a bigger
         # edge before betting a market the sharp book doesn't price (keeps volume on
         # genuinely large disagreements rather than hard-skipping).
-        "no_sharp_edge_threshold": float(raw.get("no_sharp_edge_threshold", 0.08)),
+        "no_sharp_edge_threshold": float(raw.get("no_sharp_edge_threshold", td["no_sharp_edge_threshold"])),
         # Size haircut for model-only (no-sharp) bets — they're unanchored favorite
         # risk, so bet them smaller than sharp-anchored ones.
-        "model_only_size_mult": float(raw.get("model_only_size_mult", 0.5)),
+        "model_only_size_mult": float(raw.get("model_only_size_mult", td["model_only_size_mult"])),
         "maker_first": bool(raw.get("maker_first", True)),
         "maker_min_spread_cents": int(raw.get("maker_min_spread_cents", 3)),
         "maker_min_book_depth": int(raw.get("maker_min_book_depth", 5)),
         "maker_max_adverse_imbalance": float(raw.get("maker_max_adverse_imbalance", -0.5)),
         "cash_buffer_frac": float(raw.get("cash_buffer_frac", 0.03)),
-        "max_concurrent_positions": int(raw.get("max_concurrent_positions", 8)),
+        "max_concurrent_positions": int(raw.get("max_concurrent_positions", td["max_concurrent_positions"])),
         "daily_loss_cap_frac": _daily_frac,
         "daily_loss_cap_cents": _daily_loss,
         "bankroll_cents": _bankroll,
@@ -77,8 +105,8 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "live_monitoring": bool(raw.get("live_monitoring", True)),
         "live_poll_seconds": max(10, int(raw.get("live_poll_seconds", 30))),
         "analyst_max_calls": max(0, int(raw.get("analyst_max_calls", 10))),
-        "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", 0.15)),
-        "max_adds_per_match": int(raw.get("max_adds_per_match", 2)),
+        "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", td["inplay_exposure_frac"])),
+        "max_adds_per_match": int(raw.get("max_adds_per_match", td["max_adds_per_match"])),
         "no_add_after_min": float(raw.get("no_add_after_min", 75.0)),
         "stop_loss_frac": float(raw.get("stop_loss_frac", 0.35)),
         # Sharp-odds anchor (de-vig'd bookmaker odds -> fair value -> edge vs Kalshi).
