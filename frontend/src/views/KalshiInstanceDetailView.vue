@@ -57,6 +57,18 @@ async function loadLive() {
   if (o) orders.value = { placed: o.placed || [], fills: o.fills || [], mock: o.mock || [], mock_history: o.mock_history || [] }
 }
 
+// Silent full refresh for the 10s auto-refresh — re-pulls detail + decisions + paper
+// summary + live + orders WITHOUT the loading flash, so the page stays live.
+async function refresh() {
+  const [d, dec] = await Promise.all([
+    getJson(`/instances/${id}/kalshi/detail`),
+    getJson(`/instances/${id}/kalshi/decisions?limit=200`),
+  ])
+  if (d) detail.value = d
+  if (dec) { decisions.value = dec.decisions || []; summary.value = dec.summary || summary.value; paper.value = dec.paper || paper.value }
+  await loadLive()
+}
+
 async function startStop(start) {
   if (busy.value) return
   busy.value = true
@@ -252,7 +264,7 @@ function initials(name) { return (name || '').replace(/[^A-Za-z ]/g, '').split('
 
 onMounted(() => {
   load()
-  liveTimer = setInterval(loadLive, 15000)
+  liveTimer = setInterval(refresh, 10000)   // auto-refresh the whole page every 10s
 })
 onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
 </script>
