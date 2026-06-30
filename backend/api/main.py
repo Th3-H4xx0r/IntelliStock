@@ -4601,28 +4601,42 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
         except Exception:
             fills = []
 
-    # MOCK (paper) positions — placed paper trades, marked to the live price by the
-    # engine, so the UI shows them in Orders with a MOCK tag + live unrealized P&L.
+    # MOCK (paper) trades — OPEN positions (live mark-to-market, shown in Orders with a
+    # MOCK tag + unrealized P&L) and SETTLED/EXPIRED ones (realized P&L), which go into the
+    # filled-orders HISTORY (also MOCK-tagged) so completed paper trades don't disappear.
     mock: dict = {}
+    mock_history: list = []
     try:
         for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
                       .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True}).run(conn)):
             mt = r.get("market_ticker")
             size = int(r.get("size") or 0)
             entry = r.get("entry_avg_cents")
-            if not mt or r.get("outcome") is not None or not size or entry is None:
+            if not mt or not size or entry is None:
                 continue
-            cur = mock.get(mt)
-            if cur and r.get("ts", "") < cur.get("_ts", ""):
-                continue
-            mock[mt] = {"_ts": r.get("ts", ""), "market_ticker": mt, "side": r.get("side"),
-                        "contracts": size, "entry_cents": int(entry), "entry_edge": r.get("entry_edge"),
-                        "mark_cents": r.get("mark_cents"), "unrealized_pnl_cents": r.get("unrealized_pnl_cents"),
-                        "ts": r.get("mark_ts") or r.get("ts"), "paper": True, **_info(mt, r.get("side"))}
+            if r.get("outcome") is None:
+                # still open -> live mark-to-market position
+                cur = mock.get(mt)
+                if cur and r.get("ts", "") < cur.get("_ts", ""):
+                    continue
+                mock[mt] = {"_ts": r.get("ts", ""), "market_ticker": mt, "side": r.get("side"),
+                            "contracts": size, "entry_cents": int(entry), "entry_edge": r.get("entry_edge"),
+                            "mark_cents": r.get("mark_cents"), "unrealized_pnl_cents": r.get("unrealized_pnl_cents"),
+                            "ts": r.get("mark_ts") or r.get("ts"), "paper": True, **_info(mt, r.get("side"))}
+            else:
+                # settled (win/loss) or expired -> realized P&L, into filled-orders history
+                mock_history.append({"market_ticker": mt, "side": r.get("side"), "action": "buy",
+                                     "contracts": size, "price_cents": int(entry),
+                                     "outcome": r.get("outcome"), "realized_pnl_cents": r.get("realized_pnl_cents"),
+                                     "clv": r.get("clv"), "ts": r.get("mark_ts") or r.get("ts"),
+                                     "paper": True, **_info(mt, r.get("side"))})
     except Exception:
         mock = {}
+        mock_history = []
     mock_list = [{k: v for k, v in m.items() if k != "_ts"} for m in mock.values()]
-    return _proxy_logos({"placed": pending[:n], "fills": fills[:n], "mock": mock_list}, _public_base_url(request))
+    mock_history.sort(key=lambda m: m.get("ts", ""), reverse=True)
+    return _proxy_logos({"placed": pending[:n], "fills": fills[:n], "mock": mock_list,
+                         "mock_history": mock_history[:n]}, _public_base_url(request))
 
 
 @app.get("/instances/{instance_id}/kalshi/equity", response_class=JSONResponse)

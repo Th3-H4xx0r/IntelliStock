@@ -20,7 +20,7 @@ const id = route.params.id
 const detail = ref(null)
 const decisions = ref([])
 const live = ref([])
-const orders = ref({ placed: [], fills: [], mock: [] })
+const orders = ref({ placed: [], fills: [], mock: [], mock_history: [] })
 const summary = ref({ total: 0, placed: 0, skipped: 0, queued: 0, blocked: 0 })
 const paper = ref({ trades: 0, graded: 0, realized_pnl_cents: 0, unrealized_pnl_cents: 0, open_positions: 0 })
 const loading = ref(true)
@@ -54,7 +54,7 @@ async function loadLive() {
     getJson(`/instances/${id}/kalshi/orders?limit=50`),
   ])
   if (l) live.value = l.matches || []
-  if (o) orders.value = { placed: o.placed || [], fills: o.fills || [], mock: o.mock || [] }
+  if (o) orders.value = { placed: o.placed || [], fills: o.fills || [], mock: o.mock || [], mock_history: o.mock_history || [] }
 }
 
 async function startStop(start) {
@@ -528,6 +528,26 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                       <span class="text-xs text-primary font-medium truncate">{{ f.pick_label || f.side }}</span>
                       <span class="text-xs text-slate-400 tabular-nums shrink-0">{{ f.contracts }} @ {{ f.price_cents }}¢</span>
                     </div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Mock (paper) FILLED history — settled/expired paper trades with realized P&L -->
+              <template v-if="orders.mock_history.length">
+                <div class="flex items-center gap-1.5 mt-4 mb-2"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Mock filled · {{ orders.mock_history.length }}</span></div>
+                <div v-for="(m, i) in orders.mock_history" :key="'mh' + i" class="flex items-center gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 mb-2">
+                  <img v-if="m.pick_logo" :src="m.pick_logo" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />
+                  <div v-else class="w-8 h-8 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[10px] font-bold text-slate-400 shrink-0">{{ initials((m.pick_label || '').replace(' to win','')) }}</div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-sm font-semibold text-slate-100 truncate">{{ m.match || m.market_ticker }}</span>
+                      <span class="shrink-0 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span>
+                    </div>
+                    <div class="flex items-center justify-between gap-2 mt-0.5">
+                      <span class="text-xs text-primary font-medium truncate">{{ m.pick_label || m.side }} · {{ m.contracts }} @ {{ m.price_cents }}¢</span>
+                      <span class="text-xs tabular-nums shrink-0" :class="(m.realized_pnl_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ m.realized_pnl_cents == null ? '—' : (m.realized_pnl_cents >= 0 ? '+' : '') + '$' + (m.realized_pnl_cents / 100).toFixed(2) }}</span>
+                    </div>
+                    <div v-if="m.outcome" class="text-[10px] uppercase tracking-wide text-slate-500 mt-0.5">{{ m.outcome }}</div>
                   </div>
                 </div>
               </template>

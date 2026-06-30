@@ -1,9 +1,52 @@
 """Tests for the feedback loop (reconcile) + the new selection-gate behavior."""
 from kalshi.reconcile import (
     validate_order, aggregate_positions, reconcile_position,
-    calibration_summary, go_live_ready, close_ref_updates,
+    calibration_summary, go_live_ready, close_ref_updates, prune_finished_decisions,
 )
 from kalshi.strategy.candidates import generate_candidates
+
+
+# --- prune finished games: drop stale skipped rows + expire stuck-open paper trades ---
+
+def test_prune_finished_decisions():
+    now = "2026-06-30T06:00:00+00:00"
+    rows = [
+        # still in the OPEN set -> keep (even though old)
+        {"id": "i|OPEN", "decision": "skipped", "market_ticker": "OPEN", "outcome": None,
+         "ts": "2026-06-29T00:00:00+00:00"},
+        # finished (not open), >3h old, skipped -> DELETE (board noise)
+        {"id": "i|OLDSKIP", "decision": "skipped", "market_ticker": "DONE1", "outcome": None,
+         "ts": "2026-06-29T00:00:00+00:00"},
+        # finished but RECENT (< delete threshold) -> keep (transient discovery-gap guard)
+        {"id": "i|RECENT", "decision": "skipped", "market_ticker": "DONE2", "outcome": None,
+         "ts": "2026-06-30T05:30:00+00:00"},
+        # finished, >12h, still-open PAPER trade -> EXPIRE, realizing the last mark P&L
+        {"id": "i|OPENTRADE", "decision": "placed", "market_ticker": "DONE3", "outcome": None,
+         "ts": "2026-06-29T00:00:00+00:00", "unrealized_pnl_cents": -120},
+        # placed, market absent this tick, ts old BUT mark_ts FRESH (still being marked open)
+        # -> keep (mark_ts is "last seen open"; guards a partial-discovery gap from wrongly
+        # expiring a live pregame bet).
+        {"id": "i|FRESHMARK", "decision": "placed", "market_ticker": "DONE5", "outcome": None,
+         "ts": "2026-06-29T00:00:00+00:00", "mark_ts": "2026-06-30T05:55:00+00:00"},
+        # placed, open, aged 5h: past DELETE (3h) but not EXPIRE (12h) -> keep
+        {"id": "i|MIDAGE", "decision": "placed", "market_ticker": "DONE6", "outcome": None,
+         "ts": "2026-06-30T01:00:00+00:00"},
+        # finished, old, but already SETTLED placed -> keep (P&L history)
+        {"id": "i|SETTLED", "decision": "placed", "market_ticker": "DONE4", "outcome": "win",
+         "ts": "2026-06-29T00:00:00+00:00"},
+    ]
+    out = prune_finished_decisions(rows, {"OPEN"}, now,
+                                   delete_after_hours=3.0, expire_after_hours=12.0)
+    assert set(out["delete"]) == {"i|OLDSKIP"}
+    assert out["expire"] == [{"id": "i|OPENTRADE", "realized_pnl_cents": -120}]
+
+
+def test_prune_never_acts_without_open_set():
+    # empty open set (discovery outage) -> never prune anything (mass-delete guard)
+    rows = [{"id": "i|X", "decision": "skipped", "market_ticker": "T", "outcome": None,
+             "ts": "2020-01-01T00:00:00+00:00"}]
+    out = prune_finished_decisions(rows, set(), "2026-06-30T06:00:00+00:00")
+    assert out == {"delete": [], "expire": []}
 
 
 # --- P3: roll the closing reference (sharp prob + Kalshi mid) onto open positions ---

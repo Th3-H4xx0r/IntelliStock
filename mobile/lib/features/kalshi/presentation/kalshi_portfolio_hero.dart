@@ -30,31 +30,52 @@ class KalshiPortfolioHero extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title.toUpperCase(), style: AppTextStyles.eyebrow.copyWith(color: AppColors.textMuted, letterSpacing: 1.0)),
+        Builder(builder: (_) {
+          final paper = async.value?.isPaper ?? false;
+          return Row(children: [
+            Text((paper ? 'Paper P&L · progress' : title).toUpperCase(),
+                style: AppTextStyles.eyebrow.copyWith(color: AppColors.textMuted, letterSpacing: 1.0)),
+            if (paper) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(color: AppColors.fill(AppColors.warning), borderRadius: BorderRadius.circular(4)),
+                child: Text('MOCK', style: AppTextStyles.nano.copyWith(color: AppColors.warning, fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ]);
+        }),
         const SizedBox(height: 10),
         async.when(
           loading: () => const SizedBox(height: 110, child: LoadingState()),
           error: (e, _) => ErrorBanner(message: '$e', onRetry: onRetry),
           data: (p) {
-            final hasSeries = p.series.length > 1;
-            final baseline = p.series.isNotEmpty ? p.series.first : 0.0;
+            // Paper instances: show the paper P&L progress curve (the broker value is a
+            // static demo balance). Real instances: the portfolio value curve.
+            final vals = p.isPaper ? p.paperSeries : p.series;
+            final tss = p.isPaper ? p.paperSeriesTs : p.seriesTs;
+            final headline = p.isPaper ? (p.paperPnl ?? 0.0) : p.value;
+            final dayChg = p.isPaper ? (vals.length >= 2 ? vals.last - vals.first : 0.0) : p.dayChange;
+            final hasSeries = vals.length > 1;
+            final baseline = vals.isNotEmpty ? vals.first : 0.0;
             return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               ValueListenableBuilder<int?>(
                 valueListenable: scrubIdx,
                 builder: (_, idx, __) {
-                  final scrubbing = idx != null && idx >= 0 && idx < p.series.length;
-                  final v = scrubbing ? p.series[idx] : p.value;
-                  final change = scrubbing ? (v - baseline) : p.dayChange;
+                  final scrubbing = idx != null && idx >= 0 && idx < vals.length;
+                  final v = scrubbing ? vals[idx] : headline;
+                  final change = scrubbing ? (v - baseline) : dayChg;
                   final positive = change >= 0;
                   final color = positive ? AppColors.success : AppColors.danger;
                   return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    // Odometer: rolls to the value (and value -> scrubbed value).
+                    // Odometer: rolls to the value (and value -> scrubbed value). Paper
+                    // P&L can be negative, so render the sign before the $.
                     TweenAnimationBuilder<double>(
                       tween: Tween<double>(begin: 0, end: v),
                       duration: const Duration(milliseconds: 500),
                       curve: Curves.easeOutCubic,
                       builder: (_, val, __) => Text(
-                        '\$${val.toStringAsFixed(2)}',
+                        '${val < 0 ? '-' : ''}\$${val.abs().toStringAsFixed(2)}',
                         style: AppTextStyles.value.copyWith(
                             fontSize: 34, color: AppColors.textHi, fontWeight: FontWeight.w800, letterSpacing: -0.5),
                       ),
@@ -72,9 +93,9 @@ class KalshiPortfolioHero extends StatelessWidget {
               if (hasSeries) ...[
                 const SizedBox(height: 18),
                 ScrubbableAreaChart(
-                  timestamps: p.seriesTs,
-                  values: p.series,
-                  lineColor: p.dayChange >= 0 ? AppColors.success : AppColors.danger,
+                  timestamps: tss,
+                  values: vals,
+                  lineColor: dayChg >= 0 ? AppColors.success : AppColors.danger,
                   height: 168,
                   baseline: baseline,
                   indexed: true,

@@ -152,6 +152,70 @@ def close_ref_updates(placed_rows, sharp_map, mid_map) -> list[dict]:
     return out
 
 
+def _hours_between(ts_iso, now_iso) -> float | None:
+    """Hours from ts_iso to now_iso (ISO-8601, 'Z' or offset). None if unparseable."""
+    import datetime
+    def _p(s):
+        if not s:
+            return None
+        try:
+            d = datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        return d.replace(tzinfo=datetime.timezone.utc) if d.tzinfo is None else d
+    a, b = _p(ts_iso), _p(now_iso)
+    if a is None or b is None:
+        return None
+    return (b - a).total_seconds() / 3600.0
+
+
+def _last_seen_age_hours(row, now_iso) -> float | None:
+    """Hours since a decision row was last seen OPEN. Skipped rows refresh their `ts`
+    every tick (stable id, re-inserted), so `ts` tracks last-seen-open for them. PLACED
+    paper rows have a FROZEN `ts` (written once, then deduped), so their last-seen-open
+    is `mark_ts` (mark_paper_positions refreshes it every tick the market still has a
+    live price). Use the MOST RECENT of the two (smallest age). None if neither parses."""
+    ages = [h for h in (_hours_between(row.get("ts"), now_iso),
+                        _hours_between(row.get("mark_ts"), now_iso)) if h is not None]
+    return min(ages) if ages else None
+
+
+def prune_finished_decisions(rows, open_tickers, now_iso, *,
+                             delete_after_hours: float = 3.0,
+                             expire_after_hours: float = 12.0) -> dict:
+    """Decisions whose market is no longer in Kalshi's OPEN set and that haven't been
+    seen open for a while are from FINISHED games. Returns {"delete":[ids],"expire":[ids]}:
+      - skipped/blocked/queued, not seen open for >= delete_after_hours -> DELETE (clears
+        the pregame board)
+      - still-open PLACED paper trade, not seen open for >= expire_after_hours -> EXPIRE
+        (stop showing as open; longer window so settle_and_learn can grade it first)
+      - already-settled placed rows -> kept (P&L history)
+      - recently-seen rows -> kept (guards a transient/partial discovery gap)
+    NEVER acts when open_tickers is empty (a discovery outage must not mass-delete the
+    log). Age is measured from the most recent of ts/mark_ts (see _last_seen_age_hours).
+    Pure (no DB)."""
+    open_set = set(open_tickers or [])
+    out = {"delete": [], "expire": []}
+    if not open_set:
+        return out
+    for r in rows or []:
+        if r.get("market_ticker") in open_set:
+            continue
+        age = _last_seen_age_hours(r, now_iso)
+        if age is None:
+            continue
+        if r.get("decision") == "placed":
+            if r.get("outcome") is None and age >= expire_after_hours:
+                # Realize at the LAST mark: the unrealized P&L the engine stamped each
+                # tick becomes the realized P&L (best estimate when Kalshi never settled
+                # it), so the dashboard's realized total + filled-orders history keep it.
+                out["expire"].append({"id": r.get("id"),
+                                      "realized_pnl_cents": int(r.get("unrealized_pnl_cents") or 0)})
+        elif age >= delete_after_hours:
+            out["delete"].append(r.get("id"))
+    return out
+
+
 def calibration_summary(reconciled) -> dict:
     """Roll up reconciled positions: realized P&L, EV/$ deployed, and avg CLV over
     the GRADED (vs-sharp) subset."""
