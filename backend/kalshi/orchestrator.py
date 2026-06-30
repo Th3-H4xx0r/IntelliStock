@@ -55,6 +55,8 @@ def plan_and_allocate(
             min_price_cents=getattr(caps, "min_price_cents", 15),
             max_price_cents=getattr(caps, "max_price_cents", 90),
             draw_min_edge=getattr(caps, "draw_min_edge", 0.10),
+            sharp_probs=sharp,
+            no_sharp_edge_threshold=getattr(caps, "no_sharp_edge_threshold", 0.0),
             collect_skips=True,
         )
         for s in skips:

@@ -128,6 +128,30 @@ def reconcile_position(position, *, result: str, close_cents=None,
     }
 
 
+def close_ref_updates(placed_rows, sharp_map, mid_map) -> list[dict]:
+    """For each OPEN (outcome is None) placed decision, return the rolling closing
+    reference to stamp: latest sharp prob (-> sharp_close_prob, the GRADED CLV
+    reference) and latest Kalshi mid (-> pre_settle_mid_cents). At settlement the
+    LAST value stamped is the close, so reconcile grades true CLV instead of using a
+    stale entry-time reference. Skips settled/non-placed rows and rows with no current
+    data. Pure (no DB)."""
+    sharp_map = sharp_map or {}
+    mid_map = mid_map or {}
+    out = []
+    for r in placed_rows or []:
+        if r.get("decision") != "placed" or r.get("outcome") is not None:
+            continue
+        tk = r.get("market_ticker")
+        upd = {}
+        if sharp_map.get(tk) is not None:
+            upd["sharp_close_prob"] = float(sharp_map[tk])
+        if mid_map.get(tk) is not None:
+            upd["pre_settle_mid_cents"] = int(round(float(mid_map[tk])))
+        if upd:
+            out.append({"id": r.get("id"), **upd})
+    return out
+
+
 def calibration_summary(reconciled) -> dict:
     """Roll up reconciled positions: realized P&L, EV/$ deployed, and avg CLV over
     the GRADED (vs-sharp) subset."""

@@ -50,6 +50,15 @@ def test_take_profit_scales_out_on_overshoot_with_thesis_intact():
     assert a.kind == "reduce" and a.contracts == 5 and "take-profit" in a.reason
 
 
+def test_take_profit_banks_single_contract():
+    # held 1, entry 40c, live fair 0.50 (thesis intact: fair >= entry), mark 60c
+    # overshoots fair by >= tp_overshoot (8c) -> should REDUCE (full exit of the 1).
+    pos = Pos(contracts=1, avg_price_cents=40, current_price_cents=60)
+    a = decide(position=pos, live_fair=0.50, yes_ask_cents=55, yes_bid_cents=60,
+               caps=CAPS, phase=LIVE, elapsed_min=70, allow_open=True)
+    assert a.kind == "reduce" and a.contracts == 1
+
+
 def test_no_open_or_add_past_cutoff_minute():
     a = decide(position=None, live_fair=0.70, yes_ask_cents=50, yes_bid_cents=49,
                caps=CAPS, phase=LIVE, elapsed_min=85, allow_open=True)

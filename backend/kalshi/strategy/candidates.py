@@ -39,6 +39,8 @@ def generate_candidates(
     min_price_cents: int = 15,
     max_price_cents: int = 90,
     draw_min_edge: float = 0.10,
+    sharp_probs: dict | None = None,
+    no_sharp_edge_threshold: float = 0.0,
     collect_skips: bool = False,
 ):
     """Returns the candidate list. When collect_skips=True, returns
@@ -79,8 +81,17 @@ def generate_candidates(
         # that's model miscalibration, not market overpricing) but demand a much
         # larger edge so we only take a draw when the disagreement is big.
         gate = max(edge_threshold, draw_min_edge) if side == "draw" else edge_threshold
+        # No-sharp-line gate: when the sharp book doesn't price this side, the fair is
+        # model-only and the model overrates favorites, so the edge is unanchored. Don't
+        # hard-skip (that kills too much volume) — demand a LARGER edge so we only take
+        # model-only bets when the disagreement is big.
+        has_sharp = ((sharp_probs or {}).get(mt) or {}).get(side) is not None
+        if no_sharp_edge_threshold and not has_sharp:
+            gate = max(gate, no_sharp_edge_threshold)
         if e <= gate:
-            _skip(m, side, fair, price, e, f"edge {e * 100:.1f}% <= bar {gate * 100:.1f}%")
+            _skip(m, side, fair, price, e,
+                  f"edge {e * 100:.1f}% <= bar {gate * 100:.1f}%"
+                  + ("" if has_sharp else " (no sharp line)"))
             continue
         cands.append(Candidate(fixture_id, m.get("market_ticker", ""), mt, side, fair, price, e))
 

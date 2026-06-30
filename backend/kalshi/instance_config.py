@@ -49,6 +49,10 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "min_price_cents": int(raw.get("min_price_cents", 15)),
         "max_price_cents": int(raw.get("max_price_cents", 90)),
         "draw_min_edge": float(raw.get("draw_min_edge", 0.10)),
+        # No-sharp-line gate: model-only fairs overrate favorites, so demand a bigger
+        # edge before betting a market the sharp book doesn't price (keeps volume on
+        # genuinely large disagreements rather than hard-skipping).
+        "no_sharp_edge_threshold": float(raw.get("no_sharp_edge_threshold", 0.08)),
         "maker_first": bool(raw.get("maker_first", True)),
         "maker_min_spread_cents": int(raw.get("maker_min_spread_cents", 3)),
         "maker_min_book_depth": int(raw.get("maker_min_book_depth", 5)),
@@ -119,6 +123,7 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         min_price_cents=int(c.get("min_price_cents", 15)),
         max_price_cents=int(c.get("max_price_cents", 90)),
         draw_min_edge=float(c.get("draw_min_edge", 0.10)),
+        no_sharp_edge_threshold=float(c.get("no_sharp_edge_threshold", 0.0)),
         maker_first=bool(c.get("maker_first", True)),
         maker_min_spread_cents=int(c.get("maker_min_spread_cents", 3)),
         maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),

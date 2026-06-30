@@ -75,9 +75,12 @@ def decide(*, position, live_fair: float, yes_ask_cents: float, yes_bid_cents: f
         # still strong). Routed maker by the monitor so the partial clears round-trip cost.
         # If the thesis WEAKENED (fair < entry) we fall through to a full thesis-break exit
         # instead of scaling out of a deteriorating position.
-        if (held >= 2 and entry > 0 and fair >= entry / 100.0
+        if (held >= 1 and entry > 0 and fair >= entry / 100.0
                 and _implied(mark) >= fair + (caps.tp_overshoot_cents / 100.0)):
-            return LiveAction("reduce", max(1, held // 2),
+            # Bank half when we hold >=2; a single contract can't be halved, so fully
+            # exit it as a maker sell (don't let a small win ride and round-trip away).
+            sell = max(1, held // 2) if held >= 2 else 1
+            return LiveAction("reduce", sell,
                               f"take-profit: mark {mark:.0f}c overshoots fair {fair:.2f} (thesis intact)")
         # PRIMARY exit: thesis broke — live fair now below what the bid implies.
         if fair + caps.edge_threshold < _implied(yes_bid_cents):
