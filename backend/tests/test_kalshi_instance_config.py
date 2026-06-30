@@ -10,11 +10,27 @@ def test_normalize_converts_dollars_to_cents_and_defaults():
     )
     assert c["bankroll_cents"] == 482014
     assert c["daily_loss_cap_cents"] == 40000
-    assert c["edge_threshold"] == 0.04
-    assert c["kelly_fraction"] == 0.125         # default (fractional Kelly; was 0.25, instance ran 0.40)
+    assert c["edge_threshold"] == 0.04           # explicit override kept
+    assert c["kelly_fraction"] == 0.15           # medium-tier default (tier-scaled)
     assert c["leagues"] == DEFAULT_LEAGUES       # default
     assert c["poll_seconds"] == 60
     assert c["live_enabled"] is True
+
+
+def test_tier_defaults_scale_with_aggression():
+    lo = normalize_config({"tier": "low"}, live_enabled=False)
+    mx = normalize_config({"tier": "max"}, live_enabled=False)
+    assert mx["kelly_fraction"] > lo["kelly_fraction"]
+    assert mx["per_bet_cap_frac"] > lo["per_bet_cap_frac"]
+    assert mx["max_open_exposure_frac"] > lo["max_open_exposure_frac"]
+    assert mx["edge_threshold"] < lo["edge_threshold"]
+    # the NEW fields are tier-scaled too (max takes more model-only at a lighter haircut)
+    assert mx["no_sharp_edge_threshold"] < lo["no_sharp_edge_threshold"]
+    assert mx["model_only_size_mult"] > lo["model_only_size_mult"]
+    # an explicit value still overrides the tier default
+    assert normalize_config({"tier": "max", "kelly_fraction": 0.1}, live_enabled=False)["kelly_fraction"] == 0.1
+    # bankroll is NOT a tier default — never auto-set
+    assert normalize_config({"tier": "max"}, live_enabled=False)["bankroll_cents"] == 0
 
 
 def test_normalize_poll_floor_and_league_passthrough():
@@ -40,4 +56,4 @@ def test_risk_caps_from_config():
     caps = risk_caps_from_config(cfg)
     assert caps.bankroll_cents == 100000
     assert caps.max_contracts_per_market == 25
-    assert caps.edge_threshold == 0.04
+    assert caps.edge_threshold == 0.035          # medium-tier default (tier-scaled)
