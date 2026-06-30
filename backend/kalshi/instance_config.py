@@ -53,6 +53,9 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         # edge before betting a market the sharp book doesn't price (keeps volume on
         # genuinely large disagreements rather than hard-skipping).
         "no_sharp_edge_threshold": float(raw.get("no_sharp_edge_threshold", 0.08)),
+        # Size haircut for model-only (no-sharp) bets — they're unanchored favorite
+        # risk, so bet them smaller than sharp-anchored ones.
+        "model_only_size_mult": float(raw.get("model_only_size_mult", 0.5)),
         "maker_first": bool(raw.get("maker_first", True)),
         "maker_min_spread_cents": int(raw.get("maker_min_spread_cents", 3)),
         "maker_min_book_depth": int(raw.get("maker_min_book_depth", 5)),
@@ -124,6 +127,7 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         max_price_cents=int(c.get("max_price_cents", 90)),
         draw_min_edge=float(c.get("draw_min_edge", 0.10)),
         no_sharp_edge_threshold=float(c.get("no_sharp_edge_threshold", 0.0)),
+        model_only_size_mult=float(c.get("model_only_size_mult", 1.0)),
         maker_first=bool(c.get("maker_first", True)),
         maker_min_spread_cents=int(c.get("maker_min_spread_cents", 3)),
         maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),

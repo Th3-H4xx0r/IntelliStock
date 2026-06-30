@@ -48,3 +48,24 @@ def test_higher_score_funded_first():
     ]
     allocs = allocate(cands, bankroll_cents=100000, caps=CAPS, reserve_frac=0.0, expected_better_soon=False)
     assert allocs[0]["id"] == "hi"
+
+
+def test_model_only_size_haircut():
+    # A model-only (no-sharp) candidate is sized SMALLER than an identical sharp-anchored
+    # one, so a wrong model-only favorite call costs less.
+    caps = RiskCaps(kelly_fraction=0.25, max_contracts_per_market=100000,
+                    bankroll_cents=100000, model_only_size_mult=0.5)
+    sharp_c = [{"id": "s", "score": 1.0, "edge": 0.10, "price_cents": 50, "has_sharp": True}]
+    model_c = [{"id": "m", "score": 1.0, "edge": 0.10, "price_cents": 50, "has_sharp": False}]
+    a_sharp = allocate(sharp_c, bankroll_cents=100000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    a_model = allocate(model_c, bankroll_cents=100000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    assert a_model["contracts"] == a_sharp["contracts"] // 2     # haircut to ~half
+
+
+def test_model_only_haircut_off_by_default():
+    caps = RiskCaps(kelly_fraction=0.25, max_contracts_per_market=100000, bankroll_cents=100000)  # mult defaults 1.0
+    sharp_c = [{"id": "s", "score": 1.0, "edge": 0.10, "price_cents": 50, "has_sharp": True}]
+    model_c = [{"id": "m", "score": 1.0, "edge": 0.10, "price_cents": 50, "has_sharp": False}]
+    a_sharp = allocate(sharp_c, bankroll_cents=100000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    a_model = allocate(model_c, bankroll_cents=100000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    assert a_model["contracts"] == a_sharp["contracts"]          # no haircut when mult=1.0

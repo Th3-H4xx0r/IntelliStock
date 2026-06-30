@@ -42,6 +42,7 @@ class RiskCaps:
     max_price_cents: int = 90               # price-band ceiling (no near-cert favorites — fees eat the upside)
     draw_min_edge: float = 0.10             # draws require this much edge (model overstates draw prob)
     no_sharp_edge_threshold: float = 0.0    # 0 = off; larger edge bar for markets with no sharp line (model-only)
+    model_only_size_mult: float = 1.0       # size haircut for no-sharp (model-only) bets (1.0 = off)
     maker_first: bool = True                # rest post_only inside the spread vs paying the taker fee
     maker_min_spread_cents: int = 3         # only make when the book spread is at least this wide
     maker_min_book_depth: int = 5           # require this much resting depth before making

@@ -26,6 +26,7 @@ class Candidate:
     fair: float
     price_cents: int
     edge: float
+    has_sharp: bool = True   # whether the sharp book priced this side (False = model-only)
 
 
 def generate_candidates(
@@ -93,7 +94,8 @@ def generate_candidates(
                   f"edge {e * 100:.1f}% <= bar {gate * 100:.1f}%"
                   + ("" if has_sharp else " (no sharp line)"))
             continue
-        cands.append(Candidate(fixture_id, m.get("market_ticker", ""), mt, side, fair, price, e))
+        cands.append(Candidate(fixture_id, m.get("market_ticker", ""), mt, side, fair, price, e,
+                               has_sharp=has_sharp))
 
     cands.sort(key=lambda c: c.edge, reverse=True)
 
