@@ -875,8 +875,17 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
         Row(children: [
           _crest((head['pick_logo'] ?? '').toString(), home.isNotEmpty ? home : title),
           const SizedBox(width: 10),
-          Expanded(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w700))),
+          // "Home vs Away" + a grey countdown right next to it.
+          Expanded(child: Row(children: [
+            Flexible(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w700))),
+            if (cd.isNotEmpty) Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: Text(cd == 'live' ? 'live' : cd,
+                  style: AppTextStyles.nano.copyWith(
+                      color: cd == 'live' ? AppColors.success : AppColors.textDim)),
+            ),
+          ])),
           const SizedBox(width: 8),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
@@ -894,16 +903,6 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
           const SizedBox(height: 6),
           Text(parts.join('  ·  '),
               style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
-        ],
-        if (cd.isNotEmpty) ...[
-          const SizedBox(height: 4),
-          Row(children: [
-            Icon(Icons.schedule, size: 12, color: cd == 'live' ? AppColors.success : AppColors.primary),
-            const SizedBox(width: 4),
-            Text(cd == 'live' ? 'Live now' : 'Starts in $cd',
-                style: AppTextStyles.nano.copyWith(
-                    color: cd == 'live' ? AppColors.success : AppColors.primary, fontWeight: FontWeight.w600)),
-          ]),
         ],
         const SizedBox(height: 10),
         ...shownSides.map(_pregameSideRow),

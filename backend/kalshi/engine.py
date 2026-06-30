@@ -615,7 +615,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             fixture_info = {m["id"]: {"home": m["home"], "away": m["away"],
                                       "home_logo": m.get("home_logo", ""),
                                       "away_logo": m.get("away_logo", ""),
-                                      "kickoff_ts": m.get("kickoff_ts")} for m in metas}
+                                      # precise kickoff if the market exposes one, else the
+                                      # date-coded ticker's match day (approx) for the countdown.
+                                      "kickoff_ts": (m.get("kickoff_ts")
+                                                     or match_clock.kickoff_date_ts(m["id"]))} for m in metas}
             for d in decisions:
                 fi = fixture_info.get(d.get("fixture_id"))
                 if fi:

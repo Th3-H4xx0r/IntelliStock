@@ -32,6 +32,17 @@ def match_date_from_ticker(ticker):
         return None
 
 
+def kickoff_date_ts(ticker):
+    """Epoch seconds for 00:00 UTC of the ticker's match DATE — an approximate kickoff
+    for the UI countdown when the market exposes no precise start time. None if the
+    ticker has no date token. (Display only — NOT used for phase/live timing, which
+    needs a precise kickoff.)"""
+    d = match_date_from_ticker(ticker)
+    if d is None:
+        return None
+    return datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc).timestamp()
+
+
 def match_phase(kickoff_ts, now_ts, *, regulation_min: float = 115.0):
     """Return (phase, elapsed_min). kickoff_ts/now_ts are epoch seconds.
     kickoff_ts falsy -> (UNKNOWN, None). Live spans [kickoff, kickoff+regulation_min]
