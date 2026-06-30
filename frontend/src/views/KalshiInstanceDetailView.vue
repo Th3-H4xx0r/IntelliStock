@@ -25,6 +25,8 @@ const summary = ref({ total: 0, placed: 0, skipped: 0, queued: 0, blocked: 0 })
 const paper = ref({ trades: 0, graded: 0, realized_pnl_cents: 0, unrealized_pnl_cents: 0, open_positions: 0 })
 const loading = ref(true)
 let liveTimer = null
+let kickoffTimer = null
+const nowMs = ref(Date.now())   // ticks every 1s for the live kickoff countdowns
 const busy = ref(false)
 const expanded = ref(new Set())
 
@@ -147,6 +149,22 @@ function fmtTs(ts) {
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
   return t.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
+// Live countdown to kickoff. ts is epoch SECONDS (from the engine). Clean two-unit
+// format: "5d 4h", "4h 3m", "3m 2s", "2s"; "live" once it has kicked off.
+function kickoffCountdown(ts) {
+  if (ts == null) return ''
+  let secs = Math.round(Number(ts) - nowMs.value / 1000)
+  if (Number.isNaN(secs)) return ''
+  if (secs <= 0) return 'live'
+  const d = Math.floor(secs / 86400); secs -= d * 86400
+  const h = Math.floor(secs / 3600); secs -= h * 3600
+  const m = Math.floor(secs / 60); const s = secs - m * 60
+  const u = [[d, 'd'], [h, 'h'], [m, 'm'], [s, 's']]
+  const i = u.findIndex(([v]) => v > 0)
+  const out = [`${u[i][0]}${u[i][1]}`]
+  if (i + 1 < u.length && u[i + 1][0] > 0) out.push(`${u[i + 1][0]}${u[i + 1][1]}`)  // second unit, if non-zero
+  return out.join(' ')
+}
 const SIDE_ORDER = { home: 0, draw: 1, away: 2 }
 
 // Build an SVG <polyline> "points" string for a side's edge-over-time series,
@@ -186,6 +204,7 @@ const matchBoard = computed(() => {
         home_elo: d.home_elo, away_elo: d.away_elo,
         home_xg: d.home_xg, away_xg: d.away_xg,
         home_logo: null, away_logo: null,
+        kickoff_ts: d.kickoff_ts ?? null,
         sides: [],
       })
     }
@@ -193,6 +212,7 @@ const matchBoard = computed(() => {
     // Backfill context that may only be populated on some rows.
     if (g.home == null) g.home = d.home
     if (g.away == null) g.away = d.away
+    if (g.kickoff_ts == null && d.kickoff_ts != null) g.kickoff_ts = d.kickoff_ts
     if (g.home_elo == null) g.home_elo = d.home_elo
     if (g.away_elo == null) g.away_elo = d.away_elo
     if (g.home_xg == null) g.home_xg = d.home_xg
@@ -265,8 +285,12 @@ function initials(name) { return (name || '').replace(/[^A-Za-z ]/g, '').split('
 onMounted(() => {
   load()
   liveTimer = setInterval(refresh, 10000)   // auto-refresh the whole page every 10s
+  kickoffTimer = setInterval(() => { nowMs.value = Date.now() }, 1000)   // tick countdowns
 })
-onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
+onUnmounted(() => {
+  if (liveTimer) clearInterval(liveTimer)
+  if (kickoffTimer) clearInterval(kickoffTimer)
+})
 </script>
 
 <template>
@@ -398,6 +422,12 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                     <span v-if="g.home_elo != null || g.away_elo != null">Elo {{ fmtNum(g.home_elo) ?? '?' }}/{{ fmtNum(g.away_elo) ?? '?' }}</span>
                     <span v-if="(g.home_elo != null || g.away_elo != null) && (g.home_xg != null || g.away_xg != null)" class="text-slate-700"> · </span>
                     <span v-if="g.home_xg != null || g.away_xg != null">xG {{ fmtNum(g.home_xg) ?? '?' }}/{{ fmtNum(g.away_xg) ?? '?' }}</span>
+                  </div>
+                  <!-- Live countdown to kickoff -->
+                  <div v-if="g.kickoff_ts != null" class="flex items-center gap-1 text-[11px] font-semibold mt-0.5 tabular-nums"
+                       :class="kickoffCountdown(g.kickoff_ts) === 'live' ? 'text-emerald-400' : 'text-primary'">
+                    <span class="material-symbols-outlined text-[12px]">schedule</span>
+                    <span>{{ kickoffCountdown(g.kickoff_ts) === 'live' ? 'Live now' : 'Starts in ' + kickoffCountdown(g.kickoff_ts) }}</span>
                   </div>
                 </div>
                 <img v-if="g.away_logo" :src="g.away_logo" referrerpolicy="no-referrer" class="w-9 h-9 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" :alt="g.away" />

@@ -30,6 +30,8 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
   int _decPage = 0;
   static const _decPageSize = 8;
   Timer? _liveTimer;
+  Timer? _tickTimer;
+  DateTime _now = DateTime.now();   // ticks every 1s for the kickoff countdowns
 
   @override
   void initState() {
@@ -40,11 +42,15 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
         ref.invalidate(kalshiInstanceOrdersProvider(widget.instanceId));
       }
     });
+    _tickTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _now = DateTime.now());
+    });
   }
 
   @override
   void dispose() {
     _liveTimer?.cancel();
+    _tickTimer?.cancel();
     _scrubIdx.dispose();
     super.dispose();
   }
@@ -805,6 +811,23 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     return ((fair - edge) * 100).round();
   }
 
+  // Live countdown to kickoff. ts is epoch SECONDS. Clean two-unit format:
+  // "5d 4h" / "4h 3m" / "3m 2s" / "2s"; "live" once it has kicked off.
+  String _kickoffCountdown(num? ts) {
+    if (ts == null) return '';
+    var secs = (ts.toDouble() - _now.millisecondsSinceEpoch / 1000).round();
+    if (secs <= 0) return 'live';
+    final d = secs ~/ 86400; secs -= d * 86400;
+    final h = secs ~/ 3600; secs -= h * 3600;
+    final m = secs ~/ 60; final s = secs - m * 60;
+    final u = <List<dynamic>>[[d, 'd'], [h, 'h'], [m, 'm'], [s, 's']];
+    final i = u.indexWhere((e) => (e[0] as int) > 0);
+    if (i < 0) return 'live';
+    final out = ['${u[i][0]}${u[i][1]}'];
+    if (i + 1 < u.length && (u[i + 1][0] as int) > 0) out.add('${u[i + 1][0]}${u[i + 1][1]}');
+    return out.join(' ');
+  }
+
   Widget _pregameCard(List<Map<String, dynamic>> sides) {
     final head = sides.first;
     final match = (head['match'] ?? '').toString();
@@ -815,6 +838,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
         : (home.isNotEmpty || away.isNotEmpty ? '$home vs $away' : 'Match');
     final best = _bestEdge(sides);
     final bestPos = best > 0;
+    final cd = _kickoffCountdown(head['kickoff_ts'] as num?);   // live countdown to kickoff
 
     // Compact context line: "Elo h/a · xG h/a", each half omitted if null.
     final elo = _pair(head['home_elo'], head['away_elo'], decimals: 0);
@@ -870,6 +894,16 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
           const SizedBox(height: 6),
           Text(parts.join('  ·  '),
               style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+        ],
+        if (cd.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Row(children: [
+            Icon(Icons.schedule, size: 12, color: cd == 'live' ? AppColors.success : AppColors.primary),
+            const SizedBox(width: 4),
+            Text(cd == 'live' ? 'Live now' : 'Starts in $cd',
+                style: AppTextStyles.nano.copyWith(
+                    color: cd == 'live' ? AppColors.success : AppColors.primary, fontWeight: FontWeight.w600)),
+          ]),
         ],
         const SizedBox(height: 10),
         ...shownSides.map(_pregameSideRow),
