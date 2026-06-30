@@ -28,6 +28,8 @@ class InPlayCaps:
     maker_min_spread_cents: int = 3        # in-play maker-or-skip: only rest a maker when spread >= this
     maker_min_book_depth: int = 5          # require this much resting depth before making
     maker_max_adverse_imbalance: float = -0.5
+    order_size_min_cents: int = 0          # order-size RANGE floor ($/order; 0/0 = auto/Kelly)
+    order_size_max_cents: int = 0          # range ceiling — sized within [min,max] by edge conviction
 
 
 @dataclass(frozen=True)
@@ -42,12 +44,24 @@ def _implied(cents) -> float:
 
 
 def _size(edge: float, ask_cents: float, caps: InPlayCaps, *, held_contracts: int) -> int:
-    """quarter-Kelly contracts at the live ask, clamped by per-market + in-play
-    exposure caps (counting what's already held)."""
-    frac = quarter_kelly_fraction(edge=edge, price_cents=ask_cents, kelly=caps.kelly_fraction)
-    if frac <= 0.0 or caps.bankroll_cents <= 0 or ask_cents <= 0:
+    """Contracts at the live ask, clamped by per-market + in-play exposure caps (counting
+    what's already held). If an order-size RANGE [min,max] is set, size within it by edge
+    conviction; else quarter-Kelly of the bankroll."""
+    if ask_cents <= 0:
         return 0
-    stake_cents = frac * caps.bankroll_cents
+    _osmax = int(getattr(caps, "order_size_max_cents", 0))
+    if _osmax > 0:
+        _osmin = int(getattr(caps, "order_size_min_cents", 0))
+        _lo, _hi = min(_osmin, _osmax), max(_osmin, _osmax)
+        _conv = max(0.0, min(1.0, float(edge) / 0.20))
+        stake_cents = _lo + (_hi - _lo) * _conv
+        if stake_cents <= 0:
+            return 0
+    else:
+        frac = quarter_kelly_fraction(edge=edge, price_cents=ask_cents, kelly=caps.kelly_fraction)
+        if frac <= 0.0 or caps.bankroll_cents <= 0:
+            return 0
+        stake_cents = frac * caps.bankroll_cents
     n = int(stake_cents // ask_cents)
     room_market = max(0, caps.max_contracts_per_market - held_contracts)
     exposure_cap_contracts = int((caps.inplay_exposure_frac * caps.bankroll_cents) // ask_cents)

@@ -24,6 +24,11 @@ def allocate(candidates, *, bankroll_cents, caps, reserve_frac, expected_better_
     per_market_cap = int(getattr(caps, "max_contracts_per_market", 50))
     kelly = float(getattr(caps, "kelly_fraction", 0.25))           # tier aggression
     model_only_mult = max(0.0, float(getattr(caps, "model_only_size_mult", 1.0)))  # haircut for no-sharp bets
+    # Order-size RANGE [min,max] in cents (UI knob; 0/0 = auto/Kelly). Bot sizes within
+    # the range by edge conviction (stronger edge -> bigger trade) — meaningful trades
+    # even on a tiny account.
+    order_size_min = max(0, int(getattr(caps, "order_size_min_cents", 0)))
+    order_size_max = max(0, int(getattr(caps, "order_size_max_cents", 0)))
     min_stake_frac = max(0.0, float(getattr(caps, "min_stake_frac", 0.0)))
     per_bet_cap_frac = max(0.0, float(getattr(caps, "per_bet_cap_frac", 0.0)))  # ceiling (0 = off)
 
@@ -35,16 +40,26 @@ def allocate(candidates, *, bankroll_cents, caps, reserve_frac, expected_better_
             continue
         # Model-only (no sharp line) bets are sized smaller: the model overrates
         # favorites and the edge is unanchored, so a wrong call costs less.
-        eff_kelly = kelly * (model_only_mult if not c.get("has_sharp", True) else 1.0)
-        frac = quarter_kelly_fraction(edge=c.get("edge", 0.0), price_cents=price, kelly=eff_kelly)
-        if frac <= 0.0:
-            continue
-        # Floor any +EV bet at min_stake_frac of bankroll so small-edge bets aren't
-        # dust (the risk tier controls how big). Still bounded by per-market + deployable.
-        eff = max(frac, min_stake_frac)
-        if per_bet_cap_frac > 0.0:
-            eff = min(eff, per_bet_cap_frac)             # cap single-bet exposure
-        stake = int(eff * bankroll_cents)
+        _mo = model_only_mult if not c.get("has_sharp", True) else 1.0
+        if order_size_max > 0:
+            # Order-size RANGE: size within [min,max] by edge conviction (a 20%+ edge
+            # tops the range; the edge bar floors it). Decoupled from Kelly so trades are
+            # meaningful even on a tiny account. Bounded by per-market cap + deployable +
+            # the engine's available-cash gate. Halved for model-only.
+            _lo, _hi = min(order_size_min, order_size_max), max(order_size_min, order_size_max)
+            _conv = max(0.0, min(1.0, float(c.get("edge", 0.0)) / 0.20))
+            stake = int((_lo + (_hi - _lo) * _conv) * _mo)
+        else:
+            eff_kelly = kelly * _mo
+            frac = quarter_kelly_fraction(edge=c.get("edge", 0.0), price_cents=price, kelly=eff_kelly)
+            if frac <= 0.0:
+                continue
+            # Floor any +EV bet at min_stake_frac of bankroll so small-edge bets aren't
+            # dust (the risk tier controls how big). Still bounded by per-market + deployable.
+            eff = max(frac, min_stake_frac)
+            if per_bet_cap_frac > 0.0:
+                eff = min(eff, per_bet_cap_frac)             # cap single-bet exposure
+            stake = int(eff * bankroll_cents)
         contracts = min(stake // price, per_market_cap)
         if contracts <= 0:
             continue

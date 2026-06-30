@@ -84,6 +84,11 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         # Size haircut for model-only (no-sharp) bets — they're unanchored favorite
         # risk, so bet them smaller than sharp-anchored ones.
         "model_only_size_mult": float(raw.get("model_only_size_mult", td["model_only_size_mult"])),
+        # Order-size RANGE ($/trade): when set, the bot sizes each trade within [min,max]
+        # by edge conviction (decoupled from Kelly) — meaningful trades even on a tiny
+        # account. 0/0 = auto (Kelly-sized).
+        "order_size_min_cents": _dollars_to_cents(raw.get("order_size_min_dollars"), 0),
+        "order_size_max_cents": _dollars_to_cents(raw.get("order_size_max_dollars"), 0),
         "maker_first": bool(raw.get("maker_first", True)),
         "maker_min_spread_cents": int(raw.get("maker_min_spread_cents", 3)),
         "maker_min_book_depth": int(raw.get("maker_min_book_depth", 5)),
@@ -156,6 +161,8 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         draw_min_edge=float(c.get("draw_min_edge", 0.10)),
         no_sharp_edge_threshold=float(c.get("no_sharp_edge_threshold", 0.0)),
         model_only_size_mult=float(c.get("model_only_size_mult", 1.0)),
+        order_size_min_cents=int(c.get("order_size_min_cents", 0)),
+        order_size_max_cents=int(c.get("order_size_max_cents", 0)),
         maker_first=bool(c.get("maker_first", True)),
         maker_min_spread_cents=int(c.get("maker_min_spread_cents", 3)),
         maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),
@@ -184,4 +191,6 @@ def inplay_caps_from_config(config: dict) -> InPlayCaps:
         maker_min_spread_cents=int(c.get("maker_min_spread_cents", 3)),
         maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),
         maker_max_adverse_imbalance=float(c.get("maker_max_adverse_imbalance", -0.5)),
+        order_size_min_cents=int(c.get("order_size_min_cents", 0)),
+        order_size_max_cents=int(c.get("order_size_max_cents", 0)),
     )

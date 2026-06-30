@@ -4192,6 +4192,10 @@ class CreateKalshiInstanceBody(BaseModel):
     min_price_cents: Optional[int] = 15
     max_price_cents: Optional[int] = 90
     draw_min_edge: Optional[float] = 0.10
+    # Order-size RANGE ($/trade): bot sizes within [min,max] by edge conviction
+    # (0/0 = auto, Kelly-sized). Lets trades stay meaningful on a small account.
+    order_size_min_dollars: Optional[float] = 0
+    order_size_max_dollars: Optional[float] = 0
     daily_loss_cap_dollars: Optional[float] = 0
     bankroll_dollars: Optional[float] = 0
     poll_seconds: Optional[int] = 60
