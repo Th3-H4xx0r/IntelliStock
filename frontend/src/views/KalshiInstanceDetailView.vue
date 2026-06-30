@@ -515,15 +515,17 @@ onUnmounted(() => { if (liveTimer) clearInterval(liveTimer) })
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-sm font-semibold text-slate-100 truncate">{{ m.match || m.market_ticker }}</span>
-                    <span class="text-base font-bold tabular-nums shrink-0" :class="m.unrealized_pnl_cents == null ? 'text-slate-500' : (m.unrealized_pnl_cents > 0 ? 'text-emerald-400' : (m.unrealized_pnl_cents < 0 ? 'text-red-400' : 'text-slate-400'))">{{ m.unrealized_pnl_cents == null ? '—' : (m.unrealized_pnl_cents >= 0 ? '+' : '') + '$' + (m.unrealized_pnl_cents / 100).toFixed(2) }}</span>
+                    <!-- Total position value (contracts × current mark) in big bold -->
+                    <span class="text-lg font-bold tabular-nums text-slate-100 shrink-0">${{ ((m.contracts * (m.mark_cents ?? m.entry_cents ?? 0)) / 100).toFixed(2) }}</span>
                   </div>
                   <div class="flex items-center justify-between gap-2 mt-0.5">
                     <span class="flex items-center gap-1.5 min-w-0">
                       <span class="text-xs text-primary font-medium truncate">{{ m.pick_label || m.side }}</span>
                       <span class="shrink-0 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span>
                     </span>
-                    <span class="text-[11px] text-slate-500 tabular-nums shrink-0">{{ m.contracts }} @ {{ m.entry_cents }}¢ → {{ m.mark_cents == null ? '—' : m.mark_cents + '¢' }}</span>
+                    <span class="text-xs tabular-nums shrink-0" :class="m.unrealized_pnl_cents == null ? 'text-slate-500' : (m.unrealized_pnl_cents > 0 ? 'text-emerald-400' : (m.unrealized_pnl_cents < 0 ? 'text-red-400' : 'text-slate-400'))">{{ m.unrealized_pnl_cents == null ? '—' : (m.unrealized_pnl_cents >= 0 ? '+' : '') + '$' + (m.unrealized_pnl_cents / 100).toFixed(2) }} <span class="text-slate-600">P&amp;L</span></span>
                   </div>
+                  <div class="text-[11px] text-slate-500 tabular-nums mt-0.5">{{ m.contracts }} @ {{ m.entry_cents }}¢ → {{ m.mark_cents == null ? '—' : m.mark_cents + '¢' }}</div>
                 </div>
               </div>
               <template v-if="orders.fills.length">
