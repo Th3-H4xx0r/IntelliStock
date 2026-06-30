@@ -453,7 +453,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 metas.append({
                     "id": event_ticker, "home": home, "away": away, "mkts": mkts, "eg": eg,
                     "fused": fused, "sharp_probs": sharp, "sharp_matched": bool(sharp),
-                    "he": he, "ae": ae, "phase": phase, "elapsed": elapsed,
+                    "he": he, "ae": ae, "phase": phase, "elapsed": elapsed, "kickoff_ts": kickoff_ts,
                     "home_logo": home_logo, "away_logo": away_logo,
                     "home_score": (_sc or {}).get("home_score"), "away_score": (_sc or {}).get("away_score"),
                     "mtypes": sorted({m["market_type"] for m in mkts}), "best_edge": best_edge,
@@ -614,12 +614,15 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # every decision row so orders/positions never show a raw ticker.
             fixture_info = {m["id"]: {"home": m["home"], "away": m["away"],
                                       "home_logo": m.get("home_logo", ""),
-                                      "away_logo": m.get("away_logo", "")} for m in metas}
+                                      "away_logo": m.get("away_logo", ""),
+                                      "kickoff_ts": m.get("kickoff_ts")} for m in metas}
             for d in decisions:
                 fi = fixture_info.get(d.get("fixture_id"))
                 if fi:
                     d["home"], d["away"] = fi["home"], fi["away"]
                     d["home_logo"], d["away_logo"] = fi["home_logo"], fi["away_logo"]
+                    if fi.get("kickoff_ts") is not None:
+                        d["kickoff_ts"] = fi["kickoff_ts"]   # epoch seconds -> UI countdown
 
             # 5) Execute (gated) + 6) write decision rows. Fetch current positions
             # first and skip markets we already hold or already ordered this run —
