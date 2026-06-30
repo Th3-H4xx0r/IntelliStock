@@ -149,13 +149,16 @@ function fmtTs(ts) {
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
   return t.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
-// Live countdown to kickoff. ts is epoch SECONDS (from the engine). Clean two-unit
-// format: "5d 4h", "4h 3m", "3m 2s", "2s"; "live" once it has kicked off.
+// Countdown to kickoff. ts is epoch SECONDS. Clean two-unit format ("5d 4h", "3m 2s").
+// These are PREGAME-board games (the engine routes genuinely-live games elsewhere) and
+// the time may be a date-only estimate, so we never say "live": once the match day has
+// arrived show "today"; hide clearly-past games.
 function kickoffCountdown(ts) {
   if (ts == null) return ''
   let secs = Math.round(Number(ts) - nowMs.value / 1000)
   if (Number.isNaN(secs)) return ''
-  if (secs <= 0) return 'live'
+  if (secs <= -86400) return ''        // a clearly past day -> hide
+  if (secs <= 0) return 'today'        // match day arrived (not necessarily kicked off)
   const d = Math.floor(secs / 86400); secs -= d * 86400
   const h = Math.floor(secs / 3600); secs -= h * 3600
   const m = Math.floor(secs / 60); const s = secs - m * 60
@@ -256,7 +259,8 @@ const matchBoard = computed(() => {
     const edges = g.sides.map(s => s.edge).filter(e => e != null)
     g.bestEdge = edges.length ? Math.max(...edges) : null
   }
-  list.sort((a, b) => (b.bestEdge ?? -Infinity) - (a.bestEdge ?? -Infinity))
+  // Sort by soonest kickoff first; games with no known kickoff sink to the bottom.
+  list.sort((a, b) => (a.kickoff_ts ?? Infinity) - (b.kickoff_ts ?? Infinity))
   return list
 })
 
@@ -417,7 +421,7 @@ onUnmounted(() => {
                 <img v-if="g.home_logo" :src="g.home_logo" referrerpolicy="no-referrer" class="w-9 h-9 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" :alt="g.home" />
                 <div v-else class="w-9 h-9 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[11px] font-bold text-slate-400 shrink-0">{{ initials(g.home) }}</div>
                 <div class="min-w-0 flex-1">
-                  <div class="text-sm font-semibold text-slate-100 truncate">{{ g.home || '—' }} <span class="text-slate-600">vs</span> {{ g.away || '—' }}<span v-if="g.kickoff_ts != null" class="ml-1.5 font-normal text-[11px]" :class="kickoffCountdown(g.kickoff_ts) === 'live' ? 'text-emerald-400' : 'text-slate-500'">· {{ kickoffCountdown(g.kickoff_ts) === 'live' ? 'live' : kickoffCountdown(g.kickoff_ts) }}</span></div>
+                  <div class="text-sm font-semibold text-slate-100 truncate">{{ g.home || '—' }} <span class="text-slate-600">vs</span> {{ g.away || '—' }}<span v-if="kickoffCountdown(g.kickoff_ts)" class="ml-1.5 font-normal text-[11px] text-slate-500">· {{ kickoffCountdown(g.kickoff_ts) }}</span></div>
                   <div v-if="g.home_elo != null || g.away_elo != null || g.home_xg != null || g.away_xg != null" class="text-[11px] text-slate-500 truncate">
                     <span v-if="g.home_elo != null || g.away_elo != null">Elo {{ fmtNum(g.home_elo) ?? '?' }}/{{ fmtNum(g.away_elo) ?? '?' }}</span>
                     <span v-if="(g.home_elo != null || g.away_elo != null) && (g.home_xg != null || g.away_xg != null)" class="text-slate-700"> · </span>
