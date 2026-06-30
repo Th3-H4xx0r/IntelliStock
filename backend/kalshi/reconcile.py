@@ -216,6 +216,28 @@ def prune_finished_decisions(rows, open_tickers, now_iso, *,
     return out
 
 
+def paper_cash_state(rows, bankroll_cents) -> dict:
+    """Paper portfolio cash from kalshi_decisions rows. Open paper positions tie up
+    cost (size*entry); settled/expired ones credit realized P&L. available = bankroll
+    + realized - open_cost (clamped >=0). Lets the engine size paper buys against the
+    cash actually left, so total deployed never exceeds the (paper) account. Pure."""
+    open_cost = realized = open_count = 0
+    for r in rows or []:
+        if not (r.get("paper") and r.get("decision") == "placed"):
+            continue
+        if r.get("outcome") is None:
+            size = int(r.get("size") or 0)
+            entry = r.get("entry_avg_cents")
+            if size > 0 and entry is not None:
+                open_cost += size * int(entry)
+                open_count += 1
+        else:
+            realized += int(r.get("realized_pnl_cents") or 0)
+    available = int(bankroll_cents or 0) + realized - open_cost
+    return {"open_cost_cents": open_cost, "realized_cents": realized,
+            "available_cents": max(0, available), "open_count": open_count}
+
+
 def calibration_summary(reconciled) -> dict:
     """Roll up reconciled positions: realized P&L, EV/$ deployed, and avg CLV over
     the GRADED (vs-sharp) subset."""

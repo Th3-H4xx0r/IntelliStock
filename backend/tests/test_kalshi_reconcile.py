@@ -2,8 +2,33 @@
 from kalshi.reconcile import (
     validate_order, aggregate_positions, reconcile_position,
     calibration_summary, go_live_ready, close_ref_updates, prune_finished_decisions,
+    paper_cash_state,
 )
 from kalshi.strategy.candidates import generate_candidates
+
+
+# --- paper portfolio cash: track open mock positions + realized so buys respect cash ---
+
+def test_paper_cash_state_tracks_open_cost_and_realized():
+    rows = [
+        {"paper": True, "decision": "placed", "outcome": None, "size": 10, "entry_avg_cents": 50},  # open cost 500
+        {"paper": True, "decision": "placed", "outcome": None, "size": 5, "entry_avg_cents": 40},   # open cost 200
+        {"paper": True, "decision": "placed", "outcome": "win", "realized_pnl_cents": 300},          # realized +300
+        {"paper": True, "decision": "placed", "outcome": "expired", "realized_pnl_cents": -120},     # realized -120
+        {"paper": True, "decision": "skipped", "outcome": None},                                     # ignored
+        {"paper": None, "decision": "placed", "outcome": None, "size": 9, "entry_avg_cents": 90},    # live -> ignored
+    ]
+    s = paper_cash_state(rows, 5000)   # $50 paper bankroll
+    assert s["open_cost_cents"] == 700
+    assert s["open_count"] == 2
+    assert s["realized_cents"] == 180
+    assert s["available_cents"] == 5000 + 180 - 700   # 4480 free to deploy
+
+
+def test_paper_cash_state_never_negative():
+    rows = [{"paper": True, "decision": "placed", "outcome": None, "size": 100, "entry_avg_cents": 90}]  # cost 9000
+    s = paper_cash_state(rows, 5000)   # over-committed beyond bankroll
+    assert s["available_cents"] == 0   # clamped, no more buys
 
 
 # --- prune finished games: drop stale skipped rows + expire stuck-open paper trades ---

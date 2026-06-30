@@ -625,14 +625,19 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # PAPER mode has NO broker position to dedup against, so a paper "fill"
             # would be re-placed every tick (duplicate buys). Treat markets already
             # paper-placed for THIS instance (recorded in kalshi_decisions) as held.
+            _pp: list = []   # this instance's PAPER placed rows (dedup + cash accounting)
             if dry:
                 try:
-                    _pp = (kdb._r.db(kdb.DB_NAME).table("kalshi_decisions")
-                           .filter({"instance_id": config.instance_id, "decision": "placed"})
-                           .pluck("market_ticker").run(conn))
-                    placed_markets |= {row.get("market_ticker") for row in _pp if row.get("market_ticker")}
+                    _pp = list(kdb._r.db(kdb.DB_NAME).table("kalshi_decisions")
+                               .filter({"instance_id": config.instance_id, "decision": "placed", "paper": True})
+                               .pluck("market_ticker", "decision", "paper", "outcome", "size",
+                                      "entry_avg_cents", "realized_pnl_cents").run(conn))
+                    # Only OPEN paper positions count as "held" for dedup — a settled/
+                    # expired market is done (finished markets won't re-list anyway).
+                    placed_markets |= {row.get("market_ticker") for row in _pp
+                                       if row.get("market_ticker") and row.get("outcome") is None}
                 except Exception as e:
-                    log(f"tick {tick}: paper position dedup query failed: {type(e).__name__}: {e}", "yellow")
+                    log(f"tick {tick}: paper position query failed: {type(e).__name__}: {e}", "yellow")
 
             # Pre-trade balance gate state — avoids the observed insufficient_balance
             # loop (over-leverage). Validate params + cap cumulative spend per tick.
@@ -656,6 +661,19 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             _open_count = len(positions)
             _opened_this_tick = 0
             _max_concurrent = int(getattr(config.caps, "max_concurrent_positions", 8))
+            # PAPER: the broker balance/positions are the demo account, NOT the paper
+            # book. Size against the paper account's actual free cash + open MOCK
+            # positions (bankroll + realized - open cost) so buys/sells respect cash and
+            # total deployed never exceeds the (paper) account.
+            if dry:
+                from kalshi.reconcile import paper_cash_state as _paper_cash_state
+                _ps = _paper_cash_state(_pp, int(getattr(config.caps, "bankroll_cents", 0)))
+                avail_cents = _ps["available_cents"]
+                _open_cost = _ps["open_cost_cents"]
+                _open_count = _ps["open_count"]
+                if tick % 20 == 1:
+                    log(f"tick {tick}: paper cash ${avail_cents/100:.2f} free "
+                        f"(${_open_cost/100:.2f} in {_open_count} open, realized ${_ps['realized_cents']/100:+.2f}).", "white")
 
             alloc_by_id = {a["id"]: a for a in allocations}
             for d in decisions:
@@ -667,26 +685,30 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     # avoids both duplicate buys and decision-log spam.
                     log(f"tick {tick}: already positioned/ordered {d['market_ticker']} — skipping.", "white")
                     continue
-                elif a and not dry:
+                elif a:
+                    # Shared pre-trade caps (apply to BOTH paper and real): order-param
+                    # validity, available-cash (paper cash OR real balance), aggregate
+                    # open-exposure, and max concurrent positions. spent_this_tick +
+                    # _open_cost/_open_count are paper- or broker-sourced (set above).
+                    _cost = a["contracts"] * a["price_cents"]
                     _okv, _whyv = _validate_order(a["contracts"], a["price_cents"],
                                                   max_per_market=int(getattr(config.caps, "max_contracts_per_market", 100000)))
-                    _cost = a["contracts"] * a["price_cents"]
+                    _spendable = int((1.0 - float(getattr(config.caps, "cash_buffer_frac", 0.03))) * avail_cents)
+                    _block = None
                     if not _okv:
-                        d["decision"], d["block_reason"] = "blocked", f"invalid order: {_whyv}"
-                        log(f"tick {tick}: order {d['market_ticker']} invalid: {_whyv}", "yellow")
-                    elif avail_cents and (spent_this_tick + _cost) > int((1.0 - float(getattr(config.caps, "cash_buffer_frac", 0.03))) * avail_cents):
-                        d["decision"], d["block_reason"] = "blocked", "insufficient_balance_guard"
-                        log(f"tick {tick}: skip {d['market_ticker']} — balance guard "
-                            f"(need {_cost}c, ~{avail_cents - spent_this_tick}c free).", "yellow")
+                        _block = f"invalid order: {_whyv}"
+                    elif (spent_this_tick + _cost) > _spendable and (dry or avail_cents):
+                        # paper: always enforce (avail 0 -> block); real: only when balance readable
+                        _block = "insufficient_paper_cash" if dry else "insufficient_balance_guard"
                     elif _max_exposure_cents and (_open_cost + spent_this_tick + _cost) > _max_exposure_cents:
-                        d["decision"], d["block_reason"] = "blocked", "max_open_exposure cap"
-                        log(f"tick {tick}: skip {d['market_ticker']} — open-exposure cap "
-                            f"({_open_cost + spent_this_tick + _cost}c > {_max_exposure_cents}c).", "yellow")
+                        _block = "max_open_exposure cap"
                     elif _max_concurrent and (_open_count + _opened_this_tick) >= _max_concurrent:
-                        d["decision"], d["block_reason"] = "blocked", "max_concurrent_positions cap"
-                        log(f"tick {tick}: skip {d['market_ticker']} — max concurrent positions "
-                            f"({_open_count + _opened_this_tick}/{_max_concurrent}).", "yellow")
-                    else:
+                        _block = "max_concurrent_positions cap"
+                    if _block:
+                        d["decision"], d["block_reason"] = "blocked", _block
+                        log(f"tick {tick}: skip {d['market_ticker']} — {_block} "
+                            f"(need {_cost}c, ~{max(0, avail_cents - spent_this_tick)}c free).", "yellow")
+                    elif not dry:
                         # Maker-first: rest a post_only YES bid inside the spread rather
                         # than paying taker (research: takers consistently lose; making
                         # avoids that quadrant). post_only auto-cancels if it would cross.
@@ -727,16 +749,18 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         except Exception as e:
                             log(f"tick {tick}: order {d['market_ticker']} failed: {e}", "red")
                             d["decision"], d["block_reason"] = "blocked", str(e)
-                elif a and dry:
-                    placed_markets.add(d["market_ticker"])   # don't spam dry-run logs either
-                    # PAPER fill: tag the would-be trade + record the would-be entry so the
-                    # feedback loop grades it (CLV/P&L) against real settlements — the valid
-                    # test against real prices with NO real order placed.
-                    d["paper"] = True
-                    d["entry_avg_cents"] = a["price_cents"]
-                    d["entry_edge"] = d.get("edge")   # edge AT placement (UI: "placed @ X%")
-                    log(f"tick {tick}: PAPER would place {a['contracts']}x {d['market_ticker']} @ "
-                        f"{a['price_cents']}c (edge {(d['edge'] or 0):.1%}).", "cyan")
+                    else:
+                        # PAPER fill: tag the would-be trade + record the would-be entry so
+                        # the feedback loop grades it (CLV/P&L) vs real settlements. Counts
+                        # against paper cash + exposure so subsequent buys this tick fit.
+                        spent_this_tick += _cost
+                        _opened_this_tick += 1
+                        placed_markets.add(d["market_ticker"])
+                        d["paper"] = True
+                        d["entry_avg_cents"] = a["price_cents"]
+                        d["entry_edge"] = d.get("edge")   # edge AT placement (UI: "placed @ X%")
+                        log(f"tick {tick}: PAPER would place {a['contracts']}x {d['market_ticker']} @ "
+                            f"{a['price_cents']}c (edge {(d['edge'] or 0):.1%}).", "cyan")
                 try:
                     kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(d, conflict="replace").run(conn)
                 except Exception:
