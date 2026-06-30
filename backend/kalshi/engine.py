@@ -579,11 +579,29 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     "liquidity": 500, "hours_to_kickoff": 24, "model_confidence": 0.6,
                 })
 
-            # 4) Plan + allocate across the forward book.
+            # Account balance (read ONCE per tick). PAPER sizes off the LIVE account
+            # balance so the paper bankroll is never a hardcoded number and total mock
+            # exposure can never exceed the real account — fund the account to size up.
+            # Falls back to the configured bankroll only if the balance can't be read.
+            import dataclasses as _dc
+            dry = not should_execute(config.environment, config.live_enabled, config.paper_mode)
+            try:
+                _acct = client.get_balance()
+                _acct_cash = int(getattr(_acct, "cash_cents", 0) or 0)
+            except Exception as e:
+                log(f"tick {tick}: get_balance failed: {type(e).__name__}: {e}", "yellow")
+                _acct, _acct_cash = None, 0
+            _cfg_bankroll = int(getattr(config.caps, "bankroll_cents", 0))
+            _eff_bankroll = _acct_cash if (dry and _acct_cash > 0) else _cfg_bankroll
+            _eff_caps = _dc.replace(config.caps, bankroll_cents=_eff_bankroll) if _eff_bankroll != _cfg_bankroll else config.caps
+            _eff_inplay = _dc.replace(config.inplay_caps, bankroll_cents=_eff_bankroll) \
+                if _eff_bankroll != int(getattr(config.inplay_caps, "bankroll_cents", 0)) else config.inplay_caps
+
+            # 4) Plan + allocate across the forward book (sized off the effective bankroll).
             ts = _iso_now()
             plan = plan_and_allocate(
                 fixtures_in, instance_id=config.instance_id, brokerage_id=config.brokerage_id, ts=ts,
-                tier=config.tier, caps=config.caps, fee_rate=config.fee_rate,
+                tier=config.tier, caps=_eff_caps, fee_rate=config.fee_rate,
                 edge_threshold=config.caps.edge_threshold, reserve_frac=config.reserve_frac,
                 expected_better_soon=False, w_sharp=config.sharp_weight,
             )
@@ -605,8 +623,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
             # 5) Execute (gated) + 6) write decision rows. Fetch current positions
             # first and skip markets we already hold or already ordered this run —
-            # so we don't re-submit the same order every tick.
-            dry = not should_execute(config.environment, config.live_enabled, config.paper_mode)
+            # so we don't re-submit the same order every tick. (`dry` computed above.)
             try:
                 positions = client.get_positions()
             except Exception as e:
@@ -641,11 +658,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
 
             # Pre-trade balance gate state — avoids the observed insufficient_balance
             # loop (over-leverage). Validate params + cap cumulative spend per tick.
+            # Real path: the live account cash (read once above). Paper path: overridden
+            # just below with the paper book's available cash.
             from kalshi.reconcile import validate_order as _validate_order
-            try:
-                avail_cents = int(getattr(client.get_balance(), "cash_cents", 0) or 0)
-            except Exception:
-                avail_cents = 0
+            avail_cents = _acct_cash
             spent_this_tick = 0
             # Aggregate OPEN-EXPOSURE cap (B1): the live path previously enforced only
             # per-bet Kelly — never a portfolio cap. Bound total deployed across all
@@ -656,7 +672,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             except Exception:
                 _open_cost = 0
             _max_exposure_cents = int(float(getattr(config.caps, "max_open_exposure_frac", 0.15))
-                                      * int(getattr(config.caps, "bankroll_cents", 0)))
+                                      * _eff_bankroll)   # exposure cap on the effective (live for paper) bankroll
             # Concurrent-position cap (count): bound how many distinct positions are open.
             _open_count = len(positions)
             _opened_this_tick = 0
@@ -667,7 +683,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # total deployed never exceeds the (paper) account.
             if dry:
                 from kalshi.reconcile import paper_cash_state as _paper_cash_state
-                _ps = _paper_cash_state(_pp, int(getattr(config.caps, "bankroll_cents", 0)))
+                _ps = _paper_cash_state(_pp, _eff_bankroll)   # _eff_bankroll = live account balance for paper
                 avail_cents = _ps["available_cents"]
                 _open_cost = _ps["open_cost_cents"]
                 _open_count = _ps["open_count"]
@@ -847,7 +863,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 live_rows = live_monitor.run_live_step(
                     client=client, live_matches=live_matches, price_history=price_history,
                     adds_by_match=adds_by_match, positions_by_ticker=positions_by_ticker,
-                    caps=config.inplay_caps, dry_run=live_dry, instance_id=config.instance_id,
+                    caps=_eff_inplay, dry_run=live_dry, instance_id=config.instance_id,
                     brokerage_id=config.brokerage_id, ts=ts, llm=_live_llm_tilt, log=log,
                     already_placed=placed_markets,
                 )
@@ -918,11 +934,11 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # 7) Snapshot. For PAPER instances the broker value is a static demo balance,
             # so also record cumulative paper P&L (realized + unrealized) -> the UI's
             # progress-over-time curve.
-            bal = client.get_balance()
+            bal = _acct or client.get_balance()   # reuse the balance read at tick start
             # ONLY paper/dry instances get a paper_pnl_cents series (real & demo
             # instances place real orders -> their portfolio VALUE curve is the truth;
             # writing 0 here would wrongly flip the UI into paper/MOCK mode).
-            _is_paper = not should_execute(config.environment, config.live_enabled, config.paper_mode)
+            _is_paper = dry
             try:
                 _paper_pnl = kdb.paper_pnl_totals(conn, config.instance_id)["total_cents"] if _is_paper else None
             except Exception:
