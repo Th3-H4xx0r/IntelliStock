@@ -516,6 +516,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final placed = (data['placed'] as List?) ?? const [];
     final fills = (data['fills'] as List?) ?? const [];
     final mock = (data['mock'] as List?) ?? const [];
+    final mockHistory = (data['mock_history'] as List?) ?? const [];
     return GlassCard(
    frosted: true,      padding: const EdgeInsets.all(14),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -557,6 +558,67 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
         if (mock.isEmpty)
           Text('No mock (paper) positions.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
         ...mock.take(12).map((m) => _mockTile(m as Map<String, dynamic>)),
+        if (mockHistory.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Row(children: [
+            Icon(Icons.history, color: AppColors.warning, size: 14),
+            const SizedBox(width: 5),
+            Text('MOCK FILLED · ${mockHistory.length}',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim, fontWeight: FontWeight.bold)),
+          ]),
+          const SizedBox(height: 6),
+          ...mockHistory.take(12).map((m) => _mockHistoryTile(m as Map<String, dynamic>)),
+        ],
+      ]),
+    );
+  }
+
+  // Settled/expired paper trade -> filled-orders history with realized P&L + MOCK tag.
+  Widget _mockHistoryTile(Map<String, dynamic> m) {
+    final match = (m['match'] ?? m['market_ticker'] ?? '').toString();
+    final pick = (m['pick_label'] ?? m['side'] ?? '').toString();
+    final contracts = (m['contracts'] as num?)?.toInt() ?? 0;
+    final entryCents = (m['price_cents'] as num?)?.toInt();
+    final rCents = (m['realized_pnl_cents'] as num?)?.toDouble();
+    final rPos = (rCents ?? 0) >= 0;
+    final outcome = (m['outcome'] ?? '').toString();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: AppColors.fill(AppColors.surface),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(children: [
+        _crest((m['pick_logo'] ?? '').toString(), pick.replaceAll(' to win', '')),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: Text(match, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w600))),
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(color: AppColors.fill(AppColors.warning), borderRadius: BorderRadius.circular(4)),
+              child: Text('MOCK', style: AppTextStyles.nano.copyWith(color: AppColors.warning, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              rCents == null ? '—' : '${rPos ? '+' : '-'}\$${(rCents.abs() / 100).toStringAsFixed(2)}',
+              style: AppTextStyles.nano.copyWith(
+                  color: rCents == null ? AppColors.textDim : (rPos ? AppColors.success : AppColors.danger),
+                  fontWeight: FontWeight.bold),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Row(children: [
+            Expanded(child: Text(pick, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.nano.copyWith(color: AppColors.primary, fontWeight: FontWeight.w500))),
+            Text('$contracts @ ${entryCents ?? '—'}¢${outcome.isNotEmpty ? ' · $outcome' : ''}',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          ]),
+        ])),
       ]),
     );
   }

@@ -10,6 +10,9 @@ class KalshiPortfolio {
     required this.dayChange,
     required this.series,
     required this.seriesTs,
+    this.paperPnl,
+    this.paperSeries = const [],
+    this.paperSeriesTs = const [],
   });
 
   final double value;
@@ -17,15 +20,26 @@ class KalshiPortfolio {
   final double dayChange;
   final List<double> series; // value points, chronological
   final List<DateTime> seriesTs; // matching timestamps for the scrubbable chart
+  // Paper P&L progress over time (present only for paper instances). When set, the
+  // hero shows this instead of the (static demo) portfolio value.
+  final double? paperPnl;
+  final List<double> paperSeries;
+  final List<DateTime> paperSeriesTs;
+
+  bool get isPaper => paperSeries.isNotEmpty;
 
   factory KalshiPortfolio.fromJson(Map<String, dynamic> j) {
     final raw = (j['series'] as List?) ?? const [];
+    final praw = (j['paper_series'] as List?) ?? const [];
     return KalshiPortfolio(
       value: (j['value'] as num?)?.toDouble() ?? 0,
       cash: (j['cash'] as num?)?.toDouble() ?? 0,
       dayChange: (j['day_change'] as num?)?.toDouble() ?? 0,
       series: raw.map((p) => ((p as Map)['value'] as num?)?.toDouble() ?? 0).toList(),
       seriesTs: raw.map((p) => DateTime.tryParse(((p as Map)['ts'] ?? '').toString()) ?? DateTime.now()).toList(),
+      paperPnl: (j['paper_pnl'] as num?)?.toDouble(),
+      paperSeries: praw.map((p) => ((p as Map)['pnl'] as num?)?.toDouble() ?? 0).toList(),
+      paperSeriesTs: praw.map((p) => DateTime.tryParse(((p as Map)['ts'] ?? '').toString()) ?? DateTime.now()).toList(),
     );
   }
 }
