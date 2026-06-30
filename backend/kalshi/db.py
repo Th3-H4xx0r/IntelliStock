@@ -215,6 +215,29 @@ def mark_paper_positions(conn, instance_id, price_map) -> dict:
     return {"marked": marked, "unrealized_pnl_cents": total}
 
 
+def update_close_refs(conn, instance_id, sharp_map, mid_map) -> int:
+    """Stamp the rolling closing reference (sharp_close_prob + pre_settle_mid_cents)
+    onto open placed decisions so reconcile grades true CLV at settlement (vs the LAST
+    sharp prob + Kalshi mid before the game settled, not the entry-time reference).
+    Measurement only — never trades. Returns the number of rows updated."""
+    from kalshi.reconcile import close_ref_updates
+    try:
+        rows = list(_r.db(DB_NAME).table("kalshi_decisions")
+                    .filter({"instance_id": str(instance_id), "decision": "placed"})
+                    .pluck("id", "decision", "market_ticker", "outcome").run(conn))
+    except Exception:
+        return 0
+    n = 0
+    for u in close_ref_updates(rows, sharp_map, mid_map):
+        try:
+            _r.db(DB_NAME).table("kalshi_decisions").get(u["id"]).update(
+                {k: v for k, v in u.items() if k != "id"}).run(conn)
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
 def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> dict:
     """Pull settlements, reconcile un-settled PLACED decisions at the POSITION level
     (cost-weighted, one settlement counted once), write back outcome/realized_pnl/clv,

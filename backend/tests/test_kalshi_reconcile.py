@@ -1,9 +1,24 @@
 """Tests for the feedback loop (reconcile) + the new selection-gate behavior."""
 from kalshi.reconcile import (
     validate_order, aggregate_positions, reconcile_position,
-    calibration_summary, go_live_ready,
+    calibration_summary, go_live_ready, close_ref_updates,
 )
 from kalshi.strategy.candidates import generate_candidates
+
+
+# --- P3: roll the closing reference (sharp prob + Kalshi mid) onto open positions ---
+
+def test_close_ref_updates_open_placed_only():
+    rows = [
+        {"id": "i1|T1", "decision": "placed", "market_ticker": "T1", "outcome": None},
+        {"id": "i1|T2", "decision": "placed", "market_ticker": "T2", "outcome": "win"},   # settled -> skip
+        {"id": "i1|T3", "decision": "skipped", "market_ticker": "T3", "outcome": None},   # not placed -> skip
+        {"id": "i1|T4", "decision": "placed", "market_ticker": "T4", "outcome": None},    # no data -> skip
+    ]
+    sharp_map = {"T1": 0.62}
+    mid_map = {"T1": 58.0, "T2": 50.0}
+    ups = close_ref_updates(rows, sharp_map, mid_map)
+    assert ups == [{"id": "i1|T1", "sharp_close_prob": 0.62, "pre_settle_mid_cents": 58}]
 
 
 # --- order validation ---

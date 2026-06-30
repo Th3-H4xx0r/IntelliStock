@@ -769,6 +769,19 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 kdb.append_edge_history(conn, config.instance_id, decisions, ts)
             except Exception:
                 pass
+            # 7c-ii) Roll the closing reference onto open placed positions so CLV grades
+            # against the LAST sharp prob + Kalshi mid before settlement (true CLV),
+            # not the entry-time reference. Measurement only — never trades.
+            try:
+                _sharp_map = {}
+                for _mt in metas:
+                    for _mk in _mt["mkts"]:
+                        _sp = (_mt["sharp_probs"].get(_mk["market_type"], {}) or {}).get(_mk["side"])
+                        if _sp is not None:
+                            _sharp_map[_mk["market_ticker"]] = _sp
+                kdb.update_close_refs(conn, config.instance_id, _sharp_map, _mark_map)
+            except Exception as e:
+                log(f"tick {tick}: update_close_refs failed: {type(e).__name__}: {e}", "yellow")
 
             # 8) Live in-match monitoring (two-way) for in-play matches.
             if config.live_monitoring and live_matches:
