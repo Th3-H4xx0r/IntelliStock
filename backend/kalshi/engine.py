@@ -895,8 +895,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # so also record cumulative paper P&L (realized + unrealized) -> the UI's
             # progress-over-time curve.
             bal = client.get_balance()
+            # ONLY paper/dry instances get a paper_pnl_cents series (real & demo
+            # instances place real orders -> their portfolio VALUE curve is the truth;
+            # writing 0 here would wrongly flip the UI into paper/MOCK mode).
+            _is_paper = not should_execute(config.environment, config.live_enabled, config.paper_mode)
             try:
-                _paper_pnl = kdb.paper_pnl_totals(conn, config.instance_id)["total_cents"]
+                _paper_pnl = kdb.paper_pnl_totals(conn, config.instance_id)["total_cents"] if _is_paper else None
             except Exception:
                 _paper_pnl = None
             kdb.save_portfolio_snapshot(
