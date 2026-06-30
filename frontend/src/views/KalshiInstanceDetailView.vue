@@ -417,17 +417,11 @@ onUnmounted(() => {
                 <img v-if="g.home_logo" :src="g.home_logo" referrerpolicy="no-referrer" class="w-9 h-9 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" :alt="g.home" />
                 <div v-else class="w-9 h-9 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[11px] font-bold text-slate-400 shrink-0">{{ initials(g.home) }}</div>
                 <div class="min-w-0 flex-1">
-                  <div class="text-sm font-semibold text-slate-100 truncate">{{ g.home || '—' }} <span class="text-slate-600">vs</span> {{ g.away || '—' }}</div>
+                  <div class="text-sm font-semibold text-slate-100 truncate">{{ g.home || '—' }} <span class="text-slate-600">vs</span> {{ g.away || '—' }}<span v-if="g.kickoff_ts != null" class="ml-1.5 font-normal text-[11px]" :class="kickoffCountdown(g.kickoff_ts) === 'live' ? 'text-emerald-400' : 'text-slate-500'">· {{ kickoffCountdown(g.kickoff_ts) === 'live' ? 'live' : kickoffCountdown(g.kickoff_ts) }}</span></div>
                   <div v-if="g.home_elo != null || g.away_elo != null || g.home_xg != null || g.away_xg != null" class="text-[11px] text-slate-500 truncate">
                     <span v-if="g.home_elo != null || g.away_elo != null">Elo {{ fmtNum(g.home_elo) ?? '?' }}/{{ fmtNum(g.away_elo) ?? '?' }}</span>
                     <span v-if="(g.home_elo != null || g.away_elo != null) && (g.home_xg != null || g.away_xg != null)" class="text-slate-700"> · </span>
                     <span v-if="g.home_xg != null || g.away_xg != null">xG {{ fmtNum(g.home_xg) ?? '?' }}/{{ fmtNum(g.away_xg) ?? '?' }}</span>
-                  </div>
-                  <!-- Live countdown to kickoff -->
-                  <div v-if="g.kickoff_ts != null" class="flex items-center gap-1 text-[11px] font-semibold mt-0.5 tabular-nums"
-                       :class="kickoffCountdown(g.kickoff_ts) === 'live' ? 'text-emerald-400' : 'text-primary'">
-                    <span class="material-symbols-outlined text-[12px]">schedule</span>
-                    <span>{{ kickoffCountdown(g.kickoff_ts) === 'live' ? 'Live now' : 'Starts in ' + kickoffCountdown(g.kickoff_ts) }}</span>
                   </div>
                 </div>
                 <img v-if="g.away_logo" :src="g.away_logo" referrerpolicy="no-referrer" class="w-9 h-9 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" :alt="g.away" />

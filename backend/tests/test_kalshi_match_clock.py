@@ -44,3 +44,11 @@ def test_phase_for_market_falls_back_to_ticker_date():
     # a precise kickoff wins over the date heuristic
     ko = _ts(2026, 6, 23, 12)
     assert phase_for_market(kickoff_ts=ko, ticker="X-26JUN23ABCDEF", now_ts=ko + 60)[0] == LIVE
+
+
+def test_kickoff_date_ts_from_ticker_and_none():
+    from kalshi.live.match_clock import kickoff_date_ts
+    # 26JUL03 -> 2026-07-03 00:00 UTC epoch
+    ts = kickoff_date_ts("KXWCGAME-26JUL03ARGCPV-ARG")
+    assert ts == datetime.datetime(2026, 7, 3, tzinfo=datetime.timezone.utc).timestamp()
+    assert kickoff_date_ts("NO-DATE-TICKER") is None
