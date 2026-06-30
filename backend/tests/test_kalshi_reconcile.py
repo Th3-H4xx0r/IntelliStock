@@ -17,6 +17,8 @@ def test_paper_cash_state_tracks_open_cost_and_realized():
         {"paper": True, "decision": "placed", "outcome": "expired", "realized_pnl_cents": -120},     # realized -120
         {"paper": True, "decision": "skipped", "outcome": None},                                     # ignored
         {"paper": None, "decision": "placed", "outcome": None, "size": 9, "entry_avg_cents": 90},    # live -> ignored
+        # in-play SELL (exit) — must NOT count as open buy cost even if entry is set
+        {"paper": True, "decision": "placed", "outcome": None, "size": 8, "entry_avg_cents": 30, "live_action": "exit"},
     ]
     s = paper_cash_state(rows, 5000)   # $50 paper bankroll
     assert s["open_cost_cents"] == 700

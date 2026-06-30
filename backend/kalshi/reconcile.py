@@ -225,6 +225,10 @@ def paper_cash_state(rows, bankroll_cents) -> dict:
     for r in rows or []:
         if not (r.get("paper") and r.get("decision") == "placed"):
             continue
+        # live exit/reduce rows are SELLS written as decision='placed' — never count
+        # them as open buy cost (mirrors aggregate_positions).
+        if r.get("live_action") in ("exit", "reduce"):
+            continue
         if r.get("outcome") is None:
             size = int(r.get("size") or 0)
             entry = r.get("entry_avg_cents")

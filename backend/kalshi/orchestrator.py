@@ -84,7 +84,8 @@ def plan_and_allocate(
                 edge=c.edge, model_confidence=fx.get("model_confidence", 0.6),
                 liquidity=fx.get("liquidity", 0.0), hours_to_kickoff=fx.get("hours_to_kickoff", 24.0),
             )
-            scored.append({"id": cid, "score": opp, "edge": c.edge, "price_cents": c.price_cents})
+            scored.append({"id": cid, "score": opp, "edge": c.edge, "price_cents": c.price_cents,
+                           "has_sharp": c.has_sharp})
             meta[cid] = (
                 c, fx, rationales.get(c.market_type, ""),
                 (model_only.get(c.market_type, {})).get(c.side),

@@ -631,7 +631,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     _pp = list(kdb._r.db(kdb.DB_NAME).table("kalshi_decisions")
                                .filter({"instance_id": config.instance_id, "decision": "placed", "paper": True})
                                .pluck("market_ticker", "decision", "paper", "outcome", "size",
-                                      "entry_avg_cents", "realized_pnl_cents").run(conn))
+                                      "entry_avg_cents", "realized_pnl_cents", "live_action").run(conn))
                     # Only OPEN paper positions count as "held" for dedup — a settled/
                     # expired market is done (finished markets won't re-list anyway).
                     placed_markets |= {row.get("market_ticker") for row in _pp
