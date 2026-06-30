@@ -656,6 +656,8 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     final markCents = (m['mark_cents'] as num?)?.toInt();
     final upCents = (m['unrealized_pnl_cents'] as num?)?.toDouble();
     final upPos = (upCents ?? 0) > 0;
+    // Total current value of the position = contracts × current mark (fallback entry).
+    final value = (contracts * (markCents ?? entryCents ?? 0)) / 100.0;
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(11),
@@ -678,22 +680,24 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
               child: Text('MOCK', style: AppTextStyles.nano.copyWith(color: AppColors.warning, fontWeight: FontWeight.bold)),
             ),
             const SizedBox(width: 8),
-            Text(
-              upCents == null ? '—' : '${upPos ? '+' : '-'}\$${(upCents.abs() / 100).toStringAsFixed(2)}',
-              style: AppTextStyles.nano.copyWith(
-                  color: upCents == null
-                      ? AppColors.textDim
-                      : (upPos ? AppColors.success : AppColors.danger),
-                  fontWeight: FontWeight.bold),
-            ),
+            // Total position value — big bold
+            Text('\$${value.toStringAsFixed(2)}',
+                style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.bold, fontSize: 17)),
           ]),
           const SizedBox(height: 4),
           Row(children: [
             Expanded(child: Text(pick, maxLines: 1, overflow: TextOverflow.ellipsis,
                 style: AppTextStyles.nano.copyWith(color: AppColors.primary, fontWeight: FontWeight.w500))),
-            Text('$contracts @ ${entryCents ?? '—'}¢ → ${markCents ?? '—'}¢',
-                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+            Text(
+              upCents == null ? '—' : '${upPos ? '+' : '-'}\$${(upCents.abs() / 100).toStringAsFixed(2)} P&L',
+              style: AppTextStyles.nano.copyWith(
+                  color: upCents == null ? AppColors.textDim : (upPos ? AppColors.success : AppColors.danger),
+                  fontWeight: FontWeight.w600),
+            ),
           ]),
+          const SizedBox(height: 2),
+          Text('$contracts @ ${entryCents ?? '—'}¢ → ${markCents ?? '—'}¢',
+              style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
         ])),
       ]),
     );
