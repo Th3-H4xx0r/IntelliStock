@@ -747,8 +747,13 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
             // Candidate rows are keyed per-tick, so a side accumulates many rows.
             // Collapse each game to ONE row per side (latest by ts; keep PLACED if
             // it was ever placed so a held side isn't shown as a later skip).
+            // Soonest kickoff first; games with no known kickoff sink to the bottom.
             final games = groups.values.map(_dedupeSides).toList()
-              ..sort((a, b) => _bestEdge(b).compareTo(_bestEdge(a)));
+              ..sort((a, b) {
+                final ka = (a.first['kickoff_ts'] as num?)?.toDouble() ?? double.infinity;
+                final kb = (b.first['kickoff_ts'] as num?)?.toDouble() ?? double.infinity;
+                return ka.compareTo(kb);
+              });
             return Column(children: games.map(_pregameCard).toList());
           },
         ),
@@ -811,18 +816,20 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     return ((fair - edge) * 100).round();
   }
 
-  // Live countdown to kickoff. ts is epoch SECONDS. Clean two-unit format:
-  // "5d 4h" / "4h 3m" / "3m 2s" / "2s"; "live" once it has kicked off.
+  // Countdown to kickoff. ts is epoch SECONDS. Clean two-unit format ("5d 4h"/"3m 2s").
+  // Pregame-board games (engine routes live ones elsewhere) with a possibly date-only
+  // time: never say "live" — show "today" once the match day arrives; hide past days.
   String _kickoffCountdown(num? ts) {
     if (ts == null) return '';
     var secs = (ts.toDouble() - _now.millisecondsSinceEpoch / 1000).round();
-    if (secs <= 0) return 'live';
+    if (secs <= -86400) return '';   // clearly a past day -> hide
+    if (secs <= 0) return 'today';   // match day arrived (not necessarily kicked off)
     final d = secs ~/ 86400; secs -= d * 86400;
     final h = secs ~/ 3600; secs -= h * 3600;
     final m = secs ~/ 60; final s = secs - m * 60;
     final u = <List<dynamic>>[[d, 'd'], [h, 'h'], [m, 'm'], [s, 's']];
     final i = u.indexWhere((e) => (e[0] as int) > 0);
-    if (i < 0) return 'live';
+    if (i < 0) return 'today';
     final out = ['${u[i][0]}${u[i][1]}'];
     if (i + 1 < u.length && (u[i + 1][0] as int) > 0) out.add('${u[i + 1][0]}${u[i + 1][1]}');
     return out.join(' ');
@@ -881,9 +888,7 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                 style: AppTextStyles.body.copyWith(color: AppColors.textHi, fontWeight: FontWeight.w700))),
             if (cd.isNotEmpty) Padding(
               padding: const EdgeInsets.only(left: 6),
-              child: Text(cd == 'live' ? 'live' : cd,
-                  style: AppTextStyles.nano.copyWith(
-                      color: cd == 'live' ? AppColors.success : AppColors.textDim)),
+              child: Text(cd, style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
             ),
           ])),
           const SizedBox(width: 8),
