@@ -4,7 +4,7 @@ in main.py stay thin and this stays unit-testable with no DB.
 """
 from __future__ import annotations
 
-from kalshi.telemetry import portfolio_series
+from kalshi.telemetry import portfolio_series, paper_pnl_series
 from kalshi.clv import summarize_clv
 from kalshi.ingest_odds import budget_remaining, fixtures_per_day_budget
 
@@ -26,11 +26,15 @@ def portfolio_payload(
         day_change = round(series[-1]["value"] - series[0]["value"], 2)
     else:
         day_change = 0.0
+    # Paper P&L progress-over-time (only present for paper instances that recorded it).
+    paper_series = paper_pnl_series(snapshot_rows)
     return {
         "value": round(value_cents / 100.0, 2),
         "cash": round(cash_cents / 100.0, 2),
         "day_change": day_change,
         "series": series,
+        "paper_series": paper_series,
+        "paper_pnl": (paper_series[-1]["pnl"] if paper_series else None),
     }
 
 

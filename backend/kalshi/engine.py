@@ -782,6 +782,18 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 kdb.update_close_refs(conn, config.instance_id, _sharp_map, _mark_map)
             except Exception as e:
                 log(f"tick {tick}: update_close_refs failed: {type(e).__name__}: {e}", "yellow")
+            # 7c-iii) Prune FINISHED games: drop stale skipped rows + expire stuck-open
+            # paper trades for markets no longer in the OPEN set, so the pregame board and
+            # open-trade list don't accumulate completed matches. Guarded against empty
+            # discovery (no mass-delete on an outage).
+            try:
+                _open_tk = {p["market_ticker"] for p in soccer if p.get("market_ticker")}
+                _pr = kdb.prune_finished(conn, config.instance_id, _open_tk, ts)
+                if _pr.get("deleted") or _pr.get("expired"):
+                    log(f"tick {tick}: pruned {_pr['deleted']} finished decision row(s), "
+                        f"expired {_pr['expired']} stale open trade(s).", "white")
+            except Exception as e:
+                log(f"tick {tick}: prune_finished failed: {type(e).__name__}: {e}", "yellow")
 
             # 8) Live in-match monitoring (two-way) for in-play matches.
             if config.live_monitoring and live_matches:
@@ -879,11 +891,18 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 except Exception:
                     pass
 
-            # 7) Snapshot.
+            # 7) Snapshot. For PAPER instances the broker value is a static demo balance,
+            # so also record cumulative paper P&L (realized + unrealized) -> the UI's
+            # progress-over-time curve.
             bal = client.get_balance()
+            try:
+                _paper_pnl = kdb.paper_pnl_totals(conn, config.instance_id)["total_cents"]
+            except Exception:
+                _paper_pnl = None
             kdb.save_portfolio_snapshot(
                 conn, brokerage_id=config.brokerage_id, ts=ts,
                 value_cents=bal.portfolio_value_cents, cash_cents=bal.cash_cents,
+                paper_pnl_cents=_paper_pnl,
             )
             log(f"tick {tick}: portfolio ${bal.portfolio_value_cents / 100:.2f} "
                 f"(cash ${bal.cash_cents / 100:.2f}).", "white")

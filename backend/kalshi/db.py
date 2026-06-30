@@ -62,14 +62,20 @@ def ensure_tables(conn) -> list[str]:
 
 # --- pure doc builders (unit-tested) ---
 
-def portfolio_snapshot_doc(*, brokerage_id: str, ts: str, value_cents: int, cash_cents: int) -> dict:
-    return {
+def portfolio_snapshot_doc(*, brokerage_id: str, ts: str, value_cents: int, cash_cents: int,
+                           paper_pnl_cents: int | None = None) -> dict:
+    doc = {
         "id": f"{brokerage_id}|{ts}",
         "brokerage_id": brokerage_id,
         "ts": ts,
         "value_cents": int(value_cents),
         "cash_cents": int(cash_cents),
     }
+    if paper_pnl_cents is not None:
+        # Cumulative paper P&L at this tick (realized + unrealized) -> progress-over-time
+        # curve for paper instances, whose broker value_cents is a static demo balance.
+        doc["paper_pnl_cents"] = int(paper_pnl_cents)
+    return doc
 
 
 def edge_doc(*, brokerage_id: str, ts: str, flag: dict) -> dict:
@@ -92,6 +98,20 @@ def save_portfolio_snapshot(conn, **kw) -> None:
     _r.db(DB_NAME).table("kalshi_portfolio_snapshots").insert(
         portfolio_snapshot_doc(**kw), conflict="replace"
     ).run(conn)
+
+
+def paper_pnl_totals(conn, instance_id) -> dict:
+    """Cumulative paper P&L for an instance: realized (settled/expired) + unrealized
+    (open marks). Thin DB wrapper over telemetry.paper_pnl_from_rows."""
+    from kalshi.telemetry import paper_pnl_from_rows
+    try:
+        rows = list(_r.db(DB_NAME).table("kalshi_decisions")
+                    .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True})
+                    .pluck("paper", "decision", "outcome",
+                           "realized_pnl_cents", "unrealized_pnl_cents").run(conn))
+    except Exception:
+        return {"realized_cents": 0, "unrealized_cents": 0, "total_cents": 0}
+    return paper_pnl_from_rows(rows)
 
 
 def read_portfolio_snapshots(conn, brokerage_id: str, limit: int = 5000) -> list[dict]:
@@ -236,6 +256,44 @@ def update_close_refs(conn, instance_id, sharp_map, mid_map) -> int:
         except Exception:
             pass
     return n
+
+
+def prune_finished(conn, instance_id, open_tickers, now_iso, *,
+                   delete_after_hours: float = 3.0, expire_after_hours: float = 12.0) -> dict:
+    """Drop stale skipped/blocked decision rows + expire stuck-open paper trades for
+    markets no longer in Kalshi's OPEN set (finished games), so the pregame board and
+    open-trade list don't accumulate completed matches. Recently-seen rows are kept
+    (transient discovery-gap guard; age uses ts/mark_ts). Returns {deleted, expired}.
+    NEVER prunes when open_tickers is empty (a discovery outage must not mass-delete)."""
+    from kalshi.reconcile import prune_finished_decisions
+    if not open_tickers:
+        return {"deleted": 0, "expired": 0}
+    try:
+        rows = list(_r.db(DB_NAME).table("kalshi_decisions")
+                    .filter({"instance_id": str(instance_id)})
+                    .pluck("id", "decision", "market_ticker", "outcome", "ts", "mark_ts",
+                           "unrealized_pnl_cents").run(conn))
+    except Exception:
+        return {"deleted": 0, "expired": 0}
+    plan = prune_finished_decisions(rows, open_tickers, now_iso,
+                                    delete_after_hours=delete_after_hours,
+                                    expire_after_hours=expire_after_hours)
+    deleted = expired = 0
+    for did in plan["delete"]:
+        try:
+            _r.db(DB_NAME).table("kalshi_decisions").get(did).delete().run(conn)
+            deleted += 1
+        except Exception:
+            pass
+    for e in plan["expire"]:
+        try:
+            # Realize at the last mark (becomes filled-orders history with realized P&L).
+            _r.db(DB_NAME).table("kalshi_decisions").get(e["id"]).update(
+                {"outcome": "expired", "realized_pnl_cents": int(e.get("realized_pnl_cents") or 0)}).run(conn)
+            expired += 1
+        except Exception:
+            pass
+    return {"deleted": deleted, "expired": expired}
 
 
 def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> dict:

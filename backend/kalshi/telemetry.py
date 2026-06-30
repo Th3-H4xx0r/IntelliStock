@@ -39,6 +39,40 @@ def portfolio_series(snapshots: list[dict], max_points: int = 120) -> list[dict]
     return [pts[i] for i in idxs if 0 <= i < n]
 
 
+def paper_pnl_series(snapshots: list[dict], max_points: int = 120) -> list[dict]:
+    """Progress-over-time curve of paper P&L. snapshots: [{'ts','paper_pnl_cents'}]
+    chronological. Only snapshots that actually carry paper_pnl_cents are plotted (so
+    pre-feature rows aren't shown as 0). Downsampled to <= max_points (keeps first+last),
+    cents -> dollars."""
+    pts = [
+        {"ts": s["ts"], "pnl": round(int(s.get("paper_pnl_cents") or 0) / 100.0, 2)}
+        for s in snapshots
+        if s.get("paper_pnl_cents") is not None
+    ]
+    n = len(pts)
+    if n <= max_points or max_points <= 1:
+        return pts
+    step = n / float(max_points)
+    idxs = sorted({int(i * step) for i in range(max_points)} | {0, n - 1})
+    return [pts[i] for i in idxs if 0 <= i < n]
+
+
+def paper_pnl_from_rows(rows: list[dict]) -> dict:
+    """Total paper P&L from kalshi_decisions rows: realized (settled/expired placed
+    paper trades) + unrealized (still-open marked paper trades). Mirrors the dashboard
+    summary so the time series and the headline agree."""
+    realized = unrealized = 0
+    for r in rows or []:
+        if not (r.get("paper") and r.get("decision") == "placed"):
+            continue
+        if r.get("outcome") is None:
+            unrealized += int(r.get("unrealized_pnl_cents") or 0)
+        else:
+            realized += int(r.get("realized_pnl_cents") or 0)
+    return {"realized_cents": realized, "unrealized_cents": unrealized,
+            "total_cents": realized + unrealized}
+
+
 def _unrealized_cents(p: KalshiContractPosition) -> float | None:
     if p.current_price_cents is None:
         return None
