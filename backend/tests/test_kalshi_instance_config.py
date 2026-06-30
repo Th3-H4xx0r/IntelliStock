@@ -27,6 +27,8 @@ def test_tier_defaults_scale_with_aggression():
     # the NEW fields are tier-scaled too (max takes more model-only at a lighter haircut)
     assert mx["no_sharp_edge_threshold"] < lo["no_sharp_edge_threshold"]
     assert mx["model_only_size_mult"] > lo["model_only_size_mult"]
+    # order-size range scales with the tier (max suggests bigger trades)
+    assert mx["order_size_max_cents"] > lo["order_size_max_cents"]
     # an explicit value still overrides the tier default
     assert normalize_config({"tier": "max", "kelly_fraction": 0.1}, live_enabled=False)["kelly_fraction"] == 0.1
     # bankroll is NOT a tier default — never auto-set

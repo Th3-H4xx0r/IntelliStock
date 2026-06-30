@@ -12,6 +12,7 @@ import '../../../core/widgets/material_symbols.dart';
 import '../../instances/presentation/live_logs_panel.dart';
 import '../data/kalshi_repository.dart';
 import 'kalshi_portfolio_hero.dart';
+import 'kalshi_screen.dart' show KalshiInstanceSheet;
 
 /// Kalshi instance detail: status + Start/Stop/KILL, decision summary, the
 /// LLM-reasoned decision log, and live logs.
@@ -55,6 +56,24 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
     ref.invalidate(kalshiInstanceOrdersProvider(widget.instanceId));
     final bid = ref.read(kalshiInstanceDetailProvider(widget.instanceId)).value?['brokerage_id']?.toString();
     if (bid != null && bid.isNotEmpty) ref.invalidate(kalshiPositionsProvider(bid));
+  }
+
+  // Edit this instance's config via the shared sheet (prefilled, PATCHes on save).
+  void _editInstance(Map<String, dynamic> detail) {
+    final cfg = (detail['config'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => KalshiInstanceSheet(
+        accounts: const [],
+        initialBrokerageId: detail['brokerage_id']?.toString() ?? '',
+        editInstanceId: widget.instanceId,
+        editName: detail['name']?.toString(),
+        editConfig: cfg,
+        onCreated: (_) => _refresh(),
+      ),
+    );
   }
 
   Future<void> _startStop(bool start) async {
@@ -150,6 +169,11 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                       ]),
                     ),
                   ),
+                ),
+                IconButton(
+                  onPressed: _busy ? null : () => _editInstance(detail),
+                  icon: Icon(Icons.tune, color: AppColors.primary),
+                  tooltip: 'Edit config',
                 ),
                 IconButton(
                   onPressed: _busy ? null : _delete,

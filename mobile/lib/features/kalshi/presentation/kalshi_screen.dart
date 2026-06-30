@@ -158,7 +158,7 @@ class _KalshiScreenState extends ConsumerState<KalshiScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _CreateInstanceSheet(
+      builder: (_) => KalshiInstanceSheet(
         accounts: accounts,
         initialBrokerageId: brokerageId,
         onCreated: (bid) {
@@ -378,27 +378,32 @@ const _kLeagues = [
 // Survival-first presets: fractional Kelly + small exposure caps + cash reserve
 // (all far below the old kelly 0.25-0.60 / exposure 60-100%). Mirrors the web modal.
 const _kRiskPresets = <String, Map<String, dynamic>>{
-  'low': {'label': 'Low', 'edge': 5.0, 'kelly': 0.10, 'maxC': 25, 'exp': 10.0, 'lcap': 12.0, 'usage': 40.0, 'poll': 90, 'dlpct': 0.05,
+  'low': {'label': 'Low', 'edge': 5.0, 'kelly': 0.10, 'maxC': 25, 'exp': 10.0, 'lcap': 12.0, 'usage': 40.0, 'poll': 90, 'dlpct': 0.05, 'osmin': 1, 'osmax': 3,
     'blurb': 'Conservative — fewer, higher-confidence trades; small stakes, tight daily-loss cap.'},
-  'medium': {'label': 'Medium', 'edge': 4.0, 'kelly': 0.125, 'maxC': 50, 'exp': 15.0, 'lcap': 25.0, 'usage': 50.0, 'poll': 60, 'dlpct': 0.08,
+  'medium': {'label': 'Medium', 'edge': 4.0, 'kelly': 0.125, 'maxC': 50, 'exp': 15.0, 'lcap': 25.0, 'usage': 50.0, 'poll': 60, 'dlpct': 0.08, 'osmin': 2, 'osmax': 5,
     'blurb': 'Balanced — the default. Fractional-Kelly with a small exposure cap and cash reserve.'},
-  'high': {'label': 'High', 'edge': 3.0, 'kelly': 0.15, 'maxC': 75, 'exp': 25.0, 'lcap': 30.0, 'usage': 60.0, 'poll': 45, 'dlpct': 0.10,
+  'high': {'label': 'High', 'edge': 3.0, 'kelly': 0.15, 'maxC': 75, 'exp': 25.0, 'lcap': 30.0, 'usage': 60.0, 'poll': 45, 'dlpct': 0.10, 'osmin': 5, 'osmax': 10,
     'blurb': 'More active — lower edge bar, slightly bigger Kelly and exposure. More variance.'},
-  'max': {'label': 'Max', 'edge': 2.0, 'kelly': 0.20, 'maxC': 100, 'exp': 40.0, 'lcap': 40.0, 'usage': 70.0, 'poll': 30, 'dlpct': 0.15,
+  'max': {'label': 'Max', 'edge': 2.0, 'kelly': 0.20, 'maxC': 100, 'exp': 40.0, 'lcap': 40.0, 'usage': 70.0, 'poll': 30, 'dlpct': 0.15, 'osmin': 8, 'osmax': 15,
     'blurb': 'Aggressive — more +EV spots at larger size. Highest variance, but capped well below the old defaults.'},
 };
 
-class _CreateInstanceSheet extends ConsumerStatefulWidget {
-  const _CreateInstanceSheet({required this.accounts, required this.initialBrokerageId, required this.onCreated});
+class KalshiInstanceSheet extends ConsumerStatefulWidget {
+  const KalshiInstanceSheet({super.key, required this.accounts, required this.initialBrokerageId, required this.onCreated,
+      this.editInstanceId, this.editName, this.editConfig});
   final List<BrokerageAccount> accounts;
   final String initialBrokerageId;
   final ValueChanged<String> onCreated;
+  // Edit mode: when set, the sheet prefills from this config and PATCHes instead of creating.
+  final String? editInstanceId;
+  final String? editName;
+  final Map<String, dynamic>? editConfig;
 
   @override
-  ConsumerState<_CreateInstanceSheet> createState() => _CreateInstanceSheetState();
+  ConsumerState<KalshiInstanceSheet> createState() => _KalshiInstanceSheetState();
 }
 
-class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
+class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
   late String _brokerageId = widget.initialBrokerageId;
   final _name = TextEditingController();
   final _edge = TextEditingController(text: '4');
@@ -432,11 +437,42 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   bool _creating = false;
   String _err = '';
 
+  bool get _isEdit => widget.editInstanceId != null;
+
   @override
   void initState() {
     super.initState();
+    if (widget.editConfig != null) _prefill(widget.editConfig!);
     _loadBalance();
     _loadModels();
+  }
+
+  // Prefill the form from an existing kalshi_config (edit mode).
+  void _prefill(Map<String, dynamic> c) {
+    num? n(String k) => c[k] as num?;
+    if (widget.editName != null) _name.text = widget.editName!;
+    if (n('edge_threshold') != null) _edge.text = _num(n('edge_threshold')! * 100);
+    if (n('kelly_fraction') != null) _kelly.text = _num(n('kelly_fraction')!);
+    if (n('max_contracts_per_market') != null) _maxContracts.text = _num(n('max_contracts_per_market')!);
+    if (n('max_open_exposure_frac') != null) _exposure.text = _num(n('max_open_exposure_frac')! * 100);
+    if (n('per_league_cap_frac') != null) _leagueCap.text = _num(n('per_league_cap_frac')! * 100);
+    if (n('min_price_cents') != null) _minPrice.text = _num(n('min_price_cents')!);
+    if (n('max_price_cents') != null) _maxPrice.text = _num(n('max_price_cents')!);
+    if (n('draw_min_edge') != null) _drawMinEdge.text = _num(n('draw_min_edge')! * 100);
+    if (n('order_size_min_cents') != null) _orderSizeMin.text = _num(n('order_size_min_cents')! / 100);
+    if (n('order_size_max_cents') != null) _orderSizeMax.text = _num(n('order_size_max_cents')! / 100);
+    if (n('daily_loss_cap_cents') != null) { _dailyLoss.text = _num(n('daily_loss_cap_cents')! / 100); _dailyLossTouched = true; }
+    if (n('poll_seconds') != null) _poll.text = _num(n('poll_seconds')!);
+    if (n('bankroll_cents') != null) _manualBankroll.text = _num(n('bankroll_cents')! / 100);
+    if (c['odds_api_key'] != null) _oddsKey.text = c['odds_api_key'].toString();
+    if (n('sharp_weight') != null) _sharpWeight = (n('sharp_weight')! * 100).toDouble();
+    if (n('bankroll_usage_pct') != null) _usagePct = n('bankroll_usage_pct')!.toDouble();
+    if (c['tier'] != null) _risk = c['tier'].toString();
+    if (c['model'] != null) _selectedModel = c['model'].toString();
+    if (c['live_monitoring'] != null) _liveMonitoring = c['live_monitoring'] == true;
+    if (c['paper_mode'] != null) _paperMode = c['paper_mode'] == true;
+    final lg = c['leagues'];
+    if (lg is List && lg.isNotEmpty) { _leagues..clear()..addAll(lg.map((e) => e.toString())); }
   }
 
   Future<void> _loadModels() async {
@@ -491,6 +527,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
       _exposure.text = _num(p['exp'] as num);
       _leagueCap.text = _num(p['lcap'] as num);
       _poll.text = _num(p['poll'] as num);
+      _orderSizeMin.text = _num(p['osmin'] as num);
+      _orderSizeMax.text = _num(p['osmax'] as num);
       _usagePct = (p['usage'] as num).toDouble();
       _dailyLossPct = (p['dlpct'] as num).toDouble();
       _dailyLossTouched = false;
@@ -506,7 +544,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
     if (_leagues.isEmpty) { setState(() => _err = 'Pick at least one league'); return; }
     setState(() { _creating = true; _err = ''; });
     try {
-      await ref.read(kalshiRepositoryProvider).createInstance(_brokerageId, {
+      final body = {
         'name': _name.text.trim(),
         'leagues': _leagues.toList(),
         'edge_threshold': _d(_edge, 3) / 100,
@@ -529,7 +567,13 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'tier': _risk,
         'model': _selectedModel,
         'paper_mode': _paperMode,   // dry-run by default; backend forces paper on live brokerages unless off
-      });
+      };
+      final repo = ref.read(kalshiRepositoryProvider);
+      if (_isEdit) {
+        await repo.updateInstance(widget.editInstanceId!, body);
+      } else {
+        await repo.createInstance(_brokerageId, body);
+      }
       if (mounted) Navigator.pop(context);
       widget.onCreated(_brokerageId);
     } catch (e) {
@@ -558,7 +602,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
               child: Row(children: [
                 Icon(symbol('smart_toy'), color: AppColors.primary, size: 20),
                 const SizedBox(width: 8),
-                Text('Create Kalshi instance', style: AppTextStyles.cardTitle),
+                Text(_isEdit ? 'Edit Kalshi instance' : 'Create Kalshi instance', style: AppTextStyles.cardTitle),
                 const Spacer(),
                 GestureDetector(onTap: () => Navigator.pop(context), child: Icon(Icons.close, color: AppColors.textDim)),
               ]),
@@ -567,9 +611,9 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
                 children: [
-                  // Brokerage selector + balance
-                  _label('Kalshi account', 'Which Kalshi account this bot trades on.'),
-                  Container(
+                  // Brokerage selector + balance (create only — an edit keeps the same account)
+                  if (!_isEdit) _label('Kalshi account', 'Which Kalshi account this bot trades on.'),
+                  if (!_isEdit) Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
                     child: DropdownButtonHideUnderline(
@@ -789,7 +833,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                  child: Text(_creating ? 'Creating…' : 'Create instance',
+                  child: Text(_creating ? 'Saving…' : (_isEdit ? 'Save changes' : 'Create instance'),
                       style: AppTextStyles.body.copyWith(fontWeight: FontWeight.bold, color: AppColors.onPrimary)),
                 ),
               ),
