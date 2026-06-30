@@ -409,6 +409,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   final _minPrice = TextEditingController(text: '15');
   final _maxPrice = TextEditingController(text: '90');
   final _drawMinEdge = TextEditingController(text: '10');
+  final _orderSizeMin = TextEditingController(text: '0');   // order-size range $/trade (0/0 = auto)
+  final _orderSizeMax = TextEditingController(text: '0');
   final _dailyLoss = TextEditingController(text: '100');
   final _poll = TextEditingController(text: '60');
   final _manualBankroll = TextEditingController(text: '1000');
@@ -446,7 +448,7 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
 
   @override
   void dispose() {
-    for (final c in [_name, _edge, _kelly, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll, _manualBankroll, _minPrice, _maxPrice, _drawMinEdge]) {
+    for (final c in [_name, _edge, _kelly, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll, _manualBankroll, _minPrice, _maxPrice, _drawMinEdge, _orderSizeMin, _orderSizeMax]) {
       c.dispose();
     }
     super.dispose();
@@ -515,6 +517,8 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
         'min_price_cents': _i(_minPrice, 15),
         'max_price_cents': _i(_maxPrice, 90),
         'draw_min_edge': _d(_drawMinEdge, 10) / 100,
+        'order_size_min_dollars': _d(_orderSizeMin, 0),
+        'order_size_max_dollars': _d(_orderSizeMax, 0),
         'daily_loss_cap_dollars': _d(_dailyLoss, 100),
         'bankroll_dollars': _effectiveBankroll,
         'poll_seconds': _i(_poll, 60),
@@ -755,6 +759,11 @@ class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
                     Expanded(child: _field(_maxPrice, 'Max price (¢)', number: true)),
                     const SizedBox(width: 12),
                     Expanded(child: _field(_drawMinEdge, 'Draw min edge (%)', number: true)),
+                  ]),
+                  Row(children: [
+                    Expanded(child: _field(_orderSizeMin, 'Order size min (\$)', number: true)),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field(_orderSizeMax, 'Order size max (\$)', number: true)),
                   ]),
                   TextField(
                     controller: _dailyLoss,

@@ -65,6 +65,8 @@ const sharpWeight = ref(85)
 const minPrice = ref(15)
 const maxPrice = ref(90)
 const drawMinEdge = ref(10)   // % min edge required to take a draw
+const orderSizeMin = ref(0)   // order-size range floor ($/trade); 0/0 = auto (Kelly)
+const orderSizeMax = ref(0)   // order-size range ceiling ($/trade)
 const risk = ref('medium')
 // Live brokerage: dry-run (read real prices, place NO real orders) by default. Toggle
 // OFF to place REAL orders. Demo ignores this (it sandbox-executes).
@@ -139,6 +141,8 @@ function prefillFromEdit() {
   if (c.kelly_fraction != null) kelly.value = c.kelly_fraction
   if (c.max_contracts_per_market != null) maxContracts.value = c.max_contracts_per_market
   if (c.max_open_exposure_frac != null) exposurePct.value = Math.round(c.max_open_exposure_frac * 100)
+  if (c.order_size_min_cents != null) orderSizeMin.value = Math.round(c.order_size_min_cents) / 100
+  if (c.order_size_max_cents != null) orderSizeMax.value = Math.round(c.order_size_max_cents) / 100
   if (c.per_league_cap_frac != null) leagueCapPct.value = Math.round(c.per_league_cap_frac * 100)
   if (c.daily_loss_cap_cents != null) { dailyLoss.value = Math.round(c.daily_loss_cap_cents / 100); dailyLossTouched.value = true }
   if (c.bankroll_cents != null) manualBankroll.value = Math.round(c.bankroll_cents / 100)
@@ -194,6 +198,8 @@ async function submit() {
       min_price_cents: Number(minPrice.value),
       max_price_cents: Number(maxPrice.value),
       draw_min_edge: Number(drawMinEdge.value) / 100,
+      order_size_min_dollars: Number(orderSizeMin.value) || 0,
+      order_size_max_dollars: Number(orderSizeMax.value) || 0,
       tier: risk.value,
       model: selectedModel.value || null,
       // live brokerage: send the paper toggle (default dry-run). demo always sandbox-executes.
@@ -367,8 +373,16 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
             <input v-model.number="poll" type="number" step="15" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block col-span-2">
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Order size ($ / trade) <InfoTip text="Target dollar size per trade as a RANGE — the bot sizes within it by edge conviction (stronger edge → bigger trade), so trades stay meaningful even on a small account. Leave both 0 for auto (Kelly-sized)." size="13px" /></span>
+            <div class="flex items-center gap-2">
+              <input v-model.number="orderSizeMin" type="number" min="0" step="1" placeholder="min $" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
+              <span class="text-slate-500 text-sm">to</span>
+              <input v-model.number="orderSizeMax" type="number" min="0" step="1" placeholder="max $" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
+            </div>
+          </label>
+          <label class="block col-span-2">
             <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Daily-loss cap ($) <InfoTip text="Bot halts for the day if losses hit this. Auto-scales with your risk preset until you edit it." size="13px" /></span>
-            <input v-model.number="dailyLoss" @input="dailyLossTouched = true" type="number" step="25" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <input v-model.number="dailyLoss" @input="dailyLossTouched = true" type="number" min="0" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
         </div>
 

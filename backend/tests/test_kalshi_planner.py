@@ -69,3 +69,32 @@ def test_model_only_haircut_off_by_default():
     a_sharp = allocate(sharp_c, bankroll_cents=100000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
     a_model = allocate(model_c, bankroll_cents=100000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
     assert a_model["contracts"] == a_sharp["contracts"]          # no haircut when mult=1.0
+
+
+def test_order_size_range_scales_with_edge_on_small_account():
+    # $5-$10 range on a tiny $50 account: a strong edge lands near $10, a weak edge near
+    # $5 — meaningful trades regardless of the small Kelly stake.
+    caps = RiskCaps(kelly_fraction=0.25, max_contracts_per_market=10000, bankroll_cents=5000,
+                    order_size_min_cents=500, order_size_max_cents=1000)
+    weak = allocate([{"id": "w", "score": 1.0, "edge": 0.03, "price_cents": 50, "has_sharp": True}],
+                    bankroll_cents=5000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    strong = allocate([{"id": "s", "score": 1.0, "edge": 0.20, "price_cents": 50, "has_sharp": True}],
+                      bankroll_cents=5000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    assert 10 <= weak["contracts"] <= 20          # within [$5,$10]/50c
+    assert strong["contracts"] == 20              # 20%+ edge -> top of range ($10 / 50c)
+    assert strong["contracts"] > weak["contracts"]  # bigger edge -> bigger trade
+
+
+def test_order_size_range_haircut_for_model_only():
+    caps = RiskCaps(kelly_fraction=0.25, max_contracts_per_market=10000, bankroll_cents=5000,
+                    order_size_min_cents=500, order_size_max_cents=1000, model_only_size_mult=0.5)
+    a = allocate([{"id": "m", "score": 1.0, "edge": 0.20, "price_cents": 50, "has_sharp": False}],
+                 bankroll_cents=5000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    assert a["contracts"] == 10                   # $10 top-of-range * 0.5 = $5 -> 10 @ 50c
+
+
+def test_order_size_off_uses_kelly():
+    caps = RiskCaps(kelly_fraction=0.25, max_contracts_per_market=10000, bankroll_cents=100000)  # range off
+    cands = [{"id": "x", "score": 1.0, "edge": 0.10, "price_cents": 50, "has_sharp": True}]
+    a = allocate(cands, bankroll_cents=100000, caps=caps, reserve_frac=0.0, expected_better_soon=False)[0]
+    assert a["contracts"] == 100           # Kelly: 0.25*0.10/0.5*$1000 = $50 -> 100 @ 50c

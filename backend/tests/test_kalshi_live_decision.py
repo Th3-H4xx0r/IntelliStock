@@ -50,6 +50,15 @@ def test_take_profit_scales_out_on_overshoot_with_thesis_intact():
     assert a.kind == "reduce" and a.contracts == 5 and "take-profit" in a.reason
 
 
+def test_order_size_range_sizes_in_play():
+    # order-size range $5-$10; strong live edge 0.30 (fair .80 vs ask .50) -> top ($10).
+    caps = InPlayCaps(bankroll_cents=5000, order_size_min_cents=500, order_size_max_cents=1000,
+                      max_contracts_per_market=10000, inplay_exposure_frac=1.0)
+    a = decide(position=None, live_fair=0.80, yes_ask_cents=50, yes_bid_cents=49,
+               caps=caps, phase=LIVE, elapsed_min=30, allow_open=True)
+    assert a.kind == "open" and a.contracts == 20   # $10 / 50c
+
+
 def test_take_profit_banks_single_contract():
     # held 1, entry 40c, live fair 0.50 (thesis intact: fair >= entry), mark 60c
     # overshoots fair by >= tp_overshoot (8c) -> should REDUCE (full exit of the 1).
