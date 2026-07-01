@@ -173,6 +173,14 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
     ]);
   }
 
+  String _pickLabel(Map t) {
+    final s = t['side'];
+    if (s == 'draw') return 'Draw';
+    if (s == 'home') return '${t['home'] ?? 'Home'} to win';
+    if (s == 'away') return '${t['away'] ?? 'Away'} to win';
+    return '$s';
+  }
+
   Widget _tradeCard(Map t) {
     final pnl = t['realized_pnl_cents'];
     final hasSharp = t['sharp_prob'] != null;
@@ -191,7 +199,7 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
           const SizedBox(width: 6),
           Text(_money(pnl), style: TextStyle(color: (pnl ?? 0) >= 0 ? AppColors.success : AppColors.danger, fontSize: 13, fontWeight: FontWeight.w600)),
         ]),
-        Text('${t['league'] ?? ''} · side ${t['side']} · entry ${t['entry_cents']}¢ × ${t['size']}', style: const TextStyle(color: AppColors.textMuted, fontSize: 11)),
+        Text('${t['league'] ?? ''} · ${_pickLabel(t)} · entry ${t['entry_cents']}¢ × ${t['size']}', style: const TextStyle(color: AppColors.textMuted, fontSize: 11)),
         const SizedBox(height: 6),
         Wrap(spacing: 6, runSpacing: 4, children: [
           _badge('edge ${((t['edge'] ?? 0) * 100).toStringAsFixed(1)}%', AppColors.textMuted),

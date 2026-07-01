@@ -89,6 +89,12 @@ function pickIdx(i) {
   if (t) { selectedDay.value = dayOf(t.kickoff); tab.value = 'trades' }
 }
 
+function pickLabel(t) {
+  if (t.side === 'draw') return 'Draw'
+  if (t.side === 'home') return `${t.home || 'Home'} to win`
+  if (t.side === 'away') return `${t.away || 'Away'} to win`
+  return t.side
+}
 function fmtPct(v) { return v == null ? '—' : `${(v * 100).toFixed(1)}%` }
 function fmtMoney(c) { return c == null ? '—' : `$${(c / 100).toFixed(2)}` }
 const s = computed(() => (status.value && status.value.summary) || {})
@@ -193,7 +199,7 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); if (clockTimer)
             </div>
             <div class="text-xs text-slate-400 mt-1">
               <span v-if="t.league" class="mr-1 text-slate-500">{{ t.league }}</span>
-              side <span class="text-slate-200">{{ t.side }}</span> · entry {{ t.entry_cents }}¢ × {{ t.size }}
+              <span class="text-slate-200">{{ pickLabel(t) }}</span> · entry {{ t.entry_cents }}¢ × {{ t.size }}
             </div>
             <!-- flags / badges -->
             <div class="flex flex-wrap gap-1.5 mt-2">
