@@ -17,6 +17,7 @@ import uuid as _uuid
 from typing import Any, Optional
 
 from kalshi.signing import access_headers
+from kalshi.data.ticker_names import parse_market_ticker
 from kalshi.models import (
     KalshiBalance,
     KalshiContractPosition,
@@ -74,6 +75,67 @@ def yes_ask_close_at(candles, ts) -> int | None:
         return int(round(float(cd) * 100))
     except (TypeError, ValueError):
         return None
+
+
+def result_side_from_markets(markets: list[dict], fixture_prefix: str) -> str | None:
+    """Map yes-resolved market side ticker to 'home', 'away', or 'draw'.
+
+    Given markets list from /markets?series_ticker=...&status=settled, find the
+    yes-resolved market and map its suffix to the fixture's home/away team codes.
+    E.g., KXWCGAME-26JUN30MEXECU with MEX-result=yes -> 'home'; TIE-result=yes -> 'draw'.
+    """
+    import re
+
+    # Find the yes-resolved market
+    yes_market = None
+    for m in markets:
+        if (m or {}).get("result") == "yes":
+            yes_market = m
+            break
+
+    if not yes_market:
+        return None
+
+    # Extract the suffix (last hyphen-separated segment)
+    ticker = yes_market.get("ticker", "")
+    parts = ticker.split("-")
+    if len(parts) < 3:
+        return None
+    suffix = parts[-1].upper()
+
+    # TIE / DRAW -> draw
+    if suffix in ("TIE", "DRAW"):
+        return "draw"
+
+    # Extract team codes from fixture_prefix
+    # E.g., KXWCGAME-26JUN30MEXECU -> extract "MEXECU" (after date)
+    fixture_parts = fixture_prefix.split("-")
+    if len(fixture_parts) < 2:
+        return None
+
+    fixture_blob = fixture_parts[-1]  # e.g., "26JUN30MEXECU"
+
+    # Use regex to find and skip the date (e.g., "26JUN30") then get teams
+    date_pattern = re.compile(r"^\d{2}[A-Z]{3}\d{2}", re.I)
+    match = date_pattern.match(fixture_blob)
+    if not match:
+        return None
+
+    teams = fixture_blob[match.end():].upper()  # e.g., "MEXECU"
+    if len(teams) < 6:
+        return None
+
+    # Split teams into home and away (first 3 chars each)
+    home_code = teams[:3]
+    away_code = teams[3:6]
+
+    # Map suffix to side
+    if suffix == home_code:
+        return "home"
+    elif suffix == away_code:
+        return "away"
+
+    return None
 
 
 class KalshiHTTPError(RuntimeError):
@@ -267,6 +329,33 @@ class KalshiClient:
         resp = self._session.request("GET", url, headers=headers, params=params, timeout=self.timeout)
         resp.raise_for_status()
         return parse_candlesticks(resp.json() if getattr(resp, "content", None) else {})
+
+    def list_settled_markets(self, series: str, limit: int = 1000) -> list[dict]:
+        """Fetch settled markets for a series (public, no auth). Paginates via cursor.
+        Host: external-api.kalshi.com. Free score source via result field."""
+        url = "https://external-api.kalshi.com/trade-api/v2/markets"
+        headers = {
+            "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/126",
+            "Accept": "application/json"
+        }
+        out = []
+        cursor = None
+        while True:
+            params = {
+                "series_ticker": str(series),
+                "status": "settled",
+                "limit": max(1, min(int(limit), 1000))
+            }
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._session.request("GET", url, headers=headers, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            d = resp.json() if getattr(resp, "content", None) else {}
+            out.extend(d.get("markets", []) or [])
+            cursor = d.get("cursor")
+            if not cursor:
+                break
+        return out
 
     # --- orders ---
     def submit_order(
