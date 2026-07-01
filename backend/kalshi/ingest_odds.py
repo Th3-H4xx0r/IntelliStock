@@ -154,13 +154,14 @@ class OddsPapiClient:
 
     def list_fixtures(self, sport_id: int, date_from: str, date_to: str) -> list[dict]:
         """Fixtures for a sport in a date window, normalized (parsed)."""
-        raw = self.fetch_raw("/fixtures", {
-            "sport_id": sport_id, "date_from": date_from, "date_to": date_to,
+        raw = self.fetch_raw("/v4/fixtures", {
+            "sportId": sport_id, "from": date_from, "to": date_to,
         })
         return parse_fixtures(raw)
 
     def historical_odds(self, fixture_id, books: tuple[str, ...] = ("pinnacle",)) -> list[dict]:
         """Historical odds snapshots for a fixture, normalized (parsed) for the
         first available book in `books` priority order."""
-        raw = self.fetch_raw("/historical-odds", {"fixture_id": fixture_id})
+        raw = self.fetch_raw("/v4/historical-odds",
+                             {"fixtureId": fixture_id, "bookmakers": ",".join(books)})
         return parse_hist_odds(raw, books=books)

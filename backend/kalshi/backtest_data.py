@@ -283,7 +283,16 @@ class BacktestDataProvider:
                 "BacktestDataProvider.sharp_odds: OddsPapi budget exhausted, "
                 "skipping fixture_id=%s (returning cached-or-empty)", fixture_id)
             return []
-        rows = self.oddspapi_client.historical_odds(fixture_id)
+        # The sharp line is OPTIONAL — any OddsPapi failure (bad key, 404, network)
+        # must degrade to model-only, never crash the backtest.
+        try:
+            rows = self.oddspapi_client.historical_odds(fixture_id)
+        except Exception as e:
+            self.log.warning(
+                "BacktestDataProvider.sharp_odds: OddsPapi failed for fixture_id=%s "
+                "(%s) — trading model-only", fixture_id, e)
+            self._table_put("KalshiHistOdds", {"id": fixture_id, "snapshots": []}, "id")
+            return []
         self.api_calls += 1
         self._budget_bumper()
         self._table_put("KalshiHistOdds", {"id": fixture_id, "snapshots": rows}, "id")

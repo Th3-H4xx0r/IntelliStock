@@ -128,10 +128,10 @@ def test_list_fixtures_calls_fetch_raw_with_expected_params():
     out = client.list_fixtures(sport_id=1, date_from="2026-07-01", date_to="2026-07-02")
     method, url, params = sess.last_call
     assert method == "GET"
-    assert url.endswith("/fixtures")
-    assert params["sport_id"] == 1
-    assert params["date_from"] == "2026-07-01"
-    assert params["date_to"] == "2026-07-02"
+    assert url.endswith("/v4/fixtures")
+    assert params["sportId"] == 1
+    assert params["from"] == "2026-07-01"
+    assert params["to"] == "2026-07-02"
     assert params["apiKey"] == "KEY"
     assert out[0]["fixture_id"] == "9"
 
@@ -143,7 +143,7 @@ def test_historical_odds_calls_fetch_raw_with_expected_params():
     out = client.historical_odds(fixture_id=9, books=("pinnacle",))
     method, url, params = sess.last_call
     assert method == "GET"
-    assert url.endswith("/historical-odds")
-    assert params["fixture_id"] == 9
+    assert url.endswith("/v4/historical-odds")
+    assert params["fixtureId"] == 9
     assert params["apiKey"] == "KEY"
     assert out == [{"ts": 100, "home": 2.0, "draw": 3.5, "away": 4.0}]

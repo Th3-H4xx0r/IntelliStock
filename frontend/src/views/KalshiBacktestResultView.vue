@@ -22,7 +22,7 @@ async function load() {
     const res = await fetch(`${API_BASE}/kalshi/backtests/${id}/results`, { headers: authHeaders() })
     if (!res.ok) return
     const d = await res.json()
-    status.value = { status: d.status, summary: d.summary || {} }
+    status.value = { status: d.status, summary: d.summary || {}, error: d.error }
     result.value = d.result || null
     if (!selectedDay.value && dayKeys.value.length) selectedDay.value = dayKeys.value[dayKeys.value.length - 1]
   } catch (e) { /* ignore */ }
@@ -89,6 +89,10 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
         <h1 class="text-xl font-semibold text-slate-100">Backtest <span class="font-mono text-slate-400 text-base">{{ id.slice(0, 8) }}</span></h1>
         <span v-if="status" :class="statusColor(status.status)" class="text-sm">{{ status.status }}</span>
       </div>
+    </div>
+
+    <div v-if="status && status.error" class="bg-rose-500/10 border border-rose-500/40 rounded-lg p-3 text-sm text-rose-300">
+      <span class="font-semibold">Error:</span> {{ status.error }}
     </div>
 
     <!-- Summary hero -->

@@ -82,6 +82,12 @@ def run_job(job, *, conn, provider, model_fn, store=_db, stop_check=None,
         return "stopped"
     except Exception as e:  # pragma: no cover - defensive; unit-tested via run_fn raising
         log.exception("backtest %s failed", jid)
+        # Save the error as a viewable log so the results screen shows WHAT failed
+        # instead of an empty "No logs recorded."
+        try:
+            store.save_backtest_result(conn, jid, {"logs": [f"ERROR: {e}"], "summary": {}})
+        except Exception:
+            pass
         store.update_backtest_progress(conn, jid, status="error", error=str(e),
                                        finished_at=_iso_now())
         return "error"
