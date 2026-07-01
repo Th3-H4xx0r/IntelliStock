@@ -135,6 +135,12 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
         const SizedBox(height: 8),
         Text('Fixtures ${s['n_fixtures'] ?? 0} · bet ${s['bet'] ?? 0} · no-edge ${s['no_bet'] ?? 0} · unsettled ${s['unsettled'] ?? 0} · unmatched ${s['unmatched'] ?? 0} · no-price ${s['no_candle_data'] ?? 0}',
             style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
+        if (s['profit_confidence'] != null) Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            'Trust: profit confidence ${((s['profit_confidence'] as num) * 100).toStringAsFixed(0)}% · 90% range ${_money(s['pnl_ci_low_cents'])} → ${_money(s['pnl_ci_high_cents'])}${(s['pnl_ci_low_cents'] ?? 0) < 0 ? ' (spans a loss — not proven)' : ''}',
+            style: TextStyle(color: (s['profit_confidence'] as num) >= 0.9 ? AppColors.success : (s['profit_confidence'] as num) >= 0.75 ? AppColors.warning : AppColors.danger, fontSize: 11)),
+        ),
       ]);
 
   Widget _tabs() {

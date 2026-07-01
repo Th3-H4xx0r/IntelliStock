@@ -72,6 +72,7 @@ class BacktestConfig:
     # This is the "market anchor" — it stops the model betting its own biased,
     # overconfident view of cheap home underdogs blind.
     market_shrink: float = 0.5
+    one_bet_per_fixture: bool = True  # never hold >1 side of the same match
 
 
 def config_from_body(body: dict) -> BacktestConfig:
@@ -122,6 +123,7 @@ def config_from_body(body: dict) -> BacktestConfig:
         analyst_max_calls=int(body.get("analyst_max_calls", 10) or 10),
         use_llm=bool(body.get("use_llm", False)),
         market_shrink=min(1.0, max(0.0, float(body.get("market_shrink", 0.5)))),
+        one_bet_per_fixture=bool(body.get("one_bet_per_fixture", True)),
     )
 
 
@@ -577,6 +579,11 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_
                     fx_for_eval = dict(fx)
                     fx_for_eval["market_tickers"] = tickers
                     bets = evaluate(cfg, model_probs, sharp_probs, kalshi_asks, fx_for_eval, llm_adj)
+                    # PER-FIXTURE LOCK: never hold more than one side of the same
+                    # match — keep only the single highest-edge bet (no correlated
+                    # both-sides exposure).
+                    if cfg.one_bet_per_fixture and len(bets) > 1:
+                        bets = sorted(bets, key=lambda b: b.edge, reverse=True)[:1]
                     rec.update({"model_prob": {k: round(v, 4) for k, v in model_probs.items()},
                                 "sharp_prob": {k: round(v, 4) for k, v in sharp_probs.items()},
                                 "asks": kalshi_asks, "has_sharp": bool(sharp_probs)})
@@ -616,14 +623,37 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_
          f"cache_hits={getattr(data, 'cache_hits', 0)}")
 
     out = aggregate(trades, cfg.bankroll_cents)
+    ci_lo, ci_hi, p_profit = _bootstrap_pnl_ci([t.realized_pnl_cents for t in trades])
     out.summary = {
         "api_calls": getattr(data, "api_calls", 0),
         "cache_hits": getattr(data, "cache_hits", 0),
-        "n_fixtures": n, **counts,
+        "n_fixtures": n,
+        # Trustworthiness: 90% bootstrap CI on total P&L + P(profit>0). A CI that
+        # spans zero / a low profit-confidence means the result is indistinguishable
+        # from luck — the honest read on a small, longshot-heavy sample.
+        "pnl_ci_low_cents": ci_lo, "pnl_ci_high_cents": ci_hi,
+        "profit_confidence": p_profit,
+        **counts,
     }
     out.logs = logs
     out.decision_log = decision_log
     return out
+
+
+def _bootstrap_pnl_ci(pnls: list, n: int = 2000, seed: int = 42):
+    """Deterministic bootstrap: resample the per-trade P&L with replacement `n`
+    times, sum each. Returns (5th pct, 95th pct total, fraction of resamples > 0).
+    Empty -> (0, 0, 0.0)."""
+    if not pnls:
+        return 0, 0, 0.0
+    import random as _random
+    rng = _random.Random(seed)
+    k = len(pnls)
+    sums = sorted(sum(rng.choice(pnls) for _ in range(k)) for _ in range(n))
+    lo = int(sums[int(0.05 * n)])
+    hi = int(sums[int(0.95 * n)])
+    p_profit = sum(1 for s in sums if s > 0) / n
+    return lo, hi, round(p_profit, 3)
 
 
 # --------------------------------------------------------------------------
