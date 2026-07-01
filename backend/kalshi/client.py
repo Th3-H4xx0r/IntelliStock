@@ -52,6 +52,30 @@ def _dollars_cents(v) -> float:
     return _fp(v) * 100.0
 
 
+# --- public candlesticks / settled markets (no auth) ---
+
+def parse_candlesticks(payload: dict) -> list[dict]:
+    """Extract candlesticks array from raw API response. Safe on empty/missing."""
+    return list((payload or {}).get("candlesticks") or [])
+
+
+def yes_ask_close_at(candles, ts) -> int | None:
+    """Last candle's yes_ask.close_dollars in cents at or before ts. None if absent/no book."""
+    best = None
+    for c in candles:
+        if int(c.get("end_period_ts", 0)) <= int(ts):
+            best = c
+        else:
+            break
+    cd = ((best or {}).get("yes_ask") or {}).get("close_dollars")
+    if cd is None:
+        return None
+    try:
+        return int(round(float(cd) * 100))
+    except (TypeError, ValueError):
+        return None
+
+
 class KalshiHTTPError(RuntimeError):
     """Typed Kalshi API error. Subclasses RuntimeError so existing callers that
     `except RuntimeError` / `except Exception` keep working. `status` lets callers
@@ -229,6 +253,20 @@ class KalshiClient:
         if series_ticker:
             params["series_ticker"] = series_ticker
         return self._request("GET", "/events", params=params)
+
+    def get_candlesticks(self, ticker: str, start_ts, end_ts, period_interval: int = 60) -> list[dict]:
+        """Fetch public candlesticks for a market (no auth). Host: external-api.kalshi.com.
+        Series is derived from ticker prefix (before first '-'). Period in seconds."""
+        series = str(ticker).split("-", 1)[0]
+        url = f"https://external-api.kalshi.com/trade-api/v2/series/{series}/markets/{ticker}/candlesticks"
+        headers = {
+            "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/126",
+            "Accept": "application/json"
+        }
+        params = {"start_ts": int(start_ts), "end_ts": int(end_ts), "period_interval": int(period_interval)}
+        resp = self._session.request("GET", url, headers=headers, params=params, timeout=self.timeout)
+        resp.raise_for_status()
+        return parse_candlesticks(resp.json() if getattr(resp, "content", None) else {})
 
     # --- orders ---
     def submit_order(
