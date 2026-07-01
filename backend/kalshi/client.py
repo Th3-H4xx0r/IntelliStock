@@ -17,6 +17,7 @@ import uuid as _uuid
 from typing import Any, Optional
 
 from kalshi.signing import access_headers
+from kalshi.data.ticker_names import parse_market_ticker
 from kalshi.models import (
     KalshiBalance,
     KalshiContractPosition,
@@ -50,6 +51,66 @@ def _fp(v) -> float:
 def _dollars_cents(v) -> float:
     """Dollar amount (string/number, e.g. '1.56') -> cents (156.0)."""
     return _fp(v) * 100.0
+
+
+# --- public candlesticks / settled markets (no auth) ---
+
+def parse_candlesticks(payload: dict) -> list[dict]:
+    """Extract candlesticks array from raw API response. Safe on empty/missing."""
+    return list((payload or {}).get("candlesticks") or [])
+
+
+def yes_ask_close_at(candles, ts) -> int | None:
+    """Last candle's yes_ask.close_dollars in cents at or before ts. None if absent/no book.
+
+    Robust to unsorted input: selects the candle with the max end_period_ts
+    that is <= ts, rather than assuming ascending order.
+    """
+    ts = int(ts)
+    best = None
+    best_end = None
+    for c in candles:
+        end = int(c.get("end_period_ts", 0))
+        if end <= ts and (best_end is None or end > best_end):
+            best = c
+            best_end = end
+    cd = ((best or {}).get("yes_ask") or {}).get("close_dollars")
+    if cd is None:
+        return None
+    try:
+        return int(round(float(cd) * 100))
+    except (TypeError, ValueError):
+        return None
+
+
+def result_side_from_markets(markets: list[dict], fixture_prefix: str) -> str | None:
+    """Map yes-resolved market side ticker to 'home', 'away', or 'draw'.
+
+    Given markets list from /markets?series_ticker=...&status=settled, find the
+    yes-resolved market and map its suffix to the fixture's home/away team codes.
+    E.g., KXWCGAME-26JUN30MEXECU with MEX-result=yes -> 'home'; TIE-result=yes -> 'draw'.
+
+    The settled market's own ticker already carries the full
+    "<fixture_prefix>-<suffix>" shape parse_market_ticker understands (it's the
+    same ticker format used for the human-readable UI labels), so we reuse it
+    instead of hand-rolling a second team-code splitter.
+    """
+    # Find the yes-resolved market
+    yes_market = None
+    for m in markets:
+        if (m or {}).get("result") == "yes":
+            yes_market = m
+            break
+
+    if not yes_market:
+        return None
+
+    ticker = yes_market.get("ticker", "")
+    if fixture_prefix and not ticker.startswith(str(fixture_prefix)):
+        return None
+
+    pick = parse_market_ticker(ticker).get("pick")
+    return pick if pick in ("home", "away", "draw") else None
 
 
 class KalshiHTTPError(RuntimeError):
@@ -229,6 +290,48 @@ class KalshiClient:
         if series_ticker:
             params["series_ticker"] = series_ticker
         return self._request("GET", "/events", params=params)
+
+    def get_candlesticks(self, ticker: str, start_ts, end_ts, period_interval: int = 60) -> list[dict]:
+        """Fetch public candlesticks for a market (no auth). Host: external-api.kalshi.com.
+        Series is derived from ticker prefix (before first '-'). Period in seconds."""
+        series = str(ticker).split("-", 1)[0]
+        url = f"https://external-api.kalshi.com/trade-api/v2/series/{series}/markets/{ticker}/candlesticks"
+        headers = {
+            "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/126",
+            "Accept": "application/json"
+        }
+        params = {"start_ts": int(start_ts), "end_ts": int(end_ts), "period_interval": int(period_interval)}
+        resp = self._session.request("GET", url, headers=headers, params=params, timeout=self.timeout)
+        resp.raise_for_status()
+        return parse_candlesticks(resp.json() if getattr(resp, "content", None) else {})
+
+    def list_settled_markets(self, series: str, limit: int = 1000) -> list[dict]:
+        """Fetch settled markets for a series (public, no auth). Paginates via cursor.
+        Host: external-api.kalshi.com. Free score source via result field."""
+        url = "https://external-api.kalshi.com/trade-api/v2/markets"
+        headers = {
+            "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/126",
+            "Accept": "application/json"
+        }
+        _MAX_PAGES = 50  # sane cap so a misbehaving/looping cursor can't hang forever
+        out = []
+        cursor = None
+        for _ in range(_MAX_PAGES):
+            params = {
+                "series_ticker": str(series),
+                "status": "settled",
+                "limit": max(1, min(int(limit), 1000))
+            }
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._session.request("GET", url, headers=headers, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            d = resp.json() if getattr(resp, "content", None) else {}
+            out.extend(d.get("markets", []) or [])
+            cursor = d.get("cursor")
+            if not cursor:
+                break
+        return out
 
     # --- orders ---
     def submit_order(

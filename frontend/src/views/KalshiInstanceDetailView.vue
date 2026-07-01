@@ -325,6 +325,10 @@ onUnmounted(() => {
                     :class="running ? 'border border-amber-500/40 text-amber-400 hover:bg-amber-500/10' : 'bg-primary text-background-dark hover:brightness-110'">
               <span class="material-symbols-outlined text-[18px]">{{ running ? 'pause' : 'play_arrow' }}</span>{{ running ? 'Stop' : 'Start' }}
             </button>
+            <router-link :to="`/kalshi/instances/${id}/backtest`"
+                    class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border-subtle text-slate-300 text-sm font-semibold hover:text-slate-100 hover:border-primary/50 transition-all">
+              <span class="material-symbols-outlined text-[18px]">science</span> Backtest
+            </router-link>
             <button @click="showEdit = true" :disabled="busy"
                     class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border-subtle text-slate-300 text-sm font-semibold hover:text-slate-100 hover:border-primary/50 transition-all disabled:opacity-50">
               <span class="material-symbols-outlined text-[18px]">tune</span> Edit

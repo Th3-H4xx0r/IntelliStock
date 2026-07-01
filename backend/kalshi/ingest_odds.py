@@ -9,6 +9,7 @@ client maps raw responses into.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any, Optional
 
 from kalshi.models import OddsQuote
@@ -47,6 +48,85 @@ def parse_three_way(raw: dict, book: str = "pinnacle") -> Optional[OddsQuote]:
         return None
 
 
+def _to_ts(entry: dict) -> int | None:
+    """Fixture kickoff as epoch seconds, accepting either a raw `kickoff_ts`
+    (int) or an ISO8601 `kickoff` string. None if neither is present/parseable."""
+    ts = entry.get("kickoff_ts")
+    if ts is not None:
+        try:
+            return int(ts)
+        except (TypeError, ValueError):
+            return None
+    iso = entry.get("kickoff")
+    if not iso:
+        return None
+    try:
+        s = str(iso).replace("Z", "+00:00")
+        dt = _dt.datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_dt.timezone.utc)
+        return int(dt.timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_fixtures(raw: dict) -> list[dict]:
+    """Normalize an OddsPapi fixtures-list response into
+    [{fixture_id, home, away, kickoff_ts, home_score, away_score, result, settled}].
+    Settled = both scores present; result derived home/draw/away from the score,
+    None when either score is missing. Never raises; empty-safe."""
+    out = []
+    for f in (raw or {}).get("fixtures") or []:
+        hs, as_ = f.get("home_score"), f.get("away_score")
+        settled = hs is not None and as_ is not None
+        result = None
+        if settled:
+            try:
+                hs_n, as_n = float(hs), float(as_)
+                result = "home" if hs_n > as_n else ("away" if as_n > hs_n else "draw")
+            except (TypeError, ValueError):
+                settled = False
+        out.append({
+            "fixture_id": str(f.get("id", "")),
+            "home": f.get("home", ""),
+            "away": f.get("away", ""),
+            "kickoff_ts": _to_ts(f),
+            "home_score": hs if settled else None,
+            "away_score": as_ if settled else None,
+            "result": result,
+            "settled": settled,
+        })
+    return out
+
+
+def parse_hist_odds(raw: dict, books: tuple[str, ...] = ("pinnacle",)) -> list[dict]:
+    """Normalize an OddsPapi historical-odds response into decimal-odds
+    snapshots [{ts, home, draw, away}] for the first available book (in
+    priority order) per snapshot, sorted ascending by ts. Snapshots with none
+    of the requested books are skipped. Never raises; empty-safe."""
+    out = []
+    for snap in (raw or {}).get("odds") or []:
+        snap_books = (snap or {}).get("books") or {}
+        chosen = None
+        for b in books:
+            if b in snap_books:
+                chosen = snap_books[b]
+                break
+        if not chosen:
+            continue
+        try:
+            out.append({
+                "ts": int(snap.get("ts")),
+                "home": float(chosen["home"]),
+                "draw": float(chosen["draw"]),
+                "away": float(chosen["away"]),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    out.sort(key=lambda s: s["ts"])
+    return out
+
+
 class OddsPapiClient:
     def __init__(self, api_key: str, session: Any = None, base_url: str = "https://api.oddspapi.io"):
         self.api_key = api_key
@@ -62,3 +142,16 @@ class OddsPapiClient:
         resp = self._session.request("GET", f"{self.base_url}{path}", params=p, timeout=20.0)
         resp.raise_for_status()
         return resp.json() if resp.content else {}
+
+    def list_fixtures(self, sport_id: int, date_from: str, date_to: str) -> list[dict]:
+        """Fixtures for a sport in a date window, normalized (parsed)."""
+        raw = self.fetch_raw("/fixtures", {
+            "sport_id": sport_id, "date_from": date_from, "date_to": date_to,
+        })
+        return parse_fixtures(raw)
+
+    def historical_odds(self, fixture_id, books: tuple[str, ...] = ("pinnacle",)) -> list[dict]:
+        """Historical odds snapshots for a fixture, normalized (parsed) for the
+        first available book in `books` priority order."""
+        raw = self.fetch_raw("/historical-odds", {"fixture_id": fixture_id})
+        return parse_hist_odds(raw, books=books)

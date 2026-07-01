@@ -16,8 +16,20 @@ def test_tables_cover_the_design():
         # v2 intelligence
         "kalshi_decisions", "match_features", "player_stats", "h2h_history",
         "lineups", "kalshi_market_listings", "kalshi_capital_plan",
+        # backtest data layer + jobs
+        "KalshiBacktests", "KalshiBacktestResults", "KalshiHistCandles",
+        "KalshiHistOdds", "KalshiHistFixtures",
     ]:
         assert required in names
+
+
+def test_backtest_tables_have_expected_primary_keys():
+    pk_by_name = dict(KALSHI_TABLES)
+    assert pk_by_name["KalshiBacktests"] == "id"
+    assert pk_by_name["KalshiBacktestResults"] == "id"
+    assert pk_by_name["KalshiHistCandles"] == "id"
+    assert pk_by_name["KalshiHistOdds"] == "id"
+    assert pk_by_name["KalshiHistFixtures"] == "fixture_key"
 
 
 def test_portfolio_snapshot_doc_id_is_scoped():

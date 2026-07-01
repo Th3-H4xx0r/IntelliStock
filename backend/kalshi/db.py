@@ -40,6 +40,13 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("kalshi_live", "id"),   # live in-match cards: id = "{instance_id}|{fixture_id}"
     ("kalshi_fills", "id"),  # actual fills — ground-truth entry price for reconcile
     ("kalshi_edge_history", "id"),  # rolling per-side edge series for UI sparklines
+    # backtest data layer + jobs
+    ("KalshiBacktests", "id"),           # queued/running/finished backtest jobs
+    ("KalshiBacktestResults", "id"),     # per-job results (equity curve, trades, stats)
+    ("KalshiHistCandles", "id"),         # cached Kalshi candlesticks, id = market ticker
+    ("KalshiHistOdds", "id"),            # cached OddsPapi historical odds, id = fixture_id
+    ("KalshiHistFixtures", "fixture_key"),  # cached per-fixture final-score resolution
+    ("KalshiBtFixtureList", "id"),  # cached fixture-list query results (zero-cost re-runs)
 ]
 
 
@@ -413,3 +420,118 @@ def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> d
             }, conflict="replace").run(conn)
         settled += 1
     return {"settled": settled}
+
+
+# --- backtest jobs + results ---------------------------------------------
+# Pure doc builders (unit-tested); thin writers below run against a live DB.
+
+def backtest_job_doc(*, id, brokerage_id, instance_id=None, name="", config=None,
+                     leagues=None, start_date="", end_date="", bankroll_cents=0,
+                     created_at="") -> dict:
+    """A queued backtest job row: status 'pending', run True, progress 0."""
+    return {
+        "id": id,
+        "brokerage_id": brokerage_id,
+        "instance_id": instance_id,
+        "name": name or "",
+        "status": "pending",
+        "progress": 0.0,
+        "run": True,
+        "config": dict(config or {}),
+        "leagues": list(leagues or []),
+        "start_date": start_date or "",
+        "end_date": end_date or "",
+        "bankroll_cents": int(bankroll_cents or 0),
+        "created_at": created_at or "",
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+        "summary": {},
+    }
+
+
+def _as_plain(obj):
+    """dict passthrough; dataclass/obj -> its __dict__ copy."""
+    if isinstance(obj, dict):
+        return dict(obj)
+    return dict(getattr(obj, "__dict__", {}) or {})
+
+
+def backtest_result_doc(id, result) -> dict:
+    """Serialize a kalshi.backtest.BacktestResult (dataclass) or a dict into a
+    storable KalshiBacktestResults row."""
+    def g(k, default=None):
+        if isinstance(result, dict):
+            return result.get(k, default)
+        return getattr(result, k, default)
+    return {
+        "id": id,
+        "pnl_cents": int(g("pnl_cents", 0) or 0),
+        "roi": float(g("roi", 0.0) or 0.0),
+        "n_bets": int(g("n_bets", 0) or 0),
+        "win_rate": float(g("win_rate", 0.0) or 0.0),
+        "clv_avg": float(g("clv_avg", 0.0) or 0.0),
+        "equity_curve": list(g("equity_curve", []) or []),
+        "per_league": dict(g("per_league", {}) or {}),
+        "calibration": list(g("calibration", []) or []),
+        "trades": [_as_plain(t) for t in (g("trades", []) or [])],
+        "summary": dict(g("summary", {}) or {}),
+    }
+
+
+def create_backtest_job(conn, doc) -> None:
+    _r.db(DB_NAME).table("KalshiBacktests").insert(doc, conflict="replace").run(conn)
+
+
+def update_backtest_progress(conn, id, *, status=None, progress=None, error=None,
+                             started_at=None, finished_at=None, summary=None) -> None:
+    upd = {}
+    if status is not None:
+        upd["status"] = status
+    if progress is not None:
+        upd["progress"] = float(progress)
+    if error is not None:
+        upd["error"] = error
+    if started_at is not None:
+        upd["started_at"] = started_at
+    if finished_at is not None:
+        upd["finished_at"] = finished_at
+    if summary is not None:
+        upd["summary"] = summary
+    if upd:
+        _r.db(DB_NAME).table("KalshiBacktests").get(id).update(upd).run(conn)
+
+
+def save_backtest_result(conn, id, result) -> None:
+    _r.db(DB_NAME).table("KalshiBacktestResults").insert(
+        backtest_result_doc(id, result), conflict="replace").run(conn)
+
+
+def list_backtests(conn, brokerage_id, limit: int = 100) -> list:
+    rows = list(_r.db(DB_NAME).table("KalshiBacktests")
+                .filter({"brokerage_id": brokerage_id}).run(conn))
+    rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return rows[:limit]
+
+
+def get_backtest(conn, id):
+    return _r.db(DB_NAME).table("KalshiBacktests").get(id).run(conn)
+
+
+def get_backtest_result(conn, id):
+    return _r.db(DB_NAME).table("KalshiBacktestResults").get(id).run(conn)
+
+
+def set_backtest_run(conn, id, run: bool) -> None:
+    _r.db(DB_NAME).table("KalshiBacktests").get(id).update({"run": bool(run)}).run(conn)
+
+
+def delete_backtest(conn, id) -> None:
+    _r.db(DB_NAME).table("KalshiBacktests").get(id).delete().run(conn)
+    _r.db(DB_NAME).table("KalshiBacktestResults").get(id).delete().run(conn)
+
+
+def pending_or_running_backtests(conn) -> list:
+    return list(_r.db(DB_NAME).table("KalshiBacktests")
+                .filter(lambda d: (d["status"] == "pending") | (d["status"] == "running"))
+                .run(conn))

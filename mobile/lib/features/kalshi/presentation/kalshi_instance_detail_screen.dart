@@ -177,6 +177,11 @@ class _State extends ConsumerState<KalshiInstanceDetailScreen> {
                   ),
                 ),
                 IconButton(
+                  onPressed: () => context.push('/kalshi/instances/${widget.instanceId}/backtest'),
+                  icon: Icon(Icons.science_outlined, color: AppColors.warning),
+                  tooltip: 'Backtest',
+                ),
+                IconButton(
                   onPressed: _busy ? null : () => _editInstance(detail),
                   icon: Icon(Icons.tune, color: AppColors.primary),
                   tooltip: 'Edit config',
