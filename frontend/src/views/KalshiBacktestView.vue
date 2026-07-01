@@ -57,6 +57,7 @@ const drawMinEdge = ref(10)
 const orderMin = ref(8)
 const orderMax = ref(15)
 const sharpWeight = ref(85)
+const marketShrink = ref(50)   // % pull toward the de-vigged market when no sharp
 const oddspapiKey = ref('')
 
 // LLM analyst
@@ -151,6 +152,7 @@ async function submit() {
         order_size_min_dollars: Number(orderMin.value) || 0,
         order_size_max_dollars: Number(orderMax.value) || 0,
         sharp_weight: Number(sharpWeight.value) / 100,
+        market_shrink: Number(marketShrink.value) / 100,
         oddspapi_api_key: oddspapiKey.value || undefined,
         model: useLlm.value ? (modelId.value || undefined) : undefined,
         use_llm: useLlm.value && !!modelId.value,
@@ -326,6 +328,7 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
         <label class="block"><span class="text-xs text-slate-400">Order max ($)</span><input v-model.number="orderMax" type="number" :class="inputCls" /></label>
         <label class="block"><span class="text-xs text-slate-400">Sharp weight (%)</span><input v-model.number="sharpWeight" type="number" step="5" :class="inputCls" /></label>
         <label class="block"><span class="text-xs text-slate-400">Daily loss cap (%)</span><input v-model.number="dailyLossPct" type="number" :class="inputCls" /></label>
+        <label class="block"><span class="text-xs text-slate-400">Market anchor (%)</span><input v-model.number="marketShrink" type="number" step="5" :class="inputCls" /></label>
       </div>
 
       <label class="block">
