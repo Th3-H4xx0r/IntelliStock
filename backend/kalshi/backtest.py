@@ -3,7 +3,7 @@
 `run_backtest` (built separately) loops historical fixtures and calls the
 primitives in this module: `evaluate()` turns one fixture's model/sharp probs
 and Kalshi asks into sized bets using the SAME pricing/candidate/sizing code
-path the live bot uses (`intelligence.pricing.build_market_probs` ->
+path the live bot uses (`intelligence.fusion.fuse`/`renormalize_group` ->
 `strategy.candidates.generate_candidates` -> `capital.planner.allocate`);
 `settle()`/`aggregate()` grade those bets against the final result and roll
 them up into a `BacktestResult`.
@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from kalshi import instance_config
 from kalshi.fees import DEFAULT_FEE_RATE, fee_as_prob, fee_cents_for_order
-from kalshi.intelligence.pricing import build_market_probs
+from kalshi.intelligence.fusion import fuse, renormalize_group
 from kalshi.strategy.candidates import generate_candidates
 from kalshi.capital.planner import allocate
 from kalshi.risk import RiskCaps
@@ -120,38 +120,36 @@ def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
     engine targets); `kalshi_asks` is `{side: cents}`.
 
     This mirrors `orchestrator.plan_and_allocate`'s single-fixture call
-    sequence (build_market_probs -> generate_candidates -> allocate) with the
+    sequence (fuse per side -> generate_candidates -> allocate) with the
     live/in-play parts (LLM adjustments, player props, opportunity scoring
     across multiple fixtures) omitted — a backtest fixture has no LLM
-    rationale and is evaluated one match at a time."""
+    rationale and is evaluated one match at a time.
+
+    ADAPTATION from the brief: the brief named `intelligence.fusion.build_market_probs`
+    as the fuser, but that function actually lives in `intelligence.pricing`
+    and derives its OWN model probs from `expected_goals` (a Dixon-Coles
+    scoreline matrix) — it has no way to accept an externally-computed
+    `model_probs` dict, which is exactly what `evaluate()`'s signature takes.
+    Reusing it here would silently ignore the caller's `model_probs` whenever
+    `expected_goals` is absent from the fixture. Instead this fuses each side
+    directly with `intelligence.fusion.fuse` (the same per-side blend
+    `pricing.build_market_probs` calls internally) and renormalizes the
+    winner group with `fusion.renormalize_group` — the same two primitives,
+    without the Dixon-Coles detour."""
     fixture_id = fixture.get("fixture_id", "")
     tier = fixture.get("tier") or _TIER_FOR_MARKET_TYPES
-    league = fixture.get("league", "")
 
-    expected_goals = fixture.get("expected_goals")
     sharp_probs = sharp_probs or {}
     model_probs = model_probs or {}
     kalshi_asks = kalshi_asks or {}
 
-    # build_market_probs expects {market_type: {side: prob}}; evaluate()'s
-    # model_probs/sharp_probs are already scoped to one market ({side: prob}),
-    # so wrap them under "winner" before fusing.
+    base = {}
+    for side in set(model_probs) | set(sharp_probs):
+        sharp_v = sharp_probs.get(side)
+        model_v = model_probs.get(side, sharp_v if sharp_v is not None else 0.0)
+        base[side] = fuse(sharp=sharp_v, model=model_v, llm_adjustment=0.0, w_sharp=cfg.sharp_weight, llm_cap=0.05)
+    fused = {"winner": renormalize_group(base) if base else {}}
     sharp_by_type = {"winner": dict(sharp_probs)} if sharp_probs else {}
-    fused = build_market_probs(expected_goals, sharp_by_type, {}, w_sharp=cfg.sharp_weight)
-    # If there's no expected_goals model signal, fall back to the caller-supplied
-    # model_probs directly (fused would otherwise degrade to sharp-only).
-    if "winner" not in fused or not fused.get("winner"):
-        fused = dict(fused)
-        base = {}
-        for side in set(model_probs) | set(sharp_probs):
-            base[side] = dict(sharp_by_type.get("winner", {})).get(side) if side in sharp_probs else None
-        fused["winner"] = {
-            side: (
-                (cfg.sharp_weight * sharp_probs[side] + (1 - cfg.sharp_weight) * model_probs.get(side, sharp_probs[side]))
-                if side in sharp_probs else model_probs.get(side)
-            )
-            for side in (set(model_probs) | set(sharp_probs))
-        }
 
     kalshi_markets = [
         {
