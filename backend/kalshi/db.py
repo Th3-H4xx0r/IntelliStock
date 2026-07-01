@@ -40,6 +40,12 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("kalshi_live", "id"),   # live in-match cards: id = "{instance_id}|{fixture_id}"
     ("kalshi_fills", "id"),  # actual fills — ground-truth entry price for reconcile
     ("kalshi_edge_history", "id"),  # rolling per-side edge series for UI sparklines
+    # backtest data layer + jobs
+    ("KalshiBacktests", "id"),           # queued/running/finished backtest jobs
+    ("KalshiBacktestResults", "id"),     # per-job results (equity curve, trades, stats)
+    ("KalshiHistCandles", "id"),         # cached Kalshi candlesticks, id = market ticker
+    ("KalshiHistOdds", "id"),            # cached OddsPapi historical odds, id = fixture_id
+    ("KalshiHistFixtures", "fixture_key"),  # cached per-fixture final-score resolution
 ]
 
 
