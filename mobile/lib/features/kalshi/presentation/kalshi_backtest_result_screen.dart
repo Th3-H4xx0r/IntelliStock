@@ -39,7 +39,10 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
       final d = await ref.read(kalshiRepositoryProvider).backtestResults(widget.backtestId);
       if (!mounted) return;
       setState(() {
-        _status = {'status': d['status'], 'summary': d['summary'] ?? {}};
+        _status = {'status': d['status'], 'summary': d['summary'] ?? {},
+                   'error': d['error'], 'progress': d['progress'],
+                   'started_at': d['started_at'], 'created_at': d['created_at'],
+                   'finished_at': d['finished_at']};
         _result = d['result'] as Map<String, dynamic>?;
         final days = _daysList();
         if (_selectedDay == null && days.isNotEmpty) _selectedDay = days.last;

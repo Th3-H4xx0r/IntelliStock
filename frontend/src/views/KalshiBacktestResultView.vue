@@ -15,14 +15,30 @@ const status = ref(null)
 const result = ref(null)
 const tab = ref('trades')  // trades | decisions | logs
 const selectedDay = ref(null)
+const now = ref(Date.now())
 let pollTimer = null
+let clockTimer = null
+
+const running = computed(() => status.value && (status.value.status === 'running' || status.value.status === 'pending'))
+const elapsed = computed(() => {
+  const s = status.value
+  if (!s) return ''
+  const start = s.started_at || s.created_at
+  if (!start) return ''
+  const endMs = (!running.value && s.finished_at) ? new Date(s.finished_at).getTime() : now.value
+  const secs = Math.max(0, Math.floor((endMs - new Date(start).getTime()) / 1000))
+  const m = Math.floor(secs / 60), sc = secs % 60
+  return m > 0 ? `${m}m ${sc}s` : `${sc}s`
+})
 
 async function load() {
   try {
     const res = await fetch(`${API_BASE}/kalshi/backtests/${id}/results`, { headers: authHeaders() })
     if (!res.ok) return
     const d = await res.json()
-    status.value = { status: d.status, summary: d.summary || {}, error: d.error }
+    status.value = { status: d.status, summary: d.summary || {}, error: d.error,
+                     progress: d.progress, created_at: d.created_at,
+                     started_at: d.started_at, finished_at: d.finished_at }
     result.value = d.result || null
     if (!selectedDay.value && dayKeys.value.length) selectedDay.value = dayKeys.value[dayKeys.value.length - 1]
   } catch (e) { /* ignore */ }
@@ -41,7 +57,10 @@ const tradesByDay = computed(() => {
   return m
 })
 const dayKeys = computed(() => Object.keys(tradesByDay.value).sort())
-const selectedTrades = computed(() => (selectedDay.value && tradesByDay.value[selectedDay.value]) || [])
+const selectedTrades = computed(() => {
+  if (selectedDay.value === 'all') return trades.value
+  return (selectedDay.value && tradesByDay.value[selectedDay.value]) || []
+})
 
 // --- equity chart: one point per trade, x = kickoff date ---
 const equitySeries = computed(() => {
@@ -50,16 +69,19 @@ const equitySeries = computed(() => {
 })
 const equityOpts = computed(() => ({
   chart: { type: 'area', toolbar: { show: false }, animations: { enabled: false },
+    background: 'transparent', fontFamily: 'Inter, sans-serif', zoom: { enabled: false },
     events: {
       dataPointSelection: (e, ctx, cfg) => pickIdx(cfg.dataPointIndex),
       markerClick: (e, ctx, { dataPointIndex }) => pickIdx(dataPointIndex),
     } },
   dataLabels: { enabled: false },
-  stroke: { curve: 'straight', width: 2 },
-  markers: { size: 4, strokeColors: '#0f172a', hover: { size: 6 } },
-  xaxis: { type: 'datetime', labels: { style: { colors: '#94a3b8' } } },
-  yaxis: { labels: { style: { colors: '#94a3b8' }, formatter: (v) => `$${Math.round(v)}` } },
-  colors: ['#22d3ee'], grid: { borderColor: '#1e293b' },
+  stroke: { curve: 'smooth', width: 2.5 },
+  fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.28, opacityTo: 0 } },
+  markers: { size: 0, hover: { size: 5 } },
+  xaxis: { type: 'datetime', axisBorder: { show: false }, axisTicks: { show: false },
+    labels: { style: { colors: '#64748b', fontSize: '11px' } } },
+  yaxis: { labels: { style: { colors: '#64748b', fontSize: '11px' }, formatter: (v) => `$${Math.round(v)}` } },
+  colors: ['#34d399'], grid: { borderColor: '#1e293b', strokeDashArray: 4 },
   tooltip: { theme: 'dark', x: { format: 'MMM dd' } },
 }))
 function pickIdx(i) {
@@ -74,11 +96,10 @@ function statusColor(st) { return st === 'finished' ? 'text-emerald-400' : st ==
 
 onMounted(async () => {
   await load()
-  pollTimer = setInterval(() => {
-    if (status.value && (status.value.status === 'pending' || status.value.status === 'running')) load()
-  }, 3000)
+  pollTimer = setInterval(() => { if (running.value) load() }, 2000)
+  clockTimer = setInterval(() => { now.value = Date.now() }, 1000)
 })
-onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
+onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); if (clockTimer) clearInterval(clockTimer) })
 </script>
 
 <template>
@@ -88,6 +109,13 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
       <div class="flex items-center gap-3 mt-1">
         <h1 class="text-xl font-semibold text-slate-100">Backtest <span class="font-mono text-slate-400 text-base">{{ id.slice(0, 8) }}</span></h1>
         <span v-if="status" :class="statusColor(status.status)" class="text-sm">{{ status.status }}</span>
+        <span v-if="status && elapsed" class="text-xs text-slate-500">· {{ elapsed }}</span>
+      </div>
+      <div v-if="running" class="flex items-center gap-2 mt-2 max-w-md">
+        <div class="flex-1 h-2 rounded-full bg-slate-700/60 overflow-hidden">
+          <div class="h-full bg-amber-400 rounded-full transition-all" :style="{ width: Math.max(3, Math.round((status && status.progress) || 0)) + '%' }"></div>
+        </div>
+        <span class="text-xs text-slate-400">{{ Math.round((status && status.progress) || 0) }}%</span>
       </div>
     </div>
 
@@ -118,12 +146,17 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
     <!-- Scrubbable equity chart -->
     <section v-if="trades.length" class="bg-surface border border-border-subtle rounded-xl p-4">
       <div class="flex items-center justify-between mb-2">
-        <h2 class="text-sm font-semibold text-slate-200">Equity — click a point to see that day's trades</h2>
-        <span v-if="selectedDay" class="text-xs text-primary">{{ selectedDay }} · {{ selectedTrades.length }} trade(s)</span>
+        <h2 class="text-sm font-semibold text-slate-200">Equity curve</h2>
+        <span v-if="selectedDay" class="text-xs text-primary">{{ selectedDay === 'all' ? 'All' : selectedDay }} · {{ selectedTrades.length }} trade(s)</span>
       </div>
       <VueApexCharts type="area" height="280" :options="equityOpts" :series="equitySeries" />
       <!-- day chips -->
       <div class="flex flex-wrap gap-2 mt-3">
+        <button @click="selectedDay = 'all'; tab = 'trades'"
+                class="px-2.5 py-1 rounded-full text-xs border transition-colors"
+                :class="selectedDay === 'all' ? 'bg-primary/20 border-primary text-primary' : 'border-border-subtle text-slate-400 hover:text-slate-200'">
+          All · {{ trades.length }}
+        </button>
         <button v-for="d in dayKeys" :key="d" @click="selectedDay = d; tab = 'trades'"
                 class="px-2.5 py-1 rounded-full text-xs border transition-colors"
                 :class="selectedDay === d ? 'bg-primary/20 border-primary text-primary' : 'border-border-subtle text-slate-400 hover:text-slate-200'">
@@ -149,15 +182,14 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
         <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div v-for="(t, i) in selectedTrades" :key="i" class="bg-surface border border-border-subtle rounded-lg p-3">
             <div class="flex items-center justify-between">
-              <div class="text-sm text-slate-200 font-mono">{{ t.market_ticker }}</div>
-              <div class="text-sm font-semibold" :class="(t.realized_pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(t.realized_pnl_cents) }}</div>
-            </div>
-            <div v-if="t.home || t.away" class="flex items-center gap-1.5 text-xs text-slate-300 mt-1">
-              <img v-if="t.home_flag" :src="t.home_flag" class="w-4 h-3 rounded-sm object-cover" alt="" />
-              <span>{{ t.home }}</span>
-              <span class="text-slate-600">vs</span>
-              <img v-if="t.away_flag" :src="t.away_flag" class="w-4 h-3 rounded-sm object-cover" alt="" />
-              <span>{{ t.away }}</span>
+              <div class="flex items-center gap-1.5 text-sm text-slate-100 font-medium min-w-0">
+                <img v-if="t.home_flag" :src="t.home_flag" class="w-4 h-3 rounded-sm object-cover shrink-0" alt="" />
+                <span class="truncate">{{ t.home || t.side }}</span>
+                <span class="text-slate-500 text-xs shrink-0">v</span>
+                <img v-if="t.away_flag" :src="t.away_flag" class="w-4 h-3 rounded-sm object-cover shrink-0" alt="" />
+                <span class="truncate">{{ t.away }}</span>
+              </div>
+              <div class="text-sm font-semibold shrink-0 ml-2" :class="(t.realized_pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(t.realized_pnl_cents) }}</div>
             </div>
             <div class="text-xs text-slate-400 mt-1">
               <span v-if="t.league" class="mr-1 text-slate-500">{{ t.league }}</span>
@@ -167,8 +199,6 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
             <div class="flex flex-wrap gap-1.5 mt-2">
               <span class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700/50 text-slate-300">edge {{ (t.edge * 100).toFixed(1) }}%</span>
               <span class="px-1.5 py-0.5 rounded text-[10px]" :class="t.sharp_prob != null ? 'bg-sky-500/20 text-sky-300' : 'bg-amber-500/20 text-amber-300'">{{ t.sharp_prob != null ? 'sharp' : 'model-only' }}</span>
-              <span v-if="t.model_prob != null" class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700/50 text-slate-300">model {{ t.model_prob.toFixed(2) }}</span>
-              <span v-if="t.sharp_prob != null" class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700/50 text-slate-300">sharp {{ t.sharp_prob.toFixed(2) }}</span>
               <span class="px-1.5 py-0.5 rounded text-[10px]" :class="t.outcome === 'win' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'">{{ t.outcome }}</span>
               <span v-if="t.clv != null" class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700/50 text-slate-300">CLV {{ (t.clv * 100).toFixed(1) }}%</span>
             </div>
@@ -179,14 +209,12 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
       <!-- Decision log -->
       <div v-else-if="tab === 'decisions'" class="overflow-x-auto">
         <table class="w-full text-xs">
-          <thead><tr class="text-left text-slate-500"><th class="py-1">Fixture</th><th>Decision</th><th>Reason</th><th>Model</th><th>Sharp</th></tr></thead>
+          <thead><tr class="text-left text-slate-500"><th class="py-1">Fixture</th><th>Decision</th><th>Reason</th></tr></thead>
           <tbody>
             <tr v-for="(d, i) in (result && result.decision_log) || []" :key="i" class="border-t border-border-subtle/40">
               <td class="py-1 text-slate-300">{{ d.label }}</td>
               <td><span :class="d.decision === 'placed' ? 'text-emerald-400' : d.decision === 'no_bet' ? 'text-slate-300' : 'text-amber-400'">{{ d.decision }}</span></td>
               <td class="text-slate-500">{{ d.reason || (d.bets ? d.bets.length + ' side(s)' : '') }}</td>
-              <td class="text-slate-400">{{ d.model_prob ? Object.entries(d.model_prob).map(([k, v]) => k[0] + ':' + v.toFixed(2)).join(' ') : '—' }}</td>
-              <td class="text-slate-400">{{ d.sharp_prob && Object.keys(d.sharp_prob).length ? Object.entries(d.sharp_prob).map(([k, v]) => k[0] + ':' + v.toFixed(2)).join(' ') : '—' }}</td>
             </tr>
           </tbody>
         </table>

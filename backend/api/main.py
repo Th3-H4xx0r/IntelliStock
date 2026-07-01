@@ -4396,7 +4396,9 @@ def api_kalshi_backtest_results(backtest_id: str, conn=Depends(conn_dependency),
     if not row:
         raise HTTPException(status_code=404, detail="backtest not found")
     return {"status": row.get("status"), "summary": row.get("summary") or {},
-            "error": row.get("error"),
+            "error": row.get("error"), "progress": row.get("progress"),
+            "created_at": row.get("created_at"), "started_at": row.get("started_at"),
+            "finished_at": row.get("finished_at"),
             "result": kdb.get_backtest_result(conn, backtest_id)}
 
 

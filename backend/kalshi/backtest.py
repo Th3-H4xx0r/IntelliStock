@@ -432,7 +432,8 @@ def _sharp_probs_at(oddseries: list[dict], snap_ts: int, devig_method: str) -> d
     return {"home": p[0], "draw": p[1], "away": p[2]}
 
 
-def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_fn=None) -> BacktestResult:
+def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_fn=None,
+                 partial_sink=None) -> BacktestResult:
     """Replay `data`'s fixture history through `evaluate`/`settle`/`aggregate`,
     in kickoff order, one decision snapshot per fixture.
 
@@ -565,6 +566,15 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_
 
         if progress_cb is not None:
             progress_cb((i + 1) / n if n else 1.0)
+        # Live snapshot of logs/decisions so the results screen updates mid-run.
+        if partial_sink is not None and (i % 3 == 0 or i == n - 1):
+            try:
+                partial_sink(list(logs), list(decision_log),
+                             {"api_calls": getattr(data, "api_calls", 0),
+                              "cache_hits": getattr(data, "cache_hits", 0),
+                              "n_fixtures": n, **counts})
+            except Exception:
+                pass
 
     _log(f"done: {counts['bet']} bet · {counts['no_bet']} no-edge · "
          f"{counts['unsettled']} unsettled · {counts['unmatched']} unmatched · "
