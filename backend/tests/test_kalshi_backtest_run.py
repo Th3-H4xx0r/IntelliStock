@@ -67,7 +67,7 @@ class FakeDataProvider:
     def kalshi_tickers(self, fx):
         return dict(self._tickers[fx["fixture_id"]])
 
-    def candles(self, ticker):
+    def candles(self, ticker, start_ts=0, end_ts=4102444800):
         return list(self._candles.get(ticker, []))
 
     def sharp_odds(self, fx):

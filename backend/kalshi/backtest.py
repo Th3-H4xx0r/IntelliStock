@@ -41,6 +41,12 @@ log = logging.getLogger(__name__)
 _DEVIG_METHODS = ("power", "shin", "proportional")
 _DEVIG_FUNCS = {"power": power_devig, "shin": shin_devig, "proportional": proportional_devig}
 
+# Candlestick fetch window around a fixture's kickoff. Kalshi's candlesticks
+# endpoint 400s on an unbounded range; a pre-match lookback of 14 days (hourly
+# candles -> ~336 rows) covers every decision snapshot under the request cap.
+CANDLE_LOOKBACK_SEC = 14 * 24 * 3600
+CANDLE_LOOKAHEAD_SEC = 6 * 3600
+
 
 # --------------------------------------------------------------------------
 # Task 5: BacktestConfig + config_from_body
@@ -440,7 +446,19 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None) -> Backt
                 log.info("run_backtest: skipping fixture_id=%s reason=unmatched", fixture_id)
             else:
                 kickoff_ts = int(fx.get("kickoff_ts", fx.get("kickoff", 0)) or 0)
-                candles_by_side = {side: data.candles(ticker) for side, ticker in tickers.items()}
+                # Bound the candlestick window around kickoff. Kalshi's endpoint
+                # rejects (400) an unbounded range — an hourly interval over
+                # 1970..2100 would be millions of candles. A pre-match window of
+                # ~14 days back to a few hours after kickoff covers every decision
+                # snapshot while staying well under the per-request candle cap.
+                if kickoff_ts > 0:
+                    _c_start = kickoff_ts - CANDLE_LOOKBACK_SEC
+                    _c_end = kickoff_ts + CANDLE_LOOKAHEAD_SEC
+                    candles_by_side = {side: data.candles(ticker, _c_start, _c_end)
+                                       for side, ticker in tickers.items()}
+                else:
+                    candles_by_side = {side: data.candles(ticker)
+                                       for side, ticker in tickers.items()}
                 oddseries = data.sharp_odds(fx)
 
                 kalshi_asks: dict = {}
