@@ -115,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
             analyst_max_calls=int(cfg.get("analyst_max_calls", 10)),
             odds_api_key=(str(cfg.get("odds_api_key") or "").strip()
                           or __import__("os").environ.get("ODDS_API_KEY", "").strip()),
+            oddspapi_api_key=(str(cfg.get("oddspapi_api_key") or "").strip()
+                              or __import__("os").environ.get("ODDSPAPI_API_KEY", "").strip()),
             sharp_weight=float(cfg.get("sharp_weight", 0.7)),
             devig_method=str(cfg.get("devig_method", "power")),
             market_shrink=float(cfg.get("market_shrink", 0.4)),

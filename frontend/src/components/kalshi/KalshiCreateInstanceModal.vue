@@ -58,9 +58,13 @@ const dailyLoss = ref(0)
 const dailyLossTouched = ref(false)
 const dailyLossPct = ref(0.08)
 const poll = ref(60)
-const liveMonitoring = ref(true)
+const liveMonitoring = ref(false)
 const oddsApiKey = ref('')
+const oddspapiKey = ref('')
 const sharpWeight = ref(85)
+const noSharp = ref(5)
+const marketShrink = ref(40)
+const oneBetPerFixture = ref(true)
 // Price band + draw gate (favorite-longshot guard) — tunable; 15/90/10 are the safe defaults.
 const minPrice = ref(15)
 const maxPrice = ref(90)
@@ -152,10 +156,14 @@ function prefillFromEdit() {
   if (c.poll_seconds != null) poll.value = c.poll_seconds
   if (c.live_monitoring != null) liveMonitoring.value = !!c.live_monitoring
   if (c.odds_api_key) oddsApiKey.value = c.odds_api_key
+  if (c.oddspapi_api_key) oddspapiKey.value = c.oddspapi_api_key
   if (c.sharp_weight != null) sharpWeight.value = Math.round(c.sharp_weight * 100)
   if (c.min_price_cents != null) minPrice.value = c.min_price_cents
   if (c.max_price_cents != null) maxPrice.value = c.max_price_cents
   if (c.draw_min_edge != null) drawMinEdge.value = Math.round(c.draw_min_edge * 1000) / 10
+  if (c.no_sharp_edge_threshold != null) noSharp.value = c.no_sharp_edge_threshold * 100
+  if (c.market_shrink != null) marketShrink.value = c.market_shrink * 100
+  if (c.one_bet_per_fixture != null) oneBetPerFixture.value = !!c.one_bet_per_fixture
   if (c.tier) risk.value = c.tier
   if (c.model) selectedModel.value = c.model
   if (c.paper_mode != null) paperMode.value = !!c.paper_mode
@@ -195,11 +203,15 @@ async function submit() {
       poll_seconds: Number(poll.value),
       bankroll_usage_pct: Number(usagePct.value),
       live_monitoring: liveMonitoring.value,
-      odds_api_key: oddsApiKey.value.trim(),
+      odds_api_key: oddsApiKey.value.trim() || undefined,
+      oddspapi_api_key: oddspapiKey.value.trim() || undefined,
       sharp_weight: Number(sharpWeight.value) / 100,
       min_price_cents: Number(minPrice.value),
       max_price_cents: Number(maxPrice.value),
       draw_min_edge: Number(drawMinEdge.value) / 100,
+      no_sharp_edge_threshold: Number(noSharp.value) / 100,
+      market_shrink: Number(marketShrink.value) / 100,
+      one_bet_per_fixture: oneBetPerFixture.value,
       order_size_min_dollars: Number(orderSizeMin.value) || 0,
       order_size_max_dollars: Number(orderSizeMax.value) || 0,
       tier: risk.value,
@@ -374,6 +386,14 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
             <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Scan cadence (s) <InfoTip text="How often it polls odds, respecting the OddsPapi monthly budget." size="13px" /></span>
             <input v-model.number="poll" type="number" step="15" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
+          <label class="block">
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">No-sharp edge bar (%) <InfoTip text="Higher edge required to bet a market with no sharp odds (model-only)." size="13px" /></span>
+            <input v-model.number="noSharp" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+          </label>
+          <label class="block">
+            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Market anchor (%) <InfoTip text="When there's no sharp line, shrink the model this far toward the de-vigged Kalshi market." size="13px" /></span>
+            <input v-model.number="marketShrink" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+          </label>
           <label class="block col-span-2">
             <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Order size ($ / trade) <InfoTip text="Target dollar size per trade as a RANGE — the bot sizes within it by edge conviction (stronger edge → bigger trade), so trades stay meaningful even on a small account. Leave both 0 for auto (Kelly-sized)." size="13px" /></span>
             <div class="flex items-center gap-2">
@@ -400,11 +420,29 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
           </span>
         </button>
 
+        <button type="button" @click="oneBetPerFixture = !oneBetPerFixture"
+                class="w-full flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface/50 px-3 py-2.5 text-left hover:border-primary/50 transition-colors">
+          <span class="min-w-0">
+            <span class="flex items-center gap-1 text-sm font-medium text-slate-200">One bet per fixture
+              <InfoTip text="Never hold more than one side of the same match." size="13px" /></span>
+            <span class="block text-[11px] text-slate-500 mt-0.5">Limit to a single open position per match</span>
+          </span>
+          <span class="shrink-0 w-10 h-6 rounded-full transition-colors relative" :class="oneBetPerFixture ? 'bg-primary' : 'bg-border-subtle'">
+            <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform" :class="oneBetPerFixture ? 'translate-x-4' : ''"></span>
+          </span>
+        </button>
+
         <div class="rounded-lg border border-border-subtle bg-surface/50 px-3 py-3 space-y-3">
           <label class="block">
-            <span class="flex items-center gap-1 text-sm font-medium text-slate-200 mb-1.5">Odds API key — sharp anchor
-              <InfoTip text="Anchor fair value to de-vig'd sharp bookmaker odds (The-Odds-API) so the bot bets where Kalshi disagrees with the books — the real edge. Free key at the-odds-api.com. Leave blank to price on the model only (rarely trades on efficient markets)." size="13px" /></span>
+            <span class="flex items-center gap-1 text-sm font-medium text-slate-200 mb-1.5">The-Odds-API key (live sharp odds)
+              <InfoTip text="Live bookmaker odds for the sharp anchor, e.g. Pinnacle via the-odds-api.com." size="13px" /></span>
             <input v-model="oddsApiKey" type="password" autocomplete="off" placeholder="the-odds-api.com key (optional)"
+                   class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+          </label>
+          <label class="block">
+            <span class="flex items-center gap-1 text-sm font-medium text-slate-200 mb-1.5">OddsPapi key (backtest odds)
+              <InfoTip text="Historical odds source used by backtests, from oddspapi.io. Optional; live trading uses the The-Odds-API key above." size="13px" /></span>
+            <input v-model="oddspapiKey" type="password" autocomplete="off" placeholder="oddspapi.io key (optional)"
                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
           </label>
           <label class="block">

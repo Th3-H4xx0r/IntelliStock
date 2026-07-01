@@ -84,7 +84,8 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         # No-sharp-line gate: model-only fairs overrate favorites, so demand a bigger
         # edge before betting a market the sharp book doesn't price (keeps volume on
         # genuinely large disagreements rather than hard-skipping).
-        "no_sharp_edge_threshold": float(raw.get("no_sharp_edge_threshold", td["no_sharp_edge_threshold"])),
+        "no_sharp_edge_threshold": (float(_nse) if (_nse := raw.get("no_sharp_edge_threshold")) is not None
+                                    else td["no_sharp_edge_threshold"]),
         # Size haircut for model-only (no-sharp) bets — they're unanchored favorite
         # risk, so bet them smaller than sharp-anchored ones.
         "model_only_size_mult": float(raw.get("model_only_size_mult", td["model_only_size_mult"])),
@@ -113,8 +114,10 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         # HARD dry-run gate: when True the engine reads real prices but places NO real
         # orders (paper-fill grading). Lets a FUNDED live account be tested safely.
         "paper_mode": bool(raw.get("paper_mode", False)),
-        # Live in-match monitoring (Kalshi-price-only, two-way in-play).
-        "live_monitoring": bool(raw.get("live_monitoring", True)),
+        # Live in-match monitoring (Kalshi-price-only, two-way in-play). Defaults
+        # OFF: only the pregame strategy is backtest-validated; in-play is a separate,
+        # unvalidated path. Opt in explicitly if you want in-match trading.
+        "live_monitoring": bool(raw.get("live_monitoring", False)),
         "live_poll_seconds": max(10, int(raw.get("live_poll_seconds", 30))),
         "analyst_max_calls": max(0, int(raw.get("analyst_max_calls", 10))),
         "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", td["inplay_exposure_frac"])),
@@ -130,8 +133,8 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "devig_method": (str(raw.get("devig_method") or "power").lower()
                          if str(raw.get("devig_method") or "power").lower()
                          in ("power", "shin", "proportional") else "power"),
-        "market_shrink": min(1.0, max(0.0, float(raw.get("market_shrink", 0.4)))),
-        "one_bet_per_fixture": bool(raw.get("one_bet_per_fixture", True)),
+        "market_shrink": (min(1.0, max(0.0, float(_msh))) if (_msh := raw.get("market_shrink")) is not None else 0.4),
+        "one_bet_per_fixture": (bool(_obf) if (_obf := raw.get("one_bet_per_fixture")) is not None else True),
         "odds_refresh_secs": max(300, int(raw.get("odds_refresh_secs", 3600))),
         "odds_regions": str(raw.get("odds_regions") or "eu,uk,us").strip() or "eu,uk,us",
         # Kalshi series tickers to scan ([] = engine uses DEFAULT_SOCCER_SERIES).

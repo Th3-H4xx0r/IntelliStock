@@ -118,7 +118,8 @@ class EngineConfig:
     inplay_caps: InPlayCaps = field(default_factory=InPlayCaps)
     analyst_max_calls: int = 10   # cap on LLM analyst calls per tick (cost control)
     # Sharp-odds anchor: fair value from de-vig'd bookmaker odds -> edge vs Kalshi.
-    odds_api_key: str = ""
+    odds_api_key: str = ""          # The-Odds-API — primary LIVE sharp source
+    oddspapi_api_key: str = ""      # OddsPapi — fallback LIVE sharp source
     sharp_weight: float = 0.7
     devig_method: str = "power"
     # Overconfidence brake: when there is NO sharp line, pull the model prob this
@@ -384,6 +385,22 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         pass
                     log(f"tick {tick}: sharp odds — fetched {len(evs)} events for {sk}"
                         + (f" (quota left {quota})" if quota is not None else "") + ".", "white")
+
+            # Fallback: if The-Odds-API produced nothing (no key / quota / outage) and
+            # an OddsPapi key is configured, try OddsPapi as a secondary sharp source so
+            # a single feed dropping out doesn't force the whole slate to model-only.
+            if not all_events and getattr(config, "oddspapi_api_key", ""):
+                try:
+                    import datetime as _dt
+                    from kalshi.data.sources import oddspapi_live
+                    _d0 = _dt.datetime.utcfromtimestamp(now_wall)
+                    _df = (_d0 - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+                    _dto = (_d0 + _dt.timedelta(days=3)).strftime("%Y-%m-%d")
+                    all_events = oddspapi_live.fetch_events(config.oddspapi_api_key, _df, _dto)
+                    log(f"tick {tick}: sharp odds — The-Odds-API empty; OddsPapi fallback "
+                        f"returned {len(all_events)} event(s).", "cyan" if all_events else "yellow")
+                except Exception as e:
+                    log(f"tick {tick}: OddsPapi fallback failed: {type(e).__name__}: {e}", "yellow")
 
             # 2c) Live scores/clock (ESPN) — TIMING ONLY (not pricing): gives the true
             # in-play minute so the live monitor knows a match is actually live and can
