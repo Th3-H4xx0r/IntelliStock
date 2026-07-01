@@ -57,7 +57,7 @@ const drawMinEdge = ref(10)
 const orderMin = ref(8)
 const orderMax = ref(15)
 const sharpWeight = ref(85)
-const marketShrink = ref(50)   // % pull toward the de-vigged market when no sharp
+const marketShrink = ref(30)   // % pull toward the de-vigged market when no sharp
 const oddspapiKey = ref('')
 
 // LLM analyst

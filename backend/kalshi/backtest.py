@@ -71,7 +71,7 @@ class BacktestConfig:
     # far toward the de-vigged Kalshi market (0 = pure model, 1 = pure market).
     # This is the "market anchor" — it stops the model betting its own biased,
     # overconfident view of cheap home underdogs blind.
-    market_shrink: float = 0.5
+    market_shrink: float = 0.3
     one_bet_per_fixture: bool = True  # never hold >1 side of the same match
 
 
@@ -122,7 +122,7 @@ def config_from_body(body: dict) -> BacktestConfig:
         model=str(body.get("model") or ""),
         analyst_max_calls=int(body.get("analyst_max_calls", 10) or 10),
         use_llm=bool(body.get("use_llm", False)),
-        market_shrink=min(1.0, max(0.0, float(body.get("market_shrink", 0.5)))),
+        market_shrink=min(1.0, max(0.0, float(body.get("market_shrink", 0.3)))),
         one_bet_per_fixture=bool(body.get("one_bet_per_fixture", True)),
     )
 
