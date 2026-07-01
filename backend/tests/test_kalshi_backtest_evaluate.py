@@ -26,7 +26,7 @@ def _cfg(**cap_overrides):
 
 
 def _fixture():
-    return {"fixture_id": "f1", "league": "EPL", "expected_goals": None}
+    return {"fixture_id": "f1", "league": "EPL", "kickoff_ts": 1735689600, "expected_goals": None}
 
 
 def test_model_and_sharp_agree_home_edge_returns_sized_bet():
@@ -41,6 +41,8 @@ def test_model_and_sharp_agree_home_edge_returns_sized_bet():
     assert bet.side == "home"
     assert bet.size > 0
     assert bet.entry_cents == 45
+    assert bet.league == "EPL"
+    assert bet.kickoff == 1735689600
 
 
 def test_thin_edge_is_gated_out():

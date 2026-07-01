@@ -10,16 +10,23 @@ them up into a `BacktestResult`.
 
 No network, no DB — every function here takes plain data in and returns plain
 data out, so it is unit-testable with fabricated inputs.
+
+CAVEAT: when a single fixture yields multiple candidates under a binding
+capital cap, `evaluate()` orders/allocates them by raw `edge` (candidate
+`score` fed to `capital.planner.allocate`), not live's `opportunity_score`
+(which also weighs recency/liquidity across fixtures). This is an accepted,
+documented divergence from the live path for this per-fixture primitive.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from kalshi import instance_config
-from kalshi.fees import DEFAULT_FEE_RATE, fee_as_prob, fee_cents_for_order
+from kalshi.fees import DEFAULT_FEE_RATE
 from kalshi.intelligence.fusion import fuse, renormalize_group
 from kalshi.strategy.candidates import generate_candidates
 from kalshi.capital.planner import allocate
+from kalshi.reconcile import reconcile_position
 from kalshi.risk import RiskCaps
 
 _DEVIG_METHODS = ("power", "shin", "proportional")
@@ -109,6 +116,8 @@ class SizedBet:
     edge: float
     market_type: str = ""
     fixture_id: str = ""
+    league: str = ""
+    kickoff: str | int = ""
 
 
 def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
@@ -137,6 +146,10 @@ def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
     winner group with `fusion.renormalize_group` — the same two primitives,
     without the Dixon-Coles detour."""
     fixture_id = fixture.get("fixture_id", "")
+    league = fixture.get("league", "")
+    # BacktestDataProvider.fixtures() dicts key kickoff as `kickoff_ts`; accept
+    # a plain `kickoff` too in case the caller passes an already-normalized dict.
+    kickoff = fixture.get("kickoff_ts", fixture.get("kickoff", ""))
     tier = fixture.get("tier") or _TIER_FOR_MARKET_TYPES
 
     sharp_probs = sharp_probs or {}
@@ -202,6 +215,8 @@ def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
             edge=c.edge,
             market_type=c.market_type,
             fixture_id=fixture_id,
+            league=league,
+            kickoff=kickoff,
         ))
     return out
 
@@ -227,7 +242,7 @@ class Trade:
     market_type: str = ""
     fixture_id: str = ""
     league: str = ""
-    kickoff: str = ""
+    kickoff: str | int = ""
 
 
 @dataclass
@@ -246,17 +261,23 @@ class BacktestResult:
 def settle(bet: SizedBet, result: str, fee_rate: float = DEFAULT_FEE_RATE) -> Trade:
     """Grade one `SizedBet` against the fixture result. `result` is the winning
     side ('home'/'away'/'draw', matching `bet.side`) — win when `result ==
-    bet.side`. Same settlement math as `reconcile.reconcile_position` (a
-    single-fill position, so its cost-weighted-average path collapses to the
-    plain formula): win -> (100-entry)*size - fee; loss -> -entry*size. CLV
-    is the fused fair (the closest thing to a pre-match "sharp close" this
-    per-fixture primitive has) vs the entry price."""
+    bet.side`. Settlement math is delegated to `reconcile.reconcile_position`
+    (the live settlement path) rather than reimplemented here: a `SizedBet` is
+    a single-fill position, so its cost-weighted-average path collapses to the
+    plain formula, and `bet.side` winning is exactly the position's YES side
+    winning. Kalshi charges the trading fee AT EXECUTION regardless of outcome,
+    so `reconcile_position` (and therefore this) charges it on wins AND losses:
+    win -> (100-entry)*size - fee; loss -> -entry*size - fee. CLV is the fused
+    fair (the closest thing to a pre-match "sharp close" this per-fixture
+    primitive has) vs the entry price — `reconcile_position`'s own CLV (which
+    grades vs a sharp/mid close, not the fused fair) is not used here."""
     won = (result == bet.side)
-    fee = fee_cents_for_order(bet.entry_cents, bet.size, fee_rate)
-    if won:
-        realized = (100 - bet.entry_cents) * bet.size - fee
-    else:
-        realized = -bet.entry_cents * bet.size
+    position = {
+        "market_ticker": bet.market_ticker,
+        "contracts": bet.size,
+        "avg_entry_cents": bet.entry_cents,
+    }
+    settled = reconcile_position(position, result=("yes" if won else "no"), fee_rate=fee_rate)
     clv = (bet.fused_fair * 100.0 - bet.entry_cents) / 100.0
     return Trade(
         side=bet.side,
@@ -267,11 +288,13 @@ def settle(bet: SizedBet, result: str, fee_rate: float = DEFAULT_FEE_RATE) -> Tr
         sharp_prob=bet.sharp_prob,
         fused_fair=bet.fused_fair,
         edge=bet.edge,
-        outcome="win" if won else "loss",
-        realized_pnl_cents=int(realized),
+        outcome=settled["outcome"],
+        realized_pnl_cents=int(settled["realized_pnl_cents"]),
         clv=round(clv, 4),
         market_type=bet.market_type,
         fixture_id=bet.fixture_id,
+        league=bet.league,
+        kickoff=bet.kickoff,
     )
 
 
