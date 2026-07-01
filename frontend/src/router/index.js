@@ -88,6 +88,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/kalshi/instances/:id/backtest',
+    name: 'kalshi-backtest',
+    component: () => import('../views/KalshiBacktestView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/strategies',
     name: 'strategies',
     component: () => import('../views/StrategiesView.vue'),
