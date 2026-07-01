@@ -24,9 +24,13 @@ from dataclasses import dataclass, field
 
 from kalshi import instance_config
 from kalshi.client import yes_ask_close_at
+from kalshi.data.sources.clubelo import elo_for
 from kalshi.devig import power_devig, shin_devig, proportional_devig
 from kalshi.fees import DEFAULT_FEE_RATE
 from kalshi.intelligence.fusion import fuse, renormalize_group
+from kalshi.intelligence.pricing import model_market_probs
+from kalshi.quant.elo import elo_to_expected_goals
+from kalshi.quant.national_elo import is_national_team, national_elo_from
 from kalshi.strategy.candidates import generate_candidates
 from kalshi.capital.planner import allocate
 from kalshi.reconcile import reconcile_position
@@ -473,3 +477,50 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None) -> Backt
     }
     return out
 
+
+# --------------------------------------------------------------------------
+# Task 9: build_model_fn() — production model_fn via the live pricing chain
+# --------------------------------------------------------------------------
+
+
+def build_model_fn(nat_elo_table: dict | None, elo_table: dict | None):
+    """Production `model_fn(fx) -> {home, draw, away}` for `run_backtest`,
+    reusing the SAME pricing chain the live engine (`engine.py`'s tick loop)
+    uses: `quant.elo.elo_to_expected_goals` -> `intelligence.pricing
+    .model_market_probs`'s `winner` group (itself `quant.dixon_coles
+    .scoreline_matrix` + `quant.derive_markets.one_x_two`).
+
+    Per-team Elo lookup mirrors `engine.py`'s `_team_elo` closure: a team
+    recognized as a national side (`quant.national_elo.is_national_team`) is
+    priced off `nat_elo_table` (`national_elo_from` — falls back to the
+    built-in static table, then `DEFAULT_NATIONAL_ELO`, when the team is
+    unlisted); anything else is priced off the club `elo_table`
+    (`data.sources.clubelo.elo_for` — falls back to its own 1500.0 default).
+
+    CAVEAT — look-ahead: `nat_elo_table`/`elo_table` are single point-in-time
+    snapshots the caller injects (e.g. today's live ClubElo/eloratings.net
+    fetch), not a historical Elo as of each fixture's kickoff. A backtest run
+    over past fixtures is therefore priced with CURRENT team strength, not the
+    strength at the time of that match — this makes `build_model_fn`'s model
+    signal indicative-only (a rough form check proxy) until per-date historical
+    Elo snapshots are wired into the data layer; the sharp (Pinnacle) line
+    devigged in `run_backtest` remains the properly-dated pre-match probability
+    when it is present.
+    """
+    nat_elo_table = nat_elo_table or {}
+    elo_table = elo_table or {}
+
+    def _team_elo(name: str) -> float:
+        if is_national_team(name):
+            return national_elo_from(nat_elo_table, name)
+        return elo_for(elo_table, name)
+
+    def model_fn(fx: dict) -> dict:
+        home = fx.get("home", "")
+        away = fx.get("away", "")
+        home_elo, away_elo = _team_elo(home), _team_elo(away)
+        expected_goals = elo_to_expected_goals(home_elo, away_elo)
+        probs = model_market_probs(expected_goals)
+        return probs.get("winner", {})
+
+    return model_fn
