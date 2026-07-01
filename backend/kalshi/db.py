@@ -46,6 +46,7 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("KalshiHistCandles", "id"),         # cached Kalshi candlesticks, id = market ticker
     ("KalshiHistOdds", "id"),            # cached OddsPapi historical odds, id = fixture_id
     ("KalshiHistFixtures", "fixture_key"),  # cached per-fixture final-score resolution
+    ("KalshiBtFixtureList", "id"),  # cached fixture-list query results (zero-cost re-runs)
 ]
 
 

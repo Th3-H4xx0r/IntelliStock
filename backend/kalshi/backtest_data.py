@@ -11,8 +11,9 @@ Design:
   OddsPapi-fixture-result fallback (used only when Kalshi has no ticker match or
   no client is configured). An unsettled cache row is retried on every call
   until it settles; a settled row is never re-fetched.
-- `candles`/`sharp_odds` are simple fetch-or-cache: a cache hit never touches
-  the network; a cache miss fetches once and stores the result.
+- `fixtures`/`candles`/`sharp_odds` are simple fetch-or-cache: a cache hit
+  never touches the network; a cache miss fetches once and stores the result.
+  `fixtures` keys its cache on the (leagues, start_date, end_date) query.
 - All OddsPapi calls (the metered ~250/mo free tier) are guarded by
   `ingest_odds.should_scan`; a budget-exhausted call returns cached-or-None and
   LOGS the skip — it is never silently dropped.
@@ -134,7 +135,16 @@ class BacktestDataProvider:
         dates, YYYY-MM-DD). Each dict carries the parsed OddsPapi fields
         (home/away/kickoff_ts/home_score/away_score/result/settled) plus
         fixture_id/sport/league — a superset of the plain Fixture DTO so
-        `final_score`'s fallback has the data it needs without a second call."""
+        `final_score`'s fallback has the data it needs without a second call.
+
+        The listing itself is cached per (leagues, start_date, end_date) query
+        — a backtest is over a past, immutable window, so re-running it never
+        re-hits OddsPapi for the fixture list."""
+        cache_key = "fixturelist|" + ",".join(sorted(leagues or [])) + "|" + start_date + "|" + end_date
+        cached = self._table_get("KalshiBtFixtureList", cache_key)
+        if cached is not None:
+            self.cache_hits += 1
+            return cached.get("fixtures", [])
         out: list[dict] = []
         if self.oddspapi_client is None:
             return out
@@ -165,6 +175,8 @@ class BacktestDataProvider:
                     "result": r.get("result"),
                     "settled": r.get("settled", False),
                 })
+        if out:
+            self._table_put("KalshiBtFixtureList", {"id": cache_key, "fixtures": out}, "id")
         return out
 
     # --- candles (Kalshi price history — immutable once traded) ---

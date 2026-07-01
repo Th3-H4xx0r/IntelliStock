@@ -31,16 +31,62 @@ class FakeKalshiClient:
 
 
 class FakeOddsPapiClient:
-    def __init__(self, hist_odds=None):
+    def __init__(self, hist_odds=None, fixture_rows=None):
         self.hist_odds = hist_odds if hist_odds is not None else []
         self.hist_calls = 0
+        self.fixture_rows = fixture_rows if fixture_rows is not None else []
+        self.list_fixtures_calls = 0
 
     def historical_odds(self, fixture_id, books=("pinnacle",)):
         self.hist_calls += 1
         return self.hist_odds
 
     def list_fixtures(self, sport_id, date_from, date_to):
-        return []
+        self.list_fixtures_calls += 1
+        return self.fixture_rows
+
+
+# --- fixtures(): listing is cached per (leagues, start_date, end_date) query ---
+
+def test_fixtures_cache_miss_calls_client_once_and_stores():
+    op = FakeOddsPapiClient(fixture_rows=[
+        {"fixture_id": "fx1", "home": "England", "away": "DR Congo", "kickoff_ts": 100,
+         "home_score": None, "away_score": None, "result": None, "settled": False},
+    ])
+    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 0)
+    rows = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
+    assert len(rows) == 1
+    assert rows[0]["fixture_id"] == "fx1"
+    assert op.list_fixtures_calls == 1
+    assert provider.api_calls == 1
+    assert provider.cache_hits == 0
+
+
+def test_fixtures_second_identical_call_is_a_cache_hit_no_client_call():
+    op = FakeOddsPapiClient(fixture_rows=[
+        {"fixture_id": "fx1", "home": "England", "away": "DR Congo", "kickoff_ts": 100,
+         "home_score": None, "away_score": None, "result": None, "settled": False},
+    ])
+    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 0)
+    rows1 = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
+    rows2 = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
+    assert rows1 == rows2
+    assert op.list_fixtures_calls == 1       # not called again
+    assert provider.api_calls == 1
+    assert provider.cache_hits == 1
+
+
+def test_fixtures_budget_exhausted_and_no_cache_returns_empty_and_logs(caplog):
+    op = FakeOddsPapiClient(fixture_rows=[
+        {"fixture_id": "fx1", "home": "England", "away": "DR Congo"},
+    ])
+    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 250)
+    with caplog.at_level("WARNING"):
+        rows = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
+    assert rows == []
+    assert op.list_fixtures_calls == 0
+    assert provider.api_calls == 0
+    assert any("budget" in r.message.lower() for r in caplog.records)
 
 
 # --- candles(): generic cache-miss / cache-hit pattern ---
