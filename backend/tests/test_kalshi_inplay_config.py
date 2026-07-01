@@ -15,10 +15,17 @@ def test_normalize_config_persists_live_monitoring_fields():
     assert c["stop_loss_frac"] == 0.6
 
 
-def test_normalize_config_defaults_live_monitoring_on():
+def test_normalize_config_defaults_live_monitoring_off():
+    # In-match trading defaults OFF: only the pregame strategy is backtest-validated,
+    # so in-play is opt-in. Explicitly enabling it still works (asserted below).
     c = normalize_config({"bankroll_dollars": 100}, live_enabled=False)
-    assert c["live_monitoring"] is True
+    assert c["live_monitoring"] is False
     assert c["live_poll_seconds"] == 30
+
+
+def test_normalize_config_live_monitoring_opt_in():
+    c = normalize_config({"bankroll_dollars": 100, "live_monitoring": True}, live_enabled=False)
+    assert c["live_monitoring"] is True
 
 
 def test_inplay_caps_from_config_maps_fields():
