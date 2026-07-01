@@ -67,6 +67,11 @@ class BacktestConfig:
     model: str = ""              # analyst LLM model id (Models table); "" = none
     analyst_max_calls: int = 10  # cap on LLM analyst calls (cost control)
     use_llm: bool = False        # whether the replay runs the LLM analyst
+    # Overconfidence brake: when there is NO sharp line, pull the model prob this
+    # far toward the de-vigged Kalshi market (0 = pure model, 1 = pure market).
+    # This is the "market anchor" — it stops the model betting its own biased,
+    # overconfident view of cheap home underdogs blind.
+    market_shrink: float = 0.5
 
 
 def config_from_body(body: dict) -> BacktestConfig:
@@ -116,6 +121,7 @@ def config_from_body(body: dict) -> BacktestConfig:
         model=str(body.get("model") or ""),
         analyst_max_calls=int(body.get("analyst_max_calls", 10) or 10),
         use_llm=bool(body.get("use_llm", False)),
+        market_shrink=min(1.0, max(0.0, float(body.get("market_shrink", 0.5)))),
     )
 
 
@@ -124,6 +130,24 @@ def config_from_body(body: dict) -> BacktestConfig:
 # --------------------------------------------------------------------------
 
 _TIER_FOR_MARKET_TYPES = "max"  # widest allowed-markets set; caps still gate volume/size
+
+
+def _market_probs_from_asks(kalshi_asks: dict, devig_method: str) -> dict:
+    """De-vig the 3-way Kalshi YES asks (cents) into a coherent {side: prob} that
+    sums to 1. The three YES asks sum to >1 (the vig); removing it yields the
+    market's implied probabilities. {} if the full 3-way isn't priced."""
+    sides = [s for s in ("home", "draw", "away") if s in kalshi_asks]
+    if len(sides) < 3:
+        return {}
+    raw = [float(kalshi_asks[s]) / 100.0 for s in sides]
+    if any(x <= 0 for x in raw):
+        return {}
+    fn = _DEVIG_FUNCS.get(devig_method, power_devig)
+    try:
+        p = fn(raw)
+    except Exception:
+        return {}
+    return {s: p[i] for i, s in enumerate(sides)}
 
 
 @dataclass(frozen=True)
@@ -190,6 +214,16 @@ def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
         base[side] = fuse(sharp=sharp_v, model=model_v,
                           llm_adjustment=float(llm_adjustments.get(side, 0.0) or 0.0),
                           w_sharp=cfg.sharp_weight, llm_cap=0.05)
+    # MARKET ANCHOR: with no sharp line, pull the (overconfident) model toward the
+    # de-vigged Kalshi market so edge = a SHRUNK model-vs-market disagreement, not
+    # the model's blind view. Needs the full 3-way ask book to de-vig coherently.
+    if not sharp_probs and cfg.market_shrink > 0.0 and len(kalshi_asks) >= 3:
+        market = _market_probs_from_asks(kalshi_asks, cfg.devig_method)
+        if market:
+            k = cfg.market_shrink
+            for side in base:
+                if side in market:
+                    base[side] = (1.0 - k) * base[side] + k * market[side]
     fused = {"winner": renormalize_group(base) if base else {}}
     sharp_by_type = {"winner": dict(sharp_probs)} if sharp_probs else {}
 
