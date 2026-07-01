@@ -19,9 +19,12 @@ documented divergence from the live path for this per-fixture primitive.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 
 from kalshi import instance_config
+from kalshi.client import yes_ask_close_at
+from kalshi.devig import power_devig, shin_devig, proportional_devig
 from kalshi.fees import DEFAULT_FEE_RATE
 from kalshi.intelligence.fusion import fuse, renormalize_group
 from kalshi.strategy.candidates import generate_candidates
@@ -29,7 +32,10 @@ from kalshi.capital.planner import allocate
 from kalshi.reconcile import reconcile_position
 from kalshi.risk import RiskCaps
 
+log = logging.getLogger(__name__)
+
 _DEVIG_METHODS = ("power", "shin", "proportional")
+_DEVIG_FUNCS = {"power": power_devig, "shin": shin_devig, "proportional": proportional_devig}
 
 
 # --------------------------------------------------------------------------
@@ -256,6 +262,10 @@ class BacktestResult:
     per_league: dict
     calibration: list
     trades: list
+    # Populated by run_backtest() with data-layer telemetry (api_calls/cache_hits
+    # from the BacktestDataProvider that fed it); aggregate() itself has no data
+    # provider to report on, so this defaults empty for direct aggregate() callers.
+    summary: dict = field(default_factory=dict)
 
 
 def settle(bet: SizedBet, result: str, fee_rate: float = DEFAULT_FEE_RATE) -> Trade:
@@ -362,3 +372,104 @@ def aggregate(trades: list[Trade], bankroll_cents: int) -> BacktestResult:
         calibration=calibration,
         trades=list(trades),
     )
+
+
+# --------------------------------------------------------------------------
+# Task 8: run_backtest() — orchestration over cached historical data
+# --------------------------------------------------------------------------
+
+
+def _sharp_probs_at(oddseries: list[dict], snap_ts: int, devig_method: str) -> dict:
+    """Devigged {home,draw,away} from the odds snapshot at/just-before
+    `snap_ts` (the latest snapshot with ts <= snap_ts; the earliest snapshot if
+    all of them are AFTER snap_ts — better than nothing pre-match; {} if there
+    are no snapshots at all). Same devig methods `evaluate`'s caller already
+    uses via `fair_value.fair_from_odds` (power/shin/proportional), applied
+    directly here since `fair_value.fair_from_odds` wants an `OddsQuote`, not a
+    raw historical-odds dict."""
+    if not oddseries:
+        return {}
+    before = [s for s in oddseries if int(s.get("ts", 0)) <= snap_ts]
+    snap = max(before, key=lambda s: int(s.get("ts", 0))) if before else min(
+        oddseries, key=lambda s: int(s.get("ts", 0)))
+    fn = _DEVIG_FUNCS.get(devig_method, power_devig)
+    raw = [1.0 / snap["home"], 1.0 / snap["draw"], 1.0 / snap["away"]]
+    p = fn(raw)
+    return {"home": p[0], "draw": p[1], "away": p[2]}
+
+
+def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None) -> BacktestResult:
+    """Replay `data`'s fixture history through `evaluate`/`settle`/`aggregate`,
+    in kickoff order, one decision snapshot per fixture.
+
+    For each fixture: `data.final_score(fx)` gates it in (None -> SKIP,
+    reason "unsettled"); `data.kalshi_tickers(fx)` resolves the Kalshi side
+    tickers (empty -> SKIP, reason "unmatched"). For each offset in
+    `cfg.decision_offsets_sec` (in order), `snap_ts = kickoff_ts + offset`;
+    `client.yes_ask_close_at` reads each side's Kalshi ask at-or-before
+    `snap_ts` from that side's candles, and `_sharp_probs_at` devigs the sharp
+    odds snapshot at-or-before `snap_ts`. The FIRST offset that produces at
+    least one Kalshi ask is used (one snapshot per fixture) — if none do,
+    SKIP with reason "no_candle_data". `model_fn(fx)` supplies model probs
+    (injected so tests don't need a live Elo table; `build_model_fn` wires the
+    production closure). `evaluate()` is called with the resolved tickers
+    threaded through `fixture["market_tickers"]` so it prices the REAL Kalshi
+    tickers instead of synthesizing placeholders; each returned `SizedBet` is
+    `settle()`d against the fixture result. `progress_cb(frac)` (if given) is
+    called once per fixture, reaching 1.0 on the last one (a no-op, frac=1.0,
+    single call when there are zero fixtures). Returns `aggregate()`'s result
+    with `data.api_calls`/`data.cache_hits` surfaced into `result.summary`.
+    """
+    fixtures = list(data.fixtures(cfg.leagues, cfg.start_date, cfg.end_date))
+    fixtures.sort(key=lambda fx: fx.get("kickoff_ts", fx.get("kickoff", 0)) or 0)
+
+    trades: list[Trade] = []
+    n = len(fixtures)
+    for i, fx in enumerate(fixtures):
+        fixture_id = fx.get("fixture_id", "")
+        result = data.final_score(fx)
+        if result is None:
+            log.info("run_backtest: skipping fixture_id=%s reason=unsettled", fixture_id)
+        else:
+            tickers = data.kalshi_tickers(fx)
+            if not tickers:
+                log.info("run_backtest: skipping fixture_id=%s reason=unmatched", fixture_id)
+            else:
+                kickoff_ts = int(fx.get("kickoff_ts", fx.get("kickoff", 0)) or 0)
+                candles_by_side = {side: data.candles(ticker) for side, ticker in tickers.items()}
+                oddseries = data.sharp_odds(fx)
+
+                kalshi_asks: dict = {}
+                sharp_probs: dict = {}
+                for offset in cfg.decision_offsets_sec:
+                    snap_ts = kickoff_ts + int(offset)
+                    asks = {}
+                    for side, candles in candles_by_side.items():
+                        ask = yes_ask_close_at(candles, snap_ts)
+                        if ask is not None:
+                            asks[side] = ask
+                    if asks:
+                        kalshi_asks = asks
+                        sharp_probs = _sharp_probs_at(oddseries, snap_ts, cfg.devig_method)
+                        break
+
+                if not kalshi_asks:
+                    log.info("run_backtest: skipping fixture_id=%s reason=no_candle_data", fixture_id)
+                else:
+                    model_probs = model_fn(fx) or {}
+                    fx_for_eval = dict(fx)
+                    fx_for_eval["market_tickers"] = tickers
+                    bets = evaluate(cfg, model_probs, sharp_probs, kalshi_asks, fx_for_eval)
+                    for bet in bets:
+                        trades.append(settle(bet, result, cfg.fee_rate))
+
+        if progress_cb is not None:
+            progress_cb((i + 1) / n if n else 1.0)
+
+    out = aggregate(trades, cfg.bankroll_cents)
+    out.summary = {
+        "api_calls": getattr(data, "api_calls", 0),
+        "cache_hits": getattr(data, "cache_hits", 0),
+    }
+    return out
+
