@@ -130,6 +130,8 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "devig_method": (str(raw.get("devig_method") or "power").lower()
                          if str(raw.get("devig_method") or "power").lower()
                          in ("power", "shin", "proportional") else "power"),
+        "market_shrink": min(1.0, max(0.0, float(raw.get("market_shrink", 0.4)))),
+        "one_bet_per_fixture": bool(raw.get("one_bet_per_fixture", True)),
         "odds_refresh_secs": max(300, int(raw.get("odds_refresh_secs", 3600))),
         "odds_regions": str(raw.get("odds_regions") or "eu,uk,us").strip() or "eu,uk,us",
         # Kalshi series tickers to scan ([] = engine uses DEFAULT_SOCCER_SERIES).
@@ -179,6 +181,7 @@ def risk_caps_from_config(config: dict) -> RiskCaps:
         maker_max_adverse_imbalance=float(c.get("maker_max_adverse_imbalance", -0.5)),
         cash_buffer_frac=float(c.get("cash_buffer_frac", 0.03)),
         max_concurrent_positions=int(c.get("max_concurrent_positions", 8)),
+        one_bet_per_fixture=bool(c.get("one_bet_per_fixture", True)),
     )
 
 

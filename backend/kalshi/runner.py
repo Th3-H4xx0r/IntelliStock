@@ -117,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
                           or __import__("os").environ.get("ODDS_API_KEY", "").strip()),
             sharp_weight=float(cfg.get("sharp_weight", 0.7)),
             devig_method=str(cfg.get("devig_method", "power")),
+            market_shrink=float(cfg.get("market_shrink", 0.4)),
             odds_refresh_secs=int(cfg.get("odds_refresh_secs", 3600)),
             odds_regions=str(cfg.get("odds_regions", "eu,uk,us")),
             soccer_series=list(cfg.get("soccer_series") or []),

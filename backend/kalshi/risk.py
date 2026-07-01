@@ -51,6 +51,7 @@ class RiskCaps:
     maker_max_adverse_imbalance: float = -0.5  # skip a maker buy when asks stack this heavily
     cash_buffer_frac: float = 0.03          # keep this fraction of cash unspent (pre-trade balance gate)
     max_concurrent_positions: int = 8       # cap on number of open positions at once (live path)
+    one_bet_per_fixture: bool = True        # never hold >1 side of the same match
 
 
 def size_order(*, edge: float, yes_ask_cents: float, caps: RiskCaps) -> int:
