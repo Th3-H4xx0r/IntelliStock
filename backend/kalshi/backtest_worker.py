@@ -61,7 +61,15 @@ def run_job(job, *, conn, provider, model_fn, store=_db, stop_check=None,
                 last[0] = frac
                 store.update_backtest_progress(conn, jid, progress=round(frac * 100, 2))
 
-        result = run_fn(cfg, provider, model_fn, progress_cb=progress_cb, analyst_fn=analyst_fn)
+        def partial_sink(logs, dlog, summ):
+            # Persist logs/decisions mid-run so the results screen streams them.
+            try:
+                store.save_backtest_result(conn, jid, {"logs": logs, "decision_log": dlog, "summary": summ})
+            except Exception:
+                pass
+
+        result = run_fn(cfg, provider, model_fn, progress_cb=progress_cb,
+                        analyst_fn=analyst_fn, partial_sink=partial_sink)
 
         store.save_backtest_result(conn, jid, result)
         summary = dict(getattr(result, "summary", {}) or {})
