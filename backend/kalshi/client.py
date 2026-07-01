@@ -61,13 +61,19 @@ def parse_candlesticks(payload: dict) -> list[dict]:
 
 
 def yes_ask_close_at(candles, ts) -> int | None:
-    """Last candle's yes_ask.close_dollars in cents at or before ts. None if absent/no book."""
+    """Last candle's yes_ask.close_dollars in cents at or before ts. None if absent/no book.
+
+    Robust to unsorted input: selects the candle with the max end_period_ts
+    that is <= ts, rather than assuming ascending order.
+    """
+    ts = int(ts)
     best = None
+    best_end = None
     for c in candles:
-        if int(c.get("end_period_ts", 0)) <= int(ts):
+        end = int(c.get("end_period_ts", 0))
+        if end <= ts and (best_end is None or end > best_end):
             best = c
-        else:
-            break
+            best_end = end
     cd = ((best or {}).get("yes_ask") or {}).get("close_dollars")
     if cd is None:
         return None
@@ -83,9 +89,12 @@ def result_side_from_markets(markets: list[dict], fixture_prefix: str) -> str | 
     Given markets list from /markets?series_ticker=...&status=settled, find the
     yes-resolved market and map its suffix to the fixture's home/away team codes.
     E.g., KXWCGAME-26JUN30MEXECU with MEX-result=yes -> 'home'; TIE-result=yes -> 'draw'.
-    """
-    import re
 
+    The settled market's own ticker already carries the full
+    "<fixture_prefix>-<suffix>" shape parse_market_ticker understands (it's the
+    same ticker format used for the human-readable UI labels), so we reuse it
+    instead of hand-rolling a second team-code splitter.
+    """
     # Find the yes-resolved market
     yes_market = None
     for m in markets:
@@ -96,46 +105,12 @@ def result_side_from_markets(markets: list[dict], fixture_prefix: str) -> str | 
     if not yes_market:
         return None
 
-    # Extract the suffix (last hyphen-separated segment)
     ticker = yes_market.get("ticker", "")
-    parts = ticker.split("-")
-    if len(parts) < 3:
-        return None
-    suffix = parts[-1].upper()
-
-    # TIE / DRAW -> draw
-    if suffix in ("TIE", "DRAW"):
-        return "draw"
-
-    # Extract team codes from fixture_prefix
-    # E.g., KXWCGAME-26JUN30MEXECU -> extract "MEXECU" (after date)
-    fixture_parts = fixture_prefix.split("-")
-    if len(fixture_parts) < 2:
+    if fixture_prefix and not ticker.startswith(str(fixture_prefix)):
         return None
 
-    fixture_blob = fixture_parts[-1]  # e.g., "26JUN30MEXECU"
-
-    # Use regex to find and skip the date (e.g., "26JUN30") then get teams
-    date_pattern = re.compile(r"^\d{2}[A-Z]{3}\d{2}", re.I)
-    match = date_pattern.match(fixture_blob)
-    if not match:
-        return None
-
-    teams = fixture_blob[match.end():].upper()  # e.g., "MEXECU"
-    if len(teams) < 6:
-        return None
-
-    # Split teams into home and away (first 3 chars each)
-    home_code = teams[:3]
-    away_code = teams[3:6]
-
-    # Map suffix to side
-    if suffix == home_code:
-        return "home"
-    elif suffix == away_code:
-        return "away"
-
-    return None
+    pick = parse_market_ticker(ticker).get("pick")
+    return pick if pick in ("home", "away", "draw") else None
 
 
 class KalshiHTTPError(RuntimeError):
@@ -338,9 +313,10 @@ class KalshiClient:
             "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/126",
             "Accept": "application/json"
         }
+        _MAX_PAGES = 50  # sane cap so a misbehaving/looping cursor can't hang forever
         out = []
         cursor = None
-        while True:
+        for _ in range(_MAX_PAGES):
             params = {
                 "series_ticker": str(series),
                 "status": "settled",

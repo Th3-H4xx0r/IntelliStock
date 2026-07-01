@@ -30,6 +30,15 @@ def test_yes_ask_close_at_handles_missing_book():
     assert yes_ask_close_at([{"end_period_ts": 1, "yes_ask": {}}], 5) is None
 
 
+def test_yes_ask_close_at_robust_to_unsorted_input():
+    """Candles out of order must still pick the max end_period_ts <= ts, not
+    whichever comes last in iteration order."""
+    unsorted_rows = list(reversed(parse_candlesticks(RAW)))  # [2000, 1000]
+    assert yes_ask_close_at(unsorted_rows, 1500) == 44
+    assert yes_ask_close_at(unsorted_rows, 2500) == 50
+    assert yes_ask_close_at(unsorted_rows, 500) is None
+
+
 def test_parse_candlesticks_empty_is_safe():
     assert parse_candlesticks({}) == []
 
