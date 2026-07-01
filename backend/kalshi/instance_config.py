@@ -34,7 +34,7 @@ _TIER_DEFAULTS = {
                "max_contracts_per_market": 75,  "inplay_exposure_frac": 0.15, "max_adds_per_match": 2,
                "order_size_min_cents": 500, "order_size_max_cents": 1000},
     "max":    {"edge_threshold": 0.025, "kelly_fraction": 0.25,  "per_bet_cap_frac": 0.10,
-               "max_open_exposure_frac": 0.40, "no_sharp_edge_threshold": 0.03,
+               "max_open_exposure_frac": 0.40, "no_sharp_edge_threshold": 0.05,
                "model_only_size_mult": 0.60, "max_concurrent_positions": 12,
                "max_contracts_per_market": 100, "inplay_exposure_frac": 0.20, "max_adds_per_match": 3,
                "order_size_min_cents": 800, "order_size_max_cents": 1500},
