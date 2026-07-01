@@ -41,13 +41,18 @@
 
 ## Phase A — Backend data layer
 
-### Task 1: Kalshi historical candlesticks client method
+### Task 1: Kalshi candlesticks client method (CONFIRMED live shape)
 **Files:**
-- Modify: `backend/kalshi/client.py` (add method to the client class)
+- Modify: `backend/kalshi/client.py` (module-level pure helpers + client method)
 - Test: `backend/tests/kalshi/test_client_candlesticks.py`
 
+**CONFIRMED via live probe (2026-07-01) — build to THIS, not the docs:**
+- Endpoint is PUBLIC (no auth). Host **`https://external-api.kalshi.com`** (NOT `api.elections.kalshi.com` — that 403s via CloudFront). Path `/trade-api/v2/series/{series}/markets/{ticker}/candlesticks`. Series = the ticker prefix before the first `-` (e.g. `KXWCGAME`). Requires a browser-ish `User-Agent` header. Query: `start_ts,end_ts` (unix s), `period_interval` ∈ {1,60,1440}.
+- WC2026 markets are AFTER the `/historical/cutoff` (2026-05-02), so they live on THIS regular endpoint, not `/historical/...`.
+- Real candle shape: `{end_period_ts:int, yes_ask:{open_dollars,high_dollars,low_dollars,close_dollars}, yes_bid:{...}, price:{close_dollars,...} or {} , volume_fp, open_interest_fp}`. Prices are **dollar strings** (`"0.8100"` = 81¢).
+
 **Interfaces:**
-- Produces: `KalshiClient.get_historical_candlesticks(ticker: str, start_ts: int, end_ts: int, period_interval: int = 60) -> list[dict]` returning a list of candlestick dicts each with keys `end_period_ts:int, yes_bid:dict, yes_ask:dict, price:dict, volume, open_interest`. Also a pure helper `parse_candlesticks(payload: dict) -> list[dict]` and `yes_ask_close_at(candles: list[dict], ts: int) -> int|None` (last candle with `end_period_ts <= ts`, returns `yes_ask['close']` in cents).
+- Produces: `parse_candlesticks(payload) -> list[dict]`; `yes_ask_close_at(candles, ts) -> int|None` (last candle with `end_period_ts <= ts`; returns `round(float(yes_ask.close_dollars)*100)` cents, None if absent/no book); `KalshiClient.get_candlesticks(ticker, start_ts, end_ts, period_interval=60) -> list[dict]` (public GET to external-api host with UA; derives series from ticker; returns `parse_candlesticks`).
 
 - [ ] **Step 1: Write failing test** for the pure helpers (no network):
 
@@ -56,55 +61,78 @@
 from kalshi.client import parse_candlesticks, yes_ask_close_at
 
 RAW = {"candlesticks": [
-    {"end_period_ts": 1000, "yes_bid": {"close": 40}, "yes_ask": {"close": 44}, "price": {"close": 42}, "volume": "5", "open_interest": "10"},
-    {"end_period_ts": 2000, "yes_bid": {"close": 46}, "yes_ask": {"close": 50}, "price": {"close": 48}, "volume": "3", "open_interest": "12"},
+    {"end_period_ts": 1000, "yes_bid": {"close_dollars": "0.40"}, "yes_ask": {"close_dollars": "0.44"}, "price": {}, "volume_fp": "5.00", "open_interest_fp": "10.00"},
+    {"end_period_ts": 2000, "yes_bid": {"close_dollars": "0.46"}, "yes_ask": {"close_dollars": "0.50"}, "price": {"close_dollars": "0.48"}, "volume_fp": "3.00", "open_interest_fp": "12.00"},
 ]}
 
 def test_parse_candlesticks_extracts_rows():
     rows = parse_candlesticks(RAW)
     assert len(rows) == 2 and rows[0]["end_period_ts"] == 1000
 
-def test_yes_ask_close_at_returns_last_on_or_before():
+def test_yes_ask_close_at_returns_cents_of_last_on_or_before():
     rows = parse_candlesticks(RAW)
-    assert yes_ask_close_at(rows, 1500) == 44   # last <= 1500 is the 1000 candle
+    assert yes_ask_close_at(rows, 1500) == 44   # 0.44 dollars -> 44c, last <= 1500
     assert yes_ask_close_at(rows, 2500) == 50
     assert yes_ask_close_at(rows, 500) is None   # nothing before
+
+def test_yes_ask_close_at_handles_missing_book():
+    assert yes_ask_close_at([{"end_period_ts": 1, "yes_ask": {}}], 5) is None
 
 def test_parse_candlesticks_empty_is_safe():
     assert parse_candlesticks({}) == []
 ```
 
 - [ ] **Step 2:** Run `pytest backend/tests/kalshi/test_client_candlesticks.py -v` → FAIL (import error).
-- [ ] **Step 3: Implement** pure helpers + the fetch method in `client.py`:
+- [ ] **Step 3: Implement** module-level helpers + the fetch method:
 
 ```python
 def parse_candlesticks(payload: dict) -> list[dict]:
     return list((payload or {}).get("candlesticks") or [])
 
-def yes_ask_close_at(candles: list[dict], ts: int):
+def yes_ask_close_at(candles, ts):
     best = None
     for c in candles:
-        if int(c.get("end_period_ts", 0)) <= ts:
+        if int(c.get("end_period_ts", 0)) <= int(ts):
             best = c
         else:
             break
-    if best is None:
+    cd = ((best or {}).get("yes_ask") or {}).get("close_dollars")
+    if cd is None:
         return None
-    return int((best.get("yes_ask") or {}).get("close")) if (best.get("yes_ask") or {}).get("close") is not None else None
+    try:
+        return int(round(float(cd) * 100))
+    except (TypeError, ValueError):
+        return None
 ```
-Add to the client class (mirror existing request style in `client.py`; historical endpoint is unauthenticated — plain GET):
+Client method (public endpoint — plain GET to external-api host, browser UA, no signing):
 ```python
-def get_historical_candlesticks(self, ticker, start_ts, end_ts, period_interval=60):
-    url = f"{self.base_url}/historical/markets/{ticker}/candlesticks"
+CANDLE_HOST = "https://external-api.kalshi.com/trade-api/v2"
+_CANDLE_UA = {"User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/126", "Accept": "application/json"}
+
+def get_candlesticks(self, ticker, start_ts, end_ts, period_interval=60):
+    series = str(ticker).split("-", 1)[0]
+    url = f"{CANDLE_HOST}/series/{series}/markets/{ticker}/candlesticks"
     params = {"start_ts": int(start_ts), "end_ts": int(end_ts), "period_interval": int(period_interval)}
-    resp = self._session.get(url, params=params, timeout=20)
+    resp = self._session.request("GET", url, headers=_CANDLE_UA, params=params, timeout=20)
     resp.raise_for_status()
-    return parse_candlesticks(resp.json() if resp.content else {})
+    return parse_candlesticks(resp.json() if getattr(resp, "content", None) else {})
 ```
-(Confirm `self.base_url`/`self._session` names against the existing client; adapt.)
 
 - [ ] **Step 4:** Run tests → PASS.
-- [ ] **Step 5: Commit** `feat(kalshi): historical candlesticks client method + pure price helpers`.
+- [ ] **Step 5: Commit** `feat(kalshi): public candlesticks client method + dollar-string price helpers`.
+
+### Task 1b: Kalshi settled-markets results (free score source)
+**Files:**
+- Modify: `backend/kalshi/client.py`
+- Test: `backend/tests/kalshi/test_client_settled.py`
+
+**CONFIRMED:** `GET https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXWCGAME&status=settled&limit=..` is PUBLIC and returns `{markets:[{ticker, result:"yes"|"no", close_time, ...}]}`. Each side-ticker's `result` gives the outcome — a FREE final-score source (no OddsPapi needed).
+
+**Interfaces:**
+- Produces: `KalshiClient.list_settled_markets(series, limit=1000) -> list[dict]` (public GET, paginates via `cursor`); pure `result_side_from_markets(markets, fixture_prefix) -> "home"|"draw"|"away"|None` mapping the yes-resolved side ticker (…-TIE→draw, else the team-code side) to home/away using the fixture's ordered team codes.
+- [ ] **Step 1: Write failing test** for `result_side_from_markets`: given markets for `KXWCGAME-26JUN30MEXECU-*` where `-MEX` result yes and `-TIE`/`-ECU` result no, and fixture home=MEX away=ECU → returns "home"; if `-TIE` yes → "draw"; missing → None.
+- [ ] **Step 2-4:** FAIL → implement (reuse `data/ticker_names.py` to map side codes) → PASS.
+- [ ] **Step 5: Commit** `feat(kalshi): public settled-markets list + result resolver (free scores)`.
 
 ### Task 2: OddsPapi fixtures + historical-odds methods
 **Files:**
@@ -129,7 +157,7 @@ def get_historical_candlesticks(self, ticker, start_ts, end_ts, period_interval=
 **Interfaces:**
 - Produces: `class BacktestDataProvider` with:
   - `fixtures(leagues, start_date, end_date) -> list[Fixture]`
-  - `final_score(fx) -> str|None` (`home|draw|away`, None if unsettled)
+  - `final_score(fx) -> str|None` (`home|draw|away`, None if unsettled) — **PRIMARY source: Kalshi settled markets (Task 1b), free/public; OddsPapi fixture result only as fallback.** OddsPapi is used only for the sharp odds line.
   - `candles(ticker) -> list[dict]`
   - `sharp_odds(fx) -> list[dict]`  (snapshots)
   - `kalshi_tickers(fx) -> dict[str,str]` (side→ticker)
