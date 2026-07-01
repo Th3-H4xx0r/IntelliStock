@@ -171,6 +171,31 @@ class KalshiRepository {
 
   Future<void> deleteInstance(String id) =>
       _client.delete('/instances/$id', query: {'force': true});
+
+  // --- backtests ---
+  Future<String> createBacktest(String bid, Map<String, dynamic> body) async {
+    final d = await _client.post<Map<String, dynamic>>(
+        '/brokerages/$bid/kalshi/backtests', body: body);
+    return (d['id'] ?? '').toString();
+  }
+
+  Future<List<Map<String, dynamic>>> listBacktests(String bid) async {
+    final d = await _client.get<Map<String, dynamic>>('/brokerages/$bid/kalshi/backtests');
+    final list = (d['backtests'] ?? []) as List? ?? [];
+    return list.whereType<Map<String, dynamic>>().toList();
+  }
+
+  Future<Map<String, dynamic>> backtestStatus(String id) =>
+      _client.get<Map<String, dynamic>>('/kalshi/backtests/$id/status');
+
+  Future<Map<String, dynamic>> backtestResults(String id) =>
+      _client.get<Map<String, dynamic>>('/kalshi/backtests/$id/results');
+
+  Future<void> stopBacktest(String id) =>
+      _client.post('/kalshi/backtests/$id/stop');
+
+  Future<void> deleteBacktest(String id) =>
+      _client.delete('/kalshi/backtests/$id');
 }
 
 final kalshiRepositoryProvider = Provider<KalshiRepository>(
