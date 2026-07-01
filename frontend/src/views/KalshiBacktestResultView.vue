@@ -98,6 +98,10 @@ function pickLabel(t) {
 function fmtPct(v) { return v == null ? '—' : `${(v * 100).toFixed(1)}%` }
 function fmtMoney(c) { return c == null ? '—' : `$${(c / 100).toFixed(2)}` }
 const s = computed(() => (status.value && status.value.summary) || {})
+const confColor = computed(() => {
+  const p = s.value.profit_confidence ?? 0
+  return p >= 0.9 ? 'text-emerald-400' : p >= 0.75 ? 'text-amber-400' : 'text-rose-400'
+})
 function statusColor(st) { return st === 'finished' ? 'text-emerald-400' : st === 'error' ? 'text-rose-400' : st === 'stopped' ? 'text-slate-400' : 'text-amber-400' }
 
 onMounted(async () => {
@@ -146,6 +150,12 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); if (clockTimer)
         <span>Unsettled: <span class="text-slate-300">{{ s.unsettled ?? 0 }}</span></span>
         <span>Unmatched: <span class="text-amber-400">{{ s.unmatched ?? 0 }}</span></span>
         <span>No-price: <span class="text-slate-300">{{ s.no_candle_data ?? 0 }}</span></span>
+      </div>
+      <div v-if="s.profit_confidence != null" class="mt-2 pt-2 border-t border-border-subtle/50 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span class="text-slate-500">Trust:</span>
+        <span :class="confColor">Profit confidence {{ (s.profit_confidence * 100).toFixed(0) }}%</span>
+        <span class="text-slate-500">90% P&L range {{ fmtMoney(s.pnl_ci_low_cents) }} → {{ fmtMoney(s.pnl_ci_high_cents) }}</span>
+        <span v-if="s.pnl_ci_low_cents < 0" class="text-amber-400/80">— spans a loss, so this edge is not statistically proven</span>
       </div>
     </section>
 
