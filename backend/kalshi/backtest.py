@@ -64,6 +64,9 @@ class BacktestConfig:
     devig_method: str
     decision_offsets_sec: tuple = (-3 * 3600,)
     fee_rate: float = DEFAULT_FEE_RATE
+    model: str = ""              # analyst LLM model id (Models table); "" = none
+    analyst_max_calls: int = 10  # cap on LLM analyst calls (cost control)
+    use_llm: bool = False        # whether the replay runs the LLM analyst
 
 
 def config_from_body(body: dict) -> BacktestConfig:
@@ -110,6 +113,9 @@ def config_from_body(body: dict) -> BacktestConfig:
         devig_method=devig_method,
         decision_offsets_sec=decision_offsets_sec,
         fee_rate=float(body.get("fee_rate", DEFAULT_FEE_RATE)),
+        model=str(body.get("model") or ""),
+        analyst_max_calls=int(body.get("analyst_max_calls", 10) or 10),
+        use_llm=bool(body.get("use_llm", False)),
     )
 
 
@@ -137,7 +143,7 @@ class SizedBet:
 
 
 def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
-             kalshi_asks: dict, fixture: dict) -> list["SizedBet"]:
+             kalshi_asks: dict, fixture: dict, llm_adjustments: dict = None) -> list["SizedBet"]:
     """Replicate the live pre-match decision path for ONE fixture:
     fuse model+sharp probs -> generate edge-gated candidates -> size via the
     quarter-Kelly/order-size-range planner. `model_probs`/`sharp_probs` are
@@ -171,12 +177,15 @@ def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
     sharp_probs = sharp_probs or {}
     model_probs = model_probs or {}
     kalshi_asks = kalshi_asks or {}
+    llm_adjustments = llm_adjustments or {}
 
     base = {}
     for side in set(model_probs) | set(sharp_probs):
         sharp_v = sharp_probs.get(side)
         model_v = model_probs.get(side, sharp_v if sharp_v is not None else 0.0)
-        base[side] = fuse(sharp=sharp_v, model=model_v, llm_adjustment=0.0, w_sharp=cfg.sharp_weight, llm_cap=0.05)
+        base[side] = fuse(sharp=sharp_v, model=model_v,
+                          llm_adjustment=float(llm_adjustments.get(side, 0.0) or 0.0),
+                          w_sharp=cfg.sharp_weight, llm_cap=0.05)
     fused = {"winner": renormalize_group(base) if base else {}}
     sharp_by_type = {"winner": dict(sharp_probs)} if sharp_probs else {}
 
@@ -408,7 +417,7 @@ def _sharp_probs_at(oddseries: list[dict], snap_ts: int, devig_method: str) -> d
     return {"home": p[0], "draw": p[1], "away": p[2]}
 
 
-def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None) -> BacktestResult:
+def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_fn=None) -> BacktestResult:
     """Replay `data`'s fixture history through `evaluate`/`settle`/`aggregate`,
     in kickoff order, one decision snapshot per fixture.
 
@@ -479,9 +488,15 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None) -> Backt
                     log.info("run_backtest: skipping fixture_id=%s reason=no_candle_data", fixture_id)
                 else:
                     model_probs = model_fn(fx) or {}
+                    llm_adj = {}
+                    if analyst_fn is not None:
+                        try:
+                            llm_adj = analyst_fn(fx, model_probs, sharp_probs) or {}
+                        except Exception:
+                            llm_adj = {}   # analyst failure -> no-op (statistical model only)
                     fx_for_eval = dict(fx)
                     fx_for_eval["market_tickers"] = tickers
-                    bets = evaluate(cfg, model_probs, sharp_probs, kalshi_asks, fx_for_eval)
+                    bets = evaluate(cfg, model_probs, sharp_probs, kalshi_asks, fx_for_eval, llm_adj)
                     for bet in bets:
                         trades.append(settle(bet, result, cfg.fee_rate))
 

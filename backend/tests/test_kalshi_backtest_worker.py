@@ -36,7 +36,7 @@ def test_run_job_finished_saves_result_and_summary():
     store = FakeStore()
     job = {"id": "b1", "config": {"leagues": ["World Cup"], "bankroll_cents": 5400}}
 
-    def fake_run(cfg, provider, model_fn, progress_cb=None):
+    def fake_run(cfg, provider, model_fn, progress_cb=None, analyst_fn=None):
         progress_cb(0.5); progress_cb(1.0)
         return _result()
 
@@ -54,7 +54,7 @@ def test_run_job_stopped_when_run_flag_cleared():
     store = FakeStore(run_flag=False)   # stop_check() -> True on first progress
     job = {"id": "b2", "config": {}}
 
-    def fake_run(cfg, provider, model_fn, progress_cb=None):
+    def fake_run(cfg, provider, model_fn, progress_cb=None, analyst_fn=None):
         progress_cb(0.1)   # should raise _Stopped inside
         return _result()   # never reached
 
@@ -69,7 +69,7 @@ def test_run_job_error_records_message():
     store = FakeStore()
     job = {"id": "b3", "config": {}}
 
-    def fake_run(cfg, provider, model_fn, progress_cb=None):
+    def fake_run(cfg, provider, model_fn, progress_cb=None, analyst_fn=None):
         raise ValueError("boom")
 
     status = run_job(job, conn=None, provider=object(), model_fn=object(),

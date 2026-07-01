@@ -31,7 +31,7 @@ class _Stopped(Exception):
 
 
 def run_job(job, *, conn, provider, model_fn, store=_db, stop_check=None,
-            run_fn=_run_backtest) -> str:
+            run_fn=_run_backtest, analyst_fn=None) -> str:
     """Run one backtest job to completion, writing status/progress/result via
     `store`. Returns the terminal status ('finished' | 'stopped' | 'error').
 
@@ -61,7 +61,7 @@ def run_job(job, *, conn, provider, model_fn, store=_db, stop_check=None,
                 last[0] = frac
                 store.update_backtest_progress(conn, jid, progress=round(frac * 100, 2))
 
-        result = run_fn(cfg, provider, model_fn, progress_cb=progress_cb)
+        result = run_fn(cfg, provider, model_fn, progress_cb=progress_cb, analyst_fn=analyst_fn)
 
         store.save_backtest_result(conn, jid, result)
         summary = dict(getattr(result, "summary", {}) or {})
@@ -135,12 +135,50 @@ def _build_job_context(job, conn):  # pragma: no cover - integration
     except Exception:
         elo = {}
     model_fn = build_model_fn(nat_elo, elo)
-    return provider, model_fn
+    analyst_fn = _build_analyst_fn(cfg, conn)
+    return provider, model_fn, analyst_fn
+
+
+def _build_analyst_fn(cfg, conn):  # pragma: no cover - integration
+    """Build the LLM analyst closure for a backtest, or None. Uses the configured
+    Models-table model; news is intentionally empty (a past fixture has no
+    time-faithful news feed), so the analyst adjusts on the feature bundle only.
+    Any failure degrades to None -> the replay runs on the statistical model."""
+    if not cfg.get("use_llm") or not cfg.get("model"):
+        return None
+    try:
+        model_doc = _db._r.db(_db.DB_NAME).table("Models").get(cfg["model"]).run(conn)
+    except Exception:
+        model_doc = None
+    if not model_doc:
+        return None
+    try:
+        from kalshi.intelligence.analyst_panel import analyze, make_llm_call
+    except Exception:
+        return None
+    llm_call = make_llm_call(model_doc)
+    if llm_call is None:
+        return None
+
+    def analyst_fn(fx, model_probs, sharp_probs):
+        markets = list((model_probs or {}).keys()) or ["home", "draw", "away"]
+        features = {
+            "home": fx.get("home"), "away": fx.get("away"),
+            "league": fx.get("league"), "model_probs": model_probs,
+            "home_elo": fx.get("home_elo"), "away_elo": fx.get("away_elo"),
+            "home_xg": fx.get("home_xg"), "away_xg": fx.get("away_xg"),
+        }
+        try:
+            return analyze(features, markets, news="", llm_call=llm_call).get("adjustments", {})
+        except Exception:
+            return {}
+
+    return analyst_fn
 
 
 def _run_job_production(job, conn):  # pragma: no cover - integration
-    provider, model_fn = _build_job_context(job, conn)
-    return run_job(job, conn=conn, provider=provider, model_fn=model_fn)
+    provider, model_fn, analyst_fn = _build_job_context(job, conn)
+    return run_job(job, conn=conn, provider=provider, model_fn=model_fn, analyst_fn=analyst_fn)
 
 
 def start_worker(conn_factory, *, max_workers: int = 2):  # pragma: no cover - integration
