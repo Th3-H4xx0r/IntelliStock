@@ -656,6 +656,17 @@ class CreateBacktestBody(BaseModel):
     initial_cash: Optional[float] = 100000.0
 
 
+class KalshiBacktestBody(BaseModel):
+    name: str = ""
+    instance_id: Optional[str] = None
+    leagues: List[str] = Field(default_factory=list)
+    start_date: str = Field(..., min_length=1)
+    end_date: str = Field(..., min_length=1)
+    bankroll_cents: int = 0
+    bankroll_dollars: Optional[float] = None
+    config: dict = Field(default_factory=dict)
+
+
 class AgentControlBody(BaseModel):
     running: Optional[bool] = None
     paused: Optional[bool] = None
@@ -4303,6 +4314,117 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
         {"name": body.name.strip(), "kalshi_config": config}
     ).run(conn)
     return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config}
+
+
+# --- Kalshi backtests -----------------------------------------------------
+
+@app.post("/brokerages/{brokerage_id}/kalshi/backtests", response_class=JSONResponse)
+def api_kalshi_create_backtest(brokerage_id: str, body: KalshiBacktestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Enqueue a Kalshi soccer backtest over the chosen leagues/date range with
+    the given tuning config. A background worker picks up the pending row."""
+    _kalshi_brokerage_row(conn, brokerage_id)
+    import uuid as _uuid, datetime as _dt
+    from kalshi import db as kdb
+    try:
+        kdb.ensure_tables(conn)
+    except Exception:
+        pass
+    # Merge the tuning knobs with leagues/date-range/bankroll into one config the
+    # replay reads via kalshi.backtest.config_from_body.
+    cfg = dict(body.config or {})
+    cfg["leagues"] = list(body.leagues or [])
+    cfg["start_date"] = body.start_date
+    cfg["end_date"] = body.end_date
+    if body.bankroll_cents:
+        cfg["bankroll_cents"] = int(body.bankroll_cents)
+    if body.bankroll_dollars is not None:
+        cfg["bankroll_dollars"] = float(body.bankroll_dollars)
+    # Inherit odds keys (sharp line) from the linked instance's config if given.
+    if body.instance_id:
+        try:
+            inst = _kalshi_instance_row(conn, body.instance_id)
+            icfg = inst.get("kalshi_config") or {}
+            for k in ("oddspapi_api_key", "odds_api_key"):
+                if not cfg.get(k) and icfg.get(k):
+                    cfg[k] = icfg.get(k)
+        except Exception:
+            pass
+    jid = str(_uuid.uuid4())
+    doc = kdb.backtest_job_doc(
+        id=jid, brokerage_id=brokerage_id, instance_id=body.instance_id,
+        name=(body.name or "").strip(), config=cfg, leagues=list(body.leagues or []),
+        start_date=body.start_date, end_date=body.end_date,
+        bankroll_cents=int(cfg.get("bankroll_cents", 0) or 0),
+        created_at=_dt.datetime.utcnow().isoformat() + "Z",
+    )
+    kdb.create_backtest_job(conn, doc)
+    return {"ok": True, "id": jid}
+
+
+@app.get("/brokerages/{brokerage_id}/kalshi/backtests", response_class=JSONResponse)
+def api_kalshi_list_backtests(brokerage_id: str, limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    _kalshi_brokerage_row(conn, brokerage_id)
+    from kalshi import db as kdb
+    return {"backtests": kdb.list_backtests(conn, brokerage_id, limit=max(1, min(int(limit or 100), 500)))}
+
+
+@app.get("/kalshi/backtests/{backtest_id}/status", response_class=JSONResponse)
+def api_kalshi_backtest_status(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi import db as kdb
+    row = kdb.get_backtest(conn, backtest_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="backtest not found")
+    return {
+        "id": backtest_id, "name": row.get("name"), "status": row.get("status"),
+        "progress": row.get("progress"), "summary": row.get("summary") or {},
+        "error": row.get("error"), "leagues": row.get("leagues"),
+        "start_date": row.get("start_date"), "end_date": row.get("end_date"),
+        "created_at": row.get("created_at"),
+    }
+
+
+@app.get("/kalshi/backtests/{backtest_id}/results", response_class=JSONResponse)
+def api_kalshi_backtest_results(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi import db as kdb
+    row = kdb.get_backtest(conn, backtest_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="backtest not found")
+    return {"status": row.get("status"), "summary": row.get("summary") or {},
+            "result": kdb.get_backtest_result(conn, backtest_id)}
+
+
+@app.post("/kalshi/backtests/{backtest_id}/stop", response_class=JSONResponse)
+def api_kalshi_backtest_stop(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi import db as kdb
+    if not kdb.get_backtest(conn, backtest_id):
+        raise HTTPException(status_code=404, detail="backtest not found")
+    kdb.set_backtest_run(conn, backtest_id, False)
+    return {"ok": True, "id": backtest_id}
+
+
+@app.delete("/kalshi/backtests/{backtest_id}", response_class=JSONResponse)
+def api_kalshi_backtest_delete(backtest_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    from kalshi import db as kdb
+    kdb.delete_backtest(conn, backtest_id)
+    return {"ok": True, "id": backtest_id}
+
+
+@app.on_event("startup")
+def _startup_kalshi_backtest_worker():
+    """Start the in-process Kalshi backtest worker (drains pending rows + watches
+    the changefeed). Never blocks API startup."""
+    import logging as _logging
+    _wlog = _logging.getLogger("uvicorn.error")
+    try:
+        from kalshi.backtest_worker import start_worker
+        from interactive_utils import r as _r_iu, RETHINKDB_HOST as _H, RETHINKDB_PORT as _P
+
+        def _cf():
+            return _r_iu.connect(host=_H, port=_P, timeout=10)
+
+        start_worker(_cf)
+    except Exception:
+        _wlog.exception("kalshi backtest worker failed to start")
 
 
 def _kalshi_instance_row(conn, instance_id: str) -> dict:
