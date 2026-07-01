@@ -178,6 +178,14 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
           Expanded(child: Text('${t['market_ticker']}', style: const TextStyle(color: AppColors.textMd, fontSize: 12), overflow: TextOverflow.ellipsis)),
           Text(_money(pnl), style: TextStyle(color: (pnl ?? 0) >= 0 ? AppColors.success : AppColors.danger, fontSize: 13, fontWeight: FontWeight.w600)),
         ]),
+        if ((t['home'] ?? '').toString().isNotEmpty)
+          Padding(padding: const EdgeInsets.only(top: 2), child: Row(children: [
+            _flagImg(t['home_flag']),
+            const SizedBox(width: 4),
+            Flexible(child: Text('${t['home']} vs ${t['away']}', style: const TextStyle(color: AppColors.textMd, fontSize: 11), overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 4),
+            _flagImg(t['away_flag']),
+          ])),
         Text('${t['league'] ?? ''} · side ${t['side']} · entry ${t['entry_cents']}¢ × ${t['size']}', style: const TextStyle(color: AppColors.textMuted, fontSize: 11)),
         const SizedBox(height: 6),
         Wrap(spacing: 6, runSpacing: 4, children: [
@@ -202,6 +210,13 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
         Expanded(child: Text(d['reason']?.toString() ?? '', style: const TextStyle(color: AppColors.textDim, fontSize: 11), textAlign: TextAlign.right, overflow: TextOverflow.ellipsis)),
       ]),
     );
+  }
+
+  Widget _flagImg(dynamic url) {
+    final u = (url ?? '').toString();
+    if (u.isEmpty) return const SizedBox.shrink();
+    return Image.network(u, width: 18, height: 12, fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => const SizedBox.shrink());
   }
 
   Widget _badge(String text, Color color) => Container(

@@ -140,6 +140,10 @@ class SizedBet:
     fixture_id: str = ""
     league: str = ""
     kickoff: str | int = ""
+    home: str = ""
+    away: str = ""
+    home_flag: str = ""
+    away_flag: str = ""
 
 
 def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
@@ -242,6 +246,10 @@ def evaluate(cfg: BacktestConfig, model_probs: dict, sharp_probs: dict,
             fixture_id=fixture_id,
             league=league,
             kickoff=kickoff,
+            home=fixture.get("home", ""),
+            away=fixture.get("away", ""),
+            home_flag=fixture.get("home_flag", ""),
+            away_flag=fixture.get("away_flag", ""),
         ))
     return out
 
@@ -268,6 +276,10 @@ class Trade:
     fixture_id: str = ""
     league: str = ""
     kickoff: str | int = ""
+    home: str = ""
+    away: str = ""
+    home_flag: str = ""
+    away_flag: str = ""
 
 
 @dataclass
@@ -324,6 +336,10 @@ def settle(bet: SizedBet, result: str, fee_rate: float = DEFAULT_FEE_RATE) -> Tr
         fixture_id=bet.fixture_id,
         league=bet.league,
         kickoff=bet.kickoff,
+        home=bet.home,
+        away=bet.away,
+        home_flag=bet.home_flag,
+        away_flag=bet.away_flag,
     )
 
 
@@ -400,17 +416,16 @@ def aggregate(trades: list[Trade], bankroll_cents: int) -> BacktestResult:
 
 def _sharp_probs_at(oddseries: list[dict], snap_ts: int, devig_method: str) -> dict:
     """Devigged {home,draw,away} from the odds snapshot at/just-before
-    `snap_ts` (the latest snapshot with ts <= snap_ts; the earliest snapshot if
-    all of them are AFTER snap_ts — better than nothing pre-match; {} if there
-    are no snapshots at all). Same devig methods `evaluate`'s caller already
-    uses via `fair_value.fair_from_odds` (power/shin/proportional), applied
-    directly here since `fair_value.fair_from_odds` wants an `OddsQuote`, not a
-    raw historical-odds dict."""
+    `snap_ts` — the LATEST snapshot with ts <= snap_ts. NO LOOK-AHEAD: if every
+    snapshot is AFTER the decision time, returns {} (trade model-only) rather
+    than borrowing a post-decision line. Same devig methods `evaluate`'s caller
+    uses (power/shin/proportional)."""
     if not oddseries:
         return {}
     before = [s for s in oddseries if int(s.get("ts", 0)) <= snap_ts]
-    snap = max(before, key=lambda s: int(s.get("ts", 0))) if before else min(
-        oddseries, key=lambda s: int(s.get("ts", 0)))
+    if not before:
+        return {}   # no pre-decision sharp line -> model-only (never look ahead)
+    snap = max(before, key=lambda s: int(s.get("ts", 0)))
     fn = _DEVIG_FUNCS.get(devig_method, power_devig)
     raw = [1.0 / snap["home"], 1.0 / snap["draw"], 1.0 / snap["away"]]
     p = fn(raw)
@@ -450,6 +465,9 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_
     fixtures.sort(key=lambda fx: fx.get("kickoff_ts", fx.get("kickoff", 0)) or 0)
     _log(f"discovered {len(fixtures)} fixture(s) for leagues={cfg.leagues} "
          f"{cfg.start_date}..{cfg.end_date}")
+    _log("no look-ahead: decisions use only the Kalshi price + sharp odds at/"
+         "before kickoff-3h; the result is used only to settle; the model uses "
+         "as-of-date/frozen Elo (never post-match ratings); LLM sees no news.")
     if not fixtures:
         _log("no fixtures found — check the OddsPapi key/coverage for these "
              "leagues+dates, or that markets exist on Kalshi for this range.")

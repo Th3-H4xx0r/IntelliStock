@@ -48,45 +48,48 @@ class FakeOddsPapiClient:
 
 # --- fixtures(): listing is cached per (leagues, start_date, end_date) query ---
 
-def test_fixtures_cache_miss_calls_client_once_and_stores():
-    op = FakeOddsPapiClient(fixture_rows=[
-        {"fixture_id": "fx1", "home": "England", "away": "DR Congo", "kickoff_ts": 100,
-         "home_score": None, "away_score": None, "result": None, "settled": False},
-    ])
-    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 0)
+_SETTLED_ENGFRA = [
+    {"ticker": "KXWCGAME-26JUN15ENGFRA-ENG", "result": "yes", "close_time": "2026-06-15T20:00:00Z"},
+    {"ticker": "KXWCGAME-26JUN15ENGFRA-FRA", "result": "no", "close_time": "2026-06-15T20:00:00Z"},
+    {"ticker": "KXWCGAME-26JUN15ENGFRA-TIE", "result": "no", "close_time": "2026-06-15T20:00:00Z"},
+]
+
+
+def test_fixtures_from_kalshi_settled_markets_once_and_stores():
+    kc = FakeKalshiClient(settled_markets=list(_SETTLED_ENGFRA))
+    provider = BacktestDataProvider(kalshi_client=kc, tables={})
     rows = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
     assert len(rows) == 1
-    assert rows[0]["fixture_id"] == "fx1"
-    assert op.list_fixtures_calls == 1
+    assert rows[0]["fixture_id"] == "KXWCGAME-26JUN15ENGFRA"
+    assert rows[0]["result"] == "home"                       # ENG (home) resolved yes
+    assert set(rows[0]["market_tickers"]) == {"home", "away", "draw"}
+    assert rows[0]["home_flag"]                              # flag URL derived, not hardcoded
+    assert kc.settled_calls == 1
     assert provider.api_calls == 1
     assert provider.cache_hits == 0
 
 
 def test_fixtures_second_identical_call_is_a_cache_hit_no_client_call():
-    op = FakeOddsPapiClient(fixture_rows=[
-        {"fixture_id": "fx1", "home": "England", "away": "DR Congo", "kickoff_ts": 100,
-         "home_score": None, "away_score": None, "result": None, "settled": False},
-    ])
-    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 0)
+    kc = FakeKalshiClient(settled_markets=list(_SETTLED_ENGFRA))
+    provider = BacktestDataProvider(kalshi_client=kc, tables={})
     rows1 = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
     rows2 = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
     assert rows1 == rows2
-    assert op.list_fixtures_calls == 1       # not called again
+    assert kc.settled_calls == 1       # not called again
     assert provider.api_calls == 1
     assert provider.cache_hits == 1
 
 
-def test_fixtures_budget_exhausted_and_no_cache_returns_empty_and_logs(caplog):
-    op = FakeOddsPapiClient(fixture_rows=[
-        {"fixture_id": "fx1", "home": "England", "away": "DR Congo"},
-    ])
-    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 250)
-    with caplog.at_level("WARNING"):
-        rows = provider.fixtures(["world cup"], "2026-06-01", "2026-06-30")
+def test_fixtures_no_kalshi_client_returns_empty():
+    provider = BacktestDataProvider(kalshi_client=None, tables={})
+    assert provider.fixtures(["world cup"], "2026-06-01", "2026-06-30") == []
+
+
+def test_fixtures_filters_out_of_range_events():
+    kc = FakeKalshiClient(settled_markets=list(_SETTLED_ENGFRA))
+    provider = BacktestDataProvider(kalshi_client=kc, tables={})
+    rows = provider.fixtures(["world cup"], "2026-07-01", "2026-07-31")  # June event excluded
     assert rows == []
-    assert op.list_fixtures_calls == 0
-    assert provider.api_calls == 0
-    assert any("budget" in r.message.lower() for r in caplog.records)
 
 
 # --- candles(): generic cache-miss / cache-hit pattern ---
@@ -173,8 +176,11 @@ def test_final_score_primary_source_is_kalshi_settled_markets():
         {"ticker": "KXWCGAME-26JUL01ENGCOD-TIE"},
     ]}
     provider = BacktestDataProvider(kalshi_client=kc, tables={})
-    fx = {"fixture_id": "fx1", "home": "England", "away": "DR Congo",
-          "settled": True, "result": "away"}  # OddsPapi disagrees -> Kalshi wins
+    # Fixture without a pre-resolved result -> resolved from Kalshi settled markets.
+    fx = {"fixture_id": "KXWCGAME-26JUL01ENGCOD", "home": "England", "away": "DR Congo",
+          "market_tickers": {"home": "KXWCGAME-26JUL01ENGCOD-ENG",
+                             "away": "KXWCGAME-26JUL01ENGCOD-COD",
+                             "draw": "KXWCGAME-26JUL01ENGCOD-TIE"}}
     assert provider.final_score(fx) == "home"
     assert kc.settled_calls == 1
 
