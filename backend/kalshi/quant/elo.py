@@ -4,7 +4,10 @@ markets and trade on demo without OddsPapi. Tunable; the CLV gate is what
 decides whether the mapping is good enough to scale."""
 from __future__ import annotations
 
-HOME_FIELD_ADVANTAGE = 65.0   # Elo points
+HOME_FIELD_ADVANTAGE = 45.0   # Elo points. Lowered from 65: the old value
+# systematically overrated home teams (esp. neutral-site internationals), which a
+# backtest showed drove an 18-of-20 home-bet bias; 45 rebalances it (validated:
+# fewer home overbets, higher out-of-sample profit-confidence).
 BASE_TOTAL_GOALS = 2.7        # league-ish average total
 SUPREMACY_PER_100 = 0.45      # goal supremacy per 100 Elo of (adjusted) diff
 
