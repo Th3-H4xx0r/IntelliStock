@@ -290,11 +290,11 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
     final res = _result;
     final ec = (res?['equity_curve'] ?? []) as List? ?? [];
     final trades = (res?['trades'] ?? []) as List? ?? [];
+    // equity_curve is a bare list of cumulative-P&L cents, ordered by bet.
     final ts = <DateTime>[], vals = <double>[];
-    for (final p in ec) {
-      final m = p as Map;
-      ts.add(DateTime.fromMillisecondsSinceEpoch(((m['ts'] ?? 0) as num).toInt() * 1000));
-      vals.add(((m['cum_pnl_cents'] ?? 0) as num) / 100);
+    for (var i = 0; i < ec.length; i++) {
+      ts.add(DateTime.fromMillisecondsSinceEpoch(i * 3600000));
+      vals.add(((ec[i] ?? 0) as num) / 100);
     }
     return _card('Results', [
       Wrap(spacing: 10, runSpacing: 10, children: [
@@ -307,7 +307,7 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
       ]),
       const SizedBox(height: 12),
       if (vals.length > 1)
-        ScrubbableAreaChart(timestamps: ts, values: vals, lineColor: AppColors.chartLine, height: 200, baseline: 0),
+        ScrubbableAreaChart(timestamps: ts, values: vals, lineColor: AppColors.chartLine, height: 200, baseline: 0, indexed: true),
       if (trades.isNotEmpty) ...[
         const SizedBox(height: 12),
         Text('Trades (${trades.length})', style: const TextStyle(color: AppColors.textMuted, fontSize: 12, fontWeight: FontWeight.w600)),

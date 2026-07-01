@@ -160,14 +160,15 @@ function openResults(id) {
 }
 
 const equitySeries = computed(() => {
+  // equity_curve is a bare list of cumulative-P&L cents, ordered by bet.
   const ec = (result.value && result.value.equity_curve) || []
-  return [{ name: 'Cumulative P&L ($)', data: ec.map((p) => [Number(p.ts) * 1000, (p.cum_pnl_cents || 0) / 100]) }]
+  return [{ name: 'Cumulative P&L ($)', data: ec.map((v, i) => [i + 1, (v || 0) / 100]) }]
 })
 const equityOpts = {
   chart: { type: 'area', toolbar: { show: false }, animations: { enabled: false } },
   dataLabels: { enabled: false },
   stroke: { curve: 'straight', width: 2 },
-  xaxis: { type: 'datetime', labels: { style: { colors: '#94a3b8' } } },
+  xaxis: { type: 'numeric', title: { text: 'Bet #', style: { color: '#64748b' } }, labels: { style: { colors: '#94a3b8' } } },
   yaxis: { labels: { style: { colors: '#94a3b8' }, formatter: (v) => `$${Math.round(v)}` } },
   colors: ['#22d3ee'], grid: { borderColor: '#1e293b' }, tooltip: { theme: 'dark' },
 }
@@ -342,12 +343,12 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
         <div>
           <h3 class="text-xs font-semibold text-slate-400 mb-2">By league</h3>
           <table class="w-full text-xs">
-            <thead><tr class="text-left text-slate-500"><th>League</th><th>Bets</th><th>P&L</th><th>ROI</th></tr></thead>
+            <thead><tr class="text-left text-slate-500"><th>League</th><th>Bets</th><th>P&L</th><th>Win%</th></tr></thead>
             <tbody>
               <tr v-for="(v, k) in result.per_league" :key="k" class="border-t border-border-subtle/40">
-                <td class="py-1 text-slate-300">{{ k }}</td><td class="text-slate-400">{{ v.n }}</td>
+                <td class="py-1 text-slate-300">{{ k }}</td><td class="text-slate-400">{{ v.n_bets }}</td>
                 <td :class="(v.pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(v.pnl_cents) }}</td>
-                <td class="text-slate-400">{{ fmtPct(v.roi) }}</td>
+                <td class="text-slate-400">{{ fmtPct(v.win_rate) }}</td>
               </tr>
             </tbody>
           </table>
@@ -358,9 +359,9 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
             <thead><tr class="text-left text-slate-500"><th>Bucket</th><th>Predicted</th><th>Actual</th><th>n</th></tr></thead>
             <tbody>
               <tr v-for="(c, i) in result.calibration" :key="i" class="border-t border-border-subtle/40">
-                <td class="py-1 text-slate-400">{{ (c.bucket_lo * 100).toFixed(0) }}–{{ (c.bucket_hi * 100).toFixed(0) }}%</td>
-                <td class="text-slate-400">{{ (c.predicted * 100).toFixed(0) }}%</td>
-                <td class="text-slate-400">{{ (c.actual * 100).toFixed(0) }}%</td>
+                <td class="py-1 text-slate-400">{{ (c.bucket[0] * 100).toFixed(0) }}–{{ (c.bucket[1] * 100).toFixed(0) }}%</td>
+                <td class="text-slate-400">{{ (c.predicted_avg * 100).toFixed(0) }}%</td>
+                <td class="text-slate-400">{{ (c.actual_rate * 100).toFixed(0) }}%</td>
                 <td class="text-slate-400">{{ c.n }}</td>
               </tr>
             </tbody>
