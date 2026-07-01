@@ -123,15 +123,18 @@ def _build_job_context(job, conn):  # pragma: no cover - integration
         budget_bumper=lambda: _db.bump_scan_budget(conn, _iso_now()),
     )
 
-    nat_elo, elo = {}, {}
-    try:
-        from kalshi.data.sources.natelo import fetch_national_elo_table
-        nat_elo = fetch_national_elo_table() or {}
-    except Exception:
-        nat_elo = {}
+    # NO LOOK-AHEAD: the model's team strength must not reflect results from
+    # inside the backtest window. So (1) national Elo uses the FROZEN static
+    # table (pass {} -> national_elo_from falls back to the fixed ratings, which
+    # never update per match) rather than the LIVE eloratings.net feed that would
+    # already encode a June-30 result when replaying a June-30 game; and (2) club
+    # Elo is fetched AS OF the backtest start date (ClubElo serves any past date),
+    # predating every fixture in the range.
+    nat_elo: dict = {}
+    elo: dict = {}
     try:
         from kalshi.data.sources.clubelo import fetch_elo_table
-        elo = fetch_elo_table() or {}
+        elo = fetch_elo_table(cfg.get("start_date")) or {}
     except Exception:
         elo = {}
     model_fn = build_model_fn(nat_elo, elo)

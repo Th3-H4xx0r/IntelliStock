@@ -148,6 +148,13 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
               <div class="text-sm text-slate-200 font-mono">{{ t.market_ticker }}</div>
               <div class="text-sm font-semibold" :class="(t.realized_pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(t.realized_pnl_cents) }}</div>
             </div>
+            <div v-if="t.home || t.away" class="flex items-center gap-1.5 text-xs text-slate-300 mt-1">
+              <img v-if="t.home_flag" :src="t.home_flag" class="w-4 h-3 rounded-sm object-cover" alt="" />
+              <span>{{ t.home }}</span>
+              <span class="text-slate-600">vs</span>
+              <img v-if="t.away_flag" :src="t.away_flag" class="w-4 h-3 rounded-sm object-cover" alt="" />
+              <span>{{ t.away }}</span>
+            </div>
             <div class="text-xs text-slate-400 mt-1">
               <span v-if="t.league" class="mr-1 text-slate-500">{{ t.league }}</span>
               side <span class="text-slate-200">{{ t.side }}</span> · entry {{ t.entry_cents }}¢ × {{ t.size }}

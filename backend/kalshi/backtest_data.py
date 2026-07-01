@@ -44,6 +44,29 @@ _SOCCER_SPORT_ID = 10
 _SPORT_ID_BY_LEAGUE: dict = {}
 _DEFAULT_SPORT_ID = _SOCCER_SPORT_ID
 
+# League -> Kalshi series ticker for fixture discovery. Extend as Kalshi lists
+# more soccer series; unknown leagues fall back to the default set.
+_KALSHI_SERIES_BY_LEAGUE = {
+    "world cup": "KXWCGAME",
+    "world cup qualifiers": "KXWCGAME",
+}
+_DEFAULT_KALSHI_SERIES = ["KXWCGAME"]
+
+
+def _date_in_range(ts: int, start_date: str, end_date: str) -> bool:
+    """Is the unix-second `ts` within [start_date, end_date] (YYYY-MM-DD, UTC)?
+    Empty bounds are open-ended."""
+    import datetime as _dt
+    try:
+        day = _dt.datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d")
+    except Exception:
+        return True
+    if start_date and day < start_date:
+        return False
+    if end_date and day > end_date:
+        return False
+    return True
+
 
 def _fx_get(fx: Any, key: str, default: Any = None) -> Any:
     """Read a field off a fixture that may be a dict or a dataclass-like object."""
@@ -148,50 +171,83 @@ class BacktestDataProvider:
         if cached is not None:
             self.cache_hits += 1
             return cached.get("fixtures", [])
-        out: list[dict] = []
-        if self.oddspapi_client is None:
-            return out
-        # All soccer leagues share one OddsPapi sport id, so fetch once per unique
-        # sport id (not per league) — league-agnostic and budget-frugal. Fixtures
-        # are deduped by id; each is tagged with its own tournament when the feed
-        # provides one, else the requested league(s).
-        want = list(leagues or [])
-        sport_ids = sorted({_SPORT_ID_BY_LEAGUE.get((lg or "").strip().lower(), _DEFAULT_SPORT_ID)
-                            for lg in (want or [""])})
-        seen: set = set()
-        for sport_id in sport_ids:
-            if not self._oddspapi_allowed(1):
-                self.log.warning(
-                    "BacktestDataProvider.fixtures: OddsPapi budget exhausted, "
-                    "skipping sport_id=%s %s..%s", sport_id, start_date, end_date)
-                continue
-            try:
-                rows = self.oddspapi_client.list_fixtures(sport_id, start_date, end_date)
-            except Exception:
-                self.log.warning("BacktestDataProvider.fixtures: list_fixtures failed for sport_id=%s", sport_id)
-                continue
-            self.api_calls += 1
-            self._budget_bumper()
-            for r in rows:
-                fid = r.get("fixture_id")
-                if fid in seen:
-                    continue
-                seen.add(fid)
-                out.append({
-                    "fixture_id": fid,
-                    "sport": "soccer",
-                    "league": r.get("league") or r.get("tournament") or (want[0] if want else ""),
-                    "home": normalize_team(r.get("home", "")),
-                    "away": normalize_team(r.get("away", "")),
-                    "kickoff_ts": r.get("kickoff_ts"),
-                    "home_score": r.get("home_score"),
-                    "away_score": r.get("away_score"),
-                    "result": r.get("result"),
-                    "settled": r.get("settled", False),
-                })
+        # Discover fixtures from KALSHI's own markets (public, no API key needed) —
+        # the tradable universe itself. Each fixture comes with teams, flags,
+        # settled result, and the side tickers for free. OddsPapi is used only for
+        # the (optional) sharp line, never for fixture discovery.
+        out = self._kalshi_fixtures(leagues, start_date, end_date)
         if out:
             self._table_put("KalshiBtFixtureList", {"id": cache_key, "fixtures": out}, "id")
         return out
+
+    def _kalshi_fixtures(self, leagues: list[str], start_date: str, end_date: str) -> list[dict]:
+        """Build the fixture list from Kalshi's public settled markets for the
+        series behind the chosen leagues. Groups a series' markets by event,
+        reads teams/flags via the ticker decoder, resolves the settled result,
+        and pre-resolves the per-side tickers. League-agnostic: unknown leagues
+        fall back to the default soccer series set."""
+        if self.kalshi_client is None:
+            return []
+        from kalshi.client import result_side_from_markets
+        from kalshi.data.ticker_names import parse_market_ticker
+
+        series_set = {_KALSHI_SERIES_BY_LEAGUE.get((lg or "").strip().lower()) for lg in (leagues or [])}
+        series_set = {s for s in series_set if s} or set(_DEFAULT_KALSHI_SERIES)
+        league_label = (leagues[0] if leagues else "")
+        out: list[dict] = []
+        for series in sorted(series_set):
+            try:
+                markets = self.kalshi_client.list_settled_markets(series)
+            except Exception:
+                self.log.warning("BacktestDataProvider: list_settled_markets failed for series=%s", series)
+                continue
+            self.api_calls += 1
+            groups: dict = {}
+            for m in markets:
+                tk = m.get("ticker", "")
+                if tk:
+                    groups.setdefault(tk.rsplit("-", 1)[0], []).append(m)
+            for pref, ms in groups.items():
+                parsed = parse_market_ticker(ms[0].get("ticker", ""))
+                kickoff_ts = self._kickoff_from_markets(ms)
+                if kickoff_ts and not _date_in_range(kickoff_ts, start_date, end_date):
+                    continue
+                tickers: dict = {}
+                for m in ms:
+                    pk = parse_market_ticker(m.get("ticker", "")).get("pick")
+                    if pk in ("home", "away", "draw"):
+                        tickers[pk] = m.get("ticker")
+                result = result_side_from_markets(ms, pref)
+                out.append({
+                    "fixture_id": pref,
+                    "sport": "soccer",
+                    "league": league_label,
+                    "home": parsed.get("home", ""),
+                    "away": parsed.get("away", ""),
+                    "home_flag": parsed.get("home_flag", ""),
+                    "away_flag": parsed.get("away_flag", ""),
+                    "kickoff_ts": kickoff_ts,
+                    "result": result,
+                    "settled": result is not None,
+                    "market_tickers": tickers,
+                })
+        return out
+
+    @staticmethod
+    def _kickoff_from_markets(markets: list[dict]) -> int:
+        """Approximate kickoff as ~2h before the latest market close/settlement
+        time (a match settles ~full-time). Returns 0 if no parseable time."""
+        import datetime as _dt
+        best = 0
+        for m in markets:
+            t = m.get("close_time") or m.get("expected_expiration_time") or ""
+            try:
+                s = str(t).replace("Z", "+00:00")
+                ep = int(_dt.datetime.fromisoformat(s).timestamp())
+                best = max(best, ep)
+            except Exception:
+                continue
+        return (best - 2 * 3600) if best else 0
 
     # --- candles (Kalshi price history — immutable once traded) ---
 
@@ -239,6 +295,9 @@ class BacktestDataProvider:
         """'home' | 'draw' | 'away', or None if unsettled/unknown. A cached
         settled result is returned without any network call; a cached
         unsettled result is retried (the game may have finished since)."""
+        # Fixtures discovered from Kalshi already carry the settled result.
+        if _fx_get(fx, "settled") and _fx_get(fx, "result"):
+            return _fx_get(fx, "result")
         fixture_id = _fx_get(fx, "fixture_id")
         cached = self._table_get("KalshiHistFixtures", fixture_id)
         if cached is not None and cached.get("settled"):
@@ -288,6 +347,10 @@ class BacktestDataProvider:
         pick), and `odds_api.match_event`'s fuzzy-uniqueness matcher to find the
         one Kalshi event that safely corresponds to the fixture. Unmatched
         fixtures return {} and are LOGGED — never guessed."""
+        # Fixtures discovered from Kalshi already carry their resolved side tickers.
+        pre = _fx_get(fx, "market_tickers")
+        if isinstance(pre, dict) and pre:
+            return pre
         home, away = _fx_get(fx, "home", ""), _fx_get(fx, "away", "")
         tickers = self._list_kalshi_tickers(series_options, statuses)
         groups = _group_tickers_by_event(tickers)
