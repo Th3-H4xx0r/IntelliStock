@@ -420,6 +420,9 @@ class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
   final _poll = TextEditingController(text: '60');
   final _manualBankroll = TextEditingController(text: '1000');
   final _oddsKey = TextEditingController();
+  final _oddspapiKey = TextEditingController();
+  final _noSharpEdge = TextEditingController(text: '5');
+  final _marketShrink = TextEditingController(text: '40');
   double _sharpWeight = 85;
   final Set<String> _leagues = {'EPL', 'Serie B', 'Ligue 2'};
   double _usagePct = 50;
@@ -428,10 +431,13 @@ class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
   bool _dailyLossTouched = false;
   double _dailyLossPct = 0.10;
   String _risk = 'medium';
-  bool _liveMonitoring = true;
+  // Off by default for a NEW instance — only the pregame strategy is validated;
+  // in-match live monitoring is opt-in. An edit still reflects the stored value (see _prefill).
+  bool _liveMonitoring = false;
   // HARD dry-run: read real prices, place NO real orders. Safe default for a funded
   // live account; toggle OFF to place REAL orders.
   bool _paperMode = true;
+  bool _oneBetPerFixture = true;
   List<Map<String, dynamic>> _models = [];
   String? _selectedModel;
   bool _creating = false;
@@ -465,12 +471,16 @@ class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
     if (n('poll_seconds') != null) _poll.text = _num(n('poll_seconds')!);
     if (n('bankroll_cents') != null) _manualBankroll.text = _num(n('bankroll_cents')! / 100);
     if (c['odds_api_key'] != null) _oddsKey.text = c['odds_api_key'].toString();
+    if (c['oddspapi_api_key'] != null) _oddspapiKey.text = c['oddspapi_api_key'].toString();
+    if (n('no_sharp_edge_threshold') != null) _noSharpEdge.text = _num(n('no_sharp_edge_threshold')! * 100);
+    if (n('market_shrink') != null) _marketShrink.text = _num(n('market_shrink')! * 100);
     if (n('sharp_weight') != null) _sharpWeight = (n('sharp_weight')! * 100).toDouble();
     if (n('bankroll_usage_pct') != null) _usagePct = n('bankroll_usage_pct')!.toDouble();
     if (c['tier'] != null) _risk = c['tier'].toString();
     if (c['model'] != null) _selectedModel = c['model'].toString();
     if (c['live_monitoring'] != null) _liveMonitoring = c['live_monitoring'] == true;
     if (c['paper_mode'] != null) _paperMode = c['paper_mode'] == true;
+    if (c['one_bet_per_fixture'] != null) _oneBetPerFixture = c['one_bet_per_fixture'] == true;
     final lg = c['leagues'];
     if (lg is List && lg.isNotEmpty) { _leagues..clear()..addAll(lg.map((e) => e.toString())); }
   }
@@ -484,7 +494,7 @@ class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
 
   @override
   void dispose() {
-    for (final c in [_name, _edge, _kelly, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll, _manualBankroll, _minPrice, _maxPrice, _drawMinEdge, _orderSizeMin, _orderSizeMax]) {
+    for (final c in [_name, _edge, _kelly, _maxContracts, _exposure, _leagueCap, _dailyLoss, _poll, _manualBankroll, _minPrice, _maxPrice, _drawMinEdge, _orderSizeMin, _orderSizeMax, _oddspapiKey, _noSharpEdge, _marketShrink]) {
       c.dispose();
     }
     super.dispose();
@@ -562,11 +572,15 @@ class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
         'poll_seconds': _i(_poll, 60),
         'bankroll_usage_pct': _usagePct.round(),
         'live_monitoring': _liveMonitoring,
-        'odds_api_key': _oddsKey.text.trim(),
+        if (_oddsKey.text.trim().isNotEmpty) 'odds_api_key': _oddsKey.text.trim(),
         'sharp_weight': _sharpWeight / 100,
         'tier': _risk,
         'model': _selectedModel,
         'paper_mode': _paperMode,   // dry-run by default; backend forces paper on live brokerages unless off
+        'no_sharp_edge_threshold': _d(_noSharpEdge, 5) / 100,
+        'market_shrink': _d(_marketShrink, 40) / 100,
+        'one_bet_per_fixture': _oneBetPerFixture,
+        if (_oddspapiKey.text.trim().isNotEmpty) 'oddspapi_api_key': _oddspapiKey.text.trim(),
       };
       final repo = ref.read(kalshiRepositoryProvider);
       if (_isEdit) {
@@ -721,10 +735,26 @@ class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
                   ),
                   const SizedBox(height: 12),
 
+                  // One bet per fixture
+                  Container(
+                    decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+                    child: SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                      activeColor: AppColors.primary,
+                      value: _oneBetPerFixture,
+                      onChanged: (v) => setState(() => _oneBetPerFixture = v),
+                      title: Text('One bet per fixture', style: AppTextStyles.body.copyWith(color: AppColors.textHi)),
+                      subtitle: Text('Only take one open position per match at a time.', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
                   // Sharp-odds anchor
                   _label('Odds API key — sharp anchor',
                       'Anchor fair value to de-vig\'d sharp bookmaker odds (the-odds-api.com) so it bets where Kalshi disagrees with the books. Free key. Blank = model-only (rarely trades).'),
-                  _field(_oddsKey, 'Odds API key', hint: 'the-odds-api.com key (optional)', obscure: true),
+                  _field(_oddsKey, 'The-Odds-API key (live sharp odds)', hint: 'the-odds-api.com key (optional)', obscure: true),
+                  _label('OddsPapi key', 'Used for backtest odds only, not live trading.'),
+                  _field(_oddspapiKey, 'OddsPapi key (backtest odds)', hint: 'oddspapi.io key (optional)', obscure: true),
                   Padding(
                     padding: const EdgeInsets.only(top: 4, bottom: 12),
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -808,6 +838,11 @@ class _KalshiInstanceSheetState extends ConsumerState<KalshiInstanceSheet> {
                     Expanded(child: _field(_orderSizeMin, 'Order size min (\$)', number: true)),
                     const SizedBox(width: 12),
                     Expanded(child: _field(_orderSizeMax, 'Order size max (\$)', number: true)),
+                  ]),
+                  Row(children: [
+                    Expanded(child: _field(_noSharpEdge, 'No-sharp edge bar (%)', number: true)),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field(_marketShrink, 'Market anchor (%)', number: true)),
                   ]),
                   TextField(
                     controller: _dailyLoss,

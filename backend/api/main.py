@@ -4203,6 +4203,10 @@ class CreateKalshiInstanceBody(BaseModel):
     min_price_cents: Optional[int] = 15
     max_price_cents: Optional[int] = 90
     draw_min_edge: Optional[float] = 0.10
+    # Model-only guardrails (validated tuning). None on no_sharp -> tier default.
+    no_sharp_edge_threshold: Optional[float] = None   # bigger edge bar when no sharp line
+    market_shrink: Optional[float] = 0.4              # shrink model toward de-vig'd market when no sharp
+    one_bet_per_fixture: Optional[bool] = True        # never hold >1 side of a match
     # Order-size RANGE ($/trade): bot sizes within [min,max] by edge conviction.
     # None (omitted) -> the tier's suggested range; an explicit 0 stays auto (Kelly).
     order_size_min_dollars: Optional[float] = None
@@ -4213,15 +4217,17 @@ class CreateKalshiInstanceBody(BaseModel):
     bankroll_usage_pct: Optional[int] = 50
     tier: Optional[str] = "medium"
     model: Optional[str] = None          # LLM model id for the analyst panel
-    # Live in-match monitoring (two-way in-play; Kalshi-price-only).
-    live_monitoring: Optional[bool] = True
+    # Live in-match monitoring (two-way in-play; Kalshi-price-only). Defaults OFF —
+    # only the pregame strategy is backtest-validated; in-play is opt-in.
+    live_monitoring: Optional[bool] = False
     live_poll_seconds: Optional[int] = 30
     inplay_exposure_frac: Optional[float] = 0.15
     max_adds_per_match: Optional[int] = 2
     no_add_after_min: Optional[float] = 75.0
     stop_loss_frac: Optional[float] = 0.35
     # Sharp-odds anchor (fair value from de-vig'd bookmaker odds; edge vs Kalshi).
-    odds_api_key: Optional[str] = None
+    odds_api_key: Optional[str] = None        # The-Odds-API key — LIVE sharp odds
+    oddspapi_api_key: Optional[str] = None    # OddsPapi key — backtest historical odds
     sharp_weight: Optional[float] = 0.85
     devig_method: Optional[str] = "power"
     odds_refresh_secs: Optional[int] = 3600
