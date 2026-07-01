@@ -52,6 +52,8 @@ def _to_ts(entry: dict) -> int | None:
     """Fixture kickoff as epoch seconds, accepting either a raw `kickoff_ts`
     (int) or an ISO8601 `kickoff` string. None if neither is present/parseable."""
     ts = entry.get("kickoff_ts")
+    if ts is None and entry.get("startTime"):
+        entry = {**entry, "kickoff": entry.get("startTime")}  # OddsPapi startTime -> kickoff
     if ts is not None:
         try:
             return int(ts)
@@ -71,30 +73,27 @@ def _to_ts(entry: dict) -> int | None:
 
 
 def parse_fixtures(raw: dict) -> list[dict]:
-    """Normalize an OddsPapi fixtures-list response into
-    [{fixture_id, home, away, kickoff_ts, home_score, away_score, result, settled}].
-    Settled = both scores present; result derived home/draw/away from the score,
-    None when either score is missing. Never raises; empty-safe."""
+    """Normalize an OddsPapi /v4/fixtures response (confirmed live schema) into
+    [{fixture_id, home, away, kickoff_ts, has_odds, tournament}]. OddsPapi's own
+    `fixtureId` is what /v4/historical-odds needs; teams are `participantNName`.
+    Tolerant to the older {home,away,id} shape too. Never raises; empty-safe."""
+    rows = (raw or {}).get("fixtures") or (raw or {}).get("data") or []
+    if isinstance(raw, list):
+        rows = raw
     out = []
-    for f in (raw or {}).get("fixtures") or []:
-        hs, as_ = f.get("home_score"), f.get("away_score")
-        settled = hs is not None and as_ is not None
-        result = None
-        if settled:
-            try:
-                hs_n, as_n = float(hs), float(as_)
-                result = "home" if hs_n > as_n else ("away" if as_n > hs_n else "draw")
-            except (TypeError, ValueError):
-                settled = False
+    for f in rows:
+        home = f.get("participant1Name") or f.get("home") or ""
+        away = f.get("participant2Name") or f.get("away") or ""
+        fid = str(f.get("fixtureId") or f.get("id") or "")
+        if not fid:
+            continue
         out.append({
-            "fixture_id": str(f.get("id", "")),
-            "home": f.get("home", ""),
-            "away": f.get("away", ""),
+            "fixture_id": fid,
+            "home": home,
+            "away": away,
             "kickoff_ts": _to_ts(f),
-            "home_score": hs if settled else None,
-            "away_score": as_ if settled else None,
-            "result": result,
-            "settled": settled,
+            "has_odds": bool(f.get("hasOdds", f.get("has_odds", False))),
+            "tournament": f.get("tournamentName") or f.get("tournament") or "",
         })
     return out
 
