@@ -114,8 +114,9 @@ class FakeSession:
         self._payload = payload
         self.last_call = None
 
-    def request(self, method, url, params=None, timeout=None):
+    def request(self, method, url, params=None, timeout=None, headers=None):
         self.last_call = (method, url, params)
+        self.last_headers = headers
         return FakeResp(self._payload)
 
 
