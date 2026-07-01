@@ -71,3 +71,25 @@ def shin_devig(raw: list[float], tol: float = 1e-12, max_iter: int = 200) -> lis
         else:
             z_hi = z
     return p
+
+
+_DEVIG_FUNCS = {"power": power_devig, "shin": shin_devig, "proportional": proportional_devig}
+
+
+def market_probs_from_asks(asks_by_side: dict, devig_method: str = "power") -> dict:
+    """De-vig the 3-way Kalshi YES asks (cents) into a coherent {side: prob} that
+    sums to 1. The three YES asks sum to >1 (the vig); removing it yields the
+    market's implied probabilities. {} if the full 3-way isn't priced."""
+    asks_by_side = asks_by_side or {}
+    sides = [s for s in ("home", "draw", "away") if s in asks_by_side]
+    if len(sides) < 3:
+        return {}
+    raw = [float(asks_by_side[s]) / 100.0 for s in sides]
+    if any(x <= 0 for x in raw):
+        return {}
+    fn = _DEVIG_FUNCS.get(devig_method, power_devig)
+    try:
+        p = fn(raw)
+    except Exception:
+        return {}
+    return {s: p[i] for i, s in enumerate(sides)}

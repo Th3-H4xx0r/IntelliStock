@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from kalshi import instance_config
 from kalshi.client import yes_ask_close_at
 from kalshi.data.sources.clubelo import elo_for
-from kalshi.devig import power_devig, shin_devig, proportional_devig
+from kalshi.devig import power_devig, shin_devig, proportional_devig, market_probs_from_asks
 from kalshi.fees import DEFAULT_FEE_RATE
 from kalshi.intelligence.fusion import fuse, renormalize_group
 from kalshi.intelligence.pricing import model_market_probs
@@ -137,19 +137,11 @@ _TIER_FOR_MARKET_TYPES = "max"  # widest allowed-markets set; caps still gate vo
 def _market_probs_from_asks(kalshi_asks: dict, devig_method: str) -> dict:
     """De-vig the 3-way Kalshi YES asks (cents) into a coherent {side: prob} that
     sums to 1. The three YES asks sum to >1 (the vig); removing it yields the
-    market's implied probabilities. {} if the full 3-way isn't priced."""
-    sides = [s for s in ("home", "draw", "away") if s in kalshi_asks]
-    if len(sides) < 3:
-        return {}
-    raw = [float(kalshi_asks[s]) / 100.0 for s in sides]
-    if any(x <= 0 for x in raw):
-        return {}
-    fn = _DEVIG_FUNCS.get(devig_method, power_devig)
-    try:
-        p = fn(raw)
-    except Exception:
-        return {}
-    return {s: p[i] for i, s in enumerate(sides)}
+    market's implied probabilities. {} if the full 3-way isn't priced.
+
+    Delegates to `devig.market_probs_from_asks` — the single implementation
+    shared with the live path (`orchestrator.plan_and_allocate`)."""
+    return market_probs_from_asks(kalshi_asks, devig_method)
 
 
 @dataclass(frozen=True)

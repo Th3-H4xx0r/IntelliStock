@@ -121,6 +121,9 @@ class EngineConfig:
     odds_api_key: str = ""
     sharp_weight: float = 0.7
     devig_method: str = "power"
+    # Overconfidence brake: when there is NO sharp line, pull the model prob this
+    # far toward the de-vigged Kalshi market (0 = pure model, 1 = pure market).
+    market_shrink: float = 0.4
     odds_refresh_secs: int = 3600
     odds_regions: str = "eu,uk,us"
     # Kalshi series to scan (empty = use discovery.DEFAULT_SOCCER_SERIES).
@@ -608,6 +611,9 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 tier=config.tier, caps=_eff_caps, fee_rate=config.fee_rate,
                 edge_threshold=config.caps.edge_threshold, reserve_frac=config.reserve_frac,
                 expected_better_soon=False, w_sharp=config.sharp_weight,
+                market_shrink=config.market_shrink,
+                one_bet_per_fixture=getattr(config.caps, "one_bet_per_fixture", True),
+                devig_method=config.devig_method,
             )
             allocations, decisions = plan["allocations"], plan["decisions"]
             log(f"tick {tick}: {len(decisions)} candidate(s) evaluated → {len(allocations)} to place "

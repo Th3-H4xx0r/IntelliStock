@@ -10,6 +10,7 @@ from kalshi.strategy.candidates import generate_candidates
 from kalshi.capital.opportunity import score as opportunity_score
 from kalshi.capital.planner import allocate
 from kalshi.decisions import decision_doc
+from kalshi.devig import market_probs_from_asks
 
 
 def plan_and_allocate(
@@ -26,6 +27,9 @@ def plan_and_allocate(
     expected_better_soon: bool,
     w_sharp: float = 0.7,
     llm_cap: float = 0.05,
+    market_shrink: float = 0.0,
+    one_bet_per_fixture: bool = True,
+    devig_method: str = "power",
 ) -> dict:
     """fixtures: each {fixture_id, expected_goals, sharp_probs, analyst:{adjustments,
     rationales}, kalshi_markets, liquidity, hours_to_kickoff, model_confidence}.
@@ -49,6 +53,23 @@ def plan_and_allocate(
         player_probs = fx.get("player_probs")
         fused = build_market_probs(eg, sharp, adjustments, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
         model_only = build_market_probs(eg, {}, {}, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
+        # MARKET ANCHOR: with no sharp line, pull the (overconfident) model toward the
+        # de-vigged Kalshi market so edge = a SHRUNK model-vs-market disagreement, not
+        # the model's blind view. Only fires when there is no sharp anchor already.
+        if not sharp and market_shrink > 0.0:
+            win_asks = {
+                m["side"]: m["yes_ask_cents"]
+                for m in fx.get("kalshi_markets", [])
+                if m.get("market_type") == "winner" and (m.get("yes_ask_cents") or 0) > 0
+            }
+            market = market_probs_from_asks(win_asks, devig_method)
+            if market and "winner" in fused:
+                for side in list(fused["winner"]):
+                    if side in market:
+                        fused["winner"][side] = (
+                            (1.0 - market_shrink) * fused["winner"][side]
+                            + market_shrink * market[side]
+                        )
         cands, skips = generate_candidates(
             fx["fixture_id"], tier, fused, fx.get("kalshi_markets", []),
             fee_rate=fee_rate, edge_threshold=edge_threshold,
@@ -59,6 +80,10 @@ def plan_and_allocate(
             no_sharp_edge_threshold=getattr(caps, "no_sharp_edge_threshold", 0.0),
             collect_skips=True,
         )
+        # PER-FIXTURE LOCK: never hold more than one side of the same match — keep
+        # only the single highest-edge candidate (no correlated both-sides exposure).
+        if one_bet_per_fixture and len(cands) > 1:
+            cands = sorted(cands, key=lambda c: c.edge, reverse=True)[:1]
         for s in skips:
             # Log what the bot evaluated and why it passed. Stable id (no ts) upserts
             # to ONE row per market = its latest evaluation -> the decision log shows
