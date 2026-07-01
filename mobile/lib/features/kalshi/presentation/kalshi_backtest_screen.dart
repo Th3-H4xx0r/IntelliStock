@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
-import '../../../core/charts/scrubbable_area_chart.dart';
 import '../../../core/theme/app_colors.dart';
 import '../data/kalshi_repository.dart';
 
@@ -45,8 +45,6 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
   bool _submitting = false;
   String? _err;
   List<Map<String, dynamic>> _backtests = [];
-  Map<String, dynamic>? _selected;
-  Map<String, dynamic>? _result;
   Timer? _timer;
 
   KalshiRepository get _repo => ref.read(kalshiRepositoryProvider);
@@ -122,11 +120,9 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
 
   Future<void> _tick() async {
     await _loadBacktests();
-    final sel = _selected;
-    if (sel != null && (sel['status'] == 'pending' || sel['status'] == 'running')) {
-      await _openResults(sel['id'].toString());
-    }
   }
+
+  void _openResults(String id) => context.push('/kalshi/backtests/$id');
 
   String _fmtDate(DateTime? d) => d == null ? '' : '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
@@ -173,7 +169,7 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
       };
       final id = await _repo.createBacktest(_bid, body);
       await _loadBacktests();
-      await _openResults(id);
+      if (mounted) _openResults(id);
     } catch (_) {
       setState(() => _err = 'Failed to start the backtest.');
     } finally {
@@ -181,19 +177,7 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
     }
   }
 
-  Future<void> _openResults(String id) async {
-    try {
-      final d = await _repo.backtestResults(id);
-      if (!mounted) return;
-      setState(() {
-        _selected = {'id': id, 'status': d['status'], 'summary': d['summary'] ?? {}};
-        _result = d['result'] as Map<String, dynamic>?;
-      });
-    } catch (_) {}
-  }
-
   String _money(dynamic cents) => cents == null ? '—' : '\$${((cents as num) / 100).toStringAsFixed(2)}';
-  String _pct(dynamic v) => v == null ? '—' : '${((v as num) * 100).toStringAsFixed(1)}%';
   Color _statusColor(String? s) => s == 'finished' ? AppColors.success : s == 'error' ? AppColors.danger : s == 'stopped' ? AppColors.textDim : AppColors.warning;
 
   @override
@@ -286,7 +270,6 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
             else
               for (final b in _backtests) _btRow(b),
           ]),
-          if (_selected != null) ...[const SizedBox(height: 16), _resultsCard()],
         ],
       ),
     );
@@ -348,59 +331,4 @@ class _KalshiBacktestScreenState extends ConsumerState<KalshiBacktestScreen> {
     );
   }
 
-  Widget _resultsCard() {
-    final sel = _selected!;
-    final summary = (sel['summary'] ?? {}) as Map;
-    final res = _result;
-    final ec = (res?['equity_curve'] ?? []) as List? ?? [];
-    final trades = (res?['trades'] ?? []) as List? ?? [];
-    final ts = <DateTime>[], vals = <double>[];
-    for (var i = 0; i < ec.length; i++) {
-      ts.add(DateTime.fromMillisecondsSinceEpoch(i * 3600000));
-      vals.add(((ec[i] ?? 0) as num) / 100);
-    }
-    return _card('Results', [
-      Wrap(spacing: 10, runSpacing: 10, children: [
-        _stat('Total P&L', _money(summary['pnl_cents']), (summary['pnl_cents'] ?? 0) >= 0 ? AppColors.success : AppColors.danger),
-        _stat('ROI', _pct(summary['roi']), AppColors.textHi),
-        _stat('Bets', '${summary['n_bets'] ?? '—'}', AppColors.textHi),
-        _stat('Win rate', _pct(summary['win_rate']), AppColors.textHi),
-        _stat('Avg CLV', _pct(summary['clv_avg']), AppColors.textHi),
-        _stat('API/cache', '${summary['api_calls'] ?? 0}/${summary['cache_hits'] ?? 0}', AppColors.textMuted),
-      ]),
-      const SizedBox(height: 12),
-      if (vals.length > 1)
-        ScrubbableAreaChart(timestamps: ts, values: vals, lineColor: AppColors.chartLine, height: 200, baseline: 0, indexed: true),
-      if (trades.isNotEmpty) ...[
-        const SizedBox(height: 12),
-        Text('Trades (${trades.length})', style: const TextStyle(color: AppColors.textMuted, fontSize: 12, fontWeight: FontWeight.w600)),
-        for (final t in trades.take(60)) _tradeRow(t as Map),
-      ],
-      if (res != null && trades.isEmpty && sel['status'] == 'finished')
-        const Padding(padding: EdgeInsets.only(top: 8), child: Text('No bets were placed under these settings over this range.', style: TextStyle(color: AppColors.textDim, fontSize: 12))),
-    ]);
-  }
-
-  Widget _stat(String label, String value, Color color) => Container(
-        width: 104, padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(color: AppColors.canvas, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label, style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
-          Text(value, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.w600)),
-        ]));
-
-  Widget _tradeRow(Map t) {
-    final pnl = t['realized_pnl_cents'];
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(children: [
-        Expanded(child: Text('${t['market_ticker']}', style: const TextStyle(color: AppColors.textMd, fontSize: 11), overflow: TextOverflow.ellipsis)),
-        Text('${t['side']} · ${t['entry_cents']}¢ ×${t['size']}', style: const TextStyle(color: AppColors.textMuted, fontSize: 11)),
-        const SizedBox(width: 8),
-        Text('${t['outcome']}', style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
-        const SizedBox(width: 8),
-        Text(_money(pnl), style: TextStyle(color: (pnl ?? 0) >= 0 ? AppColors.success : AppColors.danger, fontSize: 11)),
-      ]),
-    );
-  }
 }

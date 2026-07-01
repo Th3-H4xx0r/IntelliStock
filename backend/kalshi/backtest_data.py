@@ -36,10 +36,13 @@ log = logging.getLogger(__name__)
 _DEFAULT_SOCCER_SERIES = ("KXWCGAME",)
 _DEFAULT_MARKET_STATUSES = ("open", "settled")
 
-# OddsPapi sport_id is unconfirmed (Phase 0 note in ingest_odds.py); soccer
-# defaults to 1 and is easy to extend per-league once the real catalog is known.
-_SPORT_ID_BY_LEAGUE = {"world cup": 1}
-_DEFAULT_SPORT_ID = 1
+# OddsPapi uses a single sport id for ALL soccer (docs: sportId=10); leagues are
+# distinguished by tournament name in the results, NOT by sport id. So every
+# league resolves to the soccer id — league-agnostic, no per-league hardcoding.
+# (A per-tournament name filter is a follow-up once a live key confirms the field.)
+_SOCCER_SPORT_ID = 10
+_SPORT_ID_BY_LEAGUE: dict = {}
+_DEFAULT_SPORT_ID = _SOCCER_SPORT_ID
 
 
 def _fx_get(fx: Any, key: str, default: Any = None) -> Any:
@@ -148,25 +151,36 @@ class BacktestDataProvider:
         out: list[dict] = []
         if self.oddspapi_client is None:
             return out
-        for league in leagues or []:
+        # All soccer leagues share one OddsPapi sport id, so fetch once per unique
+        # sport id (not per league) — league-agnostic and budget-frugal. Fixtures
+        # are deduped by id; each is tagged with its own tournament when the feed
+        # provides one, else the requested league(s).
+        want = list(leagues or [])
+        sport_ids = sorted({_SPORT_ID_BY_LEAGUE.get((lg or "").strip().lower(), _DEFAULT_SPORT_ID)
+                            for lg in (want or [""])})
+        seen: set = set()
+        for sport_id in sport_ids:
             if not self._oddspapi_allowed(1):
                 self.log.warning(
                     "BacktestDataProvider.fixtures: OddsPapi budget exhausted, "
-                    "skipping league=%s %s..%s", league, start_date, end_date)
+                    "skipping sport_id=%s %s..%s", sport_id, start_date, end_date)
                 continue
-            sport_id = _SPORT_ID_BY_LEAGUE.get((league or "").strip().lower(), _DEFAULT_SPORT_ID)
             try:
                 rows = self.oddspapi_client.list_fixtures(sport_id, start_date, end_date)
             except Exception:
-                self.log.warning("BacktestDataProvider.fixtures: list_fixtures failed for league=%s", league)
+                self.log.warning("BacktestDataProvider.fixtures: list_fixtures failed for sport_id=%s", sport_id)
                 continue
             self.api_calls += 1
             self._budget_bumper()
             for r in rows:
+                fid = r.get("fixture_id")
+                if fid in seen:
+                    continue
+                seen.add(fid)
                 out.append({
-                    "fixture_id": r.get("fixture_id"),
+                    "fixture_id": fid,
                     "sport": "soccer",
-                    "league": league,
+                    "league": r.get("league") or r.get("tournament") or (want[0] if want else ""),
                     "home": normalize_team(r.get("home", "")),
                     "away": normalize_team(r.get("away", "")),
                     "kickoff_ts": r.get("kickoff_ts"),

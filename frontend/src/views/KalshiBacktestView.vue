@@ -187,9 +187,6 @@ async function loadBacktests() {
 
 async function tick() {
   await loadBacktests()
-  if (selected.value && (selected.value.status === 'pending' || selected.value.status === 'running')) {
-    await refreshResults(selected.value.id)
-  }
 }
 
 async function stopBacktest(id) {
@@ -217,9 +214,7 @@ async function refreshResults(id) {
   } catch (e) { /* ignore */ }
 }
 function openResults(id) {
-  selected.value = { id, status: 'pending', summary: {} }
-  result.value = null
-  refreshResults(id)
+  router.push(`/kalshi/backtests/${id}`)
 }
 
 const equitySeries = computed(() => {
@@ -378,70 +373,5 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
       </table>
     </section>
 
-    <!-- Results -->
-    <section v-if="selected" class="bg-surface border border-border-subtle rounded-xl p-4 space-y-4">
-      <div class="flex items-center justify-between">
-        <h2 class="text-sm font-semibold text-slate-200">Results</h2>
-        <span :class="statusColor(selected.status)" class="text-xs">{{ selected.status }}</span>
-      </div>
-      <div v-if="selected.summary" class="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div class="bg-surface border border-border-subtle rounded-lg p-3"><div class="text-xs text-slate-500">Total P&L</div><div class="text-lg font-semibold" :class="(selected.summary.pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(selected.summary.pnl_cents) }}</div></div>
-        <div class="bg-surface border border-border-subtle rounded-lg p-3"><div class="text-xs text-slate-500">ROI</div><div class="text-lg font-semibold text-slate-100">{{ fmtPct(selected.summary.roi) }}</div></div>
-        <div class="bg-surface border border-border-subtle rounded-lg p-3"><div class="text-xs text-slate-500">Bets · Win rate</div><div class="text-lg font-semibold text-slate-100">{{ selected.summary.n_bets ?? '—' }} · {{ fmtPct(selected.summary.win_rate) }}</div></div>
-        <div class="bg-surface border border-border-subtle rounded-lg p-3"><div class="text-xs text-slate-500">Avg CLV · API/cache</div><div class="text-lg font-semibold text-slate-100">{{ fmtPct(selected.summary.clv_avg) }} · {{ selected.summary.api_calls ?? 0 }}/{{ selected.summary.cache_hits ?? 0 }}</div></div>
-      </div>
-      <div v-if="result && result.equity_curve && result.equity_curve.length">
-        <VueApexCharts type="area" height="260" :options="equityOpts" :series="equitySeries" />
-      </div>
-      <div v-if="result && result.trades && result.trades.length" class="overflow-x-auto">
-        <h3 class="text-xs font-semibold text-slate-400 mb-2">Trades ({{ result.trades.length }})</h3>
-        <table class="w-full text-xs">
-          <thead><tr class="text-left text-slate-500"><th class="py-1">Ticker</th><th>Side</th><th>Entry</th><th>Size</th><th>Model</th><th>Sharp</th><th>Edge</th><th>Outcome</th><th>P&L</th><th>CLV</th></tr></thead>
-          <tbody>
-            <tr v-for="(t, i) in result.trades" :key="i" class="border-t border-border-subtle/40">
-              <td class="py-1 text-slate-300">{{ t.market_ticker }}</td><td class="text-slate-400">{{ t.side }}</td>
-              <td class="text-slate-400">{{ t.entry_cents }}¢</td><td class="text-slate-400">{{ t.size }}</td>
-              <td class="text-slate-400">{{ t.model_prob != null ? t.model_prob.toFixed(2) : '—' }}</td>
-              <td class="text-slate-400">{{ t.sharp_prob != null ? t.sharp_prob.toFixed(2) : '—' }}</td>
-              <td class="text-slate-400">{{ (t.edge * 100).toFixed(1) }}%</td><td class="text-slate-400">{{ t.outcome }}</td>
-              <td :class="(t.realized_pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(t.realized_pnl_cents) }}</td>
-              <td class="text-slate-400">{{ t.clv != null ? (t.clv * 100).toFixed(1) + '%' : '—' }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-if="result && result.per_league && Object.keys(result.per_league).length" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <h3 class="text-xs font-semibold text-slate-400 mb-2">By league</h3>
-          <table class="w-full text-xs">
-            <thead><tr class="text-left text-slate-500"><th>League</th><th>Bets</th><th>P&L</th><th>Win%</th></tr></thead>
-            <tbody>
-              <tr v-for="(v, k) in result.per_league" :key="k" class="border-t border-border-subtle/40">
-                <td class="py-1 text-slate-300">{{ k }}</td><td class="text-slate-400">{{ v.n_bets }}</td>
-                <td :class="(v.pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(v.pnl_cents) }}</td>
-                <td class="text-slate-400">{{ fmtPct(v.win_rate) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div v-if="result.calibration && result.calibration.length">
-          <h3 class="text-xs font-semibold text-slate-400 mb-2">Calibration</h3>
-          <table class="w-full text-xs">
-            <thead><tr class="text-left text-slate-500"><th>Bucket</th><th>Predicted</th><th>Actual</th><th>n</th></tr></thead>
-            <tbody>
-              <tr v-for="(c, i) in result.calibration" :key="i" class="border-t border-border-subtle/40">
-                <td class="py-1 text-slate-400">{{ (c.bucket[0] * 100).toFixed(0) }}–{{ (c.bucket[1] * 100).toFixed(0) }}%</td>
-                <td class="text-slate-400">{{ (c.predicted_avg * 100).toFixed(0) }}%</td>
-                <td class="text-slate-400">{{ (c.actual_rate * 100).toFixed(0) }}%</td>
-                <td class="text-slate-400">{{ c.n }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      <p v-if="result && (!result.trades || !result.trades.length) && selected.status === 'finished'" class="text-sm text-slate-500">
-        No bets were placed under these settings over this range.
-      </p>
-    </section>
   </main>
 </template>

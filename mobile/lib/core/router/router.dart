@@ -23,6 +23,7 @@ import '../../features/nexus/presentation/nexus_screen.dart';
 import '../../features/kalshi/presentation/kalshi_screen.dart';
 import '../../features/kalshi/presentation/kalshi_instance_detail_screen.dart';
 import '../../features/kalshi/presentation/kalshi_backtest_screen.dart';
+import '../../features/kalshi/presentation/kalshi_backtest_result_screen.dart';
 import '../../features/models/presentation/models_screen.dart';
 import '../../features/token_usage/presentation/token_usage_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
@@ -126,6 +127,11 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/kalshi/instances/:id/backtest',
         parentNavigatorKey: _rootKey,
         builder: (_, s) => KalshiBacktestScreen(instanceId: s.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/kalshi/backtests/:id',
+        parentNavigatorKey: _rootKey,
+        builder: (_, s) => KalshiBacktestResultScreen(backtestId: s.pathParameters['id']!),
       ),
       // Detail / fullscreen routes pushed over the shell.
       GoRoute(
