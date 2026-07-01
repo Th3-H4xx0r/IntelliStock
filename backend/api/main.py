@@ -4347,6 +4347,12 @@ def api_kalshi_create_backtest(brokerage_id: str, body: KalshiBacktestBody, conn
             for k in ("oddspapi_api_key", "odds_api_key"):
                 if not cfg.get(k) and icfg.get(k):
                     cfg[k] = icfg.get(k)
+            # Persist a newly-entered OddsPapi key onto the instance so it's saved
+            # once and prefilled on subsequent backtests (deep-merged into config).
+            new_key = cfg.get("oddspapi_api_key")
+            if new_key and new_key != icfg.get("oddspapi_api_key"):
+                _r_auth.db("IntelliStock").table("Instances").get(str(body.instance_id)).update(
+                    {"kalshi_config": {"oddspapi_api_key": new_key}}).run(conn)
         except Exception:
             pass
     jid = str(_uuid.uuid4())

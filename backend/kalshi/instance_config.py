@@ -123,6 +123,9 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "stop_loss_frac": float(raw.get("stop_loss_frac", 0.35)),
         # Sharp-odds anchor (de-vig'd bookmaker odds -> fair value -> edge vs Kalshi).
         "odds_api_key": str(raw.get("odds_api_key") or "").strip(),
+        # OddsPapi key (historical sharp line for backtests). Persisted so it's
+        # entered once and reused across backtests.
+        "oddspapi_api_key": str(raw.get("oddspapi_api_key") or "").strip(),
         "sharp_weight": min(1.0, max(0.0, float(raw.get("sharp_weight", 0.85)))),
         "devig_method": (str(raw.get("devig_method") or "power").lower()
                          if str(raw.get("devig_method") or "power").lower()
