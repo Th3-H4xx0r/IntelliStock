@@ -278,25 +278,65 @@ class BacktestDataProvider:
             return cached.get("snapshots", [])
         if self.oddspapi_client is None:
             return []
-        if not self._oddspapi_allowed(1):
-            self.log.warning(
-                "BacktestDataProvider.sharp_odds: OddsPapi budget exhausted, "
-                "skipping fixture_id=%s (returning cached-or-empty)", fixture_id)
+        # Match the Kalshi fixture to OddsPapi's OWN fixtureId by team name + day.
+        # OddsPapi's historical-odds needs ITS id (not the Kalshi ticker); and only
+        # fixtures with hasOdds=true have a sharp line at all.
+        oid, has_odds = self._oddspapi_match(fx)
+        if not oid or not has_odds:
+            self.log.info(
+                "sharp_odds: no OddsPapi odds for %s vs %s — model-only",
+                _fx_get(fx, "home"), _fx_get(fx, "away"))
+            self._table_put("KalshiHistOdds", {"id": fixture_id, "snapshots": []}, "id")
             return []
-        # The sharp line is OPTIONAL — any OddsPapi failure (bad key, 404, network)
-        # must degrade to model-only, never crash the backtest.
+        if not self._oddspapi_allowed(1):
+            self.log.warning("sharp_odds: OddsPapi budget exhausted for %s", fixture_id)
+            return []
+        # Optional line — any failure degrades to model-only, never crashes.
         try:
-            rows = self.oddspapi_client.historical_odds(fixture_id)
+            rows = self.oddspapi_client.historical_odds(oid)
         except Exception as e:
-            self.log.warning(
-                "BacktestDataProvider.sharp_odds: OddsPapi failed for fixture_id=%s "
-                "(%s) — trading model-only", fixture_id, e)
+            self.log.warning("sharp_odds: OddsPapi failed for %s (%s) — model-only", fixture_id, e)
             self._table_put("KalshiHistOdds", {"id": fixture_id, "snapshots": []}, "id")
             return []
         self.api_calls += 1
         self._budget_bumper()
         self._table_put("KalshiHistOdds", {"id": fixture_id, "snapshots": rows}, "id")
         return rows
+
+    def _oddspapi_match(self, fx: Any):
+        """Find the OddsPapi (fixtureId, has_odds) for a Kalshi fixture by matching
+        canonical team names on the fixture's kickoff day. The day's OddsPapi
+        fixture list is cached (namespaced in KalshiBtFixtureList). ({}, False) if
+        no match. Never raises."""
+        import datetime as _dt
+        kt = int(_fx_get(fx, "kickoff_ts", 0) or 0)
+        if not kt or self.oddspapi_client is None:
+            return None, False
+        day = _dt.datetime.utcfromtimestamp(kt).strftime("%Y-%m-%d")
+        key = "oddsday|" + day
+        cached = self._table_get("KalshiBtFixtureList", key)
+        if cached is not None:
+            self.cache_hits += 1
+            ofx = cached.get("fixtures", [])
+        else:
+            if not self._oddspapi_allowed(1):
+                return None, False
+            try:
+                ofx = self.oddspapi_client.list_fixtures(_SOCCER_SPORT_ID, day, day)
+            except Exception:
+                ofx = []
+            self.api_calls += 1
+            self._budget_bumper()
+            self._table_put("KalshiBtFixtureList", {"id": key, "fixtures": ofx}, "id")
+        from kalshi.quant.national_elo import canonical_team
+        h, a = canonical_team(_fx_get(fx, "home", "")), canonical_team(_fx_get(fx, "away", ""))
+        if not h or not a:
+            return None, False
+        for of in ofx:
+            oh, oa = canonical_team(of.get("home", "")), canonical_team(of.get("away", ""))
+            if {oh, oa} == {h, a}:
+                return of.get("fixture_id"), bool(of.get("has_odds"))
+        return None, False
 
     # --- final score (Kalshi-primary, OddsPapi-fallback, settled-aware cache) ---
 

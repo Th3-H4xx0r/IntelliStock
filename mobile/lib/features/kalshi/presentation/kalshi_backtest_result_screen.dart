@@ -105,6 +105,10 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
             ),
             const SizedBox(height: 8),
             Wrap(spacing: 6, runSpacing: 6, children: [
+              GestureDetector(onTap: () => setState(() => _selectedDay = 'all'), child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(borderRadius: BorderRadius.circular(20), color: _selectedDay == 'all' ? AppColors.primary.withValues(alpha: 0.2) : AppColors.surface, border: Border.all(color: _selectedDay == 'all' ? AppColors.primary : AppColors.border)),
+                child: Text('All · ${_trades.length}', style: TextStyle(fontSize: 11, color: _selectedDay == 'all' ? AppColors.primary : AppColors.textMuted)))),
               for (final d in _daysList())
                 GestureDetector(onTap: () => setState(() => _selectedDay = d), child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -136,7 +140,7 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
   Widget _tabs() {
     final decisions = ((_result?['decision_log'] ?? []) as List).cast<Map>();
     final logs = ((_result?['logs'] ?? []) as List);
-    final dayTrades = (_byDay()[_selectedDay] ?? []);
+    final dayTrades = _selectedDay == 'all' ? _trades : (_byDay()[_selectedDay] ?? []);
     return _card('', [
       Row(children: [
         for (final t in ['trades', 'decisions', 'logs'])
@@ -178,23 +182,20 @@ class _S extends ConsumerState<KalshiBacktestResultScreen> {
       decoration: BoxDecoration(color: AppColors.canvas, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Expanded(child: Text('${t['market_ticker']}', style: const TextStyle(color: AppColors.textMd, fontSize: 12), overflow: TextOverflow.ellipsis)),
+          _flagImg(t['home_flag']),
+          const SizedBox(width: 4),
+          Expanded(child: Text(
+            (t['home'] ?? '').toString().isNotEmpty ? '${t['home']} v ${t['away']}' : '${t['side']}',
+            style: const TextStyle(color: AppColors.textHi, fontSize: 13, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis)),
+          _flagImg(t['away_flag']),
+          const SizedBox(width: 6),
           Text(_money(pnl), style: TextStyle(color: (pnl ?? 0) >= 0 ? AppColors.success : AppColors.danger, fontSize: 13, fontWeight: FontWeight.w600)),
         ]),
-        if ((t['home'] ?? '').toString().isNotEmpty)
-          Padding(padding: const EdgeInsets.only(top: 2), child: Row(children: [
-            _flagImg(t['home_flag']),
-            const SizedBox(width: 4),
-            Flexible(child: Text('${t['home']} vs ${t['away']}', style: const TextStyle(color: AppColors.textMd, fontSize: 11), overflow: TextOverflow.ellipsis)),
-            const SizedBox(width: 4),
-            _flagImg(t['away_flag']),
-          ])),
         Text('${t['league'] ?? ''} · side ${t['side']} · entry ${t['entry_cents']}¢ × ${t['size']}', style: const TextStyle(color: AppColors.textMuted, fontSize: 11)),
         const SizedBox(height: 6),
         Wrap(spacing: 6, runSpacing: 4, children: [
           _badge('edge ${((t['edge'] ?? 0) * 100).toStringAsFixed(1)}%', AppColors.textMuted),
           _badge(hasSharp ? 'sharp' : 'model-only', hasSharp ? AppColors.info : AppColors.warning),
-          if (t['model_prob'] != null) _badge('model ${(t['model_prob'] as num).toStringAsFixed(2)}', AppColors.textMuted),
           _badge('${t['outcome']}', t['outcome'] == 'win' ? AppColors.success : AppColors.danger),
         ]),
       ]),

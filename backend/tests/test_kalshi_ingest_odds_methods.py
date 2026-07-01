@@ -11,41 +11,29 @@ from kalshi.ingest_odds import OddsPapiClient, parse_fixtures, parse_hist_odds
 
 # --- parse_fixtures ---
 
-def test_parse_fixtures_settled_home_win_derives_result():
+def test_parse_fixtures_real_schema_names_id_and_odds_flag():
     raw = {"fixtures": [
-        {"id": 1, "home": "England", "away": "DR Congo", "kickoff_ts": 1780000000,
-         "status": "finished", "home_score": 2, "away_score": 0},
+        {"fixtureId": "id123", "participant1Name": "England", "participant2Name": "DR Congo",
+         "startTime": "2026-06-15T20:00:00Z", "hasOdds": True, "tournamentName": "World Cup"},
     ]}
     out = parse_fixtures(raw)
     assert len(out) == 1
     f = out[0]
-    assert f == {
-        "fixture_id": "1", "home": "England", "away": "DR Congo",
-        "kickoff_ts": 1780000000, "home_score": 2, "away_score": 0,
-        "result": "home", "settled": True,
-    }
+    assert f["fixture_id"] == "id123"
+    assert f["home"] == "England" and f["away"] == "DR Congo"
+    assert f["has_odds"] is True and f["tournament"] == "World Cup"
+    assert f["kickoff_ts"] and f["kickoff_ts"] > 0
 
 
-def test_parse_fixtures_settled_away_win_and_draw():
-    raw = {"fixtures": [
-        {"id": 2, "home": "A", "away": "B", "kickoff_ts": 1, "status": "finished",
-         "home_score": 0, "away_score": 1},
-        {"id": 3, "home": "A", "away": "B", "kickoff_ts": 2, "status": "finished",
-         "home_score": 1, "away_score": 1},
-    ]}
+def test_parse_fixtures_tolerates_legacy_home_away_id():
+    raw = {"fixtures": [{"id": "9", "home": "A", "away": "B", "kickoff_ts": 5}]}
     out = parse_fixtures(raw)
-    assert out[0]["result"] == "away"
-    assert out[1]["result"] == "draw"
+    assert out[0] == {"fixture_id": "9", "home": "A", "away": "B",
+                      "kickoff_ts": 5, "has_odds": False, "tournament": ""}
 
 
-def test_parse_fixtures_unsettled_has_no_result():
-    raw = {"fixtures": [
-        {"id": 4, "home": "A", "away": "B", "kickoff_ts": 3, "status": "scheduled"},
-    ]}
-    out = parse_fixtures(raw)
-    assert out[0]["settled"] is False
-    assert out[0]["result"] is None
-    assert out[0]["home_score"] is None and out[0]["away_score"] is None
+def test_parse_fixtures_skips_rows_without_id():
+    assert parse_fixtures({"fixtures": [{"participant1Name": "A", "participant2Name": "B"}]}) == []
 
 
 def test_parse_fixtures_accepts_iso_kickoff():

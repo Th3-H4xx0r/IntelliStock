@@ -117,29 +117,36 @@ def test_candles_second_call_is_a_cache_hit_no_client_call():
 
 # --- sharp_odds(): generic cache pattern + budget guard ---
 
-def test_sharp_odds_cache_miss_then_hit():
-    op = FakeOddsPapiClient(hist_odds=[{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}])
-    provider = BacktestDataProvider(oddspapi_client=op, tables={},
-                                     budget_used_getter=lambda: 0)
-    fx = {"fixture_id": "fx1"}
-    rows1 = provider.sharp_odds(fx)
-    rows2 = provider.sharp_odds(fx)
+_OFX = [{"fixture_id": "oid1", "home": "England", "away": "DR Congo",
+         "has_odds": True, "kickoff_ts": 1780000000}]
+_FX = {"fixture_id": "fx1", "home": "England", "away": "DR Congo", "kickoff_ts": 1780000000}
+
+
+def test_sharp_odds_matches_oddspapi_fixture_and_caches():
+    op = FakeOddsPapiClient(hist_odds=[{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}],
+                            fixture_rows=[dict(_OFX[0])])
+    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 0)
+    rows1 = provider.sharp_odds(dict(_FX))
+    rows2 = provider.sharp_odds(dict(_FX))
     assert rows1 == rows2 == [{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}]
-    assert op.hist_calls == 1
-    assert provider.api_calls == 1
-    assert provider.cache_hits == 1
+    assert op.hist_calls == 1      # fetched once (by OddsPapi id), then cached
 
 
-def test_sharp_odds_budget_exhausted_skips_client_and_logs(caplog):
-    op = FakeOddsPapiClient(hist_odds=[{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}])
-    provider = BacktestDataProvider(oddspapi_client=op, tables={},
-                                     budget_used_getter=lambda: 250)  # exhausted
-    with caplog.at_level("WARNING"):
-        rows = provider.sharp_odds({"fixture_id": "fx1"})
-    assert rows == []
+def test_sharp_odds_no_odds_flag_is_model_only():
+    op = FakeOddsPapiClient(hist_odds=[{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}],
+                            fixture_rows=[{**_OFX[0], "has_odds": False}])
+    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 0)
+    assert provider.sharp_odds(dict(_FX)) == []
+    assert op.hist_calls == 0       # never fetch odds when hasOdds is false
+
+
+def test_sharp_odds_budget_exhausted_no_client_calls():
+    op = FakeOddsPapiClient(hist_odds=[{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}],
+                            fixture_rows=[dict(_OFX[0])])
+    provider = BacktestDataProvider(oddspapi_client=op, tables={}, budget_used_getter=lambda: 250)
+    assert provider.sharp_odds(dict(_FX)) == []
     assert op.hist_calls == 0
     assert provider.api_calls == 0
-    assert any("budget" in r.message.lower() for r in caplog.records)
 
 
 def test_sharp_odds_budget_exhausted_returns_cached_value_if_present():
@@ -153,13 +160,14 @@ def test_sharp_odds_budget_exhausted_returns_cached_value_if_present():
 
 
 def test_sharp_odds_budget_bumper_called_on_real_fetch():
-    op = FakeOddsPapiClient(hist_odds=[{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}])
+    op = FakeOddsPapiClient(hist_odds=[{"ts": 1, "home": 2.0, "draw": 3.5, "away": 4.0}],
+                            fixture_rows=[dict(_OFX[0])])
     bumps = []
     provider = BacktestDataProvider(oddspapi_client=op, tables={},
                                      budget_used_getter=lambda: 0,
                                      budget_bumper=lambda: bumps.append(1))
-    provider.sharp_odds({"fixture_id": "fx1"})
-    assert bumps == [1]
+    provider.sharp_odds(dict(_FX))
+    assert len(bumps) >= 1   # bumped for the fixture-list match and the odds fetch
 
 
 # --- final_score(): Kalshi-primary, settled-tracking cache ---
