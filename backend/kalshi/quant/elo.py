@@ -4,11 +4,11 @@ markets and trade on demo without OddsPapi. Tunable; the CLV gate is what
 decides whether the mapping is good enough to scale."""
 from __future__ import annotations
 
-HOME_FIELD_ADVANTAGE = 30.0   # Elo points. Lowered from 65 -> 45 -> 30: the old
-# value badly overrated the (often arbitrary, neutral-site) "home" team at the
-# World Cup, driving a heavy home-bet bias. A grid backtest found 30 maximizes
-# profit + trade count while holding profit-confidence — fewer home overbets,
-# ~11 bets vs 4, ~106% ROI on the WC slate.
+HOME_FIELD_ADVANTAGE = 65.0   # Elo points — a REAL home game (club leagues, a
+# host nation). Kept at the genuine ~65 value.
+NEUTRAL_HFA = 5.0             # Neutral-site game (World Cup group/knockout): the
+# "home" label is essentially arbitrary, so home advantage is ~0. Callers pick
+# NEUTRAL_HFA vs HOME_FIELD_ADVANTAGE by whether the fixture is neutral-site.
 BASE_TOTAL_GOALS = 2.7        # league-ish average total
 SUPREMACY_PER_100 = 0.45      # goal supremacy per 100 Elo of (adjusted) diff
 

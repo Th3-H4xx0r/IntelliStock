@@ -29,7 +29,7 @@ from kalshi.devig import power_devig, shin_devig, proportional_devig
 from kalshi.fees import DEFAULT_FEE_RATE
 from kalshi.intelligence.fusion import fuse, renormalize_group
 from kalshi.intelligence.pricing import model_market_probs
-from kalshi.quant.elo import elo_to_expected_goals
+from kalshi.quant.elo import elo_to_expected_goals, HOME_FIELD_ADVANTAGE, NEUTRAL_HFA
 from kalshi.quant.national_elo import is_national_team, national_elo_from
 from kalshi.strategy.candidates import generate_candidates
 from kalshi.capital.planner import allocate
@@ -697,7 +697,12 @@ def build_model_fn(nat_elo_table: dict | None, elo_table: dict | None):
         home = fx.get("home", "")
         away = fx.get("away", "")
         home_elo, away_elo = _team_elo(home), _team_elo(away)
-        expected_goals = elo_to_expected_goals(home_elo, away_elo)
+        # Context-aware home advantage: neutral-site (both national teams -> a WC
+        # tournament game where "home" is arbitrary) uses ~0; a real home game
+        # (club) keeps the genuine ~65.
+        _neutral = is_national_team(home) and is_national_team(away)
+        expected_goals = elo_to_expected_goals(
+            home_elo, away_elo, hfa=(NEUTRAL_HFA if _neutral else HOME_FIELD_ADVANTAGE))
         probs = model_market_probs(expected_goals)
         return probs.get("winner", {})
 

@@ -233,7 +233,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         f"bankroll ${config.caps.bankroll_cents / 100:.0f} · edge > {config.caps.edge_threshold:.1%} · "
         f"¼-Kelly {config.caps.kelly_fraction}", "white")
 
-    from kalshi.quant.elo import elo_to_expected_goals
+    from kalshi.quant.elo import elo_to_expected_goals, HOME_FIELD_ADVANTAGE, NEUTRAL_HFA
     from kalshi.quant.national_elo import is_national_team, national_elo, national_elo_from
     from kalshi.data.sources.clubelo import fetch_elo_table, elo_for
     from kalshi.data.sources.natelo import fetch_national_elo_table
@@ -431,7 +431,11 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     return elo_for(elo_table, name)
 
                 he, ae = _team_elo(home), _team_elo(away)
-                eg = elo_to_expected_goals(he, ae)
+                # Context-aware home advantage: a neutral-site tournament game (WC
+                # series / both national) has ~0 home edge ("home" is arbitrary); a
+                # real home game keeps the genuine ~65.
+                _neutral = national_series or (is_national_team(home) and is_national_team(away))
+                eg = elo_to_expected_goals(he, ae, hfa=(NEUTRAL_HFA if _neutral else HOME_FIELD_ADVANTAGE))
                 # Sharp anchor: de-vig the matched bookmaker odds, then fuse sharp+model.
                 # No match -> sharp_probs={} -> fused == model (degrade-safe).
                 sharp = {}
