@@ -439,20 +439,44 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_
     single call when there are zero fixtures). Returns `aggregate()`'s result
     with `data.api_calls`/`data.cache_hits` surfaced into `result.summary`.
     """
+    logs: list = []
+    decision_log: list = []
+
+    def _log(msg):
+        logs.append(msg)
+        log.info("run_backtest: %s", msg)
+
     fixtures = list(data.fixtures(cfg.leagues, cfg.start_date, cfg.end_date))
     fixtures.sort(key=lambda fx: fx.get("kickoff_ts", fx.get("kickoff", 0)) or 0)
+    _log(f"discovered {len(fixtures)} fixture(s) for leagues={cfg.leagues} "
+         f"{cfg.start_date}..{cfg.end_date}")
+    if not fixtures:
+        _log("no fixtures found — check the OddsPapi key/coverage for these "
+             "leagues+dates, or that markets exist on Kalshi for this range.")
+    counts = {"unsettled": 0, "unmatched": 0, "no_candle_data": 0, "no_bet": 0, "bet": 0}
 
     trades: list[Trade] = []
     n = len(fixtures)
     for i, fx in enumerate(fixtures):
         fixture_id = fx.get("fixture_id", "")
+        label = (f"{fx.get('home')} vs {fx.get('away')}"
+                 if fx.get("home") else fixture_id)
+        rec = {"fixture_id": fixture_id, "label": label,
+               "kickoff_ts": int(fx.get("kickoff_ts", fx.get("kickoff", 0)) or 0)}
         result = data.final_score(fx)
         if result is None:
-            log.info("run_backtest: skipping fixture_id=%s reason=unsettled", fixture_id)
+            counts["unsettled"] += 1
+            rec.update({"decision": "skipped", "reason": "unsettled"})
+            _log(f"skip {label}: not settled yet")
+            decision_log.append(rec)
         else:
+            rec["result"] = result
             tickers = data.kalshi_tickers(fx)
             if not tickers:
-                log.info("run_backtest: skipping fixture_id=%s reason=unmatched", fixture_id)
+                counts["unmatched"] += 1
+                rec.update({"decision": "skipped", "reason": "unmatched"})
+                _log(f"skip {label}: no Kalshi market matched this fixture")
+                decision_log.append(rec)
             else:
                 kickoff_ts = int(fx.get("kickoff_ts", fx.get("kickoff", 0)) or 0)
                 # Bound the candlestick window around kickoff. Kalshi's endpoint
@@ -485,7 +509,10 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_
                         break
 
                 if not kalshi_asks:
-                    log.info("run_backtest: skipping fixture_id=%s reason=no_candle_data", fixture_id)
+                    counts["no_candle_data"] += 1
+                    rec.update({"decision": "skipped", "reason": "no_candle_data"})
+                    _log(f"skip {label}: no Kalshi price at the decision snapshot")
+                    decision_log.append(rec)
                 else:
                     model_probs = model_fn(fx) or {}
                     llm_adj = {}
@@ -497,17 +524,43 @@ def run_backtest(cfg: BacktestConfig, data, model_fn, progress_cb=None, analyst_
                     fx_for_eval = dict(fx)
                     fx_for_eval["market_tickers"] = tickers
                     bets = evaluate(cfg, model_probs, sharp_probs, kalshi_asks, fx_for_eval, llm_adj)
-                    for bet in bets:
-                        trades.append(settle(bet, result, cfg.fee_rate))
+                    rec.update({"model_prob": {k: round(v, 4) for k, v in model_probs.items()},
+                                "sharp_prob": {k: round(v, 4) for k, v in sharp_probs.items()},
+                                "asks": kalshi_asks, "has_sharp": bool(sharp_probs)})
+                    if bets:
+                        counts["bet"] += 1
+                        settled = [settle(b, result, cfg.fee_rate) for b in bets]
+                        trades.extend(settled)
+                        rec.update({"decision": "placed", "bets": [
+                            {"side": b.side, "entry_cents": b.entry_cents, "size": b.size,
+                             "edge": round(b.edge, 4), "fused_fair": round(b.fused_fair, 4),
+                             "outcome": s.outcome, "pnl_cents": s.realized_pnl_cents}
+                            for b, s in zip(bets, settled)]})
+                        _log(f"BET {label}: {len(bets)} side(s), "
+                             f"pnl {sum(s.realized_pnl_cents for s in settled)}c")
+                    else:
+                        counts["no_bet"] += 1
+                        rec.update({"decision": "no_bet", "reason": "no side cleared the edge bar"})
+                        _log(f"no bet {label}: no side cleared the edge bar "
+                             f"(sharp={'yes' if sharp_probs else 'no'})")
+                    decision_log.append(rec)
 
         if progress_cb is not None:
             progress_cb((i + 1) / n if n else 1.0)
+
+    _log(f"done: {counts['bet']} bet · {counts['no_bet']} no-edge · "
+         f"{counts['unsettled']} unsettled · {counts['unmatched']} unmatched · "
+         f"{counts['no_candle_data']} no-price · api_calls={getattr(data, 'api_calls', 0)} "
+         f"cache_hits={getattr(data, 'cache_hits', 0)}")
 
     out = aggregate(trades, cfg.bankroll_cents)
     out.summary = {
         "api_calls": getattr(data, "api_calls", 0),
         "cache_hits": getattr(data, "cache_hits", 0),
+        "n_fixtures": n, **counts,
     }
+    out.logs = logs
+    out.decision_log = decision_log
     return out
 
 

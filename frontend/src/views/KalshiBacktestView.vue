@@ -356,7 +356,17 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
           <tr v-for="b in backtests" :key="b.id" class="border-t border-border-subtle/50">
             <td class="py-2 text-slate-300 font-mono text-xs">{{ b.id.slice(0, 8) }}</td>
             <td class="text-slate-400">{{ b.start_date }} → {{ b.end_date }}</td>
-            <td><span :class="statusColor(b.status)">{{ b.status }}</span><span v-if="b.status === 'running' || b.status === 'pending'" class="text-slate-500"> {{ Math.round(b.progress || 0) }}%</span></td>
+            <td>
+              <div class="flex items-center gap-2">
+                <span :class="statusColor(b.status)">{{ b.status }}</span>
+                <template v-if="b.status === 'running' || b.status === 'pending'">
+                  <div class="w-16 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
+                    <div class="h-full bg-amber-400 rounded-full transition-all" :style="{ width: Math.max(3, Math.round(b.progress || 0)) + '%' }"></div>
+                  </div>
+                  <span class="text-slate-500 text-[11px]">{{ Math.round(b.progress || 0) }}%</span>
+                </template>
+              </div>
+            </td>
             <td :class="(b.summary && b.summary.pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ b.summary ? fmtMoney(b.summary.pnl_cents) : '—' }}</td>
             <td class="text-right">
               <button @click="openResults(b.id)" class="text-xs text-primary hover:underline mr-2">View</button>

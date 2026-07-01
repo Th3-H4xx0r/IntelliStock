@@ -476,6 +476,8 @@ def backtest_result_doc(id, result) -> dict:
         "calibration": list(g("calibration", []) or []),
         "trades": [_as_plain(t) for t in (g("trades", []) or [])],
         "summary": dict(g("summary", {}) or {}),
+        "logs": list(g("logs", []) or []),
+        "decision_log": list(g("decision_log", []) or []),
     }
 
 

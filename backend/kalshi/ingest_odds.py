@@ -136,10 +136,19 @@ class OddsPapiClient:
             session = requests.Session()
         self._session = session
 
+    # OddsPapi sits behind Cloudflare, which 403s (error 1010) requests without a
+    # browser-like User-Agent. Send one so the API is reachable at all.
+    _HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/126 Safari/537.36",
+        "Accept": "application/json",
+    }
+
     def fetch_raw(self, path: str, params: dict | None = None) -> dict:
         p = dict(params or {})
         p["apiKey"] = self.api_key  # query param, not a header
-        resp = self._session.request("GET", f"{self.base_url}{path}", params=p, timeout=20.0)
+        resp = self._session.request("GET", f"{self.base_url}{path}", params=p,
+                                     headers=self._HEADERS, timeout=20.0)
         resp.raise_for_status()
         return resp.json() if resp.content else {}
 
