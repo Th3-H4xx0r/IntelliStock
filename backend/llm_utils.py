@@ -3126,6 +3126,48 @@ def _log_token_usage(provider: str, model: str, data: dict) -> None:
         pass
 
 
+def _extract_openrouter_usage(usage: Any) -> tuple[dict[str, int], float | None]:
+    """Normalize an OpenRouter ``/chat/completions`` usage block into the
+    telemetry token dict plus an optional OpenRouter-reported USD cost.
+
+    Returns ``(usage_dict, cost_usd_override_or_None)``. OpenRouter returns
+    ``usage.cost`` (credits == USD) when the request opts in with
+    ``usage: {"include": true}``; we surface it as an envelope cost override so
+    it wins over the pricing YAML / Models-row estimate. When absent or
+    non-positive we return ``None`` so the caller falls back to registry
+    pricing — but the token counts are ALWAYS returned so the row is never
+    dropped.
+    """
+    if not isinstance(usage, dict):
+        return {}, None
+    try:
+        inp = int(usage.get("prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        inp = 0
+    try:
+        out = int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        out = 0
+    reasoning = 0
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict):
+        try:
+            reasoning = int(details.get("reasoning_tokens") or 0)
+        except (TypeError, ValueError):
+            reasoning = 0
+    u: dict[str, int] = {"input_tokens": inp, "output_tokens": out}
+    if reasoning:
+        u["reasoning_tokens"] = reasoning
+    cost_override: float | None = None
+    _cost = usage.get("cost")
+    try:
+        if _cost is not None and float(_cost) > 0:
+            cost_override = float(_cost)
+    except (TypeError, ValueError):
+        cost_override = None
+    return u, cost_override
+
+
 def _call_gemini(
     api_key: str,
     model: str,
@@ -4533,9 +4575,17 @@ def _call_openrouter(
 ) -> str:
     """Call OpenRouter (OpenAI-compatible /chat/completions). Structural clone of
     _call_nvidia without NVIDIA's RPM limiter, plus optional attribution headers
-    (HTTP-Referer / X-Title) and reasoning-effort passthrough."""
+    (HTTP-Referer / X-Title) and reasoning-effort passthrough.
+
+    Records one telemetry row per call (success or terminal failure) via
+    ``_safe_record`` — OpenRouter is otherwise invisible in LLMUsage because,
+    unlike every other provider path, it has no self-recording. Cost prefers
+    OpenRouter's own ``usage.cost`` (requested below via ``usage.include``),
+    then falls through to the pricing registry / Models-row override inside
+    ``record_llm_call``, then zero — but the row is never dropped."""
     if not api_key:
         return ""
+    _t0 = time.monotonic()
     try:
         import requests as _requests
         url = (base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
@@ -4548,6 +4598,10 @@ def _call_openrouter(
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "top_p": 0.95,
+            # Ask OpenRouter to include the per-call USD cost in the usage
+            # block so telemetry can record real spend without a second
+            # /generation round-trip or a local pricing table.
+            "usage": {"include": True},
         }
         if not _omit_temperature(model):
             body["temperature"] = 0.2
@@ -4628,6 +4682,9 @@ def _call_openrouter(
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
             data = r.json()
             _log_token_usage("openrouter", model, data)
+            _or_usage, _or_cost = _extract_openrouter_usage(
+                data.get("usage") if isinstance(data, dict) else None
+            )
             choices = data.get("choices") or []
             if not choices:
                 if attempt < max_retries:
@@ -4641,6 +4698,12 @@ def _call_openrouter(
                     _stash_last_http(status=200, body=None, exc=None)
                 except Exception:
                     pass
+                _safe_record(
+                    provider="openrouter", model=model, usage=_or_usage, ok=True,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error=None,
+                    cost_usd_override=_or_cost, model_id=None,
+                )
                 return text
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
@@ -4649,6 +4712,15 @@ def _call_openrouter(
         return ""
     except Exception as _exc:
         _LAST_PLAIN_LLM_CALL_ERROR.error = str(_exc)
+        try:
+            _safe_record(
+                provider="openrouter", model=model, usage={}, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=int(retries or 0), error=str(_exc)[:200],
+                model_id=None,
+            )
+        except Exception:
+            pass
         try:
             tid = threading.get_ident()
             with _LAST_HTTP_LOCK:
