@@ -145,6 +145,38 @@ def is_immediately_fatal(class_tag: str) -> bool:
     return class_tag in {"azure_403_blocked", "auth_failure", "codex_quota_exhausted"}
 
 
+# Article-enrichment roles whose critical LLM failure must DEGRADE the run
+# (empty signal) rather than halt live trading. Everything else — decision
+# roles (sentiment/overlay/event_maintenance/generic ""), None, unknown — is
+# halt-worthy by default (fail-safe).
+#
+# Incident 2026-06-22/23: the `macro_article` role (codex-cli, gpt-5.4-mini)
+# hit weekly quota, LLMCriticalFailure bubbled to live_critical_abort.handle(),
+# and the whole-instance kill switch flipped (runCommand=False) — alpaca-main
+# lost two trading days. Macro/company articles are an enrichment signal; a
+# codex-quota exhaustion there must never kill decision-making trades.
+_NON_HALT_WORTHY_ROLES = frozenset({
+    "macro_article",
+    "company_article",
+    "lookback_macro_article",
+    "lookback_company_article",
+})
+
+
+def role_is_halt_worthy(role: str | None) -> bool:
+    """Return True if a critical LLM failure in this role should HALT the
+    instance, False if it should only DEGRADE the run.
+
+    Fail-safe: only the four explicit article-enrichment roles degrade. Any
+    None / unknown / decision role halts — the dangerous bug to avoid is the
+    INVERSE (a decision-role failure that no longer halts), so unrecognised
+    provenance defaults to halt.
+    """
+    if role is None:
+        return True
+    return str(role).strip().lower() not in _NON_HALT_WORTHY_ROLES
+
+
 def is_consecutive_class(class_tag: str) -> bool:
     """True for classes that ONLY fire after a consecutive-counter trip."""
     return class_tag == "provider_5xx_persistent"
@@ -192,13 +224,18 @@ class LLMCriticalFailure(BaseException):
         model: str,
         attribution: dict[str, Any],
         attempts: list[dict[str, Any]],
+        role: str | None = None,
     ) -> None:
         super().__init__(
             f"LLM critical failure after {len(attempts)} attempts: "
-            f"class={class_tag} provider={provider} model={model}"
+            f"class={class_tag} provider={provider} model={model} role={role}"
         )
         self.class_tag = class_tag
         self.provider = provider
         self.model = model
         self.attribution = dict(attribution or {})
         self.attempts = list(attempts or [])
+        # Optional caller role (e.g. "macro_article"). Consumed by
+        # role_is_halt_worthy() so article-enrichment failures degrade rather
+        # than halt. None (default) is fail-safe → halt-worthy.
+        self.role = role

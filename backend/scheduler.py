@@ -218,7 +218,8 @@ def get_next_wake(
         mode = "IDLE"
     elif fired_slot_min is None:
         mode = "IDLE"          # mid-tick wake-up between slots
-    elif fired_slot_min == full_min and marker != today_str:
+    elif marker != today_str and fired_slot_min >= full_min:
+        # catch-up: if the anchor was missed (crash/restart churn), the next slot re-fires FULL
         mode = "FULL"
     else:
         mode = "MONITOR"

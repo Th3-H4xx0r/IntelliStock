@@ -51,11 +51,29 @@ LIVE_OVERRIDES: dict[str, object] = {
 }
 
 
+# Keys whose live-mode value is a *default*, not a hard safety clamp: if the
+# user's Strategies config sets them explicitly, the user's value wins. Everything
+# else in LIVE_OVERRIDES stays unconditional (fail-closed safety cannot be tuned
+# away from the DB). ``portfolio_drawdown_halt_pct`` is a user-chosen circuit
+# breaker (doc-179 Track-B sets 8.0); clobbering it to the 10.0 default would
+# silently discard the operator's tighter threshold.
+_USER_OVERRIDABLE_KEYS: frozenset[str] = frozenset({"portfolio_drawdown_halt_pct"})
+
+
 def apply_live_overrides(config: dict | None) -> dict:
     """Return a NEW dict with LIVE_OVERRIDES merged on top of config.
 
+    Overrides win unconditionally EXCEPT for keys in ``_USER_OVERRIDABLE_KEYS``,
+    which act as live-mode defaults: an explicitly-set value in ``config``
+    survives, but a config that omits the key still inherits the live default.
+
     Never mutates input. Never writes to DB.
     """
-    merged: dict = dict(config or {})
+    src: dict = dict(config or {})
+    merged: dict = dict(src)
     merged.update(LIVE_OVERRIDES)
+    # Restore any user-overridable key the operator set explicitly.
+    for _key in _USER_OVERRIDABLE_KEYS:
+        if _key in src:
+            merged[_key] = src[_key]
     return merged

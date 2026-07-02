@@ -114,6 +114,64 @@ except Exception:
     def llm_call_context(**_kwargs):
         yield
 
+# Bare-module import so LLMCriticalFailure resolves to the SAME class object
+# that llm_utils raises and broker.py catches (see llm_utils rationale) —
+# isinstance identity must match for the article-role degrade below to fire.
+try:
+    from llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+except ImportError:
+    from backend.llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+
+
+# One-shot dedup for the article-role degrade operator alert (per process).
+_ARTICLE_CRITICAL_DEGRADE_ALERTED = False
+
+
+def _alert_article_critical_degrade(exc, *, instance_id, stage: str) -> None:
+    """Degrade an article-enrichment-role LLM critical failure: re-arm the
+    critical guard, log (red), and page the operator ONCE (Task 4, Benzinga-401
+    precedent). The run continues with the article signal empty."""
+    role = getattr(exc, "role", None)
+    _log(
+        f"{stage}: LLM critical in enrichment role {role} "
+        f"({getattr(exc, 'class_tag', '?')} on {getattr(exc, 'model', '?')}) — "
+        f"degrading, run continues without this signal (no halt)",
+        "red",
+    )
+    # Re-arm the critical guard. The raise site called mark_raised() before this
+    # failure, latching _already_raised=True process-wide. If we continue the run
+    # with it latched, EVERY subsequent LLM call — including decision roles —
+    # short-circuits to a single passthrough and can never escalate/halt again,
+    # re-introducing the inverse bug (a decision-role failure that no longer
+    # halts). Clearing it keeps decision roles protected after an enrichment
+    # degrade. Bare import → same module object the raise site latched.
+    try:
+        import llm_critical_guard as _lcg
+        _lcg.reset_state()
+    except Exception:
+        try:
+            from backend import llm_critical_guard as _lcg  # type: ignore
+            _lcg.reset_state()
+        except Exception:
+            pass
+    global _ARTICLE_CRITICAL_DEGRADE_ALERTED
+    if _ARTICLE_CRITICAL_DEGRADE_ALERTED:
+        return
+    _ARTICLE_CRITICAL_DEGRADE_ALERTED = True
+    try:
+        from live_alerts import alert_strategy_error
+        alert_strategy_error(
+            instance_id=str(instance_id or os.environ.get("INSTANCE_ID", "<unknown>")),
+            tag="llm_critical_degraded",
+            message=(
+                f"{stage}: {getattr(exc, 'class_tag', '?')} in enrichment role "
+                f"'{role}' — strategy running WITHOUT this signal until fixed. "
+                f"No halt (article-enrichment role)."
+            ),
+        )
+    except Exception as _alert_e:
+        _log(f"{stage}: degrade alert dispatch failed: {type(_alert_e).__name__}: {_alert_e}", "yellow")
+
 try:
     from strategies.ml_news import _score_finbert_batch as _ml_news_score_finbert_batch
 except ImportError:
@@ -3386,6 +3444,7 @@ def _classify_company_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "company_article",
             },
+            role="company_article",
             system_prompt=system_prompt,
             retries=2,
             output_retries=output_retries,
@@ -3443,6 +3502,7 @@ def _classify_company_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "company_article_single",
                 },
+                role="company_article",
                 system_prompt=system_prompt,
                 retries=2,
                 output_retries=output_retries,
@@ -3638,6 +3698,7 @@ def _classify_macro_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "macro_article",
             },
+            role="macro_article",
             system_prompt=system_prompt,
             retries=2,
             output_retries=output_retries,
@@ -3701,6 +3762,7 @@ def _classify_macro_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "macro_article_single",
                 },
+                role="macro_article",
                 system_prompt=system_prompt,
                 retries=2,
                 output_retries=output_retries,
@@ -9145,6 +9207,43 @@ def _should_call_trade_overlay_for_candidate(
     return float(ml.get("ml_confidence") or 0.0) >= 0.30
 
 
+def _emu_last_price(portfolio_emulator, sym):
+    """Last known price for `sym` from the portfolio emulator / broker adapter.
+
+    The real price surface (Step 1) is the `_last_prices` dict attribute exposed
+    by PortfolioEmulator (backend/portfolio_emulator.py:22) and the Alpaca /
+    Robinhood adapters — there is no get_last_price() method."""
+    try:
+        return (getattr(portfolio_emulator, "_last_prices", {}) or {}).get(sym)
+    except Exception:
+        return None
+
+
+def _outcome_entry_price(sym, payload, prices, portfolio_emulator):
+    """Entry price for a TradeOutcomes row. Live `prices` only covers held
+    names (candidates are unpriced there), which kept this table empty for
+    every live instance — fall back to the payload's own price (top-level, then
+    the nested quality_metadata.current_price the enriched_scores payload
+    actually carries), then the emulator/adapter last price."""
+    payload = payload if isinstance(payload, dict) else {}
+    quality_meta = payload.get("quality_metadata")
+    quality_meta = quality_meta if isinstance(quality_meta, dict) else {}
+    for candidate in (
+        (prices or {}).get(sym),
+        payload.get("current_price"),
+        payload.get("price"),
+        payload.get("last_close"),
+        quality_meta.get("current_price"),
+        _emu_last_price(portfolio_emulator, sym),
+    ):
+        try:
+            if candidate is not None and float(candidate) > 0:
+                return float(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _save_trade_contexts_and_outcomes(
     conn,
     *,
@@ -9156,6 +9255,7 @@ def _save_trade_contexts_and_outcomes(
     llm_traces: dict[str, list[dict]],
     active_events: list[dict],
     config: dict,
+    portfolio_emulator=None,
 ) -> None:
     if conn is None:
         return
@@ -9178,6 +9278,7 @@ def _save_trade_contexts_and_outcomes(
         action_intent = _normalize_action_intent(payload.get("action_intent"))
         trade_id = f"{instance_id}|{date_key}|{sym}"
         feature_row = candidate_features.get(sym) or {}
+        _entry_px = _outcome_entry_price(sym, payload, prices, portfolio_emulator)
         doc = {
             "id": trade_id,
             "instance_id": instance_id,
@@ -9187,7 +9288,7 @@ def _save_trade_contexts_and_outcomes(
             "symbol": sym,
             "date_key": date_key,
             "entry_date": date_key,
-            "entry_price": prices.get(sym),
+            "entry_price": _entry_px,
             "final_score": payload.get("score", 0),
             "final_action": "buy" if int(payload.get("score", 0) or 0) > 0 else ("sell" if int(payload.get("score", 0) or 0) < 0 else "hold"),
             "score": payload.get("score", 0),
@@ -9207,7 +9308,7 @@ def _save_trade_contexts_and_outcomes(
             "dominant_event_type": feature_row.get("dominant_event_type") or "general",
         }
         docs.append(doc)
-        if action_intent != "hold" and prices.get(sym):
+        if action_intent != "hold" and _entry_px:
             outcome_docs.append({
                 "id": trade_id,
                 "instance_id": instance_id,
@@ -9216,7 +9317,7 @@ def _save_trade_contexts_and_outcomes(
                 "history_model_stamp": history_model_stamp,
                 "symbol": sym,
                 "entry_date": date_key,
-                "entry_price": prices.get(sym),
+                "entry_price": _entry_px,
                 "action_intent": action_intent,
                 "latest_return": 0.0,
                 "latest_observation_date": date_key,
@@ -16413,6 +16514,51 @@ def _compute_propagated_scores(
 # previous inline block — see backend/tests/test_nexus_evaluate_position_risk.py.
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
+    """Page operators when a held position's risk pipeline is silently bypassed.
+
+    When a held position's current or entry price cannot be resolved, P&L is
+    uncomputable and EVERY risk-exit gate (circuit-breaker, fast-loser,
+    trailing-stop, ...) is skipped for that bar. That silent skip is exactly
+    how a position can bleed past every loss floor uncut, so it must never
+    fail quietly again.
+
+    Reuses live_alerts' notify/_channel utility layer and the same lazy-import,
+    try/except-wrapped, live-only (``_instance_id``) pattern as
+    ``_apply_portfolio_drawdown_halt`` — a Discord outage never blocks the
+    strategy.
+    """
+    try:
+        from live_alerts import notify, _channel
+        _body = (
+            f"RISK PIPELINE SKIP [{instance_id}] {sym}: current/entry price "
+            f"unresolved — P&L uncomputable, ALL risk-exit checks bypassed "
+            f"this bar"
+        )
+        notify(
+            category="risk_skip",
+            instance_id=str(instance_id),
+            title="Risk pipeline SKIP",
+            body=_body,
+            discord_channel=_channel("notifications"),
+            discord_embed={
+                "title": "Risk pipeline SKIP",
+                "color": 0xE74C3C,
+                "description": _body[:1500],
+                "fields": [
+                    {"name": "symbol", "value": str(sym), "inline": True},
+                    {"name": "effect",
+                     "value": "All risk-exit gates bypassed (no P&L this bar)",
+                     "inline": False},
+                ],
+            },
+            push_body=f"{sym}: risk pipeline skipped (price unresolved)",
+        )
+    except Exception:
+        # Alerts must never block strategy execution.
+        pass
+
+
 def _evaluate_position_risk(
     sym: str,
     *,
@@ -16488,7 +16634,27 @@ def _evaluate_position_risk(
                     _ep = float(_th.get("price", 0) or 0)
                     break
             if _cp <= 0 or _ep <= 0:
-                _log(f"Risk pipeline SKIP: {sym} qty={_pos_qty:.1f} but cp=${_cp:.2f} ep=${_ep:.2f} — cannot compute P&L, all risk checks bypassed", "yellow")
+                _log(f"Risk pipeline SKIP: {sym} qty={_pos_qty:.1f} but cp=${_cp:.2f} ep=${_ep:.2f} — cannot compute P&L, all risk checks bypassed", "red")
+                # A silent skip here is exactly how a position bleeds past every
+                # loss floor uncut (CRWV 2026-07). Page operators once per
+                # (sym, PT-date) so a silent bypass can never happen again.
+                # Dedup + Discord are live-only (PortfolioEmulator has no
+                # _instance_id); backtests/tests stay quiet.
+                _rs_instance_id = getattr(portfolio_emulator, "_instance_id", None)
+                if _rs_instance_id and isinstance(strategy_cache, dict):
+                    try:
+                        from datetime import datetime as _rs_dt, timezone as _rs_tz
+                        from zoneinfo import ZoneInfo as _rs_ZI
+                        _rs_pt_date = _rs_dt.now(_rs_tz.utc).astimezone(
+                            _rs_ZI("America/Los_Angeles")
+                        ).strftime("%Y-%m-%d")
+                    except Exception:
+                        _rs_pt_date = str(date_key)
+                    _rs_sent = strategy_cache.setdefault("_risk_skip_alerted", {})
+                    _rs_key = f"{sym}|{_rs_pt_date}"
+                    if not _rs_sent.get(_rs_key):
+                        _rs_sent[_rs_key] = True
+                        _alert_risk_pipeline_skip(str(_rs_instance_id), sym)
             if _ep > 0 and _cp > 0:
                 _unrealized_pct = ((_cp - _ep) / _ep) * 100.0
                 _prop_raw = float((propagated or {}).get(sym, {}).get("raw_score", 0.0))
@@ -21215,13 +21381,22 @@ class GraphNexusAnalysis:
                 if not isinstance(finbert_rows, dict):
                     finbert_rows = {}
             with _timed_stage("Company article classification", start_details=f"articles={len(normalized_alpaca_articles)}"):
-                company_article_rows, company_traces = _classify_company_article_records(
-                    normalized_alpaca_articles,
-                    config,
-                    date_key=date_key,
-                    conn=conn,
-                    instance_id=instance_id,
-                )
+                try:
+                    company_article_rows, company_traces = _classify_company_article_records(
+                        normalized_alpaca_articles,
+                        config,
+                        date_key=date_key,
+                        conn=conn,
+                        instance_id=instance_id,
+                    )
+                except LLMCriticalFailure as _company_crit:
+                    # Task 4: article-enrichment-role critical LLM failure
+                    # degrades to an empty signal; decision-role (fail-safe)
+                    # still propagates to broker.py for the halt.
+                    if role_is_halt_worthy(getattr(_company_crit, "role", None)):
+                        raise
+                    _alert_article_critical_degrade(_company_crit, instance_id=instance_id, stage="Company article")
+                    company_article_rows, company_traces = [], []
                 if not isinstance(company_article_rows, list):
                     company_article_rows = []
                 if not isinstance(company_traces, list):
@@ -21848,6 +22023,18 @@ class GraphNexusAnalysis:
                 if not isinstance(_gn_normalized, list):
                     _gn_normalized = []
                 llm_traces_global.extend(_gn_macro_traces)
+            except LLMCriticalFailure as _macro_crit:
+                # Task 4: an article-enrichment-role critical LLM failure
+                # (e.g. codex-cli quota) must DEGRADE, not halt. A decision-role
+                # critical (fail-safe: None/unknown too) still propagates to
+                # broker.py's outer loop for the halt.
+                if role_is_halt_worthy(getattr(_macro_crit, "role", None)):
+                    raise
+                _alert_article_critical_degrade(_macro_crit, instance_id=instance_id, stage="Macro article")
+                macro_rows = []
+                _gn_macro_traces = []
+                google_articles = []
+                _gn_normalized = []
             except Exception as _macro_join_exc:
                 _log(f"Macro pipeline error (non-fatal): {_macro_join_exc}", "yellow")
                 macro_rows = []
@@ -26358,6 +26545,7 @@ class GraphNexusAnalysis:
                 llm_traces=trace_map,
                 active_events=active_events,
                 config=config,
+                portfolio_emulator=portfolio_emulator,
             )
 
         # Attach nexus metadata for broker to extract
