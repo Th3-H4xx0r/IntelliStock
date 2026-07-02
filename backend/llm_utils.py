@@ -1562,6 +1562,35 @@ def _raw_structured_fallback_prompt(prompt: str, output_type: Any) -> str:
     return f"{base}\n\nTask:\n{prompt}"
 
 
+# OpenRouter reasoning models (e.g. nvidia/nemotron-3-ultra-550b-a55b) burn the
+# provider-default completion cap on *reasoning* tokens before emitting any JSON
+# — live telemetry showed ~13.7k reasoning tokens on a 14.7k-token completion.
+# Our call sites pass max_output_tokens=0 to mean "uncapped", which sends NO
+# max_tokens on the wire and lets OpenRouter apply its own finite default cap;
+# the reasoning burn then exhausts that cap before any structured JSON is
+# produced, and PydanticAI raises "Model token limit (provider default)
+# exceeded before any response was generated. Increase the `max_tokens` model
+# setting...". So for OpenRouter specifically an uncapped call gets an explicit,
+# generous cap large enough for reasoning + JSON to both fit. Bounded for
+# sanity (well under typical OpenRouter context windows). Other providers are
+# intentionally left uncapped when the caller asks for uncapped.
+_OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS = 32768
+
+
+def _openrouter_effective_max_output_tokens(max_output_tokens) -> int:
+    """Resolve the wire ``max_tokens`` for an OpenRouter call.
+
+    Honour an explicit positive cap; when the caller left it uncapped (<=0),
+    inject the generous reasoning-safe default so a reasoning model's thinking
+    tokens don't consume the provider-default cap before the JSON is emitted.
+    """
+    try:
+        n = int(max_output_tokens or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return n if n > 0 else _OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS
+
+
 def _build_structured_model_settings(
     provider: str,
     max_output_tokens: int,
@@ -1572,6 +1601,11 @@ def _build_structured_model_settings(
     """Build provider-appropriate PydanticAI model settings for structured output."""
     effective_max_tokens = max_output_tokens if max_output_tokens and max_output_tokens > 0 else None
     p = (provider or "gemini").strip().lower()
+    # OpenRouter reasoning models need an explicit generous cap when uncapped —
+    # see _OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS. Only OpenRouter is affected;
+    # every other provider keeps its prior (uncapped => None) behaviour.
+    if p == "openrouter" and effective_max_tokens is None:
+        effective_max_tokens = _OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS
     skip_temp = _omit_temperature(model)
     if p == "gemini" and GoogleModelSettings is not None:
         if effective_max_tokens is None or effective_max_tokens < 256:
@@ -4608,8 +4642,13 @@ def _call_openrouter(
         }
         if not _omit_temperature(model):
             body["temperature"] = 0.2
-        if max_output_tokens and max_output_tokens > 0:
-            body["max_tokens"] = max_output_tokens
+        # Always send an explicit max_tokens for OpenRouter: honour a positive
+        # caller cap, else inject the generous reasoning-safe default so a
+        # reasoning model's thinking tokens don't exhaust the provider-default
+        # cap before the completion is emitted. See
+        # _OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS. This path also backs the
+        # raw-JSON structured fallback, so the fix covers both.
+        body["max_tokens"] = _openrouter_effective_max_output_tokens(max_output_tokens)
         effort = normalize_reasoning_effort(reasoning_effort)
         if effort:
             # OpenRouter accepts the OpenAI-style `reasoning_effort` alias AND its
