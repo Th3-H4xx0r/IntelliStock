@@ -9145,6 +9145,43 @@ def _should_call_trade_overlay_for_candidate(
     return float(ml.get("ml_confidence") or 0.0) >= 0.30
 
 
+def _emu_last_price(portfolio_emulator, sym):
+    """Last known price for `sym` from the portfolio emulator / broker adapter.
+
+    The real price surface (Step 1) is the `_last_prices` dict attribute exposed
+    by PortfolioEmulator (backend/portfolio_emulator.py:22) and the Alpaca /
+    Robinhood adapters — there is no get_last_price() method."""
+    try:
+        return (getattr(portfolio_emulator, "_last_prices", {}) or {}).get(sym)
+    except Exception:
+        return None
+
+
+def _outcome_entry_price(sym, payload, prices, portfolio_emulator):
+    """Entry price for a TradeOutcomes row. Live `prices` only covers held
+    names (candidates are unpriced there), which kept this table empty for
+    every live instance — fall back to the payload's own price (top-level, then
+    the nested quality_metadata.current_price the enriched_scores payload
+    actually carries), then the emulator/adapter last price."""
+    payload = payload if isinstance(payload, dict) else {}
+    quality_meta = payload.get("quality_metadata")
+    quality_meta = quality_meta if isinstance(quality_meta, dict) else {}
+    for candidate in (
+        (prices or {}).get(sym),
+        payload.get("current_price"),
+        payload.get("price"),
+        payload.get("last_close"),
+        quality_meta.get("current_price"),
+        _emu_last_price(portfolio_emulator, sym),
+    ):
+        try:
+            if candidate is not None and float(candidate) > 0:
+                return float(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _save_trade_contexts_and_outcomes(
     conn,
     *,
@@ -9156,6 +9193,7 @@ def _save_trade_contexts_and_outcomes(
     llm_traces: dict[str, list[dict]],
     active_events: list[dict],
     config: dict,
+    portfolio_emulator=None,
 ) -> None:
     if conn is None:
         return
@@ -9178,6 +9216,7 @@ def _save_trade_contexts_and_outcomes(
         action_intent = _normalize_action_intent(payload.get("action_intent"))
         trade_id = f"{instance_id}|{date_key}|{sym}"
         feature_row = candidate_features.get(sym) or {}
+        _entry_px = _outcome_entry_price(sym, payload, prices, portfolio_emulator)
         doc = {
             "id": trade_id,
             "instance_id": instance_id,
@@ -9187,7 +9226,7 @@ def _save_trade_contexts_and_outcomes(
             "symbol": sym,
             "date_key": date_key,
             "entry_date": date_key,
-            "entry_price": prices.get(sym),
+            "entry_price": _entry_px,
             "final_score": payload.get("score", 0),
             "final_action": "buy" if int(payload.get("score", 0) or 0) > 0 else ("sell" if int(payload.get("score", 0) or 0) < 0 else "hold"),
             "score": payload.get("score", 0),
@@ -9207,7 +9246,7 @@ def _save_trade_contexts_and_outcomes(
             "dominant_event_type": feature_row.get("dominant_event_type") or "general",
         }
         docs.append(doc)
-        if action_intent != "hold" and prices.get(sym):
+        if action_intent != "hold" and _entry_px:
             outcome_docs.append({
                 "id": trade_id,
                 "instance_id": instance_id,
@@ -9216,7 +9255,7 @@ def _save_trade_contexts_and_outcomes(
                 "history_model_stamp": history_model_stamp,
                 "symbol": sym,
                 "entry_date": date_key,
-                "entry_price": prices.get(sym),
+                "entry_price": _entry_px,
                 "action_intent": action_intent,
                 "latest_return": 0.0,
                 "latest_observation_date": date_key,
@@ -26358,6 +26397,7 @@ class GraphNexusAnalysis:
                 llm_traces=trace_map,
                 active_events=active_events,
                 config=config,
+                portfolio_emulator=portfolio_emulator,
             )
 
         # Attach nexus metadata for broker to extract
