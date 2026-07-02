@@ -1,8 +1,9 @@
 """Unit tests for the doc-179 hygiene script's pure logic.
 
 All fixtures use FAKE keys (``AKFAKE...``/``SKFAKE...``) — no real secrets appear
-here, and nothing in this file touches a real database. Only the pure
-``build_updates`` / ``extract_broker_creds`` functions are exercised.
+here, and nothing in this file touches a real database. The pure
+``build_updates`` / ``extract_broker_creds`` functions are exercised, plus
+``apply_updates`` against a FAKE in-memory rdb object (no network, no driver).
 """
 
 import copy
@@ -16,10 +17,14 @@ if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
 from scripts.fix_doc179_hygiene import (  # noqa: E402
+    apply_updates,
     build_updates,
     extract_broker_creds,
     HALT_CLEAR,
 )
+
+WORKING_KEY = "AKFAKELIVEKEY1111111"
+WORKING_SECRET = "SKFAKELIVESECRET11111111111111111111"
 
 
 def _doc179():
@@ -47,33 +52,42 @@ def _doc179():
 
 
 def _brokerage_row():
-    """The 'Alpaca Live' BrokerageAccounts row holding the WORKING key."""
+    """The 'Alpaca Live' BrokerageAccounts row holding the WORKING key.
+
+    Field names mirror the REAL prod row (verified live 2026-07-02):
+    ``alpaca_key``/``alpaca_secret`` — NOT ``key``/``secret``.
+    """
     return {
         "id": "08f683af-76f6-404d-872c-37baa45711ee",
         "account_name": "Alpaca Live",
-        "key": "AKFAKELIVEKEY1111111",
-        "secret": "SKFAKELIVESECRET11111111111111111111",
+        "brokerage_type": "alpaca",
+        "alpaca_key": WORKING_KEY,
+        "alpaca_secret": WORKING_SECRET,
+        "alpaca_paper": False,
+        "status": "active",
     }
 
 
 # --- extract_broker_creds ---------------------------------------------------
 
 
-def test_extract_creds_key_secret_fields():
+def test_extract_creds_real_prod_field_names():
+    """Primary case: the prod row's actual fields, alpaca_key/alpaca_secret."""
     k, s, kf, sf = extract_broker_creds(_brokerage_row())
-    assert k == "AKFAKELIVEKEY1111111"
-    assert s == "SKFAKELIVESECRET11111111111111111111"
-    assert kf == "key"
-    assert sf == "secret"
+    assert k == WORKING_KEY
+    assert s == WORKING_SECRET
+    assert kf == "alpaca_key"
+    assert sf == "alpaca_secret"
 
 
-def test_extract_creds_alternate_field_names():
-    row = {"id": "x", "alpaca_key": "AKFAKEALT1", "alpaca_secret": "SKFAKEALT2"}
+def test_extract_creds_key_secret_fallback_pair():
+    """Fallback case: a row using plain key/secret is still handled."""
+    row = {"id": "x", "key": "AKFAKEALT1", "secret": "SKFAKEALT2"}
     k, s, kf, sf = extract_broker_creds(row)
     assert k == "AKFAKEALT1"
     assert s == "SKFAKEALT2"
-    assert kf == "alpaca_key"
-    assert sf == "alpaca_secret"
+    assert kf == "key"
+    assert sf == "secret"
 
 
 def test_extract_creds_missing_raises():
@@ -98,8 +112,8 @@ def test_build_updates_replaces_only_inner_creds():
     new_arr = strat_update["strategies"]
     cfg0 = new_arr[0]["config"]
     # inner creds swapped to the working brokerage key/secret
-    assert cfg0["alpaca_key"] == "AKFAKELIVEKEY1111111"
-    assert cfg0["alpaca_secret"] == "SKFAKELIVESECRET11111111111111111111"
+    assert cfg0["alpaca_key"] == WORKING_KEY
+    assert cfg0["alpaca_secret"] == WORKING_SECRET
     # everything else in config[0] untouched
     assert cfg0["risk_pct"] == 2.5
     assert cfg0["keep_me"] == "untouched-inner"
@@ -137,8 +151,8 @@ def test_build_updates_meta_fingerprints_show_mismatch():
     assert meta["old_key_fp"] != meta["new_key_fp"]
     assert meta["old_secret_fp"] != meta["new_secret_fp"]
     assert meta["key_changed"] is True
-    assert meta["broker_key_field"] == "key"
-    assert meta["broker_secret_field"] == "secret"
+    assert meta["broker_key_field"] == "alpaca_key"
+    assert meta["broker_secret_field"] == "alpaca_secret"
     # no raw secret values leak into meta
     blob = repr(meta)
     assert "AKFAKE" not in blob
@@ -149,8 +163,107 @@ def test_build_updates_no_change_when_already_matching():
     doc = _doc179()
     row = _brokerage_row()
     # make doc already carry the working key
-    doc["strategies"][0]["config"]["alpaca_key"] = row["key"]
-    doc["strategies"][0]["config"]["alpaca_secret"] = row["secret"]
+    doc["strategies"][0]["config"]["alpaca_key"] = row["alpaca_key"]
+    doc["strategies"][0]["config"]["alpaca_secret"] = row["alpaca_secret"]
     updates = build_updates(doc, row)
     assert updates["meta"]["key_changed"] is False
     assert updates["meta"]["old_key_fp"] == updates["meta"]["new_key_fp"]
+
+
+# --- apply_updates: scrubbed exceptions (no real DB — fake rdb object) -------
+
+
+class FakeReqlError(Exception):
+    """Stands in for ReqlRuntimeError: its str() renders the query term tree,
+    which INCLUDES the literal update payload (i.e. the raw key/secret)."""
+
+
+class _FakeRdb:
+    """Mimics r.db(...).table(...).get(...).update(payload).run(conn).
+
+    Tables listed in ``fail_tables`` raise a driver-style error whose message
+    embeds the full payload — exactly the leak vector apply_updates must scrub.
+    """
+
+    def __init__(self, fail_tables=()):
+        self.fail_tables = set(fail_tables)
+        self.writes = []  # (table, payload) of successful runs
+        self._table = None
+        self._payload = None
+
+    def db(self, name):
+        return self
+
+    def table(self, name):
+        self._table = name
+        return self
+
+    def get(self, _id):
+        return self
+
+    def update(self, payload):
+        self._payload = payload
+        return self
+
+    def run(self, conn):
+        if self._table in self.fail_tables:
+            raise FakeReqlError(
+                "ReqlRuntimeError: Cannot perform write: term tree = "
+                "r.table(%r).update(%r)" % (self._table, self._payload)
+            )
+        self.writes.append((self._table, self._payload))
+        return {"replaced": 1}
+
+
+def _updates():
+    return build_updates(_doc179(), _brokerage_row())
+
+
+def test_apply_updates_happy_path_writes_both():
+    rdb = _FakeRdb()
+    apply_updates(rdb, conn=object(), updates=_updates(), instance_row={"id": "alpaca-main"})
+    tables = [t for t, _ in rdb.writes]
+    assert tables == ["Strategies", "Instances"]
+    assert rdb.writes[1][1] == HALT_CLEAR
+
+
+def test_apply_updates_skips_instance_write_when_row_missing():
+    rdb = _FakeRdb()
+    apply_updates(rdb, conn=object(), updates=_updates(), instance_row=None)
+    assert [t for t, _ in rdb.writes] == ["Strategies"]
+
+
+def test_apply_updates_scrubs_secret_from_strategies_failure():
+    rdb = _FakeRdb(fail_tables={"Strategies"})
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_updates(rdb, conn=object(), updates=_updates(), instance_row={"id": "alpaca-main"})
+    exc = excinfo.value
+    msg = str(exc)
+    # The scrubbed error must NEVER contain the raw key/secret values...
+    assert WORKING_KEY not in msg
+    assert WORKING_SECRET not in msg
+    assert "AKFAKE" not in msg
+    assert "SKFAKE" not in msg
+    # ...but should name the original class and give fingerprint-only context.
+    assert "FakeReqlError" in msg
+    assert "fp=" in msg
+    # Exception chain severed (`from None`) so the term-tree message can't
+    # render in the traceback either.
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+
+
+def test_apply_updates_scrubs_instances_failure():
+    rdb = _FakeRdb(fail_tables={"Instances"})
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_updates(rdb, conn=object(), updates=_updates(), instance_row={"id": "alpaca-main"})
+    exc = excinfo.value
+    msg = str(exc)
+    assert "AKFAKE" not in msg
+    assert "SKFAKE" not in msg
+    assert "FakeReqlError" in msg
+    assert "already succeeded" in msg  # tells operator the key write landed
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+    # The Strategies write did land before the failure.
+    assert [t for t, _ in rdb.writes] == ["Strategies"]

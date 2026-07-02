@@ -143,6 +143,42 @@ def build_updates(doc179, brokerage_row):
     }
 
 
+def apply_updates(rdb, conn, updates, instance_row):
+    """Perform the two writes. SECRET-SAFE on driver failure.
+
+    The Strategies update payload contains the literal alpaca_key/alpaca_secret
+    values. If the RethinkDB driver raises (ReqlRuntimeError/ReqlOpFailedError,
+    ...), its stringified error renders the query TERM TREE — including those
+    literal values — so letting it propagate would print the working secret in
+    the traceback. Both writes are therefore wrapped and re-raised as a
+    scrubbed RuntimeError (original exception CLASS NAME + fingerprint-only
+    context), with ``from None`` to sever the exception chain so the driver's
+    term-tree message can never reach stderr.
+    """
+    meta = updates["meta"]
+    try:
+        rdb.db(DB_NAME).table("Strategies").get(DOC_179_ID).update(
+            updates["strategies_179_update"]
+        ).run(conn)
+    except Exception as e:  # noqa: BLE001 — deliberately broad: scrub everything
+        raise RuntimeError(
+            "[fix-179] Strategies doc-%s update FAILED (%s). Payload redacted; "
+            "intended new key fp=%s, new secret fp=%s."
+            % (DOC_179_ID, type(e).__name__, meta["new_key_fp"], meta["new_secret_fp"])
+        ) from None
+    if instance_row is not None:
+        try:
+            rdb.db(DB_NAME).table("Instances").get(INSTANCE_ID).update(
+                updates["instance_halt_clear"]
+            ).run(conn)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                "[fix-179] Instances %r halt clear FAILED (%s). NOTE: the "
+                "Strategies doc-%s key update already succeeded."
+                % (INSTANCE_ID, type(e).__name__, DOC_179_ID)
+            ) from None
+
+
 def _print_plan(doc179, instance_row, updates, apply):
     meta = updates["meta"]
     print("=" * 72)
@@ -229,13 +265,9 @@ def main(argv=None):
             return 0
 
         # --- WRITE PATH (only with --apply) ---
-        r.db(DB_NAME).table("Strategies").get(DOC_179_ID).update(
-            updates["strategies_179_update"]
-        ).run(conn)
-        if instance_row is not None:
-            r.db(DB_NAME).table("Instances").get(INSTANCE_ID).update(
-                updates["instance_halt_clear"]
-            ).run(conn)
+        # apply_updates scrubs driver exceptions so the raw key/secret in the
+        # update payload can never leak into a traceback.
+        apply_updates(r, conn, updates, instance_row)
         print("\n[fix-179] APPLIED. doc-179 key replaced; halt cleared on %r." % INSTANCE_ID)
         print("[fix-179] The live broker will restart via the Strategies changefeed.")
         return 0
