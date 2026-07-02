@@ -31,8 +31,10 @@ def cage_alerts(monkeypatch):
     values and push it through the live notification stack (which loads real
     webhook/config from the repo .env).
 
-    This AUTOUSE fixture cages EVERY notification/RethinkDB side effect for every
-    test in this file, no matter what an individual test leaves unmocked.
+    This AUTOUSE fixture cages EVERY production side effect reachable from this
+    file — notifications (Discord/push/RethinkDB outbox) AND the live kill
+    switch (runCommand=False + cancel live orders in prod RethinkDB) — for
+    every test, no matter what an individual test leaves unmocked.
 
     SEAM: both alert paths exercised here reach the sender via a LAZY
     `from live_alerts import alert_strategy_error` resolved at CALL time
@@ -46,13 +48,24 @@ def cage_alerts(monkeypatch):
     notify() caller can never reach Discord/push/RethinkDB regardless of what
     else a test mocks.
 
-    Returns a recorder dict so a test can PROVE the stub — not the real sender —
-    captured the alert.
+    HALT SEAM: handle() reaches the kill switch through the module-level
+    `live_critical_abort._halt_live_trading`, which itself does a lazy
+    call-time `from live_kill_switch import halt_live_trading`. We stub BOTH
+    seams: the module-level name (so a test that forgets its own
+    `patch.object(live_critical_abort, "_halt_live_trading")` cannot flip the
+    real kill switch) and `live_kill_switch.halt_live_trading` (so even a
+    direct lazy import elsewhere is caged). Per-test `patch.object` mocks
+    layer on top of the fixture stub and restore it on exit — their own
+    assert_called/assert_not_called contracts are unaffected.
+
+    Returns a recorder dict so a test can PROVE the stub — not the real sender
+    or kill switch — captured the call.
     """
     import live_alerts
+    import live_kill_switch
     import notifications
 
-    calls = {"alert_strategy_error": [], "notify": []}
+    calls = {"alert_strategy_error": [], "notify": [], "halt": []}
 
     def _rec_alert(**kw):
         calls["alert_strategy_error"].append(kw)
@@ -60,9 +73,15 @@ def cage_alerts(monkeypatch):
     def _rec_notify(*a, **kw):
         calls["notify"].append({"args": a, "kwargs": kw})
 
+    def _rec_halt(**kw):
+        calls["halt"].append(kw)
+        return {"instances_halted": 0, "orders_canceled": 0}
+
     monkeypatch.setattr(live_alerts, "alert_strategy_error", _rec_alert)
     monkeypatch.setattr(live_alerts, "notify", _rec_notify)
     monkeypatch.setattr(notifications, "notify", _rec_notify)
+    monkeypatch.setattr(live_critical_abort, "_halt_live_trading", _rec_halt)
+    monkeypatch.setattr(live_kill_switch, "halt_live_trading", _rec_halt)
     return calls
 
 
