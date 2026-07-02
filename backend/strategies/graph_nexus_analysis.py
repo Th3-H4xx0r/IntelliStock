@@ -16452,6 +16452,51 @@ def _compute_propagated_scores(
 # previous inline block — see backend/tests/test_nexus_evaluate_position_risk.py.
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
+    """Page operators when a held position's risk pipeline is silently bypassed.
+
+    When a held position's current or entry price cannot be resolved, P&L is
+    uncomputable and EVERY risk-exit gate (circuit-breaker, fast-loser,
+    trailing-stop, ...) is skipped for that bar. That silent skip is exactly
+    how a position can bleed past every loss floor uncut, so it must never
+    fail quietly again.
+
+    Reuses live_alerts' notify/_channel utility layer and the same lazy-import,
+    try/except-wrapped, live-only (``_instance_id``) pattern as
+    ``_apply_portfolio_drawdown_halt`` — a Discord outage never blocks the
+    strategy.
+    """
+    try:
+        from live_alerts import notify, _channel
+        _body = (
+            f"RISK PIPELINE SKIP [{instance_id}] {sym}: current/entry price "
+            f"unresolved — P&L uncomputable, ALL risk-exit checks bypassed "
+            f"this bar"
+        )
+        notify(
+            category="risk_skip",
+            instance_id=str(instance_id),
+            title="Risk pipeline SKIP",
+            body=_body,
+            discord_channel=_channel("notifications"),
+            discord_embed={
+                "title": "Risk pipeline SKIP",
+                "color": 0xE74C3C,
+                "description": _body[:1500],
+                "fields": [
+                    {"name": "symbol", "value": str(sym), "inline": True},
+                    {"name": "effect",
+                     "value": "All risk-exit gates bypassed (no P&L this bar)",
+                     "inline": False},
+                ],
+            },
+            push_body=f"{sym}: risk pipeline skipped (price unresolved)",
+        )
+    except Exception:
+        # Alerts must never block strategy execution.
+        pass
+
+
 def _evaluate_position_risk(
     sym: str,
     *,
@@ -16527,7 +16572,27 @@ def _evaluate_position_risk(
                     _ep = float(_th.get("price", 0) or 0)
                     break
             if _cp <= 0 or _ep <= 0:
-                _log(f"Risk pipeline SKIP: {sym} qty={_pos_qty:.1f} but cp=${_cp:.2f} ep=${_ep:.2f} — cannot compute P&L, all risk checks bypassed", "yellow")
+                _log(f"Risk pipeline SKIP: {sym} qty={_pos_qty:.1f} but cp=${_cp:.2f} ep=${_ep:.2f} — cannot compute P&L, all risk checks bypassed", "red")
+                # A silent skip here is exactly how a position bleeds past every
+                # loss floor uncut (CRWV 2026-07). Page operators once per
+                # (sym, PT-date) so a silent bypass can never happen again.
+                # Dedup + Discord are live-only (PortfolioEmulator has no
+                # _instance_id); backtests/tests stay quiet.
+                _rs_instance_id = getattr(portfolio_emulator, "_instance_id", None)
+                if _rs_instance_id and isinstance(strategy_cache, dict):
+                    try:
+                        from datetime import datetime as _rs_dt, timezone as _rs_tz
+                        from zoneinfo import ZoneInfo as _rs_ZI
+                        _rs_pt_date = _rs_dt.now(_rs_tz.utc).astimezone(
+                            _rs_ZI("America/Los_Angeles")
+                        ).strftime("%Y-%m-%d")
+                    except Exception:
+                        _rs_pt_date = str(date_key)
+                    _rs_sent = strategy_cache.setdefault("_risk_skip_alerted", {})
+                    _rs_key = f"{sym}|{_rs_pt_date}"
+                    if not _rs_sent.get(_rs_key):
+                        _rs_sent[_rs_key] = True
+                        _alert_risk_pipeline_skip(str(_rs_instance_id), sym)
             if _ep > 0 and _cp > 0:
                 _unrealized_pct = ((_cp - _ep) / _ep) * 100.0
                 _prop_raw = float((propagated or {}).get(sym, {}).get("raw_score", 0.0))
