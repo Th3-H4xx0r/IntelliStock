@@ -150,6 +150,48 @@ def test_plain_openrouter_records_failure_row(telemetry_clean):
     assert rows[0]["ok"] is False
 
 
+def test_plain_openrouter_records_empty_completion_terminal(telemetry_clean):
+    """HTTP 200 with an empty completion, retries exhausted → the call still
+    records one ok=False row carrying the parsed usage (OpenRouter may have
+    billed the attempt) instead of vanishing from telemetry."""
+    import llm_utils
+    resp = _FakeResp(payload=_ok_payload(content="", cost=0.004))
+    with patch("requests.post", return_value=resp):
+        out = llm_utils.call_llm_by_provider(
+            "openrouter", "sk-or-key", "nvidia/nemotron-3-ultra-550b-a55b", "decide",
+            retries=0,
+        )
+    assert out == ""
+    rows = telemetry_clean.get_recent_calls(10)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["provider"] == "openrouter"
+    assert row["ok"] is False
+    assert row["error"] == "empty response"
+    assert row["input_tokens"] == 120
+    assert row["output_tokens"] == 42
+    assert row["total_cost_usd"] == pytest.approx(0.004)
+    assert row["retry_count"] == 0
+
+
+def test_plain_openrouter_records_no_choices_terminal(telemetry_clean):
+    """HTTP 200 with no choices at all, retries exhausted → ok=False row."""
+    import llm_utils
+    resp = _FakeResp(payload={"choices": [], "usage": {"prompt_tokens": 33,
+                                                       "completion_tokens": 0}})
+    with patch("requests.post", return_value=resp):
+        out = llm_utils.call_llm_by_provider(
+            "openrouter", "sk-or-key", "nvidia/nemotron-3-ultra-550b-a55b", "decide",
+            retries=0,
+        )
+    assert out == ""
+    rows = telemetry_clean.get_recent_calls(10)
+    assert len(rows) == 1
+    assert rows[0]["ok"] is False
+    assert rows[0]["error"] == "no choices"
+    assert rows[0]["input_tokens"] == 33
+
+
 # ── Structured raw-JSON fallback path (what Nemotron actually uses) ──────────
 def test_structured_raw_json_fallback_records_row(telemetry_clean):
     import llm_utils

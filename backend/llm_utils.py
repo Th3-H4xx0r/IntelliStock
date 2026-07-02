@@ -4586,6 +4586,9 @@ def _call_openrouter(
     if not api_key:
         return ""
     _t0 = time.monotonic()
+    # Pre-bind so the outer except can report the true attempt count even if
+    # the failure happens before (or on the first pass of) the retry loop.
+    attempt = 0
     try:
         import requests as _requests
         url = (base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
@@ -4690,6 +4693,15 @@ def _call_openrouter(
                 if attempt < max_retries:
                     time.sleep(_backoff_sleep_seconds(attempt))
                     continue
+                # Terminal HTTP-200 with no choices: still record (with any
+                # parsed usage/cost — OpenRouter may have billed the attempt)
+                # so truncated/empty completions stay visible in telemetry.
+                _safe_record(
+                    provider="openrouter", model=model, usage=_or_usage, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="no choices",
+                    cost_usd_override=_or_cost, model_id=None,
+                )
                 return ""
             message = choices[0].get("message") or {}
             text = _extract_chat_message_text(message)
@@ -4708,6 +4720,14 @@ def _call_openrouter(
             if attempt < max_retries:
                 time.sleep(_backoff_sleep_seconds(attempt))
                 continue
+            # Terminal HTTP-200 with an empty completion after retries —
+            # same rationale as the no-choices case above.
+            _safe_record(
+                provider="openrouter", model=model, usage=_or_usage, ok=False,
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                retry_count=attempt, error="empty response",
+                cost_usd_override=_or_cost, model_id=None,
+            )
             return ""
         return ""
     except Exception as _exc:
@@ -4716,7 +4736,7 @@ def _call_openrouter(
             _safe_record(
                 provider="openrouter", model=model, usage={}, ok=False,
                 duration_ms=int((time.monotonic() - _t0) * 1000),
-                retry_count=int(retries or 0), error=str(_exc)[:200],
+                retry_count=attempt, error=str(_exc)[:200],
                 model_id=None,
             )
         except Exception:
