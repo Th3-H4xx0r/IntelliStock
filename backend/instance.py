@@ -503,12 +503,16 @@ def run():
     conn = None
     try:
         conn = get_conn()
-        # Fresh start clears any prior crash flags (crashed badge) too.
+        # Fresh start clears any prior crash flags (crashed badge) too, plus any
+        # stale halt fields — the server only spawns this process for a row with
+        # runCommand=True, i.e. the operator has already un-halted it.
         r.db(DB_NAME).table('Instances').get(instance_id).update({
             'uptimeStart': r.now(),
             'running': True,
             'crashed': False,
             'crashed_at': None,
+            'halt_reason': None,
+            'halted_at': None,
         }).run(conn)
         current_symbols = get_symbols_for_instance(conn, instance_id)
         doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
