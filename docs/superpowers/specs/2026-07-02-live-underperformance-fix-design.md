@@ -182,7 +182,27 @@ the module hash must be re-stamped too (or accept one lookback deliberately, pre
   constraints and tests bound the blast radius.
 - Backtest costs: Track C burns OpenRouter tokens; keep repeats modest (≥2, not 10).
 
-## 9. Open items (user)
+## 9. Amendments (2026-07-02, post-recon — authoritative where they differ from above)
+
+Code/data recon (two agents + live config dump) corrected four assumptions:
+- Inner doc-179 config is authoritative: `fast_loser_cut_pct` is **−10** (not −15), with
+  `fast_loser_cut_pct_high_vol=−18` and a >40% recent-runup carve-out. CRWV's missed cut
+  was primarily the 07-01 zero-cycles outage (fixed by the FULL catch-up), with a hard-floor
+  guarantee added so carve-outs can never defer a cut beyond the high-vol threshold.
+- MONITOR cycles already evaluate sell-side risk exits; A1's "safety net" is regression
+  tests + a loud alert on the silent `Risk pipeline SKIP` path, not a new execution path.
+- Trading-rule keys are in NEITHER identity hash → the Track-B tune needs **no restamp**;
+  only the macro-article LLM migration flips `history_scope_id` and restamps.
+- "Priority buys may tap reserve" is **replaced by `max_positions` 8 → 10**: June's 28
+  blocked priority buys were `queue_status=full_priority_blocked` (position slots full),
+  not cash starvation.
+- The outcomes defect is the `prices.get(sym)` write-gate (live `prices` covers held names
+  only), not instance-id scoping. Also `lookback_macro_article_*` must migrate off
+  codex-cli along with `macro_article_*`.
+
+Implementation plan: `docs/superpowers/plans/2026-07-02-live-underperformance-fix.md`.
+
+## 10. Open items (user)
 
 - Renew Benzinga APIs data subscription (licensing@benzinga.com); flip
   `benzinga_*_enabled` back on afterward.
