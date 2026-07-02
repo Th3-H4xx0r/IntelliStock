@@ -5209,6 +5209,7 @@ def _call_llm_with_critical_guard(
     prompt: str,
     *,
     attribution_keys: dict[str, Any] | None = None,
+    role: str | None = None,
     **kw,
 ) -> str:
     """Wraps _call_with_capture with critical-class detection + retry escalation.
@@ -5289,6 +5290,7 @@ def _call_llm_with_critical_guard(
             model=model,
             attribution=dict(attribution_keys or {}),
             attempts=attempts,
+            role=role,
         )
 
     return text  # unreachable, but mypy-friendly
@@ -5321,6 +5323,7 @@ def _call_structured_llm_with_critical_guard(
     output_type: Any,
     *,
     attribution_keys: dict[str, Any] | None = None,
+    role: str | None = None,
     **kw,
 ):
     """Mirror of _call_llm_with_critical_guard for the structured-JSON path.
@@ -5405,6 +5408,7 @@ def _call_structured_llm_with_critical_guard(
             model=model,
             attribution=dict(attribution_keys or {}),
             attempts=attempts,
+            role=role,
         )
 
     return result  # unreachable, but mypy-friendly

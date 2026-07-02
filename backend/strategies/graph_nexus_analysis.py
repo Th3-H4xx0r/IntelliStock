@@ -114,6 +114,64 @@ except Exception:
     def llm_call_context(**_kwargs):
         yield
 
+# Bare-module import so LLMCriticalFailure resolves to the SAME class object
+# that llm_utils raises and broker.py catches (see llm_utils rationale) —
+# isinstance identity must match for the article-role degrade below to fire.
+try:
+    from llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+except ImportError:
+    from backend.llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+
+
+# One-shot dedup for the article-role degrade operator alert (per process).
+_ARTICLE_CRITICAL_DEGRADE_ALERTED = False
+
+
+def _alert_article_critical_degrade(exc, *, instance_id, stage: str) -> None:
+    """Degrade an article-enrichment-role LLM critical failure: re-arm the
+    critical guard, log (red), and page the operator ONCE (Task 4, Benzinga-401
+    precedent). The run continues with the article signal empty."""
+    role = getattr(exc, "role", None)
+    _log(
+        f"{stage}: LLM critical in enrichment role {role} "
+        f"({getattr(exc, 'class_tag', '?')} on {getattr(exc, 'model', '?')}) — "
+        f"degrading, run continues without this signal (no halt)",
+        "red",
+    )
+    # Re-arm the critical guard. The raise site called mark_raised() before this
+    # failure, latching _already_raised=True process-wide. If we continue the run
+    # with it latched, EVERY subsequent LLM call — including decision roles —
+    # short-circuits to a single passthrough and can never escalate/halt again,
+    # re-introducing the inverse bug (a decision-role failure that no longer
+    # halts). Clearing it keeps decision roles protected after an enrichment
+    # degrade. Bare import → same module object the raise site latched.
+    try:
+        import llm_critical_guard as _lcg
+        _lcg.reset_state()
+    except Exception:
+        try:
+            from backend import llm_critical_guard as _lcg  # type: ignore
+            _lcg.reset_state()
+        except Exception:
+            pass
+    global _ARTICLE_CRITICAL_DEGRADE_ALERTED
+    if _ARTICLE_CRITICAL_DEGRADE_ALERTED:
+        return
+    _ARTICLE_CRITICAL_DEGRADE_ALERTED = True
+    try:
+        from live_alerts import alert_strategy_error
+        alert_strategy_error(
+            instance_id=str(instance_id or os.environ.get("INSTANCE_ID", "<unknown>")),
+            tag="llm_critical_degraded",
+            message=(
+                f"{stage}: {getattr(exc, 'class_tag', '?')} in enrichment role "
+                f"'{role}' — strategy running WITHOUT this signal until fixed. "
+                f"No halt (article-enrichment role)."
+            ),
+        )
+    except Exception as _alert_e:
+        _log(f"{stage}: degrade alert dispatch failed: {type(_alert_e).__name__}: {_alert_e}", "yellow")
+
 try:
     from strategies.ml_news import _score_finbert_batch as _ml_news_score_finbert_batch
 except ImportError:
@@ -3386,6 +3444,7 @@ def _classify_company_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "company_article",
             },
+            role="company_article",
             system_prompt=system_prompt,
             retries=2,
             output_retries=output_retries,
@@ -3443,6 +3502,7 @@ def _classify_company_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "company_article_single",
                 },
+                role="company_article",
                 system_prompt=system_prompt,
                 retries=2,
                 output_retries=output_retries,
@@ -3638,6 +3698,7 @@ def _classify_macro_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "macro_article",
             },
+            role="macro_article",
             system_prompt=system_prompt,
             retries=2,
             output_retries=output_retries,
@@ -3701,6 +3762,7 @@ def _classify_macro_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "macro_article_single",
                 },
+                role="macro_article",
                 system_prompt=system_prompt,
                 retries=2,
                 output_retries=output_retries,
@@ -21319,13 +21381,22 @@ class GraphNexusAnalysis:
                 if not isinstance(finbert_rows, dict):
                     finbert_rows = {}
             with _timed_stage("Company article classification", start_details=f"articles={len(normalized_alpaca_articles)}"):
-                company_article_rows, company_traces = _classify_company_article_records(
-                    normalized_alpaca_articles,
-                    config,
-                    date_key=date_key,
-                    conn=conn,
-                    instance_id=instance_id,
-                )
+                try:
+                    company_article_rows, company_traces = _classify_company_article_records(
+                        normalized_alpaca_articles,
+                        config,
+                        date_key=date_key,
+                        conn=conn,
+                        instance_id=instance_id,
+                    )
+                except LLMCriticalFailure as _company_crit:
+                    # Task 4: article-enrichment-role critical LLM failure
+                    # degrades to an empty signal; decision-role (fail-safe)
+                    # still propagates to broker.py for the halt.
+                    if role_is_halt_worthy(getattr(_company_crit, "role", None)):
+                        raise
+                    _alert_article_critical_degrade(_company_crit, instance_id=instance_id, stage="Company article")
+                    company_article_rows, company_traces = [], []
                 if not isinstance(company_article_rows, list):
                     company_article_rows = []
                 if not isinstance(company_traces, list):
@@ -21952,6 +22023,18 @@ class GraphNexusAnalysis:
                 if not isinstance(_gn_normalized, list):
                     _gn_normalized = []
                 llm_traces_global.extend(_gn_macro_traces)
+            except LLMCriticalFailure as _macro_crit:
+                # Task 4: an article-enrichment-role critical LLM failure
+                # (e.g. codex-cli quota) must DEGRADE, not halt. A decision-role
+                # critical (fail-safe: None/unknown too) still propagates to
+                # broker.py's outer loop for the halt.
+                if role_is_halt_worthy(getattr(_macro_crit, "role", None)):
+                    raise
+                _alert_article_critical_degrade(_macro_crit, instance_id=instance_id, stage="Macro article")
+                macro_rows = []
+                _gn_macro_traces = []
+                google_articles = []
+                _gn_normalized = []
             except Exception as _macro_join_exc:
                 _log(f"Macro pipeline error (non-fatal): {_macro_join_exc}", "yellow")
                 macro_rows = []

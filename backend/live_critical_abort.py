@@ -39,6 +39,51 @@ def handle(*, instance_id: str, failure) -> None:
 
     sample = (failure.attempts[-1].get("body_sample") or "") if failure.attempts else ""
 
+    # 0. Role-scoped degrade (Task 4, incident 2026-06-22/23). A critical LLM
+    # failure in an article-ENRICHMENT role (macro_article / company_article /
+    # lookback_*) must NOT flip the whole-instance kill switch — those signals
+    # are optional and the run should degrade (empty signal), not halt. Only
+    # decision roles (None / unknown / everything else, fail-safe) halt.
+    # We still fire the one-shot operator alert via the same _already_alerted
+    # machinery (already claimed above), then return WITHOUT halting.
+    role = getattr(failure, "role", None)
+    try:
+        from llm_critical_guard import role_is_halt_worthy
+        _halt_worthy = role_is_halt_worthy(role)
+    except Exception:
+        _halt_worthy = True  # fail-safe: if the guard import breaks, halt.
+
+    if not _halt_worthy:
+        try:
+            from intellistock_logger import intellistock_logger
+            intellistock_logger.log(
+                f"LLM critical in non-decision role {role}: degrading (no halt) "
+                f"[{failure.class_tag} on {failure.model} ({failure.provider})]",
+                "red", service="LIVE_CRITICAL_ABORT",
+            )
+        except Exception:
+            pass
+        try:
+            _alert_strategy_error(
+                instance_id=instance_id,
+                tag="llm_critical_degraded",
+                message=(
+                    f"{failure.class_tag} in enrichment role '{role}' on "
+                    f"{failure.model} ({failure.provider}) — DEGRADING (no halt). "
+                    f"Run continues without this signal. Sample: {sample[:200]}"
+                ),
+            )
+        except Exception as e:
+            try:
+                from intellistock_logger import intellistock_logger
+                intellistock_logger.log(
+                    f"live_critical_abort degrade alert failed: {e}",
+                    "red", service="LIVE_CRITICAL_ABORT",
+                )
+            except Exception:
+                pass
+        return
+
     # 1. Halt (existing infra: flip runCommand + cancel orders + alert_halt).
     # 1-B (bug-sweep 2026-05-28): scope the AUTOMATIC abort to the FAILING
     # instance only — a paper instance's LLM failure must not halt the
