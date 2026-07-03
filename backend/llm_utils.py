@@ -284,6 +284,41 @@ def _structured_run_usage_dict(result) -> dict[str, int]:
     return out
 
 
+def _structured_usage_for_record(usage_data: dict[str, int] | None) -> dict[str, int]:
+    """Normalise a :func:`_structured_run_usage_dict` result into the token
+    shape ``_safe_record`` / ``compute_cost`` consume: ``input_tokens``,
+    ``output_tokens``, and ``reasoning_tokens``.
+
+    PydanticAI's ``RunUsage`` exposes ``input_tokens`` / ``output_tokens``
+    directly (verified on pinned pydantic-ai 1.0.18) and carries reasoning
+    counts inside the free-form ``details`` map, surfaced by
+    ``_structured_run_usage_dict`` as ``detail_reasoning_tokens``. This is the
+    telemetry-facing projection used when recording a native structured
+    success — PydanticAI has no USD cost envelope, so cost is left to the
+    pricing registry/YAML downstream.
+    """
+    src = usage_data or {}
+    out: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens"):
+        value = src.get(key)
+        if value is None:
+            continue
+        try:
+            out[key] = int(value)
+        except (TypeError, ValueError):
+            continue
+    for reasoning_key in ("detail_reasoning_tokens", "reasoning_tokens", "detail_reasoning"):
+        value = src.get(reasoning_key)
+        if value is None:
+            continue
+        try:
+            out["reasoning_tokens"] = int(value)
+            break
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _coerce_timeout_sec(timeout_sec: int | None) -> int:
     """Resolve timeout (seconds) from arg/env with a safe fallback."""
     if timeout_sec is None:
@@ -2862,6 +2897,7 @@ def call_structured_llm_by_provider(
                             file=sys.stderr,
                             flush=True,
                         )
+                _native_call_t0 = time.monotonic()
                 if provider_lock is not None:
                     with provider_lock:
                         result = agent.run_sync(prompt, infer_name=False)
@@ -2876,6 +2912,34 @@ def call_structured_llm_by_provider(
                     "error": "",
                     "usage": usage_data,
                 })
+                # ── Telemetry: record the PydanticAI-native structured SUCCESS.
+                # This is the $6.71-invisible-spend fix (backtest 586767). The
+                # native Agent.run_sync path — which EVERY provider that
+                # _build_pydantic_ai_model can build routes through (openrouter,
+                # azure, openai, deepseek, nvidia, gemini, bedrock, ollama) —
+                # was the only successful LLM path that never called
+                # _safe_record, so its spend was invisible in LLMUsage. One
+                # native success = one HTTP call = exactly one row (the
+                # raw-JSON fallback makes its OWN call via call_llm_by_provider
+                # and records separately; native success returns before that
+                # path, so there is no double-record). PydanticAI carries no
+                # USD cost envelope, so cost_usd_override=None lets cost fall
+                # back to the pricing registry / YAML. Wrapped so telemetry can
+                # never break a real LLM call.
+                try:
+                    _safe_record(
+                        provider=(provider or "").strip().lower(),
+                        model=structured_model,
+                        usage=_structured_usage_for_record(usage_data),
+                        ok=True,
+                        duration_ms=int((time.monotonic() - _native_call_t0) * 1000),
+                        retry_count=int(http_attempt),
+                        error=None,
+                        cost_usd_override=None,
+                        model_id=None,
+                    )
+                except Exception:
+                    pass
                 if idx > 0:
                     import sys
                     print(
