@@ -9,8 +9,13 @@ HOME_FIELD_ADVANTAGE = 65.0   # Elo points — a REAL home game (club leagues, a
 NEUTRAL_HFA = 5.0             # Neutral-site game (World Cup group/knockout): the
 # "home" label is essentially arbitrary, so home advantage is ~0. Callers pick
 # NEUTRAL_HFA vs HOME_FIELD_ADVANTAGE by whether the fixture is neutral-site.
-BASE_TOTAL_GOALS = 2.7        # league-ish average total
-SUPREMACY_PER_100 = 0.45      # goal supremacy per 100 Elo of (adjusted) diff
+BASE_TOTAL_GOALS = 2.6        # league-ish average total. 2.7 -> 2.6: calibration
+# fit on settled WC games (see below).
+SUPREMACY_PER_100 = 0.60      # goal supremacy per 100 Elo of (adjusted) diff.
+# 0.45 -> 0.60: the model was UNDER-confident (its ~50% picks won ~67% of the
+# time). Sharpening the Elo->supremacy mapping fixed that — a +4% out-of-sample
+# log-loss AND Brier improvement on a train/test split of the settled WC slate.
+# Deliberately moderate, not the grid optimum (which overfit 79 games).
 
 
 def win_prob(home_elo: float, away_elo: float, hfa: float = HOME_FIELD_ADVANTAGE) -> float:

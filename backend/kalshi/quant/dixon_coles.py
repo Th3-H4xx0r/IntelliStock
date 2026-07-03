@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import math
 
-DEFAULT_RHO = -0.05  # low-score dependence correction (Dixon-Coles 1997)
+DEFAULT_RHO = -0.10  # low-score dependence correction (Dixon-Coles 1997). -0.05 ->
+# -0.10: the model under-predicted draws (~23% vs ~28% actual on the WC slate); a
+# stronger low-score correction lifts draw mass and improved out-of-sample fit.
 
 
 def _poisson(k: int, lam: float) -> float:
