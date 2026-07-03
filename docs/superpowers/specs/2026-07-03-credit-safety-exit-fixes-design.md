@@ -131,14 +131,49 @@ After deploy + user tops up credits: rerun the June-2026 replay (same params). T
 — with credits, working exits, true P&L — is the first valid Nemotron baseline. Compare
 against SPY and live June; THEN decide whether a model A/B is warranted.
 
-### Track 5 — P&L levers (pending hunter reports)
+### Track 5 — P&L levers (finalized from the three hunter reports, 2026-07-03)
 
-Three Opus agents are mining trade economics, config archaeology (incl. dead keys +
-LIVE_OVERRIDES clobbers), and execution/cadence (open-auction drag, reserve stacking,
-order sequencing). Their ranked levers get appended here; adopt the top items whose
-evidence is strong and risk is low; config-only levers ship in the same apply-script
-pattern as the 2026-07 tune. This section will be finalized before the implementation
-plan is written.
+Core finding (trade economics): the strategy's historical +180–266% came from a fat
+right tail — winners averaging +14–21%, held 14–28d, with 8–10 wins >+50% per run. In
+586767, 27 of 28 exits were MECHANICAL rotations ejecting graph-HOLD-rated positions at
++3–10% (AMAT rotated at +9.3%, ran +30% in 12d); holding each exit +10 trading days
+flips June −2.3% → +2.3%. The exit machinery, not entry signal, kills the tail.
+
+**ADOPTED (this round):**
+
+| # | Lever | Change | Kind |
+|---|---|---|---|
+| 5.1 | Rotation respects the graph | Code gate: never rotate out a position whose current raw graph signal is positive (rotation may only eject negative/neutral-signal names); tighten `backfill_rotation_winner_lock_bypass_max_held_pnl_pct` 10→3 and `backfill_rotation_min_hold_days` 10→15 | code + config |
+| 5.2 | Re-concentrate | `max_positions` 10→8, `allocation_max_new_stock_buys` 10→6 (matches all three historical winners; reverses part of the 2026-07 tune — the June evidence shows slot scarcity was an EXIT problem, and 2b's enforcement makes 8 real) | config |
+| 5.3 | Winners' breathing room | `profitable_min_hold_release_peak_drop_pct` 8→12 (the +266% value; supports 5.1's fat-tail goal) | config |
+| 5.4 | Trim ETF sleeve | ETF budget mix 0.2→0.05 (June: 18% win rate, −$598; the +266% run traded ~0 ETFs) | config |
+| 5.5 | Macro-scale floor | `macro_risk_scale_min` 0.8→0.9 (LLM strength-weights bearish 1.47×; June budget was pinned at the 0.8 floor in an up-tape) | config |
+| 5.6 | LIVE_OVERRIDES clobbers #2/#3 | Add `quality_filter_missing_metadata_policy` and `break_glass_fresh_shield_enabled` to `_USER_OVERRIDABLE_KEYS` (live currently forces "block"/shield-on against doc-179's explicit values — the "block" clobber silently narrows the LIVE buy universe vs every backtest) | code + tests |
+| 5.7 | Single-position cap | Wire `single_position_max_pct` (25) as a REAL cap at buy/winner-add/amplifier time — currently a dead key; no concentration cap exists at all while the momentum amplifier is silently ON | code |
+| 5.8 | Same-cycle sell-proceeds crediting (live) | Live sells only free cash on async fill, so rotation-day buys can't use the proceeds (works in backtest — divergence): credit expected proceeds of already-submitted sells to the buy ceiling within the cycle, mirroring the existing earnings-path pattern (broker.py:7519); guard partial fills conservatively (credit ×0.95, cap at cash+proceeds) | code |
+| 5.9 | Reserve de-stack | `backfill_budget_reserve_pct` 0.2→0.1 (stacks multiplicatively with the cash floor; day-1 deploy was $72k on $100k) | config |
+| 5.10 | Dead-key secret scrub | Delete from doc 179 ONLY the dead `*_llm_azure_openai_*` key family + other dead keys carrying live secrets (they are read by nothing; leaving credentials in dead config rows is pure exposure) | apply-script |
+
+**DEFERRED (explicit, with reasons):**
+- Buying-power/margin sizing (7.5× deployable capital): a leverage decision for the
+  user, not an optimization — flag only. Amplifies losses on an unproven edge.
+- VWAP/limit execution (~65 bps vs VWAP but ~$100–170/mo at $6k; delay-to-10:30
+  measured flat — no cheap win) and intraday signal-sells / second FULL run (new
+  trading code paths) — next round.
+- Full bear-regime ladder + trailing-stop ratchet wiring (operator's configured
+  protections are DEAD KEYS — documented as known-dead in this spec; the 8% halt +
+  circuit breaker remain the active protections; proper wiring is its own project).
+- Momentum amplifier: left ON deliberately (operator's "off" key is a dead typo, but
+  the amplifier was ON in all historical winners and pyramids winners — consistent
+  with the fat-tail goal; 5.7's cap bounds its risk).
+- `new_entry_reserved_budget_pct` back to 0.3, Benzinga re-enable, drawdown 12%,
+  nexus_ml, analyst panel: insufficient/conflicting evidence or pending user actions.
+- Model swap to gpt-5.4-mini: this is the A/B question — decide AFTER the Track-4
+  valid baseline rerun, holding config constant.
+
+Config levers (5.1-partial/5.2/5.3/5.4/5.5/5.9) + 5.10 ship via a new one-shot apply
+script (same --dry-run/--apply/snapshot/restamp-check pattern as apply_tune_2026_07;
+none of these keys are in the identity hashes except none — verify via preview).
 
 ## 5. Testing
 
