@@ -58,23 +58,26 @@ def _start_training_worker(instance_id, cfg) -> None:  # pragma: no cover - inte
         leagues = list(cfg.get("leagues") or [])
         if not leagues:
             return
-        try:
-            from kalshi.data.sources.clubelo import fetch_elo_table
-            elo = fetch_elo_table() or {}
-        except Exception:
-            elo = {}
-        model_fn = build_model_fn({}, elo)  # static national Elo + club Elo (calibration is robust to small model diffs)
+        # Static national Elo + empty club table: national-team (WC) fixtures are priced
+        # off the built-in national table, so we skip the synchronous ClubElo fetch that
+        # would otherwise delay engine start (the engine fetches club Elo itself). The
+        # calibrator maps prob->prob and is robust to small train/live model diffs.
+        model_fn = build_model_fn({}, {})
 
         def provider_factory(conn):
             return BacktestDataProvider(
                 conn=conn,
                 kalshi_client=KalshiClient(key_id="training", private_key_pem="", environment="prod"))
 
+        # Per-instance champion (engine reads config.instance_id, falling back to the
+        # seeded "__default__" bootstrap). start_date is intentionally recent — the model
+        # prices with a single point-in-time Elo snapshot, so training only on the
+        # current window keeps that a minor approximation, not a deep-history look-ahead.
         refit = training_worker.build_refit_fn(
             provider_factory=provider_factory, model_fn=model_fn, leagues=leagues,
-            start_date="2020-01-01",
+            start_date="2026-01-01",
             end_date_fn=lambda: _dt.datetime.utcnow().strftime("%Y-%m-%d"),
-            instance_id="__default__", min_total=100)
+            instance_id=instance_id, min_total=100)
         try:
             from notifications import notify as _notify
         except Exception:

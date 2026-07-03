@@ -4176,6 +4176,14 @@ def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(
     sample count, held-out raw-vs-calibrated log-loss/Brier, and reliability points
     (predicted vs actual). {champion: null} until the loop produces one."""
     _kalshi_brokerage_row(conn, brokerage_id)
+    # Cross-instance guard: the path instance_id must belong to this brokerage, else
+    # any authenticated user could read another instance's calibrator metrics.
+    try:
+        _inst = _r_auth.db("IntelliStock").table("Instances").get(instance_id).run(conn) or {}
+    except Exception:
+        _inst = {}
+    if _inst.get("kind") != "kalshi" or _inst.get("brokerage_id") != brokerage_id:
+        return {"champion": None}
     from kalshi.db import get_champion
     champ = get_champion(conn, instance_id, "calibrator")
     if not champ:

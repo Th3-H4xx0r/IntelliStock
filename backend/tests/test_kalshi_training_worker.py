@@ -39,8 +39,8 @@ def test_does_not_promote_identity_or_no_data(monkeypatch):
 
 
 def test_does_not_promote_when_worse(monkeypatch):
-    # Force a doc whose calibrated log-loss is WORSE than raw by monkeypatching fit
-    # to return a harmful shrink, and evaluate to report regression.
+    # Force a doc whose HELD-OUT calibrated log-loss is WORSE than raw (>= min_eval
+    # samples so the holdout gate is satisfied and it's the regression that rejects).
     saved, champs = _patch_registry(monkeypatch)
     monkeypatch.setattr(training_worker.training, "fit_calibrator",
                         lambda s, **k: {"method": "shrink", "calibrator": None,
@@ -48,9 +48,31 @@ def test_does_not_promote_when_worse(monkeypatch):
     monkeypatch.setattr(training_worker.training, "evaluate",
                         lambda s, doc: {"raw_logloss": 0.60, "cal_logloss": 0.80,
                                         "raw_brier": 0.2, "cal_brier": 0.3, "n_eval": len(s)})
-    v = training_worker.refit_once(FakeConn(), "__default__", [(0.7, 1.0)] * 10, [(0.7, 1.0)] * 10,
+    v = training_worker.refit_once(FakeConn(), "__default__", [(0.7, 1.0)] * 40, [(0.7, 1.0)] * 40,
                                    new_id="vbad", now_iso="t")
     assert v["promoted"] is False and champs == []   # worse model rejected
+
+
+def test_no_promotion_without_holdout(monkeypatch):
+    # CRITICAL: real overconfident data fits fine, but with NO held-out split the fit
+    # is unvalidated (isotonic trivially "improves" in-sample) -> must NOT promote.
+    saved, champs = _patch_registry(monkeypatch)
+    train = ([(0.8, 1.0 if i % 2 == 0 else 0.0) for i in range(60)]
+             + [(0.2, 1.0 if i % 5 == 0 else 0.0) for i in range(60)])
+    v = training_worker.refit_once(FakeConn(), "__default__", train, [],
+                                   new_id="v", now_iso="t", min_total=100)
+    assert v["method"] == "isotonic" and v["held_out"] is False
+    assert v["promoted"] is False and champs == []   # recorded, but NOT promoted
+    assert saved and saved[0]["id"] == "v"
+
+
+def test_no_promotion_when_holdout_too_small(monkeypatch):
+    saved, champs = _patch_registry(monkeypatch)
+    train = ([(0.8, 1.0 if i % 2 == 0 else 0.0) for i in range(60)]
+             + [(0.2, 1.0 if i % 5 == 0 else 0.0) for i in range(60)])
+    v = training_worker.refit_once(FakeConn(), "__default__", train, train[:10],  # 10 < min_eval 30
+                                   new_id="v", now_iso="t", min_total=100, min_eval=30)
+    assert v["promoted"] is False and champs == []
 
 
 def test_start_worker_self_heals_on_conn_error(monkeypatch):

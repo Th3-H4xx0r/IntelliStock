@@ -592,9 +592,10 @@ def get_champion(conn, instance_id: str, kind: str = "calibrator"):
         tbl = _r.db(DB_NAME).table("KalshiModelRegistry")
         for scope in (instance_id, "__default__"):
             rows = list(tbl.filter({"instance_id": scope, "kind": kind,
-                                    "is_champion": True}).limit(1).run(conn))
+                                    "is_champion": True}).run(conn))
             if rows:
-                return rows[0]
+                # Deterministic if a non-atomic set_champion race ever left >1: newest wins.
+                return max(rows, key=lambda r: str(r.get("created_at") or ""))
     except Exception:
         pass
     return None

@@ -34,6 +34,7 @@ class _Filtered:
     def _m(self, r): return all(r.get(k) == v for k, v in self.pred.items())
     def limit(self, n): return _Limited([r for r in self.rows if self._m(r)][:n])
     def update(self, upd): return _Upd([r for r in self.rows if self._m(r)], upd)
+    def run(self, conn): return [r for r in self.rows if self._m(r)]
 
 
 class _GetOne:
