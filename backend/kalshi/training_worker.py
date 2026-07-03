@@ -66,11 +66,13 @@ def _new_id(instance_id: str) -> str:
 
 
 def build_refit_fn(*, provider_factory, model_fn, leagues, start_date,
-                   end_date_fn, instance_id: str = "__default__", min_total: int = 100):
-    """Return a `refit(conn) -> dict|None` that fetches settled fixtures, gathers
-    per-side calibration samples, splits train/test by fixture (no leakage), and
-    calls `refit_once`. `end_date_fn()` returns today's date string so the window
-    rolls forward. Degrade-safe: returns None on any data failure."""
+                   end_date_fn, instance_id: str = "__default__", min_total: int = 100,
+                   feat_fn=None):
+    """Return a `refit(conn) -> dict|None` that fetches settled fixtures and refits
+    (1) the isotonic calibrator (SP1) and, when `feat_fn` is given, (2) the model
+    champion — physical/learned/ensemble comparison (SP2). Deterministic split by
+    fixture (no leakage). Degrade-safe: returns None on any data failure; a model
+    refit failure never blocks the calibrator."""
     def refit(conn):
         try:
             provider = provider_factory(conn)
@@ -87,9 +89,21 @@ def build_refit_fn(*, provider_factory, model_fn, leagues, start_date,
         except Exception:
             log.exception("training: fixture fetch/gather failed")
             return None
-        return refit_once(conn, instance_id, train, test,
-                          new_id=_new_id(instance_id), now_iso=_now_iso(),
-                          min_total=min_total)
+        cal_version = refit_once(conn, instance_id, train, test,
+                                 new_id=_new_id(instance_id), now_iso=_now_iso(),
+                                 min_total=min_total)
+        if feat_fn is not None:   # SP2: also refit + promote the model champion
+            try:
+                from kalshi import model_ensemble
+                mv = model_ensemble.refit_model_once(
+                    conn, instance_id, fixtures, feat_fn,
+                    new_id=f"model|{instance_id}|{_new_id(instance_id).split('|')[-1]}",
+                    now_iso=_now_iso())
+                cal_version = dict(cal_version or {})
+                cal_version["model_champion"] = mv.get("champion")
+            except Exception:
+                log.exception("training: model champion refit failed (calibrator unaffected)")
+        return cal_version
     return refit
 
 

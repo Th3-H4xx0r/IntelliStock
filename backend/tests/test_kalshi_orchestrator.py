@@ -194,3 +194,55 @@ def test_calibrator_none_is_identity():
     fa = {d.get("side"): d["fused_fair"] for d in a["decisions"]}
     fb = {d.get("side"): d["fused_fair"] for d in b["decisions"]}
     assert fa == fb
+
+
+def test_model_champion_overrides_winner_when_nonphysical():
+    """A learned/ensemble champion re-fuses the winner group; 'physical' is a no-op."""
+    asks = {"home": 55, "draw": 26, "away": 19}
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0)
+    # a champion model that strongly favours AWAY (opposite of the physical home lean)
+    away_fn = lambda fx: {"home": 0.1, "draw": 0.2, "away": 0.7}
+
+    base = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common,
+                             model_champion="physical", model_probs_fn=away_fn)  # gated off
+    ens = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common,
+                            model_champion="ensemble", model_probs_fn=away_fn)   # active
+
+    def side_fair(out, side):
+        return next(d["fused_fair"] for d in out["decisions"] if d.get("side") == side)
+
+    # physical champion -> away_fn ignored; ensemble champion -> away prob rises
+    assert side_fair(ens, "away") > side_fair(base, "away")
+    assert abs(sum(side_fair(ens, s) for s in ("home", "draw", "away")) - 1.0) < 1e-6
+
+
+def test_model_champion_physical_is_identity():
+    asks = {"home": 55, "draw": 26, "away": 19}
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0)
+    a = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common)
+    b = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common,
+                          model_champion="physical", model_probs_fn=lambda fx: {"home": 0.9})
+    fa = {d.get("side"): d["fused_fair"] for d in a["decisions"]}
+    fb = {d.get("side"): d["fused_fair"] for d in b["decisions"]}
+    assert fa == fb
+
+
+def test_model_champion_respects_cheap_side_cap():
+    """The override routes through fuse(), so a champion model that's overconfident on
+    a CHEAP side (sharp < 20c) can't run far above the sharp prob (the failure mode
+    a hand-rolled blend would reintroduce)."""
+    # sharp says home is a 10c longshot; the model champion loves home at 40%.
+    fx = _fixture_3way("f1", 1.0, 1.0, {"home": 62, "draw": 26, "away": 12},
+                       sharp={"home": 0.10, "draw": 0.25, "away": 0.65})
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0, w_sharp=0.7)
+    out = plan_and_allocate([fx], **common, model_champion="ensemble",
+                            model_probs_fn=lambda f: {"home": 0.40, "draw": 0.20, "away": 0.40})
+    home = next(d["fused_fair"] for d in out["decisions"] if d.get("side") == "home")
+    # cheap_side_cap(0.10)=0.0 -> home may not exceed ~sharp(0.10) by more than rounding
+    assert home <= 0.14   # capped near sharp, NOT ~0.19 (the uncapped hand-rolled value)

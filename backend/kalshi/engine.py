@@ -282,6 +282,8 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     odds_cache: dict = {}       # sport_key -> {"ts": wall, "events": [...], "quota": int|None}
     espn_cache: dict = {"ts": 0.0, "board": []}   # ESPN live scores+clock (timing only, ~30s)
     _calibrator = None            # champion isotonic calibrator (self-improving loop); None = identity
+    _model_champion = "physical"  # SP2 champion model; "physical" (default) = no override
+    _model_probs_fn = None        # winner-probs fn when champion is learned/ensemble
     raw_dumped = False           # one-time raw-market field dump (price diagnostics)
     placed_markets: set = set()  # market_tickers already held/ordered — don't re-order
     _soccer_series = config.soccer_series or discovery.DEFAULT_SOCCER_SERIES
@@ -373,6 +375,20 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                             f"{_m.get('cal_logloss', 0):.3f}).", "cyan")
                 except Exception:
                     _calibrator = None
+                # SP2: champion MODEL (physical / learned / ensemble). Degrade to
+                # physical (identity override) on any failure.
+                try:
+                    _mc = kdb.get_champion(conn, config.instance_id, "model")
+                    _model_champion = (_mc or {}).get("champion", "physical")
+                    if _mc and _model_champion != "physical":
+                        from kalshi.model_ensemble import champion_predict_fn
+                        _model_probs_fn = champion_predict_fn(_mc, nat_elo_table, elo_table)
+                        log(f"tick {tick}: champion MODEL = {_model_champion} "
+                            f"(beat physical on held-out).", "cyan")
+                    else:
+                        _model_probs_fn = None
+                except Exception:
+                    _model_champion, _model_probs_fn = "physical", None
             # 1b) Live national-team Elo (eloratings.net) for World Cup / international
             # markets — replaces the frozen static table when reachable. Degrade-safe:
             # {} keeps the static fallback (national_elo_from), so a feed outage is a no-op.
@@ -693,6 +709,8 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 one_bet_per_fixture=getattr(config.caps, "one_bet_per_fixture", True),
                 devig_method=config.devig_method,
                 calibrator=_calibrator,
+                model_champion=_model_champion,
+                model_probs_fn=_model_probs_fn,
             )
             allocations, decisions = plan["allocations"], plan["decisions"]
             log(f"tick {tick}: {len(decisions)} candidate(s) evaluated → {len(allocations)} to place "
