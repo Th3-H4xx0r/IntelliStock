@@ -56,6 +56,40 @@ def get_conn():
     return _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
 
 
+def is_conn_error(exc) -> bool:
+    """True when `exc` looks like a dropped/closed/unreachable DB connection (the
+    signal to reconnect and self-heal) rather than a genuine query/logic error.
+    Matches by exception type AND message so it works across rethinkdb driver
+    versions without importing their exception classes."""
+    name = type(exc).__name__
+    if name in ("ReqlDriverError", "ReqlTimeoutError", "ReqlAvailabilityError",
+                "ReqlOpFailedError", "ConnectionError", "ConnectionResetError",
+                "ConnectionAbortedError", "BrokenPipeError", "TimeoutError"):
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        "connection is closed", "connection closed", "connection reset",
+        "broken pipe", "not connected", "connection refused", "lost connection",
+        "connection already closed", "socket is closed", "eof",
+    ))
+
+
+def reconnect(old_conn=None):
+    """Return a FRESH DB connection, best-effort closing a dead one first. Used by
+    the long-running engine loop to recover from a closed connection (idle timeout,
+    DB restart, network blip) instead of retrying forever on a dead handle. Prefers
+    the driver's own `.reconnect()` (reuses auth/host), else opens a new connection."""
+    if old_conn is not None:
+        try:
+            return old_conn.reconnect(noreply_wait=False)
+        except Exception:
+            try:
+                old_conn.close(noreply_wait=False)
+            except Exception:
+                pass
+    return get_conn()
+
+
 def ensure_tables(conn) -> list[str]:
     """Create any missing kalshi_* tables. Returns the names created."""
     existing = set(_r.db(DB_NAME).table_list().run(conn))
