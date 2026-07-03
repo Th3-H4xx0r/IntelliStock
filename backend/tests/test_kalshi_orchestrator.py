@@ -229,3 +229,20 @@ def test_model_champion_physical_is_identity():
     fa = {d.get("side"): d["fused_fair"] for d in a["decisions"]}
     fb = {d.get("side"): d["fused_fair"] for d in b["decisions"]}
     assert fa == fb
+
+
+def test_model_champion_respects_cheap_side_cap():
+    """The override routes through fuse(), so a champion model that's overconfident on
+    a CHEAP side (sharp < 20c) can't run far above the sharp prob (the failure mode
+    a hand-rolled blend would reintroduce)."""
+    # sharp says home is a 10c longshot; the model champion loves home at 40%.
+    fx = _fixture_3way("f1", 1.0, 1.0, {"home": 62, "draw": 26, "away": 12},
+                       sharp={"home": 0.10, "draw": 0.25, "away": 0.65})
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0, w_sharp=0.7)
+    out = plan_and_allocate([fx], **common, model_champion="ensemble",
+                            model_probs_fn=lambda f: {"home": 0.40, "draw": 0.20, "away": 0.40})
+    home = next(d["fused_fair"] for d in out["decisions"] if d.get("side") == "home")
+    # cheap_side_cap(0.10)=0.0 -> home may not exceed ~sharp(0.10) by more than rounding
+    assert home <= 0.14   # capped near sharp, NOT ~0.19 (the uncapped hand-rolled value)

@@ -4183,7 +4183,7 @@ def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(
     except Exception:
         _inst = {}
     if _inst.get("kind") != "kalshi" or _inst.get("brokerage_id") != brokerage_id:
-        return {"champion": None}
+        return {"champion": None, "model": None}
     from kalshi.db import get_champion
     champ = get_champion(conn, instance_id, "calibrator")
     model = get_champion(conn, instance_id, "model")   # SP2: physical/learned/ensemble

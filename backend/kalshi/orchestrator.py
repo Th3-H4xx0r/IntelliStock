@@ -11,7 +11,7 @@ from kalshi.capital.opportunity import score as opportunity_score
 from kalshi.capital.planner import allocate
 from kalshi.decisions import decision_doc
 from kalshi.devig import market_probs_from_asks
-from kalshi.intelligence.fusion import renormalize_group
+from kalshi.intelligence.fusion import renormalize_group, fuse, clamp_adjustment
 from kalshi import training
 
 
@@ -67,14 +67,21 @@ def plan_and_allocate(
                 mc = model_probs_fn(fx)
             except Exception:
                 mc = None
+            # Route through the SAME fuse() build_market_probs uses (not a hand-rolled
+            # blend) so the champion model still gets the cheap-side overconfidence cap,
+            # the w_sharp clamp, and the analyst adjustment — dropping those is exactly
+            # the favorite-longshot failure mode the physical path guards against.
             if mc:
-                sw = (sharp or {}).get("winner")
-                if sw:
-                    fused["winner"] = renormalize_group(
-                        {s: w_sharp * float(sw.get(s, 0.0)) + (1.0 - w_sharp) * float(mc.get(s, 0.0))
-                         for s in ("home", "draw", "away")})
-                else:
-                    fused["winner"] = renormalize_group({s: float(mc.get(s, 0.0)) for s in ("home", "draw", "away")})
+                sw = (sharp or {}).get("winner") or {}
+                _adj = clamp_adjustment(float(adjustments.get("winner", 0.0) or 0.0), llm_cap)
+                base = {}
+                for side in ("home", "draw", "away"):
+                    sv = sw.get(side)
+                    mv = float(mc.get(side, sv if sv is not None else 0.0))
+                    base[side] = fuse(sharp=sv, model=mv, llm_adjustment=0.0,
+                                      w_sharp=w_sharp, llm_cap=llm_cap)
+                base["home"] = max(0.0, min(1.0, base["home"] + _adj))   # primary-side nudge
+                fused["winner"] = renormalize_group(base)
         # MARKET ANCHOR: with no sharp line, pull the (overconfident) model toward the
         # de-vigged Kalshi market so edge = a SHRUNK model-vs-market disagreement, not
         # the model's blind view. Only fires when there is no sharp anchor already.

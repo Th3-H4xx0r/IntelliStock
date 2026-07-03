@@ -45,21 +45,28 @@ def fit(X, y, *, l2: float = 2.0, iters: int = 1000, lr: float = 0.5) -> list:
         P = _softmax_rows(Xb @ W)
         grad = Xb.T @ (P - Y) / n + (l2 / n) * (W * reg_mask)
         W -= lr * grad
+    if not np.isfinite(W).all():
+        # Diverged (e.g. an extreme l2/lr). Never persist NaN/inf weights — fall back
+        # to a bias-only model (uniform after softmax) so predict() stays well-defined.
+        return np.zeros((d + 1, 3)).tolist()
     return W.tolist()
 
 
 def predict(weights, x) -> dict:
     """Predict {home,draw,away} for a single feature vector. Degrade-safe: any
     shape mismatch / bad weights -> uniform 1/3 each (never raises)."""
+    uniform = {"home": 1 / 3, "draw": 1 / 3, "away": 1 / 3}
     try:
         W = np.asarray(weights, dtype=float)
         xb = np.append(np.asarray(x, dtype=float), 1.0)
-        if xb.shape[0] != W.shape[0]:
-            return {"home": 1 / 3, "draw": 1 / 3, "away": 1 / 3}
+        if xb.shape[0] != W.shape[0] or not np.isfinite(W).all() or not np.isfinite(xb).all():
+            return uniform
         z = xb @ W
         z = z - z.max()
         e = np.exp(z)
         p = e / e.sum()
+        if not np.isfinite(p).all():   # NaN never raises — guard explicitly
+            return uniform
         return {"home": float(p[0]), "draw": float(p[1]), "away": float(p[2])}
     except Exception:
-        return {"home": 1 / 3, "draw": 1 / 3, "away": 1 / 3}
+        return uniform
