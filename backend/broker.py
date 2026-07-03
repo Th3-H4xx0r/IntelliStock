@@ -24,7 +24,7 @@ from typing import Any, Optional
 from portfolio_emulator import PortfolioEmulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
-from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count
+from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
 from robinhood_data_policy import robinhood_data_fallback_allowed
 
 try:
@@ -7515,6 +7515,22 @@ while not shutdown_requested:
                     executed_start = 0
                     skipped_start_no_price = []
                     skipped_start_no_cash = []
+                    # Task 7 review-fix (IMPORTANT 1): pending-trade buys run
+                    # BEFORE the main emission loop's max_positions gate arms —
+                    # gate NEW-name buys here too with the same helper. Held
+                    # names snapshotted once at block entry; pending sells sort
+                    # first per strategy, so a funding full-exit is credited
+                    # before the buy it pays for. Adds to held names exempt.
+                    _pnd_cap, _pnd_cap_reason = resolve_max_positions_cap(_cached_strategies)
+                    _pnd_held = set()
+                    _pnd_full_exits = set()
+                    _pnd_new_emitted = set()
+                    if _pnd_cap is not None:
+                        try:
+                            _pnd_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                            _pnd_held = {str(_s).strip().upper() for _s, _q in (_pnd_pos or {}).items() if float(_q or 0.0) > 0.0}
+                        except Exception:
+                            _pnd_cap = None  # fail-open: gate inert this block
                     for _sname, _sc in list((_strategy_cache or {}).items()):
                         if not _sc:
                             continue
@@ -7567,11 +7583,19 @@ while not shutdown_requested:
                                     _log("[Pending] SKIP buy %s — no cash remaining (budget=%.2f, cash=%.2f)" % (
                                         sym, remaining_budget, portfolio_emulator.get_cash()), "yellow")
                                     continue
+                                # Task 7 review-fix (IMPORTANT 1): hard cap gate
+                                # on NEW-name pending buys (adds to held exempt).
+                                if _pnd_cap is not None and not max_positions_gate(_pnd_held, _pnd_cap, _pnd_full_exits, _pnd_new_emitted, sym):
+                                    _pnd_proj = max_positions_projected_count(_pnd_held, _pnd_full_exits, _pnd_new_emitted)
+                                    _log("MAX_POSITIONS_GATE: blocked %s (held=%d, cap=%d)" % (sym, _pnd_proj, _pnd_cap), "yellow")
+                                    continue
                                 remaining_budget -= cash_use
                                 shares_before = portfolio_emulator._positions.get(sym, 0.0)
                                 portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                     cash_per_trade=cash_use, sell_fraction=1.0)
                                 shares_after = portfolio_emulator._positions.get(sym, 0.0)
+                                if _pnd_cap is not None and sym not in _pnd_held:
+                                    _pnd_new_emitted.add(sym)
                                 if _epos is not None:
                                     _epos[sym] = _epos.get(sym, 0.0) + max(0.0, shares_after - shares_before)
                             else:
@@ -7581,8 +7605,13 @@ while not shutdown_requested:
                                     total_shares = portfolio_emulator._positions.get(sym, 0.0)
                                     if total_shares > 0:
                                         sell_frac = min(1.0, _epos[sym] / total_shares)
-                                portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
+                                _pnd_sell_ok = portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                     cash_per_trade=1000.0, sell_fraction=sell_frac)
+                                # Task 7 review-fix (IMPORTANT 2): credit the
+                                # freed slot only when the sell actually
+                                # executed/submitted (execute_signal -> True).
+                                if _pnd_cap is not None and _pnd_sell_ok and sell_frac >= 0.999 and sym in _pnd_held:
+                                    _pnd_full_exits.add(sym)
                                 if _epos is not None and sym in _epos:
                                     _epos.pop(sym, None)
                                 # After sell frees cash, update remaining_budget so subsequent buys can use it
@@ -8587,6 +8616,19 @@ while not shutdown_requested:
                         executed_same = 0
                         skipped_same_no_price = []
                         skipped_same_no_cash = []
+                        # Task 7 review-fix (IMPORTANT 1): same-bar pending buys
+                        # also run before the main emission gate — apply the same
+                        # hard max_positions gate here (adds to held exempt).
+                        _sbg_cap, _sbg_cap_reason = resolve_max_positions_cap(_cached_strategies)
+                        _sbg_held = set()
+                        _sbg_full_exits = set()
+                        _sbg_new_emitted = set()
+                        if _sbg_cap is not None:
+                            try:
+                                _sbg_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                                _sbg_held = {str(_s).strip().upper() for _s, _q in (_sbg_pos or {}).items() if float(_q or 0.0) > 0.0}
+                            except Exception:
+                                _sbg_cap = None  # fail-open: gate inert this block
                         for _sname2, _sc2 in list((_strategy_cache or {}).items()):
                             if not _sc2:
                                 continue
@@ -8634,11 +8676,19 @@ while not shutdown_requested:
                                         _log("[Pending] SKIP buy %s — no cash remaining (budget=%.2f, cash=%.2f)" % (
                                             sym, remaining2, portfolio_emulator.get_cash()), "yellow")
                                         continue
+                                    # Task 7 review-fix (IMPORTANT 1): hard cap
+                                    # gate on NEW-name same-bar pending buys.
+                                    if _sbg_cap is not None and not max_positions_gate(_sbg_held, _sbg_cap, _sbg_full_exits, _sbg_new_emitted, sym):
+                                        _sbg_proj = max_positions_projected_count(_sbg_held, _sbg_full_exits, _sbg_new_emitted)
+                                        _log("MAX_POSITIONS_GATE: blocked %s (held=%d, cap=%d)" % (sym, _sbg_proj, _sbg_cap), "yellow")
+                                        continue
                                     remaining2 -= cash_use
                                     shares_before = portfolio_emulator._positions.get(sym, 0.0)
                                     portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                         cash_per_trade=cash_use, sell_fraction=1.0)
                                     shares_after = portfolio_emulator._positions.get(sym, 0.0)
+                                    if _sbg_cap is not None and sym not in _sbg_held:
+                                        _sbg_new_emitted.add(sym)
                                     if _epos2 is not None:
                                         _epos2[sym] = _epos2.get(sym, 0.0) + max(0.0, shares_after - shares_before)
                                 else:
@@ -8648,8 +8698,12 @@ while not shutdown_requested:
                                         total_shares = portfolio_emulator._positions.get(sym, 0.0)
                                         if total_shares > 0:
                                             sell_frac = min(1.0, _epos2[sym] / total_shares)
-                                    portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
+                                    _sbg_sell_ok = portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                         cash_per_trade=1000.0, sell_fraction=sell_frac)
+                                    # Task 7 review-fix (IMPORTANT 2): credit the
+                                    # freed slot only on actual execution.
+                                    if _sbg_cap is not None and _sbg_sell_ok and sell_frac >= 0.999 and sym in _sbg_held:
+                                        _sbg_full_exits.add(sym)
                                     if _epos2 is not None and sym in _epos2:
                                         _epos2.pop(sym, None)
                                     # After sell frees cash, update remaining budget so subsequent buys can use it
@@ -8939,15 +8993,10 @@ while not shutdown_requested:
             _mpg_new_emitted: set = set()  # NEW names already emitted this cycle
             if portfolio_emulator is not None:
                 try:
-                    _mpg_nexus_spec = next(
-                        (s for s in (_cached_strategies or [])
-                         if str((s or {}).get("strategy") or "").strip() == "graph_nexus_analysis"),
-                        None,
-                    )
-                    _mpg_nexus_cfg = (_mpg_nexus_spec or {}).get("config") or {}
-                    _mpg_cap_raw = _mpg_nexus_cfg.get("max_positions")
-                    if _mpg_cap_raw is not None:
-                        _mpg_cap = int(_mpg_cap_raw)
+                    _mpg_cap, _mpg_cap_reason = resolve_max_positions_cap(_cached_strategies)
+                    _mpg_warn = max_positions_arm_warning(_mpg_cap_reason)
+                    if _mpg_warn:
+                        _log(_mpg_warn, "yellow")
                     _mpg_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
                     _mpg_held = {str(_s).strip().upper() for _s, _q in (_mpg_pos or {}).items() if float(_q or 0.0) > 0.0}
                 except Exception as _mpg_e:
@@ -9541,6 +9590,11 @@ while not shutdown_requested:
                             # idempotency via client_order_id (cid) prevents
                             # duplicate orders if the abandoned worker eventually
                             # succeeds and the next tick re-tries.
+                            # Task 7 review-fix (IMPORTANT 2): track whether the
+                            # submit actually succeeded so a FAILED funding sell
+                            # cannot credit a rotation slot (which would admit
+                            # the paired buy and land the book at cap+1 live).
+                            _mpg_submit_ok = False
                             if mode == MODE_LIVE:
                                 try:
                                     _es_fut = _PRICE_FETCH_EXECUTOR.submit(
@@ -9551,6 +9605,7 @@ while not shutdown_requested:
                                         sell_fraction=sell_fraction,
                                     )
                                     _es_placed = _es_fut.result(timeout=90.0)
+                                    _mpg_submit_ok = bool(_es_placed)
                                     # Telemetry only — record the confirmed
                                     # buy/sell + reasoning for the app's "Bot
                                     # activity". Fully off the trade path.
@@ -9575,19 +9630,24 @@ while not shutdown_requested:
                                         "yellow",
                                     )
                             else:
-                                portfolio_emulator.execute_signal(symbol, decision, price, timestamp=current_time, cash_per_trade=cash_to_use, sell_fraction=sell_fraction)
+                                _mpg_submit_ok = bool(portfolio_emulator.execute_signal(symbol, decision, price, timestamp=current_time, cash_per_trade=cash_to_use, sell_fraction=sell_fraction))
 
                             # ── Task 7: keep the running cycle counts current so
                             # later buys in this _exec_order see this emission. A
-                            # NEW-name buy grows the count; a FULL-exit sell of a
-                            # held name (planned sell_fraction ~1.0) frees a slot
-                            # (rotation-pair accounting). Sells sort first, so a
-                            # rotation's funding exit is booked before its buy.
+                            # NEW-name buy grows the count on INTENT (a failed
+                            # buy blocking a later buy errs on the safe side of
+                            # the cap); a FULL-exit sell (sell_fraction ~1.0) of
+                            # a held name frees a slot ONLY when the submit
+                            # actually succeeded (review IMPORTANT 2 — a failed
+                            # funding sell must not admit the paired rotation
+                            # buy). Sells sort first, so a rotation's funding
+                            # exit is booked before its buy. Async live fills
+                            # can still fail post-submit — accepted residual.
                             if _mpg_cap is not None:
                                 _mpg_sym_u = str(symbol).strip().upper()
                                 if decision == 1 and _mpg_sym_u not in _mpg_held:
                                     _mpg_new_emitted.add(_mpg_sym_u)
-                                elif decision == -1 and _mpg_sym_u in _mpg_held:
+                                elif decision == -1 and _mpg_sym_u in _mpg_held and _mpg_submit_ok:
                                     try:
                                         _mpg_is_full_exit = float(sell_fraction or 0.0) >= 0.999
                                     except Exception:

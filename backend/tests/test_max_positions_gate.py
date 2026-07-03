@@ -21,7 +21,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nexus_broker_utils import max_positions_gate, max_positions_projected_count  # noqa: E402
+from nexus_broker_utils import (  # noqa: E402
+    max_positions_arm_warning,
+    max_positions_gate,
+    max_positions_projected_count,
+    resolve_max_positions_cap,
+)
 from tests.nexus_real_config import real_config  # noqa: E402
 
 
@@ -137,9 +142,11 @@ def _held_snapshot(emu):
 def _replay_emission(emu, cap, order):
     """Re-play broker's `for symbol in _exec_order` gate.
 
-    `order` items: (symbol, side, full_exit) where side in {"buy","sell"}.
-    Sells are processed first (broker sorts `_sell_first + _buy_rest`). Returns
-    (emitted_buys, blocked_buys, log_lines).
+    `order` items: (symbol, side, full_exit[, submit_ok]) with side in
+    {"buy","sell"}; ``submit_ok`` (default True) models execute_signal/submit
+    success. Sells are processed first (broker sorts `_sell_first + _buy_rest`)
+    and — per review IMPORTANT 2 — a full-exit sell credits its slot ONLY when
+    the submit succeeded. Returns (emitted_buys, blocked_buys, log_lines).
     """
     held0 = _held_snapshot(emu)
     full_exits = set()
@@ -150,10 +157,13 @@ def _replay_emission(emu, cap, order):
 
     sells = [o for o in order if o[1] == "sell"]
     buys = [o for o in order if o[1] == "buy"]
-    for sym, _side, full_exit in sells:
-        if full_exit:
+    for o in sells:
+        sym, _side, full_exit = o[0], o[1], o[2]
+        submit_ok = o[3] if len(o) > 3 else True
+        if full_exit and submit_ok:
             full_exits.add(sym)
-    for sym, _side, _fx in buys:
+    for o in buys:
+        sym = o[0]
         if not max_positions_gate(held0, cap, full_exits, emitted_new, sym):
             proj = max_positions_projected_count(held0, full_exits, emitted_new)
             log_lines.append(f"MAX_POSITIONS_GATE: blocked {sym} (held={proj}, cap={cap})")
@@ -209,3 +219,159 @@ def test_wiring_rotation_with_partial_sell_blocks_the_buy():
     assert emitted == []
     assert blocked == ["ROTIN"]
     assert logs == ["MAX_POSITIONS_GATE: blocked ROTIN (held=10, cap=10)"]
+
+
+def test_wiring_live_failed_funding_sell_blocks_the_paired_buy():
+    # Review IMPORTANT 2: a live rotation whose funding sell FAILS to submit
+    # must NOT credit the freed slot — otherwise the paired buy lands cap+1.
+    cap = int(real_config()["max_positions"])
+    held = {f"H{i}": 10.0 for i in range(10)}  # at cap
+    emu = _FakeEmulator(held)
+    order = [("H0", "sell", True, False),  # planned full exit, submit FAILED
+             ("ROTIN", "buy", False)]
+    emitted, blocked, logs = _replay_emission(emu, cap, order)
+    assert emitted == []
+    assert blocked == ["ROTIN"]
+    assert logs == ["MAX_POSITIONS_GATE: blocked ROTIN (held=10, cap=10)"]
+
+
+def test_wiring_successful_funding_sell_still_admits_the_paired_buy():
+    # Counterpart of the failure case: submit_ok=True keeps rotation working.
+    cap = int(real_config()["max_positions"])
+    held = {f"H{i}": 10.0 for i in range(10)}
+    emu = _FakeEmulator(held)
+    order = [("H0", "sell", True, True), ("ROTIN", "buy", False)]
+    emitted, blocked, _logs = _replay_emission(emu, cap, order)
+    assert emitted == ["ROTIN"]
+    assert blocked == []
+
+
+# --------------------------------------------------------------------------- #
+# Cap resolution + arm warning (review IMPORTANT 1 seam + MINOR)
+# --------------------------------------------------------------------------- #
+
+def _nexus_spec(config):
+    return {"strategy": "graph_nexus_analysis", "config": config}
+
+
+def test_resolve_cap_from_real_config():
+    cap, reason = resolve_max_positions_cap([_nexus_spec(real_config())])
+    assert (cap, reason) == (10, "armed")
+
+
+def test_resolve_cap_missing_key_and_warning_line():
+    cfg = real_config()
+    cfg.pop("max_positions", None)
+    cap, reason = resolve_max_positions_cap([_nexus_spec(cfg)])
+    assert cap is None
+    assert reason == "no_max_positions_key"
+    # MINOR review item: the exact operator-facing warning line.
+    assert max_positions_arm_warning(reason) == (
+        "MAX_POSITIONS_GATE not armed: no max_positions in config"
+    )
+
+
+def test_resolve_cap_no_nexus_spec_is_silent():
+    cap, reason = resolve_max_positions_cap([{"strategy": "other", "config": {}}])
+    assert cap is None
+    assert reason == "no_nexus_spec"
+    assert max_positions_arm_warning(reason) is None
+    # Empty / None spec lists too.
+    assert resolve_max_positions_cap([]) == (None, "no_nexus_spec")
+    assert resolve_max_positions_cap(None) == (None, "no_nexus_spec")
+
+
+def test_resolve_cap_invalid_value_warns():
+    cap, reason = resolve_max_positions_cap([_nexus_spec({"max_positions": "ten"})])
+    assert cap is None
+    assert reason == "invalid"
+    assert "not armed" in (max_positions_arm_warning(reason) or "")
+
+
+def test_arm_warning_silent_when_armed():
+    assert max_positions_arm_warning("armed") is None
+
+
+# --------------------------------------------------------------------------- #
+# Pending-trade path re-play (review IMPORTANT 1)
+# --------------------------------------------------------------------------- #
+
+def _replay_pending_block(emu, cached_strategies, pending):
+    """Re-play the broker pending-trade block gate (start-of-bar / same-bar).
+
+    ``pending`` items: (symbol, signal, sell_frac, submit_ok). Sells sort first
+    (broker sorts pending by signal). Mirrors broker.py: cap via
+    resolve_max_positions_cap, held snapshot at block entry, NEW-name buys
+    gated, full-exit sells credited only on execute success.
+    """
+    cap, reason = resolve_max_positions_cap(cached_strategies)
+    held = _held_snapshot(emu) if cap is not None else set()
+    full_exits = set()
+    new_emitted = set()
+    executed = []
+    logs = []
+    warn = max_positions_arm_warning(reason)
+    if warn:
+        logs.append(warn)
+    pending = sorted(pending, key=lambda t: (0 if t[1] == -1 else 1))
+    for sym, sig, sell_frac, submit_ok in pending:
+        if sig == 1:
+            if cap is not None and not max_positions_gate(held, cap, full_exits, new_emitted, sym):
+                proj = max_positions_projected_count(held, full_exits, new_emitted)
+                logs.append("MAX_POSITIONS_GATE: blocked %s (held=%d, cap=%d)" % (sym, proj, cap))
+                continue
+            executed.append(("buy", sym))
+            if cap is not None and sym not in held:
+                new_emitted.add(sym)
+        else:
+            executed.append(("sell", sym))
+            if cap is not None and submit_ok and sell_frac >= 0.999 and sym in held:
+                full_exits.add(sym)
+    return executed, logs
+
+
+def test_pending_path_buy_blocked_at_cap():
+    # Review IMPORTANT 1: pending-trade (queue drain) buys run BEFORE the main
+    # emission loop and must hit the same gate. At cap, a new-name pending buy
+    # is blocked and logged; an add to a held name still executes.
+    specs = [_nexus_spec(real_config())]  # cap = 10
+    held = {f"H{i}": 10.0 for i in range(10)}
+    emu = _FakeEmulator(held)
+    pending = [("EARNNEW", 1, 1.0, True),  # new name -> blocked
+               ("H4", 1, 1.0, True)]       # add to held -> executes
+    executed, logs = _replay_pending_block(emu, specs, pending)
+    assert ("buy", "H4") in executed
+    assert ("buy", "EARNNEW") not in executed
+    assert "MAX_POSITIONS_GATE: blocked EARNNEW (held=10, cap=10)" in logs
+
+
+def test_pending_path_full_exit_sell_frees_slot_for_pending_buy():
+    specs = [_nexus_spec(real_config())]
+    held = {f"H{i}": 10.0 for i in range(10)}
+    emu = _FakeEmulator(held)
+    # Sell sorts first (signal -1), fully exits H0 successfully -> buy admitted.
+    pending = [("EARNNEW", 1, 1.0, True), ("H0", -1, 1.0, True)]
+    executed, logs = _replay_pending_block(emu, specs, pending)
+    assert ("buy", "EARNNEW") in executed
+    assert logs == []
+
+
+def test_pending_path_failed_sell_does_not_free_slot():
+    specs = [_nexus_spec(real_config())]
+    held = {f"H{i}": 10.0 for i in range(10)}
+    emu = _FakeEmulator(held)
+    pending = [("EARNNEW", 1, 1.0, True), ("H0", -1, 1.0, False)]  # sell fails
+    executed, logs = _replay_pending_block(emu, specs, pending)
+    assert ("buy", "EARNNEW") not in executed
+    assert "MAX_POSITIONS_GATE: blocked EARNNEW (held=10, cap=10)" in logs
+
+
+def test_pending_path_missing_cap_warns_and_does_not_block():
+    cfg = real_config()
+    cfg.pop("max_positions", None)
+    specs = [_nexus_spec(cfg)]
+    emu = _FakeEmulator({f"H{i}": 10.0 for i in range(10)})
+    pending = [("EARNNEW", 1, 1.0, True)]
+    executed, logs = _replay_pending_block(emu, specs, pending)
+    assert ("buy", "EARNNEW") in executed  # gate inert (fail-open)
+    assert logs[0] == "MAX_POSITIONS_GATE not armed: no max_positions in config"

@@ -34,6 +34,48 @@ def max_positions_projected_count(held_symbols, planned_sells_full_exit, emitted
         return -1
 
 
+def resolve_max_positions_cap(cached_strategies) -> tuple:
+    """Resolve the hard max_positions cap from the loaded strategy specs.
+
+    Returns ``(cap, reason)`` where ``cap`` is an int or None and ``reason`` is
+    one of:
+      * ``"armed"``                — cap resolved from the nexus config
+      * ``"no_nexus_spec"``        — no graph_nexus_analysis strategy loaded
+      * ``"no_max_positions_key"`` — nexus config exists but lacks max_positions
+      * ``"invalid"``              — key present but not coercible to int
+
+    Fail-open: any structural surprise resolves to ``(None, ...)`` — the broker
+    gate stays inert rather than crashing the cycle.
+    """
+    try:
+        spec = next(
+            (s for s in (cached_strategies or [])
+             if str((s or {}).get("strategy") or "").strip() == "graph_nexus_analysis"),
+            None,
+        )
+        if spec is None:
+            return (None, "no_nexus_spec")
+        cfg = spec.get("config") or {}
+        if "max_positions" not in cfg or cfg.get("max_positions") is None:
+            return (None, "no_max_positions_key")
+        return (int(cfg["max_positions"]), "armed")
+    except Exception:
+        return (None, "invalid")
+
+
+def max_positions_arm_warning(reason) -> str | None:
+    """Log line for a gate that could NOT arm; None when no warning is due.
+
+    ``no_nexus_spec`` is silent — a portfolio without graph_nexus_analysis has
+    no concept of this cap, and warning every tick would be noise.
+    """
+    if reason == "no_max_positions_key":
+        return "MAX_POSITIONS_GATE not armed: no max_positions in config"
+    if reason == "invalid":
+        return "MAX_POSITIONS_GATE not armed: max_positions in config is not an integer"
+    return None
+
+
 def max_positions_gate(held_symbols, cap, planned_sells_full_exit, emitted_new_names, candidate) -> bool:
     """Hard max_positions gate — return True iff a BUY of ``candidate`` may emit.
 
