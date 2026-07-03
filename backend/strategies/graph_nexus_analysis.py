@@ -7678,6 +7678,7 @@ def _rotation_candidate_allowed(
     config: dict,
     incoming_meta: dict | None = None,
     market_regime: str = "bull",
+    held_sym: str = "",
 ) -> tuple[bool, float, str]:
     _cfg = lambda k, d: float(d if (v := config.get(k)) is None else v)
     # V26 Fix B: when the incoming candidate is high-conviction (top_momentum or
@@ -7749,6 +7750,26 @@ def _rotation_candidate_allowed(
 
     if float(incoming_raw_score or 0.0) < min_score:
         return False, delta, "incoming_score"
+    # Task 12 / spec 5.1 — POSITIVE-GRAPH ROTATION GATE.
+    # Forensics on BT586767: 27/28 exits were mechanical rotations ejecting
+    # positions the graph still rated positive (AMAT rotated at +9.3% with
+    # raw=+0.284 HOLD, then ran +30% in 12 more days; historical +266% runs
+    # held winners 14-28d). When enabled, a held position whose CURRENT raw
+    # graph signal is positive (held_raw_score > 0) can NEVER be selected as a
+    # rotation-funding sell — no winner-lock-bypass / break-glass / gamma path
+    # below can override a live positive forward signal. Config-gated (default
+    # OFF) so existing rotation behavior is unchanged unless the operator opts
+    # in (doc-179 turns it on).
+    if (
+        bool(config.get("rotation_positive_graph_gate_enabled", False))
+        and float(held_raw_score or 0.0) > 0.0
+    ):
+        _log(
+            f"ROTATION_GRAPH_GATE: kept {held_sym or '?'} "
+            f"(raw={float(held_raw_score or 0.0):+.2f})",
+            "cyan",
+        )
+        return False, delta, "positive_graph_gate"
     if float(held_pnl_pct or 0.0) >= 0.0:
         winner_lock_active, _ = _rotation_winner_lock_active(
             held_pnl_pct=float(held_pnl_pct or 0.0),
@@ -7948,6 +7969,59 @@ def _conviction_allocation_schedule(ranked: list[dict]) -> list[float]:
     return [s / total for s in scores]
 
 
+def _clip_to_single_position_cap(
+    *,
+    sym: str,
+    intended_value: float,
+    current_position_value: float,
+    portfolio_total: float,
+    config: dict,
+) -> float:
+    """Clip a buy/add/amplifier order so the resulting position does not exceed
+    ``single_position_max_pct`` of the portfolio.
+
+    Task 12 / spec 5.7: ``single_position_max_pct`` (doc-179 = 25) was a DEAD
+    config key. This wires it as a real cap. Any order that would push
+    ``(current_position_value + intended_value) / portfolio_total`` above
+    ``pct/100`` is clipped to the remaining headroom (partial fill of the
+    intent), or returns 0.0 if the position is already at/above the cap.
+
+    NO behavior change when the key is absent/None/non-positive: the intended
+    value passes through untouched (preserving today's uncapped default for
+    every config that doesn't set it). Logs ``SINGLE_POS_CAP: clipped <sym>``
+    whenever it actually reduces or skips an order.
+    """
+    _pct_raw = config.get("single_position_max_pct")
+    if _pct_raw is None:
+        return intended_value
+    try:
+        _pct = float(_pct_raw)
+    except (TypeError, ValueError):
+        return intended_value
+    _total = float(portfolio_total or 0.0)
+    if _pct <= 0.0 or _total <= 0.0:
+        return intended_value
+    _intended = max(0.0, float(intended_value or 0.0))
+    _current = max(0.0, float(current_position_value or 0.0))
+    _cap_value = _total * (_pct / 100.0)
+    _headroom = _cap_value - _current
+    if _headroom <= 1e-9:
+        _log(
+            f"SINGLE_POS_CAP: clipped {sym or '?'} — already at/above "
+            f"{_pct:.1f}% cap ({_current / _total * 100.0:.1f}%); order skipped",
+            "yellow",
+        )
+        return 0.0
+    if _intended <= _headroom + 1e-9:
+        return _intended
+    _log(
+        f"SINGLE_POS_CAP: clipped {sym or '?'} ${_intended:.0f} -> ${_headroom:.0f} "
+        f"({_current / _total * 100.0:.1f}% + intent would breach {_pct:.1f}% cap)",
+        "yellow",
+    )
+    return max(0.0, _headroom)
+
+
 def _plan_executable_stock_buy_slate(
     candidates: list[dict],
     available_budget: float,
@@ -7956,6 +8030,7 @@ def _plan_executable_stock_buy_slate(
     config: dict,
     blocked_tickers: set[str] | None = None,
     initial_value: float = 0.0,
+    portfolio_total: float = 0.0,
 ) -> tuple[list[dict], list[str], dict[str, Any]]:
     profile = str(config.get("allocation_profile", "balanced") or "balanced").strip().lower()
     # Tier-3 B2: scale per-cycle new-buy cap by account size. Explicit override wins.
@@ -8089,6 +8164,16 @@ def _plan_executable_stock_buy_slate(
             )
             allocation = min(remaining_budget - min_remaining, max(min_required, scheduled))
         allocation = max(0.0, min(remaining_budget, allocation))
+        # Task 12: single_position_max_pct cap. A new entry starts from 0
+        # current value, so the cap clips the opening size to pct% of the
+        # portfolio (no-op when the key is absent).
+        allocation = _clip_to_single_position_cap(
+            sym=item.get("ticker", ""),
+            intended_value=allocation,
+            current_position_value=0.0,
+            portfolio_total=portfolio_total,
+            config=config,
+        )
         if allocation + 1e-9 < min_required:
             break
         item_funded = dict(item)
@@ -8230,6 +8315,7 @@ def _plan_winner_adds(
     *,
     min_position_size: float,
     config: dict,
+    portfolio_total: float = 0.0,
 ) -> tuple[list[dict], float]:
     if not bool(config.get("winner_add_enabled", True)) or available_budget <= 0.0:
         return [], max(0.0, float(available_budget or 0.0))
@@ -8279,6 +8365,19 @@ def _plan_winner_adds(
         target_allocation = max(raw_allocation, min_winner_add)
         target_allocation = min(target_allocation, max_allowed)
         allocation = min(remaining_budget, target_allocation)
+        # Task 12: single_position_max_pct cap. Current market value of the held
+        # position (prefer an explicit position_value, else approximate from the
+        # first entry notional grown by unrealized pnl). No-op when key absent.
+        _cur_val = float(item.get("position_value") or 0.0)
+        if _cur_val <= 0.0:
+            _cur_val = entry_notional * (1.0 + float(item.get("unrealized_pct", 0.0) or 0.0) / 100.0)
+        allocation = _clip_to_single_position_cap(
+            sym=item.get("ticker", ""),
+            intended_value=allocation,
+            current_position_value=_cur_val,
+            portfolio_total=portfolio_total,
+            config=config,
+        )
         if allocation + 1e-9 < min_position_size:
             continue
         funded_item = dict(item)
@@ -11547,6 +11646,15 @@ def _momentum_amplifier_pass(
         max_amplifier_buy = portfolio_total * max_buy_pct
         room = max(0.0, max_position_value - current_value)
         buy_cash = min(max_amplifier_buy, room)
+        # Task 12: single_position_max_pct cap (in addition to the amplifier's
+        # own momentum_amplifier_max_position_pct). No-op when the key is absent.
+        buy_cash = _clip_to_single_position_cap(
+            sym=sym,
+            intended_value=buy_cash,
+            current_position_value=current_value,
+            portfolio_total=portfolio_total,
+            config=config,
+        )
         min_pos_size = float(config.get("min_position_size", 100.0) or 100.0)
 
         if buy_cash < min_pos_size:
@@ -24170,6 +24278,8 @@ class GraphNexusAnalysis:
                                         incoming_meta=_incoming_meta,
                                         # Phase ε.C.2: regime-aware time-floor decay
                                         market_regime=str((strategy_cache or {}).get("_market_regime") or "bull"),
+                                        # Task 12: symbol for the ROTATION_GRAPH_GATE log line.
+                                        held_sym=_wt,
                                     )
                                     # V28 Fix 4: log every rotation eval result so failed
                                     # rotations are visible (previously most failures
@@ -24543,6 +24653,11 @@ class GraphNexusAnalysis:
                             "is_propagation_expansion": bool(_candidate_meta["is_propagation_expansion"]),
                             "grace_eligible": bool(_candidate_meta["grace_eligible"]),
                             "existing_add_count": max(0, int((_ctx.get("buy_count", 1) or 1) - 1)),
+                            # Task 12: current market value of the held position, so
+                            # _plan_winner_adds can enforce single_position_max_pct.
+                            "position_value": float(
+                                (getattr(portfolio_emulator, "_positions", {}) or {}).get(_sym, 0.0) or 0.0
+                            ) * float(_ctx.get("current_price", 0.0) or 0.0),
                         }
                     )
                     _winner_add_docs.append(_ctx)
@@ -24585,6 +24700,7 @@ class GraphNexusAnalysis:
                             _winner_add_budget,
                             min_position_size=_min_position_size,
                             config=config,
+                            portfolio_total=portfolio_total,
                         )
                     # Sweep-3 fix: filter out winner adds whose live-bar score is a sell
                     # signal BEFORE computing spent. The previous order summed buy_cash
@@ -24786,6 +24902,8 @@ class GraphNexusAnalysis:
                     # Tier-3 B2: thread broker's _initial_value so scaled new-buy
                     # cap can pick the right account-size bucket.
                     initial_value=float(getattr(portfolio_emulator, "_initial_value", 0.0) or 0.0),
+                    # Task 12: current portfolio total for the single_position_max_pct cap.
+                    portfolio_total=portfolio_total,
                 )
                 # V31 Section 4.3: vol-adjusted sizing — reweight slate so high-vol
                 # names get smaller positions and low-vol names get larger ones,
@@ -26132,6 +26250,19 @@ class GraphNexusAnalysis:
                         )
                         _hp_pnl = float(_hp_snap.get("unrealized_pct", 0.0))
                         _hp_held = int(_hp_snap.get("held_days") or 0)
+                        # Task 12: positive-graph rotation gate also protects the
+                        # backfill-rotation outgoing picker — a held position the
+                        # graph still rates positive is never a BFQ sell candidate.
+                        _hp_raw = float((scores.get(_hp_sym) or {}).get("raw_net_score", 0.0) or 0.0)
+                        if (
+                            bool(config.get("rotation_positive_graph_gate_enabled", False))
+                            and _hp_raw > 0.0
+                        ):
+                            _log(
+                                f"ROTATION_GRAPH_GATE: kept {_hp_sym} (raw={_hp_raw:+.2f}) [bfq]",
+                                "cyan",
+                            )
+                            continue
                         _hp_locked, _ = _rotation_winner_lock_active(
                             held_pnl_pct=_hp_pnl, held_days=_hp_held,
                             held_raw_score=float((scores.get(_hp_sym) or {}).get("raw_net_score", 0.0) or 0.0),
