@@ -6805,6 +6805,68 @@ def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
         pass
 
 
+def _credit_guard_or_raise(*, call_site: str) -> str:
+    """R2 Task 4: preflight OpenRouter credit guard.
+
+    Best-effort and FAIL-OPEN: returns "ok"/"warn"/"skip" normally and NEVER
+    lets its own failure block trading (a flaky credits endpoint degrades to
+    "ok" — the reactive 402 de-cliff still protects us). On "halt" (balance
+    at/under the halt threshold) it raises LLMCriticalFailure(insufficient_
+    credits) so the existing outer-except routes it exactly like a mid-run
+    402: backtest → clean-stop paused_credits; live → live_critical_abort +
+    exit(7). Testable logic lives in openrouter_credits.py; this wrapper is
+    the thin lazy-import wiring (broker.py is not import-safe)."""
+    try:
+        from openrouter_credits import run_credit_guard as _run_credit_guard
+    except Exception:
+        return "skip"
+
+    def _notify(msg):
+        try:
+            _log(f"[credit-guard] {msg}", "yellow")
+        except Exception:
+            pass
+        try:
+            from live_alerts import alert_strategy_error as _alert
+            _alert(instance_id=str(instance_id), tag="openrouter_low_credit",
+                   message=str(msg))
+        except Exception:
+            pass
+
+    try:
+        result = _run_credit_guard(_run_once_specs, notify_fn=_notify)
+    except Exception as _g_err:
+        try:
+            _log(f"[credit-guard] guard raised, ignoring: {_g_err}", "yellow")
+        except Exception:
+            pass
+        return "skip"
+
+    if result == "halt":
+        try:
+            _log(f"[credit-guard] OpenRouter balance at/below halt threshold at "
+                 f"{call_site}; raising insufficient_credits critical.", "red")
+        except Exception:
+            pass
+        from llm_critical_guard import LLMCriticalFailure
+        raise LLMCriticalFailure(
+            class_tag="insufficient_credits",
+            provider="openrouter",
+            model="(preflight)",
+            attribution={"call_site": f"credit_preflight:{call_site}",
+                         "instance_id": str(instance_id)},
+            attempts=[{"attempt": 1, "class_tag": "insufficient_credits",
+                       "http_status": 402,
+                       "body_sample": ("OpenRouter preflight credit guard: balance "
+                                       "at/below halt threshold; top up credits and "
+                                       "re-queue.")}],
+        )
+    return result
+
+
+# R2 Task 4: sim-day counter driving the every-5-days backtest credit check.
+_bt_credit_guard_tick = 0
+
 while not shutdown_requested:
     try:
         ###################################
@@ -6813,6 +6875,14 @@ while not shutdown_requested:
         if mode == MODE_BACKTEST:
             import time as _time
             _backtest_loop_start = _time.time()
+            # R2 Task 4: preflight OpenRouter credit guard at backtest START
+            # (tick 0) and every 5 sim days thereafter. A "halt" raises
+            # LLMCriticalFailure(insufficient_credits); the outer-except then
+            # clean-stops with status=paused_credits instead of simulating an
+            # entire month LLM-blind (incident 586767).
+            if _bt_credit_guard_tick % 5 == 0:
+                _credit_guard_or_raise(call_site="backtest_sim_day")
+            _bt_credit_guard_tick += 1
         ###################################
         ## Backtesting/Live Price Fetching
         ###################################
@@ -7868,6 +7938,15 @@ while not shutdown_requested:
                                 # through. mode=IDLE → strategy returns {} fast.
                                 # mode=MONITOR → strategy routes to monitor cycle.
                                 # mode=FULL or None → full pipeline.
+                                # R2 Task 4: preflight OpenRouter credit guard
+                                # at the START of a live FULL run (the LLM-heavy
+                                # pipeline). MONITOR/IDLE ticks are cheap and
+                                # skip it. A "halt" raises LLMCriticalFailure
+                                # (insufficient_credits) → outer-except runs
+                                # live_critical_abort + exit(7) rather than
+                                # trading LLM-blind.
+                                if mode == MODE_LIVE and _tick_mode in (None, "FULL"):
+                                    _credit_guard_or_raise(call_site="live_full_run")
                                 try:
                                     _set_strategy_tick_phase("strategy_run")
                                 except Exception:
