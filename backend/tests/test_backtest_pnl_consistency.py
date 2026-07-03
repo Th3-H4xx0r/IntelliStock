@@ -11,6 +11,9 @@ import datetime as _dt
 from backend.backtest_summary import (
     compute_backtest_summary,
     build_backtest_price_series,
+    resolve_end_prices,
+    compute_per_stock_pnl,
+    compute_stock_price_change,
 )
 
 
@@ -92,6 +95,17 @@ DATA = {
         {"t": "2026-07-01T21:00:00+00:00", "c": LATER_LOWER_CLOSE["MSFT"]},
     ],
 }
+
+
+# Trades consistent with the cash accounting above: initial 100,000 minus
+# 50,000 of buys leaves CASH_REMAINING = 50,000 (prices are contrived so the
+# arithmetic reconciles exactly; that is the property under test).
+TRADES = [
+    {"timestamp": _dt.datetime(2026, 6, 30, 14, 0, 0), "action": "buy",
+     "ticker": "AAPL", "shares": 10.0, "price": 2500.0, "total": 25000.0},
+    {"timestamp": _dt.datetime(2026, 6, 30, 14, 5, 0), "action": "buy",
+     "ticker": "MSFT", "shares": 5.0, "price": 5000.0, "total": 25000.0},
+]
 
 
 def test_summary_pnl_equals_equity_curve_end_exactly():
@@ -186,3 +200,53 @@ def test_snapshot_seeds_only_symbols_without_bars():
     assert all(r["close"] != 0 for r in aapl_rows)
     assert 200.0 in [r["close"] for r in aapl_rows]
     assert [r["close"] for r in aapl_rows].count(200.0) == 1
+
+
+# --- Review fast-follow: per-stock P&L / end_price on the same snapshot basis
+
+
+def test_end_prices_prefer_last_snapshot_marks_over_resolver():
+    # The resolver returned the phantom (lower) duplicate-bar closes; the last
+    # snapshot's marks must win, and the resolver only fills missing symbols.
+    resolver = dict(LATER_LOWER_CLOSE)
+    resolver["NFLX"] = 900.0  # not in any snapshot
+    end_prices = resolve_end_prices(resolver, SNAPSHOTS)
+    assert end_prices["AAPL"] == SNAPSHOT_PRICES["AAPL"]
+    assert end_prices["MSFT"] == SNAPSHOT_PRICES["MSFT"]
+    assert end_prices["NFLX"] == 900.0  # resolver fallback preserved
+    # Inputs not mutated.
+    assert resolver["AAPL"] == LATER_LOWER_CLOSE["AAPL"]
+    assert SNAPSHOTS[-1]["prices"] == SNAPSHOT_PRICES
+
+
+def test_per_stock_pnl_reconciles_with_headline_pnl():
+    """Dup end-date bars: sum of per-stock P&L (realized + open marks) must
+    reconcile with the headline pnl because both use the snapshot basis."""
+    emulator = _FakeEmulator(CASH_REMAINING, POSITIONS, SNAPSHOT_PRICES)
+    headline = compute_backtest_summary(emulator, SNAPSHOTS, INITIAL_CASH)["pnl"]
+
+    end_prices = resolve_end_prices(dict(LATER_LOWER_CLOSE), SNAPSHOTS)
+    pnl_per_stock, pnl_pct = compute_per_stock_pnl(
+        TRADES, POSITIONS, end_prices, ["AAPL", "MSFT"],
+    )
+    assert sum(pnl_per_stock.values()) == headline
+
+    # On the phantom resolver basis it would NOT have reconciled — prove the
+    # divergence is real and the merge is what closes it.
+    wrong_pnl, _ = compute_per_stock_pnl(
+        TRADES, POSITIONS, dict(LATER_LOWER_CLOSE), ["AAPL", "MSFT"],
+    )
+    assert sum(wrong_pnl.values()) != headline
+
+    # pnl_percent is against cost basis (buys).
+    assert pnl_pct["AAPL"] == round(pnl_per_stock["AAPL"] / 25000.0 * 100.0, 4)
+
+
+def test_stock_price_change_end_price_is_snapshot_mark():
+    end_prices = resolve_end_prices(dict(LATER_LOWER_CLOSE), SNAPSHOTS)
+    start_prices = {"AAPL": 190.0, "MSFT": 380.0}
+    spc = compute_stock_price_change(["AAPL", "MSFT"], start_prices, end_prices)
+    assert spc["AAPL"]["end_price"] == SNAPSHOT_PRICES["AAPL"]
+    assert spc["MSFT"]["end_price"] == SNAPSHOT_PRICES["MSFT"]
+    assert spc["AAPL"]["end_price"] != LATER_LOWER_CLOSE["AAPL"]
+    assert spc["AAPL"]["change_percent"] == round((200.0 - 190.0) / 190.0 * 100.0, 4)

@@ -75,6 +75,88 @@ def compute_backtest_summary(emulator, snapshots, initial_cash) -> dict:
     return {"final_value": final_value, "pnl": pnl, "pnl_percent": pnl_percent}
 
 
+def resolve_end_prices(resolver_prices, snapshots) -> dict:
+    """End-of-run marks for valuing open positions, on the equity curve's basis.
+
+    The LAST snapshot's own prices win (they are the marks the simulation
+    actually ran on — the same basis as ``compute_backtest_summary``'s
+    final_value); the resolver-derived ``resolver_prices`` (latest-bar lookup /
+    fetch) fill only symbols the last snapshot lacks. This keeps per-stock P&L
+    and ``stock_price_change.end_price`` reconcilable with the headline pnl
+    when the data carries duplicate end-date bars (incident 586767).
+
+    Returns a NEW dict — never mutates either input (the resolver fallback may
+    alias a snapshot's stored prices dict, which is history).
+    """
+    out = dict(resolver_prices or {})
+    if snapshots:
+        snap_prices = (snapshots[-1] or {}).get("prices") or {}
+        if isinstance(snap_prices, dict):
+            for sym, val in snap_prices.items():
+                try:
+                    f = float(val)
+                except (TypeError, ValueError):
+                    continue
+                if f > 0:
+                    out[sym] = f
+    return out
+
+
+def compute_per_stock_pnl(trades, positions, end_prices, all_traded, *, log=None) -> tuple:
+    """Per-stock P&L: realized (sells - buys) + open positions marked at
+    ``end_prices``. When ``end_prices`` comes from ``resolve_end_prices`` the
+    sum over all traded symbols reconciles with the headline pnl
+    (``compute_backtest_summary``) by construction, because both value open
+    positions at the last snapshot's marks.
+
+    Returns ``(pnl_per_stock, pnl_percent_per_stock)``.
+    """
+    pnl_per_stock: dict = {}
+    pnl_percent_per_stock: dict = {}
+    trades = trades or []
+    for sym in (all_traded or []):
+        buys = sum(t.get("total", 0) or 0 for t in trades
+                   if t.get("ticker") == sym and t.get("action") == "buy")
+        sells = sum(t.get("total", 0) or 0 for t in trades
+                    if t.get("ticker") == sym and t.get("action") == "sell")
+        pos_shares = (positions or {}).get(sym, 0.0) or 0.0
+        end_price = (end_prices or {}).get(sym)
+        pos_value = (pos_shares * float(end_price)) if end_price is not None else 0.0
+        if pos_shares > 0 and end_price is None and log is not None:
+            log("[Backtest] Per-stock P&L incomplete for %s (no end price; position valued at 0)" % sym, "yellow")
+        pnl = sells - buys + pos_value
+        pnl_per_stock[sym] = round(pnl, 4)
+        if buys and float(buys) != 0:
+            pnl_percent_per_stock[sym] = round((pnl / float(buys)) * 100.0, 4)
+        else:
+            pnl_percent_per_stock[sym] = None
+    return pnl_per_stock, pnl_percent_per_stock
+
+
+def compute_stock_price_change(all_traded, start_prices, end_prices) -> dict:
+    """Start -> end price movement per symbol. ``end_prices`` should be the
+    ``resolve_end_prices`` result so ``end_price`` shows the mark the sim ran
+    on, not a phantom duplicate end-date bar."""
+    stock_price_change: dict = {}
+    for sym in (all_traded or []):
+        sp = (start_prices or {}).get(sym)
+        ep = (end_prices or {}).get(sym)
+        if sp is not None and ep is not None and float(sp) != 0:
+            pct = (float(ep) - float(sp)) / float(sp) * 100.0
+            stock_price_change[sym] = {
+                "start_price": round(float(sp), 4),
+                "end_price": round(float(ep), 4),
+                "change_percent": round(pct, 4),
+            }
+        elif sp is not None or ep is not None:
+            stock_price_change[sym] = {
+                "start_price": round(float(sp), 4) if sp is not None else None,
+                "end_price": round(float(ep), 4) if ep is not None else None,
+                "change_percent": None,
+            }
+    return stock_price_change
+
+
 def build_backtest_price_series(
     data: dict,
     snapshots: Iterable,

@@ -6993,50 +6993,23 @@ while not shutdown_requested:
                             p = _fetch_price_for_symbol(sym, start_dt, key=key, secret=secret, feed=data_feed) if start_dt else None
                             if p is not None and p > 0:
                                 start_prices[sym] = p
-                    # P&L per stock and P&L % per stock for all traded symbols (watchlist + earnings etc.)
-                    pnl_per_stock = {}
-                    pnl_percent_per_stock = {}
-                    for sym in all_traded:
-                        buys = sum(t.get("total", 0) or 0 for t in trades if t.get("ticker") == sym and t.get("action") == "buy")
-                        sells = sum(t.get("total", 0) or 0 for t in trades if t.get("ticker") == sym and t.get("action") == "sell")
-                        pos_shares = positions.get(sym, 0.0) or 0.0
-                        end_price = (final_prices or {}).get(sym)
-                        if end_price is None and snapshots:
-                            _snap_prices = (snapshots[-1].get("prices") or {}).get(sym)
-                            try:
-                                if _snap_prices is not None and float(_snap_prices) > 0:
-                                    end_price = _snap_prices
-                                    # Backfill only if final_prices is our own dict (not the snapshot's), to avoid mutating history
-                                    if final_prices is not None and id(final_prices) != id(snapshots[-1].get("prices")):
-                                        final_prices[sym] = end_price
-                            except (TypeError, ValueError):
-                                pass
-                        pos_value = (pos_shares * float(end_price)) if end_price is not None else 0.0
-                        if pos_shares > 0 and end_price is None:
-                            _log("[Backtest] Per-stock P&L incomplete for %s (no end price; position valued at 0)" % sym, "yellow")
-                        pnl = sells - buys + pos_value
-                        pnl_per_stock[sym] = round(pnl, 4)
-                        if buys and float(buys) != 0:
-                            pnl_percent_per_stock[sym] = round((pnl / float(buys)) * 100.0, 4)
-                        else:
-                            pnl_percent_per_stock[sym] = None
-                    stock_price_change = {}
-                    for sym in all_traded:
-                        sp = start_prices.get(sym)
-                        ep = (final_prices or {}).get(sym)
-                        if sp is not None and ep is not None and float(sp) != 0:
-                            pct = (float(ep) - float(sp)) / float(sp) * 100.0
-                            stock_price_change[sym] = {
-                                "start_price": round(float(sp), 4),
-                                "end_price": round(float(ep), 4),
-                                "change_percent": round(pct, 4),
-                            }
-                        elif sp is not None or ep is not None:
-                            stock_price_change[sym] = {
-                                "start_price": round(float(sp), 4) if sp is not None else None,
-                                "end_price": round(float(ep), 4) if ep is not None else None,
-                                "change_percent": None,
-                            }
+                    # P&L per stock and P&L % per stock for all traded symbols
+                    # (watchlist + earnings etc.). Open positions are marked at
+                    # the LAST snapshot's own prices (the marks the sim ran on)
+                    # so per-stock P&L and end_price reconcile with the headline
+                    # pnl; the resolver's final_prices fill only symbols the
+                    # last snapshot lacks (incident 586767 — a duplicate
+                    # end-date bar made the two bases disagree by ~$2,756/pos).
+                    from backtest_summary import (
+                        resolve_end_prices,
+                        compute_per_stock_pnl,
+                        compute_stock_price_change,
+                    )
+                    end_prices = resolve_end_prices(final_prices, snapshots)
+                    pnl_per_stock, pnl_percent_per_stock = compute_per_stock_pnl(
+                        trades, positions, end_prices, all_traded, log=_log,
+                    )
+                    stock_price_change = compute_stock_price_change(all_traded, start_prices, end_prices)
                     _log("---------- Backtest summary: P&L per stock ----------", "cyan")
                     for sym in all_traded:
                         pnl = pnl_per_stock.get(sym)
