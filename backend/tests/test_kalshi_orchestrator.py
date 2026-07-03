@@ -162,3 +162,35 @@ def test_one_bet_per_fixture_caps_placed_candidates():
 
     assert len(placed_capped) <= 1
     assert len(placed_uncapped) == 2
+
+
+def test_calibrator_remaps_and_renormalizes_winner_probs():
+    """The champion calibrator remaps the winner fair values (here a shrink toward
+    the base rate flattens a strong favorite), renormalized to a coherent book."""
+    asks = {"home": 55, "draw": 26, "away": 19}
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0)
+    base = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common, calibrator=None)
+    shrunk = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common,
+                               calibrator={"method": "shrink", "calibrator": None, "shrink_strength": 0.5})
+
+    def side_fair(out, side):
+        return next(d["fused_fair"] for d in out["decisions"] if d.get("side") == side)
+
+    # favorite (home) is flattened toward uniform; the group still ~sums to 1
+    assert side_fair(shrunk, "home") < side_fair(base, "home")
+    total = sum(side_fair(shrunk, s) for s in ("home", "draw", "away"))
+    assert abs(total - 1.0) < 1e-6
+
+
+def test_calibrator_none_is_identity():
+    asks = {"home": 55, "draw": 26, "away": 19}
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0)
+    a = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common, calibrator=None)
+    b = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common)  # default None
+    fa = {d.get("side"): d["fused_fair"] for d in a["decisions"]}
+    fb = {d.get("side"): d["fused_fair"] for d in b["decisions"]}
+    assert fa == fb
