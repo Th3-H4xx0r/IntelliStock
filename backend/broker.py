@@ -24,7 +24,7 @@ from typing import Any, Optional
 from portfolio_emulator import PortfolioEmulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
-from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason
+from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count
 from robinhood_data_policy import robinhood_data_fallback_allowed
 
 try:
@@ -8922,6 +8922,40 @@ while not shutdown_requested:
                 except Exception as _qe:
                     _log(f"Pre-submit quote refresh failed: {_qe} — using tick-start prices", "yellow")
 
+            # ── Task 7 (round-2 credit-safety): hard max_positions gate at
+            # order emission. GNA sizes NEW-name buys across several independent
+            # paths (main allocation, BFQ direct-reserved, BFQ dequeue,
+            # momentum-window adds) each against its OWN local headroom snapshot,
+            # and rotation buys are cap-EXEMPT on the assumption their paired
+            # full-exit sell nets the count to zero — nothing recounted the TOTAL
+            # here, so the sums (plus any rotation whose sell didn't net) overshot
+            # the cap (bt 586767: 13 held vs cap 10). This is the missing single
+            # authoritative emission-time recount. Adds to existing names are
+            # exempt; a same-cycle rotation pair nets to zero. Fail-open: if the
+            # nexus config / cap can't be resolved the gate stays inert.
+            _mpg_cap = None
+            _mpg_held: set = set()
+            _mpg_full_exits: set = set()   # names FULLY exited this cycle (sells run first)
+            _mpg_new_emitted: set = set()  # NEW names already emitted this cycle
+            if portfolio_emulator is not None:
+                try:
+                    _mpg_nexus_spec = next(
+                        (s for s in (_cached_strategies or [])
+                         if str((s or {}).get("strategy") or "").strip() == "graph_nexus_analysis"),
+                        None,
+                    )
+                    _mpg_nexus_cfg = (_mpg_nexus_spec or {}).get("config") or {}
+                    _mpg_cap_raw = _mpg_nexus_cfg.get("max_positions")
+                    if _mpg_cap_raw is not None:
+                        _mpg_cap = int(_mpg_cap_raw)
+                    _mpg_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                    _mpg_held = {str(_s).strip().upper() for _s, _q in (_mpg_pos or {}).items() if float(_q or 0.0) > 0.0}
+                except Exception as _mpg_e:
+                    _log(f"max_positions gate setup failed ({type(_mpg_e).__name__}: {_mpg_e}) — gate inert this tick", "yellow")
+                    _mpg_cap = None
+            if _mpg_cap is not None:
+                _log(f"max_positions gate armed: held={len(_mpg_held)}, cap={_mpg_cap}", "cyan")
+
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
                 normalized = None  # reset per-symbol to avoid stale values from previous iteration
@@ -9486,6 +9520,19 @@ while not shutdown_requested:
                                 )
                                 _trade_skipped_no_price = True
                                 continue
+                            # ── Task 7: hard max_positions gate. Block a NEW-name
+                            # buy that would push the projected open-position count
+                            # to/over the cap. Adds/winner-adds to names already
+                            # held are exempt; a same-cycle rotation pair (full
+                            # exit of another name funding this buy) nets to zero
+                            # because that sell already ran (sells sort first) and
+                            # is booked into _mpg_full_exits below.
+                            if _mpg_cap is not None and decision == 1:
+                                if not max_positions_gate(_mpg_held, _mpg_cap, _mpg_full_exits, _mpg_new_emitted, symbol):
+                                    _mpg_proj = max_positions_projected_count(_mpg_held, _mpg_full_exits, _mpg_new_emitted)
+                                    _log(f"MAX_POSITIONS_GATE: blocked {symbol} (held={_mpg_proj}, cap={_mpg_cap})", "yellow")
+                                    _trade_skipped_no_price = True
+                                    continue
                             # 2026-05-06: bound order submission at 90s. Adapter
                             # internally has ~70s retry budget + 25-45s inter-order
                             # delay = ~115s worst case naturally; outer 90s ceiling
@@ -9529,6 +9576,24 @@ while not shutdown_requested:
                                     )
                             else:
                                 portfolio_emulator.execute_signal(symbol, decision, price, timestamp=current_time, cash_per_trade=cash_to_use, sell_fraction=sell_fraction)
+
+                            # ── Task 7: keep the running cycle counts current so
+                            # later buys in this _exec_order see this emission. A
+                            # NEW-name buy grows the count; a FULL-exit sell of a
+                            # held name (planned sell_fraction ~1.0) frees a slot
+                            # (rotation-pair accounting). Sells sort first, so a
+                            # rotation's funding exit is booked before its buy.
+                            if _mpg_cap is not None:
+                                _mpg_sym_u = str(symbol).strip().upper()
+                                if decision == 1 and _mpg_sym_u not in _mpg_held:
+                                    _mpg_new_emitted.add(_mpg_sym_u)
+                                elif decision == -1 and _mpg_sym_u in _mpg_held:
+                                    try:
+                                        _mpg_is_full_exit = float(sell_fraction or 0.0) >= 0.999
+                                    except Exception:
+                                        _mpg_is_full_exit = False
+                                    if _mpg_is_full_exit:
+                                        _mpg_full_exits.add(_mpg_sym_u)
 
                 # Capture per-symbol sub-strategy decision for playback UI (skip if no price — trade wasn't executed)
                 if mode == MODE_BACKTEST and _backtest_decisions is not None and not _trade_skipped_no_price:

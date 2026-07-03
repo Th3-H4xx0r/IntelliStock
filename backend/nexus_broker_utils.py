@@ -1,5 +1,90 @@
 from __future__ import annotations
 
+import logging
+
+_mpg_logger = logging.getLogger(__name__)
+
+
+def _mpg_norm_set(value) -> set:
+    """Upper-case, whitespace-trim, drop empties/None into a set of tickers."""
+    out: set[str] = set()
+    for s in (value or []):
+        if s is None:
+            continue
+        t = str(s).strip().upper()
+        if t:
+            out.add(t)
+    return out
+
+
+def max_positions_projected_count(held_symbols, planned_sells_full_exit, emitted_new_names) -> int:
+    """Projected open-position count used by the gate and its log line.
+
+        projected = len(held − full_exit_sells) + len(new_names_already_emitted)
+
+    Fail-open to -1 on malformed input (the caller only uses this for a log
+    string; -1 signals "could not compute" without crashing the cycle).
+    """
+    try:
+        held = _mpg_norm_set(held_symbols)
+        full_exits = _mpg_norm_set(planned_sells_full_exit)
+        emitted = _mpg_norm_set(emitted_new_names)
+        return len(held - full_exits) + len(emitted)
+    except Exception:
+        return -1
+
+
+def max_positions_gate(held_symbols, cap, planned_sells_full_exit, emitted_new_names, candidate) -> bool:
+    """Hard max_positions gate — return True iff a BUY of ``candidate`` may emit.
+
+    Single authoritative emission-time recount that closes the leak behind
+    bt 586767 (13 held vs cap 10): GNA sizes NEW-name buys in several independent
+    paths (main allocation, BFQ direct-reserved, BFQ dequeue, momentum-window
+    adds) each against its OWN local headroom snapshot, and rotation buys are
+    cap-EXEMPT on the assumption their paired full-exit sell nets the count to
+    zero. Nothing recounted the TOTAL at order emission, so the paths' sums —
+    plus any rotation whose sell didn't fully net — overshot the cap.
+
+    Semantics:
+      * Adds / winner-adds / amplifier-adds to a name ALREADY held are always
+        allowed — they do not grow the open-position count.
+      * A NEW name is blocked once the projected count would meet or exceed the
+        cap:  ``len(held − full_exit_sells) + len(emitted_new_names) >= cap``.
+      * A same-cycle rotation (full exit of A funding a new B) nets to zero: A's
+        full-exit sell drops the projected count by 1, so B lands back at the cap.
+      * Idempotent: a candidate already in ``emitted_new_names`` is allowed (it is
+        already counted) so re-evaluation never double-blocks a legitimate buy.
+
+    Fail-open: any malformed input logs a warning and ALLOWS the buy. This gate is
+    a safety net, not a trade generator — an over-cap buy is a P&L nuisance, but a
+    crashed cycle halts the whole strategy, so on a type error we never crash and
+    never silently strand a buy.
+    """
+    try:
+        cand = str(candidate).strip().upper()
+        if not cand:
+            return True
+        held = _mpg_norm_set(held_symbols)
+        # Add to an existing name never grows the count -> always allowed.
+        if cand in held:
+            return True
+        emitted = _mpg_norm_set(emitted_new_names)
+        # Already counted this cycle -> don't double-block on re-evaluation.
+        if cand in emitted:
+            return True
+        if cap is None:
+            return True
+        cap_i = int(cap)
+        full_exits = _mpg_norm_set(planned_sells_full_exit)
+        projected = len(held - full_exits) + len(emitted)
+        return projected < cap_i
+    except Exception as exc:  # fail-open — never crash the trading cycle
+        _mpg_logger.warning(
+            "max_positions_gate fail-open on malformed input (%s): %r",
+            type(exc).__name__, exc,
+        )
+        return True
+
 
 def _normalize_strategy_name(value) -> str:
     return str(value or "").strip().lower()
