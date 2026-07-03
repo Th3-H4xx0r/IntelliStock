@@ -7108,70 +7108,34 @@ while not shutdown_requested:
                                         end_date_only = _bar_time_to_datetime(last_ts).date() if _bar_time_to_datetime(last_ts) else None
                                 except Exception:
                                     pass
-                            rows_to_write = []
+                            # Build the DB/UI price series. Snapshot-derived
+                            # closes fill only (date, symbol) the bars didn't
+                            # cover, so no second same-date close is seeded for
+                            # a symbol that already has an end-date bar (the
+                            # duplicate-bar half of incident 586767).
+                            from backtest_summary import (
+                                build_backtest_price_series,
+                                compute_backtest_summary,
+                            )
                             price_symbols = all_traded if all_traded else (symbols or [])
-                            for sym in price_symbols:
-                                for b in (data.get(sym) or []):
-                                    t = b.get("t")
-                                    c = b.get("c")
-                                    if t is None or c is None:
-                                        continue
-                                    bt = _bar_time_to_datetime(t)
-                                    if bt is None:
-                                        continue
-                                    bar_date = bt.date()
-                                    if start_date_only is not None and bar_date < start_date_only:
-                                        continue
-                                    if end_date_only is not None and bar_date > end_date_only:
-                                        continue
-                                    ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                                    rows_to_write.append((ts, sym, c))
-                            seen_pairs = {(ts, sym) for (ts, sym, _c) in rows_to_write}
-                            # Add snapshot-derived prices so non-watchlist traded symbols are represented too.
-                            for snap in (snapshots or []):
-                                ts_raw = snap.get("timestamp")
-                                bt = _bar_time_to_datetime(ts_raw) if ts_raw is not None else None
-                                if bt is None:
-                                    continue
-                                snap_date = bt.date()
-                                if start_date_only is not None and snap_date < start_date_only:
-                                    continue
-                                if end_date_only is not None and snap_date > end_date_only:
-                                    continue
-                                ts = ts_raw.isoformat() if hasattr(ts_raw, "isoformat") else str(ts_raw)
-                                sp = snap.get("prices") or {}
-                                if not isinstance(sp, dict):
-                                    continue
-                                for sym in price_symbols:
-                                    val = sp.get(sym)
-                                    try:
-                                        close_f = float(val)
-                                    except (TypeError, ValueError):
-                                        continue
-                                    if close_f <= 0:
-                                        continue
-                                    key_pair = (ts, sym)
-                                    if key_pair in seen_pairs:
-                                        continue
-                                    seen_pairs.add(key_pair)
-                                    rows_to_write.append((ts, sym, close_f))
-                            if len(rows_to_write) == 0:
-                                for sym in price_symbols:
-                                    for b in (data.get(sym) or []):
-                                        t = b.get("t")
-                                        c = b.get("c")
-                                        if t is not None and c is not None:
-                                            bt = _bar_time_to_datetime(t)
-                                            if bt is not None:
-                                                ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                                                rows_to_write.append((ts, sym, c))
-                            rows_to_write.sort(key=lambda x: (x[0], x[1]))
-                            backtest_prices_list = [{"timestamp": ts, "symbol": sym, "close": float(c)} for (ts, sym, c) in rows_to_write]
-                            
-                            # Final P&L (for DB)
-                            final_value = portfolio_emulator.get_portfolio_value(final_prices) if portfolio_emulator else None
-                            final_pnl = (final_value - initial_cash) if (final_value is not None and initial_cash is not None) else None
-                            final_pnl_percent = ((final_value - initial_cash) / initial_cash * 100.0) if (final_pnl is not None and initial_cash and initial_cash != 0) else None
+                            backtest_prices_list = build_backtest_price_series(
+                                data, snapshots, price_symbols,
+                                start_date_only, end_date_only,
+                                bar_time_to_datetime=_bar_time_to_datetime,
+                            )
+
+                            # Final P&L (for DB). Derive from the equity
+                            # curve's own end mark (last snapshot value) so
+                            # pnl == snapshots[-1]["value"] - initial_cash by
+                            # construction — never from a separately-resolved
+                            # end-date bar that can disagree (the +$437 vs
+                            # -$2,318 half of incident 586767).
+                            _bt_summary = compute_backtest_summary(
+                                portfolio_emulator, snapshots, initial_cash,
+                            )
+                            final_value = _bt_summary["final_value"]
+                            final_pnl = _bt_summary["pnl"]
+                            final_pnl_percent = _bt_summary["pnl_percent"]
                             
                             # Create backtest result document (full update)
                             from datetime import datetime as _dt
@@ -7375,73 +7339,23 @@ while not shutdown_requested:
                                 end_date_only = _bar_time_to_datetime(last_ts).date() if _bar_time_to_datetime(last_ts) else None
                         except Exception:
                             pass
-                    # Collect bars in range (or all bars if none in range, so file is never empty)
-                    rows_to_write = []
+                    # Collect bars in range (or all bars if none in range, so file is never empty).
+                    # Same de-duplicated series as the DB path — snapshot-derived
+                    # closes fill only (date, symbol) the bars didn't cover, so
+                    # no phantom second same-date bar is written (incident 586767).
+                    from backtest_summary import build_backtest_price_series
                     price_symbols = all_traded if all_traded else (symbols or [])
-                    for sym in price_symbols:
-                        for b in (data.get(sym) or []):
-                            t = b.get("t")
-                            c = b.get("c")
-                            if t is None or c is None:
-                                continue
-                            bt = _bar_time_to_datetime(t)
-                            if bt is None:
-                                continue
-                            bar_date = bt.date()
-                            if start_date_only is not None and bar_date < start_date_only:
-                                continue
-                            if end_date_only is not None and bar_date > end_date_only:
-                                continue
-                            ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                            rows_to_write.append((ts, sym, c))
-                    seen_pairs = {(ts, sym) for (ts, sym, _c) in rows_to_write}
-                    for snap in (snapshots or []):
-                        ts_raw = snap.get("timestamp")
-                        bt = _bar_time_to_datetime(ts_raw) if ts_raw is not None else None
-                        if bt is None:
-                            continue
-                        snap_date = bt.date()
-                        if start_date_only is not None and snap_date < start_date_only:
-                            continue
-                        if end_date_only is not None and snap_date > end_date_only:
-                            continue
-                        ts = ts_raw.isoformat() if hasattr(ts_raw, "isoformat") else str(ts_raw)
-                        sp = snap.get("prices") or {}
-                        if not isinstance(sp, dict):
-                            continue
-                        for sym in price_symbols:
-                            val = sp.get(sym)
-                            try:
-                                close_f = float(val)
-                            except (TypeError, ValueError):
-                                continue
-                            if close_f <= 0:
-                                continue
-                            key_pair = (ts, sym)
-                            if key_pair in seen_pairs:
-                                continue
-                            seen_pairs.add(key_pair)
-                            rows_to_write.append((ts, sym, close_f))
-                    # If no bars in backtest range (e.g. feed only has older data), write all bars so plot has something
-                    if len(rows_to_write) == 0:
-                        for sym in price_symbols:
-                            for b in (data.get(sym) or []):
-                                t = b.get("t")
-                                c = b.get("c")
-                                if t is not None and c is not None:
-                                    bt = _bar_time_to_datetime(t)
-                                    if bt is not None:
-                                        ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                                        rows_to_write.append((ts, sym, c))
-                        if rows_to_write:
-                            _log("Backtest prices: no bars in date range %s–%s; wrote all %d bars (feed may have limited history)." % (start_date_only, end_date_only, len(rows_to_write)), "yellow")
-                    rows_to_write.sort(key=lambda x: (x[0], x[1]))
+                    _price_series = build_backtest_price_series(
+                        data, snapshots, price_symbols,
+                        start_date_only, end_date_only,
+                        bar_time_to_datetime=_bar_time_to_datetime,
+                    )
                     with open("backtest_prices.csv", "w", newline="", encoding="utf-8") as f:
                         w = csv.writer(f)
                         w.writerow(["timestamp", "symbol", "close"])
-                        for (ts, sym, c) in rows_to_write:
-                            w.writerow([ts, sym, c])
-                    _log("Backtest prices CSV: %s to %s (%d bars)." % (start_date_only, end_date_only, len(rows_to_write)), "cyan")
+                        for _row in _price_series:
+                            w.writerow([_row["timestamp"], _row["symbol"], _row["close"]])
+                    _log("Backtest prices CSV: %s to %s (%d bars)." % (start_date_only, end_date_only, len(_price_series)), "cyan")
                     _log("Wrote backtest_trades.csv, backtest_portfolio_value.csv, and backtest_prices.csv.", "green")
                 except Exception as e:
                     _log("Could not write backtest history CSV: " + str(e), "yellow")
