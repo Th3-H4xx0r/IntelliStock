@@ -118,9 +118,17 @@ except Exception:
 # that llm_utils raises and broker.py catches (see llm_utils rationale) —
 # isinstance identity must match for the article-role degrade below to fire.
 try:
-    from llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+    from llm_critical_guard import (
+        LLMCriticalFailure,
+        role_is_halt_worthy,
+        failure_is_role_independent,
+    )
 except ImportError:
-    from backend.llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+    from backend.llm_critical_guard import (
+        LLMCriticalFailure,
+        role_is_halt_worthy,
+        failure_is_role_independent,
+    )
 
 
 # One-shot dedup for the article-role degrade operator alert (per process).
@@ -615,6 +623,11 @@ NEXUS_ROTATION_COOLDOWN_TABLE = "GraphNexusRotationCooldown"
 # This catches typos at persistence time and gives a clean enumeration for downstream consumers.
 _VALID_ACTION_INTENTS = frozenset({
     "hold", "buy", "sell",
+    # Baseline intents emitted by _infer_action_intent (score>0/<0). These were
+    # missing here, so every vanilla buy/sell candidate persisted as "unknown"
+    # (870/877 rows on backtest 586767). "sell_override" is also the exact value
+    # _update_indefinite_outcomes keys the sell-return sign off of.
+    "initial_buy", "add_buy", "sell_override",
     "winner_add_buy", "momentum_amplifier_buy",
     "backfill_queue_buy", "backfill_rotation_buy",
     "direct_reserved_buy", "top_momentum_break_glass_buy",
@@ -7665,6 +7678,7 @@ def _rotation_candidate_allowed(
     config: dict,
     incoming_meta: dict | None = None,
     market_regime: str = "bull",
+    held_sym: str = "",
 ) -> tuple[bool, float, str]:
     _cfg = lambda k, d: float(d if (v := config.get(k)) is None else v)
     # V26 Fix B: when the incoming candidate is high-conviction (top_momentum or
@@ -7736,6 +7750,26 @@ def _rotation_candidate_allowed(
 
     if float(incoming_raw_score or 0.0) < min_score:
         return False, delta, "incoming_score"
+    # Task 12 / spec 5.1 — POSITIVE-GRAPH ROTATION GATE.
+    # Forensics on BT586767: 27/28 exits were mechanical rotations ejecting
+    # positions the graph still rated positive (AMAT rotated at +9.3% with
+    # raw=+0.284 HOLD, then ran +30% in 12 more days; historical +266% runs
+    # held winners 14-28d). When enabled, a held position whose CURRENT raw
+    # graph signal is positive (held_raw_score > 0) can NEVER be selected as a
+    # rotation-funding sell — no winner-lock-bypass / break-glass / gamma path
+    # below can override a live positive forward signal. Config-gated (default
+    # OFF) so existing rotation behavior is unchanged unless the operator opts
+    # in (doc-179 turns it on).
+    if (
+        bool(config.get("rotation_positive_graph_gate_enabled", False))
+        and float(held_raw_score or 0.0) > 0.0
+    ):
+        _log(
+            f"ROTATION_GRAPH_GATE: kept {held_sym or '?'} "
+            f"(raw={float(held_raw_score or 0.0):+.2f})",
+            "cyan",
+        )
+        return False, delta, "positive_graph_gate"
     if float(held_pnl_pct or 0.0) >= 0.0:
         winner_lock_active, _ = _rotation_winner_lock_active(
             held_pnl_pct=float(held_pnl_pct or 0.0),
@@ -7935,6 +7969,59 @@ def _conviction_allocation_schedule(ranked: list[dict]) -> list[float]:
     return [s / total for s in scores]
 
 
+def _clip_to_single_position_cap(
+    *,
+    sym: str,
+    intended_value: float,
+    current_position_value: float,
+    portfolio_total: float,
+    config: dict,
+) -> float:
+    """Clip a buy/add/amplifier order so the resulting position does not exceed
+    ``single_position_max_pct`` of the portfolio.
+
+    Task 12 / spec 5.7: ``single_position_max_pct`` (doc-179 = 25) was a DEAD
+    config key. This wires it as a real cap. Any order that would push
+    ``(current_position_value + intended_value) / portfolio_total`` above
+    ``pct/100`` is clipped to the remaining headroom (partial fill of the
+    intent), or returns 0.0 if the position is already at/above the cap.
+
+    NO behavior change when the key is absent/None/non-positive: the intended
+    value passes through untouched (preserving today's uncapped default for
+    every config that doesn't set it). Logs ``SINGLE_POS_CAP: clipped <sym>``
+    whenever it actually reduces or skips an order.
+    """
+    _pct_raw = config.get("single_position_max_pct")
+    if _pct_raw is None:
+        return intended_value
+    try:
+        _pct = float(_pct_raw)
+    except (TypeError, ValueError):
+        return intended_value
+    _total = float(portfolio_total or 0.0)
+    if _pct <= 0.0 or _total <= 0.0:
+        return intended_value
+    _intended = max(0.0, float(intended_value or 0.0))
+    _current = max(0.0, float(current_position_value or 0.0))
+    _cap_value = _total * (_pct / 100.0)
+    _headroom = _cap_value - _current
+    if _headroom <= 1e-9:
+        _log(
+            f"SINGLE_POS_CAP: clipped {sym or '?'} — already at/above "
+            f"{_pct:.1f}% cap ({_current / _total * 100.0:.1f}%); order skipped",
+            "yellow",
+        )
+        return 0.0
+    if _intended <= _headroom + 1e-9:
+        return _intended
+    _log(
+        f"SINGLE_POS_CAP: clipped {sym or '?'} ${_intended:.0f} -> ${_headroom:.0f} "
+        f"({_current / _total * 100.0:.1f}% + intent would breach {_pct:.1f}% cap)",
+        "yellow",
+    )
+    return max(0.0, _headroom)
+
+
 def _plan_executable_stock_buy_slate(
     candidates: list[dict],
     available_budget: float,
@@ -7943,6 +8030,7 @@ def _plan_executable_stock_buy_slate(
     config: dict,
     blocked_tickers: set[str] | None = None,
     initial_value: float = 0.0,
+    portfolio_total: float = 0.0,
 ) -> tuple[list[dict], list[str], dict[str, Any]]:
     profile = str(config.get("allocation_profile", "balanced") or "balanced").strip().lower()
     # Tier-3 B2: scale per-cycle new-buy cap by account size. Explicit override wins.
@@ -8076,6 +8164,16 @@ def _plan_executable_stock_buy_slate(
             )
             allocation = min(remaining_budget - min_remaining, max(min_required, scheduled))
         allocation = max(0.0, min(remaining_budget, allocation))
+        # Task 12: single_position_max_pct cap. A new entry starts from 0
+        # current value, so the cap clips the opening size to pct% of the
+        # portfolio (no-op when the key is absent).
+        allocation = _clip_to_single_position_cap(
+            sym=item.get("ticker", ""),
+            intended_value=allocation,
+            current_position_value=0.0,
+            portfolio_total=portfolio_total,
+            config=config,
+        )
         if allocation + 1e-9 < min_required:
             break
         item_funded = dict(item)
@@ -8217,6 +8315,7 @@ def _plan_winner_adds(
     *,
     min_position_size: float,
     config: dict,
+    portfolio_total: float = 0.0,
 ) -> tuple[list[dict], float]:
     if not bool(config.get("winner_add_enabled", True)) or available_budget <= 0.0:
         return [], max(0.0, float(available_budget or 0.0))
@@ -8266,6 +8365,19 @@ def _plan_winner_adds(
         target_allocation = max(raw_allocation, min_winner_add)
         target_allocation = min(target_allocation, max_allowed)
         allocation = min(remaining_budget, target_allocation)
+        # Task 12: single_position_max_pct cap. Current market value of the held
+        # position (prefer an explicit position_value, else approximate from the
+        # first entry notional grown by unrealized pnl). No-op when key absent.
+        _cur_val = float(item.get("position_value") or 0.0)
+        if _cur_val <= 0.0:
+            _cur_val = entry_notional * (1.0 + float(item.get("unrealized_pct", 0.0) or 0.0) / 100.0)
+        allocation = _clip_to_single_position_cap(
+            sym=item.get("ticker", ""),
+            intended_value=allocation,
+            current_position_value=_cur_val,
+            portfolio_total=portfolio_total,
+            config=config,
+        )
         if allocation + 1e-9 < min_position_size:
             continue
         funded_item = dict(item)
@@ -9350,8 +9462,97 @@ def _save_trade_contexts_and_outcomes(
                 pass
 
 
-def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: dict) -> None:
-    if conn is None or not prices:
+def _outcome_price_now(symbol: str, prices: dict, overlay_bars: dict | None, date_key: str) -> float | None:
+    """Resolve the current price for an outcome symbol as of ``date_key``.
+
+    ``prices`` is the held-only broker positions dict, so most outcome symbols
+    (which are no longer held) are absent — that was the root cause of frozen
+    outcome rows. Fall back to the overlay-bars cache (the same source
+    ``_fill_outcome_prices`` uses), picking the latest bar dated on-or-before
+    ``date_key`` so we never look forward. Returns None when no price resolves.
+    """
+    px = (prices or {}).get(symbol)
+    try:
+        if px is not None and float(px) > 0:
+            return float(px)
+    except (TypeError, ValueError):
+        pass
+    if overlay_bars:
+        best_bd = ""
+        best_val: float | None = None
+        for bar in (overlay_bars.get(symbol) or []):
+            bd = str(bar.get("t", bar.get("date", "")))[:10]
+            if not bd or bd > date_key:
+                continue
+            try:
+                val = float(bar.get("c", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if val > 0 and bd >= best_bd:
+                best_bd, best_val = bd, val
+        if best_val is not None:
+            return best_val
+    return None
+
+
+def _compute_outcome_progress(doc: dict, symbol: str, price_now, date_key: str, instance_id: str):
+    """Pure computation of the outcome-row update + series doc for one bar.
+
+    Returns ``(update, series_doc)`` or ``None`` when the row cannot advance
+    (no resolvable price or non-positive entry price) — None means the caller
+    leaves the row untouched (no regression back to zeros).
+    """
+    entry_price = float(doc.get("entry_price") or 0.0)
+    try:
+        _px = float(price_now) if price_now is not None else 0.0
+    except (TypeError, ValueError):
+        _px = 0.0
+    if _px <= 0 or entry_price <= 0:
+        return None
+    price_return = ((_px - entry_price) / entry_price) * 100.0
+    action_intent = str(doc.get("action_intent") or "").strip().lower()
+    signed_return = -price_return if action_intent == "sell_override" else price_return
+    entry_date = datetime.strptime(str(doc.get("entry_date") or date_key), "%Y-%m-%d")
+    obs_date = datetime.strptime(date_key, "%Y-%m-%d")
+    days_since = max(0, int((obs_date - entry_date).days))
+    _raw_max = doc.get("max_return_so_far")
+    existing_max = float(_raw_max) if _raw_max is not None else signed_return
+    _raw_min = doc.get("min_return_so_far")
+    existing_min = float(_raw_min) if _raw_min is not None else signed_return
+    update = {
+        "latest_return": round(signed_return, 4),
+        "latest_observation_date": date_key,
+        "max_return_so_far": round(max(existing_max, signed_return), 4),
+        "min_return_so_far": round(min(existing_min, signed_return), 4),
+        "latest_price_return": round(price_return, 4),
+    }
+    for checkpoint in (1, 3, 5, 10, 30, 90):
+        if days_since == checkpoint:
+            update[f"return_{checkpoint}d"] = round(signed_return, 4)
+    series_doc = {
+        "id": f"{doc['id']}|{date_key}",
+        "instance_id": instance_id,
+        "trade_id": doc["id"],
+        "symbol": symbol,
+        "action_intent": action_intent,
+        "entry_date": doc.get("entry_date"),
+        "observation_date": date_key,
+        "days_since_entry": days_since,
+        "price_return": round(price_return, 4),
+        "alpha_return": round(signed_return, 4),
+        "latest_return": round(signed_return, 4),
+        "max_return_so_far": round(max(existing_max, signed_return), 4),
+        "min_return_so_far": round(min(existing_min, signed_return), 4),
+        "government_action_type": doc.get("government_action_type") or "",
+        "event_cluster_key": doc.get("event_cluster_key") or "",
+    }
+    return update, series_doc
+
+
+def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: dict, overlay_bars: dict | None = None) -> None:
+    # overlay_bars lets non-held symbols still resolve a current price; without
+    # it the held-only `prices` dict left 853/877 outcome rows frozen forever.
+    if conn is None or (not prices and not overlay_bars):
         return
     _ensure_nexus_history_table(conn, NEXUS_OUTCOME_SERIES_TABLE)
     _ensure_nexus_history_table(
@@ -9369,47 +9570,16 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
         series_docs = []
         for doc in cursor:
             symbol = str(doc.get("symbol") or "").strip().upper()
-            price_now = prices.get(symbol)
-            entry_price = float(doc.get("entry_price") or 0.0)
-            if not symbol or not price_now or entry_price <= 0:
+            if not symbol:
                 continue
-            price_return = ((float(price_now) - entry_price) / entry_price) * 100.0
-            action_intent = str(doc.get("action_intent") or "").strip().lower()
-            signed_return = -price_return if action_intent == "sell_override" else price_return
-            entry_date = datetime.strptime(str(doc.get("entry_date") or date_key), "%Y-%m-%d")
-            obs_date = datetime.strptime(date_key, "%Y-%m-%d")
-            days_since = max(0, int((obs_date - entry_date).days))
-            _raw_max = doc.get("max_return_so_far")
-            existing_max = float(_raw_max) if _raw_max is not None else signed_return
-            _raw_min = doc.get("min_return_so_far")
-            existing_min = float(_raw_min) if _raw_min is not None else signed_return
-            update = {
-                "latest_return": round(signed_return, 4),
-                "latest_observation_date": date_key,
-                "max_return_so_far": round(max(existing_max, signed_return), 4),
-                "min_return_so_far": round(min(existing_min, signed_return), 4),
-                "latest_price_return": round(price_return, 4),
-            }
-            for checkpoint in (1, 3, 5, 10, 30, 90):
-                if days_since == checkpoint:
-                    update[f"return_{checkpoint}d"] = round(signed_return, 4)
-            series_docs.append({
-                "id": f"{doc['id']}|{date_key}",
-                "instance_id": instance_id,
-                "trade_id": doc["id"],
-                "symbol": symbol,
-                "action_intent": action_intent,
-                "entry_date": doc.get("entry_date"),
-                "observation_date": date_key,
-                "days_since_entry": days_since,
-                "price_return": round(price_return, 4),
-                "alpha_return": round(signed_return, 4),
-                "latest_return": round(signed_return, 4),
-                "max_return_so_far": round(max(existing_max, signed_return), 4),
-                "min_return_so_far": round(min(existing_min, signed_return), 4),
-                "government_action_type": doc.get("government_action_type") or "",
-                "event_cluster_key": doc.get("event_cluster_key") or "",
-            })
+            price_now = _outcome_price_now(symbol, prices, overlay_bars, date_key)
+            if not price_now:
+                continue
+            progress = _compute_outcome_progress(doc, symbol, price_now, date_key, instance_id)
+            if progress is None:
+                continue
+            update, series_doc = progress
+            series_docs.append(series_doc)
             _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).get(doc["id"]).update(update).run(conn)
         if series_docs:
             _r.db(DB_NAME).table(NEXUS_OUTCOME_SERIES_TABLE).insert(series_docs, conflict="replace").run(conn)
@@ -11476,6 +11646,15 @@ def _momentum_amplifier_pass(
         max_amplifier_buy = portfolio_total * max_buy_pct
         room = max(0.0, max_position_value - current_value)
         buy_cash = min(max_amplifier_buy, room)
+        # Task 12: single_position_max_pct cap (in addition to the amplifier's
+        # own momentum_amplifier_max_position_pct). No-op when the key is absent.
+        buy_cash = _clip_to_single_position_cap(
+            sym=sym,
+            intended_value=buy_cash,
+            current_position_value=current_value,
+            portfolio_total=portfolio_total,
+            config=config,
+        )
         min_pos_size = float(config.get("min_position_size", 100.0) or 100.0)
 
         if buy_cash < min_pos_size:
@@ -16559,6 +16738,18 @@ def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
         pass
 
 
+# Reason-string tags that mark a PROTECTIVE risk exit (as opposed to a
+# signal-driven sell). V31 grace must NEVER suppress these — grace gates
+# signal sells only (its purpose is protecting fresh positions from churn).
+# Matched as substrings against fresh_reason; they correspond to the exit
+# reasons emitted inside _evaluate_position_risk:
+#   "Fast loser cut: …"   "Circuit breaker: …"
+#   "Trailing stop: …"    "Hold-limit exit: …"
+# Forensic audit of backtest 586767: ZERO risk exits fired all run because
+# grace vetoed fast-loser/circuit-breaker cuts for the whole ~10d median hold.
+_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit")
+
+
 def _evaluate_position_risk(
     sym: str,
     *,
@@ -17001,8 +17192,14 @@ def _evaluate_position_risk(
                     elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and _profit_marker == _entry_key:
                         _log(f"Profit take SKIP (already taken): {sym} gain={_unrealized_pct:+.1f}% but already trimmed for entry={_entry_key[:16]}", "cyan")
 
-            _is_circuit_breaker_sell = bool(fresh_reason and "Circuit breaker" in fresh_reason)
-            if fresh_score == -1 and not _hold_limit_forced and not _is_circuit_breaker_sell:
+            # V31 grace gates SIGNAL-driven sells only. Protective risk exits
+            # (Fast loser / Circuit breaker / Trailing stop / Hold-limit) must
+            # survive grace untouched — see _RISK_EXIT_TAGS. (_hold_limit_forced
+            # is already covered by the "Hold-limit" tag but kept explicit.)
+            _is_risk_exit_sell = bool(
+                fresh_reason and any(tag in fresh_reason for tag in _RISK_EXIT_TAGS)
+            )
+            if fresh_score == -1 and not _hold_limit_forced and not _is_risk_exit_sell:
                 _grace_days = held_days
                 _grace_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
                 # Mirror the inlined original: grace fires only when _ep>0 and _cp>0 (which
@@ -18255,25 +18452,35 @@ def _apply_trade_overlay(
         "Return only the bounded overlay decision."
     )
     _overlay_timeout = int(config.get("overlay_llm_timeout_sec", 60) or 60)
-    raw = _scl_guarded(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _TradeOverlayResponse,
-        attribution_keys={
-            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
-            "instance_id": (config or {}).get("_telemetry_instance_id"),
-            "call_site": "overlay",
-        },
-        system_prompt=system_prompt,
-        max_output_tokens=0,
-        timeout_sec=_overlay_timeout,
-        retries=1,
-        output_retries=2,
-        provider_config=provider_config,
-        prefer_raw_json=True,
-    )
+    # Enter the telemetry context INSIDE the worker (this body runs in a
+    # ThreadPoolExecutor thread with no ambient context) so usage rows
+    # attribute call_site="overlay" instead of "(unset)". The attribution_keys
+    # below still enrich the LLMCriticalFailure exception path — both needed.
+    with llm_call_context(
+        backtest_id=(config or {}).get("_telemetry_backtest_id"),
+        instance_id=(config or {}).get("_telemetry_instance_id"),
+        strategy="GraphNexusAnalysis",
+        call_site="overlay",
+    ):
+        raw = _scl_guarded(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _TradeOverlayResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "overlay",
+            },
+            system_prompt=system_prompt,
+            max_output_tokens=0,
+            timeout_sec=_overlay_timeout,
+            retries=1,
+            output_retries=2,
+            provider_config=provider_config,
+            prefer_raw_json=True,
+        )
     trace = _build_llm_trace("overlay", provider, model, prompt, system_prompt, prompt_version, raw is not None)
     if raw is None:
         return {}, trace
@@ -18383,24 +18590,33 @@ def _apply_etf_trade_overlay(
         'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"],"ra":"Gold trend accelerating on Fed pivot"}\n'
         "Return only the bounded overlay decision."
     )
-    raw = _scl_guarded(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _TradeOverlayResponse,
-        attribution_keys={
-            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
-            "instance_id": (config or {}).get("_telemetry_instance_id"),
-            "call_site": "overlay_etf",
-        },
-        system_prompt=system_prompt,
-        max_output_tokens=0,
-        retries=2,
-        output_retries=2,
-        provider_config=provider_config,
-        prefer_raw_json=True,
-    )
+    # Enter the telemetry context INSIDE the worker (runs in a ThreadPoolExecutor
+    # thread with no ambient context) so usage rows attribute call_site="overlay_etf"
+    # instead of "(unset)". attribution_keys still enrich the exception path.
+    with llm_call_context(
+        backtest_id=(config or {}).get("_telemetry_backtest_id"),
+        instance_id=(config or {}).get("_telemetry_instance_id"),
+        strategy="GraphNexusAnalysis",
+        call_site="overlay_etf",
+    ):
+        raw = _scl_guarded(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _TradeOverlayResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "overlay_etf",
+            },
+            system_prompt=system_prompt,
+            max_output_tokens=0,
+            retries=2,
+            output_retries=2,
+            provider_config=provider_config,
+            prefer_raw_json=True,
+        )
     trace = _build_llm_trace("overlay_etf", provider, model, prompt, system_prompt, prompt_version, raw is not None)
     if raw is None:
         return {}, trace
@@ -20922,7 +21138,7 @@ class GraphNexusAnalysis:
                 if _conn_out and (prices or strategy_cache):
                     _ob = strategy_cache.get("_overlay_bars_raw") if strategy_cache else None
                     _fill_outcome_prices(_conn_out, instance_id, date_key, prices, overlay_bars=_ob)
-                    _update_indefinite_outcomes(_conn_out, instance_id, date_key, prices)
+                    _update_indefinite_outcomes(_conn_out, instance_id, date_key, prices, overlay_bars=_ob)
 
         # 1-C (bug-sweep 2026-05-28): the FIRST time a live run touches a given
         # trading date, bypass any pre-existing article/sentiment cache for that
@@ -21393,7 +21609,11 @@ class GraphNexusAnalysis:
                     # Task 4: article-enrichment-role critical LLM failure
                     # degrades to an empty signal; decision-role (fail-safe)
                     # still propagates to broker.py for the halt.
-                    if role_is_halt_worthy(getattr(_company_crit, "role", None)):
+                    # R2 Task 2: role-INDEPENDENT fatal classes (insufficient_credits
+                    # / HTTP 402) OVERRIDE the degrade — nothing runs without credits,
+                    # so re-raise even for an article role. Checked BEFORE the role.
+                    if failure_is_role_independent(_company_crit) or \
+                            role_is_halt_worthy(getattr(_company_crit, "role", None)):
                         raise
                     _alert_article_critical_degrade(_company_crit, instance_id=instance_id, stage="Company article")
                     company_article_rows, company_traces = [], []
@@ -22028,7 +22248,11 @@ class GraphNexusAnalysis:
                 # (e.g. codex-cli quota) must DEGRADE, not halt. A decision-role
                 # critical (fail-safe: None/unknown too) still propagates to
                 # broker.py's outer loop for the halt.
-                if role_is_halt_worthy(getattr(_macro_crit, "role", None)):
+                # R2 Task 2: role-INDEPENDENT fatal classes (insufficient_credits
+                # / HTTP 402) OVERRIDE the degrade — nothing runs without credits,
+                # so re-raise even for an article role. Checked BEFORE the role.
+                if failure_is_role_independent(_macro_crit) or \
+                        role_is_halt_worthy(getattr(_macro_crit, "role", None)):
                     raise
                 _alert_article_critical_degrade(_macro_crit, instance_id=instance_id, stage="Macro article")
                 macro_rows = []
@@ -24054,6 +24278,8 @@ class GraphNexusAnalysis:
                                         incoming_meta=_incoming_meta,
                                         # Phase ε.C.2: regime-aware time-floor decay
                                         market_regime=str((strategy_cache or {}).get("_market_regime") or "bull"),
+                                        # Task 12: symbol for the ROTATION_GRAPH_GATE log line.
+                                        held_sym=_wt,
                                     )
                                     # V28 Fix 4: log every rotation eval result so failed
                                     # rotations are visible (previously most failures
@@ -24427,6 +24653,11 @@ class GraphNexusAnalysis:
                             "is_propagation_expansion": bool(_candidate_meta["is_propagation_expansion"]),
                             "grace_eligible": bool(_candidate_meta["grace_eligible"]),
                             "existing_add_count": max(0, int((_ctx.get("buy_count", 1) or 1) - 1)),
+                            # Task 12: current market value of the held position, so
+                            # _plan_winner_adds can enforce single_position_max_pct.
+                            "position_value": float(
+                                (getattr(portfolio_emulator, "_positions", {}) or {}).get(_sym, 0.0) or 0.0
+                            ) * float(_ctx.get("current_price", 0.0) or 0.0),
                         }
                     )
                     _winner_add_docs.append(_ctx)
@@ -24469,6 +24700,7 @@ class GraphNexusAnalysis:
                             _winner_add_budget,
                             min_position_size=_min_position_size,
                             config=config,
+                            portfolio_total=portfolio_total,
                         )
                     # Sweep-3 fix: filter out winner adds whose live-bar score is a sell
                     # signal BEFORE computing spent. The previous order summed buy_cash
@@ -24670,6 +24902,8 @@ class GraphNexusAnalysis:
                     # Tier-3 B2: thread broker's _initial_value so scaled new-buy
                     # cap can pick the right account-size bucket.
                     initial_value=float(getattr(portfolio_emulator, "_initial_value", 0.0) or 0.0),
+                    # Task 12: current portfolio total for the single_position_max_pct cap.
+                    portfolio_total=portfolio_total,
                 )
                 # V31 Section 4.3: vol-adjusted sizing — reweight slate so high-vol
                 # names get smaller positions and low-vol names get larger ones,
@@ -26016,6 +26250,19 @@ class GraphNexusAnalysis:
                         )
                         _hp_pnl = float(_hp_snap.get("unrealized_pct", 0.0))
                         _hp_held = int(_hp_snap.get("held_days") or 0)
+                        # Task 12: positive-graph rotation gate also protects the
+                        # backfill-rotation outgoing picker — a held position the
+                        # graph still rates positive is never a BFQ sell candidate.
+                        _hp_raw = float((scores.get(_hp_sym) or {}).get("raw_net_score", 0.0) or 0.0)
+                        if (
+                            bool(config.get("rotation_positive_graph_gate_enabled", False))
+                            and _hp_raw > 0.0
+                        ):
+                            _log(
+                                f"ROTATION_GRAPH_GATE: kept {_hp_sym} (raw={_hp_raw:+.2f}) [bfq]",
+                                "cyan",
+                            )
+                            continue
                         _hp_locked, _ = _rotation_winner_lock_active(
                             held_pnl_pct=_hp_pnl, held_days=_hp_held,
                             held_raw_score=float((scores.get(_hp_sym) or {}).get("raw_net_score", 0.0) or 0.0),

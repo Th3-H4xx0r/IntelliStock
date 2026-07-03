@@ -53,8 +53,11 @@ def handle(*, instance_id: str, failure) -> None:
     # path gets its OWN one-shot latch (_already_degraded_alerted).
     role = getattr(failure, "role", None)
     try:
-        from llm_critical_guard import role_is_halt_worthy
-        _halt_worthy = role_is_halt_worthy(role)
+        from llm_critical_guard import role_is_halt_worthy, failure_is_role_independent
+        # Role-INDEPENDENT fatal classes (e.g. insufficient_credits / HTTP 402)
+        # OVERRIDE the article-role degrade — nothing can run without credits, so
+        # even an enrichment role must halt. Checked BEFORE the role check.
+        _halt_worthy = failure_is_role_independent(failure) or role_is_halt_worthy(role)
     except Exception:
         _halt_worthy = True  # fail-safe: if the guard import breaks, halt.
 
@@ -130,6 +133,11 @@ def handle(*, instance_id: str, failure) -> None:
             f"Halt summary: {halt_summary.get('instances_halted', 0)} instances, "
             f"{halt_summary.get('orders_canceled', 0)} orders canceled."
         )
+        if failure.class_tag == "insufficient_credits":
+            msg += (
+                " OpenRouter credits exhausted — top up at "
+                "openrouter.ai/settings/credits."
+            )
         _alert_strategy_error(
             instance_id=instance_id, tag="llm_critical", message=msg,
         )

@@ -24,7 +24,7 @@ from typing import Any, Optional
 from portfolio_emulator import PortfolioEmulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
-from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason
+from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
 from robinhood_data_policy import robinhood_data_fallback_allowed
 
 try:
@@ -6805,6 +6805,68 @@ def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
         pass
 
 
+def _credit_guard_or_raise(*, call_site: str) -> str:
+    """R2 Task 4: preflight OpenRouter credit guard.
+
+    Best-effort and FAIL-OPEN: returns "ok"/"warn"/"skip" normally and NEVER
+    lets its own failure block trading (a flaky credits endpoint degrades to
+    "ok" — the reactive 402 de-cliff still protects us). On "halt" (balance
+    at/under the halt threshold) it raises LLMCriticalFailure(insufficient_
+    credits) so the existing outer-except routes it exactly like a mid-run
+    402: backtest → clean-stop paused_credits; live → live_critical_abort +
+    exit(7). Testable logic lives in openrouter_credits.py; this wrapper is
+    the thin lazy-import wiring (broker.py is not import-safe)."""
+    try:
+        from openrouter_credits import run_credit_guard as _run_credit_guard
+    except Exception:
+        return "skip"
+
+    def _notify(msg):
+        try:
+            _log(f"[credit-guard] {msg}", "yellow")
+        except Exception:
+            pass
+        try:
+            from live_alerts import alert_strategy_error as _alert
+            _alert(instance_id=str(instance_id), tag="openrouter_low_credit",
+                   message=str(msg))
+        except Exception:
+            pass
+
+    try:
+        result = _run_credit_guard(_run_once_specs, notify_fn=_notify)
+    except Exception as _g_err:
+        try:
+            _log(f"[credit-guard] guard raised, ignoring: {_g_err}", "yellow")
+        except Exception:
+            pass
+        return "skip"
+
+    if result == "halt":
+        try:
+            _log(f"[credit-guard] OpenRouter balance at/below halt threshold at "
+                 f"{call_site}; raising insufficient_credits critical.", "red")
+        except Exception:
+            pass
+        from llm_critical_guard import LLMCriticalFailure
+        raise LLMCriticalFailure(
+            class_tag="insufficient_credits",
+            provider="openrouter",
+            model="(preflight)",
+            attribution={"call_site": f"credit_preflight:{call_site}",
+                         "instance_id": str(instance_id)},
+            attempts=[{"attempt": 1, "class_tag": "insufficient_credits",
+                       "http_status": 402,
+                       "body_sample": ("OpenRouter preflight credit guard: balance "
+                                       "at/below halt threshold; top up credits and "
+                                       "re-queue.")}],
+        )
+    return result
+
+
+# R2 Task 4: sim-day counter driving the every-5-days backtest credit check.
+_bt_credit_guard_tick = 0
+
 while not shutdown_requested:
     try:
         ###################################
@@ -6813,6 +6875,14 @@ while not shutdown_requested:
         if mode == MODE_BACKTEST:
             import time as _time
             _backtest_loop_start = _time.time()
+            # R2 Task 4: preflight OpenRouter credit guard at backtest START
+            # (tick 0) and every 5 sim days thereafter. A "halt" raises
+            # LLMCriticalFailure(insufficient_credits); the outer-except then
+            # clean-stops with status=paused_credits instead of simulating an
+            # entire month LLM-blind (incident 586767).
+            if _bt_credit_guard_tick % 5 == 0:
+                _credit_guard_or_raise(call_site="backtest_sim_day")
+            _bt_credit_guard_tick += 1
         ###################################
         ## Backtesting/Live Price Fetching
         ###################################
@@ -6923,50 +6993,23 @@ while not shutdown_requested:
                             p = _fetch_price_for_symbol(sym, start_dt, key=key, secret=secret, feed=data_feed) if start_dt else None
                             if p is not None and p > 0:
                                 start_prices[sym] = p
-                    # P&L per stock and P&L % per stock for all traded symbols (watchlist + earnings etc.)
-                    pnl_per_stock = {}
-                    pnl_percent_per_stock = {}
-                    for sym in all_traded:
-                        buys = sum(t.get("total", 0) or 0 for t in trades if t.get("ticker") == sym and t.get("action") == "buy")
-                        sells = sum(t.get("total", 0) or 0 for t in trades if t.get("ticker") == sym and t.get("action") == "sell")
-                        pos_shares = positions.get(sym, 0.0) or 0.0
-                        end_price = (final_prices or {}).get(sym)
-                        if end_price is None and snapshots:
-                            _snap_prices = (snapshots[-1].get("prices") or {}).get(sym)
-                            try:
-                                if _snap_prices is not None and float(_snap_prices) > 0:
-                                    end_price = _snap_prices
-                                    # Backfill only if final_prices is our own dict (not the snapshot's), to avoid mutating history
-                                    if final_prices is not None and id(final_prices) != id(snapshots[-1].get("prices")):
-                                        final_prices[sym] = end_price
-                            except (TypeError, ValueError):
-                                pass
-                        pos_value = (pos_shares * float(end_price)) if end_price is not None else 0.0
-                        if pos_shares > 0 and end_price is None:
-                            _log("[Backtest] Per-stock P&L incomplete for %s (no end price; position valued at 0)" % sym, "yellow")
-                        pnl = sells - buys + pos_value
-                        pnl_per_stock[sym] = round(pnl, 4)
-                        if buys and float(buys) != 0:
-                            pnl_percent_per_stock[sym] = round((pnl / float(buys)) * 100.0, 4)
-                        else:
-                            pnl_percent_per_stock[sym] = None
-                    stock_price_change = {}
-                    for sym in all_traded:
-                        sp = start_prices.get(sym)
-                        ep = (final_prices or {}).get(sym)
-                        if sp is not None and ep is not None and float(sp) != 0:
-                            pct = (float(ep) - float(sp)) / float(sp) * 100.0
-                            stock_price_change[sym] = {
-                                "start_price": round(float(sp), 4),
-                                "end_price": round(float(ep), 4),
-                                "change_percent": round(pct, 4),
-                            }
-                        elif sp is not None or ep is not None:
-                            stock_price_change[sym] = {
-                                "start_price": round(float(sp), 4) if sp is not None else None,
-                                "end_price": round(float(ep), 4) if ep is not None else None,
-                                "change_percent": None,
-                            }
+                    # P&L per stock and P&L % per stock for all traded symbols
+                    # (watchlist + earnings etc.). Open positions are marked at
+                    # the LAST snapshot's own prices (the marks the sim ran on)
+                    # so per-stock P&L and end_price reconcile with the headline
+                    # pnl; the resolver's final_prices fill only symbols the
+                    # last snapshot lacks (incident 586767 — a duplicate
+                    # end-date bar made the two bases disagree by ~$2,756/pos).
+                    from backtest_summary import (
+                        resolve_end_prices,
+                        compute_per_stock_pnl,
+                        compute_stock_price_change,
+                    )
+                    end_prices = resolve_end_prices(final_prices, snapshots)
+                    pnl_per_stock, pnl_percent_per_stock = compute_per_stock_pnl(
+                        trades, positions, end_prices, all_traded, log=_log,
+                    )
+                    stock_price_change = compute_stock_price_change(all_traded, start_prices, end_prices)
                     _log("---------- Backtest summary: P&L per stock ----------", "cyan")
                     for sym in all_traded:
                         pnl = pnl_per_stock.get(sym)
@@ -7038,70 +7081,34 @@ while not shutdown_requested:
                                         end_date_only = _bar_time_to_datetime(last_ts).date() if _bar_time_to_datetime(last_ts) else None
                                 except Exception:
                                     pass
-                            rows_to_write = []
+                            # Build the DB/UI price series. Snapshot-derived
+                            # closes fill only (date, symbol) the bars didn't
+                            # cover, so no second same-date close is seeded for
+                            # a symbol that already has an end-date bar (the
+                            # duplicate-bar half of incident 586767).
+                            from backtest_summary import (
+                                build_backtest_price_series,
+                                compute_backtest_summary,
+                            )
                             price_symbols = all_traded if all_traded else (symbols or [])
-                            for sym in price_symbols:
-                                for b in (data.get(sym) or []):
-                                    t = b.get("t")
-                                    c = b.get("c")
-                                    if t is None or c is None:
-                                        continue
-                                    bt = _bar_time_to_datetime(t)
-                                    if bt is None:
-                                        continue
-                                    bar_date = bt.date()
-                                    if start_date_only is not None and bar_date < start_date_only:
-                                        continue
-                                    if end_date_only is not None and bar_date > end_date_only:
-                                        continue
-                                    ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                                    rows_to_write.append((ts, sym, c))
-                            seen_pairs = {(ts, sym) for (ts, sym, _c) in rows_to_write}
-                            # Add snapshot-derived prices so non-watchlist traded symbols are represented too.
-                            for snap in (snapshots or []):
-                                ts_raw = snap.get("timestamp")
-                                bt = _bar_time_to_datetime(ts_raw) if ts_raw is not None else None
-                                if bt is None:
-                                    continue
-                                snap_date = bt.date()
-                                if start_date_only is not None and snap_date < start_date_only:
-                                    continue
-                                if end_date_only is not None and snap_date > end_date_only:
-                                    continue
-                                ts = ts_raw.isoformat() if hasattr(ts_raw, "isoformat") else str(ts_raw)
-                                sp = snap.get("prices") or {}
-                                if not isinstance(sp, dict):
-                                    continue
-                                for sym in price_symbols:
-                                    val = sp.get(sym)
-                                    try:
-                                        close_f = float(val)
-                                    except (TypeError, ValueError):
-                                        continue
-                                    if close_f <= 0:
-                                        continue
-                                    key_pair = (ts, sym)
-                                    if key_pair in seen_pairs:
-                                        continue
-                                    seen_pairs.add(key_pair)
-                                    rows_to_write.append((ts, sym, close_f))
-                            if len(rows_to_write) == 0:
-                                for sym in price_symbols:
-                                    for b in (data.get(sym) or []):
-                                        t = b.get("t")
-                                        c = b.get("c")
-                                        if t is not None and c is not None:
-                                            bt = _bar_time_to_datetime(t)
-                                            if bt is not None:
-                                                ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                                                rows_to_write.append((ts, sym, c))
-                            rows_to_write.sort(key=lambda x: (x[0], x[1]))
-                            backtest_prices_list = [{"timestamp": ts, "symbol": sym, "close": float(c)} for (ts, sym, c) in rows_to_write]
-                            
-                            # Final P&L (for DB)
-                            final_value = portfolio_emulator.get_portfolio_value(final_prices) if portfolio_emulator else None
-                            final_pnl = (final_value - initial_cash) if (final_value is not None and initial_cash is not None) else None
-                            final_pnl_percent = ((final_value - initial_cash) / initial_cash * 100.0) if (final_pnl is not None and initial_cash and initial_cash != 0) else None
+                            backtest_prices_list = build_backtest_price_series(
+                                data, snapshots, price_symbols,
+                                start_date_only, end_date_only,
+                                bar_time_to_datetime=_bar_time_to_datetime,
+                            )
+
+                            # Final P&L (for DB). Derive from the equity
+                            # curve's own end mark (last snapshot value) so
+                            # pnl == snapshots[-1]["value"] - initial_cash by
+                            # construction — never from a separately-resolved
+                            # end-date bar that can disagree (the +$437 vs
+                            # -$2,318 half of incident 586767).
+                            _bt_summary = compute_backtest_summary(
+                                portfolio_emulator, snapshots, initial_cash,
+                            )
+                            final_value = _bt_summary["final_value"]
+                            final_pnl = _bt_summary["pnl"]
+                            final_pnl_percent = _bt_summary["pnl_percent"]
                             
                             # Create backtest result document (full update)
                             from datetime import datetime as _dt
@@ -7305,73 +7312,23 @@ while not shutdown_requested:
                                 end_date_only = _bar_time_to_datetime(last_ts).date() if _bar_time_to_datetime(last_ts) else None
                         except Exception:
                             pass
-                    # Collect bars in range (or all bars if none in range, so file is never empty)
-                    rows_to_write = []
+                    # Collect bars in range (or all bars if none in range, so file is never empty).
+                    # Same de-duplicated series as the DB path — snapshot-derived
+                    # closes fill only (date, symbol) the bars didn't cover, so
+                    # no phantom second same-date bar is written (incident 586767).
+                    from backtest_summary import build_backtest_price_series
                     price_symbols = all_traded if all_traded else (symbols or [])
-                    for sym in price_symbols:
-                        for b in (data.get(sym) or []):
-                            t = b.get("t")
-                            c = b.get("c")
-                            if t is None or c is None:
-                                continue
-                            bt = _bar_time_to_datetime(t)
-                            if bt is None:
-                                continue
-                            bar_date = bt.date()
-                            if start_date_only is not None and bar_date < start_date_only:
-                                continue
-                            if end_date_only is not None and bar_date > end_date_only:
-                                continue
-                            ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                            rows_to_write.append((ts, sym, c))
-                    seen_pairs = {(ts, sym) for (ts, sym, _c) in rows_to_write}
-                    for snap in (snapshots or []):
-                        ts_raw = snap.get("timestamp")
-                        bt = _bar_time_to_datetime(ts_raw) if ts_raw is not None else None
-                        if bt is None:
-                            continue
-                        snap_date = bt.date()
-                        if start_date_only is not None and snap_date < start_date_only:
-                            continue
-                        if end_date_only is not None and snap_date > end_date_only:
-                            continue
-                        ts = ts_raw.isoformat() if hasattr(ts_raw, "isoformat") else str(ts_raw)
-                        sp = snap.get("prices") or {}
-                        if not isinstance(sp, dict):
-                            continue
-                        for sym in price_symbols:
-                            val = sp.get(sym)
-                            try:
-                                close_f = float(val)
-                            except (TypeError, ValueError):
-                                continue
-                            if close_f <= 0:
-                                continue
-                            key_pair = (ts, sym)
-                            if key_pair in seen_pairs:
-                                continue
-                            seen_pairs.add(key_pair)
-                            rows_to_write.append((ts, sym, close_f))
-                    # If no bars in backtest range (e.g. feed only has older data), write all bars so plot has something
-                    if len(rows_to_write) == 0:
-                        for sym in price_symbols:
-                            for b in (data.get(sym) or []):
-                                t = b.get("t")
-                                c = b.get("c")
-                                if t is not None and c is not None:
-                                    bt = _bar_time_to_datetime(t)
-                                    if bt is not None:
-                                        ts = t.isoformat() if hasattr(t, "isoformat") else str(t)
-                                        rows_to_write.append((ts, sym, c))
-                        if rows_to_write:
-                            _log("Backtest prices: no bars in date range %s–%s; wrote all %d bars (feed may have limited history)." % (start_date_only, end_date_only, len(rows_to_write)), "yellow")
-                    rows_to_write.sort(key=lambda x: (x[0], x[1]))
+                    _price_series = build_backtest_price_series(
+                        data, snapshots, price_symbols,
+                        start_date_only, end_date_only,
+                        bar_time_to_datetime=_bar_time_to_datetime,
+                    )
                     with open("backtest_prices.csv", "w", newline="", encoding="utf-8") as f:
                         w = csv.writer(f)
                         w.writerow(["timestamp", "symbol", "close"])
-                        for (ts, sym, c) in rows_to_write:
-                            w.writerow([ts, sym, c])
-                    _log("Backtest prices CSV: %s to %s (%d bars)." % (start_date_only, end_date_only, len(rows_to_write)), "cyan")
+                        for _row in _price_series:
+                            w.writerow([_row["timestamp"], _row["symbol"], _row["close"]])
+                    _log("Backtest prices CSV: %s to %s (%d bars)." % (start_date_only, end_date_only, len(_price_series)), "cyan")
                     _log("Wrote backtest_trades.csv, backtest_portfolio_value.csv, and backtest_prices.csv.", "green")
                 except Exception as e:
                     _log("Could not write backtest history CSV: " + str(e), "yellow")
@@ -7445,6 +7402,22 @@ while not shutdown_requested:
                     executed_start = 0
                     skipped_start_no_price = []
                     skipped_start_no_cash = []
+                    # Task 7 review-fix (IMPORTANT 1): pending-trade buys run
+                    # BEFORE the main emission loop's max_positions gate arms —
+                    # gate NEW-name buys here too with the same helper. Held
+                    # names snapshotted once at block entry; pending sells sort
+                    # first per strategy, so a funding full-exit is credited
+                    # before the buy it pays for. Adds to held names exempt.
+                    _pnd_cap, _pnd_cap_reason = resolve_max_positions_cap(_cached_strategies)
+                    _pnd_held = set()
+                    _pnd_full_exits = set()
+                    _pnd_new_emitted = set()
+                    if _pnd_cap is not None:
+                        try:
+                            _pnd_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                            _pnd_held = {str(_s).strip().upper() for _s, _q in (_pnd_pos or {}).items() if float(_q or 0.0) > 0.0}
+                        except Exception:
+                            _pnd_cap = None  # fail-open: gate inert this block
                     for _sname, _sc in list((_strategy_cache or {}).items()):
                         if not _sc:
                             continue
@@ -7497,11 +7470,19 @@ while not shutdown_requested:
                                     _log("[Pending] SKIP buy %s — no cash remaining (budget=%.2f, cash=%.2f)" % (
                                         sym, remaining_budget, portfolio_emulator.get_cash()), "yellow")
                                     continue
+                                # Task 7 review-fix (IMPORTANT 1): hard cap gate
+                                # on NEW-name pending buys (adds to held exempt).
+                                if _pnd_cap is not None and not max_positions_gate(_pnd_held, _pnd_cap, _pnd_full_exits, _pnd_new_emitted, sym):
+                                    _pnd_proj = max_positions_projected_count(_pnd_held, _pnd_full_exits, _pnd_new_emitted)
+                                    _log("MAX_POSITIONS_GATE: blocked %s (held=%d, cap=%d)" % (sym, _pnd_proj, _pnd_cap), "yellow")
+                                    continue
                                 remaining_budget -= cash_use
                                 shares_before = portfolio_emulator._positions.get(sym, 0.0)
                                 portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                     cash_per_trade=cash_use, sell_fraction=1.0)
                                 shares_after = portfolio_emulator._positions.get(sym, 0.0)
+                                if _pnd_cap is not None and sym not in _pnd_held:
+                                    _pnd_new_emitted.add(sym)
                                 if _epos is not None:
                                     _epos[sym] = _epos.get(sym, 0.0) + max(0.0, shares_after - shares_before)
                             else:
@@ -7511,8 +7492,13 @@ while not shutdown_requested:
                                     total_shares = portfolio_emulator._positions.get(sym, 0.0)
                                     if total_shares > 0:
                                         sell_frac = min(1.0, _epos[sym] / total_shares)
-                                portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
+                                _pnd_sell_ok = portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                     cash_per_trade=1000.0, sell_fraction=sell_frac)
+                                # Task 7 review-fix (IMPORTANT 2): credit the
+                                # freed slot only when the sell actually
+                                # executed/submitted (execute_signal -> True).
+                                if _pnd_cap is not None and _pnd_sell_ok and sell_frac >= 0.999 and sym in _pnd_held:
+                                    _pnd_full_exits.add(sym)
                                 if _epos is not None and sym in _epos:
                                     _epos.pop(sym, None)
                                 # After sell frees cash, update remaining_budget so subsequent buys can use it
@@ -7868,6 +7854,15 @@ while not shutdown_requested:
                                 # through. mode=IDLE → strategy returns {} fast.
                                 # mode=MONITOR → strategy routes to monitor cycle.
                                 # mode=FULL or None → full pipeline.
+                                # R2 Task 4: preflight OpenRouter credit guard
+                                # at the START of a live FULL run (the LLM-heavy
+                                # pipeline). MONITOR/IDLE ticks are cheap and
+                                # skip it. A "halt" raises LLMCriticalFailure
+                                # (insufficient_credits) → outer-except runs
+                                # live_critical_abort + exit(7) rather than
+                                # trading LLM-blind.
+                                if mode == MODE_LIVE and _tick_mode in (None, "FULL"):
+                                    _credit_guard_or_raise(call_site="live_full_run")
                                 try:
                                     _set_strategy_tick_phase("strategy_run")
                                 except Exception:
@@ -8508,6 +8503,19 @@ while not shutdown_requested:
                         executed_same = 0
                         skipped_same_no_price = []
                         skipped_same_no_cash = []
+                        # Task 7 review-fix (IMPORTANT 1): same-bar pending buys
+                        # also run before the main emission gate — apply the same
+                        # hard max_positions gate here (adds to held exempt).
+                        _sbg_cap, _sbg_cap_reason = resolve_max_positions_cap(_cached_strategies)
+                        _sbg_held = set()
+                        _sbg_full_exits = set()
+                        _sbg_new_emitted = set()
+                        if _sbg_cap is not None:
+                            try:
+                                _sbg_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                                _sbg_held = {str(_s).strip().upper() for _s, _q in (_sbg_pos or {}).items() if float(_q or 0.0) > 0.0}
+                            except Exception:
+                                _sbg_cap = None  # fail-open: gate inert this block
                         for _sname2, _sc2 in list((_strategy_cache or {}).items()):
                             if not _sc2:
                                 continue
@@ -8555,11 +8563,19 @@ while not shutdown_requested:
                                         _log("[Pending] SKIP buy %s — no cash remaining (budget=%.2f, cash=%.2f)" % (
                                             sym, remaining2, portfolio_emulator.get_cash()), "yellow")
                                         continue
+                                    # Task 7 review-fix (IMPORTANT 1): hard cap
+                                    # gate on NEW-name same-bar pending buys.
+                                    if _sbg_cap is not None and not max_positions_gate(_sbg_held, _sbg_cap, _sbg_full_exits, _sbg_new_emitted, sym):
+                                        _sbg_proj = max_positions_projected_count(_sbg_held, _sbg_full_exits, _sbg_new_emitted)
+                                        _log("MAX_POSITIONS_GATE: blocked %s (held=%d, cap=%d)" % (sym, _sbg_proj, _sbg_cap), "yellow")
+                                        continue
                                     remaining2 -= cash_use
                                     shares_before = portfolio_emulator._positions.get(sym, 0.0)
                                     portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                         cash_per_trade=cash_use, sell_fraction=1.0)
                                     shares_after = portfolio_emulator._positions.get(sym, 0.0)
+                                    if _sbg_cap is not None and sym not in _sbg_held:
+                                        _sbg_new_emitted.add(sym)
                                     if _epos2 is not None:
                                         _epos2[sym] = _epos2.get(sym, 0.0) + max(0.0, shares_after - shares_before)
                                 else:
@@ -8569,8 +8585,12 @@ while not shutdown_requested:
                                         total_shares = portfolio_emulator._positions.get(sym, 0.0)
                                         if total_shares > 0:
                                             sell_frac = min(1.0, _epos2[sym] / total_shares)
-                                    portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
+                                    _sbg_sell_ok = portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
                                         cash_per_trade=1000.0, sell_fraction=sell_frac)
+                                    # Task 7 review-fix (IMPORTANT 2): credit the
+                                    # freed slot only on actual execution.
+                                    if _sbg_cap is not None and _sbg_sell_ok and sell_frac >= 0.999 and sym in _sbg_held:
+                                        _sbg_full_exits.add(sym)
                                     if _epos2 is not None and sym in _epos2:
                                         _epos2.pop(sym, None)
                                     # After sell frees cash, update remaining budget so subsequent buys can use it
@@ -8842,6 +8862,56 @@ while not shutdown_requested:
                         _log(f"Pre-submit quote refresh: {_refreshed}/{len(_exec_syms)} {_bt} symbols updated", "cyan")
                 except Exception as _qe:
                     _log(f"Pre-submit quote refresh failed: {_qe} — using tick-start prices", "yellow")
+
+            # ── Task 7 (round-2 credit-safety): hard max_positions gate at
+            # order emission. GNA sizes NEW-name buys across several independent
+            # paths (main allocation, BFQ direct-reserved, BFQ dequeue,
+            # momentum-window adds) each against its OWN local headroom snapshot,
+            # and rotation buys are cap-EXEMPT on the assumption their paired
+            # full-exit sell nets the count to zero — nothing recounted the TOTAL
+            # here, so the sums (plus any rotation whose sell didn't net) overshot
+            # the cap (bt 586767: 13 held vs cap 10). This is the missing single
+            # authoritative emission-time recount. Adds to existing names are
+            # exempt; a same-cycle rotation pair nets to zero. Fail-open: if the
+            # nexus config / cap can't be resolved the gate stays inert.
+            _mpg_cap = None
+            _mpg_held: set = set()
+            _mpg_full_exits: set = set()   # names FULLY exited this cycle (sells run first)
+            _mpg_new_emitted: set = set()  # NEW names already emitted this cycle
+            if portfolio_emulator is not None:
+                try:
+                    _mpg_cap, _mpg_cap_reason = resolve_max_positions_cap(_cached_strategies)
+                    _mpg_warn = max_positions_arm_warning(_mpg_cap_reason)
+                    if _mpg_warn:
+                        _log(_mpg_warn, "yellow")
+                    _mpg_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                    _mpg_held = {str(_s).strip().upper() for _s, _q in (_mpg_pos or {}).items() if float(_q or 0.0) > 0.0}
+                except Exception as _mpg_e:
+                    _log(f"max_positions gate setup failed ({type(_mpg_e).__name__}: {_mpg_e}) — gate inert this tick", "yellow")
+                    _mpg_cap = None
+            if _mpg_cap is not None:
+                _log(f"max_positions gate armed: held={len(_mpg_held)}, cap={_mpg_cap}", "cyan")
+
+            # ── Task 13 (spec 5.8): same-cycle sell-proceeds crediting (LIVE
+            # only). Live sells free cash on the async trade_updates WS fill,
+            # so buys sized later in this cycle read pre-sell cached cash and
+            # a rotation's paired buy starves. Book each submit-SUCCESSFUL
+            # sell's expected proceeds (qty×frac×price) here; the buy path
+            # lifts its sizing ceiling by 95% of the booked total via
+            # buy_ceiling(). Backtest is untouched (emulator credits
+            # synchronously). Kill-switch: live_credit_sell_proceeds_enabled
+            # (default True) in the strategy config.
+            _scp_enabled = True
+            _scp_sell_proceeds: list = []
+            if mode == MODE_LIVE:
+                try:
+                    for _scp_spec in (_cached_strategies or []):
+                        _scp_cfg = (_scp_spec or {}).get("config") or {}
+                        if "live_credit_sell_proceeds_enabled" in _scp_cfg:
+                            _scp_enabled = bool(_scp_cfg.get("live_credit_sell_proceeds_enabled"))
+                            break
+                except Exception:
+                    _scp_enabled = True
 
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
@@ -9172,6 +9242,24 @@ while not shutdown_requested:
                                 _bp_cached = float(getattr(portfolio_emulator, "_buying_power", 0.0) or 0.0)
                                 if _bp_cached > 0:
                                     _sizing_ceiling = max(_cash_now, _bp_cached)
+                            # Task 13 (spec 5.8): lift the live sizing ceiling
+                            # by 95% of this cycle's submit-successful sell
+                            # proceeds (booked below after each sell submit).
+                            # Live-only; backtest cash is already credited
+                            # synchronously by the emulator. buy_ceiling()
+                            # clamps the haircut ≤ 1 so the ceiling can never
+                            # exceed cash + proceeds; disabled via the
+                            # live_credit_sell_proceeds_enabled kill-switch.
+                            if mode == MODE_LIVE and _scp_sell_proceeds:
+                                _scp_ceiling = buy_ceiling(_sizing_ceiling, _scp_sell_proceeds, enabled=_scp_enabled)
+                                if _scp_ceiling > _sizing_ceiling:
+                                    _log(
+                                        f"Sell-proceeds credit: sizing ceiling ${_sizing_ceiling:.2f} → "
+                                        f"${_scp_ceiling:.2f} (+95% of ${sum(_scp_sell_proceeds):.2f} "
+                                        f"same-cycle submitted sells)",
+                                        "cyan",
+                                    )
+                                _sizing_ceiling = _scp_ceiling
                             available = max(0.0, _sizing_ceiling - reserved_total - _effective_floor)
                             cash_to_use = min(cash_per_trade, available)
                             # Live-readiness HIGH #9: broker-side max_single_position_pct cap.
@@ -9407,6 +9495,19 @@ while not shutdown_requested:
                                 )
                                 _trade_skipped_no_price = True
                                 continue
+                            # ── Task 7: hard max_positions gate. Block a NEW-name
+                            # buy that would push the projected open-position count
+                            # to/over the cap. Adds/winner-adds to names already
+                            # held are exempt; a same-cycle rotation pair (full
+                            # exit of another name funding this buy) nets to zero
+                            # because that sell already ran (sells sort first) and
+                            # is booked into _mpg_full_exits below.
+                            if _mpg_cap is not None and decision == 1:
+                                if not max_positions_gate(_mpg_held, _mpg_cap, _mpg_full_exits, _mpg_new_emitted, symbol):
+                                    _mpg_proj = max_positions_projected_count(_mpg_held, _mpg_full_exits, _mpg_new_emitted)
+                                    _log(f"MAX_POSITIONS_GATE: blocked {symbol} (held={_mpg_proj}, cap={_mpg_cap})", "yellow")
+                                    _trade_skipped_no_price = True
+                                    continue
                             # 2026-05-06: bound order submission at 90s. Adapter
                             # internally has ~70s retry budget + 25-45s inter-order
                             # delay = ~115s worst case naturally; outer 90s ceiling
@@ -9415,6 +9516,11 @@ while not shutdown_requested:
                             # idempotency via client_order_id (cid) prevents
                             # duplicate orders if the abandoned worker eventually
                             # succeeds and the next tick re-tries.
+                            # Task 7 review-fix (IMPORTANT 2): track whether the
+                            # submit actually succeeded so a FAILED funding sell
+                            # cannot credit a rotation slot (which would admit
+                            # the paired buy and land the book at cap+1 live).
+                            _mpg_submit_ok = False
                             if mode == MODE_LIVE:
                                 try:
                                     _es_fut = _PRICE_FETCH_EXECUTOR.submit(
@@ -9425,6 +9531,7 @@ while not shutdown_requested:
                                         sell_fraction=sell_fraction,
                                     )
                                     _es_placed = _es_fut.result(timeout=90.0)
+                                    _mpg_submit_ok = bool(_es_placed)
                                     # Telemetry only — record the confirmed
                                     # buy/sell + reasoning for the app's "Bot
                                     # activity". Fully off the trade path.
@@ -9449,7 +9556,54 @@ while not shutdown_requested:
                                         "yellow",
                                     )
                             else:
-                                portfolio_emulator.execute_signal(symbol, decision, price, timestamp=current_time, cash_per_trade=cash_to_use, sell_fraction=sell_fraction)
+                                _mpg_submit_ok = bool(portfolio_emulator.execute_signal(symbol, decision, price, timestamp=current_time, cash_per_trade=cash_to_use, sell_fraction=sell_fraction))
+
+                            # ── Task 7: keep the running cycle counts current so
+                            # later buys in this _exec_order see this emission. A
+                            # NEW-name buy grows the count on INTENT (a failed
+                            # buy blocking a later buy errs on the safe side of
+                            # the cap); a FULL-exit sell (sell_fraction ~1.0) of
+                            # a held name frees a slot ONLY when the submit
+                            # actually succeeded (review IMPORTANT 2 — a failed
+                            # funding sell must not admit the paired rotation
+                            # buy). Sells sort first, so a rotation's funding
+                            # exit is booked before its buy. Async live fills
+                            # can still fail post-submit — accepted residual.
+                            if _mpg_cap is not None:
+                                _mpg_sym_u = str(symbol).strip().upper()
+                                if decision == 1 and _mpg_sym_u not in _mpg_held:
+                                    _mpg_new_emitted.add(_mpg_sym_u)
+                                elif decision == -1 and _mpg_sym_u in _mpg_held and _mpg_submit_ok:
+                                    try:
+                                        _mpg_is_full_exit = float(sell_fraction or 0.0) >= 0.999
+                                    except Exception:
+                                        _mpg_is_full_exit = False
+                                    if _mpg_is_full_exit:
+                                        _mpg_full_exits.add(_mpg_sym_u)
+
+                            # ── Task 13 (spec 5.8): book expected proceeds of a
+                            # submit-SUCCESSFUL live sell so later buys in this
+                            # SAME cycle may spend 95% of them (buy_ceiling).
+                            # Positions are read AFTER the submit on purpose:
+                            # if the WS fill already landed during the wait,
+                            # the adapter already credited cash AND removed the
+                            # position — qty reads 0 and nothing double-books.
+                            if mode == MODE_LIVE and decision == -1 and _mpg_submit_ok and _scp_enabled:
+                                try:
+                                    _scp_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                                    _scp_qty = float((_scp_pos or {}).get(str(symbol).strip().upper(), 0.0) or 0.0)
+                                    _scp_frac = max(0.0, min(1.0, float(sell_fraction if sell_fraction is not None else 1.0)))
+                                    _scp_expected = _scp_qty * _scp_frac * float(price)
+                                    if _scp_expected > 0:
+                                        _scp_sell_proceeds.append(_scp_expected)
+                                        _log(
+                                            f"Sell-proceeds credit: booked ${_scp_expected:.2f} expected from "
+                                            f"{symbol} sell (cycle total ${sum(_scp_sell_proceeds):.2f}; buys may "
+                                            f"spend 95% after partial-fill haircut)",
+                                            "cyan",
+                                        )
+                                except Exception as _scp_e:
+                                    _log(f"Sell-proceeds booking failed for {symbol}: {type(_scp_e).__name__}: {_scp_e}", "yellow")
 
                 # Capture per-symbol sub-strategy decision for playback UI (skip if no price — trade wasn't executed)
                 if mode == MODE_BACKTEST and _backtest_decisions is not None and not _trade_skipped_no_price:
@@ -9828,6 +9982,64 @@ while not shutdown_requested:
 
         if _is_llm_critical:
             try:
+                # R2 Task 3 (2026-07): role-INDEPENDENT fatal classes
+                # (insufficient_credits / HTTP 402) take a CLEAN-STOP pause in
+                # backtest mode, NOT the paused_llm_critical idle-wait below.
+                # Incident 586767: OpenRouter credits died mid-run and the
+                # backtest simulated an entire month LLM-blind. A credit
+                # top-up can take days — idling a container that long is
+                # waste; instead write status='paused_credits' (merge-only
+                # update: partial results preserved), fire ONE operator alert
+                # via the alert_strategy_error seam, and exit 0. The engine's
+                # containers.run(detach=False) finally block reaps the
+                # container and deletes the queue row WITHOUT touching
+                # BacktestResults.status (same lifecycle as a normal finish),
+                # so 'paused_credits' survives. Resume = top up + re-queue;
+                # the existing resume-date query skips processed days.
+                try:
+                    from llm_critical_guard import failure_is_role_independent as _f_role_indep
+                    _is_credit_fatal = _f_role_indep(_outer_err)
+                except Exception:
+                    _is_credit_fatal = False
+                if _is_credit_fatal and mode == MODE_BACKTEST and _backtest_result_id is not None:
+                    # Stop the heartbeat first so its 15s log/_last_active
+                    # writes can't race the final row state.
+                    try:
+                        _heartbeat_stop.set()
+                    except (NameError, Exception):
+                        pass
+                    try:
+                        from backtest_critical_abort import (
+                            _pause_backtest_on_credit_exhaustion as _bt_credit_pause,
+                        )
+                        _bt_credit_pause(
+                            _backtest_result_id,
+                            _outer_err,
+                            current_time,
+                            _backtest_db_conn,
+                        )
+                    except Exception as _cp_err:
+                        try:
+                            _log(f"credit-exhaustion pause handler failed: {_cp_err}", "red")
+                        except Exception:
+                            pass
+                    try:
+                        _log(
+                            "Backtest paused (insufficient credits) at "
+                            f"{current_time}; exiting cleanly — top up credits "
+                            "and re-queue to resume.",
+                            "yellow",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from intellistock_logger import intellistock_logger as _isl
+                        _isl.clear_backtest_log_buffer()
+                        _isl.close_backtest_log_file()
+                    except Exception:
+                        pass
+                    import sys as _sys
+                    _sys.exit(0)
                 if mode == MODE_BACKTEST and _backtest_result_id is not None:
                     # PAUSE flow (2026-05-22): backtest no longer exits on
                     # LLM-critical. backtest_critical_abort.handle() restores

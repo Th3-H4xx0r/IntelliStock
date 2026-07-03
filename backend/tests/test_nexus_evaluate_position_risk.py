@@ -32,6 +32,8 @@ if _BACKEND not in sys.path:
 
 from strategies.graph_nexus_analysis import _evaluate_position_risk  # noqa: E402
 
+from nexus_real_config import real_config  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Tiny stand-in for PortfolioEmulator (we only need _positions + _trades)
@@ -545,3 +547,120 @@ def test_winner_protection_softens_sell_when_not_bypassed():
         bypass_winner_protection=False,
     )
     assert "Winner protection" in reason
+
+
+# ---------------------------------------------------------------------------
+# V31 grace vs. risk exits (real_config — grace ACTIVE at its live value)
+#
+# Forensic audit of backtest 586767: ZERO risk exits fired in the entire run.
+# The V31 grace window (initial_grace_bars=14) suppressed fast-loser /
+# circuit-breaker cuts for every fresh position, and with a ~10d median hold
+# positions lived their whole life ungated. Grace must gate ONLY signal-driven
+# sells; protective risk exits (Fast loser / Circuit breaker / Trailing stop /
+# Hold-limit) must survive grace untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_circuit_breaker_fires_inside_grace_avgo():
+    """AVGO 2026-06: -13.79% on grace day 3. Under the live config this is a
+    LOW-tier fast-loser cut (past -10%, above the -15% conviction floor) that
+    V31 grace suppressed to a hold — the exact 586767 failure. The protective
+    cut MUST fire regardless of the grace window."""
+    cfg = real_config()
+    emu = _Emu()
+    emu.add("AVGO", 100, 100.0,
+            ts=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    score, reason, _ = _evaluate_position_risk(
+        "AVGO",
+        fresh_score=0,
+        fresh_reason="No graph signal",
+        config=cfg,
+        portfolio_emulator=emu,
+        strategy_cache={},
+        prices={"AVGO": 86.21},  # (86.21-100)/100 = -13.79%
+        price_history={},
+        date_key="2026-06-04",
+        propagated={},
+        entry_buy_ts=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        held_days=3,  # grace day 3 of 14
+        max_hold_days=90,
+        side_effect_mode="full",
+    )
+    assert score == -1
+    assert ("Circuit breaker" in reason) or ("Fast loser" in reason)
+    assert "grace" not in (reason or "").lower()
+
+
+def test_signal_sell_still_suppressed_inside_grace():
+    """A plain negative-signal sell on grace day 3 (only -2%, no risk gate
+    tripped) stays suppressed — protecting fresh positions from churn is
+    grace's whole purpose and must be preserved."""
+    cfg = real_config()
+    emu = _Emu()
+    emu.add("AVGO", 100, 100.0,
+            ts=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    score, reason, _ = _evaluate_position_risk(
+        "AVGO",
+        fresh_score=-1,
+        fresh_reason="External sell signal",
+        config=cfg,
+        portfolio_emulator=emu,
+        strategy_cache={},
+        prices={"AVGO": 98.0},  # -2%, no risk gate fires
+        price_history={},
+        date_key="2026-06-04",
+        propagated={"AVGO": {"raw_score": 0.0}},
+        entry_buy_ts=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        held_days=3,  # grace day 3 of 14
+        max_hold_days=90,
+        side_effect_mode="full",
+    )
+    # Signal sell suppressed to hold by grace.
+    assert score != -1
+    assert "grace" in (reason or "").lower()
+
+
+def test_trailing_stop_fires_inside_grace():
+    """Trailing stop is a protective risk exit — it too must bypass grace.
+    Position peaks +30% then drops ~19% from peak (well past the live
+    pnl-scaled trail) on grace day 3."""
+    cfg = real_config()
+    emu = _Emu()
+    emu.add("AVGO", 100, 100.0,
+            ts=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    sc: dict = {}
+    # First call establishes the peak at +30% (activates trailing stop).
+    _evaluate_position_risk(
+        "AVGO",
+        fresh_score=0,
+        fresh_reason="hold",
+        config=cfg,
+        portfolio_emulator=emu,
+        strategy_cache=sc,
+        prices={"AVGO": 130.0},
+        price_history={},
+        date_key="2026-06-03",
+        propagated={},
+        entry_buy_ts=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        held_days=2,
+        max_hold_days=90,
+    )
+    # Second call: drop to 105 from peak 130 → 19.2% drop from peak, grace day 3.
+    score, reason, _ = _evaluate_position_risk(
+        "AVGO",
+        fresh_score=0,
+        fresh_reason="hold",
+        config=cfg,
+        portfolio_emulator=emu,
+        strategy_cache=sc,
+        prices={"AVGO": 105.0},
+        price_history={},
+        date_key="2026-06-04",
+        propagated={},
+        entry_buy_ts=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        held_days=3,
+        max_hold_days=90,
+    )
+    assert score == -1
+    assert "Trailing stop" in reason
+    assert "grace" not in (reason or "").lower()
