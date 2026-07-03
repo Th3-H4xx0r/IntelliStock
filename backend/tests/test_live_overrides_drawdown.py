@@ -60,3 +60,59 @@ def test_none_config_gets_all_defaults():
 
     assert merged["portfolio_drawdown_halt_pct"] == 10.0
     assert merged["analyst_panel_enabled"] is False
+
+
+# --- Task 11: quality_filter_missing_metadata_policy is operator-owned -------
+#
+# Config archaeology found live silently forces the doc-179 value "warn" to
+# "block", narrowing the LIVE buy universe relative to every backtest (a
+# missing-metadata symbol every backtest scored is blocked live). The policy is
+# the operator's chosen strictness, not a fail-closed clamp, so an explicit
+# value must survive.
+
+
+def test_explicit_quality_filter_policy_survives_live_override():
+    """User's explicit "warn" (doc-179 value) must NOT be clobbered to "block"."""
+    user_cfg = {"quality_filter_missing_metadata_policy": "warn"}
+
+    merged = apply_live_overrides(user_cfg)
+
+    assert merged["quality_filter_missing_metadata_policy"] == "warn"
+    # Input dict is never mutated.
+    assert user_cfg["quality_filter_missing_metadata_policy"] == "warn"
+
+
+def test_absent_quality_filter_policy_gets_live_default():
+    """A config WITHOUT the key inherits the live-mode safety default "block"."""
+    user_cfg = {"some_other_key": 123}
+
+    merged = apply_live_overrides(user_cfg)
+
+    assert merged["quality_filter_missing_metadata_policy"] == "block"
+
+
+# --- Task 11: break_glass_fresh_shield_enabled is operator-owned -------------
+#
+# Live silently flips the doc-179 value False to True. The fresh-shield is a
+# behavioral toggle the operator tunes (it vetoes fresh-position exits), not a
+# fail-closed safety clamp, so an explicit False must survive.
+
+
+def test_explicit_fresh_shield_survives_live_override():
+    """User's explicit False must NOT be clobbered to True."""
+    user_cfg = {"break_glass_fresh_shield_enabled": False}
+
+    merged = apply_live_overrides(user_cfg)
+
+    assert merged["break_glass_fresh_shield_enabled"] is False
+    # Input dict is never mutated.
+    assert user_cfg["break_glass_fresh_shield_enabled"] is False
+
+
+def test_absent_fresh_shield_gets_live_default():
+    """A config WITHOUT the key inherits the live-mode safety default True."""
+    user_cfg = {"some_other_key": 123}
+
+    merged = apply_live_overrides(user_cfg)
+
+    assert merged["break_glass_fresh_shield_enabled"] is True

@@ -54,10 +54,30 @@ LIVE_OVERRIDES: dict[str, object] = {
 # Keys whose live-mode value is a *default*, not a hard safety clamp: if the
 # user's Strategies config sets them explicitly, the user's value wins. Everything
 # else in LIVE_OVERRIDES stays unconditional (fail-closed safety cannot be tuned
-# away from the DB). ``portfolio_drawdown_halt_pct`` is a user-chosen circuit
-# breaker (doc-179 Track-B sets 8.0); clobbering it to the 10.0 default would
-# silently discard the operator's tighter threshold.
-_USER_OVERRIDABLE_KEYS: frozenset[str] = frozenset({"portfolio_drawdown_halt_pct"})
+# away from the DB).
+#
+#   portfolio_drawdown_halt_pct
+#       A user-chosen circuit breaker (doc-179 Track-B sets 8.0); clobbering it
+#       to the 10.0 default would silently discard the operator's tighter
+#       threshold.
+#   quality_filter_missing_metadata_policy
+#       Operator-owned buy-universe strictness. Live forces the doc-179 value
+#       "warn" -> "block", which narrows the LIVE buy universe relative to every
+#       backtest (a missing-metadata symbol that every backtest scored gets
+#       blocked live only). "block" is a fine safe *default*, but the operator's
+#       explicit "warn" reflects a deliberate live-vs-backtest parity choice and
+#       must survive.
+#   break_glass_fresh_shield_enabled
+#       Operator-owned behavioral toggle (the fresh-position exit shield), not a
+#       fail-closed clamp. Live silently flips the doc-179 value False -> True;
+#       an explicit operator False must survive.
+_USER_OVERRIDABLE_KEYS: frozenset[str] = frozenset(
+    {
+        "portfolio_drawdown_halt_pct",
+        "quality_filter_missing_metadata_policy",
+        "break_glass_fresh_shield_enabled",
+    }
+)
 
 
 def apply_live_overrides(config: dict | None) -> dict:
