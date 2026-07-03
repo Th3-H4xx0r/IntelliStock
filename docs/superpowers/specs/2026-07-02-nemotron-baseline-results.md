@@ -209,3 +209,34 @@ runs are needed — not as a performance claim.
 4. **Orphan cleanup** — `992271`'s queue row is left as `status=running,
    run=False` residue (prod state not touched); the engine's reconcile loop
    handles these.
+
+## FINAL RESULT — run 586767 (finished 2026-07-02 19:44 UTC)
+
+First honest Nemotron baseline: June-2026 replay (06-01 → 07-01), doc-179 TUNED config
+(post-2026-07 tune), fixed code (PRs #81/#82/#83 image), fresh scope e3fdb8e1, $100,000
+initial cash (UI default — NOT the live $6k), plain daily cadence (dual-cadence sim did
+not engage at 86400s granularity).
+
+| Metric | Value |
+|---|---|
+| P&L | **−2.32%** |
+| SPY same window | ~+2.8% (≈ −5.1pp underperformance) |
+| Trades | 67 (39 buys / 28 sells) across 39 symbols |
+| Closed round-trips | 28 — **9W / 19L = 32% win rate** |
+| Realized P&L (FIFO) | −$5,343 |
+| Worst | CRDO −$1,378, AVGO −$1,315, META −$773, NBIS −$765, ACN −$711 |
+| Best | AMAT +$630, QCOM +$567, AMD +$399, UAL +$231, VIK +$210 |
+
+### Interpretation
+- Live June (kimi era, broken sentiment/ML/outcomes, 26 fills): 33% win rate, −$56 realized.
+- Backtest June (Nemotron, everything fixed, tuned config, 67 trades): **32% win rate**, −2.3%.
+- The infrastructure fixes unlocked ACTIVITY (2.5× the trades, budget deployed) but the
+  win rate is unchanged → the residual problem is SIGNAL QUALITY (model and/or
+  signal/exit structure), not plumbing. n=1 caveat applies (historical rerun variance is
+  large); June-2026 regime specific; gross of costs (costs measured negligible live).
+
+### Next-iteration candidates
+1. Model A/B on the same June window + harness: gpt-5.4-mini (the +266% run's decision
+   model), and 1-2 other OpenRouter candidates vs Nemotron. Same config, ≥2 repeats.
+2. $6k initial-cash re-run of the winner (sizing-floor realism).
+3. True dual-cadence run (granularity ≤3600s) for cadence parity with live.
