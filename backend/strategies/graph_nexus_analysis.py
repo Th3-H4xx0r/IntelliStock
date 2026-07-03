@@ -118,9 +118,17 @@ except Exception:
 # that llm_utils raises and broker.py catches (see llm_utils rationale) —
 # isinstance identity must match for the article-role degrade below to fire.
 try:
-    from llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+    from llm_critical_guard import (
+        LLMCriticalFailure,
+        role_is_halt_worthy,
+        failure_is_role_independent,
+    )
 except ImportError:
-    from backend.llm_critical_guard import LLMCriticalFailure, role_is_halt_worthy
+    from backend.llm_critical_guard import (
+        LLMCriticalFailure,
+        role_is_halt_worthy,
+        failure_is_role_independent,
+    )
 
 
 # One-shot dedup for the article-role degrade operator alert (per process).
@@ -21393,7 +21401,11 @@ class GraphNexusAnalysis:
                     # Task 4: article-enrichment-role critical LLM failure
                     # degrades to an empty signal; decision-role (fail-safe)
                     # still propagates to broker.py for the halt.
-                    if role_is_halt_worthy(getattr(_company_crit, "role", None)):
+                    # R2 Task 2: role-INDEPENDENT fatal classes (insufficient_credits
+                    # / HTTP 402) OVERRIDE the degrade — nothing runs without credits,
+                    # so re-raise even for an article role. Checked BEFORE the role.
+                    if failure_is_role_independent(_company_crit) or \
+                            role_is_halt_worthy(getattr(_company_crit, "role", None)):
                         raise
                     _alert_article_critical_degrade(_company_crit, instance_id=instance_id, stage="Company article")
                     company_article_rows, company_traces = [], []
@@ -22028,7 +22040,11 @@ class GraphNexusAnalysis:
                 # (e.g. codex-cli quota) must DEGRADE, not halt. A decision-role
                 # critical (fail-safe: None/unknown too) still propagates to
                 # broker.py's outer loop for the halt.
-                if role_is_halt_worthy(getattr(_macro_crit, "role", None)):
+                # R2 Task 2: role-INDEPENDENT fatal classes (insufficient_credits
+                # / HTTP 402) OVERRIDE the degrade — nothing runs without credits,
+                # so re-raise even for an article role. Checked BEFORE the role.
+                if failure_is_role_independent(_macro_crit) or \
+                        role_is_halt_worthy(getattr(_macro_crit, "role", None)):
                     raise
                 _alert_article_critical_degrade(_macro_crit, instance_id=instance_id, stage="Macro article")
                 macro_rows = []

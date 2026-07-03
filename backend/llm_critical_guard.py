@@ -58,6 +58,11 @@ _RX_AUTH = re.compile(
     re.I,
 )
 _RX_CODEX_QUOTA = re.compile(r"(usage_limit_reached|quota.{0,30}exhausted|weekly quota)", re.I)
+# OpenRouter (and compatible) "out of credits" — surfaced as HTTP 402 with a body
+# like "This request requires more credits ... You can only afford 10773." Incident
+# backtest 586767: credits ran out mid-run, 195 calls 402'd, and the strategy
+# silently traded LLM-blind for a simulated month because 402 was unclassified.
+_RX_INSUFFICIENT_CREDITS = re.compile(r"requires more credits|can only afford", re.I)
 
 
 def classify(
@@ -93,6 +98,14 @@ def classify(
         return "auth_failure", True
     if _RX_AUTH.search(body_l):
         return "auth_failure", True
+
+    # 2b. Insufficient credits — any provider, by HTTP 402 OR body match. This is
+    # role-INDEPENDENT fatal (see failure_is_role_independent): nothing can run
+    # without credits, so it OVERRIDES the article-role degrade at every site.
+    if status == 402:
+        return "insufficient_credits", True
+    if _RX_INSUFFICIENT_CREDITS.search(body_l):
+        return "insufficient_credits", True
 
     # 3. Codex-CLI quota exhausted — provider-scoped
     if prov in ("codex_cli", "codex-cli") and _RX_CODEX_QUOTA.search(body_l):
@@ -142,7 +155,29 @@ def update_consecutive_state(
 
 def is_immediately_fatal(class_tag: str) -> bool:
     """True for classes that fail-fast regardless of counter state."""
-    return class_tag in {"azure_403_blocked", "auth_failure", "codex_quota_exhausted"}
+    return class_tag in {
+        "azure_403_blocked",
+        "auth_failure",
+        "codex_quota_exhausted",
+        "insufficient_credits",
+    }
+
+
+# Critical classes that are fatal REGARDLESS of role. The Round-1 role-scoped
+# degrade (article-enrichment roles → degrade, not halt) is overridden for these:
+# no role can run without credits, so an insufficient_credits failure in a
+# macro_article/company_article/lookback_* role must still HALT, never degrade.
+_ROLE_INDEPENDENT_FATAL_CLASSES = frozenset({"insufficient_credits"})
+
+
+def failure_is_role_independent(failure: Any) -> bool:
+    """Return True if this failure's class is fatal regardless of role.
+
+    Checked BEFORE role_is_halt_worthy at every degrade site (live_critical_abort
+    .handle + the two GNA article catches) so a role-independent class overrides
+    the article-role degrade. role_is_halt_worthy stays purely role-based.
+    """
+    return getattr(failure, "class_tag", None) in _ROLE_INDEPENDENT_FATAL_CLASSES
 
 
 # Article-enrichment roles whose critical LLM failure must DEGRADE the run
