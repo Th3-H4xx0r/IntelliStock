@@ -4170,6 +4170,31 @@ def api_kalshi_scan_budget(brokerage_id: str, conn=Depends(conn_dependency), cur
     return scan_budget_payload(used, days_left_in_month=days_left)
 
 
+@app.get("/brokerages/{brokerage_id}/kalshi/instances/{instance_id}/model", response_class=JSONResponse)
+def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Champion calibrator for an instance (self-improving training loop): method,
+    sample count, held-out raw-vs-calibrated log-loss/Brier, and reliability points
+    (predicted vs actual). {champion: null} until the loop produces one."""
+    _kalshi_brokerage_row(conn, brokerage_id)
+    # Cross-instance guard: the path instance_id must belong to this brokerage, else
+    # any authenticated user could read another instance's calibrator metrics.
+    try:
+        _inst = _r_auth.db("IntelliStock").table("Instances").get(instance_id).run(conn) or {}
+    except Exception:
+        _inst = {}
+    if _inst.get("kind") != "kalshi" or _inst.get("brokerage_id") != brokerage_id:
+        return {"champion": None}
+    from kalshi.db import get_champion
+    champ = get_champion(conn, instance_id, "calibrator")
+    if not champ:
+        return {"champion": None}
+    return {"champion": {
+        "id": champ.get("id"), "method": champ.get("method"),
+        "n_samples": champ.get("n_samples"), "created_at": champ.get("created_at"),
+        "metrics": champ.get("metrics", {}), "reliability": champ.get("reliability", []),
+    }}
+
+
 @app.post("/brokerages/{brokerage_id}/kalshi/kill", response_class=JSONResponse)
 def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """KILL: stop the instance bound to this Kalshi account and cancel its

@@ -11,6 +11,8 @@ from kalshi.capital.opportunity import score as opportunity_score
 from kalshi.capital.planner import allocate
 from kalshi.decisions import decision_doc
 from kalshi.devig import market_probs_from_asks
+from kalshi.intelligence.fusion import renormalize_group
+from kalshi import training
 
 
 def plan_and_allocate(
@@ -30,6 +32,7 @@ def plan_and_allocate(
     market_shrink: float = 0.0,
     one_bet_per_fixture: bool = True,
     devig_method: str = "power",
+    calibrator: dict | None = None,
 ) -> dict:
     """fixtures: each {fixture_id, expected_goals, sharp_probs, analyst:{adjustments,
     rationales}, kalshi_markets, liquidity, hours_to_kickoff, model_confidence}.
@@ -70,6 +73,12 @@ def plan_and_allocate(
                             (1.0 - market_shrink) * fused["winner"][side]
                             + market_shrink * market[side]
                         )
+        # CALIBRATION: remap the winner probs through the champion isotonic calibrator
+        # (fit on settled outcomes by the training worker) so a stated 60% actually
+        # wins ~60%. Monotone + renormalized to sum to 1. No champion -> no-op.
+        if calibrator and fused.get("winner"):
+            fused["winner"] = renormalize_group(
+                {s: training.apply(calibrator, p) for s, p in fused["winner"].items()})
         cands, skips = generate_candidates(
             fx["fixture_id"], tier, fused, fx.get("kalshi_markets", []),
             fee_rate=fee_rate, edge_threshold=edge_threshold,

@@ -47,6 +47,8 @@ KALSHI_TABLES: list[tuple[str, str]] = [
     ("KalshiHistOdds", "id"),            # cached OddsPapi historical odds, id = fixture_id
     ("KalshiHistFixtures", "fixture_key"),  # cached per-fixture final-score resolution
     ("KalshiBtFixtureList", "id"),  # cached fixture-list query results (zero-cost re-runs)
+    # self-improving training pipeline: versioned calibrators + metrics per instance
+    ("KalshiModelRegistry", "id"),  # fitted calibrator versions; is_champion flags the live one
 ]
 
 
@@ -571,3 +573,38 @@ def pending_or_running_backtests(conn) -> list:
     return list(_r.db(DB_NAME).table("KalshiBacktests")
                 .filter(lambda d: (d["status"] == "pending") | (d["status"] == "running"))
                 .run(conn))
+
+
+# --- model registry (self-improving training pipeline) ---
+
+def save_model_version(conn, doc: dict) -> str:
+    """Persist a model-registry version (fitted calibrator + held-out metrics).
+    Caller stamps id/instance_id/kind/created_at. Returns the id."""
+    _r.db(DB_NAME).table("KalshiModelRegistry").insert(doc, conflict="replace").run(conn)
+    return doc["id"]
+
+
+def get_champion(conn, instance_id: str, kind: str = "calibrator"):
+    """Current champion doc for (instance, kind). Falls back to the global
+    '__default__' scope when the instance has none. None if neither exists.
+    Degrade-safe: returns None on any error (engine then uses identity)."""
+    try:
+        tbl = _r.db(DB_NAME).table("KalshiModelRegistry")
+        for scope in (instance_id, "__default__"):
+            rows = list(tbl.filter({"instance_id": scope, "kind": kind,
+                                    "is_champion": True}).run(conn))
+            if rows:
+                # Deterministic if a non-atomic set_champion race ever left >1: newest wins.
+                return max(rows, key=lambda r: str(r.get("created_at") or ""))
+    except Exception:
+        pass
+    return None
+
+
+def set_champion(conn, id: str, instance_id: str, kind: str = "calibrator") -> None:
+    """Promote `id` to champion for (instance, kind), demoting any prior champion in
+    the same scope so exactly one is live."""
+    tbl = _r.db(DB_NAME).table("KalshiModelRegistry")
+    tbl.filter({"instance_id": instance_id, "kind": kind, "is_champion": True}) \
+       .update({"is_champion": False}).run(conn)
+    tbl.get(id).update({"is_champion": True}).run(conn)

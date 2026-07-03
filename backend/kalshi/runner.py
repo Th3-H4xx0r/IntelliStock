@@ -45,6 +45,48 @@ def _configure_telemetry() -> None:  # pragma: no cover - integration
         pass
 
 
+def _start_training_worker(instance_id, cfg) -> None:  # pragma: no cover - integration
+    """Start the self-improving calibration worker as a daemon alongside the engine.
+    Best-effort: any failure here must NOT block trading (the engine simply runs
+    with the last champion, or identity)."""
+    try:
+        import datetime as _dt
+        from kalshi import training_worker
+        from kalshi.backtest_data import BacktestDataProvider
+        from kalshi.backtest import build_model_fn
+        from kalshi.client import KalshiClient
+        leagues = list(cfg.get("leagues") or [])
+        if not leagues:
+            return
+        # Static national Elo + empty club table: national-team (WC) fixtures are priced
+        # off the built-in national table, so we skip the synchronous ClubElo fetch that
+        # would otherwise delay engine start (the engine fetches club Elo itself). The
+        # calibrator maps prob->prob and is robust to small train/live model diffs.
+        model_fn = build_model_fn({}, {})
+
+        def provider_factory(conn):
+            return BacktestDataProvider(
+                conn=conn,
+                kalshi_client=KalshiClient(key_id="training", private_key_pem="", environment="prod"))
+
+        # Per-instance champion (engine reads config.instance_id, falling back to the
+        # seeded "__default__" bootstrap). start_date is intentionally recent — the model
+        # prices with a single point-in-time Elo snapshot, so training only on the
+        # current window keeps that a minor approximation, not a deep-history look-ahead.
+        refit = training_worker.build_refit_fn(
+            provider_factory=provider_factory, model_fn=model_fn, leagues=leagues,
+            start_date="2026-01-01",
+            end_date_fn=lambda: _dt.datetime.utcnow().strftime("%Y-%m-%d"),
+            instance_id=instance_id, min_total=100)
+        try:
+            from notifications import notify as _notify
+        except Exception:
+            _notify = None
+        training_worker.start_worker(kdb.get_conn, refit, refresh_secs=3600, notify=_notify)
+    except Exception:
+        pass
+
+
 def _run_with_crash_alert(config, *, run=run_instance, notify=None) -> None:
     """Run the engine; on an uncaught crash, alert the operator (Discord + iOS push,
     category 'kalshi_runtime') then re-raise so the supervisor still sees the failure.
@@ -98,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     _configure_telemetry()
+    _start_training_worker(instance_id, cfg)
     _run_with_crash_alert(
         EngineConfig(
             instance_id=instance_id,
