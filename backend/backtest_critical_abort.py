@@ -235,3 +235,117 @@ def cleared_pause_fields() -> dict:
     """Return ``{field: None}`` for every pause_* field, for the broker's
     resume update so finished-after-resume runs don't carry stale pause data."""
     return {k: None for k in _PAUSE_RESULT_FIELDS}
+
+
+# ---------------------------------------------------------------------------
+# Round-2 Task 3 (2026-07): credit-exhaustion CLEAN STOP — distinct from the
+# paused_llm_critical idle-wait flow above.
+#
+# Incident: backtest 586767 simulated an ENTIRE month of trading days after
+# OpenRouter credits died (195 calls HTTP 402) — no abort, no alert,
+# misleading blind results. Task 2 made 402 classify as `insufficient_credits`
+# (role-INDEPENDENT fatal). When that LLMCriticalFailure escapes a sim day,
+# broker.py's outer-except routes it HERE instead of handle(): the run stops
+# cleanly (process exits; container is reaped and the queue row deleted by the
+# engine's normal finally path) rather than idling a container for the days a
+# credit top-up can take. Resume = operator tops up credits and re-queues; the
+# existing resume-date query skips already-processed days.
+#
+# Partial results are preserved because the row update() MERGES and touches
+# ONLY {status, error, paused_at_date}.
+# ---------------------------------------------------------------------------
+
+
+def _human_message_from_failure(failure) -> str:
+    """Operator-facing one-liner: the provider's own words when available
+    (e.g. 'This request requires more credits ...'), else a self-explanatory
+    fallback with the top-up instruction."""
+    sample = ""
+    try:
+        if failure.attempts:
+            sample = (failure.attempts[-1].get("body_sample") or "").strip()
+    except Exception:
+        sample = ""
+    if sample:
+        return sample[:300]
+    return (
+        f"{failure.provider} {failure.class_tag} on {failure.model} after "
+        f"{len(failure.attempts)} attempts; top up provider credits and "
+        "re-queue the backtest"
+    )
+
+
+def _build_credit_pause_payload(failure, sim_date) -> dict:
+    """The exact BacktestResults update for a credit-exhaustion pause.
+
+    ONLY three keys — update() merges, so every partial-result field already
+    on the row (pnl, trades, progress, logs, ...) survives untouched."""
+    if hasattr(sim_date, "strftime"):
+        date_str = sim_date.strftime("%Y-%m-%d")
+    else:
+        date_str = str(sim_date)
+    return {
+        "status": "paused_credits",
+        "error": f"{failure.class_tag}: {_human_message_from_failure(failure)}",
+        "paused_at_date": date_str,
+    }
+
+
+def _write_backtest_credit_pause(conn, rrow_id, payload) -> None:
+    """DB seam (tests cage this). Try the caller's connection first; on any
+    failure (or conn=None) retry once on a fresh connection — the pause must
+    land even if the broker's long-lived conn went stale mid-run.
+
+    int() coercion mirrors handle(): BacktestResults.id is written as int by
+    the engine, and RethinkDB get() is type-strict (a string id silently
+    no-ops with {skipped: 1})."""
+    def _do(c, rdb):
+        rdb.db("IntelliStock").table("BacktestResults").get(int(rrow_id)).update(payload).run(c)
+
+    if conn is not None:
+        try:
+            from rethinkdb import RethinkDB
+            _do(conn, RethinkDB())
+            return
+        except Exception as e:
+            _log_red(f"credit-pause write on caller conn failed ({e}); retrying on fresh conn")
+    c2, r2 = _get_conn_and_r()
+    try:
+        _do(c2, r2)
+    finally:
+        try:
+            c2.close()
+        except Exception:
+            pass
+
+
+def _pause_backtest_on_credit_exhaustion(rrow_id, failure, sim_date, conn) -> dict:
+    """Clean-stop pause for credit exhaustion. Called ONCE by broker.py's
+    outer-except immediately before the sim-day loop stops, so the single
+    call here IS the once-only alert guarantee.
+
+    1. BacktestResults.update({status: 'paused_credits', error, paused_at_date})
+       — merge-only, partial results preserved.
+    2. ONE operator alert through the `alert_strategy_error` seam (call-time
+       lazy import = the where-it's-looked-up seam; tests cage
+       live_alerts.alert_strategy_error).
+
+    Each step is independently fault-isolated: a dead DB must not swallow the
+    operator page, and a broken alert stack must not lose the row update.
+    Returns the payload written (for logging/tests)."""
+    payload = _build_credit_pause_payload(failure, sim_date)
+    try:
+        _write_backtest_credit_pause(conn, rrow_id, payload)
+    except Exception as e:
+        _log_red(f"credit-pause BacktestResults update failed: {e}")
+    try:
+        from live_alerts import alert_strategy_error
+        instance_id = str((failure.attribution or {}).get("instance_id") or rrow_id)
+        alert_strategy_error(
+            instance_id=instance_id,
+            tag="backtest_credit_exhaustion",
+            message=payload["error"],
+        )
+    except Exception as e:
+        _log_red(f"credit-pause alert failed: {e}")
+    return payload

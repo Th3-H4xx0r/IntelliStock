@@ -9828,6 +9828,64 @@ while not shutdown_requested:
 
         if _is_llm_critical:
             try:
+                # R2 Task 3 (2026-07): role-INDEPENDENT fatal classes
+                # (insufficient_credits / HTTP 402) take a CLEAN-STOP pause in
+                # backtest mode, NOT the paused_llm_critical idle-wait below.
+                # Incident 586767: OpenRouter credits died mid-run and the
+                # backtest simulated an entire month LLM-blind. A credit
+                # top-up can take days — idling a container that long is
+                # waste; instead write status='paused_credits' (merge-only
+                # update: partial results preserved), fire ONE operator alert
+                # via the alert_strategy_error seam, and exit 0. The engine's
+                # containers.run(detach=False) finally block reaps the
+                # container and deletes the queue row WITHOUT touching
+                # BacktestResults.status (same lifecycle as a normal finish),
+                # so 'paused_credits' survives. Resume = top up + re-queue;
+                # the existing resume-date query skips processed days.
+                try:
+                    from llm_critical_guard import failure_is_role_independent as _f_role_indep
+                    _is_credit_fatal = _f_role_indep(_outer_err)
+                except Exception:
+                    _is_credit_fatal = False
+                if _is_credit_fatal and mode == MODE_BACKTEST and _backtest_result_id is not None:
+                    # Stop the heartbeat first so its 15s log/_last_active
+                    # writes can't race the final row state.
+                    try:
+                        _heartbeat_stop.set()
+                    except (NameError, Exception):
+                        pass
+                    try:
+                        from backtest_critical_abort import (
+                            _pause_backtest_on_credit_exhaustion as _bt_credit_pause,
+                        )
+                        _bt_credit_pause(
+                            _backtest_result_id,
+                            _outer_err,
+                            current_time,
+                            _backtest_db_conn,
+                        )
+                    except Exception as _cp_err:
+                        try:
+                            _log(f"credit-exhaustion pause handler failed: {_cp_err}", "red")
+                        except Exception:
+                            pass
+                    try:
+                        _log(
+                            "Backtest paused (insufficient credits) at "
+                            f"{current_time}; exiting cleanly — top up credits "
+                            "and re-queue to resume.",
+                            "yellow",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from intellistock_logger import intellistock_logger as _isl
+                        _isl.clear_backtest_log_buffer()
+                        _isl.close_backtest_log_file()
+                    except Exception:
+                        pass
+                    import sys as _sys
+                    _sys.exit(0)
                 if mode == MODE_BACKTEST and _backtest_result_id is not None:
                     # PAUSE flow (2026-05-22): backtest no longer exits on
                     # LLM-critical. backtest_critical_abort.handle() restores
