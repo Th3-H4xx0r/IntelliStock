@@ -207,7 +207,7 @@
         "allocation_profile": "conviction",
         "allocation_top2_min_raw_score": 0.5,
         "alpaca_key": "AK\u2026(len 26)",
-        "alpaca_secret": "JD\u2026(len 44)",
+        "alpaca_secret": "qs\u2026(len 43)",
         "analyst_panel_cache_enabled": true,
         "analyst_panel_cooldown_seconds": -1,
         "analyst_panel_debate_style": "adversarial",

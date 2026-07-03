@@ -281,6 +281,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     live_news_cache: dict = {}  # fixture_id -> {"ts": wall, "snip": str}; live-card news (5 min)
     odds_cache: dict = {}       # sport_key -> {"ts": wall, "events": [...], "quota": int|None}
     espn_cache: dict = {"ts": 0.0, "board": []}   # ESPN live scores+clock (timing only, ~30s)
+    _calibrator = None            # champion isotonic calibrator (self-improving loop); None = identity
     raw_dumped = False           # one-time raw-market field dump (price diagnostics)
     placed_markets: set = set()  # market_tickers already held/ordered — don't re-order
     _soccer_series = config.soccer_series or discovery.DEFAULT_SOCCER_SERIES
@@ -360,6 +361,18 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 elo_table = fetch_elo_table() or {}
                 log(f"tick {tick}: loaded {len(elo_table)} club Elo ratings.",
                     "white" if elo_table else "yellow")
+            # 1a) Champion calibrator from the self-improving training loop (refit by
+            # the training worker as games settle). Degrade to identity on any failure.
+            if tick == 1 or tick % 60 == 1:
+                try:
+                    _calibrator = kdb.get_champion(conn, config.instance_id, "calibrator")
+                    if _calibrator:
+                        _m = _calibrator.get("metrics", {})
+                        log(f"tick {tick}: loaded champion calibrator ({_calibrator.get('method')}, "
+                            f"{_calibrator.get('n_samples')} samples, held-out log-loss "
+                            f"{_m.get('cal_logloss', 0):.3f}).", "cyan")
+                except Exception:
+                    _calibrator = None
             # 1b) Live national-team Elo (eloratings.net) for World Cup / international
             # markets — replaces the frozen static table when reachable. Degrade-safe:
             # {} keeps the static fallback (national_elo_from), so a feed outage is a no-op.
@@ -679,6 +692,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 market_shrink=config.market_shrink,
                 one_bet_per_fixture=getattr(config.caps, "one_bet_per_fixture", True),
                 devig_method=config.devig_method,
+                calibrator=_calibrator,
             )
             allocations, decisions = plan["allocations"], plan["decisions"]
             log(f"tick {tick}: {len(decisions)} candidate(s) evaluated → {len(allocations)} to place "
