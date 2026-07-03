@@ -228,27 +228,44 @@ def start_worker(conn_factory, *, max_workers: int = 2):  # pragma: no cover - i
         pool.submit(_task)
 
     def _loop():
-        c = conn_factory()
-        # Drain rows left pending/running from a prior process.
-        try:
-            for row in _db.pending_or_running_backtests(c):
-                if row.get("status") == "running":
-                    # orphaned mid-run -> re-queue as pending
-                    _db.update_backtest_progress(c, row["id"], status="pending")
-                    row = {**row, "status": "pending"}
-                _dispatch(row)
-        except Exception:
-            log.exception("backtest worker drain failed")
-        # Watch for new pending jobs.
-        try:
-            feed = (_db._r.db(_db.DB_NAME).table("KalshiBacktests")
-                    .filter({"status": "pending"}).changes(include_initial=False).run(c))
-            for change in feed:
-                new = (change or {}).get("new_val")
-                if new and new.get("status") == "pending":
-                    _dispatch(new)
-        except Exception:
-            log.exception("backtest worker changefeed ended")
+        # Self-healing: a dropped changefeed connection (idle timeout, DB restart,
+        # network blip) must NOT silently kill the worker thread and stop picking up
+        # new backtests. Reconnect + re-watch forever, with a short backoff.
+        import time as _time
+        backoff = 2
+        while True:
+            try:
+                c = conn_factory()
+            except Exception:
+                log.exception("backtest worker: DB connect failed; retrying in %ss", backoff)
+                _time.sleep(backoff); backoff = min(backoff * 2, 30); continue
+            backoff = 2  # connected — reset
+            # Drain rows left pending/running from a prior process.
+            try:
+                for row in _db.pending_or_running_backtests(c):
+                    if row.get("status") == "running":
+                        # orphaned mid-run -> re-queue as pending
+                        _db.update_backtest_progress(c, row["id"], status="pending")
+                        row = {**row, "status": "pending"}
+                    _dispatch(row)
+            except Exception:
+                log.exception("backtest worker drain failed")
+            # Watch for new pending jobs.
+            try:
+                feed = (_db._r.db(_db.DB_NAME).table("KalshiBacktests")
+                        .filter({"status": "pending"}).changes(include_initial=False).run(c))
+                for change in feed:
+                    new = (change or {}).get("new_val")
+                    if new and new.get("status") == "pending":
+                        _dispatch(new)
+            except Exception:
+                log.exception("backtest worker changefeed ended; reconnecting in %ss", backoff)
+            # Feed ended (conn drop / server close) -> close, back off, reconnect + re-watch.
+            try:
+                c.close(noreply_wait=False)
+            except Exception:
+                pass
+            _time.sleep(backoff)
 
     threading.Thread(target=_loop, name="kalshi-backtest-worker", daemon=True).start()
     log.info("kalshi backtest worker started")

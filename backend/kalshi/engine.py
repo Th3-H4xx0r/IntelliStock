@@ -290,14 +290,62 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     if not config.odds_api_key:
         log("No odds API key — pricing model-only. Set odds_api_key (or ODDS_API_KEY env) "
             "to anchor fair value to sharp bookmaker odds and trade where Kalshi disagrees.", "yellow")
+    # DB self-heal state: the loop shares ONE `conn`, so a poll-level reconnect
+    # heals every DB op in the tick. Alert the operator ONCE per outage (not every
+    # tick for 20h) on loss and again on recovery.
+    _db_down = False
+    _db_fail_streak = 0
+
+    def _notify_kalshi(title, body, push_title, push_body):
+        """Best-effort operator alert (Discord + iOS push), same channel as the
+        crash alert. Never raises — a notify failure must not affect trading."""
+        try:
+            from notifications import notify as _n
+            _n(category="kalshi_runtime", instance_id=config.instance_id,
+               title=title, body=body, discord_channel="notifications",
+               push_title=push_title, push_body=push_body)
+        except Exception:
+            pass
+
     tick = 0
     while True:
         # Control-plane poll. A transient DB/connection blip must NOT kill the
         # 24/7 engine — log and retry next tick instead of propagating.
         try:
             inst = kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn) or {}
+            if _db_down:  # a successful poll after an outage == recovered
+                log(f"control-plane: DB connection RECOVERED after {_db_fail_streak} "
+                    f"failed poll(s); engine resumed.", "green")
+                _notify_kalshi(
+                    f"KALSHI DB recovered [{config.instance_id}]",
+                    f"Database connection re-established after {_db_fail_streak} failed "
+                    f"poll(s) (~{_db_fail_streak * config.poll_seconds}s down). Engine resumed.",
+                    "Kalshi DB recovered", "Connection re-established — engine resumed.")
+                _db_down, _db_fail_streak = False, 0
         except Exception as e:
-            log(f"control-plane poll failed ({type(e).__name__}: {e}); retrying next tick.", "yellow")
+            # A closed/dropped connection (idle timeout, DB restart, network blip) must
+            # not wedge the engine on a dead handle — rebuild it and retry. This is the
+            # fix for the 20h "Connection is closed" stall. Non-connection errors are
+            # logged but not treated as an outage (no reconnect churn).
+            if kdb.is_conn_error(e):
+                _db_fail_streak += 1
+                try:
+                    conn = kdb.reconnect(conn)
+                    log(f"control-plane: DB connection lost ({type(e).__name__}); "
+                        f"reconnected (attempt {_db_fail_streak}), will re-poll next tick.", "yellow")
+                except Exception as e2:
+                    log(f"control-plane: DB lost ({type(e).__name__}); reconnect FAILED "
+                        f"({type(e2).__name__}: {e2}); retrying next tick.", "red")
+                if not _db_down:  # first failure of this outage -> alert once
+                    _db_down = True
+                    _notify_kalshi(
+                        f"KALSHI DB connection lost [{config.instance_id}]",
+                        f"{type(e).__name__}: {e}\n\nEngine is SELF-HEALING — auto-reconnecting "
+                        f"every {config.poll_seconds}s until the database is reachable. "
+                        f"You'll get a follow-up when it recovers.",
+                        "Kalshi DB connection lost", f"{type(e).__name__} — self-healing…")
+            else:
+                log(f"control-plane poll failed ({type(e).__name__}: {e}); retrying next tick.", "yellow")
             time.sleep(config.poll_seconds)
             continue
         if not inst.get("runCommand", False):
