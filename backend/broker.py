@@ -24,7 +24,7 @@ from typing import Any, Optional
 from portfolio_emulator import PortfolioEmulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
-from nexus_broker_utils import build_nexus_buy_guard, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
+from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
 from robinhood_data_policy import robinhood_data_fallback_allowed
 
 try:
@@ -8892,6 +8892,27 @@ while not shutdown_requested:
             if _mpg_cap is not None:
                 _log(f"max_positions gate armed: held={len(_mpg_held)}, cap={_mpg_cap}", "cyan")
 
+            # ── Task 13 (spec 5.8): same-cycle sell-proceeds crediting (LIVE
+            # only). Live sells free cash on the async trade_updates WS fill,
+            # so buys sized later in this cycle read pre-sell cached cash and
+            # a rotation's paired buy starves. Book each submit-SUCCESSFUL
+            # sell's expected proceeds (qty×frac×price) here; the buy path
+            # lifts its sizing ceiling by 95% of the booked total via
+            # buy_ceiling(). Backtest is untouched (emulator credits
+            # synchronously). Kill-switch: live_credit_sell_proceeds_enabled
+            # (default True) in the strategy config.
+            _scp_enabled = True
+            _scp_sell_proceeds: list = []
+            if mode == MODE_LIVE:
+                try:
+                    for _scp_spec in (_cached_strategies or []):
+                        _scp_cfg = (_scp_spec or {}).get("config") or {}
+                        if "live_credit_sell_proceeds_enabled" in _scp_cfg:
+                            _scp_enabled = bool(_scp_cfg.get("live_credit_sell_proceeds_enabled"))
+                            break
+                except Exception:
+                    _scp_enabled = True
+
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
                 normalized = None  # reset per-symbol to avoid stale values from previous iteration
@@ -9221,6 +9242,24 @@ while not shutdown_requested:
                                 _bp_cached = float(getattr(portfolio_emulator, "_buying_power", 0.0) or 0.0)
                                 if _bp_cached > 0:
                                     _sizing_ceiling = max(_cash_now, _bp_cached)
+                            # Task 13 (spec 5.8): lift the live sizing ceiling
+                            # by 95% of this cycle's submit-successful sell
+                            # proceeds (booked below after each sell submit).
+                            # Live-only; backtest cash is already credited
+                            # synchronously by the emulator. buy_ceiling()
+                            # clamps the haircut ≤ 1 so the ceiling can never
+                            # exceed cash + proceeds; disabled via the
+                            # live_credit_sell_proceeds_enabled kill-switch.
+                            if mode == MODE_LIVE and _scp_sell_proceeds:
+                                _scp_ceiling = buy_ceiling(_sizing_ceiling, _scp_sell_proceeds, enabled=_scp_enabled)
+                                if _scp_ceiling > _sizing_ceiling:
+                                    _log(
+                                        f"Sell-proceeds credit: sizing ceiling ${_sizing_ceiling:.2f} → "
+                                        f"${_scp_ceiling:.2f} (+95% of ${sum(_scp_sell_proceeds):.2f} "
+                                        f"same-cycle submitted sells)",
+                                        "cyan",
+                                    )
+                                _sizing_ceiling = _scp_ceiling
                             available = max(0.0, _sizing_ceiling - reserved_total - _effective_floor)
                             cash_to_use = min(cash_per_trade, available)
                             # Live-readiness HIGH #9: broker-side max_single_position_pct cap.
@@ -9541,6 +9580,30 @@ while not shutdown_requested:
                                         _mpg_is_full_exit = False
                                     if _mpg_is_full_exit:
                                         _mpg_full_exits.add(_mpg_sym_u)
+
+                            # ── Task 13 (spec 5.8): book expected proceeds of a
+                            # submit-SUCCESSFUL live sell so later buys in this
+                            # SAME cycle may spend 95% of them (buy_ceiling).
+                            # Positions are read AFTER the submit on purpose:
+                            # if the WS fill already landed during the wait,
+                            # the adapter already credited cash AND removed the
+                            # position — qty reads 0 and nothing double-books.
+                            if mode == MODE_LIVE and decision == -1 and _mpg_submit_ok and _scp_enabled:
+                                try:
+                                    _scp_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                                    _scp_qty = float((_scp_pos or {}).get(str(symbol).strip().upper(), 0.0) or 0.0)
+                                    _scp_frac = max(0.0, min(1.0, float(sell_fraction if sell_fraction is not None else 1.0)))
+                                    _scp_expected = _scp_qty * _scp_frac * float(price)
+                                    if _scp_expected > 0:
+                                        _scp_sell_proceeds.append(_scp_expected)
+                                        _log(
+                                            f"Sell-proceeds credit: booked ${_scp_expected:.2f} expected from "
+                                            f"{symbol} sell (cycle total ${sum(_scp_sell_proceeds):.2f}; buys may "
+                                            f"spend 95% after partial-fill haircut)",
+                                            "cyan",
+                                        )
+                                except Exception as _scp_e:
+                                    _log(f"Sell-proceeds booking failed for {symbol}: {type(_scp_e).__name__}: {_scp_e}", "yellow")
 
                 # Capture per-symbol sub-strategy decision for playback UI (skip if no price — trade wasn't executed)
                 if mode == MODE_BACKTEST and _backtest_decisions is not None and not _trade_skipped_no_price:

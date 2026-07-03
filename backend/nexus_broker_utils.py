@@ -128,6 +128,50 @@ def max_positions_gate(held_symbols, cap, planned_sells_full_exit, emitted_new_n
         return True
 
 
+def buy_ceiling(cached_cash, submitted_sells, enabled=True, haircut=0.95) -> float:
+    """Task 13 (spec 5.8) — live buy-sizing ceiling with same-cycle sell proceeds.
+
+    Live sells only free cash when the async trade_updates WS fill lands
+    (alpaca.py fill handler), but the broker reads the adapter's cached cash
+    when it sizes buys later in the SAME cycle. A rotation (sell A, buy B)
+    therefore sized B against pre-sell cash and starved the paired buy. The
+    backtest emulator credits sell proceeds synchronously, so this asymmetry
+    is live-only.
+
+        ceiling = cached_cash + haircut × Σ(expected proceeds of this cycle's
+                                            submit-SUCCESSFUL sells)
+
+    * ``haircut`` (default 0.95) hedges partial fills — a submitted sell is
+      not a filled sell. It is clamped to [0, 1] so the ceiling can NEVER
+      exceed cash + proceeds.
+    * ``enabled=False`` (config kill-switch ``live_credit_sell_proceeds_enabled``)
+      returns the cached cash unchanged.
+    * Fail-safe: malformed entries are ignored; negative/zero proceeds never
+      credit; a malformed cash value degrades to 0.0 (sizes nothing, crashes
+      nothing).
+    """
+    try:
+        cash = float(cached_cash or 0.0)
+    except (TypeError, ValueError):
+        cash = 0.0
+    if not enabled:
+        return cash
+    try:
+        h = float(haircut)
+    except (TypeError, ValueError):
+        h = 0.95
+    h = max(0.0, min(1.0, h))  # never exceed cash + proceeds
+    total = 0.0
+    for entry in (submitted_sells or []):
+        try:
+            v = float(entry or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if v > 0.0:
+            total += v
+    return cash + h * total
+
+
 def _normalize_strategy_name(value) -> str:
     return str(value or "").strip().lower()
 
