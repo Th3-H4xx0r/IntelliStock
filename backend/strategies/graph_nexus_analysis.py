@@ -623,6 +623,11 @@ NEXUS_ROTATION_COOLDOWN_TABLE = "GraphNexusRotationCooldown"
 # This catches typos at persistence time and gives a clean enumeration for downstream consumers.
 _VALID_ACTION_INTENTS = frozenset({
     "hold", "buy", "sell",
+    # Baseline intents emitted by _infer_action_intent (score>0/<0). These were
+    # missing here, so every vanilla buy/sell candidate persisted as "unknown"
+    # (870/877 rows on backtest 586767). "sell_override" is also the exact value
+    # _update_indefinite_outcomes keys the sell-return sign off of.
+    "initial_buy", "add_buy", "sell_override",
     "winner_add_buy", "momentum_amplifier_buy",
     "backfill_queue_buy", "backfill_rotation_buy",
     "direct_reserved_buy", "top_momentum_break_glass_buy",
@@ -9358,8 +9363,97 @@ def _save_trade_contexts_and_outcomes(
                 pass
 
 
-def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: dict) -> None:
-    if conn is None or not prices:
+def _outcome_price_now(symbol: str, prices: dict, overlay_bars: dict | None, date_key: str) -> float | None:
+    """Resolve the current price for an outcome symbol as of ``date_key``.
+
+    ``prices`` is the held-only broker positions dict, so most outcome symbols
+    (which are no longer held) are absent — that was the root cause of frozen
+    outcome rows. Fall back to the overlay-bars cache (the same source
+    ``_fill_outcome_prices`` uses), picking the latest bar dated on-or-before
+    ``date_key`` so we never look forward. Returns None when no price resolves.
+    """
+    px = (prices or {}).get(symbol)
+    try:
+        if px is not None and float(px) > 0:
+            return float(px)
+    except (TypeError, ValueError):
+        pass
+    if overlay_bars:
+        best_bd = ""
+        best_val: float | None = None
+        for bar in (overlay_bars.get(symbol) or []):
+            bd = str(bar.get("t", bar.get("date", "")))[:10]
+            if not bd or bd > date_key:
+                continue
+            try:
+                val = float(bar.get("c", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if val > 0 and bd >= best_bd:
+                best_bd, best_val = bd, val
+        if best_val is not None:
+            return best_val
+    return None
+
+
+def _compute_outcome_progress(doc: dict, symbol: str, price_now, date_key: str, instance_id: str):
+    """Pure computation of the outcome-row update + series doc for one bar.
+
+    Returns ``(update, series_doc)`` or ``None`` when the row cannot advance
+    (no resolvable price or non-positive entry price) — None means the caller
+    leaves the row untouched (no regression back to zeros).
+    """
+    entry_price = float(doc.get("entry_price") or 0.0)
+    try:
+        _px = float(price_now) if price_now is not None else 0.0
+    except (TypeError, ValueError):
+        _px = 0.0
+    if _px <= 0 or entry_price <= 0:
+        return None
+    price_return = ((_px - entry_price) / entry_price) * 100.0
+    action_intent = str(doc.get("action_intent") or "").strip().lower()
+    signed_return = -price_return if action_intent == "sell_override" else price_return
+    entry_date = datetime.strptime(str(doc.get("entry_date") or date_key), "%Y-%m-%d")
+    obs_date = datetime.strptime(date_key, "%Y-%m-%d")
+    days_since = max(0, int((obs_date - entry_date).days))
+    _raw_max = doc.get("max_return_so_far")
+    existing_max = float(_raw_max) if _raw_max is not None else signed_return
+    _raw_min = doc.get("min_return_so_far")
+    existing_min = float(_raw_min) if _raw_min is not None else signed_return
+    update = {
+        "latest_return": round(signed_return, 4),
+        "latest_observation_date": date_key,
+        "max_return_so_far": round(max(existing_max, signed_return), 4),
+        "min_return_so_far": round(min(existing_min, signed_return), 4),
+        "latest_price_return": round(price_return, 4),
+    }
+    for checkpoint in (1, 3, 5, 10, 30, 90):
+        if days_since == checkpoint:
+            update[f"return_{checkpoint}d"] = round(signed_return, 4)
+    series_doc = {
+        "id": f"{doc['id']}|{date_key}",
+        "instance_id": instance_id,
+        "trade_id": doc["id"],
+        "symbol": symbol,
+        "action_intent": action_intent,
+        "entry_date": doc.get("entry_date"),
+        "observation_date": date_key,
+        "days_since_entry": days_since,
+        "price_return": round(price_return, 4),
+        "alpha_return": round(signed_return, 4),
+        "latest_return": round(signed_return, 4),
+        "max_return_so_far": round(max(existing_max, signed_return), 4),
+        "min_return_so_far": round(min(existing_min, signed_return), 4),
+        "government_action_type": doc.get("government_action_type") or "",
+        "event_cluster_key": doc.get("event_cluster_key") or "",
+    }
+    return update, series_doc
+
+
+def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: dict, overlay_bars: dict | None = None) -> None:
+    # overlay_bars lets non-held symbols still resolve a current price; without
+    # it the held-only `prices` dict left 853/877 outcome rows frozen forever.
+    if conn is None or (not prices and not overlay_bars):
         return
     _ensure_nexus_history_table(conn, NEXUS_OUTCOME_SERIES_TABLE)
     _ensure_nexus_history_table(
@@ -9377,47 +9471,16 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
         series_docs = []
         for doc in cursor:
             symbol = str(doc.get("symbol") or "").strip().upper()
-            price_now = prices.get(symbol)
-            entry_price = float(doc.get("entry_price") or 0.0)
-            if not symbol or not price_now or entry_price <= 0:
+            if not symbol:
                 continue
-            price_return = ((float(price_now) - entry_price) / entry_price) * 100.0
-            action_intent = str(doc.get("action_intent") or "").strip().lower()
-            signed_return = -price_return if action_intent == "sell_override" else price_return
-            entry_date = datetime.strptime(str(doc.get("entry_date") or date_key), "%Y-%m-%d")
-            obs_date = datetime.strptime(date_key, "%Y-%m-%d")
-            days_since = max(0, int((obs_date - entry_date).days))
-            _raw_max = doc.get("max_return_so_far")
-            existing_max = float(_raw_max) if _raw_max is not None else signed_return
-            _raw_min = doc.get("min_return_so_far")
-            existing_min = float(_raw_min) if _raw_min is not None else signed_return
-            update = {
-                "latest_return": round(signed_return, 4),
-                "latest_observation_date": date_key,
-                "max_return_so_far": round(max(existing_max, signed_return), 4),
-                "min_return_so_far": round(min(existing_min, signed_return), 4),
-                "latest_price_return": round(price_return, 4),
-            }
-            for checkpoint in (1, 3, 5, 10, 30, 90):
-                if days_since == checkpoint:
-                    update[f"return_{checkpoint}d"] = round(signed_return, 4)
-            series_docs.append({
-                "id": f"{doc['id']}|{date_key}",
-                "instance_id": instance_id,
-                "trade_id": doc["id"],
-                "symbol": symbol,
-                "action_intent": action_intent,
-                "entry_date": doc.get("entry_date"),
-                "observation_date": date_key,
-                "days_since_entry": days_since,
-                "price_return": round(price_return, 4),
-                "alpha_return": round(signed_return, 4),
-                "latest_return": round(signed_return, 4),
-                "max_return_so_far": round(max(existing_max, signed_return), 4),
-                "min_return_so_far": round(min(existing_min, signed_return), 4),
-                "government_action_type": doc.get("government_action_type") or "",
-                "event_cluster_key": doc.get("event_cluster_key") or "",
-            })
+            price_now = _outcome_price_now(symbol, prices, overlay_bars, date_key)
+            if not price_now:
+                continue
+            progress = _compute_outcome_progress(doc, symbol, price_now, date_key, instance_id)
+            if progress is None:
+                continue
+            update, series_doc = progress
+            series_docs.append(series_doc)
             _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).get(doc["id"]).update(update).run(conn)
         if series_docs:
             _r.db(DB_NAME).table(NEXUS_OUTCOME_SERIES_TABLE).insert(series_docs, conflict="replace").run(conn)
@@ -20967,7 +21030,7 @@ class GraphNexusAnalysis:
                 if _conn_out and (prices or strategy_cache):
                     _ob = strategy_cache.get("_overlay_bars_raw") if strategy_cache else None
                     _fill_outcome_prices(_conn_out, instance_id, date_key, prices, overlay_bars=_ob)
-                    _update_indefinite_outcomes(_conn_out, instance_id, date_key, prices)
+                    _update_indefinite_outcomes(_conn_out, instance_id, date_key, prices, overlay_bars=_ob)
 
         # 1-C (bug-sweep 2026-05-28): the FIRST time a live run touches a given
         # trading date, bypass any pre-existing article/sentiment cache for that
