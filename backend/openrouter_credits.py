@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from typing import Any, Callable, Iterable, Optional
 
 _CREDITS_URL = "https://openrouter.ai/api/v1/credits"
@@ -53,17 +54,32 @@ _warn_latched = False
 _last_balance: Optional[float] = None
 # Last affordable-token budget learned from a 402 de-cliff. Drives the proactive
 # pre-clamp so we stop sending calls we already know will 402.
+#
+# STALENESS CONTRACT (review fix on ab35280): this cache must never become a
+# permanent clamp in a long-lived live process after the operator tops up.
+# Three release valves, all fail-open:
+#   1. Any OpenRouter call that succeeds WITHOUT needing the pre-clamp clears
+#      it (llm_utils calls clear_affordable_tokens on unclamped success) —
+#      the mechanically simplest reliable "credits are fine" signal, since a
+#      still-broke account would have 402'd that call instead.
+#   2. The preflight guard clears it whenever a fresh balance reads above the
+#      warn threshold (see check_credit_guard).
+#   3. TTL backstop: entries older than _AFFORDABLE_TOKENS_TTL_SEC are treated
+#      as absent by get_cached_affordable_tokens (lazy expiry — no timer).
+_AFFORDABLE_TOKENS_TTL_SEC = 900.0  # 15 min
 _last_affordable_tokens: Optional[int] = None
+_last_affordable_at: float = 0.0  # time.monotonic() of the last note
 
 
 def reset_state() -> None:
     """Clear the warn latch + cached balances. For test isolation and for a
     broker resume after an operator tops up credits."""
-    global _warn_latched, _last_balance, _last_affordable_tokens
+    global _warn_latched, _last_balance, _last_affordable_tokens, _last_affordable_at
     with _state_lock:
         _warn_latched = False
         _last_balance = None
         _last_affordable_tokens = None
+        _last_affordable_at = 0.0
 
 
 # ── Balance fetch ────────────────────────────────────────────────────────────
@@ -126,7 +142,9 @@ def check_credit_guard(
     - balance ``<=`` halt threshold        → ``"halt"``
     - balance ``<=`` warn threshold        → ``"warn"`` (fires ``notify_fn``
       AT MOST ONCE per process via the warn latch).
-    - otherwise                            → ``"ok"``.
+    - otherwise                            → ``"ok"`` (and any cached 402
+      affordable-token budget is cleared — a healthy balance means the sticky
+      pre-clamp must not outlive a credit top-up).
     """
     global _warn_latched
     warn_usd = _threshold(config, _WARN_KEY, _DEFAULT_WARN_USD)
@@ -154,6 +172,9 @@ def check_credit_guard(
                 pass
         return "warn"
 
+    # Healthy balance (above warn) — release valve #2 for the pre-clamp cache:
+    # the operator has topped up, so stop clamping future calls.
+    clear_affordable_tokens()
     return "ok"
 
 
@@ -185,18 +206,42 @@ def decliff_max_tokens(affordable_n: int) -> int:
 
 def note_affordable_tokens(affordable_n: int) -> None:
     """Cache the affordable-token budget learned from a 402 so future uncapped
-    calls can be pre-clamped before they hit the wire."""
-    global _last_affordable_tokens
+    calls can be pre-clamped before they hit the wire. Stamped with a monotonic
+    timestamp for the TTL backstop (see the staleness contract above). Callers
+    re-note on EVERY 402 that carries an affordable N — including the terminal
+    second 402 of a de-cliff — so the cache always holds the freshest (lowest)
+    budget rather than a stale-high one that would repeat the 402+retry cycle."""
+    global _last_affordable_tokens, _last_affordable_at
     try:
         n = int(affordable_n)
     except (TypeError, ValueError):
         return
     with _state_lock:
         _last_affordable_tokens = n
+        _last_affordable_at = time.monotonic()
+
+
+def clear_affordable_tokens() -> None:
+    """Drop the cached affordable budget. Called when there is evidence the
+    account can afford normal calls again: an OpenRouter call succeeded without
+    needing the pre-clamp, or the preflight guard saw a healthy balance."""
+    global _last_affordable_tokens, _last_affordable_at
+    with _state_lock:
+        _last_affordable_tokens = None
+        _last_affordable_at = 0.0
 
 
 def get_cached_affordable_tokens() -> Optional[int]:
+    """The cached budget, or None when nothing is cached OR the entry is older
+    than the TTL backstop (lazy expiry — the stale entry is dropped here)."""
+    global _last_affordable_tokens, _last_affordable_at
     with _state_lock:
+        if _last_affordable_tokens is None:
+            return None
+        if (time.monotonic() - _last_affordable_at) > _AFFORDABLE_TOKENS_TTL_SEC:
+            _last_affordable_tokens = None
+            _last_affordable_at = 0.0
+            return None
         return _last_affordable_tokens
 
 

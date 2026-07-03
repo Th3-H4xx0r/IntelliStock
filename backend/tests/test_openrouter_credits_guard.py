@@ -352,3 +352,91 @@ def test_preclamp_applies_cached_budget_before_wire(telemetry_clean):
     assert out == '{"text": "hi"}'
     assert len(bodies) == 1
     assert bodies[0]["max_tokens"] == 10261  # pre-clamped from uncapped
+    # A CLAMPED success is not evidence of recovery — the cache survives.
+    assert oc.get_cached_affordable_tokens() == 10773
+
+
+# ── cache staleness: release valves (review fix on ab35280) ──────────────────
+def test_unclamped_success_clears_cache_then_full_cap_restored(telemetry_clean):
+    """Release valve #1: a success that needed NO pre-clamp proves the account
+    can afford normal calls — the sticky budget is dropped, and the next
+    uncapped call goes back to the full 32768 default."""
+    import llm_utils
+    oc.note_affordable_tokens(10773)
+    bodies = []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        bodies.append(dict(json or {}))
+        return _PostResp(payload=_ok_payload())
+
+    with patch("requests.post", side_effect=_fake_post):
+        # Explicit cap below the clamp target → preclamp is a no-op (call is
+        # NOT clamped) → its success clears the cache.
+        out1 = llm_utils._call_openrouter("sk-or-x", _NEMOTRON, "decide", max_output_tokens=2048)
+        out2 = llm_utils._call_openrouter("sk-or-x", _NEMOTRON, "decide", max_output_tokens=0)
+
+    assert out1 == '{"text": "hi"}' and out2 == '{"text": "hi"}'
+    assert bodies[0]["max_tokens"] == 2048  # untouched by preclamp
+    assert oc.get_cached_affordable_tokens() is None  # cleared by out1's success
+    assert bodies[1]["max_tokens"] == llm_utils._OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS
+
+
+def test_ttl_expiry_restores_full_cap(telemetry_clean):
+    """Release valve #3 (backstop): a cached budget older than the TTL is
+    treated as absent — the next uncapped call uses the full default."""
+    import llm_utils
+    oc.note_affordable_tokens(10773)
+    # Age the entry past the TTL.
+    with oc._state_lock:
+        oc._last_affordable_at -= (oc._AFFORDABLE_TOKENS_TTL_SEC + 1.0)
+    assert oc.get_cached_affordable_tokens() is None  # lazy expiry
+    bodies = []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        bodies.append(dict(json or {}))
+        return _PostResp(payload=_ok_payload())
+
+    with patch("requests.post", side_effect=_fake_post):
+        out = llm_utils._call_openrouter("sk-or-x", _NEMOTRON, "decide", max_output_tokens=0)
+
+    assert out == '{"text": "hi"}'
+    assert bodies[0]["max_tokens"] == llm_utils._OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS
+
+
+def test_guard_healthy_balance_clears_cache():
+    """Release valve #2: the preflight guard sees a balance above the warn
+    threshold (credits topped up) → drops the sticky budget. Warn keeps it."""
+    oc.note_affordable_tokens(10773)
+    assert _guard_at(2.9) == "warn"          # low balance: cache survives
+    assert oc.get_cached_affordable_tokens() == 10773
+    assert _guard_at(10.0) == "ok"           # healthy: cache cleared
+    assert oc.get_cached_affordable_tokens() is None
+
+
+def test_terminal_second_402_recaches_lower_n(telemetry_clean):
+    """Minor review fix: the SECOND 402's affordable N is fresher (lower) —
+    it must replace the stale-high first N so the next pre-clamp doesn't
+    replay the same 402+de-cliff cycle."""
+    import llm_utils
+    bodies = []
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        bodies.append(dict(json or {}))
+        if len(bodies) == 1:
+            return _PostResp(status_code=402, payload={"error": {"code": 402}}, text=_402_TEXT)
+        if len(bodies) == 2:
+            return _PostResp(
+                status_code=402, payload={"error": {"code": 402}},
+                text='{"error": {"message": "You can only afford 900 tokens.", "code": 402}}',
+            )
+        return _PostResp(payload=_ok_payload())
+
+    with patch("requests.post", side_effect=_fake_post):
+        out1 = llm_utils._call_openrouter("sk-or-x", _NEMOTRON, "decide", max_output_tokens=0)
+        out2 = llm_utils._call_openrouter("sk-or-x", _NEMOTRON, "decide", max_output_tokens=0)
+
+    assert out1 == ""                                # double-402 → terminal
+    assert oc.get_cached_affordable_tokens() == 900  # re-cached from the 2nd 402
+    assert out2 == '{"text": "hi"}'
+    # Next call pre-clamped to the FRESH budget: max(2048, 900-512) = 2048.
+    assert bodies[2]["max_tokens"] == 2048

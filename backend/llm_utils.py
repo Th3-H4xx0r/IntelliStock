@@ -4691,6 +4691,12 @@ def _call_openrouter(
     # done the single clamped retry so a second 402 falls through to the
     # normal terminal path (Task-2 classify → insufficient_credits).
     _decliff_retried = False
+    # True when the proactive pre-clamp actually REDUCED this call's wire
+    # max_tokens. A success where this stayed False (no clamp was needed) is
+    # evidence the account can afford normal calls again, so the sticky cached
+    # budget is cleared on that success (review fix on ab35280 — otherwise one
+    # 402 clamps every later call in a long-lived live process forever).
+    _preclamped = False
     try:
         import requests as _requests
         url = (base_url or "https://openrouter.ai/api/v1").rstrip("/") + "/chat/completions"
@@ -4730,7 +4736,10 @@ def _call_openrouter(
             )
             _cached_aff = _or_cached_aff()
             if _cached_aff is not None:
-                body["max_tokens"] = _or_preclamp(body["max_tokens"], _cached_aff)
+                _clamped_max = _or_preclamp(body["max_tokens"], _cached_aff)
+                if _clamped_max != body["max_tokens"]:
+                    body["max_tokens"] = _clamped_max
+                    _preclamped = True
         except Exception:
             pass
         effort = normalize_reasoning_effort(reasoning_effort)
@@ -4847,6 +4856,20 @@ def _call_openrouter(
                                 _err2 = r2.json()
                             except Exception:
                                 _err2 = (r2.text or "")[:500] if hasattr(r2, "text") else ""
+                            # Review fix (minor): the second 402's affordable N
+                            # is FRESHER (lower — the clamped attempt still
+                            # spent the prompt tokens). Re-cache it so the next
+                            # pre-clamp uses the tighter budget instead of
+                            # replaying the same 402+de-cliff cycle.
+                            if r2.status_code == 402:
+                                try:
+                                    _aff2 = _or_parse_aff(
+                                        (r2.text or "") if hasattr(r2, "text") else str(_err2)
+                                    )
+                                    if _aff2 is not None:
+                                        _or_note_aff(_aff2)
+                                except Exception:
+                                    pass
                             try:
                                 _stash_last_http(
                                     status=r2.status_code,
@@ -4926,6 +4949,17 @@ def _call_openrouter(
                     _stash_last_http(status=200, body=None, exc=None)
                 except Exception:
                     pass
+                # Review fix on ab35280 (release valve #1): a success that
+                # needed NO pre-clamp and NO de-cliff means the account can
+                # afford normal calls — drop any sticky cached 402 budget so
+                # one old 402 can't clamp every later call in a long-lived
+                # process. Best-effort/fail-open.
+                if not _preclamped and not _decliff_retried:
+                    try:
+                        from openrouter_credits import clear_affordable_tokens as _or_clear_aff
+                        _or_clear_aff()
+                    except Exception:
+                        pass
                 _safe_record(
                     provider="openrouter", model=model, usage=_or_usage, ok=True,
                     duration_ms=int((time.monotonic() - _t0) * 1000),
