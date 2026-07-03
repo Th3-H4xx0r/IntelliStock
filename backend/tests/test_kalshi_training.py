@@ -64,6 +64,33 @@ def test_apply_is_monotone_and_bounded():
     assert lo <= hi  # monotone
 
 
+def test_apply_never_raises_on_malformed_docs():
+    # Degrade-safe contract: an unusable calibrator doc -> IDENTITY, never a throw.
+    for bad in ({"method": "isotonic", "calibrator": [[1]]},          # bad pair shape
+                {"method": "isotonic", "calibrator": "nope"},          # not a list
+                {"method": "shrink", "shrink_strength": "x"},          # non-numeric -> identity
+                {"method": "mystery"}, {"calibrator": None}, {}, None):
+        assert training.apply(bad, 0.42) == 0.42
+    # A shrink doc with a NULL strength must not crash; it defaults to a valid shrink
+    # (bounded — not necessarily identity).
+    r = training.apply({"method": "shrink", "shrink_strength": None}, 0.42)
+    assert 0.0 <= r <= 1.0
+
+
+def test_apply_clamps_nan_and_inf():
+    assert training.apply(None, 0.5) == 0.5
+    assert 0.0 <= training.apply({"method": "shrink", "shrink_strength": 0.3}, float("inf")) <= 1.0
+
+
+def test_evaluate_and_reliability_tolerate_none_samples():
+    doc = training.fit_calibrator([(0.7, 1.0)] * 60, min_total=50)
+    samples = [(0.4, 1.0), (None, 0.0), (0.6, None), (0.5, 1.0)]
+    ev = training.evaluate(samples, doc)          # must not raise; counts clean only
+    assert ev["n_eval"] == 2
+    rb = training.reliability_buckets(samples, doc)  # must not raise
+    assert isinstance(rb, list)
+
+
 def test_evaluate_reports_raw_and_calibrated():
     samples = [(0.8, 0.0)] * 50 + [(0.8, 1.0)] * 50  # 0.8 pred, actual 50%
     doc = training.fit_calibrator(samples, min_total=50)

@@ -4176,15 +4176,28 @@ def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(
     sample count, held-out raw-vs-calibrated log-loss/Brier, and reliability points
     (predicted vs actual). {champion: null} until the loop produces one."""
     _kalshi_brokerage_row(conn, brokerage_id)
+    # Cross-instance guard: the path instance_id must belong to this brokerage, else
+    # any authenticated user could read another instance's calibrator metrics.
+    try:
+        _inst = _r_auth.db("IntelliStock").table("Instances").get(instance_id).run(conn) or {}
+    except Exception:
+        _inst = {}
+    if _inst.get("kind") != "kalshi" or _inst.get("brokerage_id") != brokerage_id:
+        return {"champion": None, "model": None}
     from kalshi.db import get_champion
     champ = get_champion(conn, instance_id, "calibrator")
-    if not champ:
-        return {"champion": None}
-    return {"champion": {
-        "id": champ.get("id"), "method": champ.get("method"),
-        "n_samples": champ.get("n_samples"), "created_at": champ.get("created_at"),
-        "metrics": champ.get("metrics", {}), "reliability": champ.get("reliability", []),
-    }}
+    model = get_champion(conn, instance_id, "model")   # SP2: physical/learned/ensemble
+    model_out = None
+    if model:
+        model_out = {"champion": model.get("champion"), "ranked": model.get("ranked", []),
+                     "metrics": model.get("metrics", {}), "n_train": model.get("n_train"),
+                     "n_test": model.get("n_test"), "created_at": model.get("created_at")}
+    calib = None
+    if champ:
+        calib = {"id": champ.get("id"), "method": champ.get("method"),
+                 "n_samples": champ.get("n_samples"), "created_at": champ.get("created_at"),
+                 "metrics": champ.get("metrics", {}), "reliability": champ.get("reliability", [])}
+    return {"champion": calib, "model": model_out}
 
 
 @app.post("/brokerages/{brokerage_id}/kalshi/kill", response_class=JSONResponse)

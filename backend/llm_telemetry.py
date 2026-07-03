@@ -464,9 +464,8 @@ def _do_flush() -> None:
         r_module.db(db_name).table(_LLM_USAGE_TABLE).insert(rows).run(conn)
         with _state_lock:
             _state["last_flush_ts"] = int(time.time() * 1000)
+            _state["consecutive_flush_failures"] = 0   # recovered
     except Exception as e:
-        print(f"[llm_telemetry] flush failed ({len(rows)} rows): {e}",
-              file=sys.stderr, flush=True)
         # Re-queue the failed batch so the next flush retries instead of
         # silently dropping the rows. Without this, a 30-second RethinkDB
         # outage at 50 rows/flush burns ~300 records. We bound the re-queue
@@ -474,11 +473,21 @@ def _do_flush() -> None:
         # if the buffer is already full of newer rows, drop the oldest of
         # the failed batch first (preserving the most recent activity).
         with _state_lock:
+            fails = int(_state.get("consecutive_flush_failures", 0)) + 1
+            _state["consecutive_flush_failures"] = fails
             _state["write_errors_24h"] = int(_state.get("write_errors_24h", 0)) + 1
             hard_cap = int(_state.get("max_buffer_hard_cap", 5000))
             remaining_capacity = max(0, hard_cap - len(_buffer))
             if remaining_capacity > 0:
                 _buffer.extendleft(reversed(rows[-remaining_capacity:]))
+        # THROTTLE + TRUNCATE: a transient DB blip must not flood the log. Log only
+        # the FIRST failure of an outage, then every 20th — and only the error's first
+        # line, never the giant insert payload (a rethinkdb write error stringifies the
+        # ENTIRE query otherwise, which is the wall of text we saw).
+        if fails == 1 or fails % 20 == 0:
+            first_line = (str(e).splitlines() or [str(e)])[0][:180]
+            print(f"[llm_telemetry] flush failed ({len(rows)} rows, {fails} consecutive): "
+                  f"{first_line}", file=sys.stderr, flush=True)
     finally:
         if conn is not None:
             try:
@@ -493,6 +502,11 @@ def _flusher_loop() -> None:
             if _state.get("stop_flusher"):
                 return
             interval = float(_state.get("flush_interval_s", 5.0))
+            fails = int(_state.get("consecutive_flush_failures", 0))
+        # Back off during a sustained outage so we stop hammering a down DB (and stop
+        # spamming): exponential up to a 2-minute cap while consecutive flushes fail.
+        if fails:
+            interval = min(interval * (2 ** min(fails, 5)), 120.0)
         time.sleep(interval)
         _do_flush()
 

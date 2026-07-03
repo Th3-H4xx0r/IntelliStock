@@ -73,49 +73,68 @@ def fit_calibrator(samples, *, min_total: int = 100, shrink_strength: float = 0.
 
 
 def apply(doc, p):
-    """Apply a calibrator doc to a probability. Identity for a missing/identity doc.
-    Result is clamped to [0,1]. Monotone."""
+    """Apply a calibrator doc to a probability. Identity for a missing/identity/
+    malformed doc. Result is clamped to [0,1] and monotone.
+
+    HARDENED (degrade-safe contract): this NEVER raises. A structurally-odd champion
+    doc (from a migration, manual DB edit, or future writer) degrades to identity
+    rather than throwing — because a throw here, at the live pricing call site
+    (orchestrator), would silently zero out a whole tick's trading."""
     if p is None:
         return p
-    p = max(0.0, min(1.0, float(p)))
+    try:
+        p = max(0.0, min(1.0, float(p)))
+    except (TypeError, ValueError):
+        return p
     if not doc:
         return p
-    method = doc.get("method")
-    if method == "isotonic" and doc.get("calibrator"):
-        cal = [(float(x), float(y)) for x, y in doc["calibrator"]]
-        return max(0.0, min(1.0, calibration.apply_isotonic(cal, p)))
-    if method == "shrink":
-        return calibration.shrink(p, strength=float(doc.get("shrink_strength", 0.4)))
+    try:
+        method = doc.get("method")
+        if method == "isotonic" and doc.get("calibrator"):
+            cal = [(float(x), float(y)) for x, y in doc["calibrator"]]
+            return max(0.0, min(1.0, calibration.apply_isotonic(cal, p)))
+        if method == "shrink":
+            strength = doc.get("shrink_strength")
+            return calibration.shrink(p, strength=float(strength if strength is not None else 0.4))
+    except Exception:
+        return p
     return p
 
 
+def _clean(samples):
+    return [(p, o) for p, o in (samples or []) if p is not None and o is not None]
+
+
 def _logloss_brier(samples, doc):
-    if not samples:
+    clean = _clean(samples)
+    if not clean:
         return 0.0, 0.0
     ll = 0.0
     br = 0.0
-    for p, o in samples:
+    for p, o in clean:
         q = apply(doc, p) if doc else max(0.0, min(1.0, float(p)))
         q = max(1e-6, min(1.0 - 1e-6, q))
         ll += -(o * math.log(q) + (1.0 - o) * math.log(1.0 - q))
         br += (q - o) ** 2
-    n = len(samples)
+    n = len(clean)
     return ll / n, br / n
 
 
 def evaluate(samples, doc) -> dict:
-    """Held-out raw-vs-calibrated log-loss + Brier on `(pred, 0/1)` samples."""
-    raw_ll, raw_br = _logloss_brier(samples, None)
-    cal_ll, cal_br = _logloss_brier(samples, doc)
+    """Held-out raw-vs-calibrated log-loss + Brier on `(pred, 0/1)` samples. `n_eval`
+    counts only clean (non-None) samples."""
+    clean = _clean(samples)
+    raw_ll, raw_br = _logloss_brier(clean, None)
+    cal_ll, cal_br = _logloss_brier(clean, doc)
     return {"raw_logloss": raw_ll, "cal_logloss": cal_ll,
-            "raw_brier": raw_br, "cal_brier": cal_br, "n_eval": len(samples)}
+            "raw_brier": raw_br, "cal_brier": cal_br, "n_eval": len(clean)}
 
 
 def reliability_buckets(samples, doc=None, *, n_buckets: int = 5) -> list:
     """Predicted-vs-actual reliability points (for a UI reliability curve). Bins
     calibrated predictions into `n_buckets` and reports avg predicted vs hit rate."""
     buckets = [[0, 0.0, 0.0] for _ in range(n_buckets)]  # [n, sum_pred, sum_outcome]
-    for p, o in samples or []:
+    for p, o in _clean(samples):
         q = apply(doc, p)
         idx = min(n_buckets - 1, max(0, int(q * n_buckets)))
         buckets[idx][0] += 1

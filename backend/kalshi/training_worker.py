@@ -17,29 +17,37 @@ log = logging.getLogger("kalshi.training_worker")
 
 
 def refit_once(conn, instance_id, train_samples, test_samples, *, new_id, now_iso,
-               min_total: int = 100, promote: bool = True) -> dict:
-    """Fit a calibrator on `train_samples`, score it on held-out `test_samples`,
-    persist the version, and promote to champion IFF calibrated log-loss does not
-    regress vs the raw model. Returns the version doc with a `promoted` flag.
+               min_total: int = 100, min_eval: int = 30, promote: bool = True) -> dict:
+    """Fit a calibrator on `train_samples`, score it on GENUINELY HELD-OUT
+    `test_samples`, persist the version, and promote to champion IFF held-out
+    calibrated log-loss does not regress vs the raw model. Returns the version with
+    a `promoted` flag.
 
-    Falls back to train_samples for evaluation when no test split is given (thin
-    data) — the promotion gate then just guards against an actively harmful fit."""
+    CRITICAL — never gate on in-sample fit: isotonic regression is a projection onto
+    the monotone cone that already contains the identity map, so calibrated loss is
+    GUARANTEED not to increase on the training data — evaluating there would promote
+    every fit, including ones that regress on unseen games. So promotion requires a
+    real held-out set of >= `min_eval` samples; without one we record the version but
+    do NOT promote (it hasn't been validated)."""
     doc = training.fit_calibrator(train_samples, min_total=min_total)
-    eval_set = test_samples or train_samples
-    metrics = training.evaluate(eval_set, doc)
+    test_metrics = training.evaluate(test_samples, doc)     # held-out split
+    has_holdout = test_metrics["n_eval"] >= min_eval
+    # Stored metrics reflect the held-out split when we have one; otherwise the
+    # in-sample train set purely for visibility (never used to promote).
+    metrics = test_metrics if has_holdout else training.evaluate(train_samples, doc)
+    eval_for_curve = test_samples if has_holdout else train_samples
     version = {
         "id": new_id, "instance_id": instance_id, "kind": "calibrator",
         "created_at": now_iso, "is_champion": False,
         "method": doc["method"], "calibrator": doc["calibrator"],
         "shrink_strength": doc["shrink_strength"], "n_samples": doc["n_samples"],
-        "metrics": metrics,
-        "reliability": training.reliability_buckets(eval_set, doc),
+        "held_out": has_holdout, "metrics": metrics,
+        "reliability": training.reliability_buckets(eval_for_curve, doc),
     }
     _db.save_model_version(conn, version)
-    # Never ship a worse model: promote only if calibration helped (or is neutral)
-    # AND we actually have data. Identity fits are neutral and harmless to promote,
-    # but there's no point — require a real (isotonic/shrink) fit with samples.
-    improved = (metrics["cal_logloss"] <= metrics["raw_logloss"] + 1e-9)
+    # Never ship a worse model: require a real held-out win from a real (non-identity)
+    # fit with training data.
+    improved = has_holdout and (test_metrics["cal_logloss"] <= test_metrics["raw_logloss"] + 1e-9)
     promoted = bool(promote and doc["n_samples"] > 0 and doc["method"] != "identity" and improved)
     if promoted:
         _db.set_champion(conn, new_id, instance_id, "calibrator")
@@ -58,28 +66,44 @@ def _new_id(instance_id: str) -> str:
 
 
 def build_refit_fn(*, provider_factory, model_fn, leagues, start_date,
-                   end_date_fn, instance_id: str = "__default__", min_total: int = 100):
-    """Return a `refit(conn) -> dict|None` that fetches settled fixtures, gathers
-    per-side calibration samples, splits train/test by fixture (no leakage), and
-    calls `refit_once`. `end_date_fn()` returns today's date string so the window
-    rolls forward. Degrade-safe: returns None on any data failure."""
+                   end_date_fn, instance_id: str = "__default__", min_total: int = 100,
+                   feat_fn=None):
+    """Return a `refit(conn) -> dict|None` that fetches settled fixtures and refits
+    (1) the isotonic calibrator (SP1) and, when `feat_fn` is given, (2) the model
+    champion — physical/learned/ensemble comparison (SP2). Deterministic split by
+    fixture (no leakage). Degrade-safe: returns None on any data failure; a model
+    refit failure never blocks the calibrator."""
     def refit(conn):
         try:
             provider = provider_factory(conn)
             fixtures = [f for f in provider.fixtures(leagues, start_date, end_date_fn())
                         if (f or {}).get("result") in ("home", "draw", "away")]
+            if not fixtures:
+                return None
+            # Deterministic split: sort by kickoff then fixture_id (stable tie-break so
+            # simultaneous kickoffs don't flip between train/test across refits).
+            fixtures.sort(key=lambda f: (str(f.get("kickoff_ts") or ""), str(f.get("fixture_id") or "")))
+            train_fx, test_fx = fixtures[::2], fixtures[1::2]
+            train = training.gather_samples_from_settled(train_fx, model_fn)
+            test = training.gather_samples_from_settled(test_fx, model_fn)
         except Exception:
-            log.exception("training: fixture fetch failed")
+            log.exception("training: fixture fetch/gather failed")
             return None
-        if not fixtures:
-            return None
-        fixtures.sort(key=lambda f: str(f.get("kickoff_ts") or f.get("fixture_id") or ""))
-        train_fx, test_fx = fixtures[::2], fixtures[1::2]
-        train = training.gather_samples_from_settled(train_fx, model_fn)
-        test = training.gather_samples_from_settled(test_fx, model_fn)
-        return refit_once(conn, instance_id, train, test,
-                          new_id=_new_id(instance_id), now_iso=_now_iso(),
-                          min_total=min_total)
+        cal_version = refit_once(conn, instance_id, train, test,
+                                 new_id=_new_id(instance_id), now_iso=_now_iso(),
+                                 min_total=min_total)
+        if feat_fn is not None:   # SP2: also refit + promote the model champion
+            try:
+                from kalshi import model_ensemble
+                mv = model_ensemble.refit_model_once(
+                    conn, instance_id, fixtures, feat_fn,
+                    new_id=f"model|{instance_id}|{_new_id(instance_id).split('|')[-1]}",
+                    now_iso=_now_iso())
+                cal_version = dict(cal_version or {})
+                cal_version["model_champion"] = mv.get("champion")
+            except Exception:
+                log.exception("training: model champion refit failed (calibrator unaffected)")
+        return cal_version
     return refit
 
 
