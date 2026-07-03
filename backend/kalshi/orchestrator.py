@@ -33,6 +33,8 @@ def plan_and_allocate(
     one_bet_per_fixture: bool = True,
     devig_method: str = "power",
     calibrator: dict | None = None,
+    model_champion: str = "physical",
+    model_probs_fn=None,
 ) -> dict:
     """fixtures: each {fixture_id, expected_goals, sharp_probs, analyst:{adjustments,
     rationales}, kalshi_markets, liquidity, hours_to_kickoff, model_confidence}.
@@ -56,6 +58,23 @@ def plan_and_allocate(
         player_probs = fx.get("player_probs")
         fused = build_market_probs(eg, sharp, adjustments, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
         model_only = build_market_probs(eg, {}, {}, player_probs=player_probs, w_sharp=w_sharp, llm_cap=llm_cap)
+        # SP2 MODEL CHAMPION: when a learned/ensemble model has beaten the physical one
+        # on held-out data, re-fuse the WINNER group off that model instead (same sharp
+        # weighting). Gated on model_champion != 'physical', so it is a strict no-op on
+        # the safe default — no live behaviour change until a real champion switch.
+        if model_champion and model_champion != "physical" and model_probs_fn and fused.get("winner"):
+            try:
+                mc = model_probs_fn(fx)
+            except Exception:
+                mc = None
+            if mc:
+                sw = (sharp or {}).get("winner")
+                if sw:
+                    fused["winner"] = renormalize_group(
+                        {s: w_sharp * float(sw.get(s, 0.0)) + (1.0 - w_sharp) * float(mc.get(s, 0.0))
+                         for s in ("home", "draw", "away")})
+                else:
+                    fused["winner"] = renormalize_group({s: float(mc.get(s, 0.0)) for s in ("home", "draw", "away")})
         # MARKET ANCHOR: with no sharp line, pull the (overconfident) model toward the
         # de-vigged Kalshi market so edge = a SHRUNK model-vs-market disagreement, not
         # the model's blind view. Only fires when there is no sharp anchor already.

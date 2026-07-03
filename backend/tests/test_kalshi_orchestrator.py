@@ -194,3 +194,38 @@ def test_calibrator_none_is_identity():
     fa = {d.get("side"): d["fused_fair"] for d in a["decisions"]}
     fb = {d.get("side"): d["fused_fair"] for d in b["decisions"]}
     assert fa == fb
+
+
+def test_model_champion_overrides_winner_when_nonphysical():
+    """A learned/ensemble champion re-fuses the winner group; 'physical' is a no-op."""
+    asks = {"home": 55, "draw": 26, "away": 19}
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0)
+    # a champion model that strongly favours AWAY (opposite of the physical home lean)
+    away_fn = lambda fx: {"home": 0.1, "draw": 0.2, "away": 0.7}
+
+    base = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common,
+                             model_champion="physical", model_probs_fn=away_fn)  # gated off
+    ens = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common,
+                            model_champion="ensemble", model_probs_fn=away_fn)   # active
+
+    def side_fair(out, side):
+        return next(d["fused_fair"] for d in out["decisions"] if d.get("side") == side)
+
+    # physical champion -> away_fn ignored; ensemble champion -> away prob rises
+    assert side_fair(ens, "away") > side_fair(base, "away")
+    assert abs(sum(side_fair(ens, s) for s in ("home", "draw", "away")) - 1.0) < 1e-6
+
+
+def test_model_champion_physical_is_identity():
+    asks = {"home": 55, "draw": 26, "away": 19}
+    common = dict(instance_id="i1", brokerage_id="b1", ts="t", tier="medium", caps=CAPS,
+                  fee_rate=0.07, edge_threshold=0.01, reserve_frac=0.0,
+                  expected_better_soon=False, market_shrink=0.0)
+    a = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common)
+    b = plan_and_allocate([_fixture_3way("f1", 2.4, 0.4, asks)], **common,
+                          model_champion="physical", model_probs_fn=lambda fx: {"home": 0.9})
+    fa = {d.get("side"): d["fused_fair"] for d in a["decisions"]}
+    fb = {d.get("side"): d["fused_fair"] for d in b["decisions"]}
+    assert fa == fb

@@ -73,11 +73,13 @@ def _start_training_worker(instance_id, cfg) -> None:  # pragma: no cover - inte
         # seeded "__default__" bootstrap). start_date is intentionally recent — the model
         # prices with a single point-in-time Elo snapshot, so training only on the
         # current window keeps that a minor approximation, not a deep-history look-ahead.
+        from kalshi.model_ensemble import build_feature_fn
         refit = training_worker.build_refit_fn(
             provider_factory=provider_factory, model_fn=model_fn, leagues=leagues,
             start_date="2026-01-01",
             end_date_fn=lambda: _dt.datetime.utcnow().strftime("%Y-%m-%d"),
-            instance_id=instance_id, min_total=100)
+            instance_id=instance_id, min_total=100,
+            feat_fn=build_feature_fn({}, {}))   # SP2: also refit the model champion
         try:
             from notifications import notify as _notify
         except Exception:
