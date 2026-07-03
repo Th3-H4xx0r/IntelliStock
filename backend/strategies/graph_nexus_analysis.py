@@ -16567,6 +16567,18 @@ def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
         pass
 
 
+# Reason-string tags that mark a PROTECTIVE risk exit (as opposed to a
+# signal-driven sell). V31 grace must NEVER suppress these — grace gates
+# signal sells only (its purpose is protecting fresh positions from churn).
+# Matched as substrings against fresh_reason; they correspond to the exit
+# reasons emitted inside _evaluate_position_risk:
+#   "Fast loser cut: …"   "Circuit breaker: …"
+#   "Trailing stop: …"    "Hold-limit exit: …"
+# Forensic audit of backtest 586767: ZERO risk exits fired all run because
+# grace vetoed fast-loser/circuit-breaker cuts for the whole ~10d median hold.
+_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit")
+
+
 def _evaluate_position_risk(
     sym: str,
     *,
@@ -17009,8 +17021,14 @@ def _evaluate_position_risk(
                     elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and _profit_marker == _entry_key:
                         _log(f"Profit take SKIP (already taken): {sym} gain={_unrealized_pct:+.1f}% but already trimmed for entry={_entry_key[:16]}", "cyan")
 
-            _is_circuit_breaker_sell = bool(fresh_reason and "Circuit breaker" in fresh_reason)
-            if fresh_score == -1 and not _hold_limit_forced and not _is_circuit_breaker_sell:
+            # V31 grace gates SIGNAL-driven sells only. Protective risk exits
+            # (Fast loser / Circuit breaker / Trailing stop / Hold-limit) must
+            # survive grace untouched — see _RISK_EXIT_TAGS. (_hold_limit_forced
+            # is already covered by the "Hold-limit" tag but kept explicit.)
+            _is_risk_exit_sell = bool(
+                fresh_reason and any(tag in fresh_reason for tag in _RISK_EXIT_TAGS)
+            )
+            if fresh_score == -1 and not _hold_limit_forced and not _is_risk_exit_sell:
                 _grace_days = held_days
                 _grace_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
                 # Mirror the inlined original: grace fires only when _ep>0 and _cp>0 (which
