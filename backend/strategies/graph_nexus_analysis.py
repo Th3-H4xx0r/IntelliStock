@@ -18281,25 +18281,35 @@ def _apply_trade_overlay(
         "Return only the bounded overlay decision."
     )
     _overlay_timeout = int(config.get("overlay_llm_timeout_sec", 60) or 60)
-    raw = _scl_guarded(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _TradeOverlayResponse,
-        attribution_keys={
-            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
-            "instance_id": (config or {}).get("_telemetry_instance_id"),
-            "call_site": "overlay",
-        },
-        system_prompt=system_prompt,
-        max_output_tokens=0,
-        timeout_sec=_overlay_timeout,
-        retries=1,
-        output_retries=2,
-        provider_config=provider_config,
-        prefer_raw_json=True,
-    )
+    # Enter the telemetry context INSIDE the worker (this body runs in a
+    # ThreadPoolExecutor thread with no ambient context) so usage rows
+    # attribute call_site="overlay" instead of "(unset)". The attribution_keys
+    # below still enrich the LLMCriticalFailure exception path — both needed.
+    with llm_call_context(
+        backtest_id=(config or {}).get("_telemetry_backtest_id"),
+        instance_id=(config or {}).get("_telemetry_instance_id"),
+        strategy="GraphNexusAnalysis",
+        call_site="overlay",
+    ):
+        raw = _scl_guarded(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _TradeOverlayResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "overlay",
+            },
+            system_prompt=system_prompt,
+            max_output_tokens=0,
+            timeout_sec=_overlay_timeout,
+            retries=1,
+            output_retries=2,
+            provider_config=provider_config,
+            prefer_raw_json=True,
+        )
     trace = _build_llm_trace("overlay", provider, model, prompt, system_prompt, prompt_version, raw is not None)
     if raw is None:
         return {}, trace
@@ -18409,24 +18419,33 @@ def _apply_etf_trade_overlay(
         'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"],"ra":"Gold trend accelerating on Fed pivot"}\n'
         "Return only the bounded overlay decision."
     )
-    raw = _scl_guarded(
-        provider,
-        api_key,
-        model,
-        prompt,
-        _TradeOverlayResponse,
-        attribution_keys={
-            "backtest_id": (config or {}).get("_telemetry_backtest_id"),
-            "instance_id": (config or {}).get("_telemetry_instance_id"),
-            "call_site": "overlay_etf",
-        },
-        system_prompt=system_prompt,
-        max_output_tokens=0,
-        retries=2,
-        output_retries=2,
-        provider_config=provider_config,
-        prefer_raw_json=True,
-    )
+    # Enter the telemetry context INSIDE the worker (runs in a ThreadPoolExecutor
+    # thread with no ambient context) so usage rows attribute call_site="overlay_etf"
+    # instead of "(unset)". attribution_keys still enrich the exception path.
+    with llm_call_context(
+        backtest_id=(config or {}).get("_telemetry_backtest_id"),
+        instance_id=(config or {}).get("_telemetry_instance_id"),
+        strategy="GraphNexusAnalysis",
+        call_site="overlay_etf",
+    ):
+        raw = _scl_guarded(
+            provider,
+            api_key,
+            model,
+            prompt,
+            _TradeOverlayResponse,
+            attribution_keys={
+                "backtest_id": (config or {}).get("_telemetry_backtest_id"),
+                "instance_id": (config or {}).get("_telemetry_instance_id"),
+                "call_site": "overlay_etf",
+            },
+            system_prompt=system_prompt,
+            max_output_tokens=0,
+            retries=2,
+            output_retries=2,
+            provider_config=provider_config,
+            prefer_raw_json=True,
+        )
     trace = _build_llm_trace("overlay_etf", provider, model, prompt, system_prompt, prompt_version, raw is not None)
     if raw is None:
         return {}, trace
