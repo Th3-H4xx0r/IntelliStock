@@ -1671,6 +1671,7 @@ def _try_raw_structured_json_once(
     timeout_sec: int | None,
     provider_config: dict[str, Any] | None = None,
     system_prompt: str | None = None,
+    retries: int = 0,
 ) -> Any | None:
     _LAST_PLAIN_LLM_CALL_ERROR.error = ""
     raw_prompt = _raw_structured_fallback_prompt(prompt, output_type)
@@ -1684,7 +1685,7 @@ def _try_raw_structured_json_once(
         raw_prompt,
         max_output_tokens=max_output_tokens,
         timeout_sec=timeout_sec,
-        retries=0,
+        retries=max(0, int(retries or 0)),
         response_mime_type="application/json",
         provider_config=provider_config,
     )
@@ -2797,6 +2798,7 @@ def call_structured_llm_by_provider(
                                 system_prompt=system_prompt if isinstance(system_prompt, str) else (
                                     "\n".join(system_prompt) if isinstance(system_prompt, (list, tuple)) else None
                                 ),
+                                retries=retries,
                             )
                             if repaired is not None:
                                 _LAST_STRUCTURED_LLM_CALL.data.update({
@@ -3005,6 +3007,7 @@ def call_structured_llm_by_provider(
                             max_output_tokens=max_output_tokens,
                             timeout_sec=timeout_sec,
                             provider_config=provider_config,
+                            retries=retries,
                         )
                         if repaired is not None:
                             _LAST_STRUCTURED_LLM_CALL.data.update({
