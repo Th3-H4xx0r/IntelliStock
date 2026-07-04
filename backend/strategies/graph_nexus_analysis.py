@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
+# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "rotation_graph_gate_max_loss_pct": 0.0, "anchor_reinforce_target_pct": 0.0, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
 # INTELLISTOCK_DESCRIPTION: Advanced graph-based news contagion analysis with market trend tracking, Benzinga data sources, outcome tracking, and learning stage. Fetches today's news from Alpaca AND Google News (macro/geopolitical), enriches with Benzinga data (analyst ratings, analyst insights, insider trades, government trades, M&A, upcoming IPOs, stock splits, earnings calendar, company actions, prediction markets — all enable/disable configurable), uses LLM to classify sentiment AND event type per ticker, classifies macro news into sectors/themes and resolves to tickers via Neo4j (hybrid: structured classification + Gemini tool-calling fallback), then propagates through Neo4j using relationship-aware weights (10 edge types with directional propagation, sentiment inversion for competitors, edge confidence/revenue/obligation weighting, event-type amplification, sector peer contagion, macro sector-to-sector supply flows, 2-hop supply chain chains, patent partnership depth, and institutional co-holding correlation with position-size weighting). Tracks market trends across runs, discovers new stocks from trends, enforces sells on trend reversals. Outcome tracking stores event→price outcomes in RethinkDB for LLM pattern recognition. Learning stage pre-loads past outcome patterns before first trade (configurable lookback, cached). Uses TOON format for token-efficient LLM inputs. Returns symbol -> score with detailed graph reasoning. Runs once per loop (run_once).
 # DIFFICULTY: 8
 """
@@ -7041,6 +7041,35 @@ def _rotation_incoming_executable(
     return True, ""
 
 
+def _anchor_reinforce_target(config: dict, entry_notional: float,
+                             portfolio_value: float) -> float:
+    """Stage-1 target notional for anchor winner reinforcement. Lever
+    anchor_reinforce_target_pct (% of portfolio, default 0 = off) replaces
+    the legacy stage1_mult x ENTRY cap, whose adds shrink as the winner
+    appreciates (run-185254: PANW +21% got one $835 add). Higher stages
+    scale this base by their mult ratio at the call site."""
+    _s1_mult = float(config.get("anchor_reinforce_stage1_mult", 1.3) or 1.3)
+    _pct = float(config.get("anchor_reinforce_target_pct", 0.0) or 0.0)
+    if _pct > 0.0 and float(portfolio_value or 0.0) > 0.0:
+        return float(portfolio_value) * (_pct / 100.0)
+    return float(entry_notional) * _s1_mult
+
+
+def _graph_gate_holds(config: dict, held_raw, held_pnl_pct) -> bool:
+    """Positive-graph rotation gate with a loss override: a bleeding position
+    (pnl <= -rotation_graph_gate_max_loss_pct) is NOT protected by a
+    sticky-positive graph score (run-185254: DNOW bled -$788 all month at
+    graph raw +0.70..+1.25 and rotation never fired). Override defaults off."""
+    if not bool(config.get("rotation_positive_graph_gate_enabled", False)):
+        return False
+    if float(held_raw or 0.0) <= 0.0:
+        return False
+    _max_loss = float(config.get("rotation_graph_gate_max_loss_pct", 0.0) or 0.0)
+    if _max_loss > 0.0 and float(held_pnl_pct or 0.0) <= -_max_loss:
+        return False
+    return True
+
+
 def _trailing_stop_armed(sc: dict, peak_key: str, unrealized_pct,
                          activation: float, peak_protected: bool) -> bool:
     """Ratchet: once a position's gain reaches the trailing-stop activation
@@ -7861,13 +7890,10 @@ def _rotation_candidate_allowed(
     # below can override a live positive forward signal. Config-gated (default
     # OFF) so existing rotation behavior is unchanged unless the operator opts
     # in (doc-179 turns it on).
-    if (
-        bool(config.get("rotation_positive_graph_gate_enabled", False))
-        and float(held_raw_score or 0.0) > 0.0
-    ):
+    if _graph_gate_holds(config, held_raw_score, held_pnl_pct):
         _log(
             f"ROTATION_GRAPH_GATE: kept {held_sym or '?'} "
-            f"(raw={float(held_raw_score or 0.0):+.2f})",
+            f"(raw={float(held_raw_score or 0.0):+.2f} pnl={float(held_pnl_pct or 0.0):+.1f}%)",
             "cyan",
         )
         return False, delta, "positive_graph_gate"
@@ -8299,6 +8325,7 @@ def _plan_anchor_reinforcement(
     min_position_size: float,
     config: dict,
     strategy_cache: dict | None = None,
+    portfolio_total: float = 0.0,
 ) -> tuple[list[dict], float]:
     """V31 Section 3.3 — three-stage anchor reinforcement.
 
@@ -8391,7 +8418,13 @@ def _plan_anchor_reinforcement(
             target_mult = s2_mult
         else:
             target_mult = s3_mult
-        target_total_notional = entry_notional * target_mult
+        # Run-185254 leak #5: with anchor_reinforce_target_pct set, the target
+        # is a % of PORTFOLIO (scaled by stage mult ratio) instead of a
+        # multiple of entry notional — adds no longer shrink as winners run.
+        # Default lever 0 reproduces entry_notional * target_mult exactly.
+        target_total_notional = _anchor_reinforce_target(
+            config, entry_notional, portfolio_total
+        ) * (target_mult / s1_mult if s1_mult > 0 else 1.0)
         # current_value = entry_notional × (1 + unrealized_pct/100)
         current_value = entry_notional * (1.0 + unrealized_pct / 100.0)
         additional_needed = max(0.0, target_total_notional - current_value)
@@ -24823,6 +24856,7 @@ class GraphNexusAnalysis:
                             min_position_size=_min_position_size,
                             config=config,
                             strategy_cache=strategy_cache,
+                            portfolio_total=portfolio_total,
                         )
                     else:
                         # Legacy winner_adds path (bisection fallback)
@@ -26438,12 +26472,10 @@ class GraphNexusAnalysis:
                         # backfill-rotation outgoing picker — a held position the
                         # graph still rates positive is never a BFQ sell candidate.
                         _hp_raw = float((scores.get(_hp_sym) or {}).get("raw_net_score", 0.0) or 0.0)
-                        if (
-                            bool(config.get("rotation_positive_graph_gate_enabled", False))
-                            and _hp_raw > 0.0
-                        ):
+                        if _graph_gate_holds(config, _hp_raw, _hp_pnl):
                             _log(
-                                f"ROTATION_GRAPH_GATE: kept {_hp_sym} (raw={_hp_raw:+.2f}) [bfq]",
+                                f"ROTATION_GRAPH_GATE: kept {_hp_sym} "
+                                f"(raw={_hp_raw:+.2f} pnl={_hp_pnl:+.1f}%) [bfq]",
                                 "cyan",
                             )
                             continue
