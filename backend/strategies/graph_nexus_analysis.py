@@ -6926,6 +6926,10 @@ def _resolve_position_peak_state(
                 if isinstance(cache_key, str)
                 and cache_key.startswith(prefix)
                 and cache_key != peak_key
+                # Run-185254 leak #4: spare the current entry's trailing-stop
+                # armed flag (see _trailing_stop_armed); stale entries' armed
+                # flags are still pruned on re-entry.
+                and cache_key != f"{peak_key}::armed"
             ]:
                 strategy_cache.pop(stale_key, None)
         try:
@@ -7035,6 +7039,24 @@ def _rotation_incoming_executable(
     if details:
         return False, str(details.get("message") or details.get("code") or "blocked")
     return True, ""
+
+
+def _trailing_stop_armed(sc: dict, peak_key: str, unrealized_pct,
+                         activation: float, peak_protected: bool) -> bool:
+    """Ratchet: once a position's gain reaches the trailing-stop activation
+    level, the stop stays armed even if the gain later collapses below it
+    (run-185254: ROBN +24% -> -8.6% with a disarmed 12% stop). The armed flag
+    lives beside the peak key and is pruned with it on re-entry."""
+    _armed_key = f"{peak_key}::armed"
+    if isinstance(sc, dict) and sc.get(_armed_key):
+        return True
+    if unrealized_pct is None:
+        return False
+    if float(unrealized_pct) >= float(activation) or bool(peak_protected):
+        if isinstance(sc, dict):
+            sc[_armed_key] = True
+        return True
+    return False
 
 
 def _direct_reserve_alloc(config: dict, min_pos: float, stock_budget: float) -> float:
@@ -17230,7 +17252,7 @@ def _evaluate_position_risk(
                             _ts_drop = _mwp_new_ts
                 _sc = strategy_cache if strategy_cache is not None else {}
                 _peak_key, _stored_peak = _resolve_position_peak_state(_sc, sym, entry_buy_ts, _cp)
-                if (_unrealized_pct >= _ts_activation or _peak_protected) and fresh_score >= 0:
+                if _trailing_stop_armed(_sc, _peak_key, _unrealized_pct, _ts_activation, _peak_protected) and fresh_score >= 0:
                     _peak = max(_stored_peak, _cp)
                     _sc[_peak_key] = _peak
                     _drop_from_peak = ((_peak - _cp) / _peak) * 100.0 if _peak > 0 else 0
