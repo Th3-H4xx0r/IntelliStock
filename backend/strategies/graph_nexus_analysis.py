@@ -5886,6 +5886,29 @@ def _enforce_sector_portfolio_cap(
             if _eta_g_can_run:
                 _eta_g_item_source = str(item.get("signal_source") or "").strip().lower()
                 if _eta_g_item_source in _eta_g_sources:
+                    # Run-185254 leak #1: never sell a held position to keep an
+                    # incoming buy the broker will refuse (e.g. under the price
+                    # floor) — let such items fall through to normal demotion.
+                    _eta_g_item_sym = str(item.get("ticker") or "").strip().upper()
+                    _eta_g_item_price = _resolve_symbol_price(
+                        _eta_g_item_sym, prices, price_history,
+                        portfolio_emulator=portfolio_emulator,
+                    ) or 0.0
+                    _eta_g_exec_ok, _eta_g_exec_block = _rotation_incoming_executable(
+                        _eta_g_item_sym, _eta_g_item_price, config,
+                        asset_class=str(item.get("asset_class") or "stock"),
+                    )
+                    if not _eta_g_exec_ok:
+                        _log(
+                            f"ROTATION PREVALIDATE: [ETA.G] incoming {_eta_g_item_sym} "
+                            f"not executable ({_eta_g_exec_block}) — no swap, demoting normally",
+                            "yellow",
+                        )
+                        item["buy_cash"] = 0.0
+                        item["sector_cap_demoted"] = True
+                        excess -= item_cash
+                        demoted_tickers.append(_eta_g_item_sym)
+                        continue
                     _eta_g_new_eff = float(item.get("raw_net_score", 0.0) or 0.0)
                     _eta_g_candidates: list[tuple[float, str, float]] = []
                     for _eta_g_held_sym, _eta_g_held_dollars in held_by_sector.get(sector, []):
@@ -6985,6 +7008,33 @@ def _build_position_health_snapshot(
         }
     )
     return snapshot
+
+
+def _rotation_incoming_executable(
+    sym: str, price: float, config: dict, asset_class: str = "stock"
+) -> tuple[bool, str]:
+    """Pre-validate a rotation's incoming BUY against the same broker
+    execution gates it will face, BEFORE the sell leg executes (run-185254
+    leak #1: sell-then-blocked-buy stranded proceeds in cash when the
+    replacement was under the buy_price_floor)."""
+    try:
+        try:
+            from nexus_broker_utils import get_nexus_buy_block_details
+        except ImportError:
+            from backend.nexus_broker_utils import get_nexus_buy_block_details
+    except Exception:
+        return True, ""  # fail-open: the broker re-checks at execution
+    guard = {
+        "is_nexus_only_buy": True,
+        "is_whitelisted": True,          # rotation candidates are engine-selected
+        "has_buy_cash_hint": True,       # rotation always sizes the buy
+        "buy_price_floor": float(config.get("buy_price_floor", 0.0) or 0.0),
+        "asset_class": asset_class,
+    }
+    details = get_nexus_buy_block_details(sym, float(price or 0.0), guard)
+    if details:
+        return False, str(details.get("message") or details.get("code") or "blocked")
+    return True, ""
 
 
 def _rotation_winner_lock_active(
@@ -25265,6 +25315,20 @@ class GraphNexusAnalysis:
                         # Skip this rotation pair; keep current holding.
                         _mw_sell, _mw_buy = None, None
                 if _mw_sell and _mw_buy and portfolio_emulator is not None:
+                    # Run-185254 leak #1: validate the incoming BUY against the
+                    # broker execution gates BEFORE the sell leg commits, so a
+                    # sub-floor replacement can't turn the rotation sell-only.
+                    _mw_rot_ok, _mw_rot_block = _rotation_incoming_executable(
+                        _mw_buy, _mw_buy_price_for_gate, config,
+                    )
+                    if not _mw_rot_ok:
+                        _log(
+                            f"ROTATION PREVALIDATE: skip incoming {_mw_buy} "
+                            f"({_mw_rot_block}) — rotation skipped, keeping {_mw_sell}",
+                            "yellow",
+                        )
+                        _mw_sell, _mw_buy = None, None
+                if _mw_sell and _mw_buy and portfolio_emulator is not None:
                     _mw_sell_price = _resolve_symbol_price(
                         _mw_sell, prices, data, portfolio_emulator=portfolio_emulator,
                     )
@@ -25447,6 +25511,19 @@ class GraphNexusAnalysis:
                             config, float(_mw_pf_score or 0.0), log_fn=_log, lane="mw_swap",
                         )
                         if _mw_pf_gate_blocked:
+                            _mw_pf_sell, _mw_pf_buy = None, None
+                    if _mw_pf_sell and _mw_pf_buy and _mw_pf_buy not in nexus_position_sizes:
+                        # Run-185254 leak #1: pre-validate the incoming BUY
+                        # before the sell leg commits (see mw_rotation lane).
+                        _mw_pf_rot_ok, _mw_pf_rot_block = _rotation_incoming_executable(
+                            _mw_pf_buy, _mw_pf_buy_price_for_gate, config,
+                        )
+                        if not _mw_pf_rot_ok:
+                            _log(
+                                f"ROTATION PREVALIDATE: skip incoming {_mw_pf_buy} "
+                                f"({_mw_pf_rot_block}) — swap skipped, keeping {_mw_pf_sell}",
+                                "yellow",
+                            )
                             _mw_pf_sell, _mw_pf_buy = None, None
                     if _mw_pf_sell and _mw_pf_buy and _mw_pf_buy not in nexus_position_sizes:
                         _mw_pf_sell_price = _resolve_symbol_price(
