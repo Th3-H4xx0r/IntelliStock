@@ -25573,9 +25573,23 @@ class GraphNexusAnalysis:
                     _mw_extra_needed = max(0.0, _mw_size_floor - _mw_freed)
                     _mw_extra = min(_mw_extra_needed, _mw_free_cash_avail * 0.95)
                     _mw_buy_alloc = max(_mw_min_pos, _mw_freed + _mw_extra)
-                    if isinstance(strategy_cache, dict):
+                    # Track A (run-163943): pre-validate the incoming BUY against
+                    # the V31 sector-portfolio cap BEFORE the sell leg commits, so
+                    # a rotation into an already-capped sector can't turn sell-only
+                    # (06-12 DAR->AMD, 06-22 VIK/AIT->SMCI/LRCX were demoted).
+                    _mw_sc_ok, _mw_sc_block = _rotation_incoming_sector_cap_ok(
+                        _mw_buy, _mw_buy_alloc, portfolio_emulator, portfolio_total,
+                        config, prices, data, selling_sym=_mw_sell,
+                    )
+                    if not _mw_sc_ok:
+                        _log(
+                            f"ROTATION PREVALIDATE sector-cap: skip incoming {_mw_buy} "
+                            f"({_mw_sc_block}) — rotation skipped, keeping {_mw_sell}",
+                            "yellow",
+                        )
+                    if isinstance(strategy_cache, dict) and _mw_sc_ok:
                         strategy_cache["_mw_free_cash_spent_this_bar"] = _mw_fc_spent_sofar + _mw_extra
-                    if _mw_buy_alloc >= _mw_min_pos:
+                    if _mw_buy_alloc >= _mw_min_pos and _mw_sc_ok:
                         # Bug fix #2: capture sell score before deletion
                         _mw_sell_score = _mw_held.get(_mw_sell, {}).get("current_score", 0)
                         nexus_sell_enforcement.add(_mw_sell)
@@ -25767,7 +25781,18 @@ class GraphNexusAnalysis:
                         _mw_pf_extra_needed = max(0.0, _mw_pf_floor - _mw_pf_freed)
                         _mw_pf_extra = min(_mw_pf_extra_needed, _mw_pf_free_cash_avail * 0.95)
                         _mw_pf_alloc = max(_mw_pf_min_pos, _mw_pf_freed + _mw_pf_extra)
-                        if _mw_pf_alloc >= _mw_pf_min_pos:
+                        # Track A (run-163943): sector-cap pre-validation (see mw_rotation lane).
+                        _mw_pf_sc_ok, _mw_pf_sc_block = _rotation_incoming_sector_cap_ok(
+                            _mw_pf_buy, _mw_pf_alloc, portfolio_emulator, portfolio_total,
+                            config, prices, data, selling_sym=_mw_pf_sell,
+                        )
+                        if not _mw_pf_sc_ok:
+                            _log(
+                                f"ROTATION PREVALIDATE sector-cap: skip incoming {_mw_pf_buy} "
+                                f"({_mw_pf_sc_block}) — swap skipped, keeping {_mw_pf_sell}",
+                                "yellow",
+                            )
+                        if _mw_pf_alloc >= _mw_pf_min_pos and _mw_pf_sc_ok:
                             nexus_sell_enforcement.add(_mw_pf_sell)
                             if isinstance(strategy_cache, dict):
                                 strategy_cache.setdefault("_mw_rotation_sells_this_bar", set()).add(_mw_pf_sell)
