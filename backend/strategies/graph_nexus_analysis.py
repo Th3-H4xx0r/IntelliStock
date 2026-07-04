@@ -7043,6 +7043,69 @@ def _rotation_incoming_executable(
     return True, ""
 
 
+def _rotation_incoming_sector_cap_ok(
+    sym, buy_cash, portfolio_emulator, portfolio_total, config,
+    prices=None, price_history=None, selling_sym=None,
+) -> tuple[bool, str]:
+    """Pre-validate a rotation's incoming BUY against the V31 sector-portfolio
+    cap BEFORE the sell leg commits (run-163943: rotations executed the sell
+    leg, then the buy leg was sector-cap demoted, stranding proceeds — same
+    sell-leg-only leak class as run-185254 leak #1 via a new gate).
+
+    Conservative + fail-open: returns (True, "") whenever the cap is disabled,
+    the sector cache/price is unavailable, or inputs are degenerate. Only
+    returns (False, reason) when the buy's sector exposure (after removing
+    selling_sym if it is in the same sector) plus buy_cash provably exceeds
+    the cap. Blocking keeps the held position — no capital at risk."""
+    if not bool(config.get("rotation_prevalidate_sector_cap_enabled", True)):
+        return True, ""
+    if not bool(config.get("max_sector_portfolio_enabled", True)):
+        return True, ""
+    try:
+        cap_pct = float(config.get("max_sector_portfolio_pct", 0.40) or 0.40)
+        _pt = float(portfolio_total or 0.0)
+        _bc = float(buy_cash or 0.0)
+    except (TypeError, ValueError):
+        return True, ""
+    if cap_pct <= 0 or _pt <= 0 or _bc <= 0:
+        return True, ""
+    cache = _neo4j_stock_sector_cache
+    if not cache:
+        return True, ""
+    ticker_to_sector: dict[str, str] = {}
+    for sector_kw, tickers in cache.items():
+        for t in tickers:
+            ticker_to_sector.setdefault(str(t).strip().upper(), sector_kw)
+    buy_sector = ticker_to_sector.get(str(sym or "").strip().upper(), "unknown")
+    selling_u = str(selling_sym or "").strip().upper()
+    sector_dollars = 0.0
+    if portfolio_emulator is not None:
+        positions = getattr(portfolio_emulator, "_positions", {}) or {}
+        for hs, qty in positions.items():
+            try:
+                qty_f = float(qty)
+            except (TypeError, ValueError):
+                continue
+            if qty_f <= 0:
+                continue
+            hs_u = str(hs).strip().upper()
+            if ticker_to_sector.get(hs_u, "unknown") != buy_sector:
+                continue
+            if hs_u == selling_u:
+                continue  # this position is being sold in the rotation
+            price = _resolve_symbol_price(
+                hs_u, prices, price_history, portfolio_emulator=portfolio_emulator
+            ) or 0.0
+            sector_dollars += qty_f * float(price or 0.0)
+    cap_dollars = _pt * cap_pct
+    if sector_dollars + _bc > cap_dollars:
+        return False, (
+            f"sector '{buy_sector}' ${sector_dollars + _bc:,.0f} "
+            f"> {cap_pct * 100:.0f}% cap ${cap_dollars:,.0f}"
+        )
+    return True, ""
+
+
 def _anchor_reinforce_target(config: dict, entry_notional: float,
                              portfolio_value: float) -> float:
     """Stage-1 target notional for anchor winner reinforcement. Lever
@@ -7103,6 +7166,31 @@ def _slot_min_notional(config: dict, portfolio_value: float) -> float:
     0 (default) disables the guard. Add-ons and the ETF sleeve are exempt."""
     _pct = float(config.get("slot_min_notional_pct", 0.0) or 0.0)
     return float(portfolio_value) * (_pct / 100.0) if _pct > 0 else 0.0
+
+
+def _recent_runup_protect(sym, price_history, block_pct, lookback_bars) -> tuple[bool, float]:
+    """True when a position's recent close range ran up more than block_pct
+    over the last lookback_bars bars (volatile momentum on a hot entry).
+    Used to spare such a name from a forced exit at a local dip (run-163943:
+    UAL/DELL cut at local bottoms before large rebounds). Returns
+    (protected, runup_pct). block_pct <= 0 or missing history disables it."""
+    try:
+        _bp = float(block_pct or 0.0)
+    except (TypeError, ValueError):
+        return False, 0.0
+    if _bp <= 0 or not isinstance(price_history, dict):
+        return False, 0.0
+    bars = (price_history.get(sym) or [])[-max(2, int(lookback_bars or 0)):]
+    if len(bars) < 2:
+        return False, 0.0
+    closes = [float(b.get("close") or b.get("c") or 0.0) for b in bars if isinstance(b, dict)]
+    closes = [c for c in closes if c > 0.0]
+    if len(closes) < 2:
+        return False, 0.0
+    lo = min(closes)
+    hi = max(closes)
+    runup_pct = ((hi - lo) / lo) * 100.0 if lo > 0 else 0.0
+    return (runup_pct > _bp), runup_pct
 
 
 def _llm_sell_conviction_bypass(config: dict, raw_score, pnl_pct) -> bool:
@@ -17150,30 +17238,17 @@ def _evaluate_position_risk(
                 elif fresh_score >= 0 and _unrealized_pct <= _fast_cut_pct:
                     _flc_runup_block_pct = float(config.get("fast_loser_cut_recent_runup_block_pct", 0.0) or 0.0)
                     _flc_runup_lookback = int(config.get("fast_loser_cut_recent_runup_lookback_bars", 20) or 20)
-                    _flc_block_runup = False
-                    if _flc_runup_block_pct > 0 and isinstance(price_history, dict):
-                        _flc_bars = (price_history.get(sym) or [])[-max(2, _flc_runup_lookback):]
-                        if len(_flc_bars) >= 2:
-                            _flc_closes = [
-                                float(b.get("close") or b.get("c") or 0.0)
-                                for b in _flc_bars
-                            ]
-                            _flc_closes = [c for c in _flc_closes if c > 0.0]
-                            if len(_flc_closes) >= 2:
-                                _flc_lo = min(_flc_closes)
-                                _flc_hi = max(_flc_closes)
-                                _flc_runup_pct = (
-                                    ((_flc_hi - _flc_lo) / _flc_lo) * 100.0 if _flc_lo > 0 else 0.0
-                                )
-                                if _flc_runup_pct > _flc_runup_block_pct:
-                                    _flc_block_runup = True
-                                    _log(
-                                        f"V28.7 FLC recent-runup block: {sym} recent "
-                                        f"{_flc_runup_lookback}-bar range ran +{_flc_runup_pct:.1f}% > "
-                                        f"{_flc_runup_block_pct:.0f}% threshold — not cutting "
-                                        f"(volatility on hot entry)",
-                                        "yellow",
-                                    )
+                    _flc_block_runup, _flc_runup_pct = _recent_runup_protect(
+                        sym, price_history, _flc_runup_block_pct, _flc_runup_lookback,
+                    )
+                    if _flc_block_runup:
+                        _log(
+                            f"V28.7 FLC recent-runup block: {sym} recent "
+                            f"{_flc_runup_lookback}-bar range ran +{_flc_runup_pct:.1f}% > "
+                            f"{_flc_runup_block_pct:.0f}% threshold — not cutting "
+                            f"(volatility on hot entry)",
+                            "yellow",
+                        )
                     if _flc_block_runup:
                         pass  # fall through, no cut
                     else:
