@@ -7032,7 +7032,9 @@ def _rotation_incoming_executable(
         "is_nexus_only_buy": True,
         "is_whitelisted": True,          # rotation candidates are engine-selected
         "has_buy_cash_hint": True,       # rotation always sizes the buy
-        "buy_price_floor": float(config.get("buy_price_floor", 0.0) or 0.0),
+        # Default 5.0 matches the broker guard's default so pre-validation
+        # can never be laxer than execution (bug-sweep finding).
+        "buy_price_floor": float(config.get("buy_price_floor", 5.0) or 0.0),
         "asset_class": asset_class,
     }
     details = get_nexus_buy_block_details(sym, float(price or 0.0), guard)
@@ -17354,7 +17356,12 @@ def _evaluate_position_risk(
                         conviction_tier=_grace_tier_sell,
                     )
                 # Run-185254 leak #2: a high-conviction signal sell on a losing
-                # position may bypass grace (same lever as the min-hold gate) —
+                # position may bypass grace (same lever as the min-hold gate).
+                # NOTE: this site gates on the pre-overlay graph raw_score and
+                # original-entry pnl; the min-hold gate uses the overlay-adjusted
+                # raw_net and latest-add pnl. The two sites guard different sell
+                # paths, so the shared thresholds apply to slightly different
+                # scales — acceptable, but keep in mind when tuning. —
                 # otherwise the min-hold bypass is neutered for the first
                 # grace_bars days and losers still ride to the -10% hard cut.
                 _grace_conv_raw = float((propagated.get(sym) or {}).get("raw_score", 0.0) or 0.0)
@@ -25428,6 +25435,7 @@ class GraphNexusAnalysis:
                     # sub-floor replacement can't turn the rotation sell-only.
                     _mw_rot_ok, _mw_rot_block = _rotation_incoming_executable(
                         _mw_buy, _mw_buy_price_for_gate, config,
+                        asset_class=str((scores.get(_mw_buy) or {}).get("asset_class") or "stock"),
                     )
                     if not _mw_rot_ok:
                         _log(
@@ -25625,6 +25633,7 @@ class GraphNexusAnalysis:
                         # before the sell leg commits (see mw_rotation lane).
                         _mw_pf_rot_ok, _mw_pf_rot_block = _rotation_incoming_executable(
                             _mw_pf_buy, _mw_pf_buy_price_for_gate, config,
+                            asset_class=str((scores.get(_mw_pf_buy) or {}).get("asset_class") or "stock"),
                         )
                         if not _mw_pf_rot_ok:
                             _log(
@@ -26166,6 +26175,15 @@ class GraphNexusAnalysis:
                     # Run-185254 leak #3: sized at drain time from the CURRENT
                     # budget; the old min_pos*2 cap produced $200 crumbs.
                     _bfq_direct_alloc = _direct_reserve_alloc(config, _bfq_min_pos, _stock_budget_after_adds)
+                    # With the $200 crumb cap gone, respect single_position_max_pct
+                    # here like every other buy path (bug-sweep finding).
+                    _bfq_direct_alloc = _clip_to_single_position_cap(
+                        sym=_bfq_direct_sym,
+                        intended_value=_bfq_direct_alloc,
+                        current_position_value=0.0,
+                        portfolio_total=portfolio_total,
+                        config=config,
+                    )
                     _bfq_direct_min_slot = _slot_min_notional(config, portfolio_total)
                     if _bfq_direct_min_slot > 0 and _bfq_direct_alloc < _bfq_direct_min_slot:
                         _log(
