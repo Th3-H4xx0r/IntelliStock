@@ -137,3 +137,57 @@ class TestRotationIncomingSectorCapOk:
         ok, _ = gna._rotation_incoming_sector_cap_ok(
             "AMD", 5000, emu, 100000, self._cfg(), prices={"NVDA": 450.0})
         assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# Schema registration + wiring consistency (bug-sweep Lens 3: guards against a
+# config-key typo at a wiring site silently disabling a lever with tests green,
+# and against the new keys not being editor-settable / schema-registered).
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+import re  # noqa: E402
+
+
+class TestSchemaAndWiringConsistency:
+    def _schema_config(self):
+        line1 = open(gna.__file__, encoding="utf-8").readline()
+        m = re.search(r"INTELLISTOCK_SCHEMA:\s*(\{.*\})\s*$", line1.strip())
+        assert m, "INTELLISTOCK_SCHEMA header not found / not parseable"
+        return json.loads(m.group(1))["config"]
+
+    def _src(self):
+        return open(gna.__file__, encoding="utf-8").read()
+
+    def test_new_keys_registered_in_schema_with_behavior_preserving_defaults(self):
+        cfg = self._schema_config()
+        # default-ON correctness fix (emergency-togglable from the editor)
+        assert cfg["rotation_prevalidate_sector_cap_enabled"] is True
+        # Track C guards default OFF (behavior-preserving)
+        assert cfg["rotation_break_glass_recent_runup_block_pct"] == 0.0
+        assert cfg["rotation_break_glass_recent_runup_lookback_bars"] == 20
+        assert cfg["fast_loser_cut_recent_runup_block_pct"] == 0.0
+        assert cfg["fast_loser_cut_recent_runup_lookback_bars"] == 20
+
+    def test_every_new_config_key_read_is_schema_registered(self):
+        # Dynamically extract every new-family config.get key the code reads;
+        # each MUST be in the schema. A typo at a wiring site produces an
+        # unregistered key here -> this test fails (guards silent-disable).
+        src = self._src()
+        cfg = self._schema_config()
+        keys = set(re.findall(
+            r'config\.get\(\s*"((?:rotation_break_glass_recent_runup|'
+            r'rotation_prevalidate_sector_cap|fast_loser_cut_recent_runup)\w*)"',
+            src,
+        ))
+        assert keys, "expected to find the new config.get keys in source"
+        missing = sorted(k for k in keys if k not in cfg)
+        assert not missing, f"config keys read but not schema-registered: {missing}"
+
+    def test_helpers_are_wired_at_all_call_sites(self):
+        # def + 2 rotation lanes; def + FLC + break-glass. Guards accidental
+        # removal of a wiring site.
+        src = self._src()
+        assert src.count("_rotation_incoming_sector_cap_ok(") >= 3
+        assert src.count("_recent_runup_protect(") >= 3
+        # break-glass guard is gated on the losing break-glass mode
+        assert '_rotation_mode == "v28_hc_losing_break_glass"' in src
