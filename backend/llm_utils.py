@@ -319,6 +319,33 @@ def _structured_usage_for_record(usage_data: dict[str, int] | None) -> dict[str,
     return out
 
 
+def _structured_cost_override(usage_data: dict | None) -> float | None:
+    """Extract OpenRouter's per-call USD ``cost`` from a native structured run's
+    usage dict, when present, as an envelope cost override for telemetry.
+
+    ``_structured_run_usage_dict`` mirrors PydanticAI ``RunUsage.details`` into
+    ``detail_<key>`` entries, so an OpenRouter ``usage.cost`` (requested via the
+    openrouter ``extra_body`` usage.include opt-in) would surface as ``cost`` /
+    ``detail_cost``. Returns a positive float or ``None`` (fall back to registry
+    pricing). NOTE: PydanticAI 1.0.18's ``_map_usage`` filters non-int usage
+    fields out of ``details``, so the float ``cost`` is dropped before it
+    reaches here on the current stack — this wiring is forward-compatible and
+    lets cost flow the moment the SDK preserves it; today the accounting gap is
+    closed by pricing reasoning tokens at the output rate downstream."""
+    src = usage_data or {}
+    for key in ("cost", "detail_cost", "total_cost", "detail_total_cost", "usage_cost"):
+        value = src.get(key)
+        if value is None:
+            continue
+        try:
+            fval = float(value)
+        except (TypeError, ValueError):
+            continue
+        if fval > 0:
+            return fval
+    return None
+
+
 def _coerce_timeout_sec(timeout_sec: int | None) -> int:
     """Resolve timeout (seconds) from arg/env with a safe fallback."""
     if timeout_sec is None:
@@ -517,6 +544,12 @@ _PROVIDER_MODEL_REQUEST_RATE_LIMITERS: dict[tuple[str, str], _RequestRateLimiter
     ("nvidia", "moonshotai/kimi-k2.6"): _RequestRateLimiter(5, min_interval_sec=12.0),
     ("nvidia", "moonshotai/kimi-k2.5"): _RequestRateLimiter(5, min_interval_sec=12.0),
     ("nvidia", "moonshotai/kimi-k2"): _RequestRateLimiter(5, min_interval_sec=12.0),
+    # OpenRouter: upstream endpoints for large models rate-limit around a few
+    # req/s. In run 185254 the 10-worker overlay pool burst ~3.5 req/s and drew
+    # 23x HTTP 429 (there was no limiter entry for any openrouter model). Pace
+    # every openrouter model by default at ~2 req/s (120 RPM cap + 0.5s gap),
+    # applied via the ("openrouter", "__default__") provider-level fallback.
+    ("openrouter", "__default__"): _RequestRateLimiter(120, min_interval_sec=0.5),
 }
 
 
@@ -531,6 +564,12 @@ def _get_model_request_rate_limiter(model: str, provider: str = "nvidia") -> _Re
     key = (p, (model or "").strip().lower())
     if key in _PROVIDER_MODEL_REQUEST_RATE_LIMITERS:
         return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS[key]
+    # Provider-level default: any model under a provider that registers a
+    # ("<provider>", "__default__") entry (e.g. openrouter) gets paced even
+    # when the exact model name isn't enumerated.
+    _default_key = (p, "__default__")
+    if _default_key in _PROVIDER_MODEL_REQUEST_RATE_LIMITERS:
+        return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS[_default_key]
     # Best-effort prefix match for `moonshotai/kimi-*` variants we
     # haven't enumerated explicitly (e.g. moonshotai/kimi-k2.7), but
     # only when the provider matches. Other providers exposing a
@@ -1657,6 +1696,13 @@ def _build_structured_model_settings(
     kwargs = dict(max_tokens=effective_max_tokens, timeout=timeout, parallel_tool_calls=False)
     if not skip_temp:
         kwargs["temperature"] = float(temperature)
+    if p == "openrouter":
+        # Opt into OpenRouter's per-call USD cost envelope on the native
+        # structured path too — the plain _call_openrouter path already sends
+        # this. OpenAIChatModel forwards `extra_body` verbatim to the wire body,
+        # so the response usage block carries `cost` (surfaced downstream as an
+        # envelope cost override when the SDK exposes it).
+        kwargs["extra_body"] = {"usage": {"include": True}}
     return ModelSettings(**kwargs)
 
 
@@ -1671,6 +1717,7 @@ def _try_raw_structured_json_once(
     timeout_sec: int | None,
     provider_config: dict[str, Any] | None = None,
     system_prompt: str | None = None,
+    retries: int = 0,
 ) -> Any | None:
     _LAST_PLAIN_LLM_CALL_ERROR.error = ""
     raw_prompt = _raw_structured_fallback_prompt(prompt, output_type)
@@ -1684,7 +1731,7 @@ def _try_raw_structured_json_once(
         raw_prompt,
         max_output_tokens=max_output_tokens,
         timeout_sec=timeout_sec,
-        retries=0,
+        retries=max(0, int(retries or 0)),
         response_mime_type="application/json",
         provider_config=provider_config,
     )
@@ -2797,6 +2844,7 @@ def call_structured_llm_by_provider(
                                 system_prompt=system_prompt if isinstance(system_prompt, str) else (
                                     "\n".join(system_prompt) if isinstance(system_prompt, (list, tuple)) else None
                                 ),
+                                retries=retries,
                             )
                             if repaired is not None:
                                 _LAST_STRUCTURED_LLM_CALL.data.update({
@@ -2904,6 +2952,14 @@ def call_structured_llm_by_provider(
                 else:
                     result = agent.run_sync(prompt, infer_name=False)
                 usage_data = _structured_run_usage_dict(result)
+                # OpenRouter's usage envelope carries a per-call USD `cost`
+                # (requested via extra_body usage.include on the openrouter
+                # settings). When the SDK surfaces it, prefer it as the envelope
+                # override — exactly like the plain _call_openrouter path — so
+                # the row records real spend instead of a local pricing
+                # estimate. Absent/zero → None → cost falls back to the pricing
+                # registry (with reasoning now priced at the output rate).
+                _native_cost_override = _structured_cost_override(usage_data)
                 _LAST_STRUCTURED_LLM_CALL.data.update({
                     "effective_model": structured_model,
                     "fallback_used": idx > 0,
@@ -2935,7 +2991,7 @@ def call_structured_llm_by_provider(
                         duration_ms=int((time.monotonic() - _native_call_t0) * 1000),
                         retry_count=int(http_attempt),
                         error=None,
-                        cost_usd_override=None,
+                        cost_usd_override=_native_cost_override,
                         model_id=None,
                     )
                 except Exception:
@@ -3005,6 +3061,7 @@ def call_structured_llm_by_provider(
                             max_output_tokens=max_output_tokens,
                             timeout_sec=timeout_sec,
                             provider_config=provider_config,
+                            retries=retries,
                         )
                         if repaired is not None:
                             _LAST_STRUCTURED_LLM_CALL.data.update({
@@ -3264,6 +3321,39 @@ def _extract_openrouter_usage(usage: Any) -> tuple[dict[str, int], float | None]
     except (TypeError, ValueError):
         cost_override = None
     return u, cost_override
+
+
+def _salvage_usage_block(raw_text: str) -> dict | None:
+    """Best-effort extraction of the OpenRouter ``usage`` object from a raw
+    ``/chat/completions`` body that failed full JSON parsing (truncated,
+    SSE-wrapped, or trailing-garbage 200 responses).
+
+    run-185254: HTTP-200 responses whose body failed ``r.json()`` fell to the
+    outer except and were recorded with ``usage={}`` (0 tokens / $0) even though
+    OpenRouter had already billed the call. Scanning for the balanced ``usage``
+    object lets telemetry record the real tokens + envelope cost. Returns the
+    usage dict or ``None`` when no parseable block is present."""
+    if not raw_text:
+        return None
+    import re as _re
+    m = _re.search(r'"usage"\s*:\s*\{', raw_text)
+    if not m:
+        return None
+    start = raw_text.index("{", m.start())
+    depth = 0
+    for i in range(start, len(raw_text)):
+        c = raw_text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(raw_text[start : i + 1])
+                except Exception:
+                    return None
+                return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 def _call_gemini(
@@ -4922,7 +5012,26 @@ def _call_openrouter(
                 except Exception:
                     pass
                 raise RuntimeError(f"HTTP {r.status_code}: {_err_body}")
-            data = r.json()
+            try:
+                data = r.json()
+            except (ValueError, json.JSONDecodeError):
+                # HTTP 200 whose body isn't valid JSON — OpenRouter still billed
+                # the call (run-185254). Salvage the usage envelope from the raw
+                # text so the row records real tokens + envelope cost instead of
+                # 0/$0, then record a terminal failure row and return empty.
+                _raw = (r.text or "") if hasattr(r, "text") else ""
+                _sv_usage, _sv_cost = _extract_openrouter_usage(_salvage_usage_block(_raw))
+                try:
+                    _stash_last_http(status=200, body=(_raw[:1000] or "unparseable 200 body"), exc=None)
+                except Exception:
+                    pass
+                _safe_record(
+                    provider="openrouter", model=model, usage=_sv_usage, ok=False,
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    retry_count=attempt, error="unparseable 200 body",
+                    cost_usd_override=_sv_cost, model_id=None,
+                )
+                return ""
             _log_token_usage("openrouter", model, data)
             _or_usage, _or_cost = _extract_openrouter_usage(
                 data.get("usage") if isinstance(data, dict) else None

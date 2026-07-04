@@ -97,6 +97,7 @@ _COST_FIELDS = (
     "output_cost_usd",
     "cache_creation_cost_usd",
     "cache_read_cost_usd",
+    "reasoning_cost_usd",
     "total_cost_usd",
 )
 
@@ -112,6 +113,16 @@ _USAGE_TO_PRICE_KEY = {
         "cache_read_per_1m",
         "cache_read_cost_per_1m",
         "cache_read_cost_usd",
+    ),
+    # OpenRouter (and most gateways) bill reasoning/thinking tokens at the
+    # OUTPUT rate. Price them explicitly when a reasoning price is present;
+    # otherwise the post-loop fallback below reuses the resolved output rate
+    # (run-185254: ~$0.33 of reasoning spend was dropped by models_override
+    # rows because no reasoning price key existed).
+    "reasoning_tokens": (
+        "reasoning_per_1m",
+        "reasoning_cost_per_1m",
+        "reasoning_cost_usd",
     ),
 }
 
@@ -164,6 +175,9 @@ def compute_cost(
                 price_keys[yaml_k] = yaml_entry.get(yaml_k)
 
     total = 0.0
+    # Per-usage-key resolved $/1M rate actually used (models_override → yaml).
+    # The reasoning-token fallback below reuses the output rate from this map.
+    _resolved_rate_per_1m: Dict[str, float] = {}
     for usage_k, (yaml_k, _, cost_k) in _USAGE_TO_PRICE_KEY.items():
         tokens = int(usage.get(usage_k) or 0)
         price_per_1m = price_keys.get(yaml_k)
@@ -174,12 +188,25 @@ def compute_cost(
         # the caller swallows and drops the whole row. Skip the component
         # silently and keep the row with zero cost.
         try:
-            component = (tokens / 1_000_000.0) * float(price_per_1m)
+            rate = float(price_per_1m)
         except (TypeError, ValueError):
             continue
+        _resolved_rate_per_1m[usage_k] = rate
+        component = (tokens / 1_000_000.0) * rate
         result[cost_k] = component
         total += component
     result["total_cost_usd"] = total
+
+    # OpenRouter bills reasoning tokens at the output rate; if no explicit
+    # reasoning price was resolved above, fall back to the resolved output rate
+    # so reasoning spend is never silently dropped.
+    _reason_toks = int(usage.get("reasoning_tokens", 0) or 0)
+    if _reason_toks > 0 and "reasoning_tokens" not in _resolved_rate_per_1m:
+        _out_rate = _resolved_rate_per_1m.get("output_tokens", 0.0)
+        if _out_rate > 0.0:
+            result["reasoning_cost_usd"] = _reason_toks / 1_000_000.0 * _out_rate
+            result["total_cost_usd"] += result["reasoning_cost_usd"]
+
     result["cost_source"] = source
     return result
 
