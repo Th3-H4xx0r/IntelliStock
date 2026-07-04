@@ -24615,6 +24615,30 @@ class GraphNexusAnalysis:
                                                     "yellow",
                                                 )
                                                 continue
+                                        # Track C (run-163943): recent-runup momentum-protect. A losing
+                                        # position that recently ran up (volatile hot entry that dipped) is
+                                        # not evicted at a local bottom via the losing break-glass (UAL was
+                                        # cut here before a +27% move). Default-off; winner-lock partial-trim
+                                        # modes are unaffected (they already protect genuine winners).
+                                        if _rotation_mode == "v28_hc_losing_break_glass":
+                                            _bg_runup_pct_cfg = float(
+                                                config.get("rotation_break_glass_recent_runup_block_pct", 0.0) or 0.0
+                                            )
+                                            _bg_runup_lookback = int(
+                                                config.get("rotation_break_glass_recent_runup_lookback_bars", 20) or 20
+                                            )
+                                            _bg_protected, _bg_runup_pct = _recent_runup_protect(
+                                                _wt, data, _bg_runup_pct_cfg, _bg_runup_lookback,
+                                            )
+                                            if _bg_protected:
+                                                _log(
+                                                    f"break-glass recent-runup block: {_wt} recent "
+                                                    f"{_bg_runup_lookback}-bar range ran +{_bg_runup_pct:.1f}% > "
+                                                    f"{_bg_runup_pct_cfg:.0f}% — refusing losing break-glass "
+                                                    f"eviction (momentum on hot entry); trying next pair",
+                                                    "yellow",
+                                                )
+                                                continue
                                         # V28.6: v28_hc_profitable_break_glass remains FULL EXIT (V28.4 floor
                                         # protects winners >2% pnl); v28_hc_losing_break_glass reverts to
                                         # partial trim to soften V28.5's expanded eviction so displaced names
