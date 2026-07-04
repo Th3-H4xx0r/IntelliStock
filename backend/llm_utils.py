@@ -517,6 +517,12 @@ _PROVIDER_MODEL_REQUEST_RATE_LIMITERS: dict[tuple[str, str], _RequestRateLimiter
     ("nvidia", "moonshotai/kimi-k2.6"): _RequestRateLimiter(5, min_interval_sec=12.0),
     ("nvidia", "moonshotai/kimi-k2.5"): _RequestRateLimiter(5, min_interval_sec=12.0),
     ("nvidia", "moonshotai/kimi-k2"): _RequestRateLimiter(5, min_interval_sec=12.0),
+    # OpenRouter: upstream endpoints for large models rate-limit around a few
+    # req/s. In run 185254 the 10-worker overlay pool burst ~3.5 req/s and drew
+    # 23x HTTP 429 (there was no limiter entry for any openrouter model). Pace
+    # every openrouter model by default at ~2 req/s (120 RPM cap + 0.5s gap),
+    # applied via the ("openrouter", "__default__") provider-level fallback.
+    ("openrouter", "__default__"): _RequestRateLimiter(120, min_interval_sec=0.5),
 }
 
 
@@ -531,6 +537,12 @@ def _get_model_request_rate_limiter(model: str, provider: str = "nvidia") -> _Re
     key = (p, (model or "").strip().lower())
     if key in _PROVIDER_MODEL_REQUEST_RATE_LIMITERS:
         return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS[key]
+    # Provider-level default: any model under a provider that registers a
+    # ("<provider>", "__default__") entry (e.g. openrouter) gets paced even
+    # when the exact model name isn't enumerated.
+    _default_key = (p, "__default__")
+    if _default_key in _PROVIDER_MODEL_REQUEST_RATE_LIMITERS:
+        return _PROVIDER_MODEL_REQUEST_RATE_LIMITERS[_default_key]
     # Best-effort prefix match for `moonshotai/kimi-*` variants we
     # haven't enumerated explicitly (e.g. moonshotai/kimi-k2.7), but
     # only when the provider matches. Other providers exposing a

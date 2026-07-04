@@ -18950,6 +18950,18 @@ def _apply_ml_and_overlay_to_scores(
                         _discovery_nudge = float(config.get("discovery_hold_nudge", 0.06))
                         raw_net += _discovery_nudge
                         _log(f"Discovery hold nudge: {sym} +{_discovery_nudge:.2f} (pos_evidence={_pos_ev:.0f})", "cyan")
+        elif sym in overlay_results:
+            # A configured overlay call WAS made for this symbol but came back
+            # empty — a genuine terminal failure (worker exception or the LLM
+            # returned nothing after retries), not a "no overlay configured"
+            # skip (those symbols never enter overlay_results). Surface it in
+            # the engine log so failures aren't invisible; LLMUsage holds the
+            # underlying error detail.
+            _log(
+                f"LLM/overlay {sym}: terminal failure after retries — keeping "
+                f"base score (see LLMUsage for error detail)",
+                "yellow",
+            )
 
         # V11: Compute unrealized_pct for deep-loser protection check
         _v11_unrealized_pct = 0.0

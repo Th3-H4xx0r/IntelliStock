@@ -34,3 +34,14 @@ def test_raw_structured_default_stays_zero():
             max_output_tokens=1024, timeout_sec=30,
         )
     assert captured.get("retries") == 0
+
+
+def test_openrouter_models_get_request_limiter():
+    lim = llm_utils._get_model_request_rate_limiter(
+        "nvidia/nemotron-3-ultra-550b-a55b", "openrouter"
+    )
+    assert lim is not None
+
+
+def test_unknown_provider_still_none():
+    assert llm_utils._get_model_request_rate_limiter("whatever", "bedrock") is None
