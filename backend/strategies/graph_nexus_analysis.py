@@ -16971,7 +16971,7 @@ def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
 #   "Trailing stop: …"    "Hold-limit exit: …"
 # Forensic audit of backtest 586767: ZERO risk exits fired all run because
 # grace vetoed fast-loser/circuit-breaker cuts for the whole ~10d median hold.
-_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit")
+_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit", "Profit take")
 
 
 def _profit_take_next_tier(config, unrealized_pct, entry_key, prior_marker):
@@ -16986,7 +16986,7 @@ def _profit_take_next_tier(config, unrealized_pct, entry_key, prior_marker):
     for t in tiers_raw:
         try:
             g = float(t[0]); f = float(t[1])
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError, KeyError):
             continue
         if g > 0 and 0.0 < f < 1.0:
             tiers.append((g, f))
@@ -16997,7 +16997,13 @@ def _profit_take_next_tier(config, unrealized_pct, entry_key, prior_marker):
         fired = (set(float(x) for x in (prior_marker.get("fired") or []))
                  if prior_marker.get("entry") == entry_key else set())
     elif isinstance(prior_marker, str) and prior_marker == entry_key:
-        fired = {tiers[0][0]}  # legacy single-fire marker -> lowest tier taken
+        # legacy single-fire fired at profit_take_gain_pct -> every tier at/below
+        # that level is already taken (not just the lowest).
+        try:
+            _legacy_gain = float(config.get("profit_take_gain_pct", 40.0) or 40.0)
+        except (TypeError, ValueError):
+            _legacy_gain = 40.0
+        fired = {g for (g, _f) in tiers if g <= _legacy_gain}
     else:
         fired = set()
     try:
@@ -17419,8 +17425,21 @@ def _evaluate_position_risk(
                 _profit_take_sell_fraction = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
                 _profit_take_tiers_cfg = config.get("profit_take_tiers") or []
                 _profit_take_fired_fraction = None
+                # A configured tiers list with no structurally-valid [gain, fraction]
+                # entry falls back to single-fire (and warns) rather than silently
+                # disabling all profit-taking.
+                _pt_valid_tiers = False
+                for _pt_t in _profit_take_tiers_cfg:
+                    try:
+                        if float(_pt_t[0]) > 0 and 0.0 < float(_pt_t[1]) < 1.0:
+                            _pt_valid_tiers = True
+                            break
+                    except (TypeError, ValueError, IndexError, KeyError):
+                        continue
+                if _profit_take_tiers_cfg and not _pt_valid_tiers:
+                    _log("Profit take: profit_take_tiers has no valid [gain,fraction] entries — using single-fire", "yellow")
                 if _profit_take_enabled and fresh_score >= 0 and (
-                    _profit_take_tiers_cfg
+                    _pt_valid_tiers
                     or (_profit_take_gain_pct > 0 and 0.0 < _profit_take_sell_fraction < 1.0)
                 ):
                     _profit_state = _normalize_cache_mapping(strategy_cache, "_nexus_profit_take_state")
@@ -17435,7 +17454,11 @@ def _evaluate_position_risk(
                     else:
                         _entry_key = str(_entry_marker or "")
                     _profit_marker = _profit_state.get(sym)
-                    if _profit_take_tiers_cfg:
+                    _pt_already_taken = (
+                        _profit_marker == _entry_key
+                        or (isinstance(_profit_marker, dict) and _profit_marker.get("entry") == _entry_key)
+                    )
+                    if _pt_valid_tiers and _entry_key:
                         _pt_tier = _profit_take_next_tier(config, _unrealized_pct, _entry_key, _profit_marker)
                         if _pt_tier is not None:
                             fresh_score = -1
@@ -17446,7 +17469,7 @@ def _evaluate_position_risk(
                             _profit_state[sym] = _pt_tier["new_marker"]
                             _profit_take_fired_fraction = _pt_tier["fraction"]
                             _log(f"Profit take tier TRIGGER: {sym} gain={_unrealized_pct:+.1f}% >= +{_pt_tier['gain']:.0f}% tier, sell_fraction={_pt_tier['fraction']:.0%}", "magenta")
-                    elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and _profit_marker != _entry_key:
+                    elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and not _pt_already_taken:
                         fresh_score = -1
                         fresh_reason = (
                             f"Profit take: +{_unrealized_pct:.1f}% gain exceeds "
@@ -17454,7 +17477,7 @@ def _evaluate_position_risk(
                         )
                         _profit_state[sym] = _entry_key
                         _log(f"Profit take TRIGGER: {sym} gain={_unrealized_pct:+.1f}% >= {_profit_take_gain_pct:.0f}% threshold, sell_fraction={_profit_take_sell_fraction:.0%}", "magenta")
-                    elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and _profit_marker == _entry_key:
+                    elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and _pt_already_taken:
                         _log(f"Profit take SKIP (already taken): {sym} gain={_unrealized_pct:+.1f}% but already trimmed for entry={str(_entry_key)[:16]}", "cyan")
 
             # V31 grace gates SIGNAL-driven sells only. Protective risk exits
@@ -17682,6 +17705,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
         # for reuse by the dual-cadence monitor cycle). Behavior MUST be
         # byte-equivalent to the previous inline block — see
         # backend/tests/test_nexus_evaluate_position_risk.py.
+        _epr_extras: dict = {}  # bound below only when the emulator exists; keep safe for the sell_fraction sites
         if portfolio_emulator is not None:
             _epr_score, _epr_reason, _epr_extras = _evaluate_position_risk(
                 sym,
@@ -19275,6 +19299,13 @@ def _apply_ml_and_overlay_to_scores(
         if base.get("_forced_exit"):
             final_score = base["score"]  # Keep the forced exit (-1)
             _log(f"ML overlay PRESERVE forced-exit: {sym} score={final_score} reason={base.get('reason', '?')[:80]}", "yellow")
+        elif base.get("score") == -1 and "Profit take" in (base.get("reason") or ""):
+            # Partial profit-take trim must survive the overlay recompute (a winner
+            # has a positive raw score that would otherwise overwrite the -1).
+            # Kept NON-forced so its sell_fraction is honoured (a forced exit is
+            # coerced to a 100% sell downstream) — this is a partial trim, not a full exit.
+            final_score = -1
+            _log(f"ML overlay PRESERVE profit-take: {sym} — partial trim retained (reason={base.get('reason', '?')[:60]})", "yellow")
         elif base.get("score") == -1 and _v11_unrealized_pct < -5.0:
             # V11: Deep losers (>5% loss) with sell signals are protected from ML override
             final_score = -1
@@ -19312,7 +19343,7 @@ def _apply_ml_and_overlay_to_scores(
         # significantly profitable unless it's showing real deterioration (off-peak).
         # Codex fix v2: use original entry price for P&L check (not most recent add-on),
         # and use peak tracking for drawdown check. Avoids expensive snapshot call.
-        if final_score == -1 and not base.get("_forced_exit") and bool(config.get("winner_sell_protection_enabled", True)):
+        if final_score == -1 and not base.get("_forced_exit") and "Profit take" not in (base.get("reason") or "") and bool(config.get("winner_sell_protection_enabled", True)):
             # Z3.3 (2026-05-15): default min_pnl lowered from 10% to 5%.
             # Backtest 299903 sold AMD at +5% (locked) and SOXL at +10%
             # — neither hit the 10% protection threshold, so weak negative
@@ -19341,7 +19372,7 @@ def _apply_ml_and_overlay_to_scores(
         if overlay.get("buy_block") and final_score > 0:
             final_score = 0
             _log(f"ML overlay BUY_BLOCK: {sym} buy signal suppressed by overlay buy_block", "yellow")
-        if overlay.get("sell_block") and final_score < 0 and not base.get("_forced_exit"):
+        if overlay.get("sell_block") and final_score < 0 and not base.get("_forced_exit") and "Profit take" not in (base.get("reason") or ""):
             # V12: Bypass sell_block if unrealized loss exceeds configurable threshold
             _sb_bypass_pct = float(config.get("sell_block_bypass_loss_pct", -5.0))
             if _v11_unrealized_pct <= _sb_bypass_pct and _v11_unrealized_pct != 0.0:
@@ -20289,6 +20320,14 @@ class GraphNexusAnalysis:
             }
             if isinstance(_epr_extras, dict) and "sell_fraction" in _epr_extras:
                 _entry["sell_fraction"] = float(_epr_extras["sell_fraction"])
+            # Partial profit-take trims run only on the daily cycle, where the
+            # tier sell_fraction is plumbed to the broker via _nexus_position_sizes.
+            # The monitor tick has no per-symbol size channel, so a "Profit take"
+            # sell here would default to a 100% liquidation — defer it to daily.
+            if _entry["score"] == -1 and "Profit take" in (_epr_reason or ""):
+                _entry["score"] = 0
+                _entry["reason"] = "monitor: profit-take deferred to daily cycle"
+                _entry.pop("sell_fraction", None)
             # Monitor never emits buys.
             if _entry["score"] == 1:
                 _entry["score"] = 0

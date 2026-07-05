@@ -53,9 +53,13 @@ class TestProfitTakeNextTier:
         r = gna._profit_take_next_tier(TIERS, 25.0, "NEW", prior)
         assert r["gain"] == 20 and r["new_marker"]["fired"] == [20.0]
 
-    def test_legacy_string_marker_treated_as_lowest_tier_fired(self):
-        r = gna._profit_take_next_tier(TIERS, 45.0, "e1", "e1")
-        assert r["gain"] == 40  # tier 20 considered already fired
+    def test_legacy_string_marker_treats_tiers_at_or_below_gain_pct_as_fired(self):
+        # legacy single-fire fired at profit_take_gain_pct; every tier <= it is taken
+        cfg = {"profit_take_tiers": [[20, 0.33], [40, 0.5]], "profit_take_gain_pct": 40}
+        assert gna._profit_take_next_tier(cfg, 45.0, "e1", "e1") is None  # both tiers <= 40
+        cfg2 = {"profit_take_tiers": [[20, 0.33], [40, 0.5]], "profit_take_gain_pct": 25}
+        r = gna._profit_take_next_tier(cfg2, 45.0, "e1", "e1")
+        assert r["gain"] == 40  # only tier 20 (<=25) taken; tier 40 still armed
 
     def test_malformed_tiers_skipped(self):
         cfg = {"profit_take_tiers": [["x", "y"], [20, 1.5], [25, 0.4]]}
@@ -123,6 +127,32 @@ class TestTierIntegration:
         cfg = _cfg(profit_take_tiers=[], profit_take_gain_pct=20.0, profit_take_sell_fraction=0.5)
         score, reason, extras = _eval("FOO", 25.0, cache, cfg)
         assert score == -1 and extras["sell_fraction"] == 0.5
+
+    def test_dict_marker_config_flip_does_not_refire_single_fire(self):
+        # #3: config flipped tiers->single-fire; a dict marker from a prior tiered
+        # fire must be recognized as "already taken" (not re-fire an extra sell).
+        ek = "2026-01-01T00:00:00+00:00"
+        cache = {"_nexus_profit_take_state": {"FOO": {"entry": ek, "fired": [40.0]}}}
+        cfg = _cfg(profit_take_tiers=[], profit_take_gain_pct=40.0, profit_take_sell_fraction=0.5)
+        score, reason, _ = _eval("FOO", 45.0, cache, cfg)
+        assert score != -1 or "Profit take" not in (reason or "")
+
+    def test_invalid_tiers_falls_back_to_single_fire(self):
+        # #7: non-empty but structurally-invalid tiers -> single-fire, not disabled
+        cache = {}
+        cfg = _cfg(profit_take_tiers=[["x", "y"], [20]], profit_take_gain_pct=20.0, profit_take_sell_fraction=0.5)
+        score, reason, extras = _eval("FOO", 25.0, cache, cfg)
+        assert score == -1 and "Profit take" in reason and extras["sell_fraction"] == 0.5
+
+    def test_no_tier_fire_without_entry_key(self):
+        # #6: no entry timestamp -> no tiered fire (avoids empty-key marker collisions)
+        emu = _Emu(); emu.add("FOO", 100, 100.0)
+        score, reason, _ = gna._evaluate_position_risk(
+            "FOO", fresh_score=0, fresh_reason="No graph signal", config=_cfg(),
+            portfolio_emulator=emu, strategy_cache={}, prices={"FOO": 125.0},
+            price_history={}, date_key="2026-04-01", propagated={},
+            entry_buy_ts=None, held_days=100, max_hold_days=999)
+        assert score != -1 or "Profit take" not in (reason or "")
 
 
 class TestSchema:
