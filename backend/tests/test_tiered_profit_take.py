@@ -71,8 +71,12 @@ class _Emu:
         self._positions = {}
         self._trades = []
 
-    def add(self, t, sh, px):
+    def add(self, t, sh, px, ts=None):
         self._positions[t] = self._positions.get(t, 0.0) + sh
+        self._trades.append({
+            "ticker": t, "action": "buy", "price": float(px), "shares": float(sh),
+            "timestamp": ts or datetime(2026, 1, 1, tzinfo=timezone.utc),
+        })
 
 
 def _cfg(**ov):
