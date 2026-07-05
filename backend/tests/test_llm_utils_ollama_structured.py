@@ -38,11 +38,14 @@ def test_build_pydantic_ai_model_ollama_points_at_v1_endpoint():
     assert out is not None
     assert captured["model_name"] == "llama3.2"
     prov_kwargs = fake_prov.call_args.kwargs
-    assert prov_kwargs["base_url"].endswith("/v1")
-    assert prov_kwargs["base_url"].startswith("http://localhost:11434")
+    # base_url + api_key now live on the injected timeout-bounded openai_client.
+    _client = prov_kwargs["openai_client"]
+    _base = str(_client.base_url).rstrip("/")
+    assert _base.endswith("/v1")
+    assert _base.startswith("http://localhost:11434")
     # Empty api_key gets sentinel string for the OpenAI SDK (which insists
     # on a non-empty key) — local Ollama ignores it.
-    assert prov_kwargs["api_key"]
+    assert _client.api_key
 
 
 def test_build_pydantic_ai_model_ollama_does_not_double_append_v1():
@@ -58,8 +61,9 @@ def test_build_pydantic_ai_model_ollama_does_not_double_append_v1():
             provider_config={"ollama_base_url": "https://ollama.com/v1"},
         )
     prov_kwargs = fake_prov.call_args.kwargs
-    assert prov_kwargs["base_url"] == "https://ollama.com/v1"
-    assert prov_kwargs["api_key"] == "cloud-key"
+    _client = prov_kwargs["openai_client"]
+    assert str(_client.base_url).rstrip("/") == "https://ollama.com/v1"
+    assert _client.api_key == "cloud-key"
 
 
 def test_build_pydantic_ai_model_ollama_empty_api_key_allowed():
