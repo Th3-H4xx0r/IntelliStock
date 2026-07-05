@@ -17438,7 +17438,12 @@ def _evaluate_position_risk(
                         continue
                 if _profit_take_tiers_cfg and not _pt_valid_tiers:
                     _log("Profit take: profit_take_tiers has no valid [gain,fraction] entries — using single-fire", "yellow")
-                if _profit_take_enabled and fresh_score >= 0 and (
+                # Profit-take runs ONLY on the daily/full cycle: the intraday
+                # monitor has no per-symbol sell-size channel (would default to a
+                # 100% sell) and shares the persistent profit-state cache, so a
+                # monitor fire would burn the tier marker without trimming. A
+                # +20% trim is not time-critical — defer it to the daily cycle.
+                if _profit_take_enabled and side_effect_mode == "full" and fresh_score >= 0 and (
                     _pt_valid_tiers
                     or (_profit_take_gain_pct > 0 and 0.0 < _profit_take_sell_fraction < 1.0)
                 ):
@@ -19406,7 +19411,7 @@ def _apply_ml_and_overlay_to_scores(
             _prop_raw_check = float(propagated.get(sym, {}).get("raw_score", 0.0))
             if _prop_raw_check >= float(config.get("propagation_floor_threshold", 0.75)):
                 _log(f"Propagation floor BLOCKED: {sym} prop_raw={_prop_raw_check:.3f} would trigger buy, but forced_exit=True — sell preserved", "yellow")
-        if final_score <= 0 and not overlay.get("buy_block") and not base.get("_forced_exit"):
+        if final_score <= 0 and not overlay.get("buy_block") and not base.get("_forced_exit") and "Profit take" not in (base.get("reason") or ""):
             _prop_raw = float(propagated.get(sym, {}).get("raw_score", 0.0))
             _prop_floor_threshold = float(config.get("propagation_floor_threshold", 0.75))
             if _prop_raw >= _prop_floor_threshold:
@@ -25455,7 +25460,12 @@ class GraphNexusAnalysis:
 
         # Sell sizes: use LLM-provided sell_pct (partial sell support)
         for sym in sell_syms:
-            if sym in _mw_protected:
+            # A partial-sell hint (e.g. a profit-take tier trim) must still be sized
+            # even for momentum-protected names — otherwise the broker defaults to a
+            # 100% liquidation instead of the intended partial trim.
+            _sym_sf_hint = (scores.get(sym) or {}).get("sell_fraction")
+            _is_partial_sell = _sym_sf_hint is not None and 0.0 < float(_sym_sf_hint or 1.0) < 1.0
+            if sym in _mw_protected and not _is_partial_sell:
                 continue
             sd = sentiment_data.get(sym) or {}
             sp = float((scores.get(sym) or {}).get("sell_fraction", sd.get("sell_pct", 1.0)) or 1.0)
