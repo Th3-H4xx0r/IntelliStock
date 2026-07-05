@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_break_glass_recent_runup_block_pct": 0.0, "rotation_break_glass_recent_runup_lookback_bars": 20, "rotation_prevalidate_sector_cap_enabled": true, "fast_loser_cut_recent_runup_block_pct": 0.0, "fast_loser_cut_recent_runup_lookback_bars": 20, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "rotation_graph_gate_max_loss_pct": 0.0, "anchor_reinforce_target_pct": 0.0, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
+# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "profit_take_enabled": false, "profit_take_tiers": [], "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_break_glass_recent_runup_block_pct": 0.0, "rotation_break_glass_recent_runup_lookback_bars": 20, "rotation_prevalidate_sector_cap_enabled": true, "fast_loser_cut_recent_runup_block_pct": 0.0, "fast_loser_cut_recent_runup_lookback_bars": 20, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "rotation_graph_gate_max_loss_pct": 0.0, "anchor_reinforce_target_pct": 0.0, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
 # INTELLISTOCK_DESCRIPTION: Advanced graph-based news contagion analysis with market trend tracking, Benzinga data sources, outcome tracking, and learning stage. Fetches today's news from Alpaca AND Google News (macro/geopolitical), enriches with Benzinga data (analyst ratings, analyst insights, insider trades, government trades, M&A, upcoming IPOs, stock splits, earnings calendar, company actions, prediction markets — all enable/disable configurable), uses LLM to classify sentiment AND event type per ticker, classifies macro news into sectors/themes and resolves to tickers via Neo4j (hybrid: structured classification + Gemini tool-calling fallback), then propagates through Neo4j using relationship-aware weights (10 edge types with directional propagation, sentiment inversion for competitors, edge confidence/revenue/obligation weighting, event-type amplification, sector peer contagion, macro sector-to-sector supply flows, 2-hop supply chain chains, patent partnership depth, and institutional co-holding correlation with position-size weighting). Tracks market trends across runs, discovers new stocks from trends, enforces sells on trend reversals. Outcome tracking stores event→price outcomes in RethinkDB for LLM pattern recognition. Learning stage pre-loads past outcome patterns before first trade (configurable lookback, cached). Uses TOON format for token-efficient LLM inputs. Returns symbol -> score with detailed graph reasoning. Runs once per loop (run_once).
 # DIFFICULTY: 8
 """
@@ -16971,7 +16971,50 @@ def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
 #   "Trailing stop: …"    "Hold-limit exit: …"
 # Forensic audit of backtest 586767: ZERO risk exits fired all run because
 # grace vetoed fast-loser/circuit-breaker cuts for the whole ~10d median hold.
-_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit")
+_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit", "Profit take")
+
+
+def _profit_take_next_tier(config, unrealized_pct, entry_key, prior_marker):
+    """Next un-fired profit-take tier crossed at unrealized_pct, or None.
+    Fires the LOWEST un-fired crossed tier (one per bar -> progressive
+    scale-out). prior_marker may be the dict form {"entry","fired"}, a legacy
+    entry-key string (treated as lowest tier already taken), or None."""
+    tiers_raw = config.get("profit_take_tiers") or []
+    if not tiers_raw:
+        return None
+    tiers = []
+    for t in tiers_raw:
+        try:
+            g = float(t[0]); f = float(t[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if g > 0 and 0.0 < f < 1.0:
+            tiers.append((g, f))
+    if not tiers:
+        return None
+    tiers.sort(key=lambda x: x[0])
+    if isinstance(prior_marker, dict):
+        fired = (set(float(x) for x in (prior_marker.get("fired") or []))
+                 if prior_marker.get("entry") == entry_key else set())
+    elif isinstance(prior_marker, str) and prior_marker == entry_key:
+        # legacy single-fire fired at profit_take_gain_pct -> every tier at/below
+        # that level is already taken (not just the lowest).
+        try:
+            _legacy_gain = float(config.get("profit_take_gain_pct", 40.0) or 40.0)
+        except (TypeError, ValueError):
+            _legacy_gain = 40.0
+        fired = {g for (g, _f) in tiers if g <= _legacy_gain}
+    else:
+        fired = set()
+    try:
+        upct = float(unrealized_pct)
+    except (TypeError, ValueError):
+        return None
+    for g, f in tiers:  # ascending -> lowest first
+        if g not in fired and upct >= g:
+            return {"gain": g, "fraction": f,
+                    "new_marker": {"entry": entry_key, "fired": sorted(fired | {g})}}
+    return None
 
 
 def _evaluate_position_risk(
@@ -17009,6 +17052,7 @@ def _evaluate_position_risk(
     leak — both modes RESPECT existing entries).
     """
     extras: dict = {}
+    _profit_take_fired_fraction = None  # set by the tiered profit-take branch below
     if portfolio_emulator is None:
         return fresh_score, fresh_reason, extras
 
@@ -17379,7 +17423,30 @@ def _evaluate_position_risk(
                 _profit_take_enabled = bool(config.get("profit_take_enabled", False))
                 _profit_take_gain_pct = float(config.get("profit_take_gain_pct", 40.0) or 40.0)
                 _profit_take_sell_fraction = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
-                if _profit_take_enabled and fresh_score >= 0 and _profit_take_gain_pct > 0 and 0.0 < _profit_take_sell_fraction < 1.0:
+                _profit_take_tiers_cfg = config.get("profit_take_tiers") or []
+                _profit_take_fired_fraction = None
+                # A configured tiers list with no structurally-valid [gain, fraction]
+                # entry falls back to single-fire (and warns) rather than silently
+                # disabling all profit-taking.
+                _pt_valid_tiers = False
+                for _pt_t in _profit_take_tiers_cfg:
+                    try:
+                        if float(_pt_t[0]) > 0 and 0.0 < float(_pt_t[1]) < 1.0:
+                            _pt_valid_tiers = True
+                            break
+                    except (TypeError, ValueError, IndexError, KeyError):
+                        continue
+                if _profit_take_tiers_cfg and not _pt_valid_tiers:
+                    _log("Profit take: profit_take_tiers has no valid [gain,fraction] entries — using single-fire", "yellow")
+                # Profit-take runs ONLY on the daily/full cycle: the intraday
+                # monitor has no per-symbol sell-size channel (would default to a
+                # 100% sell) and shares the persistent profit-state cache, so a
+                # monitor fire would burn the tier marker without trimming. A
+                # +20% trim is not time-critical — defer it to the daily cycle.
+                if _profit_take_enabled and side_effect_mode == "full" and fresh_score >= 0 and (
+                    _pt_valid_tiers
+                    or (_profit_take_gain_pct > 0 and 0.0 < _profit_take_sell_fraction < 1.0)
+                ):
                     _profit_state = _normalize_cache_mapping(strategy_cache, "_nexus_profit_take_state")
                     _entry_marker = entry_buy_ts
                     if isinstance(_entry_marker, str):
@@ -17392,7 +17459,22 @@ def _evaluate_position_risk(
                     else:
                         _entry_key = str(_entry_marker or "")
                     _profit_marker = _profit_state.get(sym)
-                    if _unrealized_pct >= _profit_take_gain_pct and _entry_key and _profit_marker != _entry_key:
+                    _pt_already_taken = (
+                        _profit_marker == _entry_key
+                        or (isinstance(_profit_marker, dict) and _profit_marker.get("entry") == _entry_key)
+                    )
+                    if _pt_valid_tiers and _entry_key:
+                        _pt_tier = _profit_take_next_tier(config, _unrealized_pct, _entry_key, _profit_marker)
+                        if _pt_tier is not None:
+                            fresh_score = -1
+                            fresh_reason = (
+                                f"Profit take tier: +{_unrealized_pct:.1f}% gain crossed "
+                                f"+{_pt_tier['gain']:.0f}% tier"
+                            )
+                            _profit_state[sym] = _pt_tier["new_marker"]
+                            _profit_take_fired_fraction = _pt_tier["fraction"]
+                            _log(f"Profit take tier TRIGGER: {sym} gain={_unrealized_pct:+.1f}% >= +{_pt_tier['gain']:.0f}% tier, sell_fraction={_pt_tier['fraction']:.0%}", "magenta")
+                    elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and not _pt_already_taken:
                         fresh_score = -1
                         fresh_reason = (
                             f"Profit take: +{_unrealized_pct:.1f}% gain exceeds "
@@ -17400,8 +17482,8 @@ def _evaluate_position_risk(
                         )
                         _profit_state[sym] = _entry_key
                         _log(f"Profit take TRIGGER: {sym} gain={_unrealized_pct:+.1f}% >= {_profit_take_gain_pct:.0f}% threshold, sell_fraction={_profit_take_sell_fraction:.0%}", "magenta")
-                    elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and _profit_marker == _entry_key:
-                        _log(f"Profit take SKIP (already taken): {sym} gain={_unrealized_pct:+.1f}% but already trimmed for entry={_entry_key[:16]}", "cyan")
+                    elif _unrealized_pct >= _profit_take_gain_pct and _entry_key and _pt_already_taken:
+                        _log(f"Profit take SKIP (already taken): {sym} gain={_unrealized_pct:+.1f}% but already trimmed for entry={str(_entry_key)[:16]}", "cyan")
 
             # V31 grace gates SIGNAL-driven sells only. Protective risk exits
             # (Fast loser / Circuit breaker / Trailing stop / Hold-limit) must
@@ -17470,7 +17552,10 @@ def _evaluate_position_risk(
                     )
 
     if fresh_score == -1 and "Profit take" in (fresh_reason or ""):
-        extras["sell_fraction"] = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
+        extras["sell_fraction"] = (
+            _profit_take_fired_fraction if _profit_take_fired_fraction is not None
+            else float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
+        )
     return fresh_score, fresh_reason, extras
 
 
@@ -17625,6 +17710,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
         # for reuse by the dual-cadence monitor cycle). Behavior MUST be
         # byte-equivalent to the previous inline block — see
         # backend/tests/test_nexus_evaluate_position_risk.py.
+        _epr_extras: dict = {}  # bound below only when the emulator exists; keep safe for the sell_fraction sites
         if portfolio_emulator is not None:
             _epr_score, _epr_reason, _epr_extras = _evaluate_position_risk(
                 sym,
@@ -17675,7 +17761,9 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
                 "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
             }
             if "Profit take" in fresh_reason and final_score == -1:
-                out[sym]["sell_fraction"] = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
+                out[sym]["sell_fraction"] = _epr_extras.get(
+                    "sell_fraction", float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
+                )
         else:
             out[sym] = {
                 "score": fresh_score,
@@ -17683,7 +17771,9 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
                 "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
             }
             if "Profit take" in fresh_reason and fresh_score == -1:
-                out[sym]["sell_fraction"] = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
+                out[sym]["sell_fraction"] = _epr_extras.get(
+                    "sell_fraction", float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
+                )
 
     return out
 
@@ -19214,6 +19304,13 @@ def _apply_ml_and_overlay_to_scores(
         if base.get("_forced_exit"):
             final_score = base["score"]  # Keep the forced exit (-1)
             _log(f"ML overlay PRESERVE forced-exit: {sym} score={final_score} reason={base.get('reason', '?')[:80]}", "yellow")
+        elif base.get("score") == -1 and "Profit take" in (base.get("reason") or ""):
+            # Partial profit-take trim must survive the overlay recompute (a winner
+            # has a positive raw score that would otherwise overwrite the -1).
+            # Kept NON-forced so its sell_fraction is honoured (a forced exit is
+            # coerced to a 100% sell downstream) — this is a partial trim, not a full exit.
+            final_score = -1
+            _log(f"ML overlay PRESERVE profit-take: {sym} — partial trim retained (reason={base.get('reason', '?')[:60]})", "yellow")
         elif base.get("score") == -1 and _v11_unrealized_pct < -5.0:
             # V11: Deep losers (>5% loss) with sell signals are protected from ML override
             final_score = -1
@@ -19251,7 +19348,7 @@ def _apply_ml_and_overlay_to_scores(
         # significantly profitable unless it's showing real deterioration (off-peak).
         # Codex fix v2: use original entry price for P&L check (not most recent add-on),
         # and use peak tracking for drawdown check. Avoids expensive snapshot call.
-        if final_score == -1 and not base.get("_forced_exit") and bool(config.get("winner_sell_protection_enabled", True)):
+        if final_score == -1 and not base.get("_forced_exit") and "Profit take" not in (base.get("reason") or "") and bool(config.get("winner_sell_protection_enabled", True)):
             # Z3.3 (2026-05-15): default min_pnl lowered from 10% to 5%.
             # Backtest 299903 sold AMD at +5% (locked) and SOXL at +10%
             # — neither hit the 10% protection threshold, so weak negative
@@ -19280,7 +19377,7 @@ def _apply_ml_and_overlay_to_scores(
         if overlay.get("buy_block") and final_score > 0:
             final_score = 0
             _log(f"ML overlay BUY_BLOCK: {sym} buy signal suppressed by overlay buy_block", "yellow")
-        if overlay.get("sell_block") and final_score < 0 and not base.get("_forced_exit"):
+        if overlay.get("sell_block") and final_score < 0 and not base.get("_forced_exit") and "Profit take" not in (base.get("reason") or ""):
             # V12: Bypass sell_block if unrealized loss exceeds configurable threshold
             _sb_bypass_pct = float(config.get("sell_block_bypass_loss_pct", -5.0))
             if _v11_unrealized_pct <= _sb_bypass_pct and _v11_unrealized_pct != 0.0:
@@ -19314,7 +19411,7 @@ def _apply_ml_and_overlay_to_scores(
             _prop_raw_check = float(propagated.get(sym, {}).get("raw_score", 0.0))
             if _prop_raw_check >= float(config.get("propagation_floor_threshold", 0.75)):
                 _log(f"Propagation floor BLOCKED: {sym} prop_raw={_prop_raw_check:.3f} would trigger buy, but forced_exit=True — sell preserved", "yellow")
-        if final_score <= 0 and not overlay.get("buy_block") and not base.get("_forced_exit"):
+        if final_score <= 0 and not overlay.get("buy_block") and not base.get("_forced_exit") and "Profit take" not in (base.get("reason") or ""):
             _prop_raw = float(propagated.get(sym, {}).get("raw_score", 0.0))
             _prop_floor_threshold = float(config.get("propagation_floor_threshold", 0.75))
             if _prop_raw >= _prop_floor_threshold:
@@ -20228,6 +20325,14 @@ class GraphNexusAnalysis:
             }
             if isinstance(_epr_extras, dict) and "sell_fraction" in _epr_extras:
                 _entry["sell_fraction"] = float(_epr_extras["sell_fraction"])
+            # Partial profit-take trims run only on the daily cycle, where the
+            # tier sell_fraction is plumbed to the broker via _nexus_position_sizes.
+            # The monitor tick has no per-symbol size channel, so a "Profit take"
+            # sell here would default to a 100% liquidation — defer it to daily.
+            if _entry["score"] == -1 and "Profit take" in (_epr_reason or ""):
+                _entry["score"] = 0
+                _entry["reason"] = "monitor: profit-take deferred to daily cycle"
+                _entry.pop("sell_fraction", None)
             # Monitor never emits buys.
             if _entry["score"] == 1:
                 _entry["score"] = 0
@@ -25355,7 +25460,12 @@ class GraphNexusAnalysis:
 
         # Sell sizes: use LLM-provided sell_pct (partial sell support)
         for sym in sell_syms:
-            if sym in _mw_protected:
+            # A partial-sell hint (e.g. a profit-take tier trim) must still be sized
+            # even for momentum-protected names — otherwise the broker defaults to a
+            # 100% liquidation instead of the intended partial trim.
+            _sym_sf_hint = (scores.get(sym) or {}).get("sell_fraction")
+            _is_partial_sell = _sym_sf_hint is not None and 0.0 < float(_sym_sf_hint or 1.0) < 1.0
+            if sym in _mw_protected and not _is_partial_sell:
                 continue
             sd = sentiment_data.get(sym) or {}
             sp = float((scores.get(sym) or {}).get("sell_fraction", sd.get("sell_pct", 1.0)) or 1.0)
