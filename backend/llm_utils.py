@@ -357,6 +357,16 @@ def _coerce_timeout_sec(timeout_sec: int | None) -> int:
     return t if t > 0 else 180
 
 
+def _default_llm_retries() -> int:
+    """Default number of retries on transient LLM failures (timeouts, 429,
+    5xx, connection errors). Default 2 => up to 3 attempts before giving up.
+    Tunable via env LLM_MAX_RETRIES."""
+    try:
+        return max(0, int(os.environ.get("LLM_MAX_RETRIES", "2") or 2))
+    except (TypeError, ValueError):
+        return 2
+
+
 def _backoff_sleep_seconds(attempt: int, base: float = 2.0, cap: float = 60.0) -> float:
     """Exponential backoff with jitter for retry attempt index starting at 0."""
     exp = min(cap, base * (2 ** max(0, attempt)))
@@ -1128,7 +1138,9 @@ def _terminal_llm_failure_cache_key(provider: str, model: str, provider_config: 
 
 
 def _is_transient_http_error(error_text: str) -> bool:
-    """Return True if the error looks like a retriable HTTP/network error (502, 503, 429, 500, 504, connection reset)."""
+    """Return True if the error looks like a retriable HTTP/network error (502,
+    503, 429, 500, 504, connection reset, or a client-side read/connect
+    timeout)."""
     lowered = str(error_text or "").lower()
     for code in ("429", "500", "502", "503", "504"):
         if f"status_code: {code}" in lowered or f"status_code:{code}" in lowered or f"status code {code}" in lowered:
@@ -1137,6 +1149,11 @@ def _is_transient_http_error(error_text: str) -> bool:
         "bad gateway", "service unavailable", "too many requests",
         "rate limit", "gateway timeout", "connection reset", "connection error",
         "temporarily unavailable",
+        # Client-side timeouts: a bounded LLM_REQUEST_TIMEOUT firing (httpx
+        # ReadTimeout/ConnectTimeout/TimeoutException, requests Timeout,
+        # openai APITimeoutError, botocore ReadTimeoutError) is transient — a
+        # stalled upstream that we cut off should be retried, not given up on.
+        "timed out", "timeout", "readtimeout", "connecttimeout",
     ))
 
 
@@ -2675,7 +2692,7 @@ def call_structured_llm_by_provider(
     temperature: float = 0.2,
     provider_config: dict[str, Any] | None = None,
     prefer_raw_json: bool = False,
-    http_retries: int = 2,
+    http_retries: int | None = None,
     use_prompt_cache: bool = False,
 ):
     """
@@ -2800,6 +2817,8 @@ def call_structured_llm_by_provider(
         }
         return None
     timeout = float(_coerce_timeout_sec(timeout_sec))
+    if http_retries is None:
+        http_retries = _default_llm_retries()
     settings = _build_structured_model_settings(provider, max_output_tokens, timeout, temperature, model=model)
     model_candidates = _structured_model_candidates(provider, model)
     provider_lock = _STRUCTURED_LLM_PROVIDER_LOCKS.get((provider or "").strip().lower())
@@ -6121,7 +6140,7 @@ def call_llm_by_provider(
     prompt: str,
     max_output_tokens: int = 256,
     timeout_sec: int | None = None,
-    retries: int = 0,
+    retries: int | None = None,
     response_mime_type: str | None = None,
     provider_config: dict[str, Any] | None = None,
 ) -> str:
@@ -6131,9 +6150,12 @@ def call_llm_by_provider(
     Returns response text or empty string.
 
     timeout_sec: Optional override for LLM_REQUEST_TIMEOUT (seconds).
-    retries: Number of retries on retriable failures (e.g. 503/429/timeouts).
+    retries: Retries on retriable failures (timeouts/503/429). None => the
+        LLM_MAX_RETRIES default (2 => up to 3 attempts).
     response_mime_type: Gemini-only response MIME type (e.g. application/json).
     """
+    if retries is None:
+        retries = _default_llm_retries()
     if (provider or "").strip().lower() == "claude-cli":
         return _call_claude_cli_plain(
             model=model,
