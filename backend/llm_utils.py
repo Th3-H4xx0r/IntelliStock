@@ -962,6 +962,29 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
             default_structured_output_mode="prompted",
         )
 
+    def _bounded_openai_client(*, base_url=None, api_key=None, default_headers=None,
+                               azure_endpoint=None, api_version=None):
+        """OpenAI-SDK async client for the pydantic-ai structured path with a
+        HARD read/connect timeout AND max_retries=0. Without this the SDK
+        defaults to max_retries=2 at a ~10-min timeout, so a stalled upstream
+        (OpenRouter/Nemotron especially) hangs the caller for many minutes —
+        the root cause of random backtest freezes. LLM_REQUEST_TIMEOUT (default
+        180s) bounds the read; connect is capped at 15s."""
+        import httpx as _httpx
+        _read = float(os.environ.get("LLM_REQUEST_TIMEOUT", "180") or 180.0)
+        _to = _httpx.Timeout(_read, connect=min(15.0, _read))
+        if azure_endpoint is not None:
+            from openai import AsyncAzureOpenAI as _AzCli
+            return _AzCli(azure_endpoint=azure_endpoint, api_version=api_version,
+                          api_key=api_key, timeout=_to, max_retries=0)
+        from openai import AsyncOpenAI as _OaCli
+        _kw = dict(api_key=api_key, timeout=_to, max_retries=0)
+        if base_url:
+            _kw["base_url"] = base_url
+        if default_headers:
+            _kw["default_headers"] = default_headers
+        return _OaCli(**_kw)
+
     if p == "azure":
         azure_endpoint = str(resolved.get("azure_endpoint") or "").strip()
         api_version = str(resolved.get("api_version") or "").strip()
@@ -972,16 +995,14 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
         profile = _prompted_json_profile() if _prefers_prompted_structured_output(p, model) else None
         return OpenAIChatModel(
             model,
-            provider=AzureProvider(
-                azure_endpoint=azure_endpoint,
-                api_version=api_version,
-                api_key=api_key,
-            ),
+            provider=AzureProvider(openai_client=_bounded_openai_client(
+                azure_endpoint=azure_endpoint, api_version=api_version, api_key=api_key)),
             profile=profile,
         )
     if p == "deepseek":
         lower_model = model.lower()
-        if "reasoner" in lower_model and DeepSeekProvider is not None and ModelProfile is not None:
+        _ds_client = _bounded_openai_client(base_url="https://api.deepseek.com/v1", api_key=api_key)
+        if "reasoner" in lower_model and ModelProfile is not None:
             # DeepSeek reasoner supports JSON output, but the local PydanticAI DeepSeek
             # profile still defaults structured mode to tools for this model. Override
             # it to prompted JSON-object mode, and keep chat as a later fallback only.
@@ -993,31 +1014,20 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
             )
             return OpenAIChatModel(
                 model,
-                provider=DeepSeekProvider(api_key=api_key),
+                provider=OpenAIProvider(openai_client=_ds_client),
                 profile=reasoner_profile,
             )
         return OpenAIChatModel(
             model,
-            provider=OpenAIProvider(
-                base_url="https://api.deepseek.com/v1",
-                api_key=api_key,
-            ),
+            provider=OpenAIProvider(openai_client=_ds_client),
         )
     if p == "openai":
         base_url = str(resolved.get("base_url") or "").strip()
         profile = _prompted_json_profile() if _prefers_prompted_structured_output(p, model) else None
-        if base_url:
-            return OpenAIChatModel(
-                model,
-                provider=OpenAIProvider(
-                    base_url=base_url,
-                    api_key=api_key,
-                ),
-                profile=profile,
-            )
         return OpenAIChatModel(
             model,
-            provider=OpenAIProvider(api_key=api_key),
+            provider=OpenAIProvider(openai_client=_bounded_openai_client(
+                base_url=(base_url or None), api_key=api_key)),
             profile=profile,
         )
     if p == "nvidia":
@@ -1025,10 +1035,8 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
         profile = _prompted_json_profile()
         return OpenAIChatModel(
             model,
-            provider=OpenAIProvider(
-                base_url=base_url,
-                api_key=api_key,
-            ),
+            provider=OpenAIProvider(openai_client=_bounded_openai_client(
+                base_url=base_url, api_key=api_key)),
             profile=profile,
         )
     if p == "bedrock":
@@ -1042,7 +1050,9 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
         ).strip()
         if not region:
             return None
-        client = bedrock_client.build_runtime_client(api_key, region)
+        client = bedrock_client.build_runtime_client(
+            api_key, region,
+            timeout_sec=float(os.environ.get("LLM_REQUEST_TIMEOUT", "180") or 180.0))
         # Extended-thinking (bedrock_reasoning) is intentionally NOT applied on
         # the structured path: Converse requires budget_tokens < maxTokens, but
         # structured calls use small max_output_tokens (often 256) where a
@@ -1068,10 +1078,8 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
         effective_key = api_key or "ollama"
         return OpenAIChatModel(
             model,
-            provider=OpenAIProvider(
-                base_url=base,
-                api_key=effective_key,
-            ),
+            provider=OpenAIProvider(openai_client=_bounded_openai_client(
+                base_url=base, api_key=effective_key)),
         )
     if p == "openrouter":
         base_url = str(resolved.get("openrouter_base_url") or "https://openrouter.ai/api/v1").strip().rstrip("/")
@@ -1091,16 +1099,11 @@ def _build_pydantic_ai_model(provider: str, api_key: str, model: str, provider_c
         # model that can't honour a forced schema. Models that DO support
         # native schema still work fine under prompted mode.
         profile = _prompted_json_profile()
-        if default_headers:
-            try:
-                from openai import AsyncOpenAI as _AsyncOpenAI
-                _client = _AsyncOpenAI(base_url=base_url, api_key=api_key, default_headers=default_headers)
-                return OpenAIChatModel(model, provider=OpenAIProvider(openai_client=_client), profile=profile)
-            except Exception:
-                pass  # fall through to header-less provider on any client-construction issue
         return OpenAIChatModel(
             model,
-            provider=OpenAIProvider(base_url=base_url, api_key=api_key),
+            provider=OpenAIProvider(openai_client=_bounded_openai_client(
+                base_url=base_url, api_key=api_key,
+                default_headers=(default_headers or None))),
             profile=profile,
         )
     return GoogleModel(

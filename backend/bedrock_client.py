@@ -80,10 +80,18 @@ def _make_bearer_injector(api_key: str):
 
 
 def _client_config(timeout_sec: float = 30.0, max_attempts: int = 1) -> Config:
+    # Clamp to a positive float: botocore treats read_timeout=None/0 as an
+    # UNBOUNDED read, which would let a stalled Bedrock call hang forever.
+    try:
+        _t = float(timeout_sec)
+    except (TypeError, ValueError):
+        _t = 30.0
+    if not (_t > 0):
+        _t = 30.0
     return Config(
         signature_version=botocore.UNSIGNED,  # bearer token via header, not SigV4
-        read_timeout=float(timeout_sec),
-        connect_timeout=min(15.0, float(timeout_sec)),
+        read_timeout=_t,
+        connect_timeout=min(15.0, _t),
         retries={"max_attempts": max_attempts, "mode": "standard"},
     )
 
