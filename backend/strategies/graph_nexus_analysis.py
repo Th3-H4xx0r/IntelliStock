@@ -16974,6 +16974,43 @@ def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
 _RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit")
 
 
+def _profit_take_next_tier(config, unrealized_pct, entry_key, prior_marker):
+    """Next un-fired profit-take tier crossed at unrealized_pct, or None.
+    Fires the LOWEST un-fired crossed tier (one per bar -> progressive
+    scale-out). prior_marker may be the dict form {"entry","fired"}, a legacy
+    entry-key string (treated as lowest tier already taken), or None."""
+    tiers_raw = config.get("profit_take_tiers") or []
+    if not tiers_raw:
+        return None
+    tiers = []
+    for t in tiers_raw:
+        try:
+            g = float(t[0]); f = float(t[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if g > 0 and 0.0 < f < 1.0:
+            tiers.append((g, f))
+    if not tiers:
+        return None
+    tiers.sort(key=lambda x: x[0])
+    if isinstance(prior_marker, dict):
+        fired = (set(float(x) for x in (prior_marker.get("fired") or []))
+                 if prior_marker.get("entry") == entry_key else set())
+    elif isinstance(prior_marker, str) and prior_marker == entry_key:
+        fired = {tiers[0][0]}  # legacy single-fire marker -> lowest tier taken
+    else:
+        fired = set()
+    try:
+        upct = float(unrealized_pct)
+    except (TypeError, ValueError):
+        return None
+    for g, f in tiers:  # ascending -> lowest first
+        if g not in fired and upct >= g:
+            return {"gain": g, "fraction": f,
+                    "new_marker": {"entry": entry_key, "fired": sorted(fired | {g})}}
+    return None
+
+
 def _evaluate_position_risk(
     sym: str,
     *,
