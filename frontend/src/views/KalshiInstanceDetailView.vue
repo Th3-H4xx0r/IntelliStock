@@ -98,6 +98,10 @@ const running = computed(() => !!detail.value?.running)
 // Real money ONLY when a live brokerage has live_enabled AND paper_mode off.
 const liveReal = computed(() => detail.value?.environment === 'live'
   && !!(detail.value?.config || {}).live_enabled && !(detail.value?.config || {}).paper_mode)
+// Whether to surface PAPER (MOCK) UI. Prefer the backend's authoritative flag (mirrors
+// the engine's dry state + how the API scopes data) so the client never disagrees with
+// the server; fall back to !liveReal for an older API that doesn't send it.
+const showPaper = computed(() => detail.value?.show_paper ?? !liveReal.value)
 
 // Edit / delete
 const showEdit = ref(false)
@@ -342,7 +346,7 @@ onUnmounted(() => {
 
         <!-- Equity + decision summary -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <KalshiPortfolioChart :brokerage-id="detail.brokerage_id" :is-real="liveReal" />
+          <KalshiPortfolioChart :brokerage-id="detail.brokerage_id" :is-real="!showPaper" />
           <div class="glass-card rounded-2xl p-4 sm:p-5">
             <div class="flex items-center gap-2 mb-4"><span class="material-symbols-outlined text-primary text-[18px]">insights</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Decision summary</span></div>
             <div class="grid grid-cols-2 gap-3">
@@ -352,7 +356,7 @@ onUnmounted(() => {
               <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-red-400 tabular-nums">{{ summary.blocked }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Blocked</div></div>
             </div>
             <!-- Paper (mock) hypothetical P&L — "what your profit would have been" -->
-            <div v-if="!liveReal && paper.trades" class="mt-3 flex items-center justify-between gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5">
+            <div v-if="showPaper && paper.trades" class="mt-3 flex items-center justify-between gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2.5">
               <span class="text-[11px] uppercase tracking-wide text-amber-400/90 font-semibold flex items-center gap-1.5"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span>Paper P&amp;L · {{ paper.trades }} trade{{ paper.trades === 1 ? '' : 's' }}<span v-if="paper.graded" class="text-slate-500 normal-case">({{ paper.graded }} settled)</span></span>
               <span class="text-right shrink-0">
                 <span class="text-base font-bold tabular-nums" :class="(paper.realized_pnl_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">realized {{ (paper.realized_pnl_cents >= 0 ? '+' : '') + '$' + ((paper.realized_pnl_cents || 0) / 100).toFixed(2) }}</span>
@@ -483,7 +487,7 @@ onUnmounted(() => {
                   <div class="flex flex-col items-end gap-1 shrink-0">
                     <span class="text-xs tabular-nums font-semibold" :class="(d.edge || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ d.edge == null ? '' : (d.edge >= 0 ? '+' : '') + pct(d.edge) }}</span>
                     <span class="flex items-center gap-1">
-                      <span v-if="!liveReal && d.paper" class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400" title="Paper / mock — no real order placed">MOCK</span>
+                      <span v-if="showPaper && d.paper" class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400" title="Paper / mock — no real order placed">MOCK</span>
                       <span class="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded" :class="decBadge(d.decision)">{{ d.decision }}</span>
                     </span>
                   </div>
@@ -499,7 +503,7 @@ onUnmounted(() => {
                     <div><span class="text-slate-600">Opp score</span> {{ d.opportunity_score == null ? '—' : d.opportunity_score.toFixed(2) }}</div>
                     <div v-if="d.outcome"><span class="text-slate-600">Outcome</span> {{ d.outcome }}</div>
                     <div v-if="d.clv != null"><span class="text-slate-600">CLV</span> {{ pct(d.clv) }}</div>
-                    <div v-if="!liveReal && d.paper && d.realized_pnl_cents != null"><span class="text-slate-600">Paper P&amp;L</span> <span :class="d.realized_pnl_cents >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (d.realized_pnl_cents >= 0 ? '+' : '') + '$' + (d.realized_pnl_cents / 100).toFixed(2) }}</span></div>
+                    <div v-if="showPaper && d.paper && d.realized_pnl_cents != null"><span class="text-slate-600">Paper P&amp;L</span> <span :class="d.realized_pnl_cents >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ (d.realized_pnl_cents >= 0 ? '+' : '') + '$' + (d.realized_pnl_cents / 100).toFixed(2) }}</span></div>
                   </div>
                   <p v-if="d.llm_rationale" class="text-slate-300 bg-surface/60 border border-border-subtle rounded-lg px-3 py-2">
                     <span class="material-symbols-outlined text-primary text-[14px] align-middle mr-1">psychology</span>{{ d.llm_rationale }}
@@ -539,8 +543,8 @@ onUnmounted(() => {
                 </div>
               </div>
               <!-- Mock (paper) positions — live unrealized P&L on the right -->
-              <div v-if="!liveReal" class="flex items-center gap-1.5 mt-4 mb-2"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Mock positions · {{ orders.mock.length }}</span></div>
-              <p v-if="!liveReal && !orders.mock.length" class="text-xs text-slate-500 mb-2">No open mock positions.</p>
+              <div v-if="showPaper" class="flex items-center gap-1.5 mt-4 mb-2"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Mock positions · {{ orders.mock.length }}</span></div>
+              <p v-if="showPaper && !orders.mock.length" class="text-xs text-slate-500 mb-2">No open mock positions.</p>
               <div v-for="(m, i) in orders.mock" :key="'m' + i" class="flex items-center gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 mb-2">
                 <img v-if="m.pick_logo" :src="m.pick_logo" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />
                 <div v-else class="w-8 h-8 rounded-full bg-surface ring-1 ring-border-subtle flex items-center justify-center text-[10px] font-bold text-slate-400 shrink-0">{{ initials((m.pick_label || '').replace(' to win','')) }}</div>
@@ -579,7 +583,7 @@ onUnmounted(() => {
               </template>
 
               <!-- Mock (paper) FILLED history — settled/expired paper trades with realized P&L -->
-              <template v-if="!liveReal && orders.mock_history.length">
+              <template v-if="showPaper && orders.mock_history.length">
                 <div class="flex items-center gap-1.5 mt-4 mb-2"><span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span><span class="text-[10px] uppercase tracking-wide text-slate-400 font-semibold">Mock filled · {{ orders.mock_history.length }}</span></div>
                 <div v-for="(m, i) in orders.mock_history" :key="'mh' + i" class="flex items-center gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 mb-2">
                   <img v-if="m.pick_logo" :src="m.pick_logo" referrerpolicy="no-referrer" class="w-8 h-8 rounded-full object-contain bg-white/5 ring-1 ring-border-subtle shrink-0" />

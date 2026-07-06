@@ -4521,13 +4521,19 @@ def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), 
         env = bk.get("kalshi_environment") or "demo"
     except Exception:
         pass
+    from kalshi.mode import is_real_mode
+    cfg = row.get("kalshi_config") or {}
     return {
         "id": row.get("id"),
         "name": row.get("name"),
         "running": bool(row.get("runCommand", False)),
         "brokerage_id": bid,
         "environment": env,
-        "config": row.get("kalshi_config") or {},
+        "config": cfg,
+        # Authoritative paper-vs-real discriminator (mirrors the engine's dry state and
+        # the API's data scoping) so web/mobile gate paper UI on the SAME signal the
+        # API filters data by — no client-side re-derivation to drift out of sync.
+        "show_paper": not is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode"))),
     }
 
 

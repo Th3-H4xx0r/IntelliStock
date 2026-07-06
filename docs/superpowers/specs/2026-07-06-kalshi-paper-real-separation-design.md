@@ -179,6 +179,21 @@ series selection is client-side — noted as a fast-follow, not in this change's
 - **Non-goals:** physical table separation; a paper-history "archive" browser in real
   mode; restarting on non-mode config edits; the mobile chart series selection.
 
+### Residual risks (reviewed & accepted)
+
+- **live→paper cancel is best-effort + the restart is async.** The API cancels resting
+  real orders, then the config write triggers the `server.py` restart. Between the cancel
+  and the container teardown the old (still real) engine could, in principle, place one
+  more order (poll interval 30s ≫ ~5s teardown, so effectively never). This strictly
+  improves on the pre-change behavior (no cancel, no restart at all). Fully closing it
+  would require canceling inside the server-side restart after the old container stops —
+  deferred as not worth the cross-process complexity for this window.
+- **Hiding real rows in paper mode reduces observability of a *missed* restart.** If the
+  engine ever failed to restart after a flip (requires a changefeed `old_val` of `None`,
+  which does not occur for `.update()`s), a still-real engine's rows would be filtered
+  out of the paper view. The restart guard is correct for all real update events; noted
+  for completeness.
+
 ## 6. Testing strategy
 
 - **Pure/unit (no DB):** `should_execute`-driven `show_paper`; `summarize_decisions` over a
