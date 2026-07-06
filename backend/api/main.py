@@ -4333,6 +4333,7 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
     row = _kalshi_instance_row(conn, instance_id)
     bid = row.get("brokerage_id")
     live = False
+    bk = {}
     try:
         bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
         live = (bk.get("kalshi_environment") or "demo") == "live"
@@ -4346,10 +4347,24 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
     paper = bool(raw.get("paper_mode")) if raw.get("paper_mode") is not None else bool(prev.get("paper_mode", live))
     live_enabled = live and not paper
     config = normalize_config({**raw, "paper_mode": paper}, live_enabled=live_enabled)
+    # SAFETY: turning real money OFF (live→paper) must not leave resting REAL orders that
+    # could still fill after the switch. Cancel them (best-effort) before persisting the
+    # flip; the engine restart (server.py, triggered by this config write) then re-boots
+    # in paper mode. Open real POSITIONS are left on the broker (never auto-sold).
+    from kalshi.mode import is_real_mode
+    _env = "live" if live else "demo"
+    canceled_orders = 0
+    if (is_real_mode(_env, bool(prev.get("live_enabled")), bool(prev.get("paper_mode")))
+            and not is_real_mode(_env, live_enabled, paper)):
+        try:
+            canceled_orders = int(_kalshi_client_from_row(bk).cancel_all_open_orders() or 0)
+        except Exception:
+            canceled_orders = 0
     _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).update(
         {"name": body.name.strip(), "kalshi_config": config}
     ).run(conn)
-    return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config}
+    return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config,
+            "canceled_orders": canceled_orders}
 
 
 # --- Kalshi backtests -----------------------------------------------------

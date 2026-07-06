@@ -27,3 +27,19 @@ def scope_decisions(rows: list[dict], show_paper: bool) -> list[dict]:
     truthy); False -> real rows (paper falsy / absent)."""
     want = bool(show_paper)
     return [r for r in rows if bool(r.get("paper")) == want]
+
+
+def kalshi_mode_changed(old_val, new_val) -> bool:
+    """True iff a kalshi instance's paper/live mode flipped between two Instances
+    changefeed snapshots. The engine's EngineConfig (incl. paper_mode/live_enabled) is
+    frozen at container boot, so a toggle only takes effect after the container is
+    recycled — server.py uses this to decide when to restart a RUNNING instance. Returns
+    False for non-kalshi rows, missing snapshots, or non-mode edits (name/caps/etc.)."""
+    if not old_val or not new_val:
+        return False
+    if new_val.get("kind") != "kalshi":
+        return False
+    o = old_val.get("kalshi_config") or {}
+    n = new_val.get("kalshi_config") or {}
+    return (bool(o.get("paper_mode")) != bool(n.get("paper_mode"))
+            or bool(o.get("live_enabled")) != bool(n.get("live_enabled")))
