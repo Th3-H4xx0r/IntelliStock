@@ -18651,6 +18651,26 @@ def _store_overlay_result_cache(
         pass
 
 
+def _overlay_max_output_tokens(config: dict) -> int:
+    """Wire ``max_tokens`` for the trade-overlay LLM call.
+
+    The overlay response is a tiny bounded JSON, but a reasoning model (e.g.
+    Nemotron) will otherwise spiral into tens of thousands of thinking tokens:
+    passing 0 makes the OpenRouter path inject a 32,768-token reasoning-safe
+    default, and a ``requests`` between-bytes read timeout can't stop a steadily
+    streaming generation — so one runaway symbol stalls the whole bar. Cap it to
+    a value that fits normal reasoning yet cuts runaways short (a truncated call
+    falls back to the base score for that symbol). Coerce 0/invalid to the
+    default so the overlay can never be uncapped again. Tunable via
+    ``overlay_llm_max_output_tokens`` (default 2500).
+    """
+    try:
+        n = int((config or {}).get("overlay_llm_max_output_tokens", 2500) or 2500)
+    except (TypeError, ValueError):
+        n = 2500
+    return n if n > 0 else 2500
+
+
 def _apply_trade_overlay(
     symbol: str,
     base_score_doc: dict,
@@ -18796,7 +18816,7 @@ def _apply_trade_overlay(
                 "call_site": "overlay",
             },
             system_prompt=system_prompt,
-            max_output_tokens=0,
+            max_output_tokens=_overlay_max_output_tokens(config),
             timeout_sec=_overlay_timeout,
             retries=1,
             output_retries=2,
@@ -18933,7 +18953,7 @@ def _apply_etf_trade_overlay(
                 "call_site": "overlay_etf",
             },
             system_prompt=system_prompt,
-            max_output_tokens=0,
+            max_output_tokens=_overlay_max_output_tokens(config),
             retries=2,
             output_retries=2,
             provider_config=provider_config,
