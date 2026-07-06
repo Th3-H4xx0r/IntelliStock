@@ -335,7 +335,7 @@ services:
       resources:
         limits:
           cpus: "3"
-          memory: 3G
+          memory: 5G
         reservations:
           cpus: "2"
           memory: 512M
