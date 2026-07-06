@@ -94,7 +94,9 @@ const positive = computed(() => delta.value >= 0)
 // 'category' axis with [isoString, value] tuples computes the y-range but draws no line.
 // Range filtering already happened in `displayed`; labels are hidden so the index never shows.
 const chartSeries = computed(() => [{ name: isPaper.value ? 'Paper P&L' : 'Value', data: displayed.value.map((p, i) => [i, p[1]]) }])
-const chartColor = computed(() => (isPaper.value ? (positive.value ? '#34d399' : '#f87171') : '#a78bfa'))
+// Green when up, red when down — for BOTH the real portfolio value and paper P&L
+// (matches mobile), instead of a static purple for the real line.
+const chartColor = computed(() => (positive.value ? '#34d399' : '#f87171'))
 const chartOptions = computed(() => ({
   chart: { type: 'area', height: 180, toolbar: { show: false }, animations: { enabled: false }, background: 'transparent', fontFamily: 'Inter, sans-serif' },
   theme: { mode: 'dark' },
