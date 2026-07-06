@@ -154,6 +154,13 @@ free.
   the real portfolio-value curve in real mode.
 - Real-mode empty states: until real trades exist, real sections show a clean "no real
   trades yet" rather than paper data.
+- **Pregame Analysis in real mode shows the *live* engine's decisions** (the engine
+  analyzes every match each tick regardless of mode), with no MOCK/paper markers — it is
+  not blanked out. The paper pregame board is preserved and restored on switch-back. This
+  reads the user's "the pregame data should disappear (and be saved)" as *replace the
+  paper board with the live board, preserving the paper one* — the more useful behavior
+  for a running real instance. (Hiding the section entirely in real mode is a one-line
+  conditional if preferred.)
 
 ### 4.5 Mobile (`mobile/lib/features/kalshi/**`)
 
