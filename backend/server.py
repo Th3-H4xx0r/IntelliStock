@@ -22,6 +22,7 @@ import logging
 from datetime import datetime
 from typing import Dict
 from rethinkdb import RethinkDB
+from rethink_changefeed import run_reconnecting_changefeed
 import socketio
 from waitress import serve
 from os import system
@@ -286,24 +287,39 @@ def _augment_volumes_with_claude(volumes):
     return out
 
 
+_instance_network_warned = False
+
+
 def _get_instance_network(client):
     """
     Return the Docker network name to attach instance containers to.
     Uses INSTANCE_DOCKER_NETWORK if set and that network exists; otherwise
-    detects from the current container (works on Dockploy/remote).
+    auto-detects from the current container (works on Dockploy/remote).
+
+    When INSTANCE_DOCKER_NETWORK points at a network that no longer exists
+    (compose/Dockploy project drift), auto-detect is authoritative and spawned
+    containers still land on the backend's own network. We surface the detected
+    name once (not per-launch) so the stale env var is visible and fixable.
     """
+    global _instance_network_warned
     env_network = os.environ.get('INSTANCE_DOCKER_NETWORK', '').strip()
     if env_network:
         try:
             client.networks.get(env_network)
             return env_network
         except Exception:
-            # Network from env doesn't exist (e.g. on Dockploy); fall back to auto-detect
-            intellistock_logger.log(
-                f"Network '{env_network}' not found; using current container's network.",
-                "yellow",
-                service="SERVER",
-            )
+            # Network from env doesn't exist (e.g. on Dockploy); fall back to auto-detect.
+            detected = _detect_container_network(client)
+            if not _instance_network_warned:
+                intellistock_logger.log(
+                    f"INSTANCE_DOCKER_NETWORK='{env_network}' does not exist; "
+                    f"auto-detected '{detected}' from this container instead. "
+                    f"Set INSTANCE_DOCKER_NETWORK='{detected}' (or unset it) to silence this.",
+                    "yellow",
+                    service="SERVER",
+                )
+                _instance_network_warned = True
+            return detected
     return _detect_container_network(client)
 
 
@@ -1066,38 +1082,17 @@ def run_nexus_control_change(change, c):
 
 
 def run_nexus_control_changefeed():
-    """Run changefeed on EngineControl; start/stop nexus container when nexus_graph_engine.running changes."""
-    max_attempts = 30
-    delay = 2
-    for attempt in range(1, max_attempts + 1):
-        c = None
-        try:
-            c = get_conn()
-            for change in r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c):
-                run_nexus_control_change(change, c)
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            if "primary replica" in err_str or "not available" in err_str:
-                if attempt < max_attempts:
-                    time.sleep(delay)
-                    delay = min(delay * 1.5, 30)
-                else:
-                    raise
-            else:
-                intellistock_logger.log("NexusControl changefeed error: %s" % e, "red", service="SERVER")
-                raise
-        finally:
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
+    """Run changefeed on EngineControl; start/stop nexus container when nexus_graph_engine.running changes.
+
+    Self-healing: reconnects on any transient RethinkDB connection loss instead
+    of letting the daemon thread die (2026-07-06 outage regression)."""
+    run_reconnecting_changefeed(
+        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
+        run_nexus_control_change,
+        "NexusControl",
+        get_conn=get_conn,
+        log=intellistock_logger.log,
+    )
 
 
 def run_discover_control_change(change, c):
@@ -1128,38 +1123,17 @@ def run_discover_control_change(change, c):
 
 
 def run_discover_control_changefeed():
-    """Run changefeed on EngineControl; start/stop discover container when discover_engine.running changes."""
-    max_attempts = 30
-    delay = 2
-    for attempt in range(1, max_attempts + 1):
-        c = None
-        try:
-            c = get_conn()
-            for change in r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c):
-                run_discover_control_change(change, c)
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            if "primary replica" in err_str or "not available" in err_str:
-                if attempt < max_attempts:
-                    time.sleep(delay)
-                    delay = min(delay * 1.5, 30)
-                else:
-                    raise
-            else:
-                intellistock_logger.log("DiscoverControl changefeed error: %s" % e, "red", service="SERVER")
-                raise
-        finally:
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
+    """Run changefeed on EngineControl; start/stop discover container when discover_engine.running changes.
+
+    Self-healing: reconnects on any transient RethinkDB connection loss instead
+    of letting the daemon thread die (2026-07-06 outage regression)."""
+    run_reconnecting_changefeed(
+        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
+        run_discover_control_change,
+        "DiscoverControl",
+        get_conn=get_conn,
+        log=intellistock_logger.log,
+    )
 
 
 def launch_digest_from_db():
@@ -1316,46 +1290,17 @@ def run_digest_control_change(change, c):
 
 
 def run_digest_control_changefeed():
-    """Run changefeed on EngineControl; start/stop digest container when daily_digest_engine.running changes."""
-    max_attempts = 30
-    delay = 2
-    for attempt in range(1, max_attempts + 1):
-        c = None
-        try:
-            c = get_conn()
-            for change in r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c):
-                run_digest_control_change(change, c)
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            if "primary replica" in err_str or "not available" in err_str:
-                if attempt < max_attempts:
-                    intellistock_logger.log(
-                        f"AgentControl changefeed failed (attempt {attempt}/{max_attempts}): {e}. Retrying in {delay}s...",
-                        "yellow", service="SERVER",
-                    )
-                    time.sleep(delay)
-                    delay = min(delay * 1.5, 30)
-                else:
-                    intellistock_logger.log(
-                        f"AgentControl changefeed failed after {max_attempts} attempts. Giving up.",
-                        "red", service="SERVER",
-                    )
-                    raise
-            else:
-                intellistock_logger.log(f"AgentControl changefeed error: {e}", "red", service="SERVER")
-                raise
-        finally:
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
+    """Run changefeed on EngineControl; start/stop digest container when daily_digest_engine.running changes.
+
+    Self-healing: reconnects on any transient RethinkDB connection loss instead
+    of letting the daemon thread die (2026-07-06 outage regression)."""
+    run_reconnecting_changefeed(
+        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
+        run_digest_control_change,
+        "DigestControl",
+        get_conn=get_conn,
+        log=intellistock_logger.log,
+    )
 
 
 def launch_instances_from_db():
@@ -1453,39 +1398,17 @@ def check_resume_timer():
 
 
 def run_agent_control_changefeed():
-    """Run changefeed on EngineControl; start/stop agent container when ai_backtest_engine.running changes."""
-    max_attempts = 30
-    delay = 2
-    for attempt in range(1, max_attempts + 1):
-        c = None
-        try:
-            c = get_conn()
-            for change in r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c):
-                run_agent_control_change(change, c)
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            if "primary replica" in err_str or "not available" in err_str:
-                if attempt < max_attempts:
-                    intellistock_logger.log(
-                        "AgentControl changefeed waiting for primary (attempt %d/%d), retrying in %ds..."
-                        % (attempt, max_attempts, delay), "yellow", service="RethinkDB",
-                    )
-                    time.sleep(delay)
-                    continue
-            intellistock_logger.log("AgentControl changefeed error: %s" % e, "red", service="RethinkDB")
-            break
-        finally:
-            if c:
-                try:
-                    c.close()
-                except Exception:
-                    pass
+    """Run changefeed on EngineControl; start/stop agent container when ai_backtest_engine.running changes.
+
+    Self-healing: reconnects on any transient RethinkDB connection loss instead
+    of letting the daemon thread die (2026-07-06 outage regression)."""
+    run_reconnecting_changefeed(
+        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
+        run_agent_control_change,
+        "AgentControl",
+        get_conn=get_conn,
+        log=intellistock_logger.log,
+    )
 
 
 def run():
@@ -1594,47 +1517,28 @@ def run():
     intellistock_logger.log("\nService is currently \033[04m\033[01mOnline", "green", service="STATUS")
 
     def run_config_changefeed():
-        """Run changefeed on Config.Pings and call status_service_change."""
-        c = get_conn()
-        try:
-            for change in r.db(DB_NAME).table('Config').get('Pings').changes().run(c):
-                status_service_change(change, c)
-        except Exception as e:
-            intellistock_logger.log(f"Config changefeed error: {e}", "red", service="RethinkDB")
-        finally:
-            c.close()
+        """Run changefeed on Config.Pings and call status_service_change.
+
+        Self-healing: reconnects on any transient RethinkDB connection loss."""
+        run_reconnecting_changefeed(
+            lambda c: r.db(DB_NAME).table('Config').get('Pings').changes().run(c),
+            status_service_change,
+            "Config",
+            get_conn=get_conn,
+            log=intellistock_logger.log,
+        )
 
     def run_instances_changefeed():
-        """Run changefeed on Instances and call run_thread_service_change. Retries on primary replica not available."""
-        max_attempts = 30
-        delay = 2
-        for attempt in range(1, max_attempts + 1):
-            c = None
-            try:
-                c = get_conn()
-                for change in r.db(DB_NAME).table('Instances').changes().run(c):
-                    run_thread_service_change(change, c)
-                break
-            except Exception as e:
-                err_str = str(e).lower()
-                if c:
-                    try:
-                        c.close()
-                    except Exception:
-                        pass
-                if "primary replica" in err_str or "not available" in err_str:
-                    if attempt < max_attempts:
-                        intellistock_logger.log(f"Instances changefeed waiting for primary (attempt {attempt}/{max_attempts}), retrying in {delay}s...", "yellow", service="RethinkDB")
-                        time.sleep(delay)
-                        continue
-                intellistock_logger.log(f"Instances changefeed error: {e}", "red", service="RethinkDB")
-                break
-            finally:
-                if c:
-                    try:
-                        c.close()
-                    except Exception:
-                        pass
+        """Run changefeed on Instances and call run_thread_service_change.
+
+        Self-healing: reconnects on any transient RethinkDB connection loss."""
+        run_reconnecting_changefeed(
+            lambda c: r.db(DB_NAME).table('Instances').changes().run(c),
+            run_thread_service_change,
+            "Instances",
+            get_conn=get_conn,
+            log=intellistock_logger.log,
+        )
 
     config_feed_thread = threading.Thread(target=run_config_changefeed, daemon=True)
     config_feed_thread.start()
