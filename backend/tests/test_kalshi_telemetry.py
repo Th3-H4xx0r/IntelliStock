@@ -45,6 +45,15 @@ def test_portfolio_series_converts_cents_to_dollars():
     assert out == [{"ts": "t1", "value": 4820.14}, {"ts": "t2", "value": 4883.14}]
 
 
+def test_portfolio_series_is_total_equity_positions_plus_cash():
+    # The equity curve is TOTAL account value: positions (value_cents) + cash_cents,
+    # not positions alone. (value_cents-only snapshots still work: cash defaults to 0.)
+    snaps = [{"ts": "t1", "value_cents": 0, "cash_cents": 5355},
+             {"ts": "t2", "value_cents": 612, "cash_cents": 4743}]
+    out = portfolio_series(snaps)
+    assert out == [{"ts": "t1", "value": 53.55}, {"ts": "t2", "value": 53.55}]
+
+
 def test_portfolio_series_downsamples_but_keeps_endpoints():
     snaps = [{"ts": str(i), "value_cents": i * 100} for i in range(1000)]
     out = portfolio_series(snaps, max_points=50)
