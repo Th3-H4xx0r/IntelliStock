@@ -4333,6 +4333,7 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
     row = _kalshi_instance_row(conn, instance_id)
     bid = row.get("brokerage_id")
     live = False
+    bk = {}
     try:
         bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
         live = (bk.get("kalshi_environment") or "demo") == "live"
@@ -4346,10 +4347,24 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
     paper = bool(raw.get("paper_mode")) if raw.get("paper_mode") is not None else bool(prev.get("paper_mode", live))
     live_enabled = live and not paper
     config = normalize_config({**raw, "paper_mode": paper}, live_enabled=live_enabled)
+    # SAFETY: turning real money OFF (live→paper) must not leave resting REAL orders that
+    # could still fill after the switch. Cancel them (best-effort) before persisting the
+    # flip; the engine restart (server.py, triggered by this config write) then re-boots
+    # in paper mode. Open real POSITIONS are left on the broker (never auto-sold).
+    from kalshi.mode import is_real_mode
+    _env = "live" if live else "demo"
+    canceled_orders = 0
+    if (is_real_mode(_env, bool(prev.get("live_enabled")), bool(prev.get("paper_mode")))
+            and not is_real_mode(_env, live_enabled, paper)):
+        try:
+            canceled_orders = int(_kalshi_client_from_row(bk).cancel_all_open_orders() or 0)
+        except Exception:
+            canceled_orders = 0
     _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).update(
         {"name": body.name.strip(), "kalshi_config": config}
     ).run(conn)
-    return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config}
+    return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config,
+            "canceled_orders": canceled_orders}
 
 
 # --- Kalshi backtests -----------------------------------------------------
@@ -4479,6 +4494,22 @@ def _kalshi_instance_row(conn, instance_id: str) -> dict:
     return row
 
 
+def _kalshi_show_paper(conn, instance_row: dict) -> bool:
+    """Whether this instance should surface PAPER (MOCK) data — i.e. it is NOT placing
+    real orders (mirrors the engine's `dry` state). A live account with the gate on is
+    the only real-money state that hides paper; paper_mode and demo both show it. Paper
+    rows are never deleted — this only decides which mode's data the read surfaces."""
+    from kalshi.mode import is_real_mode
+    cfg = instance_row.get("kalshi_config") or {}
+    env = "demo"
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(instance_row.get("brokerage_id")).run(conn) or {}
+        env = bk.get("kalshi_environment") or "demo"
+    except Exception:
+        pass
+    return not is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode")))
+
+
 @app.get("/instances/{instance_id}/kalshi/detail", response_class=JSONResponse)
 def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Kalshi instance summary: config, run state, linked brokerage env."""
@@ -4490,13 +4521,19 @@ def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), 
         env = bk.get("kalshi_environment") or "demo"
     except Exception:
         pass
+    from kalshi.mode import is_real_mode
+    cfg = row.get("kalshi_config") or {}
     return {
         "id": row.get("id"),
         "name": row.get("name"),
         "running": bool(row.get("runCommand", False)),
         "brokerage_id": bid,
         "environment": env,
-        "config": row.get("kalshi_config") or {},
+        "config": cfg,
+        # Authoritative paper-vs-real discriminator (mirrors the engine's dry state and
+        # the API's data scoping) so web/mobile gate paper UI on the SAME signal the
+        # API filters data by — no client-side re-derivation to drift out of sync.
+        "show_paper": not is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode"))),
     }
 
 
@@ -4505,8 +4542,9 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
     """The LLM-reasoned decision log for this instance (newest first), enriched
     with readable team names + crests (league-agnostic)."""
     from kalshi.decisions import summarize_decisions
+    from kalshi.mode import scope_decisions
     from kalshi.data.ticker_names import parse_market_ticker
-    _kalshi_instance_row(conn, instance_id)
+    row = _kalshi_instance_row(conn, instance_id)
     rows = []
     try:
         rows = list(
@@ -4515,6 +4553,12 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
         )
     except Exception:
         rows = []
+    # Scope to the ACTIVE mode: a real-money instance never surfaces paper rows (and a
+    # paper/demo instance never surfaces real rows). Paper rows stay in the DB — they're
+    # just filtered out of this view, so the board, summary counts, and the paper block
+    # (all derived from `rows`) reflect only the current mode.
+    show_paper = _kalshi_show_paper(conn, row)
+    rows = scope_decisions(rows, show_paper)
     rows.sort(key=lambda d: d.get("ts", ""), reverse=True)
     n = max(1, min(int(limit or 100), 500))
     out = rows[:n]
@@ -4708,6 +4752,7 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
     (from the broker). Drives the pending/past-orders cards."""
     from kalshi.data.ticker_names import parse_market_ticker
     row = _kalshi_instance_row(conn, instance_id)
+    show_paper = _kalshi_show_paper(conn, row)
     n = max(1, min(int(limit or 50), 200))
 
     # Lookup: market_ticker -> readable info stamped on the decision rows (real team
@@ -4777,9 +4822,17 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
     # filled-orders HISTORY (also MOCK-tagged) so completed paper trades don't disappear.
     mock: dict = {}
     mock_history: list = []
+    # PAPER (MOCK) trades only surface in paper/demo mode — a real-money instance hides
+    # them (rows stay in the DB, just filtered out of this view).
+    _paper_placed = []
+    if show_paper:
+        try:
+            _paper_placed = list(_r_auth.db("IntelliStock").table("kalshi_decisions")
+                                 .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True}).run(conn))
+        except Exception:
+            _paper_placed = []
     try:
-        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
-                      .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True}).run(conn)):
+        for r in _paper_placed:
             mt = r.get("market_ticker")
             size = int(r.get("size") or 0)
             entry = r.get("entry_avg_cents")

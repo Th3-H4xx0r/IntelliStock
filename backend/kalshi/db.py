@@ -302,7 +302,8 @@ def update_close_refs(conn, instance_id, sharp_map, mid_map) -> int:
 
 
 def prune_finished(conn, instance_id, open_tickers, now_iso, *,
-                   delete_after_hours: float = 3.0, expire_after_hours: float = 12.0) -> dict:
+                   delete_after_hours: float = 3.0, expire_after_hours: float = 12.0,
+                   expire_paper: bool = True) -> dict:
     """Drop stale skipped/blocked decision rows + expire stuck-open paper trades for
     markets no longer in Kalshi's OPEN set (finished games), so the pregame board and
     open-trade list don't accumulate completed matches. Recently-seen rows are kept
@@ -320,7 +321,8 @@ def prune_finished(conn, instance_id, open_tickers, now_iso, *,
         return {"deleted": 0, "expired": 0}
     plan = prune_finished_decisions(rows, open_tickers, now_iso,
                                     delete_after_hours=delete_after_hours,
-                                    expire_after_hours=expire_after_hours)
+                                    expire_after_hours=expire_after_hours,
+                                    expire_paper=expire_paper)
     deleted = expired = 0
     for did in plan["delete"]:
         try:

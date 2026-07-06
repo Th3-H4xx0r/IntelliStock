@@ -182,7 +182,8 @@ def _last_seen_age_hours(row, now_iso) -> float | None:
 
 def prune_finished_decisions(rows, open_tickers, now_iso, *,
                              delete_after_hours: float = 3.0,
-                             expire_after_hours: float = 12.0) -> dict:
+                             expire_after_hours: float = 12.0,
+                             expire_paper: bool = True) -> dict:
     """Decisions whose market is no longer in Kalshi's OPEN set and that haven't been
     seen open for a while are from FINISHED games. Returns {"delete":[ids],"expire":[ids]}:
       - skipped/blocked/queued, not seen open for >= delete_after_hours -> DELETE (clears
@@ -205,7 +206,7 @@ def prune_finished_decisions(rows, open_tickers, now_iso, *,
         if age is None:
             continue
         if r.get("decision") == "placed":
-            if r.get("outcome") is None and age >= expire_after_hours:
+            if expire_paper and r.get("outcome") is None and age >= expire_after_hours:
                 # Realize at the LAST mark: the unrealized P&L the engine stamped each
                 # tick becomes the realized P&L (best estimate when Kalshi never settled
                 # it), so the dashboard's realized total + filled-orders history keep it.

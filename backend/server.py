@@ -1241,6 +1241,24 @@ def run_thread_service_change(change, c):
                     running_threads.remove(instance_id)
         elif not run_approval and instance_id in running_threads_objs:
             stop_instance_container(instance_id)
+        elif run_approval and instance_id in running_threads_objs:
+            # Already running: recycle the container ONLY when the kalshi paper/live mode
+            # flipped. The engine's EngineConfig is frozen at boot, so a paper toggle needs
+            # a fresh process to take effect. Other config edits (name/caps/tier) keep
+            # today's behaviour (apply on next manual restart) to keep the blast radius on
+            # a real-money engine minimal.
+            from kalshi.mode import kalshi_mode_changed
+            if kalshi_mode_changed(old_val, new_val):
+                intellistock_logger.log(
+                    f"Kalshi instance {instance_id}: paper/live mode changed — restarting engine.",
+                    "yellow", service="SERVER")
+                stop_instance_container(instance_id)
+                running_threads.append(instance_id)
+                thread_count += 1
+                if start_instance_container(instance_id) is None:
+                    thread_count -= 1
+                    if instance_id in running_threads:
+                        running_threads.remove(instance_id)
     except Exception as e:
         intellistock_logger.log(str(e), "red", service="SERVER")
     callback_done.set()
