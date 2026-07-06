@@ -69,7 +69,7 @@ exchange_calendars>=4.13.2
 # Ollama provider — official Python SDK for local + remote + cloud Ollama
 # hosts. We use Client/AsyncClient + ResponseError; httpx is a transitive
 # dep and we catch its network exceptions directly in ollama_client.py.
-ollama>=0.4,<1
+ollama>=0.6.2,<1
 # Amazon Bedrock provider — boto3 drives the Converse API (plain + tools) and
 # the control-plane bedrock client (discovery). The pydantic-ai bedrock extra
 # above also pulls boto3, but we pin an explicit floor because Bedrock API-key
