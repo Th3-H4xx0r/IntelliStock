@@ -4081,7 +4081,9 @@ def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), curre
     for s in snaps:
         if s.get("ts", "") <= cutoff:
             prev_value_cents = int(s.get("value_cents", 0))
-    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents, prev_value_cents=prev_value_cents)
+    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents,
+                             prev_value_cents=prev_value_cents,
+                             show_paper=_kalshi_brokerage_show_paper(conn, brokerage_id))
 
 
 @app.get("/brokerages/{brokerage_id}/kalshi/positions", response_class=JSONResponse)
@@ -4510,6 +4512,29 @@ def _kalshi_show_paper(conn, instance_row: dict) -> bool:
     return not is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode")))
 
 
+def _kalshi_brokerage_show_paper(conn, brokerage_id: str) -> bool:
+    """Whether a brokerage's portfolio chart should show PAPER P&L — False if ANY of its
+    kalshi instances is placing REAL orders, so a real-money account never surfaces
+    leftover paper snapshots (the MOCK P&L card). Mirrors per-instance _kalshi_show_paper."""
+    from kalshi.mode import is_real_mode
+    env = "demo"
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(brokerage_id).run(conn) or {}
+        env = bk.get("kalshi_environment") or "demo"
+    except Exception:
+        pass
+    try:
+        insts = list(_r_auth.db("IntelliStock").table("Instances")
+                     .filter({"brokerage_id": str(brokerage_id), "kind": "kalshi"}).run(conn))
+    except Exception:
+        insts = []
+    for i in insts:
+        cfg = i.get("kalshi_config") or {}
+        if is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode"))):
+            return False
+    return True
+
+
 @app.get("/instances/{instance_id}/kalshi/detail", response_class=JSONResponse)
 def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Kalshi instance summary: config, run state, linked brokerage env."""
@@ -4877,7 +4902,8 @@ def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), 
     except Exception:
         pass
     snaps = sorted(_kalshi_rows(conn, "kalshi_portfolio_snapshots", bid), key=lambda s: s.get("ts", ""))
-    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents)
+    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents,
+                             show_paper=_kalshi_show_paper(conn, row))
 
 
 class TestKalshiBody(BaseModel):
