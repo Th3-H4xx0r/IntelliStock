@@ -76,6 +76,23 @@ def test_prune_never_acts_without_open_set():
     assert out == {"delete": [], "expire": []}
 
 
+def test_prune_expire_paper_false_keeps_paper_positions_open():
+    # In LIVE mode the engine passes expire_paper=False so a frozen paper position is
+    # never expired (mutated), but stale skipped board rows are still cleaned up.
+    now = "2026-06-30T06:00:00+00:00"
+    rows = [
+        {"id": "i|OLDSKIP", "decision": "skipped", "market_ticker": "DONE1", "outcome": None,
+         "ts": "2026-06-29T00:00:00+00:00"},
+        {"id": "i|OPENTRADE", "decision": "placed", "market_ticker": "DONE3", "outcome": None,
+         "ts": "2026-06-29T00:00:00+00:00", "unrealized_pnl_cents": -120},
+    ]
+    out = prune_finished_decisions(rows, {"OPEN"}, now,
+                                   delete_after_hours=3.0, expire_after_hours=12.0,
+                                   expire_paper=False)
+    assert out["expire"] == []                      # paper position left frozen
+    assert set(out["delete"]) == {"i|OLDSKIP"}      # stale skipped still cleaned
+
+
 # --- P3: roll the closing reference (sharp prob + Kalshi mid) onto open positions ---
 
 def test_close_ref_updates_open_placed_only():
