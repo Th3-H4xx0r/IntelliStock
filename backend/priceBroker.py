@@ -11,6 +11,7 @@ try:
     from os import system
     from rethinkdb import RethinkDB
     from intellistock_logger import intellistock_logger
+    from rethink_changefeed import run_reconnecting_changefeed
 except Exception as e:
     import traceback
     traceback.print_exc()
@@ -53,45 +54,57 @@ else:
 
 
 def run_config_pings_changefeed():
-    """Watch Config.Pings and copy priceBrokerPing -> priceBrokerResponse."""
-    c = get_conn()
+    """Watch Config.Pings and copy priceBrokerPing -> priceBrokerResponse.
+
+    Self-heals: reconnects on any transient RethinkDB connection loss instead
+    of dying on the first error."""
     intellistock_logger.log("Config Pings changefeed thread started; watching for pings.", "white", service="PriceBroker")
-    try:
-        for change in r.db(DB_NAME).table('Config').get('Pings').changes().run(c):
-            new_val = change.get('new_val')
-            if new_val and 'priceBrokerPing' in new_val:
-                try:
-                    request = new_val['priceBrokerPing']
-                    r.db(DB_NAME).table('Config').get('Pings').update({
-                        'priceBrokerResponse': request
-                    }).run(c)
-                    intellistock_logger.log("Responded to priceBrokerPing.", "white", service="PriceBroker")
-                except Exception as e:
-                    intellistock_logger.log(str(e), "red", service="PriceBroker")
-    except Exception as e:
-        intellistock_logger.log(f"Config Pings changefeed error: {e}", "red", service="PriceBroker")
-    finally:
-        c.close()
+
+    def _handle(change, c):
+        new_val = change.get('new_val')
+        if new_val and 'priceBrokerPing' in new_val:
+            try:
+                request = new_val['priceBrokerPing']
+                r.db(DB_NAME).table('Config').get('Pings').update({
+                    'priceBrokerResponse': request
+                }).run(c)
+                intellistock_logger.log("Responded to priceBrokerPing.", "white", service="PriceBroker")
+            except Exception as e:
+                intellistock_logger.log(str(e), "red", service="PriceBroker")
+
+    run_reconnecting_changefeed(
+        lambda c: r.db(DB_NAME).table('Config').get('Pings').changes().run(c),
+        _handle,
+        "Config Pings",
+        get_conn=get_conn,
+        log=intellistock_logger.log,
+    )
 
 
 def run_config_doc_changefeed():
-    """Watch Config.Config: exit when runPriceService is False or terminatePriceBroker is True."""
-    c = get_conn()
-    try:
-        for change in r.db(DB_NAME).table('Config').get('Config').changes().run(c):
-            new_val = change.get('new_val')
-            if new_val is None:
-                continue
-            if new_val.get('terminatePriceBroker') is True:
-                intellistock_logger.log("Terminate requested; exiting.", "yellow", service="PriceBroker")
-                os._exit(0)
-            if new_val.get('runPriceService') is False:
-                intellistock_logger.log("runPriceService=False; exiting.", "yellow", service="PriceBroker")
-                os._exit(0)
-    except Exception as e:
-        intellistock_logger.log(f"Config changefeed error: {e}", "red", service="PriceBroker")
-    finally:
-        c.close()
+    """Watch Config.Config: exit when runPriceService is False or terminatePriceBroker is True.
+
+    Self-heals: reconnects on any transient RethinkDB connection loss instead
+    of dying on the first error (only the terminate/stop signal exits)."""
+
+    def _handle(change, c):
+        new_val = change.get('new_val')
+        if new_val is None:
+            return
+        if new_val.get('terminatePriceBroker') is True:
+            intellistock_logger.log("Terminate requested; exiting.", "yellow", service="PriceBroker")
+            os._exit(0)
+        if new_val.get('runPriceService') is False:
+            intellistock_logger.log("runPriceService=False; exiting.", "yellow", service="PriceBroker")
+            os._exit(0)
+
+    run_reconnecting_changefeed(
+        lambda c: r.db(DB_NAME).table('Config').get('Config').changes().run(c),
+        _handle,
+        "Config",
+        get_conn=get_conn,
+        log=intellistock_logger.log,
+    )
 
 
 # Changefeed threads for terminate / runPriceService

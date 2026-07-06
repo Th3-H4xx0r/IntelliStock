@@ -40,6 +40,8 @@ _crash_loop_latched = False
 # so the live-trading log stays viewable in logs-history and the operator gets a
 # notification. Operator Stop (runCommand=False) still exits cleanly. Gated to
 # equities — Kalshi keeps its own kalshi/runner.py crash handling.
+from rethink_changefeed import is_transient_rethinkdb_error
+
 CHANGEFEED_RETRY_MAX = int(os.environ.get("INSTANCE_CHANGEFEED_RETRY_MAX", "3"))
 _KEEPALIVE_ENABLED = True   # set from the Instances row 'kind' at startup
 _crash_lock = threading.Lock()
@@ -273,10 +275,15 @@ def terminate_thread_on_command(conn):
             if not _KEEPALIVE_ENABLED:
                 # Original behavior: RethinkDB likely shut down; exit so container stops.
                 os._exit(0)
-            attempts += 1
-            if attempts > CHANGEFEED_RETRY_MAX:
-                trip_crash(f"Instances changefeed lost after {attempts} attempts: {e}", e)
-                return
+            # A transient RethinkDB blip (connection drop / primary-replica
+            # reconfiguration during a restart) must NOT burn the crash budget —
+            # reconnect indefinitely with backoff. Only a non-transient failure
+            # counts toward CHANGEFEED_RETRY_MAX -> crash keep-alive.
+            if not is_transient_rethinkdb_error(e):
+                attempts += 1
+                if attempts > CHANGEFEED_RETRY_MAX:
+                    trip_crash(f"Instances changefeed lost after {attempts} attempts: {e}", e)
+                    return
             time.sleep(_changefeed_backoff(attempts))
             try:
                 conn = get_conn()
@@ -470,10 +477,14 @@ def run_instance_stocks_changefeed():
             if not _KEEPALIVE_ENABLED:
                 # Original behavior: RethinkDB likely shut down; exit so container stops.
                 os._exit(0)
-            attempts += 1
-            if attempts > CHANGEFEED_RETRY_MAX:
-                trip_crash(f"Instances (stocks) changefeed lost after {attempts} attempts: {e}", e)
-                return
+            # Transient RethinkDB blips reconnect indefinitely (see
+            # terminate_thread_on_command); only non-transient errors count
+            # toward the crash-keepalive budget.
+            if not is_transient_rethinkdb_error(e):
+                attempts += 1
+                if attempts > CHANGEFEED_RETRY_MAX:
+                    trip_crash(f"Instances (stocks) changefeed lost after {attempts} attempts: {e}", e)
+                    return
             time.sleep(_changefeed_backoff(attempts))
             try:
                 conn = get_conn()

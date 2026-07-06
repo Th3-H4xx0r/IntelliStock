@@ -2407,40 +2407,54 @@ def watch_strategies_changefeed():
         _log(f"Watching Instances[{instance_id}] and Strategies[{strategy_id}] for changes...", "white")
         # Watch instance for strategy_id changes
         def watch_instance():
-            conn_inst = get_conn()
-            try:
-                for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn_inst):
-                    if change.get('old_val') and change.get('new_val'):
-                        old_sid = change['old_val'].get('strategy_id')
-                        new_sid = change['new_val'].get('strategy_id')
-                        if old_sid != new_sid:
-                            _log(f"Instance strategy_id changed ({old_sid} -> {new_sid}). Exiting broker to reload...", "yellow")
-                            shutdown_requested = True
-                            return
-            except Exception as e:
-                _log(f"Instance changefeed error: {e}", "red")
-            finally:
+            # Self-heal: a RethinkDB blip must not kill this watcher — dying
+            # would silently stop reacting to strategy_id changes, and returning
+            # on error used to spuriously unblock the join (triggering a reload).
+            # Reconnect with backoff on any error; only the detected change exits.
+            while True:
+                conn_inst = None
                 try:
-                    conn_inst.close()
-                except Exception:
-                    pass
+                    conn_inst = get_conn()
+                    for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn_inst):
+                        if change.get('old_val') and change.get('new_val'):
+                            old_sid = change['old_val'].get('strategy_id')
+                            new_sid = change['new_val'].get('strategy_id')
+                            if old_sid != new_sid:
+                                _log(f"Instance strategy_id changed ({old_sid} -> {new_sid}). Exiting broker to reload...", "yellow")
+                                shutdown_requested = True
+                                return
+                except Exception as e:
+                    _log(f"Instance changefeed error ({e}); reconnecting...", "yellow")
+                finally:
+                    if conn_inst is not None:
+                        try:
+                            conn_inst.close()
+                        except Exception:
+                            pass
+                time.sleep(2)
         # Watch strategy for config changes (if strategy_id exists)
         def watch_strategy():
             if strategy_id is None:
                 return
-            conn_strat = get_conn()
-            try:
-                for change in r.db(DB_NAME).table('Strategies').get(strategy_id).changes().run(conn_strat):
-                    _log("Strategy config changed. Exiting broker to reload...", "yellow")
-                    shutdown_requested = True
-                    return
-            except Exception as e:
-                _log(f"Strategy changefeed error: {e}", "red")
-            finally:
+            # Self-heal: reconnect on a RethinkDB blip instead of dying (or
+            # spuriously triggering a reload); only a real config change exits.
+            while True:
+                conn_strat = None
                 try:
-                    conn_strat.close()
-                except Exception:
-                    pass
+                    conn_strat = get_conn()
+                    for change in r.db(DB_NAME).table('Strategies').get(strategy_id).changes().run(conn_strat):
+                        _log("Strategy config changed. Exiting broker to reload...", "yellow")
+                        shutdown_requested = True
+                        return
+                except Exception as e:
+                    _log(f"Strategy changefeed error ({e}); reconnecting...", "yellow")
+                finally:
+                    if conn_strat is not None:
+                        try:
+                            conn_strat.close()
+                        except Exception:
+                            pass
+                time.sleep(2)
         # Start both watchers in separate threads
         t1 = threading.Thread(target=watch_instance, daemon=True)
         t1.start()
