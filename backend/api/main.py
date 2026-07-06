@@ -4479,6 +4479,22 @@ def _kalshi_instance_row(conn, instance_id: str) -> dict:
     return row
 
 
+def _kalshi_show_paper(conn, instance_row: dict) -> bool:
+    """Whether this instance should surface PAPER (MOCK) data — i.e. it is NOT placing
+    real orders (mirrors the engine's `dry` state). A live account with the gate on is
+    the only real-money state that hides paper; paper_mode and demo both show it. Paper
+    rows are never deleted — this only decides which mode's data the read surfaces."""
+    from kalshi.mode import is_real_mode
+    cfg = instance_row.get("kalshi_config") or {}
+    env = "demo"
+    try:
+        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(instance_row.get("brokerage_id")).run(conn) or {}
+        env = bk.get("kalshi_environment") or "demo"
+    except Exception:
+        pass
+    return not is_real_mode(env, bool(cfg.get("live_enabled")), bool(cfg.get("paper_mode")))
+
+
 @app.get("/instances/{instance_id}/kalshi/detail", response_class=JSONResponse)
 def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Kalshi instance summary: config, run state, linked brokerage env."""
@@ -4505,8 +4521,9 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
     """The LLM-reasoned decision log for this instance (newest first), enriched
     with readable team names + crests (league-agnostic)."""
     from kalshi.decisions import summarize_decisions
+    from kalshi.mode import scope_decisions
     from kalshi.data.ticker_names import parse_market_ticker
-    _kalshi_instance_row(conn, instance_id)
+    row = _kalshi_instance_row(conn, instance_id)
     rows = []
     try:
         rows = list(
@@ -4515,6 +4532,12 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
         )
     except Exception:
         rows = []
+    # Scope to the ACTIVE mode: a real-money instance never surfaces paper rows (and a
+    # paper/demo instance never surfaces real rows). Paper rows stay in the DB — they're
+    # just filtered out of this view, so the board, summary counts, and the paper block
+    # (all derived from `rows`) reflect only the current mode.
+    show_paper = _kalshi_show_paper(conn, row)
+    rows = scope_decisions(rows, show_paper)
     rows.sort(key=lambda d: d.get("ts", ""), reverse=True)
     n = max(1, min(int(limit or 100), 500))
     out = rows[:n]
@@ -4708,6 +4731,7 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
     (from the broker). Drives the pending/past-orders cards."""
     from kalshi.data.ticker_names import parse_market_ticker
     row = _kalshi_instance_row(conn, instance_id)
+    show_paper = _kalshi_show_paper(conn, row)
     n = max(1, min(int(limit or 50), 200))
 
     # Lookup: market_ticker -> readable info stamped on the decision rows (real team
@@ -4777,9 +4801,17 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
     # filled-orders HISTORY (also MOCK-tagged) so completed paper trades don't disappear.
     mock: dict = {}
     mock_history: list = []
+    # PAPER (MOCK) trades only surface in paper/demo mode — a real-money instance hides
+    # them (rows stay in the DB, just filtered out of this view).
+    _paper_placed = []
+    if show_paper:
+        try:
+            _paper_placed = list(_r_auth.db("IntelliStock").table("kalshi_decisions")
+                                 .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True}).run(conn))
+        except Exception:
+            _paper_placed = []
     try:
-        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
-                      .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True}).run(conn)):
+        for r in _paper_placed:
             mt = r.get("market_ticker")
             size = int(r.get("size") or 0)
             entry = r.get("entry_avg_cents")
