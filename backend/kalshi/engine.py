@@ -890,6 +890,11 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         d["entry_edge"] = d.get("edge")   # edge AT placement (UI: "placed @ X%")
                         log(f"tick {tick}: PAPER would place {a['contracts']}x {d['market_ticker']} @ "
                             f"{a['price_cents']}c (edge {(d['edge'] or 0):.1%}).", "cyan")
+                # Stamp the mode on EVERY decision row (not just placed fills) so the
+                # API/UI can scope the pregame board + decision-summary counts by mode.
+                # (The placed-paper branch above already set True when dry; this makes
+                # skipped/blocked/real rows carry paper=False explicitly.)
+                d["paper"] = bool(dry)
                 try:
                     kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(d, conflict="replace").run(conn)
                 except Exception:
@@ -909,13 +914,17 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             except Exception as e:
                 log(f"tick {tick}: settle_and_learn failed: {type(e).__name__}: {e}", "yellow")
             # 7c) Mark open PAPER positions to the live Kalshi price (live unrealized
-            # P&L for the UI) + append each side's edge to the rolling sparkline series.
+            # P&L for the UI). PAPER (dry) mode ONLY — a live/real engine must never
+            # touch paper positions; they stay frozen at their last mark until paper
+            # resumes. `_mark_map` is still built every tick because update_close_refs
+            # (CLV, below) needs it for real positions too.
             try:
                 _mark_map = {p["market_ticker"]: p["mid_cents"] for p in soccer if p.get("mid_cents")}
-                _m = kdb.mark_paper_positions(conn, config.instance_id, _mark_map)
-                if _m.get("marked"):
-                    log(f"tick {tick}: marked {_m['marked']} paper position(s) — "
-                        f"unrealized {_m['unrealized_pnl_cents'] / 100:+.2f}.", "white")
+                if dry:
+                    _m = kdb.mark_paper_positions(conn, config.instance_id, _mark_map)
+                    if _m.get("marked"):
+                        log(f"tick {tick}: marked {_m['marked']} paper position(s) — "
+                            f"unrealized {_m['unrealized_pnl_cents'] / 100:+.2f}.", "white")
             except Exception as e:
                 log(f"tick {tick}: mark_paper_positions failed: {type(e).__name__}: {e}", "yellow")
             try:
@@ -941,7 +950,9 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             # discovery (no mass-delete on an outage).
             try:
                 _open_tk = {p["market_ticker"] for p in soccer if p.get("market_ticker")}
-                _pr = kdb.prune_finished(conn, config.instance_id, _open_tk, ts)
+                # expire_paper=dry: a live/real engine deletes stale skipped board rows
+                # but never expires (mutates) a frozen paper position.
+                _pr = kdb.prune_finished(conn, config.instance_id, _open_tk, ts, expire_paper=dry)
                 if _pr.get("deleted") or _pr.get("expired"):
                     log(f"tick {tick}: pruned {_pr['deleted']} finished decision row(s), "
                         f"expired {_pr['expired']} stale open trade(s).", "white")
@@ -984,9 +995,9 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 log(f"tick {tick}: live monitor — {len(live_matches)} in-play match(es), "
                     f"{len(live_rows)} markets watched, {acted} order(s).", "magenta")
                 for r in live_rows:
-                    # paper-tag in-play would-be trades so the feedback loop grades them too
-                    if live_dry and r.get("decision") == "placed":
-                        r["paper"] = True
+                    # Stamp mode on every in-play row (generalises the placed-only tag) so
+                    # the feedback loop + API/UI scope in-play decisions by mode too.
+                    r["paper"] = bool(live_dry)
                     try:
                         kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(r, conflict="replace").run(conn)
                     except Exception:
