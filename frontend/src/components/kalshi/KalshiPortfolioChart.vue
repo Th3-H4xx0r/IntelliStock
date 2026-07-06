@@ -5,6 +5,9 @@ import { getToken } from '../../utils/auth.js'
 
 const props = defineProps({
   brokerageId: { type: String, required: true },
+  // When true the instance is placing REAL orders -> show the real portfolio value
+  // curve, never the paper P&L curve (even if leftover paper snapshots exist).
+  isReal: { type: Boolean, default: false },
 })
 
 const API_BASE = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
@@ -52,7 +55,7 @@ watch(() => props.brokerageId, load)
 
 // Paper instances have a static demo broker balance, so when paper P&L history exists
 // we show the paper P&L PROGRESS curve instead of the (flat) portfolio value.
-const isPaper = computed(() => paperSeries.value.length > 0)
+const isPaper = computed(() => !props.isReal && paperSeries.value.length > 0)
 const activeSeries = computed(() => (isPaper.value ? paperSeries.value : series.value))
 
 // Slice the full server series to the selected range client-side. 'ALL' shows
