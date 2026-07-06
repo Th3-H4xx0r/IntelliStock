@@ -25,6 +25,18 @@ def test_portfolio_payload_day_change_from_24h_baseline():
     assert p["day_change"] == round((482014 - 481000) / 100.0, 2)  # 10.14, not 820.14
 
 
+def test_portfolio_payload_hides_paper_series_when_show_paper_false():
+    # Leftover paper snapshots must NOT surface once the instance is real-money:
+    # show_paper=False drops paper_series/paper_pnl but keeps the real value curve.
+    snaps = [{"ts": "t1", "value_cents": 600, "paper_pnl_cents": 9963},
+             {"ts": "t2", "value_cents": 612, "paper_pnl_cents": 9963}]
+    paper = portfolio_payload(snaps, value_cents=612, cash_cents=0)              # default show_paper
+    assert len(paper["paper_series"]) == 2 and paper["paper_pnl"] == 99.63
+    real = portfolio_payload(snaps, value_cents=612, cash_cents=0, show_paper=False)
+    assert real["paper_series"] == [] and real["paper_pnl"] is None
+    assert len(real["series"]) == 2                                             # real value curve intact
+
+
 def test_edges_payload_sorted_limited():
     rows = [
         {"market_ticker": "A", "edge": 0.02},

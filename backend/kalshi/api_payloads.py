@@ -15,6 +15,7 @@ def portfolio_payload(
     value_cents: int,
     cash_cents: int,
     prev_value_cents: int | None = None,
+    show_paper: bool = True,
 ) -> dict:
     """Account value + equity curve. day_change is value - prev_value_cents (the
     ~24h-ago baseline the caller resolves from raw snapshots). When no baseline
@@ -26,8 +27,10 @@ def portfolio_payload(
         day_change = round(series[-1]["value"] - series[0]["value"], 2)
     else:
         day_change = 0.0
-    # Paper P&L progress-over-time (only present for paper instances that recorded it).
-    paper_series = paper_pnl_series(snapshot_rows)
+    # Paper P&L progress-over-time — only for paper/demo instances. Dropped when the
+    # instance is real-money (show_paper=False) so a real account never surfaces leftover
+    # paper snapshots on the portfolio chart (the MOCK card).
+    paper_series = paper_pnl_series(snapshot_rows) if show_paper else []
     return {
         "value": round(value_cents / 100.0, 2),
         "cash": round(cash_cents / 100.0, 2),
