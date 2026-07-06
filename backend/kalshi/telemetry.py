@@ -28,7 +28,9 @@ def portfolio_series(snapshots: list[dict], max_points: int = 120) -> list[dict]
     chronological order. Downsamples to <= max_points (keeps first+last) and
     converts cents to dollars."""
     pts = [
-        {"ts": s["ts"], "value": round(s["value_cents"] / 100.0, 2)}
+        # TOTAL account equity = positions (value_cents) + cash_cents. cash defaults to 0
+        # for pre-cash snapshots so they degrade to positions-only rather than break.
+        {"ts": s["ts"], "value": round((s["value_cents"] + s.get("cash_cents", 0)) / 100.0, 2)}
         for s in snapshots
     ]
     n = len(pts)

@@ -4080,8 +4080,9 @@ def api_kalshi_portfolio(brokerage_id: str, conn=Depends(conn_dependency), curre
     prev_value_cents = None
     for s in snaps:
         if s.get("ts", "") <= cutoff:
-            prev_value_cents = int(s.get("value_cents", 0))
-    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents,
+            prev_value_cents = int(s.get("value_cents", 0)) + int(s.get("cash_cents", 0))
+    # Headline PORTFOLIO VALUE = TOTAL equity (positions + cash), matching the curve.
+    return portfolio_payload(snaps, value_cents=value_cents + cash_cents, cash_cents=cash_cents,
                              prev_value_cents=prev_value_cents,
                              show_paper=_kalshi_brokerage_show_paper(conn, brokerage_id))
 
@@ -4902,7 +4903,8 @@ def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), 
     except Exception:
         pass
     snaps = sorted(_kalshi_rows(conn, "kalshi_portfolio_snapshots", bid), key=lambda s: s.get("ts", ""))
-    return portfolio_payload(snaps, value_cents=value_cents, cash_cents=cash_cents,
+    # Headline = TOTAL equity (positions + cash), matching the curve.
+    return portfolio_payload(snaps, value_cents=value_cents + cash_cents, cash_cents=cash_cents,
                              show_paper=_kalshi_show_paper(conn, row))
 
 
