@@ -90,7 +90,10 @@ const delta = computed(() => {
 })
 const positive = computed(() => delta.value >= 0)
 
-const chartSeries = computed(() => [{ name: isPaper.value ? 'Paper P&L' : 'Value', data: displayed.value }])
+// Numeric-index x (like LiveTradingView) so ApexCharts actually plots the line — a
+// 'category' axis with [isoString, value] tuples computes the y-range but draws no line.
+// Range filtering already happened in `displayed`; labels are hidden so the index never shows.
+const chartSeries = computed(() => [{ name: isPaper.value ? 'Paper P&L' : 'Value', data: displayed.value.map((p, i) => [i, p[1]]) }])
 const chartColor = computed(() => (isPaper.value ? (positive.value ? '#34d399' : '#f87171') : '#a78bfa'))
 const chartOptions = computed(() => ({
   chart: { type: 'area', height: 180, toolbar: { show: false }, animations: { enabled: false }, background: 'transparent', fontFamily: 'Inter, sans-serif' },
@@ -100,7 +103,7 @@ const chartOptions = computed(() => ({
   stroke: { curve: 'smooth', width: 2.5 },
   fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.3, opacityTo: 0 } },
   grid: { borderColor: 'rgba(188,154,255,0.08)', strokeDashArray: 4, padding: { left: 8, right: 8 } },
-  xaxis: { type: 'category', labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false }, tooltip: { enabled: false } },
+  xaxis: { type: 'numeric', labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false }, tooltip: { enabled: false } },
   yaxis: { labels: { formatter: (v) => `$${Math.round(v)}`, style: { colors: '#64748b', fontSize: '11px' } } },
   tooltip: { theme: 'dark', x: { show: false } },
 }))
