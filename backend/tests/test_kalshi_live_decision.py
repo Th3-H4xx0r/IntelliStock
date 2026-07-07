@@ -27,18 +27,58 @@ def test_add_when_holding_and_value():
     assert a.kind == "add" and a.contracts == 40   # 50 cap - 10 held
 
 
-def test_stop_loss_exit():
+def test_catastrophe_exit_only_when_losing_late():
+    # Mark collapsed to <=40% of entry -> catastrophe exit ONLY when the side we backed is
+    # genuinely behind late (score-confirmed). Fair is irrelevant here (last-resort floor).
     pos = Pos(contracts=10, avg_price_cents=80, current_price_cents=30)
     a = decide(position=pos, live_fair=0.9, yes_ask_cents=85, yes_bid_cents=30,
-               caps=CAPS, phase=LIVE, elapsed_min=70)
-    assert a.kind == "exit" and a.contracts == 10 and "stop-loss" in a.reason
+               caps=CAPS, phase=LIVE, elapsed_min=80, our_goal_margin=-1)
+    assert a.kind == "exit" and a.contracts == 10 and "catastrophe" in a.reason
 
 
-def test_thesis_break_exit():
+def test_thesis_break_exit_only_when_losing_late():
+    # Live fair well below the bid AND behind late (score-confirmed) -> thesis-break exit.
     pos = Pos(contracts=10, avg_price_cents=50, current_price_cents=60)
     a = decide(position=pos, live_fair=0.30, yes_ask_cents=62, yes_bid_cents=60,
-               caps=CAPS, phase=LIVE, elapsed_min=70)
+               caps=CAPS, phase=LIVE, elapsed_min=80, our_goal_margin=-1)
     assert a.kind == "exit" and "thesis break" in a.reason
+
+
+def test_spain_bug_pregame_winner_not_stopped_out_on_price_gap():
+    # THE REGRESSION: pregame 'Spain to win' bought 12 @ 51c; price gapped to 19c mid-match
+    # (<=40% of entry -> old catastrophe stop fired and dumped it at a loss; Spain then won).
+    # Now: the score is level/unknown (NOT genuinely losing late) -> HOLD, ride to settlement.
+    pos = Pos(contracts=12, avg_price_cents=51, current_price_cents=19)
+    a = decide(position=pos, live_fair=0.45, yes_ask_cents=21, yes_bid_cents=19,
+               caps=CAPS, phase=LIVE, elapsed_min=55, origin="pregame", our_goal_margin=0)
+    assert a.kind == "hold"
+
+
+def test_price_collapse_without_score_confirmation_holds():
+    # Even for an in-play scalp: a price collapse with NO adverse score (unknown margin)
+    # holds through the noise — no price-only stop-out.
+    pos = Pos(contracts=12, avg_price_cents=51, current_price_cents=19)
+    a = decide(position=pos, live_fair=0.45, yes_ask_cents=21, yes_bid_cents=19,
+               caps=CAPS, phase=LIVE, elapsed_min=80, our_goal_margin=None)
+    assert a.kind == "hold"
+
+
+def test_pregame_holds_winner_no_take_profit():
+    # A pregame conviction bet in profit is NOT scalped out (held to settlement); only
+    # in-play scalps take profit on an overshoot.
+    pos = Pos(contracts=10, avg_price_cents=40, current_price_cents=68)
+    a = decide(position=pos, live_fair=0.55, yes_ask_cents=70, yes_bid_cents=67,
+               caps=CAPS, phase=LIVE, elapsed_min=60, origin="pregame", our_goal_margin=1)
+    assert a.kind == "hold"
+
+
+def test_pregame_exits_when_genuinely_losing_late():
+    # Even a pregame bet bails when the backed side is really behind late (score-confirmed)
+    # and the price has collapsed — salvage value rather than ride a lost bet to zero.
+    pos = Pos(contracts=12, avg_price_cents=51, current_price_cents=19)
+    a = decide(position=pos, live_fair=0.15, yes_ask_cents=21, yes_bid_cents=19,
+               caps=CAPS, phase=LIVE, elapsed_min=85, origin="pregame", our_goal_margin=-2)
+    assert a.kind == "exit"   # thesis-break or catastrophe — salvage a genuinely lost bet
 
 
 def test_take_profit_scales_out_on_overshoot_with_thesis_intact():
@@ -81,16 +121,17 @@ def test_max_adds_blocks_further_adds():
     assert a.kind == "hold" and "max adds" in a.reason
 
 
-def test_unknown_phase_no_open_without_move_but_exit_allowed():
+def test_unknown_phase_no_open_and_no_price_only_exit():
     # Flat + value but not live and not move-confirmed -> hold (no open).
     a = decide(position=None, live_fair=0.70, yes_ask_cents=50, yes_bid_cents=49,
                caps=CAPS, phase=UNKNOWN, elapsed_min=None, allow_open=False)
     assert a.kind == "hold"
-    # But a held position can still be defensively exited in any phase.
+    # A held position whose PRICE collapsed but with no adverse score confirmation HOLDS
+    # (the fix: no price-only stop-out, in any phase).
     pos = Pos(contracts=10, avg_price_cents=80, current_price_cents=30)
     b = decide(position=pos, live_fair=0.9, yes_ask_cents=85, yes_bid_cents=30,
                caps=CAPS, phase=UNKNOWN, elapsed_min=None, allow_open=False)
-    assert b.kind == "exit"
+    assert b.kind == "hold"
 
 
 def test_hold_when_no_value():
