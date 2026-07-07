@@ -98,6 +98,7 @@ def test_exit_blocked_when_no_bid_to_sell_into():
     # a 0c sell that dumps the position.
     match = [{
         "fixture_id": "E1", "home": "A", "away": "B", "phase": LIVE, "elapsed_min": 70,
+        "home_score": 0, "away_score": 2,   # backed side (home) genuinely behind, late -> exit allowed
         "model_probs": {"M1": 0.2},
         "markets": [{"market_ticker": "M1", "side": "home", "market_type": "winner",
                      "yes_ask_cents": 30, "yes_bid_cents": 0, "mid_cents": 30}],
@@ -110,6 +111,35 @@ def test_exit_blocked_when_no_bid_to_sell_into():
     )
     assert fc.orders == []                       # no 0c dump
     assert rows[0]["live_action"] == "exit" and rows[0]["decision"] == "blocked"
+
+
+def test_pregame_position_held_through_price_collapse():
+    from dataclasses import dataclass
+
+    @dataclass
+    class Pos:
+        market_ticker: str
+        contracts: int
+        avg_price_cents: float
+        current_price_cents: float
+
+    # THE SPAIN FIX end-to-end: a PREGAME 'home to win' bought 51c, price gapped to 19c
+    # (<=40% of entry), score level -> the monitor HOLDS (no dump), ride it to settlement.
+    match = [{
+        "fixture_id": "E1", "home": "A", "away": "B", "phase": LIVE, "elapsed_min": 55,
+        "home_score": 1, "away_score": 1, "model_probs": {"M1": 0.45},
+        "markets": [{"market_ticker": "M1", "side": "home", "market_type": "winner",
+                     "yes_ask_cents": 21, "yes_bid_cents": 19, "mid_cents": 20}],
+    }]
+    fc = FakeClient()
+    rows = run_live_step(
+        client=fc, live_matches=match, price_history={"M1": [51, 51]},
+        adds_by_match={}, positions_by_ticker={"M1": Pos("M1", 12, 51, 19)},
+        caps=CAPS, dry_run=False, instance_id="i", brokerage_id="b", ts="t", llm=None,
+        position_origin={"M1": "pregame"},
+    )
+    assert fc.orders == []                       # not sold
+    assert rows[0]["live_action"] == "hold"
 
 
 def test_llm_tilt_called_on_move():
@@ -125,3 +155,17 @@ def test_llm_tilt_called_on_move():
         instance_id="i", brokerage_id="b", ts="t", llm=spy_llm,
     )
     assert seen["called"] == ("E1", "M1", "up")
+
+
+def test_our_goal_margin_from_score_and_side():
+    from kalshi.live.monitor import _our_goal_margin
+    m = {"home_score": 2, "away_score": 1}
+    assert _our_goal_margin(m, {"market_type": "winner", "side": "home"}) == 1
+    assert _our_goal_margin(m, {"market_type": "winner", "side": "away"}) == -1
+    assert _our_goal_margin(m, {"market_type": "winner", "side": "draw"}) == -1   # not level -> "losing"
+    assert _our_goal_margin({"home_score": 1, "away_score": 1},
+                            {"market_type": "winner", "side": "draw"}) == 0
+    # Unknown score OR a non-winner market -> None => exits suppressed (position held).
+    assert _our_goal_margin({"home_score": None, "away_score": 1},
+                            {"market_type": "winner", "side": "home"}) is None
+    assert _our_goal_margin(m, {"market_type": "over_under", "side": "over"}) is None

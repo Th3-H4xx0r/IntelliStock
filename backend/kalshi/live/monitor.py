@@ -20,10 +20,31 @@ def _noop(*_a, **_k):
     pass
 
 
+def _our_goal_margin(match, mk):
+    """Goals the side this YES market backs is currently ahead by (negative = behind); None
+    when the score is unknown or it isn't a match-winner market. This is the score signal
+    that gates in-play exits — a price move alone never triggers a sell (live_decision)."""
+    hs, as_ = match.get("home_score"), match.get("away_score")
+    if hs is None or as_ is None or (mk.get("market_type") or "").lower() != "winner":
+        return None
+    try:
+        hs, as_ = int(hs), int(as_)
+    except (TypeError, ValueError):
+        return None
+    side = (mk.get("side") or "").lower()
+    if side == "home":
+        return hs - as_
+    if side == "away":
+        return as_ - hs
+    if side == "draw":
+        return 0 if hs == as_ else -abs(hs - as_)
+    return None
+
+
 def run_live_step(*, client, live_matches, price_history, adds_by_match,
                   positions_by_ticker, caps, dry_run, instance_id, brokerage_id, ts,
                   llm=None, log=_noop, move_threshold_cents: float = 8.0,
-                  max_history: int = 10, already_placed=None) -> list[dict]:
+                  max_history: int = 10, already_placed=None, position_origin=None) -> list[dict]:
     """For each live match's markets: update the rolling mid history, detect a
     material move, (on a move) get a bounded LLM tilt, compute hybrid live fair,
     decide open/add/reduce/exit/hold, execute (unless dry_run), and emit a
@@ -85,6 +106,8 @@ def run_live_step(*, client, live_matches, price_history, adds_by_match,
                 caps=caps, phase=phase, elapsed_min=elapsed,
                 adds_so_far=int(adds_by_match.get(fixture_id, 0)),
                 allow_open=allow_open,
+                origin=(position_origin or {}).get(ticker, "inplay"),
+                our_goal_margin=_our_goal_margin(match, mk),
             )
 
             executed = "skipped"

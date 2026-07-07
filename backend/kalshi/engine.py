@@ -984,12 +984,30 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         return 0.0
 
                 live_dry = not should_execute(config.environment, config.live_enabled, config.paper_mode)
+                # Origin of each open position — 'pregame' (a pre-match conviction bet) vs
+                # 'inplay' (an in-play scalp). A pregame position is HELD TO SETTLEMENT by the
+                # monitor (never price-stopped); only a genuine late score-loss can exit it.
+                # From the placed decision rows: a placed row WITHOUT in_play=True is pregame.
+                position_origin: dict = {}
+                try:
+                    for _od in kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").filter(
+                            {"instance_id": config.instance_id, "decision": "placed"}).pluck(
+                            "market_ticker", "in_play").run(conn):
+                        _otk = _od.get("market_ticker")
+                        if not _otk:
+                            continue
+                        if not _od.get("in_play"):
+                            position_origin[_otk] = "pregame"        # any pregame row -> pregame
+                        else:
+                            position_origin.setdefault(_otk, "inplay")
+                except Exception as e:
+                    log(f"tick {tick}: position_origin query failed: {type(e).__name__}: {e}", "yellow")
                 live_rows = live_monitor.run_live_step(
                     client=client, live_matches=live_matches, price_history=price_history,
                     adds_by_match=adds_by_match, positions_by_ticker=positions_by_ticker,
                     caps=_eff_inplay, dry_run=live_dry, instance_id=config.instance_id,
                     brokerage_id=config.brokerage_id, ts=ts, llm=_live_llm_tilt, log=log,
-                    already_placed=placed_markets,
+                    already_placed=placed_markets, position_origin=position_origin,
                 )
                 acted = sum(1 for r in live_rows if r.get("decision") == "placed")
                 log(f"tick {tick}: live monitor — {len(live_matches)} in-play match(es), "
