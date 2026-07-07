@@ -9634,12 +9634,13 @@ def _save_trade_contexts_and_outcomes(
             "feature_version": "nexus_hybrid_v1",
             "strategy_config_hash": _strategy_config_hash(config),
             "graph_snapshot_date": date_key,
-            "features": feature_row,
-            "ml": payload.get("ml") or {},
-            "overlay": payload.get("overlay") or {},
-            "historical_analogs": payload.get("historical_analogs") or [],
-            "llm_traces": llm_traces.get(sym) or [],
-            "active_event_snapshot": [dict(ev) for ev in active_events or []][:20],
+            # The heavy context blobs (features / ml / overlay / historical_analogs
+            # / llm_traces / active_event_snapshot) are intentionally NOT stored:
+            # nothing ever reads them back (resume needs only date_key+instance_id;
+            # the dashboard rationale card reads only reason/score/action_intent/
+            # dominant_event_type via dedupe_latest_contexts). At ~70KB/doc they had
+            # ballooned GraphNexusTradeContexts to ~18GB and thrashed RethinkDB's
+            # cache. Keep this doc lean (~1-2KB) so it can't re-accumulate.
             "government_action_type": feature_row.get("government_action_type") or "",
             "dominant_event_type": feature_row.get("dominant_event_type") or "general",
         }

@@ -3252,6 +3252,74 @@ class GraphHardeningTests(unittest.TestCase):
 
         self.assertEqual(["inst-a|2026-03-14|AAPL"], deleted_ids)
 
+    def test_save_trade_contexts_omits_heavy_unread_fields(self):
+        """The context doc must NOT persist the never-read heavy blobs
+        (features/ml/overlay/historical_analogs/llm_traces/active_event_snapshot)
+        that ballooned GraphNexusTradeContexts to ~18GB — while still keeping every
+        field the readers use (resume: date_key/instance_id; dashboard rationale:
+        reason/score/action_intent/dominant_event_type)."""
+        inserted: list[dict] = []
+
+        class _FakeInsert:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def run(self, conn, **kw):
+                inserted.extend(self.docs)
+                return None
+
+        class _FakeDelete:
+            def run(self, conn, **kw):
+                return None
+
+        class _FakeSelection:
+            def delete(self):
+                return _FakeDelete()
+
+        class _FakeTable:
+            def insert(self, docs, conflict=None):
+                return _FakeInsert(list(docs))
+
+            def get_all(self, *ids):
+                return _FakeSelection()
+
+        class _FakeDB:
+            def table(self, table_name):
+                return _FakeTable()
+
+        class _FakeR:
+            def db(self, name):
+                return _FakeDB()
+
+        with patch.object(gna, "_ensure_nexus_history_table"), \
+             patch.object(gna, "_get_nexus_db_conn", lambda reuse=False: None), \
+             patch.object(gna, "_r", _FakeR()):
+            gna._save_trade_contexts_and_outcomes(
+                object(),
+                instance_id="inst-a",
+                date_key="2026-03-14",
+                prices={"AAPL": 210.0},
+                scores={"AAPL": {
+                    "score": 1, "action_intent": "buy", "reason": "edge",
+                    "features": {"x": 1}, "ml": {"y": 2}, "overlay": {"z": 3},
+                    "historical_analogs": [1, 2, 3], "llm_traces": ["huge"],
+                }},
+                candidate_features={"AAPL": {"dominant_event_type": "earnings"}},
+                llm_traces={"AAPL": [{"prompt": "x" * 5000}]},
+                active_events=[{"e": 1}],
+                config={},
+            )
+
+        ctx_docs = [d for d in inserted if "final_score" in d]
+        self.assertTrue(ctx_docs, "expected a context doc to be inserted")
+        doc = ctx_docs[0]
+        for gone in ("features", "ml", "overlay", "historical_analogs",
+                     "llm_traces", "active_event_snapshot"):
+            self.assertNotIn(gone, doc, f"{gone} must no longer be stored")
+        for kept in ("date_key", "instance_id", "symbol", "reason", "score",
+                     "action_intent", "dominant_event_type"):
+            self.assertIn(kept, doc, f"{kept} must still be stored")
+
     def test_nexus_action_intent_helper_distinguishes_initial_add_and_sell(self):
         class _Portfolio:
             _positions = {"AAPL": 5.0}
