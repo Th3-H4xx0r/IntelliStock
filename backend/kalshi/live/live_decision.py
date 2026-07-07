@@ -23,8 +23,9 @@ class InPlayCaps:
     no_add_after_min: float = 75.0
     stop_loss_frac: float = 0.35           # DEPRECATED flat stop (kept for back-compat; no longer primary)
     take_profit_mult: float = 1.6          # DEPRECATED (replaced by fair-gated tp_overshoot_cents)
-    catastrophe_stop_frac: float = 0.6     # last-resort exit if mark <= entry * (1 - this)
+    catastrophe_stop_frac: float = 0.6     # last-resort exit if mark <= entry * (1 - this) AND losing late
     tp_overshoot_cents: float = 8.0        # take-profit: bank half when the MARK overshoots live fair by this
+    late_exit_min: float = 70.0            # exits fire ONLY when the backed side is genuinely BEHIND this late
     maker_min_spread_cents: int = 3        # in-play maker-or-skip: only rest a maker when spread >= this
     maker_min_book_depth: int = 5          # require this much resting depth before making
     maker_max_adverse_imbalance: float = -0.5
@@ -71,38 +72,49 @@ def _size(edge: float, ask_cents: float, caps: InPlayCaps, *, held_contracts: in
 
 def decide(*, position, live_fair: float, yes_ask_cents: float, yes_bid_cents: float,
            caps: InPlayCaps, phase: str, elapsed_min, adds_so_far: int = 0,
-           allow_open: bool = True) -> LiveAction:
+           allow_open: bool = True, origin: str = "inplay", our_goal_margin=None) -> LiveAction:
     """position: a KalshiContractPosition-like object (.contracts, .avg_price_cents,
     .current_price_cents) or None. Returns a LiveAction.
 
-    Priority: stop-loss / thesis-break exit first (any phase), then value-driven
-    add/open (live or move-confirmed only), else hold."""
+    origin: 'pregame' (a pre-match conviction bet) or 'inplay' (an in-play scalp).
+    our_goal_margin: goals the side this market backs is currently ahead by (negative =
+      behind), or None if the score isn't known — the score signal that gates exits.
+
+    Priority: score-gated exit first, then (in-play only) value add/open, else hold.
+    EXITS NEVER FIRE ON A PRICE MOVE ALONE — only when the scoreboard confirms the backed
+    side is genuinely behind, late. Pregame bets are held to settlement (no scalp/TP)."""
     held = int(getattr(position, "contracts", 0) or 0) if position else 0
     fair = max(0.0, min(1.0, float(live_fair)))
 
-    # --- defensive: exit a held position whose thesis broke (allowed any phase) ---
     if held > 0:
         entry = float(getattr(position, "avg_price_cents", 0.0) or 0.0)
         mark = float(getattr(position, "current_price_cents", None) or yes_bid_cents or 0.0)
-        # FAIR-GATED partial take-profit: thesis still INTACT (live fair >= our entry) but
-        # the market OVERSHOT fair by tp_overshoot_cents -> bank half, keep the rest (side
-        # still strong). Routed maker by the monitor so the partial clears round-trip cost.
-        # If the thesis WEAKENED (fair < entry) we fall through to a full thesis-break exit
-        # instead of scaling out of a deteriorating position.
-        if (held >= 1 and entry > 0 and fair >= entry / 100.0
+        is_pregame = (origin == "pregame")
+        # Take-profit: IN-PLAY scalps only. A pregame conviction bet is held to settlement —
+        # we never scalp out of a rising favorite we picked pre-match.
+        if (not is_pregame and held >= 1 and entry > 0 and fair >= entry / 100.0
                 and _implied(mark) >= fair + (caps.tp_overshoot_cents / 100.0)):
-            # Bank half when we hold >=2; a single contract can't be halved, so fully
-            # exit it as a maker sell (don't let a small win ride and round-trip away).
             sell = max(1, held // 2) if held >= 2 else 1
             return LiveAction("reduce", sell,
                               f"take-profit: mark {mark:.0f}c overshoots fair {fair:.2f} (thesis intact)")
-        # PRIMARY exit: thesis broke — live fair now below what the bid implies.
-        if fair + caps.edge_threshold < _implied(yes_bid_cents):
-            return LiveAction("exit", held, f"thesis break: live fair {fair:.2f} << bid {_implied(yes_bid_cents):.2f}")
-        # CATASTROPHE backstop only — NOT a flat % stop. Soccer prices gap on goals and a
-        # tight flat stop crystallises recoverable noise; this is a last-resort floor.
-        if entry > 0 and mark <= entry * (1.0 - caps.catastrophe_stop_frac):
-            return LiveAction("exit", held, f"catastrophe stop-loss: mark {mark:.0f}c <= entry {entry:.0f}c·(1-{caps.catastrophe_stop_frac:.0%})")
+        # EXITS ARE SCORE-GATED. Soccer prices gap hard on a goal but the fundamental thesis
+        # usually survives, so we NEVER stop out on a price move alone (that dumped 'Spain to
+        # win' at 19c after buying at 51c — and Spain won). An exit fires only when the
+        # SCOREBOARD confirms the backed side is genuinely BEHIND, LATE (our_goal_margin < 0
+        # at/after late_exit_min). Unknown score -> hold: don't crystallise a recoverable dip.
+        losing_late = (our_goal_margin is not None and our_goal_margin < 0
+                       and elapsed_min is not None and elapsed_min >= caps.late_exit_min)
+        if losing_late:
+            _behind = f"behind {our_goal_margin} @ {elapsed_min:.0f}'"
+            # thesis break: model's live fair now sits below the bid by our edge margin.
+            if fair + caps.edge_threshold < _implied(yes_bid_cents):
+                return LiveAction("exit", held, f"thesis break ({_behind}): live fair {fair:.2f} << bid {_implied(yes_bid_cents):.2f}")
+            # catastrophe backstop: mark collapsed to <= (1-frac) of entry AND losing late.
+            if entry > 0 and mark <= entry * (1.0 - caps.catastrophe_stop_frac):
+                return LiveAction("exit", held, f"catastrophe stop ({_behind}): mark {mark:.0f}c <= entry {entry:.0f}c·(1-{caps.catastrophe_stop_frac:.0%})")
+        # Pregame conviction bets take no other in-play action — held to settlement.
+        if is_pregame:
+            return LiveAction("hold", 0, "pregame position — held to settlement (no in-play scalp)")
 
     # --- value: add (holding) or open (flat) ---
     ask_prob = _implied(yes_ask_cents)
