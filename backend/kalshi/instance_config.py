@@ -123,7 +123,11 @@ def normalize_config(raw: dict, *, live_enabled: bool) -> dict:
         "inplay_exposure_frac": float(raw.get("inplay_exposure_frac", td["inplay_exposure_frac"])),
         "max_adds_per_match": int(raw.get("max_adds_per_match", td["max_adds_per_match"])),
         "no_add_after_min": float(raw.get("no_add_after_min", 75.0)),
-        "stop_loss_frac": float(raw.get("stop_loss_frac", 0.35)),
+        "stop_loss_frac": float(raw.get("stop_loss_frac", 0.35)),   # DEAD (unread by decide); kept for back-compat
+        # In-play EXIT knobs — the ones that actually drive live exits (score-gated).
+        "catastrophe_stop_frac": float(raw.get("catastrophe_stop_frac", 0.6)),
+        "tp_overshoot_cents": float(raw.get("tp_overshoot_cents", 8.0)),
+        "late_exit_min": float(raw.get("late_exit_min", 70.0)),
         # Sharp-odds anchor (de-vig'd bookmaker odds -> fair value -> edge vs Kalshi).
         "odds_api_key": str(raw.get("odds_api_key") or "").strip(),
         # OddsPapi key (historical sharp line for backtests). Persisted so it's
@@ -204,6 +208,7 @@ def inplay_caps_from_config(config: dict) -> InPlayCaps:
         take_profit_mult=float(c.get("take_profit_mult", 1.6)),
         catastrophe_stop_frac=float(c.get("catastrophe_stop_frac", 0.6)),
         tp_overshoot_cents=float(c.get("tp_overshoot_cents", 8.0)),
+        late_exit_min=float(c.get("late_exit_min", 70.0)),
         maker_min_spread_cents=int(c.get("maker_min_spread_cents", 3)),
         maker_min_book_depth=int(c.get("maker_min_book_depth", 5)),
         maker_max_adverse_imbalance=float(c.get("maker_max_adverse_imbalance", -0.5)),
