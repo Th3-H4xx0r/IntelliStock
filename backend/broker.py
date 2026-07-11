@@ -2693,6 +2693,35 @@ def _ensure_strategies_table(conn):
         _log(f"Could not ensure Strategies table: {e}", "yellow")
 
 
+_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference")
+
+
+def _crypto_synthetic_specs(instance_doc):
+    """For a crypto instance, synthesize a run_once strategy spec from
+    ``crypto_config.strategy`` (momentum/allocator/fast/reference) so it runs
+    without needing a Strategies-table row. Returns the ``(specs, id, schema)``
+    tuple, or ``None`` for non-crypto instances (fall through to the DB loader)."""
+    try:
+        if (instance_doc or {}).get("kind") != "crypto":
+            return None
+        cc = instance_doc.get("crypto_config") or {}
+        name = str(cc.get("strategy") or "momentum").strip().lower()
+        if name not in _CRYPTO_STRATEGY_NAMES:
+            name = "momentum"
+        spec = {
+            "strategy": name,
+            "weight": 1.0,
+            "execution_position": 0,
+            "decision_phase": "pre",
+            "execution_scope": "run_once",
+            "config": {"band": cc.get("band", "medium")},
+            "conditions": {},
+        }
+        return [spec], None, {"name": "crypto:%s" % name, "strategies": [spec]}
+    except Exception:
+        return None
+
+
 def load_strategies_from_db():
     """Load strategy list from DB table Strategies via instance.strategy_id. Returns tuple: (list of strategy specs, strategy_row_id), or ([], None) on error/missing."""
     try:
@@ -2708,6 +2737,11 @@ def load_strategies_from_db():
             instance_doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
             if not instance_doc:
                 return [], None, None
+            # Crypto instances run the strategy named in crypto_config.strategy
+            # via a synthesized run_once spec — no Strategies row required.
+            _crypto_specs = _crypto_synthetic_specs(instance_doc)
+            if _crypto_specs is not None:
+                return _crypto_specs
             strategy_id = instance_doc.get('strategy_id')
             if strategy_id is None:
                 return [], None, None

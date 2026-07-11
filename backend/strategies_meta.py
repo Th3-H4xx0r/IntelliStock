@@ -73,6 +73,93 @@ def _merge_schema_config_conditions(schema: dict) -> dict:
     return merged
 
 
+def _read_strategy_file(path: str) -> str:
+    """Read a strategy file's text; return "" on any error (treated as no header)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _build_strategy_entry(
+    module_name: str,
+    content: str,
+    *,
+    default_execution_scope: str,
+    require_schema: bool,
+    description_fallback,
+) -> dict | None:
+    """Parse one strategy file's header and build its available-list entry.
+
+    Shared by the flat (equity) loop and the crypto-subpackage loop so header
+    parsing, the required-key defaults, and the schema/config merge live in ONE
+    place — future header/schema changes apply to both automatically.
+
+    - ``default_execution_scope``: "per_symbol" (equity, run per symbol) or
+      "run_once" (crypto, run once per loop and emit per-ticker scores).
+    - ``require_schema``: when True a file WITHOUT an ``INTELLISTOCK_SCHEMA``
+      header returns ``None`` (used for crypto so helper modules like
+      ``core``/``discovery`` are skipped). When False a headerless file falls
+      back to a synthesized default schema (equity behavior).
+    - ``description_fallback(class_name) -> str``: description used when the
+      header has none.
+
+    Returns the entry dict, or ``None`` when the file should be skipped.
+    """
+    class_name = _module_to_class_name(module_name)
+    schema, description = _parse_header_meta(content)
+    if not isinstance(schema, dict):
+        if require_schema:
+            return None  # helper module (no schema header) — not a strategy
+        # Default schema when adding this strategy as a sub-strategy in DB
+        schema = {
+            "strategy": class_name,
+            "weight": 0.5,
+            "execution_position": 0,
+            "decision_phase": "pre",
+            "execution_scope": default_execution_scope,
+            "conditions": {},
+            "config": {},
+        }
+    else:
+        # Ensure required keys; strategy name should match class.
+        schema.setdefault("strategy", class_name)
+        schema.setdefault("weight", 0.5)
+        schema.setdefault("execution_position", 0)
+        schema.setdefault("decision_phase", "pre")  # "pre" = run before final decision (voting); "post" = run after (order size, pricing, etc.)
+        schema.setdefault("execution_scope", default_execution_scope)  # "per_symbol" = run per symbol; "run_once" = run once per loop, output scores per ticker
+        schema.setdefault("conditions", schema.get("conditions") or {})
+        schema.setdefault("config", schema.get("config") or {})
+    schema = _merge_schema_config_conditions(schema)
+    return {
+        "id": module_name,
+        "name": class_name,
+        "schema": schema,
+        "description": description or description_fallback(class_name),
+    }
+
+
+def _iter_strategy_entries(dirpath, *, default_execution_scope, require_schema, description_fallback):
+    """Yield built entries for every strategy .py file in ``dirpath`` (sorted)."""
+    for fn in sorted(os.listdir(dirpath)):
+        if not fn.endswith(".py") or fn == "__init__.py":
+            continue
+        module_name = fn[:-3]
+        if module_name in _EXCLUDED_STRATEGIES:
+            continue
+        content = _read_strategy_file(os.path.join(dirpath, fn))
+        entry = _build_strategy_entry(
+            module_name,
+            content,
+            default_execution_scope=default_execution_scope,
+            require_schema=require_schema,
+            description_fallback=description_fallback,
+        )
+        if entry is not None:
+            yield entry
+
+
 def get_available_strategies() -> list[dict]:
     """
     Discover strategy .py files in backend/strategies, parse schema and description
@@ -82,81 +169,22 @@ def get_available_strategies() -> list[dict]:
     """
     if not os.path.isdir(STRATEGIES_DIR):
         return []
-    result = []
-    for fn in sorted(os.listdir(STRATEGIES_DIR)):
-        if not fn.endswith(".py") or fn == "__init__.py":
-            continue
-        module_name = fn[:-3]
-        if module_name in _EXCLUDED_STRATEGIES:
-            continue
-        class_name = _module_to_class_name(module_name)
-        path = os.path.join(STRATEGIES_DIR, fn)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
-            content = ""
-        schema, description = _parse_header_meta(content)
-        # Default schema when adding this strategy as a sub-strategy in DB
-        if not isinstance(schema, dict):
-            schema = {
-                "strategy": class_name,
-                "weight": 0.5,
-                "execution_position": 0,
-                "decision_phase": "pre",
-                "execution_scope": "per_symbol",
-                "conditions": {},
-                "config": {},
-            }
-        else:
-            # Ensure required keys; strategy name should match class
-            schema.setdefault("strategy", class_name)
-            schema.setdefault("weight", 0.5)
-            schema.setdefault("execution_position", 0)
-            schema.setdefault("decision_phase", "pre")  # "pre" = run before final decision (voting); "post" = run after (order size, pricing, etc.)
-            schema.setdefault("execution_scope", "per_symbol")  # "per_symbol" = run per symbol; "run_once" = run once per loop, output scores per ticker
-            schema.setdefault("conditions", schema.get("conditions") or {})
-            schema.setdefault("config", schema.get("config") or {})
-        schema = _merge_schema_config_conditions(schema)
-        result.append({
-            "id": module_name,
-            "name": class_name,
-            "schema": schema,
-            "description": description or f"Strategy {class_name} (no description in header).",
-        })
+    result = list(_iter_strategy_entries(
+        STRATEGIES_DIR,
+        default_execution_scope="per_symbol",
+        require_schema=False,
+        description_fallback=lambda cn: f"Strategy {cn} (no description in header).",
+    ))
     # Crypto strategies live in the strategies/crypto/ subpackage (same-codebase,
     # kind="crypto"). Include only files with an explicit INTELLISTOCK_SCHEMA
-    # header so the core.py/discovery.py helpers are NOT listed as strategies.
+    # header (require_schema=True) so the core.py/discovery.py helpers are NOT
+    # listed as strategies.
     _crypto_dir = os.path.join(STRATEGIES_DIR, "crypto")
     if os.path.isdir(_crypto_dir):
-        for fn in sorted(os.listdir(_crypto_dir)):
-            if not fn.endswith(".py") or fn == "__init__.py":
-                continue
-            module_name = fn[:-3]
-            if module_name in _EXCLUDED_STRATEGIES:
-                continue
-            class_name = _module_to_class_name(module_name)
-            path = os.path.join(_crypto_dir, fn)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            except Exception:
-                content = ""
-            schema, description = _parse_header_meta(content)
-            if not isinstance(schema, dict):
-                continue  # helper module (core/discovery) — not a strategy
-            schema.setdefault("strategy", class_name)
-            schema.setdefault("weight", 0.5)
-            schema.setdefault("execution_position", 0)
-            schema.setdefault("decision_phase", "pre")
-            schema.setdefault("execution_scope", "run_once")
-            schema.setdefault("conditions", schema.get("conditions") or {})
-            schema.setdefault("config", schema.get("config") or {})
-            schema = _merge_schema_config_conditions(schema)
-            result.append({
-                "id": module_name,
-                "name": class_name,
-                "schema": schema,
-                "description": description or f"Crypto strategy {class_name}.",
-            })
+        result.extend(_iter_strategy_entries(
+            _crypto_dir,
+            default_execution_scope="run_once",
+            require_schema=True,
+            description_fallback=lambda cn: f"Crypto strategy {cn}.",
+        ))
     return result

@@ -1088,6 +1088,7 @@ def action_instances(conn):
             "brokerage_id",
             "max_usage",
             "kind",
+            "crypto_config",
             "crashed",
         )
         .run(conn)
@@ -1108,6 +1109,11 @@ def action_instances(conn):
             # bots (which have their own Kalshi-tab workflow). Stock instances
             # have no 'kind', so this is None for them.
             "kind": row.get("kind"),
+            # Crypto instances carry a crypto_config blob (band + per-coin fixed
+            # allocations). Additive: exposed so the Crypto tab can render the
+            # allocation summary + prefill the edit modal without a second fetch.
+            # Non-crypto instances have no such key, so this is None for them.
+            "crypto_config": row.get("crypto_config"),
             # True when the instance process died (not an operator Stop) and is
             # being held open for log capture — the UI shows a 'crashed' badge.
             "crashed": bool(row.get("crashed", False)),

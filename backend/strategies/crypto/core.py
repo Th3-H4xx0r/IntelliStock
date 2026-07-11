@@ -74,6 +74,13 @@ def crypto_scheduler_config(band: str) -> dict:
     weekends included (``weekdays_only=False``), so the scheduler always
     schedules a next wake — crypto never closes. Monitor cadence is paced by
     band; an unknown band falls back to ``medium``.
+
+    NOTE: ``crypto_config.band`` is the SINGLE SOURCE OF TRUTH for monitor
+    cadence — it maps to ``monitor_interval_min`` via ``_BAND_MONITOR_MIN`` here.
+    It should match the chosen strategy's intended trading frequency so the
+    instance is not polled faster or slower than the strategy expects:
+    Fast → "high" (poll often), Momentum → "medium", Allocator → "low" (slow).
+    Keep the configured band aligned with the strategy you run.
     """
     interval = _BAND_MONITOR_MIN.get(str(band or "").strip().lower(), _BAND_MONITOR_MIN["medium"])
     return {

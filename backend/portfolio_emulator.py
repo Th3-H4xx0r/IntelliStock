@@ -5,6 +5,17 @@ and portfolio value snapshots over time.
 
 import copy
 
+# Crypto is NEVER commission-free: backtest fills must model the taker fee.
+# Source the fee from the crypto core so sizing and fills stay in lock-step;
+# guard the import so any failure falls back to the known taker fee and never
+# breaks the (commission-free) equity paths. Only ever applied to crypto
+# symbols (detected via "/" in the ticker — equities never contain a slash).
+try:  # pragma: no cover - trivial import guard
+    from strategies.crypto.core import CRYPTO_FEES as _CRYPTO_FEES
+    _CRYPTO_TAKER_FEE = float(_CRYPTO_FEES["taker"])
+except Exception:  # pragma: no cover - fall back so equity paths never break
+    _CRYPTO_TAKER_FEE = 0.0025
+
 
 class PortfolioEmulator:
     """
@@ -36,17 +47,23 @@ class PortfolioEmulator:
         if total > self._cash:
             return False
         self._cash -= total
-        self._positions[ticker] = self._positions.get(ticker, 0.0) + shares
+        # Crypto is NOT commission-free: the taker fee is charged on notional, so
+        # the same cash (the full `total`, still decremented above) buys fewer
+        # coins. Equity symbols (no "/") keep the EXACT commission-free math.
+        filled_shares = shares
+        if "/" in ticker:
+            filled_shares = shares * (1.0 - _CRYPTO_TAKER_FEE)
+        self._positions[ticker] = self._positions.get(ticker, 0.0) + filled_shares
         self._trades.append({
             "timestamp": timestamp,
             "action": "buy",
             "ticker": ticker,
-            "shares": shares,
+            "shares": filled_shares,
             "price": price,
             "total": total,
             "cash_after": self._cash,
         })
-        print(f"TRADE: Buy {shares} shares of {ticker} at {price} for a total of {total} cash_after: {self._cash}")
+        print(f"TRADE: Buy {filled_shares} shares of {ticker} at {price} for a total of {total} cash_after: {self._cash}")
         return True
 
     def sell(self, ticker, shares, price, timestamp=None):
@@ -62,6 +79,11 @@ class PortfolioEmulator:
         if shares <= 0:
             return False
         total = shares * price
+        # Crypto is NOT commission-free: the taker fee is charged on notional, so
+        # proceeds credited to cash are net of the fee. Equity symbols (no "/")
+        # keep the EXACT commission-free math.
+        if "/" in ticker:
+            total = total * (1.0 - _CRYPTO_TAKER_FEE)
         self._cash += total
         self._positions[ticker] = current - shares
         if self._positions[ticker] <= 0:
