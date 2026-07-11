@@ -15,8 +15,9 @@ class InstanceRepository {
     final list = data['instances'] as List? ?? const [];
     return list
         .whereType<Map<String, dynamic>>()
-        // Kalshi bots have their own dedicated workflow on the Kalshi tab.
-        .where((j) => j['kind'] != 'kalshi')
+        // Kalshi + crypto bots each have their own dedicated screen/workflow, so
+        // they're excluded from the general equity instances list.
+        .where((j) => j['kind'] != 'kalshi' && j['kind'] != 'crypto')
         .map(Instance.fromJson)
         .toList();
   }
