@@ -476,6 +476,11 @@ class CreateInstanceBody(BaseModel):
     created_by: Optional[str] = "user"
     brokerage_id: Optional[str] = None
     max_usage: Optional[float] = None
+    # Crypto instances: kind="crypto" + a crypto_config blob (band + allocations)
+    # + an optional fixed symbol universe. Ignored for equity instances.
+    kind: Optional[str] = None
+    crypto_config: Optional[dict] = None
+    stocks: Optional[List[str]] = None
 
 
 class EditInstanceBody(BaseModel):
@@ -483,6 +488,8 @@ class EditInstanceBody(BaseModel):
     granularity: Optional[str] = None
     max_usage: Optional[float] = None
     brokerage_id: Optional[str] = None
+    crypto_config: Optional[dict] = None
+    stocks: Optional[List[str]] = None
 
 
 class DeleteInstanceBody(BaseModel):
@@ -1935,6 +1942,9 @@ def api_create_instance(body: CreateInstanceBody, conn=Depends(conn_dependency),
         created_by=body.created_by or "user",
         brokerage_id=body.brokerage_id,
         max_usage=body.max_usage,
+        kind=body.kind,
+        crypto_config=body.crypto_config,
+        stocks=body.stocks,
     )
 
 
@@ -1953,6 +1963,8 @@ def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(con
         granularity_time_increment=body.granularity,
         max_usage=body.max_usage,
         brokerage_id=body.brokerage_id,
+        crypto_config=body.crypto_config,
+        stocks=body.stocks,
     )
 
 

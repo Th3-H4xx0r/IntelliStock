@@ -317,3 +317,103 @@ def discover_universe(
         return list(pairs or [])
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Fixed + dynamic allocation overlay. Turns per-coin allocations
+# (crypto_config.allocations) into rebalance signals + the CORRECT dict-valued
+# _nexus_position_sizes the broker expects. NEVER emits bare floats.
+# ---------------------------------------------------------------------------
+def overlay_allocations(out, allocations, portfolio_value, prices, positions,
+                        tol_frac: float = 0.03):
+    """Overlay fixed per-coin allocations onto a strategy's ``run_once`` output.
+
+    ``allocations`` items are ``{"symbol": "BTC/USD", "pct": 0.10}`` (fraction of
+    portfolio value) and/or ``{"symbol": "SOL/USD", "usd": 5000}`` (absolute USD).
+    Fixed coins are rebalanced toward target (buy the shortfall / sell the excess
+    outside a ``tol_frac`` band); the remaining budget ``(1 - sum(fixed))`` is
+    split across the strategy's OWN dynamic buys. Sets top-level control keys so
+    the broker deploys 100% and applies no price floor. Empty allocations ⇒ ``out``
+    unchanged (100% dynamic). Mutates and returns ``out``.
+    """
+    allocs = [a for a in (allocations or []) if isinstance(a, Mapping) and a.get("symbol")]
+    pv = float(portfolio_value or 0.0)
+    if not allocs or pv <= 0:
+        return out
+
+    prices = prices or {}
+    positions = positions or {}
+    sizes = out.get("_nexus_position_sizes")
+    if not isinstance(sizes, dict):
+        sizes = {}
+    discovered = list(out.get("_nexus_discovered") or [])
+
+    fixed_syms: set = set()
+    fixed_frac_total = 0.0
+    for a in allocs:
+        sym = str(a.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        if a.get("pct") is not None:
+            target = max(0.0, float(a["pct"])) * pv
+        elif a.get("usd") is not None:
+            target = max(0.0, float(a["usd"]))
+        else:
+            continue
+        fixed_syms.add(sym)
+        fixed_frac_total += (target / pv) if pv > 0 else 0.0
+        px = float(prices.get(sym) or 0.0)
+        current = position_qty(positions, sym) * px if px > 0 else 0.0
+        tol = target * tol_frac
+        if px <= 0:
+            out[sym] = 1  # no price to value against — signal a buy toward target
+            sizes[sym] = {"buy_cash": round(target, 2), "asset_class": "crypto", "high_conviction": True}
+        elif current < target - tol:
+            out[sym] = 1
+            sizes[sym] = {"buy_cash": round(target - current, 2), "asset_class": "crypto", "high_conviction": True}
+        elif current > target + tol:
+            out[sym] = -1
+            sizes[sym] = {"sell_fraction": round(min(1.0, (current - target) / current), 4), "asset_class": "crypto"}
+        else:
+            out[sym] = 0  # within tolerance band — hold
+        if sym not in discovered:
+            discovered.append(sym)
+
+    # Dynamic remainder split across the strategy's own buys (signal 1, not fixed).
+    dyn_budget = max(0.0, 1.0 - min(1.0, fixed_frac_total)) * pv
+    dyn_buys = [s for s, v in list(out.items())
+                if isinstance(s, str) and not s.startswith("_") and s not in fixed_syms and v == 1]
+    if dyn_buys and dyn_budget > 0:
+        per = round(dyn_budget / len(dyn_buys), 2)
+        for s in dyn_buys:
+            sizes[s] = {"buy_cash": per, "asset_class": "crypto"}
+
+    sizes["_cash_reserve_floor_pct"] = 0.0  # deploy 100% (default holds back 10%)
+    sizes["_buy_price_floor"] = 0.0         # crypto has no $5 floor
+    out["_nexus_position_sizes"] = sizes
+    out["_nexus_discovered"] = discovered
+    return out
+
+
+def apply_crypto_config(out, config, prices, portfolio_emulator):
+    """Convenience overlay: pull ``allocations`` from the injected ``crypto_config``
+    and apply :func:`overlay_allocations`. No-op when there are no allocations
+    (100% dynamic). Call at the END of a non-IDLE ``run_once``. Never raises."""
+    try:
+        cc = (config or {}).get("crypto_config") or {}
+        allocs = cc.get("allocations")
+        if not allocs:
+            return out
+        pv, positions = 0.0, {}
+        if portfolio_emulator is not None:
+            try:
+                pv = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
+            except Exception:
+                pv = 0.0
+            try:
+                positions = portfolio_emulator.get_positions() or {}
+            except Exception:
+                positions = {}
+        return overlay_allocations(out, allocs, pv, prices, positions)
+    except Exception:
+        return out

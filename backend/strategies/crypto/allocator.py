@@ -118,7 +118,7 @@ class Allocator:
         if discovered:
             result["_nexus_discovered"] = discovered
         if not universe:
-            return result
+            return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         held = _held_symbols(portfolio_emulator, universe)
 
@@ -127,7 +127,7 @@ class Allocator:
         if btc_above is False:
             for sym in universe:
                 result[sym] = -1 if sym in held else 0
-            return result
+            return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         # Per-symbol regime: hold coins above their long-term MA, exit the rest.
         for sym in universe:
@@ -138,4 +138,4 @@ class Allocator:
                 result[sym] = 1
             else:
                 result[sym] = -1 if sym in held else 0
-        return result
+        return core.apply_crypto_config(result, config, prices, portfolio_emulator)

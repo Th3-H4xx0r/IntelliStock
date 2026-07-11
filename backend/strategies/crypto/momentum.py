@@ -116,7 +116,7 @@ class Momentum:
         if discovered:
             result["_nexus_discovered"] = discovered
         if not universe:
-            return result
+            return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         held = _held_symbols(portfolio_emulator, universe)
 
@@ -148,7 +148,7 @@ class Momentum:
         if not valid:
             for sym in universe:
                 result[sym] = -1 if sym in held else 0
-            return result
+            return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         # Aggregate-downtrend risk-off.
         uptrend = [s for s, m in valid.items() if m["trend_up"] and m["mom"] > 0]
@@ -156,7 +156,7 @@ class Momentum:
         if breadth < risk_off_breadth:
             for sym in universe:
                 result[sym] = -1 if sym in held else 0
-            return result
+            return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         # Rank uptrending names by momentum; hold the top-K.
         ranked = sorted(uptrend, key=lambda s: (-valid[s]["mom"], s))
@@ -167,4 +167,4 @@ class Momentum:
                 result[sym] = 1
             else:
                 result[sym] = -1 if sym in held else 0
-        return result
+        return core.apply_crypto_config(result, config, prices, portfolio_emulator)

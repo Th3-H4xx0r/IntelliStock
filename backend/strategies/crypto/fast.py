@@ -123,4 +123,4 @@ class Fast:
 
         if discovered:
             result["_nexus_discovered"] = discovered
-        return result
+        return core.apply_crypto_config(result, config, prices, portfolio_emulator)

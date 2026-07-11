@@ -1193,6 +1193,8 @@ def action_edit_instance(
     granularity_time_increment=None,
     max_usage=None,
     brokerage_id=None,
+    crypto_config=None,
+    stocks=None,
 ):
     if not instance_id or not str(instance_id).strip():
         raise ValueError("Instance ID required")
@@ -1229,6 +1231,15 @@ def action_edit_instance(
             updates["brokerage_id"] = bid
         else:
             updates["brokerage_id"] = None
+
+    # Crypto instances: allow editing the allocation config + fixed universe.
+    if crypto_config is not None:
+        try:
+            updates["crypto_config"] = dict(crypto_config)
+        except (TypeError, ValueError):
+            raise ValueError("crypto_config must be an object")
+    if stocks is not None:
+        updates["stocks"] = [str(s).strip().upper() for s in stocks if str(s).strip()]
 
     if not updates:
         raise ValueError("No editable fields provided")

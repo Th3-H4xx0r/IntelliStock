@@ -2838,6 +2838,17 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
         if instance_id and not config.get("instance_id"):
             config["instance_id"] = instance_id
             conditions["instance_id"] = instance_id
+        # Crypto instances: pass the instance-level crypto_config (band +
+        # per-coin allocations) into the strategy so it can honor fixed
+        # weights + a dynamic remainder. Uses the already-cached blob (no
+        # per-tick DB hit); equity instances are unaffected.
+        try:
+            _ck_inj, _ccfg_inj = _instance_kind_and_crypto_config()
+            if _ck_inj == "crypto" and _ccfg_inj and not config.get("crypto_config"):
+                config["crypto_config"] = dict(_ccfg_inj)
+                conditions["crypto_config"] = dict(_ccfg_inj)
+        except Exception:
+            pass
         # 2026-04-22: inject a live-mode marker so the strategy's destructive
         # session-cleanup paths (designed for backtest reproducibility) can
         # detect they are running against a live instance and skip the
@@ -9373,7 +9384,10 @@ while not shutdown_requested:
                                 _max_single_pct = float(os.environ.get("BROKER_MAX_SINGLE_POSITION_PCT", "0.15") or "0.15")
                             except (ValueError, TypeError):
                                 _max_single_pct = 0.15
-                            if _max_single_pct > 0 and mode == MODE_LIVE:
+                            # Crypto instances set explicit per-coin allocations
+                            # (e.g. 20%, 50%), so the equity 15% single-position
+                            # safety cap must NOT trim them — honor the user's donut.
+                            if _max_single_pct > 0 and mode == MODE_LIVE and not _is_crypto_instance_runtime():
                                 try:
                                     # Q4 fix: use CURRENT portfolio value (cash + positions) so
                                     # the cap scales with equity growth, not stuck at start-equity.

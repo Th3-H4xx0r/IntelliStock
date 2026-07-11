@@ -125,7 +125,7 @@ class Reference:
         if discovered:
             result["_nexus_discovered"] = list(discovered)
         if not universe:
-            return result
+            return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         deploy = float(settings.get("deploy_fraction", self.deploy_fraction))
         deploy = max(0.0, min(deploy, 1.0))
@@ -143,4 +143,4 @@ class Reference:
                 result[sym] = -1
             else:
                 result[sym] = 0
-        return result
+        return core.apply_crypto_config(result, config, prices, portfolio_emulator)
