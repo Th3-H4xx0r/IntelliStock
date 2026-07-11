@@ -774,6 +774,43 @@ try:
 except SystemExit:
     sys.exit(2)
 
+# 2026-07-11: Crypto instances run through THIS SAME broker, marked
+# kind="crypto" on the Instances row (they are NOT a forked module). A small
+# set of kind-gated branches (24/7 scheduler, market-hours bypass, crypto bars
+# endpoint, gtc/no-extended orders) switch behavior; equity instances see
+# kind=None and byte-identical behavior. The kind + crypto_config are read once
+# and cached here so the hot loop never re-hits the DB.
+_INSTANCE_KIND_CACHE = {"loaded": False, "kind": None, "crypto_config": {}}
+
+
+def _instance_kind_and_crypto_config():
+    """Return (kind, crypto_config) for this instance, read once and cached.
+    kind is 'crypto' for crypto instances, else None/other. Fails closed to
+    (None, {}) on any DB error so equities are never affected."""
+    if _INSTANCE_KIND_CACHE["loaded"]:
+        return _INSTANCE_KIND_CACHE["kind"], _INSTANCE_KIND_CACHE["crypto_config"]
+    kind, cc = None, {}
+    try:
+        _c = get_conn()
+        try:
+            _doc = r.db(DB_NAME).table("Instances").get(str(instance_id)).run(_c) or {}
+            kind = _doc.get("kind")
+            cc = _doc.get("crypto_config") or {}
+        finally:
+            try:
+                _c.close()
+            except Exception:
+                pass
+    except Exception:
+        kind, cc = None, {}
+    _INSTANCE_KIND_CACHE.update({"loaded": True, "kind": kind, "crypto_config": cc})
+    return kind, cc
+
+
+def _is_crypto_instance_runtime():
+    """True iff this broker process is running a kind='crypto' instance."""
+    return _instance_kind_and_crypto_config()[0] == "crypto"
+
 # Live-mode broker configuration: resolved from DB, not argv.
 # data_key/data_secret are for market-data API calls (bars, news); they can be
 # sourced from a SEPARATE brokerage row so operators can pair a PAPER trading
@@ -1193,19 +1230,34 @@ def fetch_alpaca_historical_bars(
 
     def _do_fetch_one_chunk(sym, chunk_start, chunk_end, log_empty_once=None, retry_smaller=False):
         """Perform the actual Alpaca HTTP request for one chunk. Returns list of bars."""
-        url = f"{ALPACA_DATA_BASE}/stocks/{sym}/bars"
+        # Crypto (kind="crypto") uses the v1beta3 crypto bars endpoint: symbols
+        # as a query param, NO feed, and a symbol-keyed response dict. Equities
+        # keep the /v2/stocks/{sym}/bars path unchanged.
+        _is_crypto = _is_crypto_instance_runtime()
         start_iso = to_iso(chunk_start)
         end_iso = to_iso(chunk_end)
         if not start_iso or not end_iso:
             return []
-        params = {
-            "start": start_iso,
-            "end": end_iso,
-            "timeframe": timeframe,
-            "limit": 10000,
-            "feed": feed,
-            "sort": "asc",
-        }
+        if _is_crypto:
+            url = "https://data.alpaca.markets/v1beta3/crypto/us/bars"
+            params = {
+                "symbols": sym,
+                "start": start_iso,
+                "end": end_iso,
+                "timeframe": timeframe,
+                "limit": 10000,
+                "sort": "asc",
+            }
+        else:
+            url = f"{ALPACA_DATA_BASE}/stocks/{sym}/bars"
+            params = {
+                "start": start_iso,
+                "end": end_iso,
+                "timeframe": timeframe,
+                "limit": 10000,
+                "feed": feed,
+                "sort": "asc",
+            }
         collected = []
         # Live-readiness P0 #4: 429 retry/backoff on Alpaca data API. Under live
         # load (every 5 min × hundreds of tickers via discovery) IEX free tier
@@ -1248,7 +1300,11 @@ def fetch_alpaca_historical_bars(
                 continue
             r.raise_for_status()
             data = r.json()
-            bars = data.get("bars") or []
+            if _is_crypto:
+                # v1beta3 crypto response is symbol-keyed: {"bars": {"BTC/USD": [...]}}
+                bars = (data.get("bars") or {}).get(sym, []) or []
+            else:
+                bars = data.get("bars") or []
             collected.extend(bars)
             if log_empty_once is not None and len(bars) == 0 and not log_empty_once[0]:
                 log_empty_once[0] = True
@@ -6934,8 +6990,21 @@ while not shutdown_requested:
                     _tick_marker = _gn_cache.get("_nexus_full_cycle_completed_date")
                 except Exception:
                     pass
+                # Crypto instances get a 24/7 scheduler config (no NYSE hours,
+                # band-paced monitor cadence); equities pass config=None → the
+                # existing equity DEFAULT_CONFIG. Fail-closed to None on any error.
+                _sched_cfg = None
+                try:
+                    _ck, _ccfg = _instance_kind_and_crypto_config()
+                    if _ck == "crypto":
+                        from strategies.crypto import core as _crypto_core
+                        _sched_cfg = _crypto_core.crypto_scheduler_config(
+                            (_ccfg or {}).get("band", "medium")
+                        )
+                except Exception:
+                    _sched_cfg = None
                 _next_wake_utc, _tick_mode = _scheduler_get_next_wake(
-                    _now_utc_for_sched, _tick_marker, config=None,
+                    _now_utc_for_sched, _tick_marker, config=_sched_cfg,
                 )
                 _scheduler_call_ok = True
                 _strategy_tick_n += 1
@@ -7555,7 +7624,11 @@ while not shutdown_requested:
                     break
         except Exception:
             _dc_enabled_any = False
-        if mode == MODE_LIVE:
+        if _is_crypto_instance_runtime():
+            # Crypto trades 24/7/365 — never "outside session". Skip all NYSE
+            # market-hours gating so strategies + execution run round the clock.
+            within_session = True
+        elif mode == MODE_LIVE:
             if _dc_enabled_any:
                 # Force extended-hours gate (NYSE pre-market + RTH + after-hours)
                 # regardless of RH_RTH_ONLY. The dual-cadence gate in the
@@ -8774,7 +8847,7 @@ while not shutdown_requested:
             # mirrors the "Outside session" / "Running" pattern so we only
             # print on transitions + periodic heartbeats.
             _live_market_open_this_tick = True
-            if mode == MODE_LIVE and portfolio_emulator is not None and _exec_order:
+            if (not _is_crypto_instance_runtime()) and mode == MODE_LIVE and portfolio_emulator is not None and _exec_order:
                 try:
                     # 2026-05-06: bound the market-open check at 10s. Some
                     # adapter implementations make an HTTP call here; a

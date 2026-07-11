@@ -155,6 +155,21 @@ def is_valid_us_ticker(ticker: str, *, strict: bool = True) -> bool:
     return t in universe
 
 
+# Crypto pairs use Alpaca's slash form (e.g. BTC/USD, SHIB/USD, ETH/BTC): a
+# 2-10 char alphanumeric base and a 3-4 letter quote (USD/USDT/USDC/BTC).
+_CRYPTO_PAIR_RE = re.compile(r"^[A-Z0-9]{2,10}/[A-Z]{3,4}$")
+
+
+def is_valid_crypto_pair(symbol: str) -> bool:
+    """Return True if `symbol` is a well-formed Alpaca crypto pair (slash form,
+    e.g. 'BTC/USD'). Regex-only — no Nasdaq universe call. Crypto instances use
+    this in place of `is_valid_us_ticker`, whose US-equity regex rejects the
+    slash and whose Nasdaq membership check is meaningless for crypto."""
+    if not symbol:
+        return False
+    return bool(_CRYPTO_PAIR_RE.match(str(symbol).strip().upper()))
+
+
 def filter_valid_tickers(tickers: Iterable[str], *, strict: bool = True) -> list[str]:
     """Return only the entries in `tickers` that pass `is_valid_us_ticker`.
 
