@@ -1911,13 +1911,26 @@ def _load_strategy_class(strategy_name):
     if broker_dir not in sys.path:
         sys.path.insert(0, broker_dir)
     try:
-        spec = importlib.util.find_spec("strategies." + module_name)
-        if spec is None or spec.origin is None:
-            _log(f"Module 'strategies.{module_name}' not found for strategy '{strategy_name}'", "yellow")
+        # Resolve the flat equity path first (strategies.<module>); fall back to
+        # the crypto subpackage (strategies.crypto.<module>) so crypto strategies
+        # load through this same loader. Flat-first keeps equity behavior intact.
+        spec = None
+        _resolved_mod_path = None
+        for _mod_path in ("strategies." + module_name, "strategies.crypto." + module_name):
+            try:
+                _cand = importlib.util.find_spec(_mod_path)
+            except (ImportError, AttributeError, ValueError):
+                _cand = None
+            if _cand is not None and _cand.origin is not None:
+                spec = _cand
+                _resolved_mod_path = _mod_path
+                break
+        if spec is None:
+            _log(f"Module 'strategies.{module_name}' (nor strategies.crypto.{module_name}) found for strategy '{strategy_name}'", "yellow")
             return None
         module = importlib.util.module_from_spec(spec)
         # Register module in sys.modules before execution (required for dataclass decorators)
-        sys.modules["strategies." + module_name] = module
+        sys.modules[_resolved_mod_path] = module
         spec.loader.exec_module(module)
         cls = getattr(module, class_name, None)
         if cls is None:

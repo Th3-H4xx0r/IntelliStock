@@ -1127,6 +1127,9 @@ def action_create_instance(
     created_by="user",
     brokerage_id=None,
     max_usage=None,
+    kind=None,
+    crypto_config=None,
+    stocks=None,
 ):
     if not instance_id or not str(instance_id).strip():
         raise ValueError("Instance ID required")
@@ -1167,6 +1170,18 @@ def action_create_instance(
             doc["strategy_id"] = int(strategy_id)
         except (TypeError, ValueError):
             pass
+    # Crypto instances (kind="crypto") run through the SAME broker with kind-gated
+    # branches. Carry the crypto_config (band + risk knobs) and an optional fixed
+    # symbol universe; empty/omitted stocks ⇒ the strategy auto-discovers coins.
+    if stocks:
+        doc["stocks"] = [str(s).strip().upper() for s in stocks if str(s).strip()]
+    if kind:
+        doc["kind"] = str(kind).strip()
+    if crypto_config is not None:
+        try:
+            doc["crypto_config"] = dict(crypto_config)
+        except (TypeError, ValueError):
+            doc["crypto_config"] = {}
     r.db(DB_NAME).table("Instances").insert(doc, conflict="replace").run(conn)
     return {"id": instance_id, "name": name, "strategy_id": doc.get("strategy_id")}
 

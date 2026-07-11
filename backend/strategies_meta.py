@@ -124,4 +124,39 @@ def get_available_strategies() -> list[dict]:
             "schema": schema,
             "description": description or f"Strategy {class_name} (no description in header).",
         })
+    # Crypto strategies live in the strategies/crypto/ subpackage (same-codebase,
+    # kind="crypto"). Include only files with an explicit INTELLISTOCK_SCHEMA
+    # header so the core.py/discovery.py helpers are NOT listed as strategies.
+    _crypto_dir = os.path.join(STRATEGIES_DIR, "crypto")
+    if os.path.isdir(_crypto_dir):
+        for fn in sorted(os.listdir(_crypto_dir)):
+            if not fn.endswith(".py") or fn == "__init__.py":
+                continue
+            module_name = fn[:-3]
+            if module_name in _EXCLUDED_STRATEGIES:
+                continue
+            class_name = _module_to_class_name(module_name)
+            path = os.path.join(_crypto_dir, fn)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                content = ""
+            schema, description = _parse_header_meta(content)
+            if not isinstance(schema, dict):
+                continue  # helper module (core/discovery) — not a strategy
+            schema.setdefault("strategy", class_name)
+            schema.setdefault("weight", 0.5)
+            schema.setdefault("execution_position", 0)
+            schema.setdefault("decision_phase", "pre")
+            schema.setdefault("execution_scope", "run_once")
+            schema.setdefault("conditions", schema.get("conditions") or {})
+            schema.setdefault("config", schema.get("config") or {})
+            schema = _merge_schema_config_conditions(schema)
+            result.append({
+                "id": module_name,
+                "name": class_name,
+                "schema": schema,
+                "description": description or f"Crypto strategy {class_name}.",
+            })
     return result
