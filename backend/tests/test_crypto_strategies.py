@@ -61,9 +61,9 @@ def test_reference_flat_portfolio_buys_toward_equal_weight():
     )
     assert out["BTC/USD"] == 1
     assert out["ETH/USD"] == 1
-    # equal target weights emitted as sizing hints
-    sizes = out["_nexus_position_sizes"]
-    assert abs(sizes["BTC/USD"] - sizes["ETH/USD"]) < 1e-9
+    # Sizing is left to the broker's default per-symbol sizing: the strategy
+    # must NOT emit the contract-violating ``_nexus_position_sizes`` float map.
+    assert "_nexus_position_sizes" not in out
 
 
 def test_reference_trims_overweight_and_buys_underweight():
@@ -168,9 +168,8 @@ def test_momentum_uptrend_ranks_top_k():
     assert out["BTC/USD"] == 1   # strongest momentum
     assert out["ETH/USD"] == 1   # second strongest
     assert out["SOL/USD"] == 0   # outside top-K, not held -> hold
-    assert "_nexus_position_sizes" in out
-    for frac in out["_nexus_position_sizes"].values():
-        assert 0.0 < frac <= 0.25  # vol-targeted, capped by max_frac
+    # Sizing is delegated to the broker; no _nexus_position_sizes contract map.
+    assert "_nexus_position_sizes" not in out
 
 
 def test_momentum_aggregate_downtrend_risk_off():
@@ -222,9 +221,8 @@ def test_allocator_above_ma_gets_inverse_vol_weights():
     )
     assert out["BTC/USD"] == 1
     assert out["ETH/USD"] == 1
-    sizes = out["_nexus_position_sizes"]
-    assert sum(sizes.values()) <= 1.0 + 1e-9
-    assert all(w > 0 for w in sizes.values())
+    # Sizing is delegated to the broker; no _nexus_position_sizes contract map.
+    assert "_nexus_position_sizes" not in out
 
 
 def test_allocator_btc_below_ma_full_risk_off():
@@ -241,3 +239,163 @@ def test_allocator_btc_below_ma_full_risk_off():
     assert out["BTC/USD"] == 0
     assert out["ETH/USD"] == 0
     assert "_nexus_position_sizes" not in out
+
+
+# ===========================================================================
+# Contract guard: no strategy may emit _nexus_position_sizes
+# ===========================================================================
+
+def test_no_strategy_emits_nexus_position_sizes():
+    """The broker reads _nexus_position_sizes as {sym: dict}; a {sym: float} map
+    raises TypeError and aborts the whole execution loop. Assert every crypto
+    strategy — even on its BUY path — omits the key entirely."""
+    prices = {"BTC/USD": 200.0, "ETH/USD": 150.0}
+
+    ref = Reference().run_once(
+        ["BTC/USD", "ETH/USD"], {"BTC/USD": 100.0, "ETH/USD": 200.0}, None, {}, {},
+        data={"BTC/USD": _bars([100, 100]), "ETH/USD": _bars([200, 200])},
+        portfolio_emulator=None, mode="MONITOR",
+    )
+    mom = Momentum().run_once(
+        ["BTC/USD", "ETH/USD"], prices, None, {}, {},
+        data={
+            "BTC/USD": _bars(list(np.linspace(100.0, 200.0, 40))),
+            "ETH/USD": _bars(list(np.linspace(100.0, 150.0, 40))),
+        },
+        portfolio_emulator=None, mode="MONITOR",
+    )
+    alloc = Allocator().run_once(
+        ["BTC/USD", "ETH/USD"], prices, None, {}, {},
+        data={
+            "BTC/USD": _bars(list(np.linspace(100.0, 140.0, 30))),
+            "ETH/USD": _bars(list(np.linspace(100.0, 130.0, 30))),
+        },
+        portfolio_emulator=None, mode="MONITOR",
+    )
+    fast = Fast().run_once(
+        ["BTC/USD"], {"BTC/USD": 140.0}, None, {}, {},
+        data={"BTC/USD": _bars(_breakout_series())},
+        portfolio_emulator=None, mode="MONITOR",
+    )
+    for name, out in [("reference", ref), ("momentum", mom), ("allocator", alloc), ("fast", fast)]:
+        assert "_nexus_position_sizes" not in out, f"{name} still emits _nexus_position_sizes"
+        # Sanity: each hit its buy path, so the assertion above is meaningful.
+        assert any(v == 1 for k, v in out.items() if not str(k).startswith("_")), \
+            f"{name} produced no buy signal"
+
+
+def test_held_lookup_tolerates_slashless_position_keys():
+    """Finding #4: Alpaca may key crypto positions WITHOUT the slash (BTCUSD).
+    Held detection must still fire so a risk-off exits the position."""
+    data = {
+        "BTC/USD": _bars(list(np.linspace(200.0, 100.0, 40))),  # downtrend -> risk-off
+        "ETH/USD": _bars(list(np.linspace(150.0, 100.0, 40))),
+    }
+    prices = {"BTC/USD": 100.0, "ETH/USD": 100.0}
+    pf = FakePortfolio(positions={"BTCUSD": 5}, value=10_000.0)  # NO slash
+    out = Momentum().run_once(
+        ["BTC/USD", "ETH/USD"], prices, None, {}, {},
+        data=data, portfolio_emulator=pf, mode="MONITOR",
+    )
+    assert out["BTC/USD"] == -1  # detected as held despite slash-less key -> exit
+    assert out["ETH/USD"] == 0   # not held -> hold
+
+
+# ===========================================================================
+# Auto-discovery wiring (empty seed) with robust fallback
+# ===========================================================================
+
+def _fake_alpaca_http_get(assets, bars_payload):
+    """A stand-in for ``requests.get`` serving the Alpaca assets + bars REST."""
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def _get(url, params=None, headers=None):
+        if "/v2/assets" in url:
+            return _Resp(assets)
+        return _Resp({"bars": bars_payload})
+
+    return _get
+
+
+def test_momentum_discovers_universe_when_seed_empty(monkeypatch):
+    """Empty seed + creds in config -> discovery runs through the injected
+    providers and the ranked pairs surface in _nexus_discovered (broker then
+    expands the universe and fetches their bars on the next tick)."""
+    assets = [
+        {"symbol": "BTC/USD", "tradable": True, "status": "active"},
+        {"symbol": "ETH/USD", "tradable": True, "status": "active"},
+    ]
+    bars_payload = {
+        "BTC/USD": _bars(list(np.linspace(100.0, 200.0, 8))),
+        "ETH/USD": _bars(list(np.linspace(100.0, 150.0, 8))),
+    }
+    monkeypatch.setattr(
+        "strategies.crypto.core.requests.get",
+        _fake_alpaca_http_get(assets, bars_payload),
+    )
+    out = Momentum().run_once(
+        [], {}, None, {"alpaca_key": "K", "alpaca_secret": "S"}, {},
+        data={}, portfolio_emulator=None, mode="MONITOR",
+    )
+    assert set(out.get("_nexus_discovered") or []) == {"BTC/USD", "ETH/USD"}
+    assert "_nexus_position_sizes" not in out
+
+
+def test_allocator_discovers_universe_when_seed_empty(monkeypatch):
+    assets = [
+        {"symbol": "BTC/USD", "tradable": True, "status": "active"},
+        {"symbol": "ETH/USD", "tradable": True, "status": "active"},
+    ]
+    bars_payload = {
+        "BTC/USD": _bars(list(np.linspace(100.0, 140.0, 8))),
+        "ETH/USD": _bars(list(np.linspace(100.0, 130.0, 8))),
+    }
+    monkeypatch.setattr(
+        "strategies.crypto.core.requests.get",
+        _fake_alpaca_http_get(assets, bars_payload),
+    )
+    out = Allocator().run_once(
+        [], {}, None, {"alpaca_key": "K", "alpaca_secret": "S"}, {},
+        data={}, portfolio_emulator=None, mode="MONITOR",
+    )
+    assert set(out.get("_nexus_discovered") or []) == {"BTC/USD", "ETH/USD"}
+    assert "_nexus_position_sizes" not in out
+
+
+def test_momentum_falls_back_to_default_majors_without_creds():
+    """No creds -> discovery short-circuits to []; strategy falls back to majors."""
+    from strategies.crypto.momentum import DEFAULT_MAJORS
+    out = Momentum().run_once(
+        [], {}, None, {}, {},  # no alpaca_key/secret
+        data={}, portfolio_emulator=None, mode="MONITOR",
+    )
+    assert out.get("_nexus_discovered") == DEFAULT_MAJORS
+
+
+def test_allocator_falls_back_to_default_majors_without_creds():
+    from strategies.crypto.allocator import DEFAULT_MAJORS
+    out = Allocator().run_once(
+        [], {}, None, {}, {},
+        data={}, portfolio_emulator=None, mode="MONITOR",
+    )
+    assert out.get("_nexus_discovered") == DEFAULT_MAJORS
+
+
+def test_discovery_network_error_never_crashes_tick(monkeypatch):
+    """Discovery must never raise: a provider blowing up falls back to majors."""
+    from strategies.crypto.momentum import DEFAULT_MAJORS
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("strategies.crypto.core.requests.get", boom)
+    out = Momentum().run_once(
+        [], {}, None, {"alpaca_key": "K", "alpaca_secret": "S"}, {},
+        data={}, portfolio_emulator=None, mode="MONITOR",
+    )
+    assert out.get("_nexus_discovered") == DEFAULT_MAJORS

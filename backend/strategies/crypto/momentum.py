@@ -11,8 +11,10 @@ Trend-following across a handful of majors:
 - Non-top / non-trending pairs -> exit (-1) if held, else hold (0).
 - Aggregate downtrend (breadth of uptrending names below ``risk_off_breadth``)
   -> risk-off: exit everything (held -> -1, others 0).
-Returns 1 = buy, 0 = hold, -1 = sell, plus ``_nexus_discovered`` and
-``_nexus_position_sizes`` (vol-targeted fraction-of-equity hints for buys).
+When the seed universe is empty the majors are auto-discovered (ranked tradable
+universe), falling back to ``DEFAULT_MAJORS`` on any error. Returns 1 = buy,
+0 = hold, -1 = sell, plus ``_nexus_discovered`` for auto-picked pairs.
+Per-symbol sizing is left to the broker's default sizing.
 """
 
 from __future__ import annotations
@@ -39,31 +41,13 @@ DEFAULT_MAJORS = [
     "LINK/USD", "LTC/USD", "DOT/USD", "BCH/USD",
 ]
 
+# Bars used to RANK the discovered universe (the trading bars come from the
+# broker's ``data`` on the next tick once discovery expands the symbol set).
+_DISCOVERY_TIMEFRAME = "1Hour"
 
-def _series(bars, key: str) -> np.ndarray:
-    return np.array([float(b.get(key) or 0) for b in (bars or [])], dtype=float)
-
-
-def _held_symbols(portfolio_emulator, universe):
-    held = set()
-    if portfolio_emulator is None:
-        return held
-    try:
-        positions = portfolio_emulator.get_positions() or {}
-    except Exception:
-        return held
-    for sym in universe:
-        if float(positions.get(sym, 0) or 0) > 0:
-            held.add(sym)
-    return held
-
-
-def _vol_target_fraction(recent_vol: float, target_vol: float, max_frac: float) -> float:
-    if recent_vol and recent_vol > 0:
-        frac = target_vol / recent_vol
-    else:
-        frac = max_frac
-    return max(0.0, min(frac, max_frac))
+# Shared helpers (single source of truth in core).
+_series = core.series
+_held_symbols = core.held_symbols
 
 
 class Momentum:
@@ -109,16 +93,24 @@ class Momentum:
         adx_period = max(2, int(settings.get("adx_period", self.adx_period)))
         adx_min = float(settings.get("adx_min", self.adx_min))
         risk_off_breadth = float(settings.get("risk_off_breadth", self.risk_off_breadth))
-        target_vol = float(settings.get("target_vol", self.target_vol))
-        max_frac = float(settings.get("max_frac", self.max_frac))
         min_bars = max(slow_p, adx_period * 2, lookback) + 2
 
         data = data or {}
         seed = [str(s).strip().upper() for s in (symbols or []) if str(s).strip()]
-        candidates = seed if seed else DEFAULT_MAJORS
-        universe = [s for s in candidates if data.get(s)]
+        if seed:
+            candidates = seed
+        else:
+            # No seed list -> auto-discover the best coins, majors as a fallback.
+            band = str(settings.get("band", "medium"))
+            disc_k = max(top_k, int(settings.get("discovery_k", 10)))
+            timeframe = str(settings.get("discovery_timeframe", _DISCOVERY_TIMEFRAME))
+            candidates = core.discover_universe(band, disc_k, settings, timeframe) or DEFAULT_MAJORS
+
         seed_set = set(seed)
-        discovered = [s for s in universe if s not in seed_set]
+        # Surface auto-picked pairs so the broker expands the universe and fetches
+        # their bars — even before ``data`` holds them (first discovery tick).
+        discovered = [s for s in candidates if s not in seed_set]
+        universe = [s for s in candidates if data.get(s)]
 
         result: dict = {}
         if discovered:
@@ -149,10 +141,8 @@ class Momentum:
             except Exception:
                 adx_last = np.nan
             chop = (not np.isnan(adx_last)) and (adx_last < adx_min)
-            rets = np.diff(closes) / np.where(closes[:-1] == 0, np.nan, closes[:-1])
-            recent_vol = float(np.nanstd(rets[-lookback:])) if rets.size else 0.0
             trend_up = (not np.isnan(fe)) and (not np.isnan(se)) and (fe > se) and (not chop)
-            metrics[sym] = {"mom": mom, "trend_up": trend_up, "vol": recent_vol}
+            metrics[sym] = {"mom": mom, "trend_up": trend_up}
 
         valid = {s: m for s, m in metrics.items() if m is not None}
         if not valid:
@@ -172,13 +162,9 @@ class Momentum:
         ranked = sorted(uptrend, key=lambda s: (-valid[s]["mom"], s))
         winners = set(ranked[:top_k])
 
-        sizes = {}
         for sym in universe:
             if sym in winners:
                 result[sym] = 1
-                sizes[sym] = _vol_target_fraction(valid[sym]["vol"], target_vol, max_frac)
             else:
                 result[sym] = -1 if sym in held else 0
-        if sizes:
-            result["_nexus_position_sizes"] = sizes
         return result

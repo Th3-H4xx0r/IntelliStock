@@ -179,3 +179,84 @@ def test_vol_target_size_guards_zero():
 def test_risk_off_targets_all_zero():
     t = core.risk_off_targets(["BTC/USD", "ETH/USD"])
     assert t == {"BTC/USD": 0.0, "ETH/USD": 0.0}
+
+
+# --- shared strategy helpers (consolidated single source of truth) ---------
+
+def test_series_bar_field_to_array():
+    import numpy as np
+
+    bars = [{"c": 1.0}, {"c": 2.0}, {"c": None}, {}]
+    arr = core.series(bars, "c")
+    assert isinstance(arr, np.ndarray)
+    assert list(arr) == [1.0, 2.0, 0.0, 0.0]  # missing/None -> 0.0
+    assert list(core.series([], "c")) == []
+
+
+def test_position_qty_matches_slash_and_slashless_keys():
+    # Alpaca may key crypto positions with OR without the slash.
+    assert core.position_qty({"BTC/USD": 3}, "BTC/USD") == 3.0
+    assert core.position_qty({"BTCUSD": 4}, "BTC/USD") == 4.0   # slash-less key
+    assert core.position_qty({}, "BTC/USD") == 0.0
+    assert core.position_qty({"BTC/USD": None}, "BTC/USD") == 0.0
+    assert core.position_qty(None, "BTC/USD") == 0.0
+
+
+class _PF:
+    def __init__(self, positions):
+        self._p = positions
+
+    def get_positions(self):
+        return dict(self._p)
+
+
+def test_held_symbols_detects_both_key_forms_and_guards():
+    held = core.held_symbols(_PF({"BTC/USD": 2, "ETHUSD": 1, "SOL/USD": 0}), ["BTC/USD", "ETH/USD", "SOL/USD"])
+    assert held == {"BTC/USD", "ETH/USD"}  # SOL flat (0) excluded; ETH slash-less matched
+    assert core.held_symbols(None, ["BTC/USD"]) == set()
+
+
+# --- auto-discovery wiring (robust fallback) -------------------------------
+
+def test_discover_universe_without_creds_returns_empty():
+    # No creds -> short-circuit to [] so the caller falls back to its majors.
+    assert core.discover_universe("medium", 5, {}, "1Hour") == []
+    assert core.discover_universe("medium", 5, {"alpaca_key": "K"}, "1Hour") == []
+
+
+def test_discover_universe_swallows_provider_errors():
+    def boom(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    out = core.discover_universe(
+        "medium", 5, {"alpaca_key": "K", "alpaca_secret": "S"}, "1Hour", http_get=boom,
+    )
+    assert out == []  # never raises
+
+
+def test_discover_universe_ranks_via_injected_http_get():
+    """End-to-end wiring: injected http_get serves assets + bars, discovery ranks."""
+    assets = [
+        {"symbol": "BTC/USD", "tradable": True, "status": "active"},
+        {"symbol": "ETH/USD", "tradable": True, "status": "active"},
+    ]
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, params=None, headers=None):
+        if "/v2/assets" in url:
+            return _Resp(assets)
+        return _Resp({"bars": {
+            "BTC/USD": [{"c": 100.0 + i, "v": 10.0} for i in range(6)],
+            "ETH/USD": [{"c": 50.0 + i, "v": 20.0} for i in range(6)],
+        }})
+
+    out = core.discover_universe(
+        "medium", 5, {"alpaca_key": "K", "alpaca_secret": "S"}, "1Hour", http_get=fake_get,
+    )
+    assert set(out) == {"BTC/USD", "ETH/USD"}

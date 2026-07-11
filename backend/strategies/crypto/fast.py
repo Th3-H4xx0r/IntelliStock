@@ -6,7 +6,8 @@ Fast tactical crypto strategy (run_once). DB name: "fast" (file fast.py, class F
 
 BTC/ETH only. On the provided (short-timeframe) bars:
 - Breakout: close > prior N-bar high AND fast-EMA > slow-EMA AND the EMA
-  momentum gap clears ``core.min_edge_to_trade(maker=True)`` -> buy (1).
+  momentum gap clears ``core.min_edge_to_trade(maker=False)`` (real taker
+  round-trip cost, since the adapter places market orders) -> buy (1).
 - Breakdown: close < prior N-bar low AND fast-EMA < slow-EMA -> exit (-1).
 - Otherwise (chop, or a move too small to beat fees) -> hold (0).
 Returns 1 = buy, 0 = hold, -1 = sell, plus ``_nexus_discovered`` for the
@@ -35,9 +36,8 @@ from strategies.crypto import core
 # This band is intentionally scoped to the two most-liquid pairs.
 FAST_PAIRS = ["BTC/USD", "ETH/USD"]
 
-
-def _series(bars, key: str) -> np.ndarray:
-    return np.array([float(b.get(key) or 0) for b in (bars or [])], dtype=float)
+# Shared helper (single source of truth in core).
+_series = core.series
 
 
 class Fast:
@@ -76,7 +76,7 @@ class Fast:
         window = max(2, window)
         fast_p = max(2, fast_p)
         slow_p = max(fast_p + 1, slow_p)
-        edge = core.min_edge_to_trade(maker=True)
+        edge = core.min_edge_to_trade(maker=False)
         min_bars = slow_p + window + 2
 
         seed = {str(s).strip().upper() for s in (symbols or [])}

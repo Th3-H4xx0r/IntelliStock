@@ -10,10 +10,11 @@ The simplest thing that proves the platform: an equal-weight rebalancer.
 - If a pair is under target by more than the drift band -> buy (1).
 - If a pair is over target by more than the drift band -> trim (-1).
 - Otherwise hold (0).
-The drift band is at least ``core.min_edge_to_trade(maker=True)`` so we never
-churn for a move that can't clear round-trip fees. Returns 1 = buy, 0 = hold,
--1 = sell, plus ``_nexus_discovered`` for any auto-picked pairs and
-``_nexus_position_sizes`` sizing hints (the equal target weights).
+The drift band is at least ``core.min_edge_to_trade(maker=False)`` — the adapter
+places MARKET (taker) orders, so we size the band to the real taker round-trip
+cost and never churn for a move that can't clear it. Returns 1 = buy, 0 = hold,
+-1 = sell, plus ``_nexus_discovered`` for any auto-picked pairs. Per-symbol
+sizing is left to the broker's default sizing.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ def _current_weights(portfolio_emulator, prices, universe):
             total = 0.0
     weights = {}
     for sym in universe:
-        shares = float(positions.get(sym, 0) or 0)
+        shares = core.position_qty(positions, sym)
         px = float((prices or {}).get(sym) or 0)
         weights[sym] = (shares * px / total) if total > 0 else 0.0
     return weights
@@ -130,19 +131,16 @@ class Reference:
         deploy = max(0.0, min(deploy, 1.0))
         target = deploy / len(universe)
 
-        edge = core.min_edge_to_trade(maker=True)
+        edge = core.min_edge_to_trade(maker=False)
         band = max(float(settings.get("drift_threshold", self.drift_threshold)), edge)
 
         weights = _current_weights(portfolio_emulator, prices, universe)
-        sizes = {}
         for sym in universe:
             cur = weights.get(sym, 0.0)
-            sizes[sym] = target
             if cur < target - band:
                 result[sym] = 1
             elif cur > target + band:
                 result[sym] = -1
             else:
                 result[sym] = 0
-        result["_nexus_position_sizes"] = sizes
         return result

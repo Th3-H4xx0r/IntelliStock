@@ -789,22 +789,25 @@ def _instance_kind_and_crypto_config():
     (None, {}) on any DB error so equities are never affected."""
     if _INSTANCE_KIND_CACHE["loaded"]:
         return _INSTANCE_KIND_CACHE["kind"], _INSTANCE_KIND_CACHE["crypto_config"]
-    kind, cc = None, {}
     try:
         _c = get_conn()
         try:
             _doc = r.db(DB_NAME).table("Instances").get(str(instance_id)).run(_c) or {}
-            kind = _doc.get("kind")
-            cc = _doc.get("crypto_config") or {}
         finally:
             try:
                 _c.close()
             except Exception:
                 pass
+        kind = _doc.get("kind")
+        cc = _doc.get("crypto_config") or {}
+        # Cache ONLY on a SUCCESSFUL read. RethinkDB is memory-starved/flaky here;
+        # caching a transient-error result would permanently mis-classify a real
+        # crypto instance as equity for the whole process lifetime.
+        _INSTANCE_KIND_CACHE.update({"loaded": True, "kind": kind, "crypto_config": cc})
+        return kind, cc
     except Exception:
-        kind, cc = None, {}
-    _INSTANCE_KIND_CACHE.update({"loaded": True, "kind": kind, "crypto_config": cc})
-    return kind, cc
+        # Transient failure — do NOT cache; retry on the next tick.
+        return None, {}
 
 
 def _is_crypto_instance_runtime():

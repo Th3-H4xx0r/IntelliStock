@@ -1,11 +1,13 @@
 """Shared crypto core: fees, 24/7 scheduling, bars fetch, sizing, orders.
 
-Pure and dependency-light on purpose. The ONLY external dependency is
-``requests`` (for :func:`fetch_crypto_bars`), and even that call is injectable
-via the ``http_get`` argument so unit tests never touch the network. Nothing in
-here imports ``alpaca`` — a crypto instance runs through the same broker/adapter
-as equities, and this module only supplies the crypto-specific arithmetic and
-URL/param/order shapes.
+Pure and dependency-light on purpose. External dependencies are limited to
+``requests`` (for :func:`fetch_crypto_bars` / :func:`discover_universe`) and
+``numpy`` (for the shared :func:`series` helper); every network call is
+injectable via an ``http_get`` argument so unit tests never touch the network.
+Nothing in here imports ``alpaca`` — a crypto instance runs through the same
+broker/adapter as equities, and this module only supplies the crypto-specific
+arithmetic and URL/param/order shapes plus the small helpers the strategies
+share (:func:`series`, :func:`held_symbols`, :func:`position_qty`).
 
 Symbols are Alpaca crypto slash-pairs throughout (``"BTC/USD"``). ``.upper()``
 preserves the slash, so pairs stay well-formed after normalisation.
@@ -13,9 +15,15 @@ preserves the slash, so pairs stay well-formed after normalisation.
 
 from __future__ import annotations
 
-from typing import Callable, List, Mapping, Optional
+from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
+import numpy as np
 import requests
+
+# Alpaca trading-API bases (used only to list the tradable crypto universe for
+# auto-discovery). The data feed lives at CRYPTO_BARS_URL below.
+ALPACA_TRADING_LIVE: str = "https://api.alpaca.markets"
+ALPACA_TRADING_PAPER: str = "https://paper-api.alpaca.markets"
 
 # ---------------------------------------------------------------------------
 # Fee model (Alpaca crypto, tier 1). Crypto is NEVER commission-free: apply
@@ -77,6 +85,9 @@ def crypto_scheduler_config(band: str) -> dict:
     }
 
 
+# NOTE: crypto_bars_url / crypto_bars_params / fetch_crypto_bars / build_crypto_order
+# are the CANONICAL crypto bars + order helpers. The broker/adapter wires orders
+# and bar fetches through these — do not delete or inline them.
 def crypto_bars_url(timeframe: Optional[str] = None) -> str:
     """The v1beta3 unified crypto bars endpoint (no ``/stocks/`` path).
 
@@ -212,3 +223,97 @@ def min_edge_to_trade(maker: bool) -> float:
 def risk_off_targets(symbols) -> dict:
     """All-zero target weights ⇒ hold USD/USDC (fully de-risked)."""
     return {str(s).strip().upper(): 0.0 for s in (symbols or [])}
+
+
+# ---------------------------------------------------------------------------
+# Shared strategy helpers. Single source of truth for the bar->array and
+# holdings-lookup logic every crypto strategy needs (previously copy-pasted
+# across allocator/fast/momentum).
+# ---------------------------------------------------------------------------
+def series(bars, key: str) -> np.ndarray:
+    """A float ``np.ndarray`` of one OHLCV field across ``bars`` (missing -> 0)."""
+    return np.array([float(b.get(key) or 0) for b in (bars or [])], dtype=float)
+
+
+def position_qty(positions: Optional[Mapping], sym: str) -> float:
+    """Shares held for ``sym``, tolerant of Alpaca's slash / slash-less crypto keys.
+
+    Alpaca may key crypto positions either WITH the slash (``"BTC/USD"``) or
+    WITHOUT it (``"BTCUSD"``); we look up both so held crypto is detected
+    regardless of formatting. Non-numeric / missing entries read as ``0.0``.
+    """
+    positions = positions or {}
+    raw = positions.get(sym)
+    if raw is None:
+        raw = positions.get(str(sym).replace("/", ""))
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def held_symbols(portfolio_emulator, universe) -> set:
+    """Set of ``universe`` symbols currently held (qty > 0), slash-format-agnostic."""
+    held: set = set()
+    if portfolio_emulator is None:
+        return held
+    try:
+        positions = portfolio_emulator.get_positions() or {}
+    except Exception:
+        return held
+    for sym in universe:
+        if position_qty(positions, sym) > 0:
+            held.add(sym)
+    return held
+
+
+# ---------------------------------------------------------------------------
+# Auto-coin-discovery wiring. Builds live Alpaca providers from the creds the
+# broker injects into a strategy's config and ranks a tradable universe via
+# ``discovery``. Robust by construction: ANY failure (no creds, network error,
+# empty result) returns ``[]`` so the caller falls back to its hardcoded majors
+# and the tick never crashes.
+# ---------------------------------------------------------------------------
+def discover_universe(
+    band: str,
+    k: int,
+    config: Optional[Mapping],
+    timeframe: str,
+    as_of: Optional[object] = None,
+    http_get: Optional[Callable] = None,
+) -> List[str]:
+    """Return up to ``k`` auto-discovered crypto pairs for ``band``, or ``[]``.
+
+    Creds come from ``config`` (``alpaca_key`` / ``alpaca_secret`` /
+    ``alpaca_paper``). The assets provider lists active tradable crypto assets
+    from the Alpaca trading API; the bars provider fetches point-in-time bars
+    via :func:`fetch_crypto_bars`. Never raises — returns ``[]`` on any error so
+    the strategy can fall back to its default majors.
+    """
+    try:
+        from strategies.crypto import discovery  # lazy: keep core import-light
+
+        cfg = config or {}
+        key = cfg.get("alpaca_key")
+        secret = cfg.get("alpaca_secret")
+        if not key or not secret:
+            return []
+        base = ALPACA_TRADING_PAPER if cfg.get("alpaca_paper") else ALPACA_TRADING_LIVE
+        hg = http_get or requests.get
+
+        def assets_provider() -> Sequence[dict]:
+            resp = hg(
+                base + "/v2/assets",
+                params={"asset_class": "crypto", "status": "active"},
+                headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+            )
+            raw = resp.json()
+            return raw if isinstance(raw, list) else []
+
+        def bars_provider(symbols: Sequence[str], _as_of) -> Dict[str, List[dict]]:
+            return fetch_crypto_bars(list(symbols), timeframe, key, secret, http_get=hg)
+
+        pairs = discovery.discover(band, int(k), assets_provider, bars_provider, as_of=as_of)
+        return list(pairs or [])
+    except Exception:
+        return []

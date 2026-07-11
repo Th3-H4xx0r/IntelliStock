@@ -9,9 +9,10 @@ Slow, broad, regime-aware allocation:
 - Regime gate: if BTC is below its long-term MA -> full risk-off (exit all).
 - Otherwise hold every coin trading above its own long-term MA -> buy (1);
   coins below the MA -> exit (-1) if held, else hold (0).
-- Sizing hints are inverse-volatility weights across the held set, normalised to
-  ``deploy_fraction`` (<= 1), returned in ``_nexus_position_sizes``.
-Returns 1 = buy, 0 = hold, -1 = sell, plus ``_nexus_discovered``.
+When the seed universe is empty the majors are auto-discovered (ranked tradable
+universe), falling back to ``DEFAULT_MAJORS`` on any error. Returns 1 = buy,
+0 = hold, -1 = sell, plus ``_nexus_discovered`` for auto-picked pairs.
+Per-symbol sizing is left to the broker's default sizing.
 """
 
 from __future__ import annotations
@@ -39,31 +40,21 @@ DEFAULT_MAJORS = [
 ]
 
 BTC = "BTC/USD"
-# Volatility floor so a perfectly-flat series can't produce an infinite
-# inverse-vol weight.
-_VOL_FLOOR = 1e-4
+
+# Bars used to RANK the discovered universe (trading bars arrive from the
+# broker's ``data`` on the next tick once discovery expands the symbol set).
+_DISCOVERY_TIMEFRAME = "1Day"
+
+# Shared helpers (single source of truth in core).
+_series = core.series
+_held_symbols = core.held_symbols
 
 
-def _series(bars, key: str) -> np.ndarray:
-    return np.array([float(b.get(key) or 0) for b in (bars or [])], dtype=float)
+def _above_ma(bars, period):
+    """True/False whether the last close is above its ``period`` SMA, or None.
 
-
-def _held_symbols(portfolio_emulator, universe):
-    held = set()
-    if portfolio_emulator is None:
-        return held
-    try:
-        positions = portfolio_emulator.get_positions() or {}
-    except Exception:
-        return held
-    for sym in universe:
-        if float(positions.get(sym, 0) or 0) > 0:
-            held.add(sym)
-    return held
-
-
-def _above_ma_and_vol(bars, period, vol_lookback):
-    """(above_ma, volatility) for one symbol, or None when too few bars."""
+    Returns None when there are too few bars to compute a valid SMA.
+    """
     closes = _series(bars, "c")
     if len(closes) < period + 2:
         return None
@@ -71,10 +62,7 @@ def _above_ma_and_vol(bars, period, vol_lookback):
     ma_last = sma[-1]
     if np.isnan(ma_last):
         return None
-    above = closes[-1] > ma_last
-    rets = np.diff(closes) / np.where(closes[:-1] == 0, np.nan, closes[:-1])
-    vol = float(np.nanstd(rets[-vol_lookback:])) if rets.size else 0.0
-    return above, max(vol, _VOL_FLOOR)
+    return bool(closes[-1] > ma_last)
 
 
 class Allocator:
@@ -108,15 +96,23 @@ class Allocator:
             return {}
 
         period = max(2, int(settings.get("long_ma_period", self.long_ma_period)))
-        deploy = max(0.0, min(float(settings.get("deploy_fraction", self.deploy_fraction)), 1.0))
-        vol_lookback = max(2, int(settings.get("vol_lookback", self.vol_lookback)))
 
         data = data or {}
         seed = [str(s).strip().upper() for s in (symbols or []) if str(s).strip()]
-        candidates = seed if seed else DEFAULT_MAJORS
-        universe = [s for s in candidates if data.get(s)]
+        if seed:
+            candidates = seed
+        else:
+            # No seed list -> auto-discover the best coins, majors as a fallback.
+            band = str(settings.get("band", "low"))
+            disc_k = max(1, int(settings.get("discovery_k", 10)))
+            timeframe = str(settings.get("discovery_timeframe", _DISCOVERY_TIMEFRAME))
+            candidates = core.discover_universe(band, disc_k, settings, timeframe) or DEFAULT_MAJORS
+
         seed_set = set(seed)
-        discovered = [s for s in universe if s not in seed_set]
+        # Surface auto-picked pairs so the broker expands the universe and fetches
+        # their bars — even before ``data`` holds them (first discovery tick).
+        discovered = [s for s in candidates if s not in seed_set]
+        universe = [s for s in candidates if data.get(s)]
 
         result: dict = {}
         if discovered:
@@ -127,33 +123,19 @@ class Allocator:
         held = _held_symbols(portfolio_emulator, universe)
 
         # Regime gate: BTC below its long-term MA => full risk-off.
-        btc_metrics = _above_ma_and_vol(data.get(BTC), period, vol_lookback) if data.get(BTC) else None
-        if btc_metrics is not None and not btc_metrics[0]:
+        btc_above = _above_ma(data.get(BTC), period) if data.get(BTC) else None
+        if btc_above is False:
             for sym in universe:
                 result[sym] = -1 if sym in held else 0
             return result
 
-        # Per-symbol regime + volatility.
-        above_set = []
-        vols = {}
+        # Per-symbol regime: hold coins above their long-term MA, exit the rest.
         for sym in universe:
-            m = _above_ma_and_vol(data.get(sym), period, vol_lookback)
-            if m is None:
+            above = _above_ma(data.get(sym), period)
+            if above is None:
                 result[sym] = -1 if sym in held else 0
-                continue
-            above, vol = m
-            if above:
-                above_set.append(sym)
-                vols[sym] = vol
+            elif above:
                 result[sym] = 1
             else:
                 result[sym] = -1 if sym in held else 0
-
-        # Inverse-vol sizing across the held set, normalised to deploy fraction.
-        if above_set:
-            inv = {s: 1.0 / vols[s] for s in above_set}
-            total_inv = sum(inv.values())
-            if total_inv > 0:
-                sizes = {s: deploy * inv[s] / total_inv for s in above_set}
-                result["_nexus_position_sizes"] = sizes
         return result
