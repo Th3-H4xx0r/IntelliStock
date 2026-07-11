@@ -208,14 +208,12 @@ for `alpaca-main` (`scripts/diag_alpaca_open.py`).
 - **Cadence (P1 reference):** monitor every ~20 min (fast enough to observe,
   slow enough to be cheap).
 
-## Open questions
+## Open questions — RESOLVED (2026-07-11)
 
-1. Confirm you have (or can create) an Alpaca **paper** account with crypto
-   enabled — needed to validate Phase 1. (Geo note: paper crypto works from any
-   region; live crypto excludes NY and some jurisdictions — verify at go-live.)
-2. Reuse the existing portfolio-chart path for crypto now, or defer chart tuning
-   to P3? (P1 can ship without it.)
-3. Any coin you specifically want in/out of the eventual basket?
+1. **Alpaca paper account exists** → paper is the validation target.
+2. **Portfolio-chart crypto tuning deferred to Phase 3** — P1/P2 ship without it.
+3. **No fixed coin list** → the system **auto-discovers** the best coins to trade
+   (see Amendment below).
 
 ---
 
@@ -238,3 +236,54 @@ for `alpaca-main` (`scripts/diag_alpaca_open.py`).
 Alpaca|Robinhood tab pattern), repurpose the granularity control as the
 high/med/low picker, 24/7 status badge, and let `kind="crypto"` past the
 `i.kind !== 'kalshi'` list filter (`frontend/src/views/InstancesView.vue:137-139`).
+
+---
+
+# Amendment 2026-07-11 — Full build, same-codebase, auto-discovery, backtest
+
+**Decisions (user):** Alpaca **paper** account exists → paper is the validation
+target. Portfolio-chart crypto tuning **deferred to Phase 3**. **No fixed coin
+list** → the system auto-discovers the best coins to trade. **Backtest required**
+for any crypto instance. Build **all phases** on `feat/crypto-trading-platform`
+in dependency order, paper-only with live gated OFF.
+
+## Same-codebase principle (HARD CONSTRAINT)
+
+Crypto instances are *specially-marked* instances (`kind="crypto"`), **NOT a
+forked module**. They run through the SAME `broker.py`, `broker_adapters/alpaca.py`,
+`scheduler.py`, backtest engine, and utils as equities. Every crypto behavior is
+a `kind=="crypto"` branch inside the shared code — one engine, one order path, one
+instance supervisor. (This differs from Kalshi, which is an isolated module.) The
+only *new* files are the pluggable strategy layer and the crypto helpers it uses:
+`backend/strategies/crypto/`.
+
+## Auto-coin-discovery (new — lives in the crypto core)
+
+When an instance's `stocks` list is empty/absent, discover the universe
+dynamically:
+1. Fetch tradable crypto assets — `GET /v2/assets?asset_class=crypto&status=active`
+   — keep tradable, USD-quoted pairs.
+2. Rank by a composite score: **liquidity** (trailing dollar-volume) + **momentum**
+   (recent return) + **volatility fit** for the band (fast → liquid+volatile, i.e.
+   BTC/ETH; allocator → broad majors).
+3. Select top-K per band (fast: BTC/ETH; momentum: ~5–8; allocator: broad majors).
+4. Re-run on a slow cadence (≈daily) so the universe adapts; persist the chosen
+   set for transparency.
+
+This replaces the equity Nasdaq-screener discovery (`backend/discover.py`) for
+crypto, gated on `kind`. If the user *does* supply `stocks`, use those verbatim.
+
+## Backtest (required — any crypto instance)
+
+The existing backtest path must run for crypto:
+- Branch the backtest data fetch to the crypto historical-bars endpoint
+  (`/v1beta3/crypto/us/bars`), stepping by `granularity_time_increment`.
+- Apply the `core.py` **fee model** (0.15% maker / 0.25% taker) to every simulated
+  fill — crypto backtests must NOT assume commission-free.
+- Auto-discovery inside a backtest uses **point-in-time** ranking (no lookahead).
+
+## Consequence for scope
+
+Phases 1–2 (platform + three strategies + auto-discovery + backtest) are all
+in-scope for this branch, built platform-first. Phase 3 UI is minimal (allow the
+crypto instance to be created and listed); full chart/UX polish is deferred.
