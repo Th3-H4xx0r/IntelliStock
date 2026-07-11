@@ -82,6 +82,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/crypto',
+    name: 'crypto',
+    component: () => import('../views/CryptoView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/kalshi/instances/:id',
     name: 'kalshi-instance-detail',
     component: () => import('../views/KalshiInstanceDetailView.vue'),

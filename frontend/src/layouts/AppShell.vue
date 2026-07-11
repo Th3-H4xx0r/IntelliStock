@@ -60,6 +60,7 @@ function logout() {
 const navItems = [
   { label: 'Dashboard',  icon: 'dashboard',       to: '/dashboard'   },
   { label: 'Kalshi',     icon: 'sports_soccer',    to: '/kalshi'      },
+  { label: 'Crypto',     icon: 'currency_bitcoin', to: '/crypto'      },
   { label: 'Brokerages', icon: 'account_balance',  to: '/brokerages'  },
   { label: 'Instances',  icon: 'memory',           to: '/instances'   },
   { label: 'Backtests',  icon: 'analytics',        to: '/backtests'   },
