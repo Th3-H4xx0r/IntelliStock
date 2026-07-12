@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
 import CryptoCreateInstanceModal from '../components/crypto/CryptoCreateInstanceModal.vue'
+import CryptoBacktestModal from '../components/crypto/CryptoBacktestModal.vue'
 import { getToken } from '../utils/auth.js'
 
 const router = useRouter()
@@ -116,6 +117,12 @@ function openCreate() { editTarget.value = null; showModal.value = true }
 function openEdit(inst) { editTarget.value = inst; showModal.value = true }
 function closeModal() { showModal.value = false; editTarget.value = null }
 function onSaved() { closeModal(); fetchInstances() }
+
+// ── Backtest modal ─────────────────────────────────────────────────────────────
+const showBacktest = ref(false)
+const backtestTarget = ref(null)
+function openBacktest(inst) { backtestTarget.value = inst; showBacktest.value = true }
+function closeBacktest() { showBacktest.value = false; backtestTarget.value = null }
 
 onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()]) })
 </script>
@@ -241,6 +248,10 @@ onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()])
                     class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 hover:bg-amber-500/10 border border-amber-500/20 transition-colors disabled:opacity-40">
               <span class="material-symbols-outlined text-[14px]">tune</span> Edit
             </button>
+            <button @click="openBacktest(inst)" :disabled="busy[inst.id]"
+                    class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-sky-400 hover:bg-sky-500/10 border border-sky-500/20 transition-colors disabled:opacity-40">
+              <span class="material-symbols-outlined text-[14px]">analytics</span> Backtest
+            </button>
             <button v-if="!inst.runCommand" @click="startInstance(inst.id)" :disabled="busy[inst.id]"
                     class="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 border border-emerald-500/20 transition-colors disabled:opacity-40">
               <span v-if="busy[inst.id]" class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
@@ -267,6 +278,12 @@ onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()])
       @close="closeModal"
       @created="onSaved"
       @saved="onSaved"
+    />
+
+    <CryptoBacktestModal
+      v-if="showBacktest"
+      :instance="backtestTarget"
+      @close="closeBacktest"
     />
   </AppShell>
 </template>

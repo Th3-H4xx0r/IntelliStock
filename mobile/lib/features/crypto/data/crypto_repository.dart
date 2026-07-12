@@ -39,6 +39,32 @@ class CryptoRepository {
     return Instance.fromJson(data['instance'] as Map<String, dynamic>? ?? data);
   }
 
+  /// POST /backtests — backtest a crypto instance's configured allocation. The
+  /// backend runs crypto instances through the same broker.py as live (v1beta3
+  /// historical bars + taker-fee fills + synthetic strategy from crypto_config),
+  /// so this is the equity backtest payload with the instance's slash-pairs.
+  /// Returns the created row (used for its `id` to open the result view).
+  Future<Map<String, dynamic>> createBacktest({
+    required String instanceId,
+    required List<String> stocks,
+    required String startDate,
+    required String endDate,
+    String granularity = '900',
+    double initialCash = 10000,
+  }) async {
+    return _client.post<Map<String, dynamic>>(
+      '/backtests',
+      body: {
+        'instance_id': instanceId,
+        'stocks': stocks,
+        'start_date': startDate,
+        'end_date': endDate,
+        'granularity': granularity,
+        'initial_cash': initialCash,
+      },
+    );
+  }
+
   // ── Lifecycle (shared instance endpoints) ───────────────────────────────────
 
   Future<void> startInstance(String id) =>
