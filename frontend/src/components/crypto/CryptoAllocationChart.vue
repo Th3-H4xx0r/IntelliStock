@@ -89,27 +89,24 @@ const chartOptions = computed(() => ({
   },
 }))
 
-// ── Center overlay (follows the hovered slice, defaults to Dynamic) ───────────
-const centerBig = computed(() => {
-  const i = hovered.value
-  if (i != null && slices.value[i]) return `${Math.round(slices.value[i].value)}%`
-  return `${Math.round(Number(props.dynamicPct) || 0)}%`
+// ── Center overlay (follows the hovered slice; defaults to the DOMINANT slice,
+//    i.e. the largest weight — so a 100%-BTC book shows "100% BTC", not 0%). ────
+const dominant = computed(() => {
+  if (!slices.value.length) return null
+  return slices.value.reduce((a, b) => (b.value > a.value ? b : a), slices.value[0])
 })
-const centerLabel = computed(() => {
+const centerSlice = computed(() => {
   const i = hovered.value
-  if (i != null && slices.value[i]) return slices.value[i].label
-  return 'Dynamic'
+  return (i != null && slices.value[i]) ? slices.value[i] : dominant.value
 })
+const centerBig = computed(() => centerSlice.value ? `${Math.round(centerSlice.value.value)}%` : '0%')
+const centerLabel = computed(() => centerSlice.value ? centerSlice.value.label : 'Dynamic')
 const centerSub = computed(() => {
-  const i = hovered.value
-  if (i != null && slices.value[i]) return slices.value[i].dynamic ? 'auto-discovered' : 'fixed weight'
-  return 'auto-discovered'
+  const s = centerSlice.value
+  if (!s) return 'auto-discovered'
+  return s.dynamic ? 'auto-discovered' : 'fixed weight'
 })
-const centerColor = computed(() => {
-  const i = hovered.value
-  if (i != null && slices.value[i]) return slices.value[i].color
-  return '#a78bfa'
-})
+const centerColor = computed(() => centerSlice.value ? centerSlice.value.color : '#a78bfa')
 </script>
 
 <template>

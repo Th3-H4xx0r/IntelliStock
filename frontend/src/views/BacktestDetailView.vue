@@ -22,8 +22,32 @@ function authHeaders() {
     : { 'Content-Type': 'application/json' }
 }
 
+// ── Crypto fees (per-platform estimate; only for crypto backtests) ──────────────
+// `summary.fees` = { total_fees, total_volume, taker_rate } from the backend
+// (None for equity runs). Alpaca is the fee actually charged; other venues are
+// estimated at their listed taker rate (volume × rate).
+const CRYPTO_FEE_PLATFORMS = [
+  { name: 'Alpaca', rate: 0.0025, applied: true },
+  { name: 'Coinbase Advanced', rate: 0.006 },
+  { name: 'Kraken', rate: 0.0026 },
+  { name: 'Binance.US', rate: 0.001 },
+]
+
 // ── State ─────────────────────────────────────────────────────────────────────
 const summary   = ref(null)
+const feeSummary = computed(() => summary.value?.fees || null)
+const feeVolume  = computed(() => Number(feeSummary.value?.total_volume) || 0)
+const feeRows = computed(() => {
+  const fs = feeSummary.value
+  if (!fs || feeVolume.value <= 0) return []
+  const actual = Number(fs.total_fees) || 0
+  return CRYPTO_FEE_PLATFORMS.map((p) => ({
+    name: p.name,
+    rate: p.rate,
+    applied: !!p.applied,
+    fee: p.applied ? (actual || feeVolume.value * p.rate) : feeVolume.value * p.rate,
+  }))
+})
 const graphData = shallowRef(null)
 const loading   = ref(true)
 const error     = ref('')
@@ -903,6 +927,36 @@ function onLogScroll(e) {
             <p class="text-[10px] text-slate-500">Low: <span class="font-mono text-red-400">{{ fmtMoney(summary.portfolio_value_low) }}</span></p>
           </div>
         </div>
+
+        <!-- ── Fees (crypto backtests only) ──────────────────────────────────── -->
+        <section v-if="feeRows.length" class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
+          <div class="px-5 py-4 border-b border-border-subtle flex items-center gap-3">
+            <div class="size-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-primary text-lg">receipt_long</span>
+            </div>
+            <div class="min-w-0">
+              <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500">Fees · crypto</p>
+              <p class="text-sm font-semibold text-slate-200">Estimated fees per platform</p>
+            </div>
+          </div>
+          <div class="px-5 py-4">
+            <div class="flex items-center justify-between text-sm mb-3 pb-3 border-b border-border-subtle">
+              <span class="text-slate-400">Crypto volume traded</span>
+              <span class="text-slate-100 font-semibold tabular-nums">{{ fmtMoney(feeVolume) }}</span>
+            </div>
+            <div class="space-y-2">
+              <div v-for="row in feeRows" :key="row.name" class="flex items-center gap-3 text-sm">
+                <span class="text-slate-200 flex-1 flex items-center gap-2 min-w-0">
+                  <span class="truncate">{{ row.name }}</span>
+                  <span v-if="row.applied" class="shrink-0 text-[10px] uppercase tracking-wide text-primary border border-primary/40 bg-primary/10 rounded-full px-1.5 py-0.5">applied</span>
+                </span>
+                <span class="text-slate-500 tabular-nums w-16 text-right">{{ (row.rate * 100).toFixed(2) }}%</span>
+                <span class="tabular-nums w-24 text-right font-semibold" :class="row.applied ? 'text-slate-100' : 'text-slate-400'">{{ fmtMoney(row.fee) }}</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-600 mt-3 leading-snug">Alpaca is the fee actually charged in this backtest; other venues are estimates at their listed taker rate (volume × rate) — actual tiers vary.</p>
+          </div>
+        </section>
 
         <!-- ── AI credits / LLM cost card ────────────────────────────────────── -->
         <section class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">

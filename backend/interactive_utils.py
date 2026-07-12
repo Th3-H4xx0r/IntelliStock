@@ -5941,6 +5941,9 @@ def action_summarize_backtest(conn, backtest_id):
         "tickers": doc.get("tickers") or [],
         "pnl": doc.get("pnl"),
         "pnl_percent": doc.get("pnl_percent"),
+        # Crypto fee accounting {total_fees, total_volume, taker_rate}; None for
+        # equity runs (commission-free).
+        "fees": doc.get("fees"),
         "pnl_per_stock": doc.get("pnl_per_stock") or {},
         "pnl_percent_per_stock": doc.get("pnl_percent_per_stock") or {},
         "stock_price_change": doc.get("stock_price_change") or {},
