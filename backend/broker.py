@@ -1287,7 +1287,13 @@ def fetch_alpaca_historical_bars(
                 except NameError:
                     pass
                 break
-            r = requests.get(url, headers=headers, params=params, timeout=60)
+            # Alpaca's v1beta3 crypto market-data endpoint is PUBLIC (no auth). If
+            # we send the instance's trading-account auth headers and they aren't
+            # authorized for the data API (e.g. paper keys), Alpaca rejects the
+            # request with 401 — even though an unauthenticated request succeeds.
+            # So for crypto, omit auth entirely; equities keep their required auth.
+            _req_headers = {"accept": "application/json"} if _is_crypto else headers
+            r = requests.get(url, headers=_req_headers, params=params, timeout=60)
             if r.status_code == 429 and _429_attempts < _429_max_attempts:
                 _429_attempts += 1
                 _retry_after = r.headers.get("Retry-After", "2")
