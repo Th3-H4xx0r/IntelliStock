@@ -1331,8 +1331,25 @@ def fetch_alpaca_historical_bars(
                 break
             params = dict(params)
             params["page_token"] = next_token
-            params.pop("start", None)
-            params.pop("end", None)
+            if not _is_crypto:
+                # Equities (v2 /stocks/{sym}/bars): preserve the pre-existing
+                # pagination behavior exactly — drop start/end and resume from
+                # page_token. Equity chunks fit under `limit` in a single page,
+                # so this branch is effectively unreachable for equities and
+                # the real-money path stays byte-identical.
+                params.pop("start", None)
+                params.pop("end", None)
+            # Crypto (v1beta3 /crypto/us/bars): KEEP start/end on every page.
+            # That endpoint caps each page at ~1000 bars (far below our
+            # limit=10000) and returns a next_page_token for ANY multi-day
+            # window, so crypto always paginates. Dropping `end` (as the
+            # equity path does) leaves the follow-up pages unbounded, so a
+            # single 20-day chunk over-fetches from its start to the end of
+            # ALL available data (observed: ~17.3k bars / 26 pages for a
+            # 20-day 15Min window that should be ~1.9k / 3 pages). Keeping
+            # start+end bounds each chunk to its requested window; the
+            # page_token still resumes correctly and the response drops the
+            # token once `end` is reached.
         # If chunk returned 0 bars and retry_smaller is enabled, try splitting into smaller chunks
         if len(collected) == 0 and retry_smaller and (chunk_end - chunk_start).days > 7:
             mid_point = chunk_start + (chunk_end - chunk_start) / 2
