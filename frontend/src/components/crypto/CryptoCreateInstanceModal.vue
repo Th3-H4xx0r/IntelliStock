@@ -53,9 +53,17 @@ const BANDS = [
   { value: 'low', label: 'Low' },
 ]
 const BAND_BLURB = {
-  high: 'Fastest cadence — monitors every ~5 min. More reactive, more turnover.',
-  medium: 'Balanced cadence — monitors every ~15 min. The default.',
-  low: 'Slow cadence — monitors every ~60 min. Calmer, fewer trades.',
+  high: 'High — checks every ~5 min. Most reactive to fast moves; more trades and turnover.',
+  medium: 'Medium — checks every ~15 min. Balanced reactivity vs. turnover. The default.',
+  low: 'Low — checks every ~60 min. Calmest; fewest trades, lowest fees, slower to react.',
+}
+
+// What each dynamic strategy does with the auto-discovered (Dynamic) portion.
+const STRATEGY_BLURB = {
+  momentum: 'Momentum — trend-follows the auto-discovered universe, leaning into coins whose momentum is strengthening. Higher conviction in movers.',
+  allocator: 'Allocator — risk-weights across coins toward balanced target weights. Diversified, steadier exposure.',
+  fast: 'Fast — tactical, quick in/out on short-term signals. More responsive, higher turnover.',
+  reference: 'Reference — a simple buy-and-rebalance baseline to benchmark the others against.',
 }
 
 // The four crypto strategy modules live in strategies/crypto/. We surface them
@@ -79,6 +87,9 @@ const coins = ref([]) // [{ sym, ticker, name, pct(0-100), color }]
 
 const brokerages = ref([])
 const strategies = ref(FALLBACK_STRATEGIES)
+
+const bandBlurb = computed(() => BAND_BLURB[band.value] || '')
+const strategyBlurb = computed(() => STRATEGY_BLURB[String(strategyId.value || '').toLowerCase()] || '')
 
 // Account equity (best-effort from portfolio-history) with a manual fallback.
 const equity = ref(0)
@@ -317,25 +328,25 @@ async function submit() {
             </div>
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Band</label>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Band <span class="text-slate-600 font-normal">· monitor cadence</span></label>
             <div class="relative">
               <select v-model="band" class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
                 <option v-for="b in BANDS" :key="b.value" :value="b.value">{{ b.label }}</option>
               </select>
               <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
             </div>
+            <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ bandBlurb }}</p>
           </div>
           <div class="sm:col-span-2">
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Dynamic strategy</label>
+            <label class="block text-xs font-medium text-slate-400 mb-1.5">Dynamic strategy <span class="text-slate-600 font-normal">· how the Dynamic portion trades</span></label>
             <div class="relative">
-              <select v-model="strategyId" :disabled="isEdit"
-                      class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary disabled:opacity-60">
+              <select v-model="strategyId"
+                      class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
                 <option v-for="s in strategies" :key="s.id" :value="s.id">{{ s.name }}</option>
               </select>
               <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
             </div>
-            <p class="text-[11px] text-slate-500 mt-1.5">{{ BAND_BLURB[band] }}</p>
-            <p v-if="isEdit" class="text-[11px] text-slate-600 mt-0.5">Strategy is set at creation and can't be changed here.</p>
+            <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ strategyBlurb }}</p>
           </div>
         </div>
 
@@ -409,12 +420,15 @@ async function submit() {
             <div class="grid grid-cols-[22px_1fr_84px_92px_26px] gap-2 items-center px-1 py-2 mt-0.5 rounded-lg border-t border-dashed border-primary/40 bg-gradient-to-r from-primary/[0.08] to-transparent">
               <span class="w-2.5 h-2.5 rounded-[3px] ring-1 ring-primary/40" style="background:#7c5ce6"></span>
               <span class="min-w-0">
-                <span class="text-sm font-semibold text-slate-100">Dynamic</span>
-                <span class="block text-[11px] text-primary truncate">auto-discover &amp; trade</span>
+                <span class="flex items-center gap-1.5 min-w-0">
+                  <span class="text-sm font-semibold text-slate-100">Dynamic</span>
+                  <span class="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-primary border border-primary/40 bg-primary/10 rounded-full px-1.5 py-[1px] leading-none">auto</span>
+                </span>
+                <span class="block text-[11px] text-primary truncate">auto-discovered</span>
               </span>
               <span class="text-right text-[13.5px] font-semibold text-primary tabular-nums">{{ Math.round(dynamicPct) }}%</span>
               <span class="text-right text-[13.5px] text-slate-300 tabular-nums">{{ effectiveEquity > 0 ? fmtUsd(usdFor(dynamicPct)) : '—' }}</span>
-              <span class="text-[10px] uppercase tracking-wide text-primary border border-primary/40 bg-primary/10 rounded-full px-1.5 py-0.5 justify-self-start">auto</span>
+              <span></span>
             </div>
 
             <!-- add bar -->

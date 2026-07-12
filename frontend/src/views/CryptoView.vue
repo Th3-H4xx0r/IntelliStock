@@ -123,6 +123,10 @@ const showBacktest = ref(false)
 const backtestTarget = ref(null)
 function openBacktest(inst) { backtestTarget.value = inst; showBacktest.value = true }
 function closeBacktest() { showBacktest.value = false; backtestTarget.value = null }
+function onBacktestCreated(id) { if (id) router.push(`/backtests/${id}`) }
+
+// ── Detail view ────────────────────────────────────────────────────────────────
+function openDetail(inst) { router.push(`/crypto/instances/${encodeURIComponent(inst.id)}`) }
 
 onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()]) })
 </script>
@@ -187,12 +191,12 @@ onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()])
         <div v-for="inst in instances" :key="inst.id" class="glass-card rounded-2xl p-5 sm:p-6 flex flex-col gap-4">
           <!-- Header -->
           <div class="flex items-start justify-between gap-3 min-w-0">
-            <div class="flex items-center gap-3 min-w-0">
+            <div class="flex items-center gap-3 min-w-0 cursor-pointer group" @click="openDetail(inst)" title="View details">
               <div class="size-10 rounded-xl bg-surface border border-border-subtle flex items-center justify-center shrink-0">
                 <span class="material-symbols-outlined text-primary text-xl">currency_bitcoin</span>
               </div>
               <div class="min-w-0">
-                <p class="font-semibold text-slate-100 leading-tight truncate" :title="inst.name || inst.id">{{ inst.name || inst.id }}</p>
+                <p class="font-semibold text-slate-100 leading-tight truncate group-hover:text-primary transition-colors" :title="inst.name || inst.id">{{ inst.name || inst.id }}</p>
                 <p class="text-xs text-slate-500 font-mono mt-0.5 truncate">{{ inst.id }}</p>
               </div>
             </div>
@@ -284,6 +288,7 @@ onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()])
       v-if="showBacktest"
       :instance="backtestTarget"
       @close="closeBacktest"
+      @created="onBacktestCreated"
     />
   </AppShell>
 </template>

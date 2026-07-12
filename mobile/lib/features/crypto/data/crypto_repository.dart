@@ -23,6 +23,27 @@ class CryptoRepository {
         .toList();
   }
 
+  /// GET /instances/:id → a single crypto instance (detail screen).
+  Future<Instance> getInstance(String id) async {
+    final data = await _client.get<Map<String, dynamic>>('/instances/$id');
+    return Instance.fromJson(data['instance'] as Map<String, dynamic>? ?? data);
+  }
+
+  /// GET /instances/:id/backtests → this instance's backtests, newest first.
+  Future<List<BacktestRow>> instanceBacktests(String id) async {
+    final data = await _client.get<Map<String, dynamic>>(
+      '/instances/$id/backtests',
+      query: const {
+        'page': '1',
+        'per_page': '20',
+        'sort_by': 'completed_at',
+        'sort_order': 'desc',
+      },
+    );
+    final list = data['backtests'] as List? ?? const [];
+    return list.whereType<Map<String, dynamic>>().map(BacktestRow.fromJson).toList();
+  }
+
   /// POST /instances — create a crypto instance. [body] is the fully-formed
   /// payload (id, name, granularity, run_command, kind, brokerage_id,
   /// strategy_id, stocks, crypto_config) built by the sheet.

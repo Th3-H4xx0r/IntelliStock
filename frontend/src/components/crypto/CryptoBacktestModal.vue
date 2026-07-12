@@ -1,19 +1,17 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { getToken } from '../../utils/auth.js'
 
 // Launch a backtest of a crypto instance's *own* configured allocation. The
 // backend runs crypto instances through the same broker.py as live (v1beta3
 // historical bars + taker-fee fills + synthetic strategy from crypto_config), so
-// this just POSTs /backtests with the instance's slash-pairs and navigates to the
-// generic result view. Mirrors the equity create-backtest form in InstancesView.
+// this just POSTs /backtests with the instance's slash-pairs. Emits `created`
+// with the new backtest id; the parent decides whether to navigate to the result
+// view or refresh in place. Mirrors the equity create-backtest form.
 const props = defineProps({
   instance: { type: Object, required: true }, // { id, name, crypto_config, stocks }
 })
-const emit = defineEmits(['close'])
-
-const router = useRouter()
+const emit = defineEmits(['close', 'created'])
 
 const API_BASE = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
 function authHeaders() {
@@ -89,9 +87,8 @@ async function submit() {
     const data = await res.json().catch(() => ({}))
     if (!res.ok) { err.value = data.detail || `Backtest failed (HTTP ${res.status})`; return }
     const id = data.id ?? data.backtest_id
+    emit('created', id != null ? String(id) : null)
     emit('close')
-    if (id != null) router.push(`/backtests/${id}`)
-    else router.push('/backtests')
   } catch (e) { err.value = String(e.message || e) } finally { creating.value = false }
 }
 </script>

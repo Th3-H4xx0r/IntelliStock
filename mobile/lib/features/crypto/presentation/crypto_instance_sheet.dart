@@ -83,17 +83,27 @@ const _kDynamicColor = Color(0xFF7C5CE6);
 /// Dynamic-strategy options (the crypto strategy classes). Resolved to an
 /// integer `strategy_id` at submit time by matching a Strategies doc by name.
 const _kStrategies = <(String, String)>[
-  ('Momentum', 'Trend-follow the auto-discovered universe.'),
-  ('Allocator', 'Risk-weight across coins toward target weights.'),
-  ('Fast', 'Tactical, quicker in/out on short-term signals.'),
-  ('Reference', 'Baseline buy-and-rebalance reference book.'),
+  ('Momentum', 'Trend-follows the auto-discovered universe — leans into coins whose momentum is strengthening. Higher conviction in movers.'),
+  ('Allocator', 'Risk-weights across coins toward balanced target weights. Diversified, steadier exposure.'),
+  ('Fast', 'Tactical, quick in/out on short-term signals. More responsive, higher turnover.'),
+  ('Reference', 'A simple buy-and-rebalance baseline to benchmark the others against.'),
 ];
+
+String _strategyBlurb(String name) => _kStrategies
+    .firstWhere((s) => s.$1 == name, orElse: () => (name, ''))
+    .$2;
 
 const _kBands = <(String, String)>[
   ('high', 'High'),
   ('medium', 'Medium'),
   ('low', 'Low'),
 ];
+
+const _kBandBlurb = <String, String>{
+  'high': 'High — checks every ~5 min. Most reactive to fast moves; more trades and turnover.',
+  'medium': 'Medium — checks every ~15 min. Balanced reactivity vs. turnover. The default.',
+  'low': 'Low — checks every ~60 min. Calmest; fewest trades, lowest fees, slower to react.',
+};
 
 // ── Row state ─────────────────────────────────────────────────────────────────
 
@@ -480,12 +490,20 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
                   _label('Volatility band',
                       'Sets the 24/7 monitor cadence (High = every 5m, Medium = 15m, Low = 60m).'),
                   _bandPills(),
+                  const SizedBox(height: 6),
+                  Text(_kBandBlurb[_band] ?? '',
+                      style: AppTextStyles.nano
+                          .copyWith(color: AppColors.textDim, height: 1.35)),
                   const SizedBox(height: 14),
 
                   // Dynamic strategy
                   _label('Dynamic strategy',
                       'How the auto-discovered (Dynamic) portion is traded.'),
                   _strategyDropdown(),
+                  const SizedBox(height: 6),
+                  Text(_strategyBlurb(_strategy),
+                      style: AppTextStyles.nano
+                          .copyWith(color: AppColors.textDim, height: 1.35)),
                   const SizedBox(height: 16),
 
                   // Allocation editor
