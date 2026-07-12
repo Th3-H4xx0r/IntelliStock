@@ -97,6 +97,7 @@ class BacktestSummary {
     this.status,
     this.pnl,
     this.pnlPercent,
+    this.fees,
     this.portfolioStartValue,
     this.portfolioEndValue,
     this.totalTrades,
@@ -139,6 +140,9 @@ class BacktestSummary {
   final String? status;
   final num? pnl;
   final num? pnlPercent;
+  /// Crypto fee accounting {total_fees, total_volume, taker_rate}; null for
+  /// equity (commission-free) runs.
+  final Map<String, num>? fees;
   final num? portfolioStartValue;
   final num? portfolioEndValue;
   final num? totalTrades;
@@ -181,6 +185,7 @@ class BacktestSummary {
         status: j['status']?.toString(),
         pnl: _num(j['pnl']),
         pnlPercent: _num(j['pnl_percent']),
+        fees: _numMap(j['fees']),
         portfolioStartValue: _num(j['portfolio_start_value']),
         portfolioEndValue: _num(j['portfolio_end_value']),
         totalTrades: _num(j['total_trades']),

@@ -246,6 +246,14 @@ class _BacktestDetailScreenState
                   ),
                 ),
 
+                // ── Fees card (crypto backtests only) ─────────────────────────
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                    child: _CryptoFeesCard(summary: state.summary!),
+                  ),
+                ),
+
                 // ── Strategy collapsible ──────────────────────────────────────
                 if (state.summary!.strategySchema != null)
                   SliverToBoxAdapter(
@@ -2235,6 +2243,114 @@ class _RoundTripStats extends StatelessWidget {
                   value: fmtMoney(summary.avgLosingRoundTrip),
                   valueColor: AppColors.danger),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Crypto fees card (per-platform estimate; crypto backtests only) ─────────────
+
+class _CryptoFeesCard extends StatelessWidget {
+  const _CryptoFeesCard({required this.summary});
+  final BacktestSummary summary;
+
+  // (name, taker rate, applied?)
+  static const _platforms = <(String, double, bool)>[
+    ('Alpaca', 0.0025, true),
+    ('Coinbase Advanced', 0.006, false),
+    ('Kraken', 0.0026, false),
+    ('Binance.US', 0.001, false),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final fees = summary.fees;
+    final volume = (fees?['total_volume'] ?? 0).toDouble();
+    if (fees == null || volume <= 0) return const SizedBox.shrink();
+    final actual = (fees['total_fees'] ?? 0).toDouble();
+
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.receipt_long_outlined, size: 18, color: AppColors.primary),
+            const SizedBox(width: 8),
+            Text('FEES · CRYPTO', style: AppTextStyles.eyebrow),
+          ]),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Crypto volume traded',
+                  style: AppTextStyles.meta.copyWith(color: AppColors.textDim)),
+              Text(fmtMoney(volume),
+                  style: AppTextStyles.body.copyWith(
+                      color: AppColors.textHi, fontWeight: FontWeight.w600)),
+            ],
+          ),
+          const Divider(height: 20, color: AppColors.border),
+          for (final p in _platforms)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Row(children: [
+                      Flexible(
+                        child: Text(p.$1,
+                            style: AppTextStyles.body
+                                .copyWith(color: AppColors.textMd),
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                      if (p.$3) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: AppColors.fill(AppColors.primary),
+                            borderRadius: BorderRadius.circular(999),
+                            border:
+                                Border.all(color: AppColors.stroke(AppColors.primary)),
+                          ),
+                          child: Text('applied',
+                              style: AppTextStyles.nano.copyWith(
+                                  color: AppColors.primary,
+                                  fontWeight: FontWeight.w700)),
+                        ),
+                      ],
+                    ]),
+                  ),
+                  SizedBox(
+                    width: 52,
+                    child: Text('${(p.$2 * 100).toStringAsFixed(2)}%',
+                        textAlign: TextAlign.right,
+                        style: AppTextStyles.nano
+                            .copyWith(color: AppColors.textDim)),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 84,
+                    child: Text(
+                      fmtMoney(p.$3 ? (actual > 0 ? actual : volume * p.$2) : volume * p.$2),
+                      textAlign: TextAlign.right,
+                      style: AppTextStyles.body.copyWith(
+                          color: p.$3 ? AppColors.textHi : AppColors.textMuted,
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 2),
+          Text(
+            'Alpaca is the fee actually charged in this backtest; other venues are '
+            'estimates at their listed taker rate (volume × rate) — actual tiers vary.',
+            style: AppTextStyles.nano
+                .copyWith(color: AppColors.textFaint, height: 1.3),
           ),
         ],
       ),
