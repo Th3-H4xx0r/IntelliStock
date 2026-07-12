@@ -6348,14 +6348,24 @@ def _can_use_same_day_daily_bar(current_utc: datetime.datetime) -> bool:
         return False
 
 
-def _get_prices_at_time(data, symbols, current_time):
-    """Get close price ('c') for each symbol at the bar that corresponds to current_time (latest bar at or before current_time)."""
+def _get_prices_at_time(data, symbols, current_time, use_cursor=False):
+    """Get close price ('c') for each symbol at the bar that corresponds to current_time (latest bar at or before current_time).
+
+    ``use_cursor=True`` (passed only from the monotonic main backtest loop, which
+    always uses the master ``data``) takes the O(new_bars)/call cursor path for
+    the non-daily case; every other call site keeps the O(n) full scan so the
+    cursor never has to reason about a different ``data`` object or the daily
+    same-day-bar rule."""
     prices = {}
     current_utc = _current_time_to_utc(current_time)
     if current_utc is None:
         return prices
     daily_mode = _is_daily_backtest_timeframe()
     allow_same_day_daily = _can_use_same_day_daily_bar(current_utc)
+    if use_cursor and mode == MODE_BACKTEST and not daily_mode:
+        return _bprices_cursor.latest_price_at(
+            data, symbols, current_utc, bar_time_to_datetime=_bar_time_to_datetime,
+        )
     for sym in symbols:
         bars = data.get(sym) or []
         bar_at_time = None
@@ -6406,6 +6416,7 @@ def _backtest_symbol_price_lookup_block_reason(data, symbol, current_time):
 # in `backtest_price_history` so they can be tested without importing
 # broker.py (not import-safe — runs argparse + main path at load).
 import backtest_price_history as _bph
+import backtest_prices_cursor as _bprices_cursor
 
 
 def _invalidate_price_history_cursor() -> None:
@@ -7513,7 +7524,7 @@ while not shutdown_requested:
                 sys.exit(0)
             else:
                 # current_time <= end_date: fetch prices and run this tick
-                prices = _get_prices_at_time(data, symbols, current_time)
+                prices = _get_prices_at_time(data, symbols, current_time, use_cursor=True)
                 price_history = get_price_history_up_to_current(data, symbols_for_data, current_time)
         else:
             # get_live_prices() hits Robinhood's batch-quotes endpoint. Only call it
