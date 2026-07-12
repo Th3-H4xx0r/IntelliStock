@@ -72,7 +72,17 @@ def compute_backtest_summary(emulator, snapshots, initial_cash) -> dict:
         pnl = final_value - initial_cash
         if initial_cash:
             pnl_percent = (final_value - initial_cash) / initial_cash * 100.0
-    return {"final_value": final_value, "pnl": pnl, "pnl_percent": pnl_percent}
+
+    # Crypto fee accounting (None for pure-equity runs, which are commission-free).
+    fees = None
+    if emulator is not None:
+        try:
+            fs = emulator.get_fee_summary()
+            if fs and (fs.get("total_fees") or fs.get("total_volume")):
+                fees = fs
+        except Exception:
+            fees = None
+    return {"final_value": final_value, "pnl": pnl, "pnl_percent": pnl_percent, "fees": fees}
 
 
 def resolve_end_prices(resolver_prices, snapshots) -> dict:

@@ -31,6 +31,11 @@ class PortfolioEmulator:
         self._trades = []    # list of { timestamp, action, ticker, shares, price, total, cash_after }
         self._portfolio_snapshots = []  # list of { timestamp, value, cash, positions_snapshot, prices }
         self._last_prices = {}  # V7.3: track last known prices for portfolio valuation fallback
+        # Crypto fee accounting (equities are commission-free, so these stay 0):
+        # total taker fees actually charged, and total crypto notional traded
+        # (gross, both legs) — the base for per-platform fee estimates.
+        self._crypto_fees_paid = 0.0
+        self._crypto_volume = 0.0
 
     def buy(self, ticker, shares, price, timestamp=None):
         """
@@ -53,6 +58,10 @@ class PortfolioEmulator:
         filled_shares = shares
         if "/" in ticker:
             filled_shares = shares * (1.0 - _CRYPTO_TAKER_FEE)
+            # The taker fee is embedded as fewer coins; record it (and the gross
+            # notional) for the backtest fee summary.
+            self._crypto_fees_paid += total * _CRYPTO_TAKER_FEE
+            self._crypto_volume += total
         self._positions[ticker] = self._positions.get(ticker, 0.0) + filled_shares
         self._trades.append({
             "timestamp": timestamp,
@@ -83,6 +92,8 @@ class PortfolioEmulator:
         # proceeds credited to cash are net of the fee. Equity symbols (no "/")
         # keep the EXACT commission-free math.
         if "/" in ticker:
+            self._crypto_fees_paid += total * _CRYPTO_TAKER_FEE
+            self._crypto_volume += total
             total = total * (1.0 - _CRYPTO_TAKER_FEE)
         self._cash += total
         self._positions[ticker] = current - shares
@@ -136,6 +147,18 @@ class PortfolioEmulator:
     def get_trade_history(self):
         """Return list of all trades, each with timestamp, action, ticker, shares, price, total, cash_after."""
         return list(self._trades)
+
+    def get_fee_summary(self):
+        """Crypto fee accounting for the backtest. Equities are commission-free so
+        these are 0 for pure-equity runs. ``total_fees`` is the taker fee actually
+        charged; ``total_volume`` is gross crypto notional traded across both legs
+        (the base for per-platform fee estimates); ``taker_rate`` is the applied
+        rate."""
+        return {
+            "total_fees": round(self._crypto_fees_paid, 6),
+            "total_volume": round(self._crypto_volume, 2),
+            "taker_rate": _CRYPTO_TAKER_FEE,
+        }
 
     def get_portfolio_history(self):
         """Return list of all snapshots: timestamp and value (and optionally cash/positions)."""

@@ -7284,6 +7284,8 @@ while not shutdown_requested:
                                 'progress': 100.0,
                                 'pnl': final_pnl,
                                 'pnl_percent': round(final_pnl_percent, 4) if final_pnl_percent is not None else None,
+                                # Crypto fee accounting (None for equity runs).
+                                'fees': _bt_summary.get("fees"),
                                 'pnl_per_stock': pnl_per_stock,
                                 'pnl_percent_per_stock': pnl_percent_per_stock,
                                 'stock_price_change': stock_price_change,
