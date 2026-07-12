@@ -24,7 +24,7 @@ String fmtPnl(num? v) {
 
 /// `+12.34%` / `-5.00%` (2dp, leading + for >=0), null -> `—`.
 String fmtPct(num? v) {
-  if (v == null) return _dash;
+  if (v == null || v.isNaN) return _dash;
   final sign = v >= 0 ? '+' : '-';
   return '$sign${v.abs().toStringAsFixed(2)}%';
 }

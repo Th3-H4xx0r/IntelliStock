@@ -200,7 +200,7 @@ class BacktestSummary {
         roundTrips: _num(j['round_trips']),
         pnlPerStock: _numMap(j['pnl_per_stock']),
         pnlPercentPerStock: _numMap(j['pnl_percent_per_stock']),
-        stockPriceChange: _numMap(j['stock_price_change']),
+        stockPriceChange: _changePctMap(j['stock_price_change']),
         tickers: _strList(j['tickers']),
         startDate: j['start_date']?.toString(),
         endDate: j['end_date']?.toString(),
@@ -735,6 +735,23 @@ Map<String, num>? _numMap(dynamic v) {
   v.forEach((k, val) {
     final n = _num(val);
     if (n != null) result[k.toString()] = n;
+  });
+  return result.isEmpty ? null : result;
+}
+
+/// stock_price_change values are dicts {start_price, end_price, change_percent};
+/// pull the change_percent so the UI renders the real %, not '—' or NaN%.
+Map<String, num>? _changePctMap(dynamic v) {
+  if (v is! Map) return null;
+  final result = <String, num>{};
+  v.forEach((k, val) {
+    if (val is Map) {
+      final n = _num(val['change_percent']);
+      if (n != null) result[k.toString()] = n;
+    } else {
+      final n = _num(val); // tolerate a flat-number shape too
+      if (n != null) result[k.toString()] = n;
+    }
   });
   return result.isEmpty ? null : result;
 }

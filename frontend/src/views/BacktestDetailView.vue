@@ -198,9 +198,14 @@ function fmtPnl(v) {
   return (n >= 0 ? '+' : '') + fmtMoney(n)
 }
 function fmtPct(v) {
-  if (v == null) return '—'
   const n = Number(v)
+  if (v == null || Number.isNaN(n)) return '—'
   return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
+}
+// stock_price_change[sym] is a dict {start_price,end_price,change_percent};
+// tolerate the legacy flat-number shape too.
+function priceChangePct(v) {
+  return (v && typeof v === 'object') ? v.change_percent : v
 }
 function fmtElapsed(seconds) {
   const n = Number(seconds)
@@ -1325,8 +1330,8 @@ function onLogScroll(e) {
                   <td class="px-4 py-3 text-right font-mono" :class="pnlClass(summary.pnl_percent_per_stock?.[sym])">
                     {{ fmtPct(summary.pnl_percent_per_stock?.[sym]) }}
                   </td>
-                  <td class="px-4 py-3 text-right font-mono" :class="pnlClass(summary.stock_price_change?.[sym])">
-                    {{ fmtPct(summary.stock_price_change?.[sym]) }}
+                  <td class="px-4 py-3 text-right font-mono" :class="pnlClass(priceChangePct(summary.stock_price_change?.[sym]))">
+                    {{ fmtPct(priceChangePct(summary.stock_price_change?.[sym])) }}
                   </td>
                 </tr>
               </tbody>
