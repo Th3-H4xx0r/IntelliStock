@@ -263,6 +263,14 @@ class _CryptoCardState extends ConsumerState<_CryptoCard> {
             runSpacing: 6,
             children: [
               _action(
+                icon: Icons.visibility_outlined,
+                label: 'View',
+                color: AppColors.textMuted,
+                onTap: _busy
+                    ? null
+                    : () => context.push('/crypto/instances/${inst.id}'),
+              ),
+              _action(
                 icon: symbol('edit'),
                 label: 'Edit',
                 color: AppColors.primary,

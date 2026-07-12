@@ -248,6 +248,10 @@ onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()])
 
           <!-- Actions -->
           <div class="flex flex-wrap items-center gap-2 pt-1 mt-auto">
+            <button @click="openDetail(inst)" :disabled="busy[inst.id]"
+                    class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:bg-surface border border-border-subtle transition-colors disabled:opacity-40">
+              <span class="material-symbols-outlined text-[14px]">visibility</span> View
+            </button>
             <button @click="openEdit(inst)" :disabled="busy[inst.id]"
                     class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 hover:bg-amber-500/10 border border-amber-500/20 transition-colors disabled:opacity-40">
               <span class="material-symbols-outlined text-[14px]">tune</span> Edit
