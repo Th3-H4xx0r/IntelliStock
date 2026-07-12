@@ -117,6 +117,11 @@ async function fetchStatus() {
       await Promise.all([fetchSummary(), fetchGraphData(), fetchLlmCost()])
     } else if (st === 'paused') {
       stopPolling()
+    } else {
+      // Still running/queued — refresh the summary so the stat tiles and the
+      // crypto Fees card update live (the broker rewrites pnl / trades / fees
+      // into the result doc each loop iteration).
+      void fetchSummary()
     }
   } catch { /* non-critical */ }
 }

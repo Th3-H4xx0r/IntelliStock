@@ -5927,6 +5927,25 @@ def action_summarize_backtest(conn, backtest_id):
     total_trades, total_buys, total_sells, cycle_pnls, winning, losing, breakeven = round_trip_stats(
         backtest_trades
     )
+    # Crypto fees, computed LIVE from the trade log so the fee card populates
+    # DURING the run (not just at finish). Equity trades (no "/") are
+    # commission-free, so a pure-equity run yields fees=None.
+    _CRYPTO_TAKER = 0.0025
+    _fee_paid = 0.0
+    _fee_vol = 0.0
+    for _t in backtest_trades:
+        try:
+            if "/" in str((_t or {}).get("ticker", "")):
+                _notional = abs(float((_t or {}).get("total") or 0))
+                _fee_paid += _notional * _CRYPTO_TAKER
+                _fee_vol += _notional
+        except (TypeError, ValueError):
+            continue
+    _fees_block = (
+        {"total_fees": round(_fee_paid, 6), "total_volume": round(_fee_vol, 2), "taker_rate": _CRYPTO_TAKER}
+        if _fee_vol > 0
+        else None
+    )
     portfolio_value_history = doc.get("portfolio_value_history") or []
     start_val = portfolio_value_history[0].get("value") if portfolio_value_history else None
     end_val = portfolio_value_history[-1].get("value") if len(portfolio_value_history) > 1 else start_val
@@ -5942,8 +5961,8 @@ def action_summarize_backtest(conn, backtest_id):
         "pnl": doc.get("pnl"),
         "pnl_percent": doc.get("pnl_percent"),
         # Crypto fee accounting {total_fees, total_volume, taker_rate}; None for
-        # equity runs (commission-free).
-        "fees": doc.get("fees"),
+        # equity runs (commission-free). Computed live from the trade log above.
+        "fees": _fees_block,
         "pnl_per_stock": doc.get("pnl_per_stock") or {},
         "pnl_percent_per_stock": doc.get("pnl_percent_per_stock") or {},
         "stock_price_change": doc.get("stock_price_change") or {},
