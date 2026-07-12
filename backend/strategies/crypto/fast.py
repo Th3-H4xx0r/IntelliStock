@@ -121,6 +121,10 @@ class Fast:
             if sym not in seed:
                 discovered.append(sym)
 
+        # Exit held coins we can't see this tick — coins with no bars are
+        # `continue`d above, so a held-but-blind position is never sold without
+        # this (crypto no-sells bug fix). Evaluated = the symbols we scored.
+        core.exit_blind_held(result, portfolio_emulator, data, list(result.keys()))
         if discovered:
             result["_nexus_discovered"] = discovered
         return core.apply_crypto_config(result, config, prices, portfolio_emulator)

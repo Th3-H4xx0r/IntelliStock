@@ -117,6 +117,8 @@ class Allocator:
         result: dict = {}
         if discovered:
             result["_nexus_discovered"] = discovered
+        # Exit held coins we can't see this tick (crypto no-sells bug fix).
+        core.exit_blind_held(result, portfolio_emulator, data, universe)
         if not universe:
             return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 

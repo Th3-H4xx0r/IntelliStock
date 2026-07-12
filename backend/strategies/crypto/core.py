@@ -307,6 +307,25 @@ def held_positions(portfolio_emulator) -> set:
     return {str(k) for k in positions if position_qty(positions, k) > 0}
 
 
+def exit_blind_held(result: dict, portfolio_emulator, data, evaluated) -> list:
+    """Emit a sell (-1) for every held coin that the strategy did NOT evaluate
+    this tick (absent from ``evaluated`` and with no bars in ``data``).
+
+    Entry signals ignore holdings, so a coin we hold but can't see this tick
+    (empty/degenerate window, or dropped out of the discovery universe) would
+    otherwise be silently kept forever — the crypto no-sells bug. We can't rank
+    a coin without data, so the safe action is a risk-off exit. Mutates
+    ``result`` in place; returns the list of coins exited this way."""
+    evaluated = set(evaluated or [])
+    data = data or {}
+    blind = []
+    for s in held_positions(portfolio_emulator):
+        if s not in evaluated and not data.get(s):
+            result[s] = -1
+            blind.append(s)
+    return blind
+
+
 # ---------------------------------------------------------------------------
 # Auto-coin-discovery wiring. Builds live Alpaca providers from the creds the
 # broker injects into a strategy's config and ranks a tradable universe via
