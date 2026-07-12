@@ -6586,7 +6586,17 @@ if mode == MODE_BACKTEST:
             validation_errors = []
             if not instance_id or not str(instance_id).strip():
                 validation_errors.append("instance_id is missing or empty")
-            if _strategy_row_id is None:
+            # Crypto instances have NO Strategies-table row — their strategy is a
+            # synthesized run_once spec built from crypto_config.strategy, so
+            # strategy_id is legitimately null while the specs + schema ARE loaded
+            # (schema name "crypto:<name>", see _crypto_synthetic_specs). Only flag a
+            # genuinely missing strategy. The equity path (strategy_id present, or
+            # truly absent) stays byte-identical.
+            _crypto_synth_loaded = bool(
+                _backtest_strategy_schema
+                and str((_backtest_strategy_schema or {}).get("name", "")).startswith("crypto:")
+            )
+            if _strategy_row_id is None and not _crypto_synth_loaded:
                 validation_errors.append("no strategy linked to instance (strategy_id is null)")
             # V7.3: Allow empty symbols for Nexus pure discovery mode
             # if not symbols or not [s for s in symbols if s and str(s).strip()]:
