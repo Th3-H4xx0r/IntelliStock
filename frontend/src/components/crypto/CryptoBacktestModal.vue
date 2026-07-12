@@ -37,15 +37,17 @@ const dynamicPct = computed(() => Math.max(0, Math.round(100 - fixedPct.value)))
 // Slash-pairs feed the backtest symbol universe; empty ⇒ pure auto-discovery.
 const stocks = computed(() => allocations.value.map((a) => a.symbol).filter(Boolean))
 
-// ── Granularity (seconds). Default derived from the instance's band. ────────────
-const GRANS = [
-  { value: '300', label: '5 min' },
-  { value: '900', label: '15 min' },
-  { value: '3600', label: '1 hour' },
-  { value: '86400', label: '1 day' },
-]
+// ── Bar cadence is DERIVED from the instance's Band (the single source of truth,
+//    set in create/edit) — not a separate control. High/Medium/Low → 5/15/60 min. ─
 const BAND_GRAN = { high: '300', medium: '900', low: '3600' }
-const granularity = ref('900')
+const CADENCE_LABEL = {
+  high: 'High · ~5-minute bars',
+  medium: 'Medium · ~15-minute bars',
+  low: 'Low · ~60-minute bars',
+}
+const band = computed(() => String(props.instance?.crypto_config?.band || 'medium').toLowerCase())
+const granularity = computed(() => BAND_GRAN[band.value] || '900')
+const cadenceLabel = computed(() => CADENCE_LABEL[band.value] || CADENCE_LABEL.medium)
 
 // ── Dates (default: last 90 days → today) ───────────────────────────────────────
 function isoDate(d) { return d.toISOString().slice(0, 10) }
@@ -57,8 +59,6 @@ const creating = ref(false)
 const err = ref('')
 
 onMounted(() => {
-  const band = String(props.instance?.crypto_config?.band || '').toLowerCase()
-  granularity.value = BAND_GRAN[band] || '900'
   const today = new Date()
   const ago = new Date()
   ago.setDate(ago.getDate() - 90)
@@ -146,17 +146,13 @@ async function submit() {
           </div>
         </div>
 
-        <!-- Granularity -->
+        <!-- Cadence (read-only — derived from the instance's Band) -->
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5">Granularity</label>
-          <div class="inline-flex flex-wrap gap-1.5">
-            <button v-for="g in GRANS" :key="g.value" type="button" @click="granularity = g.value"
-                    class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors"
-                    :class="granularity === g.value
-                      ? 'bg-primary/[0.14] border-primary/45 text-primary'
-                      : 'bg-surface border-border-subtle text-slate-400 hover:text-slate-200'">
-              {{ g.label }}
-            </button>
+          <label class="block text-xs font-medium text-slate-400 mb-1.5">Cadence</label>
+          <div class="flex items-center gap-2 bg-surface border border-border-subtle rounded-lg px-3 py-2.5">
+            <span class="material-symbols-outlined text-slate-500 text-[18px]">schedule</span>
+            <span class="text-sm text-slate-200">{{ cadenceLabel }}</span>
+            <span class="ml-auto text-[11px] text-slate-500">from Band — change it in Edit</span>
           </div>
         </div>
 

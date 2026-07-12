@@ -32,9 +32,11 @@ server-side change.
   `POST /backtests` = the instance's fixed slash-pairs
   (`crypto_config.allocations[].symbol`). Empty allocations (100% dynamic) → send
   `[]` → pure auto-discovery, same as live.
-- `granularity` (seconds string) defaults from the instance band:
-  `high→300` (5m), `medium→900` (15m), `low→3600` (1h); fallback `900`. User can
-  override via pills (`60/300/900/3600/86400`, reusing the equity options).
+- `granularity` (seconds string) is **derived from the instance's Band** — the
+  single source of truth set in create/edit — and shown read-only, NOT a separate
+  control (avoids duplicating the Band concept under a new "granularity" term):
+  `high→300` (5m bars), `medium→900` (15m), `low→3600` (1h); fallback `900`. To
+  change cadence, the user edits the instance's Band.
 - `initial_cash` default `10000` (crypto paper scale), editable.
 - Date range default: last 90 days → today, editable.
 - On success the `POST /backtests` response's `id` is used to navigate to the

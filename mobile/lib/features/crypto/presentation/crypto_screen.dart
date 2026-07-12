@@ -343,13 +343,14 @@ class _CryptoCardState extends ConsumerState<_CryptoCard> {
 
 // ── Backtest sheet ──────────────────────────────────────────────────────────────
 
-const _kCryptoGrans = <(String, String)>[
-  ('300', '5 min'),
-  ('900', '15 min'),
-  ('3600', '1 hour'),
-  ('86400', '1 day'),
-];
+// Bar cadence is DERIVED from the instance's Band (set in create/edit) — not a
+// separate control. High/Medium/Low → 5/15/60-minute bars.
 const _kBandGran = <String, String>{'high': '300', 'medium': '900', 'low': '3600'};
+const _kBandCadence = <String, String>{
+  'high': 'High · ~5-minute bars',
+  'medium': 'Medium · ~15-minute bars',
+  'low': 'Low · ~60-minute bars',
+};
 
 /// Configure + launch a backtest of a crypto instance's own configured
 /// allocation. Sends the instance's slash-pairs to POST /backtests (empty ⇒
@@ -385,6 +386,12 @@ class _CryptoBacktestSheetState extends ConsumerState<_CryptoBacktestSheet> {
   void dispose() {
     _cashCtrl.dispose();
     super.dispose();
+  }
+
+  String get _cadenceLabel {
+    final band =
+        (widget.inst.cryptoConfig?['band'] ?? 'medium').toString().toLowerCase();
+    return _kBandCadence[band] ?? _kBandCadence['medium']!;
   }
 
   String _fmtDate(DateTime d) =>
@@ -517,39 +524,30 @@ class _CryptoBacktestSheetState extends ConsumerState<_CryptoBacktestSheet> {
                     ],
                   ),
                   const SizedBox(height: 14),
-                  Text('Granularity', style: AppTextStyles.micro),
+                  Text('Cadence', style: AppTextStyles.micro),
                   const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      for (final g in _kCryptoGrans)
-                        GestureDetector(
-                          onTap: () => setState(() => _gran = g.$1),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: _gran == g.$1
-                                  ? AppColors.fill(AppColors.primary)
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(7),
-                              border: Border.all(
-                                color: _gran == g.$1
-                                    ? AppColors.stroke(AppColors.primary)
-                                    : AppColors.border,
-                              ),
-                            ),
-                            child: Text(g.$2,
-                                style: AppTextStyles.meta.copyWith(
-                                  color: _gran == g.$1
-                                      ? AppColors.primary
-                                      : AppColors.textMuted,
-                                  fontWeight: FontWeight.w600,
-                                )),
-                          ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 11),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.schedule, size: 15, color: AppColors.textDim),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(_cadenceLabel,
+                              style: AppTextStyles.body
+                                  .copyWith(color: AppColors.textHi)),
                         ),
-                    ],
+                        Text('from Band',
+                            style: AppTextStyles.nano
+                                .copyWith(color: AppColors.textDim)),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 14),
                   Text('Initial cash (\$)', style: AppTextStyles.micro),
