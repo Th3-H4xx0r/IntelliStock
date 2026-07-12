@@ -276,10 +276,35 @@ def held_symbols(portfolio_emulator, universe) -> set:
         positions = portfolio_emulator.get_positions() or {}
     except Exception:
         return held
+    # TEMP PROBE (remove after crypto no-sells verification, 2026-07-12): if we
+    # hold something but resolve no held symbols in `universe`, log why so the
+    # verification backtest reveals the exact cause of the empty-held paradox.
+    try:
+        if positions:
+            _resolved = {s for s in universe if position_qty(positions, s) > 0}
+            if not _resolved:
+                print(
+                    f"[HELD-PROBE] positions={list(positions.keys())} "
+                    f"universe={list(universe)} resolved_held=EMPTY"
+                )
+    except Exception:
+        pass
     for sym in universe:
         if position_qty(positions, sym) > 0:
             held.add(sym)
     return held
+
+
+def held_positions(portfolio_emulator) -> set:
+    """All held symbols (qty > 0) straight from the emulator, NOT filtered by
+    ``universe``. Used so a held coin with no bars this tick can still be exited."""
+    if portfolio_emulator is None:
+        return set()
+    try:
+        positions = portfolio_emulator.get_positions() or {}
+    except Exception:
+        return set()
+    return {str(k) for k in positions if position_qty(positions, k) > 0}
 
 
 # ---------------------------------------------------------------------------

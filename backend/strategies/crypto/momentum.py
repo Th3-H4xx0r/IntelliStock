@@ -48,6 +48,7 @@ _DISCOVERY_TIMEFRAME = "1Hour"
 # Shared helpers (single source of truth in core).
 _series = core.series
 _held_symbols = core.held_symbols
+_held_positions = core.held_positions
 
 
 class Momentum:
@@ -115,6 +116,13 @@ class Momentum:
         result: dict = {}
         if discovered:
             result["_nexus_discovered"] = discovered
+        # Exit any coin we HOLD but have no bars for this tick (or that dropped
+        # out of `universe`). Entry ignores `held`, so without this a held-but-
+        # blind coin is never sold — the crypto no-sells bug. Can't rank it
+        # without data, so risk-off exit.
+        for _hs in _held_positions(portfolio_emulator):
+            if _hs not in universe and not data.get(_hs):
+                result[_hs] = -1
         if not universe:
             return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
