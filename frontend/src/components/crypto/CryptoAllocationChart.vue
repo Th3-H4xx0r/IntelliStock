@@ -10,6 +10,7 @@ import VueApexCharts from 'vue3-apexcharts'
 const props = defineProps({
   allocations: { type: Array, default: () => [] }, // [{ symbol, pct, color }]
   dynamicPct: { type: Number, default: 100 },
+  size: { type: Number, default: 240 }, // outer diameter in px (chart scales to fit)
 })
 
 const DYNAMIC_COLOR = '#6b6488'
@@ -113,12 +114,12 @@ const centerColor = computed(() => {
 
 <template>
   <div class="flex flex-col items-center">
-    <div class="relative w-[240px] h-[240px]">
+    <div class="relative" :style="{ width: size + 'px', height: size + 'px' }">
       <VueApexCharts
         v-if="hasData"
         type="donut"
-        width="240"
-        height="240"
+        :width="size"
+        :height="size"
         :options="chartOptions"
         :series="series"
       />
@@ -126,11 +127,11 @@ const centerColor = computed(() => {
 
       <!-- Center label -->
       <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-        <div class="text-[34px] font-extrabold leading-none tabular-nums tracking-tight" :style="{ color: centerColor }">
+        <div class="font-extrabold leading-none tabular-nums tracking-tight" :style="{ color: centerColor, fontSize: Math.round(size * 0.142) + 'px' }">
           {{ centerBig }}
         </div>
-        <div class="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-slate-400 mt-1.5">{{ centerLabel }}</div>
-        <div class="text-[11px] text-slate-500 mt-0.5">{{ centerSub }}</div>
+        <div class="font-semibold uppercase tracking-[0.14em] text-slate-400 mt-1.5" :style="{ fontSize: Math.max(9, Math.round(size * 0.044)) + 'px' }">{{ centerLabel }}</div>
+        <div class="text-slate-500 mt-0.5" :style="{ fontSize: Math.max(9, Math.round(size * 0.046)) + 'px' }">{{ centerSub }}</div>
       </div>
     </div>
 

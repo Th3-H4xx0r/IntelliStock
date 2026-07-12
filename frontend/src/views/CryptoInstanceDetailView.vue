@@ -84,6 +84,22 @@ async function fetchInstance() {
     const res = await fetch(`${API_BASE}/instances/${encodeURIComponent(instanceId.value)}`, { headers: authHeaders() })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     inst.value = await res.json()
+    // The detail endpoint omits crypto_config; backfill it (band + allocations)
+    // from the list endpoint, which includes it.
+    if (!inst.value.crypto_config) {
+      try {
+        const lr = await fetch(`${API_BASE}/instances`, { headers: authHeaders() })
+        if (lr.ok) {
+          const ld = await lr.json()
+          const m = (ld.instances || []).find((i) => String(i.id) === instanceId.value)
+          if (m) {
+            inst.value.crypto_config = m.crypto_config
+            if (!(inst.value.stocks || []).length && m.stocks) inst.value.stocks = m.stocks
+            if (inst.value.brokerage_id == null) inst.value.brokerage_id = m.brokerage_id
+          }
+        }
+      } catch { /* best-effort backfill */ }
+    }
     liveSecs.value = inst.value.uptime_seconds || 0
     startUptime()
   } catch (e) { error.value = `Failed to load instance: ${e.message}` }
@@ -273,23 +289,12 @@ function fmtDate(s) { if (!s) return '—'; const d = new Date(s); return Number
           <!-- Allocation -->
           <div class="glass-card rounded-2xl p-5 sm:p-6">
             <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-4">Allocation</p>
-            <div class="flex items-center gap-4">
-              <div class="w-[120px] shrink-0">
-                <CryptoAllocationChart :allocations="chartAllocs" :dynamic-pct="dynamicPct" />
-              </div>
-              <div class="min-w-0 flex-1">
-                <p class="text-xs text-slate-500 mb-1">Dynamic strategy</p>
-                <p class="text-sm font-semibold text-primary mb-3">{{ strategyLabel }}</p>
-                <div class="flex flex-wrap gap-1.5">
-                  <span v-for="c in coins" :key="c.ticker"
-                        class="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs font-mono text-slate-300 tabular-nums">
-                    {{ c.ticker }} {{ c.pct }}%
-                  </span>
-                  <span class="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/30 text-xs font-mono text-primary tabular-nums">
-                    Dynamic {{ dynamicPct }}%
-                  </span>
-                </div>
-              </div>
+            <div class="flex justify-center">
+              <CryptoAllocationChart :allocations="chartAllocs" :dynamic-pct="dynamicPct" :size="160" />
+            </div>
+            <div class="mt-4 pt-4 border-t border-border-subtle">
+              <p class="text-xs text-slate-500 mb-1">Dynamic strategy</p>
+              <p class="text-sm font-semibold text-primary">{{ strategyLabel }}</p>
             </div>
           </div>
         </div>

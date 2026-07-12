@@ -63,7 +63,27 @@ class _CryptoInstanceDetailScreenState
 
   Future<void> _load() async {
     try {
-      final inst = await _repo.getInstance(widget.instanceId);
+      var inst = await _repo.getInstance(widget.instanceId);
+      // The detail endpoint omits crypto_config; backfill it (band + allocations)
+      // from the list endpoint, which includes it.
+      if (inst.cryptoConfig == null) {
+        try {
+          final list = await _repo.listInstances();
+          Instance? match;
+          for (final i in list) {
+            if (i.id == widget.instanceId) {
+              match = i;
+              break;
+            }
+          }
+          if (match != null) {
+            inst = inst.copyWith(
+              cryptoConfig: match.cryptoConfig,
+              stocks: inst.stocks.isEmpty ? match.stocks : inst.stocks,
+            );
+          }
+        } catch (_) {/* best-effort backfill */}
+      }
       final brokerages = await _repo.brokerages();
       final backtests = await _repo.instanceBacktests(widget.instanceId);
       double? value;
