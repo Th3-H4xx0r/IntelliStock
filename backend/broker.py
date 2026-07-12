@@ -6238,24 +6238,10 @@ if mode == MODE_LIVE:
     except Exception as e:
         _log(f"Could not start strategies watcher thread: {e}", "yellow")
 
-def _bar_time_to_datetime(t_str):
-    """Parse Alpaca bar timestamp (ISO string) to naive datetime for comparison with backtest current_time."""
-    if t_str is None:
-        return None
-    if isinstance(t_str, datetime.datetime):
-        dt = t_str
-    else:
-        try:
-            from dateutil import parser as dateutil_parser
-            dt = dateutil_parser.parse(t_str)
-        except Exception:
-            try:
-                dt = datetime.datetime.fromisoformat(t_str.replace("Z", "+00:00"))
-            except Exception:
-                return None
-    if getattr(dt, "tzinfo", None) is not None:
-        dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-    return dt
+# 2026-07-12: parse extracted to bar_time.py (import-safe, fromisoformat-first
+# ~50x faster than dateutil on Alpaca ISO timestamps; output identical). Kept
+# the private name so all call sites and the injected-helper usage still work.
+from bar_time import bar_time_to_datetime as _bar_time_to_datetime
 
 def _current_time_to_utc(current_time):
     """Convert current_time to naive UTC for comparison with Alpaca bar times (which are in UTC)."""
