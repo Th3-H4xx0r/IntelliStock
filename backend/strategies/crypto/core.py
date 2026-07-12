@@ -253,6 +253,14 @@ def position_qty(positions: Optional[Mapping], sym: str) -> float:
     raw = positions.get(sym)
     if raw is None:
         raw = positions.get(str(sym).replace("/", ""))
+    if raw is None:
+        # Last resort: match slash-stripped + uppercased on BOTH sides, so a
+        # slash-less query ("BTCUSD") still finds a slash position ("BTC/USD").
+        target = str(sym).replace("/", "").upper()
+        for k, v in positions.items():
+            if str(k).replace("/", "").upper() == target:
+                raw = v
+                break
     try:
         return float(raw or 0)
     except (TypeError, ValueError):
