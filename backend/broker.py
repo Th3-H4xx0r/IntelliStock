@@ -9977,8 +9977,12 @@ while not shutdown_requested:
                         except Exception:
                             pass
                         try:
+                            # Downsample (keep true start + shape), not tail-slice,
+                            # so a long/high-cadence RUNNING backtest shows the real
+                            # start value and curve instead of a mid-run window.
+                            from broker_snapshot_helpers import downsample_history as _downsample_history
                             update_payload['portfolio_value_history'] = _convert_datetimes_to_iso(
-                                list(portfolio_emulator.get_portfolio_history() or [])[-3000:]
+                                _downsample_history(list(portfolio_emulator.get_portfolio_history() or []), 3000)
                             )
                         except Exception:
                             pass
