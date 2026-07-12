@@ -6308,6 +6308,7 @@ from broker_session import (
     is_within_live_session as _is_within_live_session,
     next_legacy_pt_open_utc as _next_legacy_pt_open_utc,
     next_market_open_utc as _next_live_market_open_utc,
+    advance_backtest_time as _advance_backtest_time,
 )
 
 
@@ -10082,19 +10083,20 @@ while not shutdown_requested:
             if shutdown_requested:
                 break
             print("Time Increment: ", time_increment)
-            if _is_within_trading_session_pt(current_time):
-                current_time = current_time + backtest_increment_td
-            else:
-                # Outside trading hours (e.g. weekend): skip to next market open instead of looping with granularity
-                next_open = _next_market_open_utc(current_time)
-                if next_open is not None:
-                    current_time = next_open
-                    try:
-                        _log("Skipped to next market open: %s" % current_time, "cyan")
-                    except NameError:
-                        pass
-                else:
-                    current_time = current_time + backtest_increment_td
+            # Crypto trades 24/7 — never apply the equity session gate / market-
+            # open skip. Equity keeps the legacy skip-to-next-open behavior.
+            _adv_is_crypto = _is_crypto_instance_runtime()
+            _adv_next = _advance_backtest_time(
+                current_time, backtest_increment_td, _adv_is_crypto,
+                _is_within_trading_session_pt, _next_market_open_utc,
+            )
+            if (not _adv_is_crypto) and _adv_next != current_time + backtest_increment_td:
+                # Equity, outside trading hours: skipped to the next market open.
+                try:
+                    _log("Skipped to next market open: %s" % _adv_next, "cyan")
+                except NameError:
+                    pass
+            current_time = _adv_next
         else:
             # 2026-05-07 scheduler refactor (commit 4): sleep until the
             # `_next_wake_utc` computed at the TOP of this loop iteration by
