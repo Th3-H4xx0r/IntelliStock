@@ -91,7 +91,7 @@ class Connors:
             band = str(settings.get("band", "low"))
             disc_k = max(top_k + 3, int(settings.get("discovery_k", 10)))
             timeframe = str(settings.get("discovery_timeframe", _DISCOVERY_TIMEFRAME))
-            candidates = core.discover_universe(band, disc_k, settings, timeframe) or DEFAULT_MAJORS
+            candidates = core.discover_universe_cached(band, disc_k, settings, timeframe, strategy_cache) or DEFAULT_MAJORS
 
         seed_set = set(seed)
         discovered = [s for s in candidates if s not in seed_set]
@@ -109,6 +109,9 @@ class Connors:
         rsi_by = {}
         regime_ok = {}
         above_exit_ma = {}
+        # Cap the talib window: only the latest value is used, so O(cap)/step not
+        # O(history) (SMA exact from its last N bars; RSI converged after warmup).
+        _cap = min_bars + 300
         for sym in universe:
             closes = _series(data.get(sym) or [], "c")
             if len(closes) < min_bars:
@@ -116,6 +119,8 @@ class Connors:
                 regime_ok[sym] = False
                 above_exit_ma[sym] = False
                 continue
+            if len(closes) > _cap:
+                closes = closes[-_cap:]
             try:
                 rsi = talib.RSI(closes, timeperiod=rsi_p)
                 rsi_last = rsi[-1]

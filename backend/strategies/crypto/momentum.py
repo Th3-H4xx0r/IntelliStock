@@ -107,7 +107,7 @@ class Momentum:
             band = str(settings.get("band", "medium"))
             disc_k = max(top_k, int(settings.get("discovery_k", 10)))
             timeframe = str(settings.get("discovery_timeframe", _DISCOVERY_TIMEFRAME))
-            candidates = core.discover_universe(band, disc_k, settings, timeframe) or DEFAULT_MAJORS
+            candidates = core.discover_universe_cached(band, disc_k, settings, timeframe, strategy_cache) or DEFAULT_MAJORS
 
         seed_set = set(seed)
         # Surface auto-picked pairs so the broker expands the universe and fetches
@@ -126,7 +126,10 @@ class Momentum:
 
         held = _held_symbols(portfolio_emulator, universe)
 
-        # Per-symbol trend metrics.
+        # Per-symbol trend metrics. Cap the talib window (EMA/ADX use only the
+        # latest value; a generous tail keeps parity) so each step is O(cap) not
+        # O(history) — avoids an O(n²) blow-up on long backtests.
+        _cap = min_bars + 300
         metrics = {}
         for sym in universe:
             bars = data.get(sym) or []
@@ -136,6 +139,8 @@ class Momentum:
             if len(closes) < min_bars:
                 metrics[sym] = None
                 continue
+            if len(closes) > _cap:
+                closes, highs, lows = closes[-_cap:], highs[-_cap:], lows[-_cap:]
             fast_ema = talib.EMA(closes, timeperiod=fast_p)
             slow_ema = talib.EMA(closes, timeperiod=slow_p)
             fe, se = fast_ema[-1], slow_ema[-1]

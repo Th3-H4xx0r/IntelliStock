@@ -97,7 +97,7 @@ class Meanrev:
             band = str(settings.get("band", "medium"))
             disc_k = max(top_k + 3, int(settings.get("discovery_k", 10)))
             timeframe = str(settings.get("discovery_timeframe", _DISCOVERY_TIMEFRAME))
-            candidates = core.discover_universe(band, disc_k, settings, timeframe) or DEFAULT_MAJORS
+            candidates = core.discover_universe_cached(band, disc_k, settings, timeframe, strategy_cache) or DEFAULT_MAJORS
 
         seed_set = set(seed)
         discovered = [s for s in candidates if s not in seed_set]
@@ -116,12 +116,19 @@ class Meanrev:
         # Per-symbol RSI + regime.
         rsi_by = {}
         regime_ok = {}
+        # Only the LATEST indicator value is used each tick. Cap the window fed to
+        # talib so every step is O(cap) instead of O(history) (SMA(regime_ma) is
+        # exact from the last regime_ma bars; RSI has long converged after a big
+        # warmup) — avoids an O(n²) blow-up on long backtests. Generous tail = parity.
+        _cap = min_bars + 300
         for sym in universe:
             closes = _series(data.get(sym) or [], "c")
             if len(closes) < min_bars:
                 rsi_by[sym] = None
                 regime_ok[sym] = False
                 continue
+            if len(closes) > _cap:
+                closes = closes[-_cap:]
             try:
                 rsi = talib.RSI(closes, timeperiod=rsi_p)
                 rsi_last = rsi[-1]

@@ -89,7 +89,7 @@ class Allocator:
             band = str(settings.get("band", "low"))
             disc_k = max(1, int(settings.get("discovery_k", 10)))
             timeframe = str(settings.get("discovery_timeframe", _DISCOVERY_TIMEFRAME))
-            candidates = core.discover_universe(band, disc_k, settings, timeframe) or DEFAULT_MAJORS
+            candidates = core.discover_universe_cached(band, disc_k, settings, timeframe, strategy_cache) or DEFAULT_MAJORS
 
         seed_set = set(seed)
         # Surface auto-picked pairs so the broker expands the universe and fetches

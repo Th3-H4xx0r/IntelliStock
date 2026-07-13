@@ -401,6 +401,33 @@ def discover_universe(
         return []
 
 
+def discover_universe_cached(band, k, settings, timeframe, cache, every: int = 24):
+    """Throttled :func:`discover_universe`. Discovery does live Alpaca calls
+    (``/v2/assets`` + ranking bars), but the tradable universe barely changes
+    hour-to-hour, so re-running it EVERY backtest/live step is a network round
+    trip per tick — the dominant cost of a crypto run. This caches the result in
+    the strategy's persistent ``cache`` dict and only re-discovers on the first
+    call and every ``every`` calls thereafter (default ~daily on hourly bars).
+
+    ``cache`` is the ``strategy_cache`` the broker hands ``run_once`` (persists
+    across steps within a run). When it's not a dict (no persistence available)
+    this transparently falls back to discovering every call.
+    """
+    if not isinstance(cache, dict):
+        return discover_universe(band, k, settings, timeframe)
+    st = cache.get("_discovery")
+    if not isinstance(st, dict):
+        st = {"n": 0, "universe": None}
+        cache["_discovery"] = st
+    # Re-discover on the very first call and every `every`-th call; otherwise
+    # reuse the cached universe (cache the empty result too, so a transient
+    # discovery failure doesn't retry the network on every single step).
+    if st["universe"] is None or (st["n"] % max(1, int(every)) == 0):
+        st["universe"] = list(discover_universe(band, k, settings, timeframe) or [])
+    st["n"] += 1
+    return list(st["universe"])
+
+
 # ---------------------------------------------------------------------------
 # Fixed + dynamic allocation overlay. Turns per-coin allocations
 # (crypto_config.allocations) into rebalance signals + the CORRECT dict-valued
