@@ -19,9 +19,6 @@ from __future__ import annotations
 
 from typing import List, Mapping, Optional
 
-import numpy as np
-import talib
-
 try:
     import sys
     import os
@@ -45,24 +42,10 @@ BTC = "BTC/USD"
 # broker's ``data`` on the next tick once discovery expands the symbol set).
 _DISCOVERY_TIMEFRAME = "1Day"
 
-# Shared helpers (single source of truth in core).
+# Shared helpers (single source of truth in core). Regime now uses the shared
+# hysteresis MA gate (core.above_ma_state) to avoid single-bar-cross whipsaw.
 _series = core.series
 _held_symbols = core.held_symbols
-
-
-def _above_ma(bars, period):
-    """True/False whether the last close is above its ``period`` SMA, or None.
-
-    Returns None when there are too few bars to compute a valid SMA.
-    """
-    closes = _series(bars, "c")
-    if len(closes) < period + 2:
-        return None
-    sma = talib.SMA(closes, timeperiod=period)
-    ma_last = sma[-1]
-    if np.isnan(ma_last):
-        return None
-    return bool(closes[-1] > ma_last)
 
 
 class Allocator:
@@ -123,9 +106,13 @@ class Allocator:
             return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         held = _held_symbols(portfolio_emulator, universe)
+        band = core.hysteresis_band(settings)
 
-        # Regime gate: BTC below its long-term MA => full risk-off.
-        btc_above = _above_ma(data.get(BTC), period) if data.get(BTC) else None
+        # Regime gate: BTC decisively below its long-term MA => full risk-off.
+        # Hysteresis (core.above_ma_state) holds the regime steady through the
+        # neutral band instead of flipping on every single-bar MA cross — the
+        # whipsaw that churned fees and lost to buy-and-hold.
+        btc_above = core.above_ma_state(data.get(BTC), period, (BTC in held), band) if data.get(BTC) else None
         if btc_above is False:
             for sym in universe:
                 result[sym] = -1 if sym in held else 0
@@ -133,7 +120,7 @@ class Allocator:
 
         # Per-symbol regime: hold coins above their long-term MA, exit the rest.
         for sym in universe:
-            above = _above_ma(data.get(sym), period)
+            above = core.above_ma_state(data.get(sym), period, (sym in held), band)
             if above is None:
                 result[sym] = -1 if sym in held else 0
             elif above:

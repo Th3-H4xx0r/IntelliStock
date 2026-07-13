@@ -276,19 +276,6 @@ def held_symbols(portfolio_emulator, universe) -> set:
         positions = portfolio_emulator.get_positions() or {}
     except Exception:
         return held
-    # TEMP PROBE (remove after crypto no-sells verification, 2026-07-12): if we
-    # hold something but resolve no held symbols in `universe`, log why so the
-    # verification backtest reveals the exact cause of the empty-held paradox.
-    try:
-        if positions:
-            _resolved = {s for s in universe if position_qty(positions, s) > 0}
-            if not _resolved:
-                print(
-                    f"[HELD-PROBE] positions={list(positions.keys())} "
-                    f"universe={list(universe)} resolved_held=EMPTY"
-                )
-    except Exception:
-        pass
     for sym in universe:
         if position_qty(positions, sym) > 0:
             held.add(sym)
@@ -305,6 +292,42 @@ def held_positions(portfolio_emulator) -> set:
     except Exception:
         return set()
     return {str(k) for k in positions if position_qty(positions, k) > 0}
+
+
+def hysteresis_band(settings: Optional[Mapping] = None) -> float:
+    """Dead-band fraction a trend signal must CLEAR before it flips, to stop the
+    single-bar MA-cross whipsaw that churns fees on choppy crypto. Configurable
+    via ``hysteresis_pct`` (default 1.5%), floored at the round-trip taker cost
+    (0.5%) so a flip at least clears its own fees."""
+    rt = round_trip_fee(False, False)  # taker both legs = 0.005
+    try:
+        b = float((settings or {}).get("hysteresis_pct", 0.015))
+    except (TypeError, ValueError):
+        b = 0.015
+    return max(b, rt)
+
+
+def above_ma_state(bars, period: int, is_held: bool, band: float):
+    """Hysteresis moving-average regime (kills whipsaw).
+
+    Returns ``True`` (bullish / stay long) when the last close is above
+    ``SMA*(1+band)``, ``False`` (bearish / exit) when below ``SMA*(1-band)``,
+    and the CURRENT state (``is_held``) inside the neutral band — so a held
+    position is not flipped by a single-bar cross of the average, and a flat
+    position is not chased into a marginal cross. ``None`` if too few bars.
+    Uses a plain numpy SMA (core stays talib-free)."""
+    closes = series(bars, "c")
+    if closes.size < period + 1:
+        return None
+    ma = float(np.mean(closes[-period:]))
+    if not (ma > 0):
+        return None
+    px = float(closes[-1])
+    if px > ma * (1.0 + band):
+        return True
+    if px < ma * (1.0 - band):
+        return False
+    return bool(is_held)
 
 
 def exit_blind_held(result: dict, portfolio_emulator, data, evaluated) -> list:

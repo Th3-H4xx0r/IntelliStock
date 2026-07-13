@@ -94,6 +94,9 @@ class Momentum:
         adx_min = float(settings.get("adx_min", self.adx_min))
         risk_off_breadth = float(settings.get("risk_off_breadth", self.risk_off_breadth))
         min_bars = max(slow_p, adx_period * 2, lookback) + 2
+        # Hysteresis dead-band: enter on a decisive trend, hold a position
+        # through the neutral zone — kills the single-bar-cross whipsaw + fees.
+        hyst = core.hysteresis_band(settings)
 
         data = data or {}
         seed = [str(s).strip().upper() for s in (symbols or []) if str(s).strip()]
@@ -144,7 +147,12 @@ class Momentum:
             except Exception:
                 adx_last = np.nan
             chop = (not np.isnan(adx_last)) and (adx_last < adx_min)
-            trend_up = (not np.isnan(fe)) and (not np.isnan(se)) and (fe > se) and (not chop)
+            # Hysteresis on the EMA cross: enter only when fast leads slow by the
+            # band; a held coin stays "up" until fast falls the band below slow.
+            ema_up = (not np.isnan(fe)) and (not np.isnan(se)) and se > 0 and (
+                fe > se * (1 + hyst) or (sym in held and fe > se * (1 - hyst))
+            )
+            trend_up = ema_up and (not chop)
             metrics[sym] = {"mom": mom, "trend_up": trend_up}
 
         valid = {s: m for s, m in metrics.items() if m is not None}
@@ -154,7 +162,10 @@ class Momentum:
             return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
         # Aggregate-downtrend risk-off.
-        uptrend = [s for s, m in valid.items() if m["trend_up"] and m["mom"] > 0]
+        # Enter on momentum above the band; keep a held coin until momentum
+        # falls the band negative (hysteresis) — avoids flip-flopping near zero.
+        uptrend = [s for s, m in valid.items()
+                   if m["trend_up"] and (m["mom"] > hyst or (s in held and m["mom"] > -hyst))]
         breadth = len(uptrend) / len(valid)
         if breadth < risk_off_breadth:
             for sym in universe:
