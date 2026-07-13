@@ -56,6 +56,17 @@ const cash = ref('10000')
 const creating = ref(false)
 const err = ref('')
 
+// ── Emulate fees: value the strategy at a chosen venue's taker fee instead of
+//    the instance's own brokerage. 'default' = use the instance's brokerage. ──
+const FEE_VENUES = [
+  { id: 'default', label: "Default — instance's brokerage" },
+  { id: 'binanceus', label: 'Binance.US — 0.02% taker' },
+  { id: 'alpaca', label: 'Alpaca — 0.25% taker' },
+  { id: 'kraken', label: 'Kraken — 0.26% taker' },
+  { id: 'coinbase', label: 'Coinbase Advanced — 0.60% taker' },
+]
+const feeVenue = ref('default')
+
 onMounted(() => {
   const today = new Date()
   const ago = new Date()
@@ -80,6 +91,7 @@ async function submit() {
       end_date: endDate.value,
       granularity: String(granularity.value || '900'),
       initial_cash: parseFloat(cash.value) || 10000,
+      emulate_fee_venue: feeVenue.value,
     }
     const res = await fetch(`${API_BASE}/backtests`, {
       method: 'POST', headers: authHeaders(), body: JSON.stringify(payload),
@@ -151,6 +163,24 @@ async function submit() {
             <span class="text-sm text-slate-200">{{ cadenceLabel }}</span>
             <span class="ml-auto text-[11px] text-slate-500">from Band — change it in Edit</span>
           </div>
+        </div>
+
+        <!-- Emulate fees (crypto): value the strategy at another venue's taker fee -->
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1.5">
+            Emulate fees <span class="text-slate-600 font-normal">· taker rate applied to fills</span>
+          </label>
+          <div class="relative">
+            <select v-model="feeVenue"
+                    class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
+              <option v-for="v in FEE_VENUES" :key="v.id" :value="v.id">{{ v.label }}</option>
+            </select>
+            <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">
+            <template v-if="feeVenue === 'default'">Uses this instance's own brokerage fee.</template>
+            <template v-else>Emulated — fills charged at the selected venue's fee, not your instance's. Handy to compare a strategy across venues (fees make or break high-frequency crypto).</template>
+          </p>
         </div>
 
         <!-- Initial cash -->

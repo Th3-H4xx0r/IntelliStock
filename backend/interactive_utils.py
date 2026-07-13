@@ -5526,6 +5526,7 @@ def action_create_backtest(
     key=None,
     secret=None,
     initial_cash=100000.0,
+    emulate_fee_venue=None,
 ):
     if not start_date or not end_date:
         raise ValueError("start_date, end_date required")  # V7.3: stocks can be empty for pure discovery
@@ -5544,6 +5545,30 @@ def action_create_backtest(
         key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
     if not secret_val:
         secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
+    # Crypto fee emulation: resolve the taker rate to apply in this backtest. A
+    # chosen venue emulates that venue's fee; "default"/None uses the instance's
+    # own linked brokerage. Persist the resolved rate + venue so the broker fills
+    # at it and the summary/UI can label it. (Harmless for equities — the emulator
+    # only charges the taker fee on "/"-symbols.)
+    try:
+        from broker_adapters.fees import crypto_taker_fee, resolve_crypto_taker_fee, resolve_broker_type
+        _venue_choice = (emulate_fee_venue or "").strip().lower()
+        _fee_emulated = _venue_choice not in ("", "default")
+        if _fee_emulated:
+            _taker_rate = crypto_taker_fee(_venue_choice)
+            _resolved_venue = _venue_choice
+        else:
+            _brok = None
+            _bid = (instance_doc or {}).get("brokerage_id") if instance_doc else None
+            if _bid:
+                try:
+                    _brok = r.db(DB_NAME).table("BrokerageAccounts").get(str(_bid)).run(conn)
+                except Exception:
+                    _brok = None
+            _taker_rate = resolve_crypto_taker_fee(instance_doc, _brok)
+            _resolved_venue = resolve_broker_type(instance_doc, _brok) or "alpaca"
+    except Exception:
+        _venue_choice, _fee_emulated, _taker_rate, _resolved_venue = "default", False, 0.0025, "alpaca"
     doc = {
         "stocks": stocks_list,
         "start-date": str(start_date).strip()[:10],
@@ -5556,6 +5581,13 @@ def action_create_backtest(
         "key": key_val,
         "secret": secret_val,
         "initial_cash": float(initial_cash),
+        # Crypto fee emulation (see above). emulate_fee_venue = the user's choice
+        # ("default" or a venue id); emulate_taker_rate = the resolved fee applied;
+        # fee_venue_resolved = the actual venue whose fee is used.
+        "emulate_fee_venue": _venue_choice or "default",
+        "fee_emulated": bool(_fee_emulated),
+        "emulate_taker_rate": float(_taker_rate),
+        "fee_venue_resolved": _resolved_venue,
     }
     if instance_id:
         doc["instance"] = str(instance_id).strip()
@@ -5930,7 +5962,50 @@ def action_summarize_backtest(conn, backtest_id):
     # Crypto fees, computed LIVE from the trade log so the fee card populates
     # DURING the run (not just at finish). Equity trades (no "/") are
     # commission-free, so a pure-equity run yields fees=None.
+    #
+    # Taker rate = the rate ACTUALLY applied to fills (which may be an emulated
+    # venue's fee, not Alpaca's default): prefer the finish-time fee summary on
+    # the result doc, then the running queue row's resolved rate, else 0.25%.
+    _bt_row = queue_doc or {}
+    _result_fees = doc.get("fees") if isinstance(doc.get("fees"), dict) else None
     _CRYPTO_TAKER = 0.0025
+    try:
+        if _result_fees and _result_fees.get("taker_rate") is not None:
+            _CRYPTO_TAKER = float(_result_fees["taker_rate"])
+        elif _bt_row.get("emulate_taker_rate") is not None:
+            _CRYPTO_TAKER = float(_bt_row["emulate_taker_rate"])
+    except (TypeError, ValueError):
+        _CRYPTO_TAKER = 0.0025
+    # Is this fee emulated, and which venue? Explicit from the running queue row;
+    # for a COMPLETED run (queue row deleted) infer from the applied rate vs the
+    # instance's own venue rate.
+    _fee_emulated = _bt_row.get("fee_emulated")
+    _fee_venue = _bt_row.get("emulate_fee_venue")
+    _fee_venue = None if _fee_venue in (None, "", "default") else str(_fee_venue)
+    if _fee_emulated is None or _fee_venue is None:
+        try:
+            from broker_adapters.fees import CRYPTO_FEE_VENUES, resolve_crypto_taker_fee
+            _by_rate = {round(_rt, 6): (_vid, _lbl) for _vid, _lbl, _rt in CRYPTO_FEE_VENUES}
+            _matched = _by_rate.get(round(_CRYPTO_TAKER, 6))
+            if _fee_venue is None and _matched:
+                _fee_venue = _matched[0]
+            _inst_id2 = (_bt_row.get("instance") if _bt_row else None) or doc.get("instance_id")
+            _inst_rate = None
+            if _inst_id2:
+                _idoc = _resolve_instance_doc(conn, _inst_id2)
+                _ibrok = None
+                _ibid = (_idoc or {}).get("brokerage_id") if _idoc else None
+                if _ibid:
+                    try:
+                        _ibrok = r.db(DB_NAME).table("BrokerageAccounts").get(str(_ibid)).run(conn)
+                    except Exception:
+                        _ibrok = None
+                _inst_rate = resolve_crypto_taker_fee(_idoc, _ibrok)
+            if _fee_emulated is None:
+                _fee_emulated = bool(_inst_rate is not None and abs(_CRYPTO_TAKER - _inst_rate) > 1e-9)
+        except Exception:
+            if _fee_emulated is None:
+                _fee_emulated = False
     _fee_paid = 0.0
     _fee_vol = 0.0
     for _t in backtest_trades:
@@ -5942,7 +6017,8 @@ def action_summarize_backtest(conn, backtest_id):
         except (TypeError, ValueError):
             continue
     _fees_block = (
-        {"total_fees": round(_fee_paid, 6), "total_volume": round(_fee_vol, 2), "taker_rate": _CRYPTO_TAKER}
+        {"total_fees": round(_fee_paid, 6), "total_volume": round(_fee_vol, 2), "taker_rate": _CRYPTO_TAKER,
+         "emulated": bool(_fee_emulated), "venue": _fee_venue}
         if _fee_vol > 0
         else None
     )
@@ -5960,9 +6036,12 @@ def action_summarize_backtest(conn, backtest_id):
         "tickers": doc.get("tickers") or [],
         "pnl": doc.get("pnl"),
         "pnl_percent": doc.get("pnl_percent"),
-        # Crypto fee accounting {total_fees, total_volume, taker_rate}; None for
-        # equity runs (commission-free). Computed live from the trade log above.
+        # Crypto fee accounting {total_fees, total_volume, taker_rate, emulated,
+        # venue}; None for equity runs (commission-free). Live from the trade log.
         "fees": _fees_block,
+        # The emulated-fee venue choice, so "rerun" preserves it ("default" = the
+        # instance's own brokerage fee, i.e. not emulated).
+        "emulate_fee_venue": (_fee_venue if (_fee_emulated and _fee_venue) else "default"),
         "pnl_per_stock": doc.get("pnl_per_stock") or {},
         "pnl_percent_per_stock": doc.get("pnl_percent_per_stock") or {},
         "stock_price_change": doc.get("stock_price_change") or {},

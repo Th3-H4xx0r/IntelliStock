@@ -586,6 +586,15 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         key, secret,
     ] + symbols + ['--initial-cash', str(initial_cash), '--backtest-id', str(row_id)]
 
+    # Crypto fee emulation: pass the resolved taker fee so the PortfolioEmulator
+    # fills at the chosen venue's rate instead of the instance's own brokerage.
+    try:
+        _fee = row.get('emulate_taker_rate')
+        if _fee is not None:
+            cmd += ['--taker-fee', str(float(_fee))]
+    except (TypeError, ValueError):
+        pass
+
     name = _backtest_container_name(instance_id, row_id)
     image = os.environ.get('DOCKER_INSTANCE_IMAGE', 'intellistock-backend')
     rethink_host = os.environ.get('INSTANCE_RETHINKDB_HOST', RETHINKDB_HOST)

@@ -661,6 +661,10 @@ class CreateBacktestBody(BaseModel):
     key: Optional[str] = None
     secret: Optional[str] = None
     initial_cash: Optional[float] = 100000.0
+    # Crypto only: emulate a specific venue's taker fee instead of the instance's
+    # own brokerage. None / "default" = use the instance's linked brokerage.
+    # Recognized: binanceus | alpaca | kraken | coinbase (see broker_adapters.fees).
+    emulate_fee_venue: Optional[str] = None
 
 
 class KalshiBacktestBody(BaseModel):
@@ -2899,6 +2903,7 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
         key=body.key,
         secret=body.secret,
         initial_cash=body.initial_cash,
+        emulate_fee_venue=body.emulate_fee_venue,
     )
 
 

@@ -134,6 +134,10 @@ class BacktestSummary {
     this.totalRoundTripPnl,
     this.avgWinningRoundTrip,
     this.avgLosingRoundTrip,
+    // crypto fee emulation
+    this.feeEmulated,
+    this.feeVenue,
+    this.emulateFeeVenue,
   });
 
   final String? id;
@@ -143,6 +147,12 @@ class BacktestSummary {
   /// Crypto fee accounting {total_fees, total_volume, taker_rate}; null for
   /// equity (commission-free) runs.
   final Map<String, num>? fees;
+  /// True when the fee was EMULATED (a venue other than the instance's brokerage).
+  final bool? feeEmulated;
+  /// The venue whose taker fee was applied (id or label), when emulated.
+  final String? feeVenue;
+  /// The emulated-fee venue choice, so "rerun" can preserve it.
+  final String? emulateFeeVenue;
   final num? portfolioStartValue;
   final num? portfolioEndValue;
   final num? totalTrades;
@@ -186,6 +196,13 @@ class BacktestSummary {
         pnl: _num(j['pnl']),
         pnlPercent: _num(j['pnl_percent']),
         fees: _numMap(j['fees']),
+        feeEmulated: (j['fees'] is Map)
+            ? (j['fees'] as Map)['emulated'] == true
+            : null,
+        feeVenue: (j['fees'] is Map)
+            ? (j['fees'] as Map)['venue']?.toString()
+            : null,
+        emulateFeeVenue: j['emulate_fee_venue']?.toString(),
         portfolioStartValue: _num(j['portfolio_start_value']),
         portfolioEndValue: _num(j['portfolio_end_value']),
         totalTrades: _num(j['total_trades']),

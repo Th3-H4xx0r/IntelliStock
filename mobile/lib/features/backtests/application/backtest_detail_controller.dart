@@ -257,6 +257,7 @@ class BacktestDetailController
       'end_date': s.endDate,
       'granularity': s.granularity ?? '60',
       'initial_cash': s.initialCash ?? 100000,
+      'emulate_fee_venue': s.emulateFeeVenue ?? 'default',
     };
     return _repo.create(body);
   }

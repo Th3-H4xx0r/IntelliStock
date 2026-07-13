@@ -72,6 +72,7 @@ class CryptoRepository {
     required String endDate,
     String granularity = '900',
     double initialCash = 10000,
+    String emulateFeeVenue = 'default',
   }) async {
     return _client.post<Map<String, dynamic>>(
       '/backtests',
@@ -82,6 +83,7 @@ class CryptoRepository {
         'end_date': endDate,
         'granularity': granularity,
         'initial_cash': initialCash,
+        'emulate_fee_venue': emulateFeeVenue,
       },
     );
   }

@@ -17,6 +17,16 @@ const _kBandCadence = <String, String>{
   'low': 'Low · ~60-minute bars',
 };
 
+// Emulate fees: value the strategy at a chosen venue's taker fee instead of the
+// instance's own brokerage. 'default' = use the instance's brokerage.
+const _kFeeVenues = <(String, String)>[
+  ('default', "Default — instance's brokerage"),
+  ('binanceus', 'Binance.US — 0.02% taker'),
+  ('alpaca', 'Alpaca — 0.25% taker'),
+  ('kraken', 'Kraken — 0.26% taker'),
+  ('coinbase', 'Coinbase Advanced — 0.60% taker'),
+];
+
 /// Opens the crypto backtest sheet. When [onCreated] is provided the sheet calls
 /// it after queuing (so a detail screen can refresh in place); otherwise it
 /// navigates to the generic backtest result view.
@@ -50,6 +60,7 @@ class _CryptoBacktestSheetState extends ConsumerState<CryptoBacktestSheet> {
   late DateTime _start;
   late DateTime _end;
   late String _gran;
+  String _feeVenue = 'default';
   final _cashCtrl = TextEditingController(text: '10000');
   bool _busy = false;
   String? _err;
@@ -108,6 +119,7 @@ class _CryptoBacktestSheetState extends ConsumerState<CryptoBacktestSheet> {
             endDate: _fmtDate(_end),
             granularity: _gran,
             initialCash: double.tryParse(_cashCtrl.text) ?? 10000,
+            emulateFeeVenue: _feeVenue,
           );
       final id = (res['id'] ?? res['backtest_id'])?.toString();
       if (!mounted) return;
@@ -261,6 +273,38 @@ class _CryptoBacktestSheetState extends ConsumerState<CryptoBacktestSheet> {
                           borderRadius: BorderRadius.circular(10),
                           borderSide: const BorderSide(color: AppColors.primary)),
                     ),
+                  ),
+                  const SizedBox(height: 14),
+                  Text('Emulate fees', style: AppTextStyles.micro),
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _feeVenue,
+                        isExpanded: true,
+                        dropdownColor: AppColors.panel,
+                        style: AppTextStyles.body.copyWith(color: AppColors.textHi),
+                        iconEnabledColor: AppColors.textMuted,
+                        onChanged: (v) => setState(() => _feeVenue = v ?? 'default'),
+                        items: [
+                          for (final v in _kFeeVenues)
+                            DropdownMenuItem(value: v.$1, child: Text(v.$2)),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _feeVenue == 'default'
+                        ? "Uses this instance's own brokerage fee."
+                        : 'Emulated — fills charged at the selected venue\'s fee. Compare a strategy across venues (fees make or break high-frequency crypto).',
+                    style: AppTextStyles.nano.copyWith(color: AppColors.textDim),
                   ),
                   if (_err != null) ...[
                     const SizedBox(height: 12),

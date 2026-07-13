@@ -8,12 +8,25 @@ from __future__ import annotations
 
 _BINANCE = ("binanceus", "binance", "binance_us", "binance.us")
 
-# Crypto taker fee by broker_type.
+# Crypto taker fee by broker_type / venue id. Includes venues we don't trade on
+# but can EMULATE fees for in a backtest (coinbase, kraken).
 CRYPTO_TAKER_FEE_BY_BROKER = {
     "alpaca": 0.0025,
     "robinhood": 0.0025,
     "binanceus": 0.0002,
+    "coinbase": 0.006,
+    "kraken": 0.0026,
 }
+
+# Ordered venue catalog for the backtest "emulate fees" picker: (id, label, taker).
+# Single source of truth so web + mobile + backend agree (they previously drifted
+# — the display cards showed Binance.US 0.1% while fills used 0.02%).
+CRYPTO_FEE_VENUES = (
+    ("binanceus", "Binance.US", 0.0002),
+    ("alpaca", "Alpaca", 0.0025),
+    ("kraken", "Kraken", 0.0026),
+    ("coinbase", "Coinbase Advanced", 0.006),
+)
 
 
 def crypto_taker_fee(broker_type: str | None) -> float:
@@ -23,6 +36,15 @@ def crypto_taker_fee(broker_type: str | None) -> float:
     if t in _BINANCE:
         return 0.0002
     return CRYPTO_TAKER_FEE_BY_BROKER.get(t, 0.0025)
+
+
+def venue_label(venue_id: str | None) -> str:
+    """Human label for a venue id (e.g. 'binanceus' -> 'Binance.US')."""
+    t = (venue_id or "").strip().lower()
+    for vid, label, _ in CRYPTO_FEE_VENUES:
+        if vid == t or (vid == "binanceus" and t in _BINANCE):
+            return label
+    return (venue_id or "").strip() or "—"
 
 
 def resolve_broker_type(instance_doc, brokerage_doc=None) -> str | None:
