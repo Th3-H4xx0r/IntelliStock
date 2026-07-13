@@ -82,7 +82,9 @@ const _kDynamicColor = Color(0xFF7C5CE6);
 
 /// Dynamic-strategy options (the crypto strategy classes). Resolved to an
 /// integer `strategy_id` at submit time by matching a Strategies doc by name.
+// Display name lowercases to the backend strategy id (e.g. 'Meanrev' -> 'meanrev').
 const _kStrategies = <(String, String)>[
+  ('Meanrev', 'Mean-Reversion — buys oversold majors (low RSI) only while above a long trend MA ("healthy dips, not falling knives") and banks the bounce. Mostly in cash; best on low-fee Binance.US. Top backtest performer — positive through a −42% BTC drawdown.'),
   ('Momentum', 'Trend-follows the auto-discovered universe — leans into coins whose momentum is strengthening. Higher conviction in movers.'),
   ('Allocator', 'Risk-weights across coins toward balanced target weights. Diversified, steadier exposure.'),
   ('Fast', 'Tactical, quick in/out on short-term signals. More responsive, higher turnover.'),

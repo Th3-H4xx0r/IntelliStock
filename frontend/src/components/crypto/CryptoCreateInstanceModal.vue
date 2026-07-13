@@ -60,16 +60,18 @@ const BAND_BLURB = {
 
 // What each dynamic strategy does with the auto-discovered (Dynamic) portion.
 const STRATEGY_BLURB = {
+  meanrev: 'Mean-Reversion — buys oversold majors (low RSI) only while they hold above a long trend MA ("healthy dips, not falling knives") and banks the bounce. Sits in cash most of the time; best on the low-fee Binance.US venue. In backtests the top performer — stayed positive through a −42% BTC drawdown.',
   momentum: 'Momentum — trend-follows the auto-discovered universe, leaning into coins whose momentum is strengthening. Higher conviction in movers.',
   allocator: 'Allocator — risk-weights across coins toward balanced target weights. Diversified, steadier exposure.',
   fast: 'Fast — tactical, quick in/out on short-term signals. More responsive, higher turnover.',
   reference: 'Reference — a simple buy-and-rebalance baseline to benchmark the others against.',
 }
 
-// The four crypto strategy modules live in strategies/crypto/. We surface them
-// from /strategies/available (filtered), falling back to a hardcoded list.
-const CRYPTO_STRATEGY_IDS = ['momentum', 'allocator', 'fast', 'reference']
+// The crypto strategy modules live in strategies/crypto/. We surface them from
+// /strategies/available (filtered), falling back to a hardcoded list.
+const CRYPTO_STRATEGY_IDS = ['meanrev', 'momentum', 'allocator', 'fast', 'reference']
 const FALLBACK_STRATEGIES = [
+  { id: 'meanrev', name: 'Mean-Reversion' },
   { id: 'momentum', name: 'Momentum' },
   { id: 'allocator', name: 'Allocator' },
   { id: 'fast', name: 'Fast' },

@@ -2753,7 +2753,15 @@ def _ensure_strategies_table(conn):
         _log(f"Could not ensure Strategies table: {e}", "yellow")
 
 
-_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference")
+_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference", "meanrev")
+
+# crypto_config tuning knobs forwarded into the synthesized strategy config so a
+# user can tune a crypto strategy from crypto_config without a Strategies row.
+_CRYPTO_STRATEGY_TUNABLES = (
+    "rsi_period", "rsi_buy", "rsi_exit", "regime_ma", "top_k",       # meanrev
+    "fast_ema", "slow_ema", "momentum_lookback", "adx_period", "adx_min",  # momentum
+    "entry_window", "exit_window", "trend_ma",                        # fast
+)
 
 
 def _crypto_synthetic_specs(instance_doc):
@@ -2768,13 +2776,17 @@ def _crypto_synthetic_specs(instance_doc):
         name = str(cc.get("strategy") or "momentum").strip().lower()
         if name not in _CRYPTO_STRATEGY_NAMES:
             name = "momentum"
+        cfg = {"band": cc.get("band", "medium")}
+        for _k in _CRYPTO_STRATEGY_TUNABLES:
+            if _k in cc:
+                cfg[_k] = cc[_k]
         spec = {
             "strategy": name,
             "weight": 1.0,
             "execution_position": 0,
             "decision_phase": "pre",
             "execution_scope": "run_once",
-            "config": {"band": cc.get("band", "medium")},
+            "config": cfg,
             "conditions": {},
         }
         return [spec], None, {"name": "crypto:%s" % name, "strategies": [spec]}
