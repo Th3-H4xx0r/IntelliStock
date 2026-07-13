@@ -442,6 +442,12 @@ const portfolioOpts = computed(() => ({
     crosshairs: { show: true, stroke: { color: '#38bdf8', width: 1, dashArray: 3 } },
   },
   yaxis:   {
+    // forceNiceScale + decimalsInFloat are CORE options applied on every
+    // (re)render, so even when ApexCharts drops the custom formatter on a
+    // running-backtest data update the labels stay clean ("$10,500") instead
+    // of raw float precision ("10500.000000000000").
+    forceNiceScale: true,
+    decimalsInFloat: 0,
     labels: {
       formatter: v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }),
       style: { colors: AXIS_COLOR },
@@ -516,7 +522,7 @@ function stockOpts(sym) {
     colors:  ['#0ea5e9', '#34d399', '#f87171'],
     xaxis:   { type: 'datetime', labels: { style: { colors: AXIS_COLOR } },
                crosshairs: { show: true, stroke: { color: '#475569', width: 1, dashArray: 3 } } },
-    yaxis:   { labels: { formatter: v => '$' + Number(v).toFixed(2), style: { colors: AXIS_COLOR } } },
+    yaxis:   { forceNiceScale: true, decimalsInFloat: 2, labels: { formatter: v => '$' + Number(v).toFixed(2), style: { colors: AXIS_COLOR } } },
     tooltip: {
       shared: true,
       intersect: false,
