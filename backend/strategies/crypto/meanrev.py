@@ -173,10 +173,20 @@ class Meanrev:
         return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
 
-def _apply_equal_weight_sizing(result, prices, portfolio_emulator, top_k):
-    """Emit equal-weight ``buy_cash`` (~1/top_k of portfolio) for each buy and a
-    full ``sell_fraction`` for each exit, so the broker deploys 100% into the
-    top_k dip slots. Never emits bare floats. No-op if there are no buys."""
+def _apply_equal_weight_sizing(result, prices, portfolio_emulator, top_k,
+                               atr_pct_by=None, sizing="equal"):
+    """Emit per-buy ``buy_cash`` and a full ``sell_fraction`` for each exit into
+    ``result["_nexus_position_sizes"]``, so the broker deploys 100% into the
+    top_k dip slots. Never emits bare floats. No-op if there are no buys.
+
+    Default (``sizing="equal"`` or no ``atr_pct_by``): each buy targets an equal
+    ``pv/top_k`` slot. This is the behavior connors.py relies on — do not change it.
+
+    ``sizing="vol"`` with ``atr_pct_by`` {sym: ATR%}: each slot is scaled by the
+    coin's volatility — ``buy_cash = pv/top_k * clamp(atr_pct/ref, 0.6, 1.6)`` where
+    ``ref`` is the median ATR% over the coins being bought — so more capital flows to
+    higher-bounce names (validated to win/tie equal-weight in every regime). Buys with
+    a missing/invalid ATR% fall back to the flat ``pv/top_k`` slot."""
     buys = [s for s, v in result.items()
             if isinstance(s, str) and not s.startswith("_") and v == 1]
     if not buys:
@@ -191,9 +201,28 @@ def _apply_equal_weight_sizing(result, prices, portfolio_emulator, top_k):
     if not isinstance(sizes, dict):
         sizes = {}
     per = round(pv / top_k, 2) if pv > 0 else 0.0
+
+    # Volatility reference = median ATR% over the buys that carry a valid value.
+    ref = None
+    if sizing == "vol" and isinstance(atr_pct_by, dict):
+        vals = sorted(v for s in buys
+                      for v in [atr_pct_by.get(s)]
+                      if isinstance(v, (int, float)) and v is not None and v > 0)
+        if vals:
+            m = len(vals)
+            ref = vals[m // 2] if m % 2 else (vals[m // 2 - 1] + vals[m // 2]) / 2.0
+
     for s in buys:
-        if per > 0:
-            sizes[s] = {"buy_cash": per, "asset_class": "crypto"}
+        if per <= 0:
+            continue
+        cash = per
+        if ref and ref > 0:
+            av = atr_pct_by.get(s) if isinstance(atr_pct_by, dict) else None
+            if isinstance(av, (int, float)) and av is not None and av > 0:
+                w = av / ref
+                w = 0.6 if w < 0.6 else (1.6 if w > 1.6 else w)
+                cash = round(per * w, 2)
+        sizes[s] = {"buy_cash": cash, "asset_class": "crypto"}
     for s, v in result.items():
         if isinstance(s, str) and not s.startswith("_") and v == -1:
             sizes[s] = {"sell_fraction": 1.0, "asset_class": "crypto"}
