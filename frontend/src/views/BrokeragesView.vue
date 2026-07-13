@@ -29,6 +29,11 @@ const alpacaForm  = ref({ account_name: '', key: '', secret: '', paper: true, da
 // Kalshi form (RSA-PSS v2): key id + PEM private key + demo/live environment.
 const kalshiForm  = ref({ account_name: '', key_id: '', private_key: '', environment: 'demo' })
 
+// Binance.US form (spot 0.00% maker / 0.02% taker). Simpler than Alpaca — no
+// data feed. `paper` = platform-simulated fills vs. live price (Binance.US has
+// no native sandbox); un-checked = live signed MARKET orders (real money).
+const binanceusForm = ref({ account_name: '', key: '', secret: '', paper: true })
+
 // R16: Alpaca diagnostic test-suite popup state. Catches credential
 // mistakes at config time instead of surfacing as 401s mid-run.
 const testRunning = ref(false)
@@ -147,6 +152,8 @@ function openEditModal(acct) {
   rhSelected.value  = ''
   if (acct.brokerage_type === 'alpaca') {
     alpacaForm.value = { account_name: acct.account_name, key: acct.alpaca_key || '', secret: '', paper: acct.alpaca_paper ?? true, data_feed: acct.alpaca_data_feed || 'iex' }
+  } else if (acct.brokerage_type === 'binanceus') {
+    binanceusForm.value = { account_name: acct.account_name, key: acct.binanceus_key || '', secret: '', paper: acct.alpaca_paper ?? true }
   } else {
     rhForm.value = { account_name: acct.account_name, access_token: '', refresh_token: '', device_token: '' }
   }
@@ -308,6 +315,25 @@ async function submitLink(opts = {}) {
         kalshi_private_key: f.private_key,
         kalshi_environment: f.environment || 'demo',
       }
+    } else if (activeTab.value === 'binanceus') {
+      const f = binanceusForm.value
+      if (!f.account_name.trim()) throw new Error('Account name is required')
+      if (!editMode.value && !f.key.trim())    throw new Error('API Key is required')
+      if (!editMode.value && !f.secret.trim()) throw new Error('Secret Key is required')
+      body = editMode.value
+        ? {
+            account_name: f.account_name.trim() || undefined,
+            key:          f.key.trim()    || undefined,
+            secret:       f.secret.trim() || undefined,
+            paper:        f.paper,
+          }
+        : {
+            brokerage_type: 'binanceus',
+            account_name:   f.account_name.trim(),
+            key:            f.key.trim(),
+            secret:         f.secret.trim(),
+            paper:          f.paper,
+          }
     } else {
       const f = rhForm.value
       if (!editMode.value && !rhSelected.value) throw new Error('Please select an account')
@@ -535,9 +561,9 @@ onMounted(fetchAccounts)
               <div class="min-w-0">
                 <p class="font-semibold text-slate-100 leading-tight truncate" :title="acct.account_name">{{ acct.account_name }}</p>
                 <p class="text-xs text-slate-500 uppercase tracking-widest mt-0.5">
-                  {{ acct.brokerage_type }}
-                  <span v-if="acct.brokerage_type === 'alpaca' && acct.alpaca_paper" class="text-primary">&nbsp;· Paper</span>
-                  <span v-if="acct.brokerage_type === 'alpaca' && !acct.alpaca_paper" class="text-yellow-400">&nbsp;· Live</span>
+                  {{ acct.brokerage_type === 'binanceus' ? 'Binance.US' : acct.brokerage_type }}
+                  <span v-if="(acct.brokerage_type === 'alpaca' || acct.brokerage_type === 'binanceus') && acct.alpaca_paper" class="text-primary">&nbsp;· Paper</span>
+                  <span v-if="(acct.brokerage_type === 'alpaca' || acct.brokerage_type === 'binanceus') && !acct.alpaca_paper" class="text-yellow-400">&nbsp;· Live</span>
                 </p>
               </div>
             </div>
@@ -551,6 +577,9 @@ onMounted(fetchAccounts)
           <div class="space-y-1.5 text-xs text-slate-500">
             <div v-if="acct.brokerage_type === 'alpaca'">
               <span class="text-slate-400">Key: </span>{{ acct.alpaca_key }}
+            </div>
+            <div v-if="acct.brokerage_type === 'binanceus' && acct.binanceus_key">
+              <span class="text-slate-400">Key: </span>{{ acct.binanceus_key }}
             </div>
             <div v-if="acct.brokerage_type === 'alpaca' && acct.alpaca_account_number">
               <span class="text-slate-400">Account #: </span>{{ acct.alpaca_account_number }}
@@ -653,6 +682,15 @@ onMounted(fetchAccounts)
               >
                 Kalshi
               </button>
+              <button
+                @click="setTab('binanceus')"
+                class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
+                :class="activeTab === 'binanceus'
+                  ? 'bg-primary text-background-dark'
+                  : 'text-slate-400 hover:text-slate-200'"
+              >
+                Binance.US
+              </button>
             </div>
           </div>
 
@@ -735,6 +773,46 @@ onMounted(fetchAccounts)
                 </select>
                 <p v-if="kalshiForm.environment === 'live'" class="text-[11px] text-yellow-400 mt-1">⚠ Live account — instances bound here trade real money.</p>
               </div>
+            </template>
+
+            <!-- ── Binance.US fields ── -->
+            <template v-else-if="activeTab === 'binanceus'">
+              <div class="rounded-lg bg-primary/10 border border-primary/20 px-4 py-3 text-[11px] text-primary/90 leading-relaxed">
+                Spot fees: <strong>0.00% maker / 0.02% taker</strong> — ~12× cheaper than
+                Alpaca crypto (0.25%), which is what makes high-frequency strategies viable.
+                Create a read+trade API key at binance.us (no withdrawal permission needed).
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Account Name</label>
+                <input v-model="binanceusForm.account_name" type="text" placeholder="e.g. Binance.US Paper"
+                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">API Key</label>
+                <input v-model="binanceusForm.key" type="text" placeholder="Binance.US API key"
+                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Secret Key<span v-if="editMode" class="text-slate-600 ml-1">(leave blank to keep existing)</span></label>
+                <input v-model="binanceusForm.secret" type="password"
+                  :placeholder="editMode ? 'Leave blank to keep existing secret' : '••••••••••••••••••••••••••••••••••••••••'"
+                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+              </div>
+              <div class="flex items-center gap-3">
+                <button type="button" @click="binanceusForm.paper = !binanceusForm.paper"
+                  class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
+                  :class="binanceusForm.paper ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'">
+                  <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
+                    :class="binanceusForm.paper ? 'translate-x-4' : 'translate-x-0.5'"></span>
+                </button>
+                <span class="text-sm text-slate-300">
+                  Paper trading
+                  <span class="text-slate-500 text-xs ml-1">({{ binanceusForm.paper ? 'simulated fills vs. live price' : 'live signed orders · real money' }})</span>
+                </span>
+              </div>
+              <p v-if="!binanceusForm.paper" class="text-[11px] text-yellow-400 leading-relaxed">
+                ⚠ Live account — instances bound here place real Binance.US MARKET orders with real funds.
+              </p>
             </template>
 
             <!-- ── Robinhood Step 1: credentials ── -->
@@ -873,9 +951,9 @@ onMounted(fetchAccounts)
               {{ testRunning ? 'Testing...' : 'Test' }}
             </button>
 
-            <!-- Alpaca / Kalshi: Link / Save Account -->
+            <!-- Alpaca / Kalshi / Binance.US: Link / Save Account -->
             <button
-              v-if="activeTab === 'alpaca' || activeTab === 'kalshi'"
+              v-if="activeTab === 'alpaca' || activeTab === 'kalshi' || activeTab === 'binanceus'"
               @click="submitLink"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2"

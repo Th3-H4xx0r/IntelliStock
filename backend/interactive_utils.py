@@ -7118,6 +7118,10 @@ def _mask_brokerage_doc(doc):
         d["alpaca_key"] = _mask_key(d["alpaca_key"])
     if d.get("alpaca_secret"):
         d["alpaca_secret"] = "****"
+    if d.get("binanceus_key"):
+        d["binanceus_key"] = _mask_key(d["binanceus_key"])
+    if d.get("binanceus_secret"):
+        d["binanceus_secret"] = "****"
     if d.get("robinhood_access_token"):
         d["robinhood_access_token"] = "****"
     if d.get("robinhood_refresh_token"):

@@ -85,3 +85,22 @@ def test_backtest_taker_fee_is_venue_configurable():
     binance = PortfolioEmulator(initial_cash=10_000.0, taker_fee=crypto_taker_fee("binanceus"))
     binance.buy("BTC/USD", 5_000 / 50_000, 50_000.0)
     assert abs(binance.get_fee_summary()["total_fees"] - 1.0) < 1e-6
+
+
+def test_list_endpoint_masks_binanceus_credentials():
+    """GET /brokerages must never ship the Binance.US key/secret to the browser
+    — not even the Fernet ciphertext. _mask_brokerage_doc masks both like it
+    already does for Alpaca."""
+    from interactive_utils import _mask_brokerage_doc
+    doc = {
+        "brokerage_type": "binanceus",
+        "account_name": "BUS",
+        "binanceus_key": "ABCDEFGH12345678",     # plaintext or ciphertext — must be masked
+        "binanceus_secret": "supersecretvalue",
+        "alpaca_paper": True,
+    }
+    m = _mask_brokerage_doc(doc)
+    assert "****" in m["binanceus_key"] and "ABCDEFGH" not in m["binanceus_key"]
+    assert m["binanceus_secret"] == "****"
+    assert "supersecretvalue" not in str(m)
+    assert m["account_name"] == "BUS"            # non-sensitive fields untouched

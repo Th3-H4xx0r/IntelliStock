@@ -64,6 +64,12 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
   List<Map<String, dynamic>> _rhAccounts = [];
   String? _rhSelected;
 
+  // ── Binance.US form state (spot 0.00% maker / 0.02% taker) ────────────────
+  final _busNameCtrl = TextEditingController();
+  final _busKeyCtrl = TextEditingController();
+  final _busSecretCtrl = TextEditingController();
+  bool _busPaper = true;
+
   // ── Shared submission state ───────────────────────────────────────────────
   bool _submitting = false;
   String? _submitMsg;
@@ -73,12 +79,9 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
   void initState() {
     super.initState();
     _tabCtrl = TabController(
-      length: 2,
+      length: 3,
       vsync: this,
-      initialIndex:
-          (_editMode && widget.editAccount!.brokerageType == 'robinhood')
-              ? 1
-              : 0,
+      initialIndex: _editMode ? _tabIndexFor(widget.editAccount!.brokerageType) : 0,
     );
     _tabCtrl.addListener(() {
       if (!_tabCtrl.indexIsChanging) {
@@ -99,9 +102,24 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
         _alpacaNameCtrl.text = a.accountName;
         _alpacaPaper = a.paper;
         _alpacaFeed = a.alpacaDataFeed ?? 'iex';
+      } else if (a.brokerageType == 'binanceus') {
+        _busNameCtrl.text = a.accountName;
+        _busPaper = a.paper;
       } else {
         _rhNameCtrl.text = a.accountName;
       }
+    }
+  }
+
+  // Tab order: 0 = Alpaca, 1 = Robinhood, 2 = Binance.US.
+  int _tabIndexFor(String brokerageType) {
+    switch (brokerageType) {
+      case 'robinhood':
+        return 1;
+      case 'binanceus':
+        return 2;
+      default:
+        return 0;
     }
   }
 
@@ -115,6 +133,9 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
     _rhAccessCtrl.dispose();
     _rhRefreshCtrl.dispose();
     _rhDeviceCtrl.dispose();
+    _busNameCtrl.dispose();
+    _busKeyCtrl.dispose();
+    _busSecretCtrl.dispose();
     super.dispose();
   }
 
@@ -364,6 +385,55 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
     }
   }
 
+  // ── Binance.US save ───────────────────────────────────────────────────────
+
+  Future<void> _submitBinanceus() async {
+    final name = _busNameCtrl.text.trim();
+    final key = _busKeyCtrl.text.trim();
+    final secret = _busSecretCtrl.text.trim();
+
+    if (name.isEmpty) { _setMsg('Account name is required'); return; }
+    if (!_editMode && key.isEmpty) { _setMsg('API Key is required'); return; }
+    if (!_editMode && secret.isEmpty) { _setMsg('Secret Key is required'); return; }
+
+    _setSubmitting(true);
+    _setMsg('');
+    try {
+      final body = _editMode
+          ? {
+              if (name.isNotEmpty) 'account_name': name,
+              if (key.isNotEmpty) 'key': key,
+              if (secret.isNotEmpty) 'secret': secret,
+              'paper': _busPaper,
+            }
+          : {
+              'brokerage_type': 'binanceus',
+              'account_name': name,
+              'key': key,
+              'secret': secret,
+              'paper': _busPaper,
+            };
+
+      if (_editMode) {
+        await ref
+            .read(brokerageRepositoryProvider)
+            .edit(widget.editAccount!.id, body);
+      } else {
+        await ref.read(brokerageRepositoryProvider).link(body);
+      }
+      _setMsg(_editMode ? 'Account updated!' : 'Account linked!', ok: true);
+      _setSubmitting(false);
+      await ref.read(brokeragesControllerProvider.notifier).refresh();
+      if (mounted) {
+        await Future<void>.delayed(const Duration(milliseconds: 1200));
+        if (mounted) Navigator.of(context).pop();
+      }
+    } catch (e) {
+      _setMsg(e.toString());
+      _setSubmitting(false);
+    }
+  }
+
   // ── UI ────────────────────────────────────────────────────────────────────
 
   @override
@@ -395,6 +465,7 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                         children: [
                           _buildAlpacaTab(),
                           _buildRobinhoodTab(),
+                          _buildBinanceusTab(),
                         ],
                       ),
               ),
@@ -491,9 +562,12 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
           labelColor: AppColors.onPrimary,
           unselectedLabelColor: AppColors.textMuted,
           labelStyle: AppTextStyles.cardTitle,
+          isScrollable: false,
+          labelPadding: const EdgeInsets.symmetric(horizontal: 4),
           tabs: const [
             Tab(text: 'Alpaca'),
             Tab(text: 'Robinhood'),
+            Tab(text: 'Binance.US'),
           ],
         ),
       ),
@@ -502,9 +576,14 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
 
   // In edit mode we just show the right tab body directly (no TabBar).
   Widget _buildEditBody() {
-    return widget.editAccount!.brokerageType == 'alpaca'
-        ? _buildAlpacaTab()
-        : _buildRobinhoodTab();
+    switch (widget.editAccount!.brokerageType) {
+      case 'alpaca':
+        return _buildAlpacaTab();
+      case 'binanceus':
+        return _buildBinanceusTab();
+      default:
+        return _buildRobinhoodTab();
+    }
   }
 
   // ── Alpaca tab ─────────────────────────────────────────────────────────────
@@ -821,6 +900,113 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
             ),
         ],
       ),
+    );
+  }
+
+  // ── Binance.US tab ─────────────────────────────────────────────────────────
+
+  Widget _buildBinanceusTab() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _infoBox(
+          color: AppColors.primary,
+          child: RichText(
+            text: TextSpan(
+              style: AppTextStyles.meta.copyWith(color: AppColors.primary),
+              text: 'Spot fees: ',
+              children: [
+                TextSpan(
+                  text: '0.00% maker / 0.02% taker',
+                  style: AppTextStyles.meta.copyWith(
+                      color: AppColors.primary, fontWeight: FontWeight.w700),
+                ),
+                const TextSpan(
+                  text:
+                      ' — ~12× cheaper than Alpaca crypto (0.25%), which is what makes '
+                      'high-frequency strategies viable. Create a read+trade API key '
+                      'at binance.us (no withdrawal permission needed).',
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        _field('Account Name', _busNameCtrl,
+            placeholder: 'e.g. Binance.US Paper'),
+        const SizedBox(height: 14),
+        _field('API Key', _busKeyCtrl,
+            placeholder: 'Binance.US API key', mono: true),
+        const SizedBox(height: 14),
+        _field(
+          'Secret Key${_editMode ? ' (leave blank to keep existing)' : ''}',
+          _busSecretCtrl,
+          placeholder: _editMode
+              ? 'Leave blank to keep existing'
+              : '●●●●●●●●●●●●●●●●●●●●●●●●',
+          obscure: true,
+          mono: true,
+        ),
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            AppToggle(
+              value: _busPaper,
+              onChanged: (v) => setState(() => _busPaper = v),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: RichText(
+                text: TextSpan(
+                  style: AppTextStyles.body,
+                  text: 'Paper trading  ',
+                  children: [
+                    TextSpan(
+                      text: _busPaper
+                          ? '(simulated fills vs. live price)'
+                          : '(live signed orders · real money)',
+                      style: AppTextStyles.meta,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (!_busPaper) ...[
+          const SizedBox(height: 10),
+          _infoBox(
+            color: AppColors.warning,
+            child: Text(
+              '⚠ Live account — instances bound here place real Binance.US MARKET '
+              'orders with real funds.',
+              style: AppTextStyles.meta.copyWith(color: AppColors.warning),
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
+        _buildStatusMsg(),
+        const SizedBox(height: 12),
+        Row(children: [
+          Expanded(
+            child: AppButton.ghost(
+              label: 'Cancel',
+              onPressed:
+                  _submitting ? null : () => Navigator.of(context).pop(),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 2,
+            child: AppButton.primary(
+              label: _editMode ? 'Save Changes' : 'Link Account',
+              busy: _submitting,
+              onPressed: _submitting ? null : _submitBinanceus,
+            ),
+          ),
+        ]),
+        const SizedBox(height: 8),
+      ],
     );
   }
 

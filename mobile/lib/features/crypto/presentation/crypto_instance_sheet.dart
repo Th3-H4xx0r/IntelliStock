@@ -235,11 +235,12 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
   }
 
   List<Map<String, dynamic>> _cryptoBrokerages(List<Map<String, dynamic>> all) {
-    final alpaca = all
-        .where((b) =>
-            (b['brokerage_type'] ?? '').toString().toLowerCase().contains('alpaca'))
-        .toList();
-    return alpaca.isNotEmpty ? alpaca : all;
+    // Crypto trades on Alpaca or Binance.US (0%/0.02% fees).
+    final crypto = all.where((b) {
+      final t = (b['brokerage_type'] ?? '').toString().toLowerCase();
+      return t.contains('alpaca') || t.contains('binance');
+    }).toList();
+    return crypto.isNotEmpty ? crypto : all;
   }
 
   Future<void> _loadEquity() async {

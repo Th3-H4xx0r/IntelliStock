@@ -146,7 +146,7 @@ async function loadBrokerages() {
     if (!res.ok) return
     const d = await res.json()
     // Crypto trades through Alpaca.
-    brokerages.value = (d.accounts || []).filter((a) => a.brokerage_type === 'alpaca')
+    brokerages.value = (d.accounts || []).filter((a) => ['alpaca', 'binanceus'].includes(a.brokerage_type))
     if (!brokerageId.value && brokerages.value.length) brokerageId.value = brokerages.value[0].id
   } catch { /* non-critical */ }
 }
