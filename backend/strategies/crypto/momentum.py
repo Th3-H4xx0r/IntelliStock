@@ -147,12 +147,10 @@ class Momentum:
             except Exception:
                 adx_last = np.nan
             chop = (not np.isnan(adx_last)) and (adx_last < adx_min)
-            # Hysteresis on the EMA cross: enter only when fast leads slow by the
-            # band; a held coin stays "up" until fast falls the band below slow.
-            ema_up = (not np.isnan(fe)) and (not np.isnan(se)) and se > 0 and (
-                fe > se * (1 + hyst) or (sym in held and fe > se * (1 - hyst))
-            )
-            trend_up = ema_up and (not chop)
+            # EMA cross (fast leads slow) confirmed by a non-chop ADX. The
+            # anti-whipsaw hysteresis lives on the momentum threshold below (a
+            # band on the EMA gap here was too tight and blocked re-entry).
+            trend_up = (not np.isnan(fe)) and (not np.isnan(se)) and (fe > se) and (not chop)
             metrics[sym] = {"mom": mom, "trend_up": trend_up}
 
         valid = {s: m for s, m in metrics.items() if m is not None}

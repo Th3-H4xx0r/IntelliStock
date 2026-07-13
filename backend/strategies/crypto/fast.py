@@ -1,17 +1,20 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "Fast", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "high", "breakout_window": 20, "fast_ema": 9, "slow_ema": 21}}
-# INTELLISTOCK_DESCRIPTION: Band 1 fast tactical crypto strategy. BTC/USD and ETH/USD only. Short-window breakout confirmed by a fast/slow EMA cross; only trades when the momentum gap clears the maker round-trip cost. Breakdown below the recent range exits to USD.
+# INTELLISTOCK_SCHEMA: {"strategy": "Fast", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "high", "entry_window": 20, "exit_window": 10, "trend_ma": 50}}
+# INTELLISTOCK_DESCRIPTION: Band 1 Donchian-channel breakout trend-follower. Buys an N-bar-high breakout only while price is above a long trend MA (regime filter that dodges counter-trend chop), rides the trend, and exits on a faster M-bar-low breakdown (M<N). Turtle-style: let winners run, cut losers.
 # DIFFICULTY: 3
 """
 Fast tactical crypto strategy (run_once). DB name: "fast" (file fast.py, class Fast).
 
-BTC/ETH only. On the provided (short-timeframe) bars:
-- Breakout: close > prior N-bar high AND fast-EMA > slow-EMA AND the EMA
-  momentum gap clears ``core.min_edge_to_trade(maker=False)`` (real taker
-  round-trip cost, since the adapter places market orders) -> buy (1).
-- Breakdown: close < prior N-bar low AND fast-EMA < slow-EMA -> exit (-1).
-- Otherwise (chop, or a move too small to beat fees) -> hold (0).
-Returns 1 = buy, 0 = hold, -1 = sell, plus ``_nexus_discovered`` for the
-BTC/ETH pairs when they were auto-added (seed list empty).
+Donchian-channel breakout trend-follower (Turtle-style). Research is consistent
+that raw MA-cross / breakout systems bleed fees to whipsaw in chop; the fix that
+matters most is a REGIME FILTER, not tuning periods. So:
+- ENTRY (flat): close breaks above the prior ``entry_window``-bar high AND price
+  is above the ``trend_ma`` long-term average (up-regime) -> buy (1).
+- EXIT (held): close breaks below the prior ``exit_window``-bar low (a faster
+  trailing channel, ``exit_window`` < ``entry_window``) -> sell (-1); otherwise
+  hold (0) and let the winner run.
+- Everything else -> hold (0).
+Returns 1 = buy, 0 = hold, -1 = sell, plus ``_nexus_discovered`` for auto-picked
+pairs. Per-symbol sizing is left to the broker's default sizing.
 """
 
 from __future__ import annotations
@@ -19,7 +22,6 @@ from __future__ import annotations
 from typing import Mapping, Optional
 
 import numpy as np
-import talib
 
 try:
     import sys
@@ -33,20 +35,25 @@ except Exception:
 
 from strategies.crypto import core
 
-# This band is intentionally scoped to the two most-liquid pairs.
-FAST_PAIRS = ["BTC/USD", "ETH/USD"]
+DEFAULT_MAJORS = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
+    "LINK/USD", "LTC/USD", "DOT/USD", "BCH/USD",
+]
 
-# Shared helper (single source of truth in core).
+_DISCOVERY_TIMEFRAME = "1Hour"
+
+# Shared helpers (single source of truth in core).
 _series = core.series
+_held_symbols = core.held_symbols
 
 
 class Fast:
-    """Short-window breakout/momentum on BTC & ETH."""
+    """Donchian-channel breakout trend-follower on crypto majors."""
 
     def __init__(self):
-        self.breakout_window = 20
-        self.fast_ema = 9
-        self.slow_ema = 21
+        self.entry_window = 20   # breakout entry lookback (prior N-bar high)
+        self.exit_window = 10    # faster breakdown exit (prior M-bar low, M<N)
+        self.trend_ma = 50       # regime filter: only go long above this SMA
 
     def run_once(
         self,
@@ -70,61 +77,54 @@ class Fast:
         if mode == "IDLE":
             return {}
 
-        window = int(settings.get("breakout_window", self.breakout_window))
-        fast_p = int(settings.get("fast_ema", self.fast_ema))
-        slow_p = int(settings.get("slow_ema", self.slow_ema))
-        window = max(2, window)
-        fast_p = max(2, fast_p)
-        slow_p = max(fast_p + 1, slow_p)
-        edge = core.min_edge_to_trade(maker=False)
-        min_bars = slow_p + window + 2
+        entry_w = max(2, int(settings.get("entry_window", self.entry_window)))
+        exit_w = max(2, int(settings.get("exit_window", self.exit_window)))
+        trend_ma = max(entry_w, int(settings.get("trend_ma", self.trend_ma)))
+        min_bars = trend_ma + 2
 
-        seed = {str(s).strip().upper() for s in (symbols or [])}
         data = data or {}
+        seed = [str(s).strip().upper() for s in (symbols or []) if str(s).strip()]
+        if seed:
+            candidates = seed
+        else:
+            band = str(settings.get("band", "high"))
+            disc_k = max(1, int(settings.get("discovery_k", 10)))
+            timeframe = str(settings.get("discovery_timeframe", _DISCOVERY_TIMEFRAME))
+            candidates = core.discover_universe(band, disc_k, settings, timeframe) or DEFAULT_MAJORS
+
+        seed_set = set(seed)
+        discovered = [s for s in candidates if s not in seed_set]
+        universe = [s for s in candidates if data.get(s)]
 
         result: dict = {}
-        discovered = []
-        for sym in FAST_PAIRS:
-            bars = data.get(sym)
-            if not bars:
-                continue
+        if discovered:
+            result["_nexus_discovered"] = discovered
+        # Exit held coins we can't see this tick (crypto no-sells bug fix).
+        core.exit_blind_held(result, portfolio_emulator, data, universe)
+        if not universe:
+            return core.apply_crypto_config(result, config, prices, portfolio_emulator)
+
+        held = _held_symbols(portfolio_emulator, universe)
+        for sym in universe:
+            bars = data.get(sym) or []
             closes = _series(bars, "c")
             highs = _series(bars, "h")
             lows = _series(bars, "l")
-            if len(closes) < min_bars:
-                result[sym] = 0
-                if sym not in seed:
-                    discovered.append(sym)
+            if closes.size < min_bars:
+                result[sym] = -1 if sym in held else 0
                 continue
-
-            fast_ema = talib.EMA(closes, timeperiod=fast_p)
-            slow_ema = talib.EMA(closes, timeperiod=slow_p)
-            fe, se = fast_ema[-1], slow_ema[-1]
-            if np.isnan(fe) or np.isnan(se) or se <= 0:
-                result[sym] = 0
-                if sym not in seed:
-                    discovered.append(sym)
-                continue
-
-            close_now = closes[-1]
-            prior_high = float(np.max(highs[-(window + 1):-1]))
-            prior_low = float(np.min(lows[-(window + 1):-1]))
-            gap = fe / se - 1.0
-
-            if close_now > prior_high and fe > se and gap >= edge:
-                score = 1
-            elif close_now < prior_low and fe < se:
-                score = -1
+            close_now = float(closes[-1])
+            trend = float(np.mean(closes[-trend_ma:]))
+            up_regime = close_now > trend
+            # Prior-bar Donchian channels (exclude the current, still-forming bar).
+            donchian_hi = float(np.max(highs[-(entry_w + 1):-1]))
+            donchian_lo = float(np.min(lows[-(exit_w + 1):-1]))
+            if sym in held:
+                # Trailing channel exit — leave on a break of the exit low; else
+                # hold and let the winner run.
+                result[sym] = -1 if close_now < donchian_lo else 0
             else:
-                score = 0
-            result[sym] = score
-            if sym not in seed:
-                discovered.append(sym)
+                # Enter only on a breakout WHILE the long-term regime is up.
+                result[sym] = 1 if (up_regime and close_now > donchian_hi) else 0
 
-        # Exit held coins we can't see this tick — coins with no bars are
-        # `continue`d above, so a held-but-blind position is never sold without
-        # this (crypto no-sells bug fix). Evaluated = the symbols we scored.
-        core.exit_blind_held(result, portfolio_emulator, data, list(result.keys()))
-        if discovered:
-            result["_nexus_discovered"] = discovered
         return core.apply_crypto_config(result, config, prices, portfolio_emulator)

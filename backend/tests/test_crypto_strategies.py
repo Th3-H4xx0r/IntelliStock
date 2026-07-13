@@ -114,9 +114,11 @@ def _breakdown_series():
 
 
 def test_fast_breakout_buys():
-    data = {"BTC/USD": _bars(_breakout_series())}
+    # Donchian: a decisive uptrend (above the 50-bar SMA) that breaks the prior
+    # 20-bar high -> buy.
+    data = {"BTC/USD": _bars(list(np.linspace(100.0, 200.0, 60)))}
     out = Fast().run_once(
-        ["BTC/USD"], {"BTC/USD": 140.0}, None, {}, {},
+        ["BTC/USD"], {"BTC/USD": 200.0}, None, {}, {},
         data=data, portfolio_emulator=None, mode="MONITOR",
     )
     assert out["BTC/USD"] == 1
@@ -132,22 +134,26 @@ def test_fast_chop_holds():
 
 
 def test_fast_breakdown_exits():
-    data = {"BTC/USD": _bars(_breakdown_series())}
+    # Donchian trailing exit: a HELD position that breaks below the prior
+    # exit-window low -> sell.
+    data = {"BTC/USD": _bars(list(np.linspace(200.0, 100.0, 60)))}
+    pf = FakePortfolio(positions={"BTC/USD": 0.1})
     out = Fast().run_once(
-        ["BTC/USD"], {"BTC/USD": 60.0}, None, {}, {},
-        data=data, portfolio_emulator=None, mode="MONITOR",
+        ["BTC/USD"], {"BTC/USD": 100.0}, None, {}, {},
+        data=data, portfolio_emulator=pf, mode="MONITOR",
     )
     assert out["BTC/USD"] == -1
 
 
-def test_fast_only_btc_eth():
-    # A non-BTC/ETH pair in the seed is ignored by the fast band.
-    data = {"SOL/USD": _bars(_breakout_series())}
+def test_fast_trades_any_seeded_pair():
+    # The Donchian fast band is universe-based (no longer BTC/ETH-only): a seeded
+    # pair with a breakout in an up-regime is bought.
+    data = {"SOL/USD": _bars(list(np.linspace(100.0, 200.0, 60)))}
     out = Fast().run_once(
-        ["SOL/USD"], {"SOL/USD": 140.0}, None, {}, {},
+        ["SOL/USD"], {"SOL/USD": 200.0}, None, {}, {},
         data=data, portfolio_emulator=None, mode="MONITOR",
     )
-    assert "SOL/USD" not in out
+    assert out["SOL/USD"] == 1
 
 
 # ===========================================================================
@@ -273,8 +279,8 @@ def test_no_strategy_emits_nexus_position_sizes():
         portfolio_emulator=None, mode="MONITOR",
     )
     fast = Fast().run_once(
-        ["BTC/USD"], {"BTC/USD": 140.0}, None, {}, {},
-        data={"BTC/USD": _bars(_breakout_series())},
+        ["BTC/USD"], {"BTC/USD": 200.0}, None, {}, {},
+        data={"BTC/USD": _bars(list(np.linspace(100.0, 200.0, 60)))},
         portfolio_emulator=None, mode="MONITOR",
     )
     for name, out in [("reference", ref), ("momentum", mom), ("allocator", alloc), ("fast", fast)]:
