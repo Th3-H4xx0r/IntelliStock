@@ -69,3 +69,19 @@ def test_execute_signal_guards(monkeypatch):
     assert a.execute_signal("BTC/USD", -1, 50_000.0) is False   # nothing held
     assert a.execute_signal("BTC/USD", 0, 50_000.0) is False    # hold
     assert a.execute_signal("BTC/USD", 1, 0.0) is False          # no price -> can't size
+
+
+def test_backtest_taker_fee_is_venue_configurable():
+    """The backtest PortfolioEmulator applies the venue's crypto taker fee:
+    Alpaca 0.25% by default, Binance.US 0.02% when passed."""
+    from portfolio_emulator import PortfolioEmulator
+    from broker_adapters.fees import crypto_taker_fee
+    assert crypto_taker_fee("binanceus") == 0.0002
+    assert crypto_taker_fee("alpaca") == 0.0025
+    assert crypto_taker_fee(None) == 0.0025
+    default = PortfolioEmulator(initial_cash=10_000.0)          # Alpaca 0.25%
+    default.buy("BTC/USD", 5_000 / 50_000, 50_000.0)
+    assert abs(default.get_fee_summary()["total_fees"] - 12.5) < 1e-6
+    binance = PortfolioEmulator(initial_cash=10_000.0, taker_fee=crypto_taker_fee("binanceus"))
+    binance.buy("BTC/USD", 5_000 / 50_000, 50_000.0)
+    assert abs(binance.get_fee_summary()["total_fees"] - 1.0) < 1e-6

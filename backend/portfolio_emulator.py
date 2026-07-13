@@ -24,9 +24,13 @@ class PortfolioEmulator:
     value history at the end of a backtest.
     """
 
-    def __init__(self, initial_cash=100000.0):
+    def __init__(self, initial_cash=100000.0, taker_fee=None):
         self._cash = float(initial_cash)
         self._initial_value = float(initial_cash)  # Track original portfolio value
+        # Crypto taker fee applied to fills (equities are commission-free). Defaults
+        # to the module constant (Alpaca 0.25%); a Binance.US backtest passes
+        # 0.0002 (0.02%) so low-fee/high-frequency strategies value correctly.
+        self._taker_fee = float(taker_fee) if taker_fee is not None else _CRYPTO_TAKER_FEE
         self._positions = {}  # ticker -> shares (float)
         self._trades = []    # list of { timestamp, action, ticker, shares, price, total, cash_after }
         self._portfolio_snapshots = []  # list of { timestamp, value, cash, positions_snapshot, prices }
@@ -57,10 +61,10 @@ class PortfolioEmulator:
         # coins. Equity symbols (no "/") keep the EXACT commission-free math.
         filled_shares = shares
         if "/" in ticker:
-            filled_shares = shares * (1.0 - _CRYPTO_TAKER_FEE)
+            filled_shares = shares * (1.0 - self._taker_fee)
             # The taker fee is embedded as fewer coins; record it (and the gross
             # notional) for the backtest fee summary.
-            self._crypto_fees_paid += total * _CRYPTO_TAKER_FEE
+            self._crypto_fees_paid += total * self._taker_fee
             self._crypto_volume += total
         self._positions[ticker] = self._positions.get(ticker, 0.0) + filled_shares
         self._trades.append({
@@ -92,9 +96,9 @@ class PortfolioEmulator:
         # proceeds credited to cash are net of the fee. Equity symbols (no "/")
         # keep the EXACT commission-free math.
         if "/" in ticker:
-            self._crypto_fees_paid += total * _CRYPTO_TAKER_FEE
+            self._crypto_fees_paid += total * self._taker_fee
             self._crypto_volume += total
-            total = total * (1.0 - _CRYPTO_TAKER_FEE)
+            total = total * (1.0 - self._taker_fee)
         self._cash += total
         self._positions[ticker] = current - shares
         if self._positions[ticker] <= 0:
@@ -157,7 +161,7 @@ class PortfolioEmulator:
         return {
             "total_fees": round(self._crypto_fees_paid, 6),
             "total_volume": round(self._crypto_volume, 2),
-            "taker_rate": _CRYPTO_TAKER_FEE,
+            "taker_rate": self._taker_fee,
         }
 
     def get_portfolio_history(self):

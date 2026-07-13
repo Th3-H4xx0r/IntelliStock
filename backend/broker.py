@@ -780,7 +780,7 @@ except SystemExit:
 # endpoint, gtc/no-extended orders) switch behavior; equity instances see
 # kind=None and byte-identical behavior. The kind + crypto_config are read once
 # and cached here so the hot loop never re-hits the DB.
-_INSTANCE_KIND_CACHE = {"loaded": False, "kind": None, "crypto_config": {}}
+_INSTANCE_KIND_CACHE = {"loaded": False, "kind": None, "crypto_config": {}, "broker_type": None}
 
 
 def _instance_kind_and_crypto_config():
@@ -800,10 +800,11 @@ def _instance_kind_and_crypto_config():
                 pass
         kind = _doc.get("kind")
         cc = _doc.get("crypto_config") or {}
+        bt = _doc.get("broker_type") or None
         # Cache ONLY on a SUCCESSFUL read. RethinkDB is memory-starved/flaky here;
         # caching a transient-error result would permanently mis-classify a real
         # crypto instance as equity for the whole process lifetime.
-        _INSTANCE_KIND_CACHE.update({"loaded": True, "kind": kind, "crypto_config": cc})
+        _INSTANCE_KIND_CACHE.update({"loaded": True, "kind": kind, "crypto_config": cc, "broker_type": bt})
         return kind, cc
     except Exception:
         # Transient failure — do NOT cache; retry on the next tick.
@@ -813,6 +814,18 @@ def _instance_kind_and_crypto_config():
 def _is_crypto_instance_runtime():
     """True iff this broker process is running a kind='crypto' instance."""
     return _instance_kind_and_crypto_config()[0] == "crypto"
+
+
+def _instance_crypto_taker_fee():
+    """Crypto taker fee for THIS instance's venue, for the backtest fee model:
+    Binance.US = 0.02%, else Alpaca 0.25%. Returns None (PortfolioEmulator's
+    default 0.25%) on any error so equity + Alpaca crypto backtests are unchanged."""
+    try:
+        _instance_kind_and_crypto_config()  # ensure the cache is loaded
+        from broker_adapters.fees import crypto_taker_fee
+        return crypto_taker_fee(_INSTANCE_KIND_CACHE.get("broker_type"))
+    except Exception:
+        return None
 
 # Live-mode broker configuration: resolved from DB, not argv.
 # data_key/data_secret are for market-data API calls (bars, news); they can be
@@ -5286,7 +5299,7 @@ portfolio_emulator = None
 live_adapter = None
 live_wal = None
 if mode == MODE_BACKTEST:
-    portfolio_emulator = PortfolioEmulator(initial_cash=initial_cash)
+    portfolio_emulator = PortfolioEmulator(initial_cash=initial_cash, taker_fee=_instance_crypto_taker_fee())
     _log("PortfolioEmulator initialized for backtest (initial_cash=%s)." % initial_cash, "green")
 elif mode == MODE_LIVE:
     try:
