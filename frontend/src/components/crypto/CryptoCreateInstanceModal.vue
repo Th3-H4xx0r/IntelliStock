@@ -188,12 +188,32 @@ async function loadStrategies() {
         const canon = String(s?.schema?.strategy || '').toLowerCase()
         return CRYPTO_STRATEGY_IDS.includes(id) || CRYPTO_STRATEGY_IDS.includes(nm) || CRYPTO_STRATEGY_IDS.includes(canon)
       })
-      .map((s) => ({ id: s?.schema?.strategy || s?.id || s?.name, name: s?.name || s?.schema?.strategy || s?.id }))
+      // The canonical id MUST be lower-cased: crypto_config.strategy is stored
+      // lower-case and both prefill + submit lower-case it, but schema.strategy
+      // is CapitalCase ("MeanRev"). Without this the option ids ("MeanRev") never
+      // match the selected id ("meanrev"), so the reset below fires on every open
+      // and the saved strategy appears to revert.
+      .map((s) => ({
+        id: String(s?.schema?.strategy || s?.id || s?.name || '').toLowerCase(),
+        name: s?.name || s?.schema?.strategy || s?.id,
+      }))
     if (crypto.length) {
-      strategies.value = crypto
-      if (!strategies.value.some((s) => String(s.id) === String(strategyId.value))) {
-        strategyId.value = strategies.value[0].id
+      // Merge in any known strategies the backend catalog doesn't list yet (e.g.
+      // a not-yet-redeployed backend) so every option stays selectable and the
+      // current selection always has a matching option.
+      const byId = new Map(crypto.map((s) => [String(s.id), s]))
+      for (const f of FALLBACK_STRATEGIES) {
+        if (!byId.has(f.id)) byId.set(f.id, f)
       }
+      strategies.value = FALLBACK_STRATEGIES
+        .map((f) => byId.get(f.id))
+        .concat(crypto.filter((s) => !FALLBACK_STRATEGIES.some((f) => f.id === s.id)))
+      // Keep the current selection (lower-cased to match option ids); only fall
+      // back to the first option when it's truly unresolvable.
+      const cur = String(strategyId.value || '').toLowerCase()
+      strategyId.value = strategies.value.some((s) => String(s.id) === cur)
+        ? cur
+        : strategies.value[0].id
     }
   } catch { /* fall back to hardcoded list */ }
 }

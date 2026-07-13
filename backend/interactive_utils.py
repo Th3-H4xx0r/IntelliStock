@@ -1487,6 +1487,12 @@ def action_get_instance(conn, instance_id):
         "stocks": doc.get("stocks") or [],
         "strategy_id": sid,
         "strategy": strategy,
+        # Crypto instances: return kind + crypto_config so the detail view / edit
+        # modal can read the band + strategy + allocations back after a save
+        # WITHOUT a separate list-endpoint backfill (the list endpoint also
+        # includes these). Absent for equity instances.
+        "kind": doc.get("kind"),
+        "crypto_config": doc.get("crypto_config") or None,
         "brokerage_id": bid,
         "brokerage": brokerage,
         "alpaca_data_brokerage_id": data_bid,
