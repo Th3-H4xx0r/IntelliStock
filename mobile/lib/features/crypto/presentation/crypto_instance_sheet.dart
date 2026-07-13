@@ -84,16 +84,31 @@ const _kDynamicColor = Color(0xFF7C5CE6);
 /// integer `strategy_id` at submit time by matching a Strategies doc by name.
 // Display name lowercases to the backend strategy id (e.g. 'Meanrev' -> 'meanrev').
 const _kStrategies = <(String, String)>[
-  ('Meanrev', 'Mean-Reversion — buys oversold majors (low RSI) only while above a long trend MA ("healthy dips, not falling knives") and banks the bounce. Mostly in cash; best on low-fee Binance.US. Top backtest performer — positive through a −42% BTC drawdown.'),
-  ('Momentum', 'Trend-follows the auto-discovered universe — leans into coins whose momentum is strengthening. Higher conviction in movers.'),
-  ('Allocator', 'Risk-weights across coins toward balanced target weights. Diversified, steadier exposure.'),
-  ('Fast', 'Tactical, quick in/out on short-term signals. More responsive, higher turnover.'),
+  ('Meanrev', 'Mean-Reversion (RSI) — buys oversold majors (RSI-14 < 35) only while above their 200h trend MA ("healthy dips, not falling knives"), holds 2, sells when RSI recovers past 55. Mostly in cash. Top backtest performer: +24% over 400d at Binance.US fees while BTC fell −42%, ~8% drawdown. Needs a low-fee venue — loses at Alpaca 0.25%.'),
+  ('Connors', 'Connors (fast RSI) — quicker cousin of Mean-Reversion: buys deeply oversold dips above the trend MA, exits fast when price snaps back above a short MA. Higher turnover. Backtest: modest but robust +6% over 400d. Also needs a low-fee venue.'),
+  ('Momentum', 'Trend-follows the auto-discovered universe — leans into coins whose momentum is strengthening. Trend strategies were whipsawed in choppy/down backtests; best in a sustained bull run.'),
+  ('Allocator', 'Risk-weights across coins toward balanced target weights. Diversified, steadier exposure; a slower rebalancer.'),
+  ('Fast', 'Tactical Donchian breakout trend-follower; quick in/out on short-term signals. Most responsive, highest turnover.'),
   ('Reference', 'A simple buy-and-rebalance baseline to benchmark the others against.'),
 ];
+
+// Recommended band per strategy (the cadence each was validated at). Mean-reversion
+// strategies were validated on 60-min (Low) bars.
+const _kStrategyRecommendedBand = <String, String>{
+  'meanrev': 'low',
+  'connors': 'low',
+  'momentum': 'medium',
+  'allocator': 'low',
+  'fast': 'high',
+  'reference': 'low',
+};
 
 String _strategyBlurb(String name) => _kStrategies
     .firstWhere((s) => s.$1 == name, orElse: () => (name, ''))
     .$2;
+
+String? _recommendedBandFor(String strategy) =>
+    _kStrategyRecommendedBand[strategy.toLowerCase()];
 
 const _kBands = <(String, String)>[
   ('high', 'High'),
@@ -497,6 +512,21 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
                   Text(_kBandBlurb[_band] ?? '',
                       style: AppTextStyles.nano
                           .copyWith(color: AppColors.textDim, height: 1.35)),
+                  if (_recommendedBandFor(_strategy) != null &&
+                      _recommendedBandFor(_strategy) != _band) ...[
+                    const SizedBox(height: 4),
+                    GestureDetector(
+                      onTap: () => setState(
+                          () => _band = _recommendedBandFor(_strategy)!),
+                      child: Text(
+                        'Recommended ${_recommendedBandFor(_strategy)![0].toUpperCase()}${_recommendedBandFor(_strategy)!.substring(1)} for $_strategy — tap to use',
+                        style: AppTextStyles.nano.copyWith(
+                            color: AppColors.primary,
+                            fontWeight: FontWeight.w600,
+                            height: 1.35),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 14),
 
                   // Dynamic strategy
@@ -679,7 +709,12 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
                 child: Text(s.$1),
               ),
           ],
-          onChanged: (v) => setState(() => _strategy = v ?? _strategy),
+          onChanged: (v) => setState(() {
+            _strategy = v ?? _strategy;
+            // Auto-apply the strategy's recommended band (user can still change it).
+            final rec = _recommendedBandFor(_strategy);
+            if (rec != null) _band = rec;
+          }),
         ),
       ),
     );

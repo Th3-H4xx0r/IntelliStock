@@ -60,18 +60,31 @@ const BAND_BLURB = {
 
 // What each dynamic strategy does with the auto-discovered (Dynamic) portion.
 const STRATEGY_BLURB = {
-  meanrev: 'Mean-Reversion — buys oversold majors (low RSI) only while they hold above a long trend MA ("healthy dips, not falling knives") and banks the bounce. Sits in cash most of the time; best on the low-fee Binance.US venue. In backtests the top performer — stayed positive through a −42% BTC drawdown.',
-  momentum: 'Momentum — trend-follows the auto-discovered universe, leaning into coins whose momentum is strengthening. Higher conviction in movers.',
-  allocator: 'Allocator — risk-weights across coins toward balanced target weights. Diversified, steadier exposure.',
-  fast: 'Fast — tactical, quick in/out on short-term signals. More responsive, higher turnover.',
+  meanrev: 'Mean-Reversion (RSI) — buys oversold majors (RSI-14 below 35) only while they hold above their 200-hour trend MA ("healthy dips, not falling knives"), holds 2, and sells when RSI recovers past 55. Sits in cash ~75% of the time. Top backtest performer: +24% over 400 days at Binance.US fees while BTC fell −42%, ~8% drawdown. Needs a low-fee venue — loses money at Alpaca 0.25%.',
+  connors: 'Connors (fast RSI) — the quicker cousin of Mean-Reversion: buys deeply oversold dips (short RSI) above the trend MA and exits fast once price snaps back above a short MA. Higher turnover, quicker in/out. Backtest: modest but robust +6% over 400 days. Also needs a low-fee venue.',
+  momentum: 'Momentum — trend-follows the auto-discovered universe, leaning into coins whose momentum is strengthening. Higher conviction in movers. Note: trend strategies were whipsawed in choppy/down backtests — best in a sustained bull run.',
+  allocator: 'Allocator — risk-weights across coins toward balanced target weights. Diversified, steadier exposure; a slower rebalancer.',
+  fast: 'Fast — tactical Donchian breakout trend-follower; quick in/out on short-term signals. Most responsive, highest turnover.',
   reference: 'Reference — a simple buy-and-rebalance baseline to benchmark the others against.',
+}
+
+// Recommended band per strategy (the cadence each was designed / validated at).
+// Mean-reversion strategies were validated on 60-min (Low) bars.
+const STRATEGY_RECOMMENDED_BAND = {
+  meanrev: 'low',
+  connors: 'low',
+  momentum: 'medium',
+  allocator: 'low',
+  fast: 'high',
+  reference: 'low',
 }
 
 // The crypto strategy modules live in strategies/crypto/. We surface them from
 // /strategies/available (filtered), falling back to a hardcoded list.
-const CRYPTO_STRATEGY_IDS = ['meanrev', 'momentum', 'allocator', 'fast', 'reference']
+const CRYPTO_STRATEGY_IDS = ['meanrev', 'connors', 'momentum', 'allocator', 'fast', 'reference']
 const FALLBACK_STRATEGIES = [
   { id: 'meanrev', name: 'Mean-Reversion' },
+  { id: 'connors', name: 'Connors (fast RSI)' },
   { id: 'momentum', name: 'Momentum' },
   { id: 'allocator', name: 'Allocator' },
   { id: 'fast', name: 'Fast' },
@@ -92,6 +105,15 @@ const strategies = ref(FALLBACK_STRATEGIES)
 
 const bandBlurb = computed(() => BAND_BLURB[band.value] || '')
 const strategyBlurb = computed(() => STRATEGY_BLURB[String(strategyId.value || '').toLowerCase()] || '')
+
+// Per-strategy recommended band. Auto-applied when the USER picks a strategy
+// (via @change so it never clobbers the edit-mode prefill), and surfaced as a
+// hint + one-tap "Use" when the current band differs.
+const recommendedBand = computed(() => STRATEGY_RECOMMENDED_BAND[String(strategyId.value || '').toLowerCase()] || null)
+const recommendedBandLabel = computed(() => (BANDS.find((b) => b.value === recommendedBand.value) || {}).label || '')
+const bandMatchesRecommended = computed(() => !recommendedBand.value || band.value === recommendedBand.value)
+function onStrategyChange() { if (recommendedBand.value) band.value = recommendedBand.value }
+function applyRecommendedBand() { if (recommendedBand.value) band.value = recommendedBand.value }
 
 // Account equity (best-effort from portfolio-history) with a manual fallback.
 const equity = ref(0)
@@ -338,11 +360,15 @@ async function submit() {
               <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
             </div>
             <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ bandBlurb }}</p>
+            <p v-if="!bandMatchesRecommended" class="text-[11px] text-primary mt-1 leading-snug">
+              Recommended <b>{{ recommendedBandLabel }}</b> for this strategy.
+              <button type="button" @click="applyRecommendedBand" class="underline hover:no-underline ml-0.5">Use {{ recommendedBandLabel }}</button>
+            </p>
           </div>
           <div class="sm:col-span-2">
             <label class="block text-xs font-medium text-slate-400 mb-1.5">Dynamic strategy <span class="text-slate-600 font-normal">· how the Dynamic portion trades</span></label>
             <div class="relative">
-              <select v-model="strategyId"
+              <select v-model="strategyId" @change="onStrategyChange"
                       class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
                 <option v-for="s in strategies" :key="s.id" :value="s.id">{{ s.name }}</option>
               </select>

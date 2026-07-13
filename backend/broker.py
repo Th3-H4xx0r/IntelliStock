@@ -462,6 +462,14 @@ Examples:
         metavar="ID",
         help="Backtest row ID (backtest mode only; supplied by backtest engine).",
     )
+    parser.add_argument(
+        "--taker-fee",
+        type=float,
+        default=None,
+        metavar="RATE",
+        help="Crypto taker fee to EMULATE in a backtest (fraction, e.g. 0.0002). "
+             "Overrides the instance venue's fee. Backtest mode only.",
+    )
     args = parser.parse_args()
 
     start_date = _null_or_value(args.start_date)
@@ -486,6 +494,7 @@ Examples:
         symbols=args.symbols,
         initial_cash=args.initial_cash,
         backtest_row_id=args.backtest_id,
+        emulated_taker_fee=args.taker_fee,
     )
 
 
@@ -769,6 +778,7 @@ key = secret = ""
 symbols = []
 initial_cash = 100000.0
 backtest_row_id = None
+emulated_taker_fee = None  # --taker-fee: crypto fee to emulate in this backtest (else None = instance venue)
 backtest_difficulty = None  # Set from BACKTEST_DIFFICULTY env by backtest engine (1-10)
 backtest_high_usage = False  # Set from BACKTEST_HIGH_USAGE env when backtest has high-difficulty substrategy
 try:
@@ -783,6 +793,7 @@ try:
     symbols = parsed.symbols
     initial_cash = parsed.initial_cash
     backtest_row_id = parsed.backtest_row_id
+    emulated_taker_fee = parsed.emulated_taker_fee
 except SystemExit:
     sys.exit(2)
 
@@ -2753,12 +2764,12 @@ def _ensure_strategies_table(conn):
         _log(f"Could not ensure Strategies table: {e}", "yellow")
 
 
-_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference", "meanrev")
+_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference", "meanrev", "connors")
 
 # crypto_config tuning knobs forwarded into the synthesized strategy config so a
 # user can tune a crypto strategy from crypto_config without a Strategies row.
 _CRYPTO_STRATEGY_TUNABLES = (
-    "rsi_period", "rsi_buy", "rsi_exit", "regime_ma", "top_k",       # meanrev
+    "rsi_period", "rsi_buy", "rsi_exit", "regime_ma", "top_k", "exit_ma",  # meanrev/connors
     "fast_ema", "slow_ema", "momentum_lookback", "adx_period", "adx_min",  # momentum
     "entry_window", "exit_window", "trend_ma",                        # fast
 )
@@ -5335,8 +5346,11 @@ portfolio_emulator = None
 live_adapter = None
 live_wal = None
 if mode == MODE_BACKTEST:
-    portfolio_emulator = PortfolioEmulator(initial_cash=initial_cash, taker_fee=_instance_crypto_taker_fee())
-    _log("PortfolioEmulator initialized for backtest (initial_cash=%s)." % initial_cash, "green")
+    # Emulated-fee override (--taker-fee) wins; else resolve from the instance venue.
+    _bt_taker_fee = emulated_taker_fee if emulated_taker_fee is not None else _instance_crypto_taker_fee()
+    portfolio_emulator = PortfolioEmulator(initial_cash=initial_cash, taker_fee=_bt_taker_fee)
+    _log("PortfolioEmulator initialized for backtest (initial_cash=%s, taker_fee=%s%s)."
+         % (initial_cash, _bt_taker_fee, " [emulated]" if emulated_taker_fee is not None else ""), "green")
 elif mode == MODE_LIVE:
     try:
         from nexus_runtime_state import ensure_tables as _ensure_live_tables, WALStore as _WALStore
