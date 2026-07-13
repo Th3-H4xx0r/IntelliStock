@@ -825,7 +825,7 @@ class FetchRobinhoodAccountsBody(BaseModel):
 
 
 class LinkBrokerageBody(BaseModel):
-    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood|kalshi)$")
+    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood|kalshi|binanceus)$")
     account_name: str = Field(..., min_length=1)
     # Kalshi (RSA-PSS v2): API key id + PEM private key + demo/live environment.
     kalshi_key_id: Optional[str] = None
@@ -3508,6 +3508,25 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
         except Exception:
             pass
         return {"ok": True, "id": bid, "brokerage_type": "kalshi", "environment": row["kalshi_environment"]}
+    elif body.brokerage_type == "binanceus":
+        if not body.key or not body.secret:
+            raise HTTPException(status_code=400, detail="key and secret are required for Binance.US")
+        import uuid as _uuid
+        from secret_store import encrypt as _encrypt
+        bid = str(_uuid.uuid4())
+        row = {
+            "id": bid,
+            "brokerage_type": "binanceus",
+            "account_name": body.account_name,
+            "binanceus_key": _encrypt(body.key.strip()),      # Fernet at rest
+            "binanceus_secret": _encrypt(body.secret.strip()),
+            # Reuse the row-level paper flag broker.py reads (alpaca_paper);
+            # Binance.US has no native sandbox so paper == platform-simulated.
+            "alpaca_paper": (body.paper if body.paper is not None else True),
+            "created_at": _r_auth.now(),
+        }
+        _r_auth.db("IntelliStock").table("BrokerageAccounts").insert(row).run(conn)
+        return {"ok": True, "id": bid, "brokerage_type": "binanceus", "paper": row["alpaca_paper"]}
     else:
         if not body.access_token or not body.refresh_token:
             raise HTTPException(status_code=400, detail="access_token and refresh_token are required for Robinhood")

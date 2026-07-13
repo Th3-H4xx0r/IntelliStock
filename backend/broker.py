@@ -653,6 +653,18 @@ def _load_live_credentials_from_db(instance_id):
                             )
                             return None, None, broker_type, paper, brokerage_id
                         return k, s, broker_type, paper, brokerage_id
+                    if broker_type in ("binanceus", "binance", "binance_us", "binance.us"):
+                        try:
+                            k = decrypt(b_doc.get("binanceus_key")) or None
+                            s = decrypt(b_doc.get("binanceus_secret")) or None
+                        except Exception as _e:
+                            _early_log(
+                                f"Decrypt failed for BrokerageAccount {brokerage_id} "
+                                f"(is INTELLISTOCK_CRED_KEY set?): {type(_e).__name__}: {_e}",
+                                "red",
+                            )
+                            return None, None, broker_type, paper, brokerage_id
+                        return k, s, broker_type, paper, brokerage_id
             # No brokerage_id - instance-level legacy fields (decrypt passes
             # plaintext through unchanged).
             try:
