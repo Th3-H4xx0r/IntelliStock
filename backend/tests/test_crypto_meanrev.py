@@ -47,11 +47,11 @@ class _StubEmu:
         return self._val
 
 
-def _run(strat, data, positions=None, prices=None):
+def _run(strat, data, positions=None, prices=None, config=None):
     emu = _StubEmu(positions or {})
     prices = prices or {s: data[s][-1]["c"] for s in data}
     return strat.run_once(symbols=list(data.keys()), prices=prices, current_time=None,
-                          config={}, conditions={}, data=data, portfolio_emulator=emu,
+                          config=config or {}, conditions={}, data=data, portfolio_emulator=emu,
                           mode="LIVE")
 
 
@@ -71,9 +71,11 @@ def test_buys_oversold_in_regime_not_falling_knives():
 
 def test_top_k_caps_positions_and_sizes_equal_weight():
     # three healthy dips, top_k=2 -> only the 2 most-oversold are bought.
+    # sizing="equal" pins each slot to pv/top_k (the vol default reweights by ATR%,
+    # covered in test_crypto_meanrev_vol_sizing.py).
     data = {s: _bars(_uptrend_then_dip(dip_bars=d))
             for s, d in [("BTC/USD", 20), ("ETH/USD", 16), ("SOL/USD", 12)]}
-    out = _run(Meanrev(), data)
+    out = _run(Meanrev(), data, config={"sizing": "equal"})
     buys = [s for s, v in out.items() if v == 1]
     assert len(buys) == 2
     sizes = out["_nexus_position_sizes"]
