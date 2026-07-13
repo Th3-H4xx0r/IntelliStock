@@ -805,6 +805,19 @@ def _instance_kind_and_crypto_config():
         _c = get_conn()
         try:
             _doc = r.db(DB_NAME).table("Instances").get(str(instance_id)).run(_c) or {}
+            # broker_type for the fee model: the Instances row usually lacks it
+            # (action_create_instance only stores brokerage_id), so resolve the
+            # venue from the LINKED brokerage. Without this a Binance.US-linked
+            # crypto instance would backtest at Alpaca's 0.25% instead of 0.02%.
+            bt = (_doc.get("broker_type") or "").strip().lower() or None
+            if not bt:
+                _bid = _doc.get("brokerage_id")
+                if _bid:
+                    try:
+                        _bdoc = r.db(DB_NAME).table("BrokerageAccounts").get(str(_bid)).run(_c) or {}
+                        bt = (_bdoc.get("brokerage_type") or "").strip().lower() or None
+                    except Exception:
+                        pass
         finally:
             try:
                 _c.close()
@@ -812,7 +825,6 @@ def _instance_kind_and_crypto_config():
                 pass
         kind = _doc.get("kind")
         cc = _doc.get("crypto_config") or {}
-        bt = _doc.get("broker_type") or None
         # Cache ONLY on a SUCCESSFUL read. RethinkDB is memory-starved/flaky here;
         # caching a transient-error result would permanently mis-classify a real
         # crypto instance as equity for the whole process lifetime.

@@ -87,6 +87,25 @@ def test_backtest_taker_fee_is_venue_configurable():
     assert abs(binance.get_fee_summary()["total_fees"] - 1.0) < 1e-6
 
 
+def test_resolve_taker_fee_falls_back_to_linked_brokerage():
+    """The Instances row stores brokerage_id but NOT broker_type, so the fee model
+    must resolve the venue from the LINKED brokerage — else a Binance.US-linked
+    crypto instance backtests at Alpaca 0.25% instead of 0.02%."""
+    from broker_adapters.fees import resolve_broker_type, resolve_crypto_taker_fee
+    # Instance row as written by action_create_instance: no broker_type, just a link.
+    inst = {"id": "c1", "kind": "crypto", "brokerage_id": "b1"}
+    binance_brok = {"id": "b1", "brokerage_type": "binanceus"}
+    alpaca_brok = {"id": "b2", "brokerage_type": "alpaca"}
+    assert resolve_broker_type(inst, binance_brok) == "binanceus"
+    assert resolve_crypto_taker_fee(inst, binance_brok) == 0.0002   # 0.02%, not 0.25%
+    assert resolve_crypto_taker_fee(inst, alpaca_brok) == 0.0025
+    # Instance's own broker_type wins when present (authoritative).
+    assert resolve_broker_type({"broker_type": "binanceus"}, alpaca_brok) == "binanceus"
+    # Neither set -> None -> default Alpaca fee.
+    assert resolve_broker_type({"id": "x"}, None) is None
+    assert resolve_crypto_taker_fee({"id": "x"}, None) == 0.0025
+
+
 def test_list_endpoint_masks_binanceus_credentials():
     """GET /brokerages must never ship the Binance.US key/secret to the browser
     — not even the Fernet ciphertext. _mask_brokerage_doc masks both like it

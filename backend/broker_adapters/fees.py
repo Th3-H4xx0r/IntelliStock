@@ -23,3 +23,26 @@ def crypto_taker_fee(broker_type: str | None) -> float:
     if t in _BINANCE:
         return 0.0002
     return CRYPTO_TAKER_FEE_BY_BROKER.get(t, 0.0025)
+
+
+def resolve_broker_type(instance_doc, brokerage_doc=None) -> str | None:
+    """Resolve an instance's venue for the fee model.
+
+    The Instances row's own ``broker_type`` is authoritative when present, but
+    ``action_create_instance`` only stores ``brokerage_id`` (not ``broker_type``),
+    so fall back to the LINKED brokerage's ``brokerage_type``. Without this a
+    Binance.US-linked crypto instance would backtest at Alpaca's 0.25% instead
+    of 0.02%. Returns a lower-cased type string, or None if neither is set.
+    """
+    bt = None
+    if isinstance(instance_doc, dict):
+        bt = (instance_doc.get("broker_type") or "").strip().lower() or None
+    if not bt and isinstance(brokerage_doc, dict):
+        bt = (brokerage_doc.get("brokerage_type") or "").strip().lower() or None
+    return bt
+
+
+def resolve_crypto_taker_fee(instance_doc, brokerage_doc=None) -> float:
+    """Crypto taker fee for an instance, resolving the venue from the instance
+    row and falling back to its linked brokerage (see :func:`resolve_broker_type`)."""
+    return crypto_taker_fee(resolve_broker_type(instance_doc, brokerage_doc))
