@@ -185,8 +185,9 @@ class _Sector3DChartState extends State<Sector3DChart>
     return AnimatedBuilder(
       animation: Listenable.merge([_drill, _rotCtrl]),
       builder: (context, _) {
-        final d = Curves.easeInOutCubic
-            .transform(widget.debugDrill ?? _drill.value);
+        final d = Curves.easeInOutCubic.transform(
+          widget.debugDrill ?? _drill.value,
+        );
         final sel = _selected.clamp(0, slices.length - 1);
         final h = _flatH + (_drillH - _flatH) * d;
         return SizedBox(
@@ -226,11 +227,12 @@ class _Sector3DChartState extends State<Sector3DChart>
                   child: RepaintBoundary(
                     child: CustomPaint(
                       painter: _RingPainter(
-                          slices: slices,
-                          selected: sel,
-                          drill: d,
-                          ringRot: _rotNow,
-                          hits: _hits),
+                        slices: slices,
+                        selected: sel,
+                        drill: d,
+                        ringRot: _rotNow,
+                        hits: _hits,
+                      ),
                     ),
                   ),
                 ),
@@ -244,21 +246,30 @@ class _Sector3DChartState extends State<Sector3DChart>
                       opacity: ((d - 0.2) / 0.8).clamp(0.0, 1.0),
                       child: Column(
                         children: [
-                          Text('Allocation',
-                              style: AppTextStyles.micro
-                                  .copyWith(color: AppColors.textMuted)),
+                          Text(
+                            'Allocation',
+                            style: AppTextStyles.micro.copyWith(
+                              color: AppColors.textMuted,
+                            ),
+                          ),
                           const SizedBox(height: 2),
                           RichText(
-                            text: TextSpan(children: [
-                              TextSpan(
+                            text: TextSpan(
+                              children: [
+                                TextSpan(
                                   text: '${slices[sel].sector}  ',
-                                  style: AppTextStyles.h3
-                                      .copyWith(color: AppColors.textHi)),
-                              TextSpan(
+                                  style: AppTextStyles.h3.copyWith(
+                                    color: AppColors.textHi,
+                                  ),
+                                ),
+                                TextSpan(
                                   text: '${slices[sel].pct.round()}%',
-                                  style: AppTextStyles.h3
-                                      .copyWith(color: AppColors.primary)),
-                            ]),
+                                  style: AppTextStyles.h3.copyWith(
+                                    color: AppColors.primary,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ],
                       ),
@@ -277,11 +288,17 @@ class _Sector3DChartState extends State<Sector3DChart>
                         onTap: _back,
                         child: Column(
                           children: [
-                            Text('Back',
-                                style: AppTextStyles.micro
-                                    .copyWith(color: AppColors.textMd)),
-                            Icon(Icons.keyboard_arrow_up,
-                                size: 18, color: AppColors.textMd),
+                            Text(
+                              'Back',
+                              style: AppTextStyles.micro.copyWith(
+                                color: AppColors.textMd,
+                              ),
+                            ),
+                            Icon(
+                              Icons.keyboard_arrow_up,
+                              size: 18,
+                              color: AppColors.textMd,
+                            ),
                           ],
                         ),
                       ),
@@ -331,7 +348,10 @@ class _RingPainter extends CustomPainter {
     final sy = _lerp(1.0, 0.42); // flat = round top-down → tilted when drilled
     final ro = size.width * _lerp(0.33, 0.58);
     final ri = size.width * _lerp(0.205, 0.33);
-    final wall = _lerp(0, 64); // no extrusion flat → tall metallic blocks drilled
+    final wall = _lerp(
+      0,
+      64,
+    ); // no extrusion flat → tall metallic blocks drilled
     final cx = size.width / 2;
     final cy = size.height * _lerp(0.5, 0.86);
     final c = Offset(cx, cy);
@@ -343,8 +363,11 @@ class _RingPainter extends CustomPainter {
     Offset onOval(double r, double ang, double yOff) =>
         Offset(c.dx + r * math.cos(ang), c.dy + r * sy * math.sin(ang) - yOff);
 
-    Rect oval(double r, double yOff) =>
-        Rect.fromCenter(center: c.translate(0, -yOff), width: 2 * r, height: 2 * r * sy);
+    Rect oval(double r, double yOff) => Rect.fromCenter(
+      center: c.translate(0, -yOff),
+      width: 2 * r,
+      height: 2 * r * sy,
+    );
 
     Path sectorPath(double a0, double a1, double yOff) {
       final outer = oval(ro, yOff);
@@ -362,27 +385,120 @@ class _RingPainter extends CustomPainter {
 
     // Metallic gradient builders (lit from above).
     Shader topShade(Color hi, Color mid, Color lo, Rect r) => LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [hi, mid, lo],
-          stops: const [0.0, 0.5, 1.0],
-        ).createShader(r);
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [hi, mid, lo],
+      stops: const [0.0, 0.5, 1.0],
+    ).createShader(r);
 
     // Soft contact shadow (subtle when flat, deeper as the blocks rise).
     canvas.drawOval(
       Rect.fromCenter(
-          center: c.translate(0, _lerp(4, 14)),
-          width: 2 * ro * 0.96,
-          height: 2 * ro * sy * 0.72),
+        center: c.translate(0, _lerp(4, 14)),
+        width: 2 * ro * 0.96,
+        height: 2 * ro * sy * 0.72,
+      ),
       Paint()
         ..color = Colors.black.withValues(alpha: _lerp(0.28, 0.5))
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 16),
     );
 
+    // A single ~100% slice can't render as a ring — the hole/gap/inner-wall
+    // heuristics assume several discrete wedges, so it came out as a hollow
+    // shell floating over a detached floor. Draw it as a SOLID 3D disc instead.
+    var dom = 0;
+    for (var k = 1; k < slices.length; k++) {
+      if (slices[k].pct > slices[dom].pct) dom = k;
+    }
+    final fullDisc = slices[dom].pct / total >= 0.995;
+    if (fullDisc) {
+      const b = 1.0;
+      final hiC = Color.lerp(
+        const Color(0xFF7C5CE6),
+        const Color(0xFFEBE0FF),
+        b,
+      )!;
+      final midC = Color.lerp(
+        const Color(0xFF4A2C9E),
+        const Color(0xFFB79BFF),
+        b,
+      )!;
+      final loC = Color.lerp(
+        const Color(0xFF24114F),
+        const Color(0xFF7E55E6),
+        b,
+      )!;
+      final discBounds = oval(ro, wall);
+      // Cylinder side wall (front half, θ∈[0,π]) between top and bottom rims.
+      if (wall > 1) {
+        final w = Path();
+        final t0 = onOval(ro, 0, wall);
+        w.moveTo(t0.dx, t0.dy);
+        w.arcTo(oval(ro, wall), 0, math.pi, false);
+        final bot = onOval(ro, math.pi, 0);
+        w.lineTo(bot.dx, bot.dy);
+        w.arcTo(oval(ro, 0), math.pi, -math.pi, false);
+        w.close();
+        canvas.drawPath(
+          w,
+          Paint()
+            ..isAntiAlias = true
+            ..shader = topShade(
+              midC,
+              loC,
+              Color.lerp(loC, Colors.black, 0.45)!,
+              w.getBounds(),
+            ),
+        );
+      }
+      // Solid top disc (fills the hole → not hollow) with the metallic gradient.
+      final disc = Path()..addOval(oval(ro, wall));
+      canvas.drawPath(
+        disc,
+        Paint()
+          ..isAntiAlias = true
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color.lerp(hiC, Colors.white, 0.24)!, hiC, midC, loC],
+            stops: const [0.0, 0.20, 0.58, 1.0],
+          ).createShader(discBounds),
+      );
+      canvas.drawPath(
+        disc,
+        Paint()
+          ..isAntiAlias = true
+          ..blendMode = BlendMode.plus
+          ..shader = SweepGradient(
+            startAngle: -math.pi / 2,
+            endAngle: 3 * math.pi / 2,
+            colors: [
+              Colors.transparent,
+              Colors.white.withValues(alpha: 0.20),
+              Colors.transparent,
+              Colors.white.withValues(alpha: 0.05),
+              Colors.transparent,
+              Colors.white.withValues(alpha: 0.13),
+              Colors.transparent,
+            ],
+            stops: const [0.0, 0.10, 0.26, 0.5, 0.74, 0.90, 1.0],
+          ).createShader(Rect.fromCircle(center: c, radius: ro)),
+      );
+      canvas.drawPath(
+        disc,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1
+          ..color = Colors.white.withValues(alpha: 0.18)
+          ..isAntiAlias = true,
+      );
+      if (drill < 0.05) hits.add(_WedgeHit(dom, disc));
+    }
+
     // Recessed floor inside the hole so you don't see through to the dark card
     // — this is what kills the "hollow shell" look. Drilled only (flat shows a
     // centre readout over the hole instead).
-    if (drill > 0.02) {
+    if (!fullDisc && drill > 0.02) {
       final fa = drill.clamp(0.0, 1.0);
       final floor = oval(ri * 0.985, 2);
       canvas.drawOval(
@@ -411,11 +527,12 @@ class _RingPainter extends CustomPainter {
       }
       return s + slices[i].pct / total * math.pi;
     }
+
     // Front (sin near +1) drawn last.
     order.sort((a, b) => math.sin(midOf(a)).compareTo(math.sin(midOf(b))));
 
     final outerBounds = oval(ro, wall);
-    for (final i in order) {
+    for (final i in (fullDisc ? const <int>[] : order)) {
       var s = -math.pi / 2 + rot;
       for (var j = 0; j < i; j++) {
         s += slices[j].pct / total * 2 * math.pi;
@@ -434,12 +551,21 @@ class _RingPainter extends CustomPainter {
       final double b = sel
           ? 1.0
           : (n <= 1 ? 0.58 : 0.30 + 0.42 * (1 - i / (n - 1)));
-      final hiC =
-          Color.lerp(const Color(0xFF7C5CE6), const Color(0xFFEBE0FF), b)!;
-      final midC =
-          Color.lerp(const Color(0xFF4A2C9E), const Color(0xFFB79BFF), b)!;
-      final loC =
-          Color.lerp(const Color(0xFF24114F), const Color(0xFF7E55E6), b)!;
+      final hiC = Color.lerp(
+        const Color(0xFF7C5CE6),
+        const Color(0xFFEBE0FF),
+        b,
+      )!;
+      final midC = Color.lerp(
+        const Color(0xFF4A2C9E),
+        const Color(0xFFB79BFF),
+        b,
+      )!;
+      final loC = Color.lerp(
+        const Color(0xFF24114F),
+        const Color(0xFF7E55E6),
+        b,
+      )!;
 
       if (segWall > 1) {
         // ── Inner wall (the hole side) ── only on back-leaning wedges, where
@@ -461,10 +587,11 @@ class _RingPainter extends CustomPainter {
             Paint()
               ..isAntiAlias = true
               ..shader = topShade(
-                  Color.lerp(midC, Colors.black, 0.30)!,
-                  Color.lerp(loC, Colors.black, 0.26)!,
-                  Color.lerp(loC, Colors.black, 0.55)!,
-                  inner.getBounds()),
+                Color.lerp(midC, Colors.black, 0.30)!,
+                Color.lerp(loC, Colors.black, 0.26)!,
+                Color.lerp(loC, Colors.black, 0.55)!,
+                inner.getBounds(),
+              ),
           );
         }
 
@@ -483,6 +610,7 @@ class _RingPainter extends CustomPainter {
             ..lineTo(bo.dx, bo.dy)
             ..close();
         }
+
         for (final a in [a0, a1]) {
           final cap = capPath(a);
           canvas.drawPath(
@@ -490,10 +618,11 @@ class _RingPainter extends CustomPainter {
             Paint()
               ..isAntiAlias = true
               ..shader = topShade(
-                  Color.lerp(midC, Colors.black, 0.28)!,
-                  Color.lerp(loC, Colors.black, 0.32)!,
-                  Color.lerp(loC, Colors.black, 0.55)!,
-                  cap.getBounds()),
+                Color.lerp(midC, Colors.black, 0.28)!,
+                Color.lerp(loC, Colors.black, 0.32)!,
+                Color.lerp(loC, Colors.black, 0.55)!,
+                cap.getBounds(),
+              ),
           );
         }
 
@@ -510,8 +639,12 @@ class _RingPainter extends CustomPainter {
           wallPath,
           Paint()
             ..isAntiAlias = true
-            ..shader = topShade(midC, loC,
-                Color.lerp(loC, Colors.black, 0.45)!, wallPath.getBounds()),
+            ..shader = topShade(
+              midC,
+              loC,
+              Color.lerp(loC, Colors.black, 0.45)!,
+              wallPath.getBounds(),
+            ),
         );
       }
 
@@ -593,25 +726,34 @@ class _RingPainter extends CustomPainter {
       final cs = slices[selected];
       final pctTp = TextPainter(
         text: TextSpan(
-            text: '${cs.pct.round()}%',
-            style: AppTextStyles.valueXl.copyWith(
-                fontWeight: FontWeight.w800,
-                color: AppColors.textHi.withValues(alpha: flatAlpha))),
+          text: '${cs.pct.round()}%',
+          style: AppTextStyles.valueXl.copyWith(
+            fontWeight: FontWeight.w800,
+            color: AppColors.textHi.withValues(alpha: flatAlpha),
+          ),
+        ),
         textDirection: TextDirection.ltr,
       )..layout();
       pctTp.paint(
-          canvas, Offset(cx, cy - wall) - Offset(pctTp.width / 2, pctTp.height / 2 + 9));
+        canvas,
+        Offset(cx, cy - wall) - Offset(pctTp.width / 2, pctTp.height / 2 + 9),
+      );
       final nameTp = TextPainter(
         text: TextSpan(
-            text: cs.sector,
-            style: AppTextStyles.micro
-                .copyWith(color: AppColors.textMuted.withValues(alpha: flatAlpha))),
+          text: cs.sector,
+          style: AppTextStyles.micro.copyWith(
+            color: AppColors.textMuted.withValues(alpha: flatAlpha),
+          ),
+        ),
         textDirection: TextDirection.ltr,
         maxLines: 1,
         ellipsis: '…',
       )..layout(maxWidth: ri * 1.7);
-      nameTp.paint(canvas,
-          Offset(cx, cy - wall) - Offset(nameTp.width / 2, nameTp.height / 2 - 13));
+      nameTp.paint(
+        canvas,
+        Offset(cx, cy - wall) -
+            Offset(nameTp.width / 2, nameTp.height / 2 - 13),
+      );
     }
   }
 
