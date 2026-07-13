@@ -87,4 +87,15 @@ def build_adapter(
             cid_prefix=cid_prefix,
             clean_room_retention_days=clean_room_retention_days,
         )
+    if t in ("binanceus", "binance", "binance_us", "binance.us"):
+        from broker_adapters.binanceus import BinanceUSAdapter
+        return BinanceUSAdapter(
+            api_key=api_key,
+            api_secret=api_secret,
+            paper=paper,
+            instance_id=instance_id,
+            wal=wal,
+            initial_value=initial_value,
+            cid_prefix=cid_prefix,
+        )
     raise BrokerError(f"unknown broker_type: {broker_type!r}")

@@ -1,0 +1,71 @@
+"""Binance.US client + paper adapter unit tests (offline — no network).
+
+Covers HMAC signing correctness, symbol mapping, and the paper-mode fill
+accounting with the 0.00%/0.02% Binance.US fee model.
+"""
+
+import hashlib
+import hmac
+
+from broker_adapters.binanceus_client import (
+    BinanceUSClient, to_binance, from_binance, BINANCE_US_FEES,
+)
+from broker_adapters.binanceus import BinanceUSAdapter
+
+
+def test_signing_is_standard_hmac_sha256():
+    c = BinanceUSClient(api_secret="topsecret")
+    q = "symbol=BTCUSD&side=BUY&type=MARKET&timestamp=1&recvWindow=5000"
+    assert c._sign(q) == hmac.new(b"topsecret", q.encode(), hashlib.sha256).hexdigest()
+
+
+def test_signed_query_appends_timestamp_and_signature():
+    c = BinanceUSClient(api_secret="s", recv_window=5000)
+    q = c._signed_query({"symbol": "BTCUSD"}, now_ms=1000)
+    assert "symbol=BTCUSD" in q and "timestamp=1000" in q and "recvWindow=5000" in q
+    assert "&signature=" in q
+
+
+def test_symbol_mapping_roundtrip():
+    assert to_binance("BTC/USD") == "BTCUSD"
+    assert from_binance("BTCUSD") == "BTC/USD"
+    assert from_binance("BTCUSDT") == "BTC/USDT"     # USDT matched before USD
+    assert to_binance(from_binance("ETHUSDT")) == "ETHUSDT"
+    assert from_binance("BTC/USD") == "BTC/USD"       # already slashed
+
+
+def test_fees_are_binance_us():
+    assert BINANCE_US_FEES == {"maker": 0.0, "taker": 0.0002}
+
+
+def test_paper_buy_sell_accounting_with_002pct_taker():
+    a = BinanceUSAdapter(paper=True, wal=None, initial_value=10_000.0)
+    px = 50_000.0
+    assert a.execute_signal("BTC/USD", 1, px, cash_per_trade=5_000.0) is True
+    assert abs(a.get_cash() - 5_000.0) < 1e-6
+    # 0.02% taker on $5,000 = $1.00; coins = 5000/50000 * (1-0.0002)
+    assert abs(a.get_fee_summary()["total_fees"] - 1.0) < 1e-6
+    assert abs(a.get_positions()["BTC/USD"] - 0.1 * (1 - 0.0002)) < 1e-9
+    # sell all
+    assert a.execute_signal("BTC/USD", -1, px) is True
+    assert a.get_positions() == {}
+    assert 9_997.0 < a.get_cash() < 9_999.5          # ~$2 total fees, both legs
+    assert a.get_fee_summary()["taker_rate"] == 0.0002
+
+
+def test_paper_submit_order_generates_cid_and_fills(monkeypatch):
+    a = BinanceUSAdapter(paper=True, wal=None, instance_id="test", initial_value=1_000.0)
+    monkeypatch.setattr(a, "_price", lambda t: 50_000.0)   # avoid network
+    ref = a.submit_order("BTC/USD", "buy", None, 500.0, "market", None, "gtc", False, None)
+    assert ref.status == "filled"
+    assert ref.client_order_id and ref.filled_avg_price == 50_000.0
+    assert a.is_market_open(None) is True
+    assert a.get_portfolio_value({"BTC/USD": 50_000.0}) > 0
+
+
+def test_execute_signal_guards(monkeypatch):
+    a = BinanceUSAdapter(paper=True, wal=None, initial_value=100.0)
+    monkeypatch.setattr(a, "_price", lambda t: None)             # no price available
+    assert a.execute_signal("BTC/USD", -1, 50_000.0) is False   # nothing held
+    assert a.execute_signal("BTC/USD", 0, 50_000.0) is False    # hold
+    assert a.execute_signal("BTC/USD", 1, 0.0) is False          # no price -> can't size
