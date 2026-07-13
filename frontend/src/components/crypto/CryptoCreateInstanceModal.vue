@@ -461,6 +461,9 @@ async function submit() {
                 <span v-else-if="effectiveEquity > 0">{{ fmtUsd(usdFor(dynamicPct)) }} flexible</span>
                 <span v-else>{{ Math.round(dynamicPct) }}% flexible</span>
               </div>
+              <p v-if="!over && dynamicPct <= 0" class="mt-2 text-[11px] leading-snug text-amber-400">
+                ⚠ Dynamic 0% — the <b>{{ strategyId }}</b> strategy won't trade (this is buy-and-hold). Lower a fixed weight to give it a dynamic budget to trade.
+              </p>
             </div>
           </div>
         </div>

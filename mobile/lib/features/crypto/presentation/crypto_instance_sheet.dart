@@ -966,6 +966,16 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
             ),
           ],
         ),
+        if (!_over && _dynPct <= 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              '⚠ Dynamic 0% — the $_strategy strategy won\'t trade (buy-and-hold). '
+              'Lower a fixed weight to give it a dynamic budget to trade.',
+              style: AppTextStyles.nano
+                  .copyWith(color: AppColors.warning, height: 1.35),
+            ),
+          ),
       ],
     );
   }
