@@ -1,5 +1,5 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "MeanRev", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "medium", "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2}}
-# INTELLISTOCK_DESCRIPTION: Regime-filtered RSI mean-reversion for crypto. Buys oversold majors (RSI below rsi_buy) ONLY while they hold above a long regime MA ("buy healthy dips, not falling knives"), holds up to top_k, and banks the bounce when RSI recovers past rsi_exit. Sits in cash most of the time — in backtests it stayed positive across bull, chop, and a -42% BTC drawdown while trend/momentum strategies were whipsawed.
+# INTELLISTOCK_SCHEMA: {"strategy": "MeanRev", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "medium", "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14}}
+# INTELLISTOCK_DESCRIPTION: Regime-filtered RSI mean-reversion for crypto. Buys oversold majors (RSI below rsi_buy) ONLY while they hold above a long regime MA ("buy healthy dips, not falling knives"), holds up to top_k, and banks the bounce when RSI recovers past rsi_exit. Sits in cash most of the time — in backtests it stayed positive across bull, chop, and a -42% BTC drawdown while trend/momentum strategies were whipsawed. Sizes each dip by volatility (ATR%) so higher-bounce coins get more capital ("sizing":"vol", bounded 0.6-1.6x); "sizing":"equal" restores flat 1/top_k slots.
 # DIFFICULTY: 3
 """
 Mean-reversion crypto strategy (run_once). DB name: "meanrev".
@@ -59,6 +59,8 @@ class Meanrev:
         self.rsi_exit = 55.0
         self.regime_ma = 200
         self.top_k = 2
+        self.atr_period = 14
+        self.sizing = "vol"
 
     def run_once(
         self,
@@ -87,6 +89,8 @@ class Meanrev:
         rsi_exit = float(settings.get("rsi_exit", self.rsi_exit))
         regime_ma = max(2, int(settings.get("regime_ma", self.regime_ma)))
         top_k = max(1, int(settings.get("top_k", self.top_k)))
+        atr_p = max(2, int(settings.get("atr_period", self.atr_period)))
+        sizing = str(settings.get("sizing", self.sizing)).lower()
         min_bars = regime_ma + rsi_p + 2
 
         data = data or {}
@@ -113,9 +117,10 @@ class Meanrev:
 
         held = _held_symbols(portfolio_emulator, universe)
 
-        # Per-symbol RSI + regime.
+        # Per-symbol RSI + regime (+ ATR% for volatility-scaled sizing).
         rsi_by = {}
         regime_ok = {}
+        atr_pct_by = {}
         # Only the LATEST indicator value is used each tick. Cap the window fed to
         # talib so every step is O(cap) instead of O(history) (SMA(regime_ma) is
         # exact from the last regime_ma bars; RSI has long converged after a big
@@ -123,6 +128,7 @@ class Meanrev:
         _cap = min_bars + 300
         for sym in universe:
             closes = _series(data.get(sym) or [], "c")
+            atr_pct_by[sym] = None
             if len(closes) < min_bars:
                 rsi_by[sym] = None
                 regime_ok[sym] = False
@@ -138,6 +144,20 @@ class Meanrev:
             sma_last = sma[-1]
             rsi_by[sym] = None if np.isnan(rsi_last) else float(rsi_last)
             regime_ok[sym] = (not np.isnan(sma_last)) and (closes[-1] > sma_last)
+            # ATR% (latest) from the same capped window — sizing weight input.
+            highs = _series(data.get(sym) or [], "h")
+            lows = _series(data.get(sym) or [], "l")
+            if len(highs) > _cap:
+                highs = highs[-_cap:]
+            if len(lows) > _cap:
+                lows = lows[-_cap:]
+            try:
+                if len(highs) == len(closes) and len(lows) == len(closes):
+                    atr = talib.ATR(highs, lows, closes, timeperiod=atr_p)
+                    if not np.isnan(atr[-1]) and closes[-1] > 0:
+                        atr_pct_by[sym] = float(atr[-1]) / float(closes[-1])
+            except Exception:
+                atr_pct_by[sym] = None
 
         # Exits: sell a held coin ONLY once RSI recovers past rsi_exit (bank the
         # bounce). The regime filter gates ENTRIES only — exiting a held dip just
@@ -169,7 +189,8 @@ class Meanrev:
             elif sym not in result:
                 result[sym] = 0
 
-        _apply_equal_weight_sizing(result, prices, portfolio_emulator, top_k)
+        _apply_equal_weight_sizing(result, prices, portfolio_emulator, top_k,
+                                   atr_pct_by=atr_pct_by, sizing=sizing)
         return core.apply_crypto_config(result, config, prices, portfolio_emulator)
 
 
