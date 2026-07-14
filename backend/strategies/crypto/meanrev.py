@@ -1,5 +1,5 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "MeanRev", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "medium", "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14}}
-# INTELLISTOCK_DESCRIPTION: Regime-filtered RSI mean-reversion for crypto. Buys oversold majors (RSI below rsi_buy) ONLY while they hold above a long regime MA ("buy healthy dips, not falling knives"), holds up to top_k, and banks the bounce when RSI recovers past rsi_exit. Sits in cash most of the time — in backtests it stayed positive across bull, chop, and a -42% BTC drawdown while trend/momentum strategies were whipsawed. Sizes each dip by volatility (ATR%) so higher-bounce coins get more capital ("sizing":"vol", bounded 0.6-1.6x); "sizing":"equal" restores flat 1/top_k slots.
+# INTELLISTOCK_SCHEMA: {"strategy": "MeanRev", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "medium", "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14, "bear_gate_ma": 0}}
+# INTELLISTOCK_DESCRIPTION: Regime-filtered RSI mean-reversion for crypto. Buys oversold majors (RSI below rsi_buy) ONLY while they hold above a long regime MA ("buy healthy dips, not falling knives"), holds up to top_k, and banks the bounce when RSI recovers past rsi_exit. Sits in cash most of the time — in backtests it stayed positive across bull, chop, and a -42% BTC drawdown while trend/momentum strategies were whipsawed. Sizes each dip by volatility (ATR%) so higher-bounce coins get more capital ("sizing":"vol", bounded 0.6-1.6x); "sizing":"equal" restores flat 1/top_k slots. Optional crash-bear gate ("bear_gate_ma", e.g. 1200 = 50 days of hourly bars; 0=off): while the equal-weight basket of the universe sits below its bear_gate_ma-bar MA, NEW entries are blocked (exits and holds unaffected) — faithfully validated to turn a 2022-class crash-bear from -19% into +11% while every milder bear stays positive, at the cost of part of the mild-bear scalp profit.
 # DIFFICULTY: 3
 """
 Mean-reversion crypto strategy (run_once). DB name: "meanrev".
@@ -13,6 +13,16 @@ Long-only dip-buying with a regime gate on ENTRY only:
   price slipped under the MA sells into weakness and misses the bounce
   (validated: a regime-break exit costs ~20 points of return).
 - Everything else holds (0).
+- Optional bear gate (``bear_gate_ma`` > 0, e.g. 1200 hourly bars = 50 days):
+  while the equal-weight basket of the visible universe is below its
+  ``bear_gate_ma``-bar MA, NEW entries are blocked; exits/holds unaffected.
+  Rationale: the per-coin SMA(regime_ma) filter still admits dip-buys during
+  bear-market rallies, which accumulate losses in a 2022-class crash. The
+  basket gate suppresses exactly those. Faithfully verified (PortfolioEmulator,
+  Binance.US fees, 2021-2026): 2022 bear -19% -> +11% and every mild bear stays
+  positive (robust across 1200-1680-bar windows), at the cost of part of the
+  mild-bear scalp profit. Fail-OPEN: with < max(600, bear_gate_ma//2) shared
+  bars of history the gate stays off (live safety on short data windows).
 
 Emits equal-weight ``buy_cash`` sizing so each slot targets ~1/top_k of the
 portfolio, deploying 100% (no cash-reserve / price floor for crypto). Returns
@@ -61,6 +71,7 @@ class Meanrev:
         self.top_k = 2
         self.atr_period = 14
         self.sizing = "vol"
+        self.bear_gate_ma = 0  # 0 = off; e.g. 1200 (50d of hourly bars) to enable
 
     def run_once(
         self,
@@ -91,6 +102,10 @@ class Meanrev:
         top_k = max(1, int(settings.get("top_k", self.top_k)))
         atr_p = max(2, int(settings.get("atr_period", self.atr_period)))
         sizing = str(settings.get("sizing", self.sizing)).lower()
+        try:
+            bear_gate_ma = max(0, int(settings.get("bear_gate_ma", self.bear_gate_ma) or 0))
+        except (TypeError, ValueError):
+            bear_gate_ma = 0
         min_bars = regime_ma + rsi_p + 2
 
         data = data or {}
@@ -175,7 +190,12 @@ class Meanrev:
                 keep_held.add(sym)
 
         # Entries: most-oversold regime-OK coins, up to the free slots.
+        # Bear gate: while the universe basket is below its long MA, block NEW
+        # entries entirely (free=0). Exits above are already emitted; holds keep
+        # holding. See module docstring for the validation numbers.
         free = max(0, top_k - len(keep_held))
+        if free and bear_gate_ma > 0 and _bear_gate_blocked(data, universe, bear_gate_ma):
+            free = 0
         buy_candidates = sorted(
             [s for s in universe
              if s not in held and regime_ok.get(s)
@@ -192,6 +212,43 @@ class Meanrev:
         _apply_equal_weight_sizing(result, prices, portfolio_emulator, top_k,
                                    atr_pct_by=atr_pct_by, sizing=sizing)
         return core.apply_crypto_config(result, config, prices, portfolio_emulator)
+
+
+def _bear_gate_blocked(data, universe, gate_ma):
+    """True when the equal-weight basket of ``universe`` closes below its
+    ``gate_ma``-bar moving average (expanding-capped, no lookahead).
+
+    Basket = mean over coins of close normalized at a shared trailing anchor
+    (last ``gate_ma + 100`` bars). Coins shorter than max(600, gate_ma//2) bars
+    are dropped; if none (or the shared window is still that short) the gate
+    FAILS OPEN (returns False) so short live data windows never block trading.
+    Never raises."""
+    try:
+        need = gate_ma + 100
+        min_hist = max(600, gate_ma // 2)
+        series = []
+        for sym in universe:
+            closes = _series(data.get(sym) or [], "c")
+            if len(closes) >= min_hist and closes[-1] > 0:
+                tail = closes[-min(len(closes), need):]
+                if tail[0] > 0:
+                    series.append(tail)
+        if not series:
+            return False
+        shared = min(len(c) for c in series)
+        if shared < min_hist:
+            return False
+        rows = [c[-shared:] / c[-shared] for c in series if c[-shared] > 0]
+        if not rows:
+            return False
+        basket = np.mean(rows, axis=0)
+        ma = float(np.mean(basket[-min(shared, gate_ma):]))
+        last = float(basket[-1])
+        if not (np.isfinite(last) and np.isfinite(ma)):
+            return False
+        return bool(last < ma)
+    except Exception:
+        return False
 
 
 def _apply_equal_weight_sizing(result, prices, portfolio_emulator, top_k,
