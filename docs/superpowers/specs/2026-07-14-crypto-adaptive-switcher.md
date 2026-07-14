@@ -61,3 +61,23 @@ Wave-4 sweeps (job a2a5a542 tmp, eval9_wave4*.py, honest v2 harness):
 - `confirm_ma` < 600 never gates (bear-gate 600-bar live-safety floor).
 - Same live-mode `data=None` gap as all crypto strategies (see
   2026-07-14-crypto-meanrev-bear-gate.md).
+
+## ADDENDUM — prod A/B results (same day, instance `test`, hourly, Binance.US-emulated)
+
+| window | universe | EW B&H | adaptive | meanrev | meanrev+gate |
+|---|---|---|---|---|---|
+| 2023-10-01..2024-03-14 (bull) | 7 real-data coins | +181.0% | **+132.1%** (bt 792625) | +55.7% (bt 593893) | — |
+| 2022-01-01..2022-12-31 (crash) | 7 coins incl. SOL/AVAX | **−74.5%** | −19.1% (bt 535396) | — | −9.9% (bt 644298) |
+
+**Universe-dependence correction:** the faithful "2022 positive" results (adaptive
++8.6, gated-MR +11.2) were computed on the 5 old majors — the only coins with
+local 2022 caches. Adding SOL (−94% in 2022) and AVAX (−90%) turns both negative
+(−19.1 / −9.9): their violent bear rallies whipsaw false bull flips and open the
+gate at rally tops. Both still protect 55–65 pts vs holding. Docstrings and UI
+blurbs updated accordingly.
+
+Also found during the A/B: prod serves a FROZEN SOL price ($20.1715) for
+2023-24 (no real feed data there; un-purged AlpacaBarsCache) — the first
+adaptive bull run (bt 316587, +114.4%) carried SOL as dead 1/8 weight; the
+792625 rerun pins `stocks` to real-data coins. And `POST /backtests` granularity
+is SECONDS (default "60" = 1-minute stepping) — always pass "3600" for band=low.

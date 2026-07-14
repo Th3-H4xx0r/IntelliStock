@@ -1,5 +1,5 @@
 # INTELLISTOCK_SCHEMA: {"strategy": "Adaptive", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "low", "switch_ma": 4800, "confirm_ma": 1200, "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14}}
-# INTELLISTOCK_DESCRIPTION: Regime-adaptive crypto strategy: holds the equal-weight basket (buy & hold) while the universe basket trades above BOTH its slow switch MA (switch_ma, default 4800 hourly bars = 200 days) and its fast confirm MA (confirm_ma, default 1200 = 50 days); the moment the regime breaks it liquidates the basket and hands control to the MeanRev dip-buyer running with the crash-bear entry gate. Bulls get real market exposure (faithful 2021 +111% and 2023-24 +74% vs MeanRev's +72%/+31%) while the 2022 crash-bear stays positive (+8.6%); honest weaknesses: chop is negative (-21% vs B&H -35%) and mild-bear scalp profit shrinks. Faithful mean across 9 regime intervals 2021-2026: ~+24.5%/interval vs MeanRev-only ~+14.5%. Pick MeanRev for max bear safety, Adaptive for bull participation.
+# INTELLISTOCK_DESCRIPTION: Regime-adaptive crypto strategy: holds the equal-weight basket (buy & hold) while the universe basket trades above BOTH its slow switch MA (switch_ma, default 4800 hourly bars = 200 days) and its fast confirm MA (confirm_ma, default 1200 = 50 days); the moment the regime breaks it liquidates the basket and hands control to the MeanRev dip-buyer running with the crash-bear entry gate. Bulls get real market exposure: prod backtest Oct-2023..Mar-2024 at Binance.US fees = +132% vs MeanRev's +56% (EW buy&hold +181%). Crash protection is strong but UNIVERSE-DEPENDENT: 2022 on the 5 old majors was positive (+8.6% faithful) but the prod 7-coin 2022 incl. SOL(-94%)/AVAX(-90%) lost -19% — still ~55 pts better than buy&hold's -74.5%. Chop is its weak regime (~-21% vs B&H -35%). Pick MeanRev for max bear safety, Adaptive for bull participation.
 # DIFFICULTY: 3
 """
 Adaptive regime switcher (run_once). DB name: "adaptive".
@@ -30,9 +30,16 @@ Validated (faithful PortfolioEmulator, Binance.US 0.02%, 9 regime intervals
     OOS +13.1 (B&H -36)        | tgt -3.6 (B&H -21)       | fullrec +14.4 (B&H -50)
 
 Mean ~+24.5%/interval vs MeanRev-only ~+14.5%. Trade-off vs MeanRev: far more
-bull capture, 2022 crash-bear still positive, but chop and the mildest bears
-can go slightly negative. Not a replacement for MeanRev — a different point on
-the risk/return frontier.
+bull capture, but chop and the mildest bears can go slightly negative.
+
+UNIVERSE CAVEAT (prod A/B 2026-07-14): the faithful 2022 numbers above are on
+the 5 old majors (BTC/ETH/LTC/BCH/LINK — the only coins with local 2022
+caches). Prod backtests on the 7-coin universe incl. SOL (-94% in 2022) and
+AVAX (-90%): 2022 = -19.1% (vs EW B&H -74.5%) — false bull flips during
+bear-market rallies in the hardest-crashing coins cost ~-28 pts vs the
+narrow-universe result. Bull side confirmed at scale: Oct-23..Mar-24 = +132.1%
+vs MeanRev +55.7% (B&H +181%). Not a replacement for MeanRev — a different
+point on the risk/return frontier.
 """
 
 from __future__ import annotations

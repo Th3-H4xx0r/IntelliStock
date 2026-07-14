@@ -19,10 +19,14 @@ Long-only dip-buying with a regime gate on ENTRY only:
   Rationale: the per-coin SMA(regime_ma) filter still admits dip-buys during
   bear-market rallies, which accumulate losses in a 2022-class crash. The
   basket gate suppresses exactly those. Faithfully verified (PortfolioEmulator,
-  Binance.US fees, 2021-2026): 2022 bear -19% -> +11% and every mild bear stays
-  positive (robust across 1200-1680-bar windows), at the cost of part of the
-  mild-bear scalp profit. Fail-OPEN: with < max(600, bear_gate_ma//2) shared
-  bars of history the gate stays off (live safety on short data windows).
+  Binance.US fees, 2021-2026, 5-major universe): 2022 bear -19% -> +11% and
+  every mild bear stays positive (robust across 1200-1680-bar windows), at the
+  cost of part of the mild-bear scalp profit. UNIVERSE CAVEAT (prod A/B
+  2026-07-14): on the wider 7-coin 2022 universe incl. SOL(-94%)/AVAX(-90%)
+  the gated result is -9.9% (vs EW B&H -74.5%) — strong protection but not
+  positive; the "every bear positive" result is specific to the majors
+  universe it was validated on. Fail-OPEN: with < max(600, bear_gate_ma//2)
+  shared bars of history the gate stays off (live safety on short data windows).
 
 Emits equal-weight ``buy_cash`` sizing so each slot targets ~1/top_k of the
 portfolio, deploying 100% (no cash-reserve / price floor for crypto). Returns
