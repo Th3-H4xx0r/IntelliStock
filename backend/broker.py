@@ -2764,13 +2764,14 @@ def _ensure_strategies_table(conn):
         _log(f"Could not ensure Strategies table: {e}", "yellow")
 
 
-_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference", "meanrev", "connors")
+_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference", "meanrev", "connors", "adaptive")
 
 # crypto_config tuning knobs forwarded into the synthesized strategy config so a
 # user can tune a crypto strategy from crypto_config without a Strategies row.
 _CRYPTO_STRATEGY_TUNABLES = (
     "rsi_period", "rsi_buy", "rsi_exit", "regime_ma", "top_k", "exit_ma",  # meanrev/connors
     "sizing", "atr_period", "bear_gate_ma",                            # meanrev sizing + crash-bear gate
+    "switch_ma", "confirm_ma",                                         # adaptive regime switcher
     "fast_ema", "slow_ema", "momentum_lookback", "adx_period", "adx_min",  # momentum
     "entry_window", "exit_window", "trend_ma",                        # fast
 )

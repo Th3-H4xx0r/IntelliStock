@@ -85,6 +85,7 @@ const _kDynamicColor = Color(0xFF7C5CE6);
 // Display name lowercases to the backend strategy id (e.g. 'Meanrev' -> 'meanrev').
 const _kStrategies = <(String, String)>[
   ('Meanrev', 'Mean-Reversion (RSI) — buys oversold majors (RSI-14 < 35) only while above their 200h trend MA ("healthy dips, not falling knives"), holds 2, sells when RSI recovers past 55. Mostly in cash. Top backtest performer: +24% over 400d at Binance.US fees while BTC fell −42%, ~8% drawdown. Needs a low-fee venue — loses at Alpaca 0.25%.'),
+  ('Adaptive', 'Adaptive (regime switcher) — holds the whole basket (buy & hold) while the market is above both its 200-day and 50-day trend; switches to gated Mean-Reversion dip-buying when the regime breaks. Faithful 2021-26: ~+24.5% mean per regime vs Mean-Reversion\'s ~+14.5%; far more bull capture, 2022 crash still positive. Weakness: chop goes modestly negative (still beats holding).'),
   ('Connors', 'Connors (fast RSI) — quicker cousin of Mean-Reversion: buys deeply oversold dips above the trend MA, exits fast when price snaps back above a short MA. Higher turnover. Backtest: modest but robust +6% over 400d. Also needs a low-fee venue.'),
   ('Momentum', 'Trend-follows the auto-discovered universe — leans into coins whose momentum is strengthening. Trend strategies were whipsawed in choppy/down backtests; best in a sustained bull run.'),
   ('Allocator', 'Risk-weights across coins toward balanced target weights. Diversified, steadier exposure; a slower rebalancer.'),
@@ -96,6 +97,7 @@ const _kStrategies = <(String, String)>[
 // strategies were validated on 60-min (Low) bars.
 const _kStrategyRecommendedBand = <String, String>{
   'meanrev': 'low',
+  'adaptive': 'low',
   'connors': 'low',
   'momentum': 'medium',
   'allocator': 'low',

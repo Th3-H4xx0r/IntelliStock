@@ -61,6 +61,7 @@ const BAND_BLURB = {
 // What each dynamic strategy does with the auto-discovered (Dynamic) portion.
 const STRATEGY_BLURB = {
   meanrev: 'Mean-Reversion (RSI) — buys oversold majors (RSI-14 below 35) only while they hold above their 200-hour trend MA ("healthy dips, not falling knives"), holds 2, and sells when RSI recovers past 55. Sits in cash ~75% of the time. Top backtest performer: +24% over 400 days at Binance.US fees while BTC fell −42%, ~8% drawdown. Needs a low-fee venue — loses money at Alpaca 0.25%.',
+  adaptive: 'Adaptive (regime switcher) — holds the whole basket (buy & hold) while the market trades above both its 200-day and 50-day trend, and switches to gated Mean-Reversion dip-buying the moment the regime breaks. Faithful backtests 2021-2026: ~+24.5% mean per regime vs Mean-Reversion\'s ~+14.5% — far more bull capture (+111% in the 2021 bull) with the 2022 crash still positive. Weakness: choppy markets go modestly negative (still ~13 pts better than holding).',
   connors: 'Connors (fast RSI) — the quicker cousin of Mean-Reversion: buys deeply oversold dips (short RSI) above the trend MA and exits fast once price snaps back above a short MA. Higher turnover, quicker in/out. Backtest: modest but robust +6% over 400 days. Also needs a low-fee venue.',
   momentum: 'Momentum — trend-follows the auto-discovered universe, leaning into coins whose momentum is strengthening. Higher conviction in movers. Note: trend strategies were whipsawed in choppy/down backtests — best in a sustained bull run.',
   allocator: 'Allocator — risk-weights across coins toward balanced target weights. Diversified, steadier exposure; a slower rebalancer.',
@@ -72,6 +73,7 @@ const STRATEGY_BLURB = {
 // Mean-reversion strategies were validated on 60-min (Low) bars.
 const STRATEGY_RECOMMENDED_BAND = {
   meanrev: 'low',
+  adaptive: 'low',
   connors: 'low',
   momentum: 'medium',
   allocator: 'low',
@@ -81,9 +83,10 @@ const STRATEGY_RECOMMENDED_BAND = {
 
 // The crypto strategy modules live in strategies/crypto/. We surface them from
 // /strategies/available (filtered), falling back to a hardcoded list.
-const CRYPTO_STRATEGY_IDS = ['meanrev', 'connors', 'momentum', 'allocator', 'fast', 'reference']
+const CRYPTO_STRATEGY_IDS = ['meanrev', 'adaptive', 'connors', 'momentum', 'allocator', 'fast', 'reference']
 const FALLBACK_STRATEGIES = [
   { id: 'meanrev', name: 'Mean-Reversion' },
+  { id: 'adaptive', name: 'Adaptive (regime switcher)' },
   { id: 'connors', name: 'Connors (fast RSI)' },
   { id: 'momentum', name: 'Momentum' },
   { id: 'allocator', name: 'Allocator' },

@@ -1,0 +1,63 @@
+# Adaptive regime switcher (`adaptive`) — 2026-07-14
+
+## What it is
+
+User ask: "a strategy that detects bull vs bear and uses B&H when required."
+New selectable crypto strategy `adaptive` (class `Adaptive`,
+`backend/strategies/crypto/adaptive.py`):
+
+- **BULL** — universe EW basket ≥ ramped SMA(`switch_ma`=4800h≈200d) AND
+  ≥ ramped SMA(`confirm_ma`=1200h≈50d): buy every non-held coin at pv/N and
+  hold ("be the market"). Fail-open to bull below max(600, confirm_ma//2)
+  shared bars — holding the market is the benchmark behavior.
+- **BEAR** — otherwise: liquidate the basket on the flip tick (mode tracked in
+  `strategy_cache`; stateless fallback: held > top_k in bear ⇒ remnants ⇒
+  liquidate), then delegate to the real `Meanrev` with `bear_gate_ma`
+  defaulted to `confirm_ma` (dip-buys blocked while basket < 50d MA).
+
+Registered in `_CRYPTO_STRATEGY_NAMES` + tunables (`switch_ma`, `confirm_ma`);
+web + mobile pickers (recommended band: low).
+
+## Why these parameters
+
+Wave-4 sweeps (job a2a5a542 tmp, eval9_wave4*.py, honest v2 harness):
+- Plain switchers (any single MA) fail: fast MAs die in 2022 bear rallies
+  (−49..−54) and chop; slow MAs miss bulls. Max 3/9.
+- Composite (slow switch + gated-MR bear) recovers 2022 (+11.5) but chop still
+  negative; dual-confirm (also ≥ 50d MA) is the best variant. Plateau across
+  sw 3600–4800 (means +24.9/+27.0). Margin/slope chop-rescues destroy 2021 or
+  do nothing — chop is structurally unwinnable for a switcher; rejected.
+
+## Faithful validation (real Meanrev delegation + real PortfolioEmulator, 0.02%)
+
+| window | B&H | adaptive | MeanRev-only |
+|---|---|---|---|
+| 2021bull | +190.0 | **+111.2** | +64.8 |
+| 2022bear | −67.1 | **+8.6** | −19.3 |
+| 2023recov | +57.8 | +16.3 | +17.8 |
+| 2324bull | +119.1 | **+74.1** | +30.6 |
+| 2024chop | −35.2 | −21.3 | +1.7 |
+| late24 | +74.3 | +8.1 | −13.3 |
+| OOS | −36.4 | **+13.1** | +8.8 |
+| tgt | −20.8 | −3.6 | +13.4 |
+| fullrec | −50.0 | **+14.4** | +25.8 |
+| **mean** | | **+24.5** | +14.5 |
+
+`scripts/verify_adaptive_switcher.py` reproduces this table.
+
+## Honest positioning (not a strict upgrade)
+
+- Strict regime wins: 3/9 (< gated-MR's 5/9). Mean: +24.5 vs +14.5.
+- Adaptive trades chop (−21) and the mildest bears (tgt −3.6) for ~2-4× bull
+  capture with the 2022 crash still positive.
+- **MeanRev (+bear gate) = max bear safety; Adaptive = bull participation.**
+  Per-instance choice, both selectable in the UI.
+
+## Gotchas
+
+- 200d switch MA needs 4800 bars; prod backtest warmup is only 90d (~2160
+  bars) — the ramped (expanding) MA handles the shortfall deterministically,
+  matching the verified form.
+- `confirm_ma` < 600 never gates (bear-gate 600-bar live-safety floor).
+- Same live-mode `data=None` gap as all crypto strategies (see
+  2026-07-14-crypto-meanrev-bear-gate.md).
