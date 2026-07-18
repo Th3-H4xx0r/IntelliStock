@@ -74,6 +74,36 @@ class EventKind(Enum):
     DEMOTION = "DEMOTION"
 
 
+class EvidenceClass(Enum):
+    DIRECT = "DIRECT"
+    PROPAGATION = "PROPAGATION"
+    DETERMINISTIC = "DETERMINISTIC"
+
+
+class GateEffect(Enum):
+    ELIGIBLE = "ELIGIBLE"
+    REJECTED = "REJECTED"
+    HELD = "HELD"
+
+
+class OrderEffect(Enum):
+    SUBMITTED = "SUBMITTED"
+    ACCEPTED = "ACCEPTED"
+    PARTIAL = "PARTIAL"
+    FILLED = "FILLED"
+    CANCELED = "CANCELED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+
+
+class OwnerSource(Enum):
+    """Resolved order ownership. There is deliberately no UNKNOWN member —
+    unresolved ownership is a validation error and blocks promotion."""
+    STRATEGY = "STRATEGY"
+    DASHBOARD = "DASHBOARD"
+    EXTERNAL = "EXTERNAL"
+
+
 def require_execution_mode(value):
     """Return ``value`` if it is an ``ExecutionMode``; raise ``TypeError``
     otherwise — including for ``SchedulerTickMode`` members and raw strings.

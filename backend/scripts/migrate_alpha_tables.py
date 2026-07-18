@@ -19,10 +19,24 @@ if _BACKEND_ROOT not in sys.path:
 
 DB_NAME = "IntelliStock"
 
-TABLES = ("AlphaEvents", "AlphaState")
+# Task 7 record tables share the compound query shapes run_asof and
+# instance_origin_asof; the production backend maps those names to their
+# compound fields in create_index.
+RECORD_TABLES = (
+    "AlphaPredictions", "AlphaGates", "AlphaAllocations", "AlphaOrderIntents",
+    "AlphaBrokerOrders", "AlphaFills", "AlphaPortfolioSnapshots",
+    "AlphaCashActivities", "AlphaOutcomes", "AlphaIncidents",
+    "AlphaExperiments", "AlphaPromotions",
+)
+TABLES = ("AlphaEvents", "AlphaState") + RECORD_TABLES
+COMPOUND_INDEX_FIELDS = {
+    "run_asof": ("run_id", "as_of"),
+    "instance_origin_asof": ("instance_id", "origin", "as_of"),
+}
 INDEXES = {
     "AlphaEvents": ("kind",),
     "LiveOrderWAL": ("instance_id", "client_order_id"),
+    **{table: ("run_asof", "instance_origin_asof") for table in RECORD_TABLES},
 }
 
 
@@ -69,7 +83,13 @@ class RethinkMigrationBackend:
         self._r.db(DB_NAME).table_create(table).run(self._conn)
 
     def create_index(self, table, index):
-        self._r.db(DB_NAME).table(table).index_create(index).run(self._conn)
+        fields = COMPOUND_INDEX_FIELDS.get(index)
+        if fields:
+            row = self._r.row
+            self._r.db(DB_NAME).table(table).index_create(
+                index, [row[f] for f in fields]).run(self._conn)
+        else:
+            self._r.db(DB_NAME).table(table).index_create(index).run(self._conn)
         self._r.db(DB_NAME).table(table).index_wait(index).run(self._conn)
 
 

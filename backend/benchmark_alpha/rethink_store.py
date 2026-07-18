@@ -95,6 +95,15 @@ class _RethinkBackend:
                 doc, conflict="error", durability=durability).run(conn)
             return None
 
+    def insert_record(self, table, doc, *, durability):
+        with self._conn_factory() as conn:
+            existing = self._r.db(self._db).table(table).get(doc["id"]).run(conn)
+            if existing is not None:
+                return existing
+            self._r.db(self._db).table(table).insert(
+                doc, conflict="error", durability=durability).run(conn)
+            return None
+
     def compare_and_swap_state(self, key, expected_version, doc, *, durability):
         with self._conn_factory() as conn:
             table = self._r.db(self._db).table(STATE_TABLE)
@@ -168,6 +177,33 @@ class AlphaRethinkStore:
             return False
         raise AlphaIntegrityError(
             f"event {event_id!r} already exists with divergent content")
+
+    # -- typed records (Task 7) ----------------------------------------------
+
+    def write_record(self, record):
+        """Write a typed record to its table with hard durability.
+
+        Byte-identical existing content is idempotent (returns False);
+        divergent content under the same natural-identity ID raises
+        ``AlphaIntegrityError``; storage failure raises
+        ``AlphaUnavailableError`` — never an empty success."""
+        doc = record.to_doc()
+        table = record.TABLE
+        try:
+            prior = self._backend.insert_record(table, doc, durability="hard")
+        except (AlphaIntegrityError, AlphaUnavailableError):
+            raise
+        except Exception as exc:
+            raise AlphaUnavailableError(
+                f"write_record({table}) failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        if prior is None:
+            return True
+        if canonical_json(prior) == canonical_json(doc):
+            return False
+        raise AlphaIntegrityError(
+            f"record {doc.get('id')!r} in {table} already exists with "
+            "divergent content")
 
     # -- versioned state ------------------------------------------------------
 
