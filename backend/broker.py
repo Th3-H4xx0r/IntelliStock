@@ -4252,6 +4252,92 @@ def _close_live_trading_log(reason: str = "shutdown") -> None:
     _live_trading_log_path = None
 
 
+def _load_containment_state(instance_id_val):
+    """Containment state for this instance from AlphaState (Tasks 0/6).
+
+    Missing row or missing table => not contained (``{}``). A READ FAILURE
+    returns ``None`` so ``legacy_live_order_block`` fails closed — a live
+    instance whose containment state cannot be read must not trade."""
+    try:
+        conn = get_conn()
+        try:
+            tables = list(r.db(DB_NAME).table_list().run(conn))
+            if 'AlphaState' not in tables:
+                return {}
+            row = r.db(DB_NAME).table('AlphaState').get(
+                f"containment:{instance_id_val}").run(conn)
+            return (row or {}).get("payload") or {}
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+_containment_gate_logged: set = set()
+
+
+def _write_containment_gate_event(instance_id_val, sym, side, reason):
+    """Best-effort hard-durability GATE event; storage failure never
+    weakens the block itself."""
+    try:
+        conn = get_conn()
+        try:
+            ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            eid = "gate-" + hashlib.sha256(
+                f"{instance_id_val}|{sym}|{side}|{ts}".encode()).hexdigest()[:24]
+            r.db(DB_NAME).table('AlphaEvents').insert({
+                "id": eid, "kind": "GATE",
+                "payload": {"instance_id": instance_id_val, "symbol": sym,
+                            "side": side, "reason": reason},
+                "created_at": ts,
+            }, durability="hard").run(conn)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _install_legacy_containment_gate(adapter, instance_id_val):
+    """Task 6: when RethinkDB containment disables legacy order authority for
+    this instance, wrap the adapter's ``execute_signal`` so EVERY legacy live
+    submission (buys AND sells) is blocked at the single choke point. The
+    typed reduce-only emergency path submits through ``submit_order``
+    directly and is unaffected. No OFF-mode setting or healthy mark-health
+    result clears containment — only an authenticated Task 18 promotion."""
+    containment = _load_containment_state(instance_id_val)
+    if isinstance(containment, dict) and not containment.get(
+            "legacy_order_authority_disabled"):
+        return adapter
+    from benchmark_alpha.risk import legacy_live_order_block
+    orig_execute = adapter.execute_signal
+
+    def _gated_execute_signal(sym, sig, *args, **kwargs):
+        side = "buy" if (sig or 0) > 0 else "sell"
+        reason = legacy_live_order_block(instance_id_val, side, containment)
+        if reason:
+            gate_key = (str(sym).upper(), side)
+            if gate_key not in _containment_gate_logged:
+                _containment_gate_logged.add(gate_key)
+                try:
+                    _log(f"[containment] {reason} ({sym})", "red")
+                except Exception:
+                    pass
+            _write_containment_gate_event(instance_id_val, str(sym), side, reason)
+            return False
+        return orig_execute(sym, sig, *args, **kwargs)
+
+    adapter.execute_signal = _gated_execute_signal
+    try:
+        _log(
+            f"[containment] legacy order authority DISABLED for {instance_id_val} "
+            "— all legacy live submissions will be blocked",
+            "red",
+        )
+    except Exception:
+        pass
+    return adapter
+
+
 def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     """Build the dict to upsert into LiveState. Read-only over the adapter.
 
@@ -4549,6 +4635,32 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
         _strat_tick = dict(_strategy_tick_state)
     except Exception:
         _strat_tick = {}
+    # Task 6: typed mark health over the adapter's current marks, and the
+    # persisted alpha risk state (telemetry; held count comes from snapshot
+    # positions, never per-cycle action counters).
+    _mark_health_payload = None
+    try:
+        from benchmark_alpha.risk import evaluate_mark_health as _emh
+        _mh_marks = adapter.get_market_marks() if hasattr(adapter, "get_market_marks") else {}
+        _mh_syms = [p.get("symbol") for p in (positions_payload or [])
+                    if isinstance(p, dict) and p.get("symbol")]
+        _mh = _emh(_mh_syms, _mh_marks,
+                   datetime.datetime.now(datetime.timezone.utc))
+        _mark_health_payload = {"ok": _mh.ok, "entries": list(_mh.entries)}
+    except Exception:
+        _mark_health_payload = None
+    _risk_payload = None
+    try:
+        _risk_conn = get_conn()
+        try:
+            _risk_row = r.db(DB_NAME).table('AlphaState').get(
+                f"risk:{instance_id_val}").run(_risk_conn)
+            if _risk_row:
+                _risk_payload = dict(_risk_row.get("payload") or {})
+        finally:
+            _risk_conn.close()
+    except Exception:
+        _risk_payload = None
     return {
         "trading_active": status_str == "active",
         "status": status_str,
@@ -4563,6 +4675,9 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
         "total_pnl": total_pnl,
         "total_pnl_pct": total_pnl_pct,
         "positions": positions_payload,
+        "held_positions_count": len(positions_payload or []),
+        "mark_health": _mark_health_payload,
+        "risk": _risk_payload,
         "recent_trades": recent_trades,
         "portfolio_history": portfolio_history,
         "broker": {
@@ -5692,6 +5807,11 @@ elif mode == MODE_LIVE:
                 seed_trades_from_broker=(not _clean_room_mode),
             )
             live_adapter.start_trade_updates()
+            # Task 6 containment: block every legacy live submission when
+            # this instance's RethinkDB containment state disables legacy
+            # order authority (fail closed if the state is unreadable).
+            live_adapter = _install_legacy_containment_gate(
+                live_adapter, str(instance_id))
         except _BrokerError as _be:
             _log(f"Failed to build live broker adapter: {_be}", "red")
             # Phase C (2026-04-29): Discord alert on adapter build failure.

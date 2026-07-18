@@ -60,6 +60,42 @@ DB_NAME = 'IntelliStock'
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 
 broker_process = None  # single broker subprocess
+alpha_watchdog_process = None  # Task 6: out-of-process mark/equity watchdog
+
+
+def _stop_alpha_watchdog():
+    global alpha_watchdog_process
+    if alpha_watchdog_process is not None and alpha_watchdog_process.poll() is None:
+        try:
+            alpha_watchdog_process.terminate()
+            alpha_watchdog_process.wait(timeout=10)
+        except Exception:
+            pass
+    alpha_watchdog_process = None
+
+
+def _maybe_start_alpha_watchdog(instance_id_val):
+    """Start the independent mark watchdog alongside the live broker when
+    ALPHA_MARK_WATCHDOG_ENABLED=1. Default DISABLED until the RethinkDB
+    table/index migration and scoped watchdog credentials are deployed
+    (Task 6 Step 9). Restart-safe: any prior watchdog is stopped first."""
+    global alpha_watchdog_process
+    if os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") != "1":
+        return
+    _stop_alpha_watchdog()
+    try:
+        from benchmark_alpha.watchdog import build_watchdog_command
+        cmd = build_watchdog_command(str(instance_id_val),
+                                     python_executable="python")
+        alpha_watchdog_process = subprocess.Popen(cmd, cwd=BACKEND_DIR)
+        import atexit
+        atexit.register(_stop_alpha_watchdog)
+        intellistock_logger.log(
+            "Started alpha mark watchdog subprocess", "green", service="INSTANCE")
+    except Exception as _wd_exc:
+        intellistock_logger.log(
+            f"Alpha watchdog failed to start (non-fatal): {_wd_exc}",
+            "yellow", service="INSTANCE")
 current_symbols = []   # list of symbols the broker was started with
 current_granularity_time_increment = '60'  # from Instances[instance_id].granularity_time_increment
 instance_key = ''      # from Instances[instance_id].key (loaded from DB)
@@ -405,6 +441,7 @@ def start_broker(symbols):
         cwd=BACKEND_DIR,
         creationflags=0,  # same terminal (no CREATE_NEW_CONSOLE)
     )
+    _maybe_start_alpha_watchdog(instance_id)
     if symbols:
         intellistock_logger.log(
             f"Started broker with {len(symbols)} ticker(s): {', '.join(symbols)} (secrets read from DB)",
