@@ -180,3 +180,32 @@ def test_reconciliation_flags_lineage_gaps_and_passes_july18_baseline():
              "state": "submitted"}],
         strategy_cid_prefix="main-")
     assert "main-stuck" in stuck["non_terminal_intents"]
+
+
+def test_reconciliation_refuses_an_empty_strategy_prefix():
+    """Bug sweep 2026-07-18: startswith("") is True for every cid, so an
+    empty prefix silently classified ALL fills as strategy-owned."""
+    from benchmark_alpha.reconciliation import reconcile_order_ownership
+    with pytest.raises(ValueError):
+        reconcile_order_ownership(broker_fills=[], wal_rows=[],
+                                  strategy_cid_prefix="")
+    with pytest.raises(ValueError):
+        reconcile_order_ownership(broker_fills=[], wal_rows=[],
+                                  strategy_cid_prefix=None)
+
+
+def test_read_alpha_records_normalizes_origin_case():
+    from benchmark_alpha.api_reads import read_alpha_records
+
+    class FakeBackend:
+        def __init__(self):
+            self.calls = []
+
+        def read_by_index(self, table, index, key, *, limit, cursor):
+            self.calls.append(key)
+            return [], None
+
+    backend = FakeBackend()
+    read_alpha_records(backend, "AlphaPredictions", instance_id="alpaca-main",
+                       origin="live", run_id=None, limit=5, cursor=None)
+    assert backend.calls[0] == ("alpaca-main", "LIVE")

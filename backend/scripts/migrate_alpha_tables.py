@@ -106,6 +106,26 @@ class RethinkMigrationBackend:
         self._r.db(DB_NAME).table(table).index_wait(index).run(self._conn)
 
 
+def retention_plan(now):
+    """Executable form of RETENTION_DAYS: [(table, cutoff_iso, filter_kind)].
+
+    ``filter_kind`` is "as_of" for record tables and "created_at:mark_health"
+    for the AlphaEvents mark-health subset. Tables with ``None`` retention are
+    excluded — they are retained indefinitely unless policy changes."""
+    from datetime import timedelta
+    plan = []
+    for key, days in RETENTION_DAYS.items():
+        if days is None:
+            continue
+        cutoff = (now - timedelta(days=int(days))).isoformat()
+        if ":" in key:
+            table, subset = key.split(":", 1)
+            plan.append((table, cutoff, f"created_at:{subset}"))
+        else:
+            plan.append((key, cutoff, "as_of"))
+    return plan
+
+
 def main(argv=None, backend=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     group = parser.add_mutually_exclusive_group()

@@ -30,8 +30,11 @@ def read_alpha_records(backend, table, *, instance_id, origin, run_id,
         return backend.read_by_index(
             table, "run_asof", (str(run_id),), limit=limit, cursor=cursor)
     if instance_id and origin:
+        # Records store RunOrigin values uppercase; normalize so "live"
+        # cannot silently return an empty page (bug sweep 2026-07-18).
         return backend.read_by_index(
-            table, "instance_origin_asof", (str(instance_id), str(origin)),
+            table, "instance_origin_asof",
+            (str(instance_id), str(origin).upper()),
             limit=limit, cursor=cursor)
     raise ValueError(
         "alpha reads require exact scope: run_id, or instance_id + origin")

@@ -33,6 +33,9 @@ class ResearchTarget:
     turnover: float
     turnover_capped: bool
     tax_opportunity_cost_bps: float
+    # Weight not reachable this session (e.g. turnover-capped transitions);
+    # it sits in cash until a later session — explicit, never implicit.
+    unallocated_weight: float = 0.0
 
 
 class ResearchPortfolioPolicy:
@@ -112,8 +115,10 @@ class ResearchPortfolioPolicy:
                 turnover = turnover_cap
                 turnover_capped = True
 
+        unallocated = max(0.0, 1.0 - CASH_WEIGHT - sum(weights.values()))
         return ResearchTarget(
             weights=weights, cash_weight=CASH_WEIGHT,
             rejections=tuple(rejections), turnover=turnover,
             turnover_capped=turnover_capped,
-            tax_opportunity_cost_bps=tax_cost_bps)
+            tax_opportunity_cost_bps=tax_cost_bps,
+            unallocated_weight=unallocated)

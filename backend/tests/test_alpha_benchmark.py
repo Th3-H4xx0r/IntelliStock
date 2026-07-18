@@ -97,3 +97,11 @@ def test_live_broker_fetch_inception_fallback_is_removed():
     initial, unavailable = resolve_inception([])
     assert initial is None
     assert unavailable is True  # NEVER current equity; P&L must not read 0
+
+
+def test_twr_refuses_a_flow_without_a_matching_valuation_point():
+    """Bug sweep 2026-07-18: a deposit dated between valuation points was
+    silently ignored, reporting +200.5% instead of removing the deposit."""
+    with pytest.raises(ValueError):
+        time_weighted_return([("2026-06-04", 2000.0), ("2026-07-17", 6010.0)],
+                             [("2026-06-08", 4000.0)])

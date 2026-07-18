@@ -40,8 +40,15 @@ def time_weighted_return(values, flows):
     points = sorted((str(d), float(v)) for d, v in values)
     if len(points) < 2:
         raise ValueError("need at least two valuation points")
+    valuation_dates = {d for d, _ in points}
     flow_by_date = {}
     for d, amount in flows or ():
+        if str(d) not in valuation_dates:
+            # A silently-ignored flow poisons every lens (bug sweep
+            # 2026-07-18: a skipped $4,000 deposit reported +200.5% TWR).
+            raise ValueError(
+                f"external flow on {d} has no matching valuation point — "
+                "supply the flow-date valuation")
         flow_by_date[str(d)] = flow_by_date.get(str(d), 0.0) + float(amount)
     growth = 1.0
     prev_value = points[0][1]

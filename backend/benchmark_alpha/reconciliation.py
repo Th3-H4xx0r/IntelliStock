@@ -10,6 +10,11 @@ from broker_adapters._wal import TERMINAL_STATES
 
 
 def reconcile_order_ownership(*, broker_fills, wal_rows, strategy_cid_prefix):
+    if not strategy_cid_prefix or not str(strategy_cid_prefix).strip():
+        # startswith("") is True for EVERY cid — an empty prefix would
+        # silently classify all fills as strategy-owned (bug sweep 2026-07-18).
+        raise ValueError("strategy_cid_prefix must be a non-empty prefix")
+    strategy_cid_prefix = str(strategy_cid_prefix)
     wal_by_cid = {str(row.get("client_order_id") or ""): row
                   for row in (wal_rows or [])}
     strategy_owned = 0

@@ -235,3 +235,19 @@ def test_migration_plan_creates_tables_and_indexes_dry_run_prints_names_only(cap
     assert rc == 0
     assert ("table", "AlphaEvents") in fake.created
     assert ("index", "LiveOrderWAL", "instance_id") in fake.created
+
+
+def test_retention_plan_is_executable_and_scoped():
+    from datetime import datetime, timedelta, timezone
+    from scripts.migrate_alpha_tables import RETENTION_DAYS, retention_plan
+    now = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    plan = retention_plan(now)
+    by_table = {(t, kind): cutoff for t, cutoff, kind in plan}
+    assert ("AlphaPredictions", "as_of") in by_table
+    assert by_table[("AlphaPredictions", "as_of")].startswith(
+        (now - timedelta(days=400)).date().isoformat())
+    assert ("AlphaEvents", "created_at:mark_health") in by_table
+    # Indefinitely-retained tables never appear in the executable plan.
+    for table, _, _ in plan:
+        assert RETENTION_DAYS.get(table) is not None or table == "AlphaEvents"
+    assert not any(t == "AlphaFills" for t, _, _ in plan)
