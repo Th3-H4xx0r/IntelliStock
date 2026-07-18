@@ -110,6 +110,8 @@ class Forecast(_AlphaRecord):
     instance_id: str
     origin: RunOrigin
     run_id: str
+    # Producer-native raw score (pre-calibration); not part of identity.
+    raw_score: float = 0.0
 
     def __post_init__(self):
         _enum("evidence_class", self.evidence_class, EvidenceClass)
