@@ -37,7 +37,7 @@ from __future__ import annotations
 from typing import Any, Callable, Iterable
 
 
-def compute_backtest_summary(emulator, snapshots, initial_cash) -> dict:
+def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values=None) -> dict:
     """Final P&L derived from the equity curve's own end mark.
 
     ``final_value`` is the last portfolio snapshot's stored ``value`` (the
@@ -82,7 +82,38 @@ def compute_backtest_summary(emulator, snapshots, initial_cash) -> dict:
                 fees = fs
         except Exception:
             fees = None
-    return {"final_value": final_value, "pnl": pnl, "pnl_percent": pnl_percent, "fees": fees}
+    summary = {"final_value": final_value, "pnl": pnl, "pnl_percent": pnl_percent, "fees": fees}
+
+    # Task 9 (benchmark-alpha): MERGE benchmark-relative fields when a
+    # benchmark value series is supplied. Existing P&L fields are never
+    # replaced, and legacy callers without benchmark_values are byte-identical.
+    if benchmark_values is not None and snapshots:
+        try:
+            import pandas as _pd
+
+            from benchmark_alpha.metrics import compute_active_metrics
+            port = [float((s or {}).get("value") or 0.0) for s in snapshots]
+            bench = [float(v) for v in benchmark_values]
+            n = min(len(port), len(bench))
+            if n >= 2:
+                aligned = _pd.DataFrame(
+                    {"portfolio": port[:n], "benchmark": bench[:n]},
+                    index=_pd.RangeIndex(n))
+                m = compute_active_metrics(aligned)
+                summary.update({
+                    "benchmark_return": m.benchmark_return,
+                    "active_return": m.active_return,
+                    "beta": m.beta,
+                    "tracking_error": m.tracking_error,
+                    "information_ratio": m.information_ratio,
+                    "max_drawdown_magnitude": m.max_drawdown_magnitude,
+                    "bootstrap_active_low": m.bootstrap_active_low,
+                    "bootstrap_active_high": m.bootstrap_active_high,
+                })
+        except Exception:
+            # Benchmark enrichment is additive; failure never blocks base P&L.
+            pass
+    return summary
 
 
 def resolve_end_prices(resolver_prices, snapshots) -> dict:
