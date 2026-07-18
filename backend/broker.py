@@ -4257,9 +4257,13 @@ def _load_containment_state(instance_id_val):
 
     Missing row or missing table => not contained (``{}``). A READ FAILURE
     returns ``None`` so ``legacy_live_order_block`` fails closed — a live
-    instance whose containment state cannot be read must not trade."""
+    instance whose containment state cannot be read must not trade.
+    Retried (audit 2026-07-18) so one transient RethinkDB blip at boot does
+    not latch the gate for the whole process lifetime."""
     try:
-        conn = get_conn()
+        conn = get_conn_retry(max_attempts=3, delay=2)
+        if conn is None:
+            conn = get_conn()
         try:
             tables = list(r.db(DB_NAME).table_list().run(conn))
             if 'AlphaState' not in tables:
@@ -4657,6 +4661,26 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
                 f"risk:{instance_id_val}").run(_risk_conn)
             if _risk_row:
                 _risk_payload = dict(_risk_row.get("payload") or {})
+            # Audit 2026-07-18: the independent watchdog compares direct
+            # broker truth against live_snapshot:<id>, which nothing wrote —
+            # detection was permanently fail-open. Persist the broker
+            # process's view here (soft durability: monitoring telemetry on
+            # a 3s cadence, replaced each tick).
+            try:
+                _snap_marks = {
+                    str(_sym): float(_mk.price)
+                    for _sym, _mk in (adapter.get_market_marks() or {}).items()
+                } if hasattr(adapter, "get_market_marks") else {}
+                r.db(DB_NAME).table('AlphaState').insert({
+                    "id": f"live_snapshot:{instance_id_val}",
+                    "version": 0,
+                    "payload": {"equity": float(equity or 0.0),
+                                "marks": _snap_marks},
+                    "updated_at": datetime.datetime.now(
+                        datetime.timezone.utc).isoformat(),
+                }, conflict="replace", durability="soft").run(_risk_conn)
+            except Exception:
+                pass
         finally:
             _risk_conn.close()
     except Exception:

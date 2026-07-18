@@ -72,8 +72,7 @@ def graph_forecasts(scores, metadata, calibrators, run_context):
                 symbol=str(symbol),
                 as_of=run_context["as_of"],
                 horizon_trading_days=horizon,
-                expected_excess_return=expected if eligible else (
-                    expected if model is not None else 0.0),
+                expected_excess_return=expected,
                 probability_outperform=probability,
                 confidence=confidence,
                 feature_version=str(run_context["feature_version"]),
@@ -84,5 +83,6 @@ def graph_forecasts(scores, metadata, calibrators, run_context):
                 instance_id=str(run_context["instance_id"]),
                 origin=run_context["origin"],
                 run_id=str(run_context["run_id"]),
+                raw_score=raw_score,
             ))
     return out

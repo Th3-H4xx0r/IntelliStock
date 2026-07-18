@@ -650,12 +650,21 @@ def _normalize_action_intent(intent: str | None) -> str:
     return "unknown"
 
 
+_NON_EXECUTED_INTENTS = frozenset({
+    # Valid context intents that describe a BLOCKED signal — no trade
+    # occurred, so no directional forward-outcome row may exist (audit
+    # 2026-07-18: these silently biased the hit-rate denominator).
+    "blocked_priority_buy",
+})
+
+
 def _outcome_row_allowed(action_intent: str) -> bool:
     """Task 8 (benchmark-alpha E04): only a real directional prediction may
     create a forward-outcome row. 'unknown' is a schema error (context row
-    only), 'hold' and queue/deferred states are not directional outcomes."""
+    only); 'hold' and blocked/queued states are not directional outcomes."""
     intent = str(action_intent or "").strip().lower()
-    return intent in _VALID_ACTION_INTENTS and intent != "hold"
+    return (intent in _VALID_ACTION_INTENTS and intent != "hold"
+            and intent not in _NON_EXECUTED_INTENTS)
 
 
 def _load_evict_cooldown_from_db(conn, instance_id: str) -> dict:
@@ -9653,6 +9662,11 @@ def _save_trade_contexts_and_outcomes(
             "dominant_event_type": feature_row.get("dominant_event_type") or "general",
         }
         docs.append(doc)
+        if _outcome_row_allowed(action_intent) and not _entry_px:
+            # Directional intent with a transiently unresolvable entry price:
+            # write no outcome but DO NOT delete a previously-written valid
+            # same-day row (audit 2026-07-18: the else-branch clobbered it).
+            continue
         if _outcome_row_allowed(action_intent) and _entry_px:
             outcome_docs.append({
                 "id": trade_id,

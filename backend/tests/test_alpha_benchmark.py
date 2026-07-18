@@ -105,3 +105,37 @@ def test_twr_refuses_a_flow_without_a_matching_valuation_point():
     with pytest.raises(ValueError):
         time_weighted_return([("2026-06-04", 2000.0), ("2026-07-17", 6010.0)],
                              [("2026-06-08", 4000.0)])
+
+
+def test_twr_collapses_duplicate_valuation_dates_before_flows():
+    """Audit: a flow on a duplicated date was applied to every sub-period
+    ending that date — a flat account reported -10%."""
+    twr = time_weighted_return(
+        [("2026-01-02", 110.0), ("2026-01-02", 110.0), ("2026-01-03", 110.0)],
+        [("2026-01-02", 10.0)])
+    # Only points strictly before the flow date can anchor; with none, the
+    # measurable growth from the flow-adjusted base is flat.
+    assert twr == pytest.approx(0.0)
+
+
+def test_twr_rejects_non_positive_valuations():
+    with pytest.raises(ValueError):
+        time_weighted_return([("2026-01-02", 0.0), ("2026-01-03", 100.0)], [])
+
+
+def test_backtest_summary_skips_unusable_snapshots_and_never_emits_nan():
+    """Audit: a None snapshot value became 0.0, poisoning metrics with NaN
+    and a false 100% drawdown, then breaking JSON serialization."""
+    import json as _json
+    import math as _math
+    from backtest_summary import compute_backtest_summary
+    snapshots = [{"value": 100.0}, {"value": None}, {"value": 110.0},
+                 {"value": 120.0}]
+    summary = compute_backtest_summary(None, snapshots, 100.0,
+                                       benchmark_values=[100.0, 101.0, 102.0, 103.0])
+    for key, value in summary.items():
+        if isinstance(value, float):
+            assert _math.isfinite(value), key
+    _json.dumps(summary, allow_nan=False)  # must serialize
+    if "max_drawdown_magnitude" in summary:
+        assert summary["max_drawdown_magnitude"] < 0.5  # no false 100% DD

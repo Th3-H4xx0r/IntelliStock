@@ -37,7 +37,16 @@ def time_weighted_return(values, flows):
     [(date, signed_amount), ...]. A flow dated D applies at the START of D:
     the sub-period ending at D is measured to the pre-flow value
     (value_at_D - flow), and the next sub-period starts at value_at_D."""
-    points = sorted((str(d), float(v)) for d, v in values)
+    # Collapse duplicate valuation dates to their LAST value (audit
+    # 2026-07-18: a flow on a duplicated date was applied to every
+    # sub-period ending that date — a flat account reported -10%), and
+    # reject non-positive valuations outright.
+    by_date = {}
+    for d, v in sorted((str(d), float(v)) for d, v in values):
+        if v <= 0:
+            raise ValueError(f"non-positive valuation {v} on {d}")
+        by_date[d] = v
+    points = sorted(by_date.items())
     if len(points) < 2:
         raise ValueError("need at least two valuation points")
     valuation_dates = {d for d, _ in points}

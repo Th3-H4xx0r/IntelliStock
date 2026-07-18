@@ -116,3 +116,10 @@ def test_reason_text_alone_can_never_create_eligibility():
                           reason="AMAZING breakout confirmed!!!")},
         {}, _calibrators(), CTX)
     assert all(not f.eligibility for f in out)
+
+
+def test_graph_forecasts_persist_the_raw_score():
+    """Audit finding 3: the adapter computed raw_score but never passed it,
+    so stored forecasts could never re-fit a calibrator."""
+    out = graph_forecasts({"AAPL": _payload(score=2)}, {}, _calibrators(), CTX)
+    assert all(f.raw_score == 2.0 for f in out if f.symbol == "AAPL")

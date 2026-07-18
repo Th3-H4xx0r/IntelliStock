@@ -104,3 +104,12 @@ def test_policy_cannot_create_a_broker_intent():
     for forbidden in ("submit_order", "execute", "broker", "wal",
                       "order_intent", "runtime"):
         assert not hasattr(policy, forbidden)
+
+
+def test_spy_forecast_is_rejected_not_silently_clobbered():
+    """Audit: a DIRECT forecast for SPY was overwritten by the residual line
+    with no rejection entry."""
+    target = _build([_forecast("SPY"), _forecast("MSFT")], active_cap=0.40)
+    reasons = {r["symbol"]: r["reason"] for r in target.rejections}
+    assert "SPY" in reasons and "residual" in reasons["SPY"]
+    assert target.weights["SPY"] > 0.5  # residual sleeve, not an 8% slot

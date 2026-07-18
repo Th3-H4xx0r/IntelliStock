@@ -8,11 +8,13 @@ symbol tie-breaking; features consume bars at or before ``as_of`` only.
 """
 import math
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from benchmark_alpha.records import Forecast
 from benchmark_alpha.types import EvidenceClass
 
 HORIZONS = (1, 3, 5)
+_EASTERN = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -25,7 +27,11 @@ class ChallengerFeatures:
 
 
 def _closes_at_or_before(bars, as_of):
-    cutoff = as_of.date().isoformat()
+    # Cut on the EASTERN trading date (audit 2026-07-18): a 21:00-ET run is
+    # 01:00 UTC next day — the UTC date would include the following
+    # session's close, a genuine lookahead. Matches outcomes.py's session
+    # convention, keeping features strictly before the entry session.
+    cutoff = as_of.astimezone(_EASTERN).date().isoformat()
     closes = [float(b["close_adjusted"]) for b in sorted(
         (b for b in bars or () if str(b.get("date")) <= cutoff),
         key=lambda b: str(b.get("date")))

@@ -18,6 +18,7 @@ class ShadowCycle:
     equity: float
     cash: float
     positions: dict
+    degraded_marks: tuple = ()
 
 
 class ShadowPortfolio:
@@ -25,14 +26,26 @@ class ShadowPortfolio:
         self.cash = float(cash)
         self.positions = {}
         self.history = []
+        self._last_marks = {}
+
+    def _mid(self, sym, quotes):
+        quote = (quotes or {}).get(sym) or {}
+        bid, ask = quote.get("bid"), quote.get("ask")
+        if bid and ask:
+            mid = (float(bid) + float(ask)) / 2.0
+            self._last_marks[sym] = mid
+            return mid, False
+        # Audit 2026-07-18: a vanished quote must not value a held position
+        # at 0 (equity collapse mis-sizes every other symbol). Carry the
+        # last known mark and record the degradation.
+        return self._last_marks.get(sym), True
 
     def equity(self, quotes):
         total = self.cash
         for sym, qty in self.positions.items():
-            quote = (quotes or {}).get(sym) or {}
-            bid, ask = quote.get("bid"), quote.get("ask")
-            if bid and ask:
-                total += qty * (float(bid) + float(ask)) / 2.0
+            mid, _degraded = self._mid(sym, quotes)
+            if mid:
+                total += qty * mid
         return total
 
     def apply(self, targets, quotes, cost_model, now):
@@ -44,6 +57,7 @@ class ShadowPortfolio:
         equity = self.equity(quotes)
         fills = []
         rejected = []
+        degraded_marks = []
 
         deltas = {}
         symbols = set(targets) | set(self.positions)
@@ -52,6 +66,8 @@ class ShadowPortfolio:
             quote = quotes.get(sym) or {}
             bid, ask = quote.get("bid"), quote.get("ask")
             if not bid or not ask:
+                if sym in self.positions:
+                    degraded_marks.append(sym)  # held at last-known mark
                 if target_weight > 0 or sym in self.positions:
                     rejected.append({"symbol": sym, "reason": "no_quote"})
                 continue
@@ -90,6 +106,13 @@ class ShadowPortfolio:
             cost = cost_model.estimate(
                 side="buy", notional=notional, decision_quote=quote,
                 submit_quote=quote, adv_notional=None).total_cost
+            if notional + cost > self.cash:
+                # Audit 2026-07-18: the modeled cost must come out of the
+                # sized notional — a cash account can never go negative.
+                notional = max(0.0, self.cash - cost)
+                if notional <= MIN_TRADE_NOTIONAL:
+                    rejected.append({"symbol": sym, "reason": "insufficient_cash"})
+                    continue
             qty = notional / ask
             self.positions[sym] = self.positions.get(sym, 0.0) + qty
             self.cash -= notional + cost
@@ -99,6 +122,7 @@ class ShadowPortfolio:
         cycle = ShadowCycle(
             fills=tuple(fills), rejected=tuple(rejected),
             equity=self.equity(quotes), cash=self.cash,
-            positions=dict(self.positions))
+            positions=dict(self.positions),
+            degraded_marks=tuple(degraded_marks))
         self.history.append(cycle)
         return cycle

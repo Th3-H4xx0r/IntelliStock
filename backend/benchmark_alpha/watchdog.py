@@ -39,6 +39,7 @@ class AlphaWatchdog:
         self._instance_id = str(instance_id)
         self._reduce_executor = reduce_executor
         self._consecutive = 0
+        self._missing_view_polls = 0
 
     def _persisted_view(self):
         """Broker process's persisted equity/marks; None + degraded on outage."""
@@ -56,6 +57,23 @@ class AlphaWatchdog:
         persisted, degraded = self._persisted_view()
 
         mismatches = []
+        if persisted is None and not degraded:
+            # The broker process is expected to persist live_snapshot:<id>
+            # every snapshot tick. A healthy store with NO view means the
+            # comparison is fail-open — escalate to ALERT after N polls
+            # instead of silently reporting OK forever (audit 2026-07-18).
+            self._missing_view_polls += 1
+            if self._missing_view_polls >= self._thresholds["consecutive_critical"]:
+                return WatchdogResult(
+                    status="ALERT",
+                    mismatches=({"kind": "missing_persisted_view",
+                                 "polls": self._missing_view_polls},),
+                    degraded_audit=True,
+                    consecutive_mismatches=self._consecutive)
+            return WatchdogResult(status="OK", degraded_audit=True)
+        if persisted is not None:
+            self._missing_view_polls = 0
+
         if persisted:
             persisted_equity = float(persisted.get("equity") or 0.0)
             if persisted_equity > 0:
@@ -64,11 +82,18 @@ class AlphaWatchdog:
                     mismatches.append({
                         "kind": "equity", "broker": broker_equity,
                         "persisted": persisted_equity, "relative_gap": gap})
+            # Position-set divergence between the persisted view and DIRECT
+            # broker truth (audit 2026-07-18: the old per-symbol loop was
+            # dead code and no mark check ever fired).
             persisted_marks = persisted.get("marks") or {}
-            for sym, price in persisted_marks.items():
-                broker_qty = broker_positions.get(sym)
-                if broker_qty is None or not price:
-                    continue
+            held = {str(s).upper() for s, q in broker_positions.items()
+                    if float(q or 0.0) > 0}
+            marked = {str(s).upper() for s, p in persisted_marks.items() if p}
+            for sym in sorted(held - marked):
+                mismatches.append({"kind": "unmarked_position", "symbol": sym})
+            for sym in sorted(marked - held):
+                mismatches.append({"kind": "mark_without_position",
+                                   "symbol": sym})
 
         if mismatches:
             self._consecutive += 1

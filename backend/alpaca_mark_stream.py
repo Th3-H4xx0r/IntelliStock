@@ -67,6 +67,12 @@ class AlpacaMarkStream:
         symbol = str(getattr(quote, "symbol", "") or "")
         bid = _as_float(getattr(quote, "bid_price", None))
         ask = _as_float(getattr(quote, "ask_price", None))
+        # Zero/negative sides are routine on IEX (empty book). Normalize to
+        # None so a one-sided quote is usable and MarketMark validation can
+        # never raise out of the stream callback (audit 2026-07-18: a $0 bid
+        # crashed the dispatch coroutine).
+        bid = bid if bid and bid > 0 else None
+        ask = ask if ask and ask > 0 else None
         if not symbol or (bid is None and ask is None):
             return False
         if bid is not None and ask is not None:
@@ -193,9 +199,30 @@ class AlpacaMarkStream:
                 with self._lock:
                     self._stream = stream
                     resubscribe = sorted(self._subscribed)
+                # stop() may have raced the factory (audit 2026-07-18: the
+                # zombie stream held Alpaca's one-websocket slot forever).
+                if self._stop_event.is_set():
+                    with self._lock:
+                        self._stream = None
+                    try:
+                        stream.stop()
+                    except Exception:
+                        pass
+                    return
                 if resubscribe:
                     stream.subscribe_quotes(self._async_on_quote, *resubscribe)
                     stream.subscribe_trades(self._async_on_trade, *resubscribe)
+                # Re-diff after wiring: a concurrent set_symbols removal must
+                # not leave a ghost wire subscription eating the 30-symbol
+                # budget (audit 2026-07-18).
+                with self._lock:
+                    ghosts = sorted(set(resubscribe) - self._subscribed)
+                if ghosts:
+                    try:
+                        stream.unsubscribe_quotes(*ghosts)
+                        stream.unsubscribe_trades(*ghosts)
+                    except Exception:
+                        pass
                 backoff = self._reconnect_min
                 stream.run()  # blocking until disconnect/stop
                 self.record_disconnect("stream run() returned")

@@ -22,16 +22,19 @@ class CalibrationError(Exception):
 
 def _pav(points):
     """Pool-adjacent-violators isotonic regression on (x, y) pairs.
-    Returns breakpoints [(x, fitted_y), ...] with fitted_y non-decreasing."""
+    Returns breakpoints [(x, fitted_y), ...] with fitted_y non-decreasing.
+    Each pooled block keeps its LEFT edge so the pooled mean applies to
+    every x inside the block (audit 2026-07-18: keeping the right edge made
+    in-block points predict the previous block's value)."""
     points = sorted(points)
-    blocks = [[x, y, 1.0] for x, y in points]  # x, mean, weight
+    blocks = [[x, y, 1.0] for x, y in points]  # left-edge x, mean, weight
     merged = []
     for block in blocks:
         merged.append(block)
         while len(merged) > 1 and merged[-2][1] > merged[-1][1]:
-            x2, y2, w2 = merged.pop()
+            _x2, y2, w2 = merged.pop()
             x1, y1, w1 = merged.pop()
-            merged.append([x2, (y1 * w1 + y2 * w2) / (w1 + w2), w1 + w2])
+            merged.append([x1, (y1 * w1 + y2 * w2) / (w1 + w2), w1 + w2])
     return [(b[0], b[1]) for b in merged]
 
 
@@ -94,13 +97,18 @@ class CalibratedModel:
 
 class ForecastCalibrator:
     def fit(self, rows, evidence_class, horizon_trading_days):
+        # A row without a provable as_of_date cannot participate in
+        # date-grouped cross-fitting (audit 2026-07-18: None dates landed in
+        # every training fold and no test fold) — excluded like any other
+        # unprovable feature.
         rows = [r for r in (rows or [])
                 if r.get("raw_score") is not None
-                and r.get("excess_return") is not None]
+                and r.get("excess_return") is not None
+                and r.get("as_of_date")]
         if len(rows) < MIN_OBSERVATIONS:
             raise CalibrationError(
-                f"need >= {MIN_OBSERVATIONS} resolved observations, "
-                f"got {len(rows)}")
+                f"need >= {MIN_OBSERVATIONS} resolved observations with "
+                f"provable dates, got {len(rows)}")
         positives = [r for r in rows if float(r["excess_return"]) > 0]
         negatives = [r for r in rows if float(r["excess_return"]) < 0]
         if not positives or not negatives:
@@ -116,13 +124,13 @@ class ForecastCalibrator:
 
         # Date-grouped cross-fit residuals feed the uncertainty estimate:
         # observations from one date never calibrate their own fold.
-        dates = sorted({str(r.get("as_of_date") or "") for r in rows})
+        dates = sorted({str(r["as_of_date"]) for r in rows})
         folds = [set(dates[i::CROSS_FIT_FOLDS]) for i in range(CROSS_FIT_FOLDS)]
         residuals = []
         for fold_dates in folds:
             train = [(float(r["raw_score"]), float(r["excess_return"]))
-                     for r in rows if str(r.get("as_of_date")) not in fold_dates]
-            test = [r for r in rows if str(r.get("as_of_date")) in fold_dates]
+                     for r in rows if str(r["as_of_date"]) not in fold_dates]
+            test = [r for r in rows if str(r["as_of_date"]) in fold_dates]
             if not train or not test:
                 continue
             curve = _pav(train)

@@ -117,6 +117,11 @@ def _block_bootstrap_interval(active, seed, block=BOOTSTRAP_BLOCK,
         return 0.0, 0.0
     rng = np.random.default_rng(seed)
     n = len(active)
+    # Audit 2026-07-18: with n <= block every draw was the identical full
+    # series — a zero-width "90% interval". Tiny samples fall back to an
+    # iid bootstrap so the interval reflects real uncertainty.
+    if n <= block:
+        block = 1
     n_blocks = max(1, math.ceil(n / block))
     starts_max = max(1, n - block + 1)
     means = np.empty(draws)

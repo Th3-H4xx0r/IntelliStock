@@ -344,3 +344,17 @@ def test_start_never_blocks_when_stream_factory_raises():
     assert elapsed < 1.0
     stream.stop()
     assert stream.healthy is False
+
+
+def test_zero_bid_quote_is_normalized_not_fatal():
+    """Audit: a $0 bid (routine empty IEX book) raised out of the stream
+    callback and could kill the websocket dispatch task."""
+    stream, book, _ = _make_stream()
+    q = _quote()
+    q.bid_price = 0.0
+    q.bid_size = 0
+    stream.handle_quote(q)  # must not raise
+    mark = book.get("MRNA")
+    assert mark is not None
+    assert mark.bid is None  # zero side normalized away
+    assert mark.price == pytest.approx(76.52)  # one-sided: the ask

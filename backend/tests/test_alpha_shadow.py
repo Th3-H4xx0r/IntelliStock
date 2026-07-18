@@ -68,3 +68,22 @@ def test_shadow_cycle_ledger_reconciles_cash_deltas():
     spent = sum(f["qty"] * f["price"] for f in cycle.fills if f["side"] == "buy")
     costs = sum(f["cost"] for f in cycle.fills)
     assert shadow.cash == pytest.approx(10_000.0 - spent - costs)
+
+
+def test_buy_sizing_reserves_the_cost_cash_never_negative():
+    """Audit: sizing to full cash then subtracting cost overdrew the account."""
+    shadow = ShadowPortfolio(cash=10_000.0)
+    shadow.apply({"AAPL": 1.0}, {"AAPL": {"bid": 99.9, "ask": 100.1}}, MODEL, NOW)
+    assert shadow.cash >= 0.0
+
+
+def test_held_position_with_vanished_quote_keeps_last_known_mark():
+    """Audit: a vanished quote valued the position at 0, collapsing equity."""
+    shadow = ShadowPortfolio(cash=10_000.0)
+    shadow.apply({"AAPL": 0.5, "SPY": 0.48}, _quotes(), MODEL, NOW)
+    full = shadow.equity(_quotes())
+    degraded_view = shadow.equity({"SPY": _quotes()["SPY"]})
+    assert degraded_view == pytest.approx(full, rel=0.01)  # AAPL not zeroed
+    cycle = shadow.apply({"AAPL": 0.5, "SPY": 0.48},
+                         {"SPY": _quotes()["SPY"]}, MODEL, NOW)
+    assert cycle.degraded_marks  # the stale valuation is recorded

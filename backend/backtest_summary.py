@@ -89,17 +89,36 @@ def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values
     # replaced, and legacy callers without benchmark_values are byte-identical.
     if benchmark_values is not None and snapshots:
         try:
+            import math as _math
+
             import pandas as _pd
 
             from benchmark_alpha.metrics import compute_active_metrics
-            port = [float((s or {}).get("value") or 0.0) for s in snapshots]
-            bench = [float(v) for v in benchmark_values]
-            n = min(len(port), len(bench))
-            if n >= 2:
+            # Audit 2026-07-18: a None snapshot value coerced to 0.0 poisoned
+            # the metrics with NaN and a false 100% drawdown. Only jointly
+            # valid (snapshot, benchmark) pairs participate.
+            pairs = []
+            for snap, bench_v in zip(snapshots, benchmark_values):
+                value = (snap or {}).get("value")
+                try:
+                    value = float(value)
+                    bench_f = float(bench_v)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0 and bench_f > 0:
+                    pairs.append((value, bench_f))
+            if len(pairs) >= 2:
                 aligned = _pd.DataFrame(
-                    {"portfolio": port[:n], "benchmark": bench[:n]},
-                    index=_pd.RangeIndex(n))
+                    {"portfolio": [p for p, _ in pairs],
+                     "benchmark": [b for _, b in pairs]},
+                    index=_pd.RangeIndex(len(pairs)))
                 m = compute_active_metrics(aligned)
+                if not all(_math.isfinite(x) for x in (
+                        m.benchmark_return, m.active_return, m.beta,
+                        m.tracking_error, m.information_ratio,
+                        m.max_drawdown_magnitude, m.bootstrap_active_low,
+                        m.bootstrap_active_high)):
+                    raise ValueError("non-finite benchmark metrics")
                 summary.update({
                     "benchmark_return": m.benchmark_return,
                     "active_return": m.active_return,

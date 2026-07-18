@@ -21,7 +21,7 @@ _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
-from persistence_safety import assert_secret_free, sanitize_snapshot
+from persistence_safety import REDACTION_MARKER, assert_secret_free, sanitize_snapshot
 
 TABLE = "BacktestResults"
 BATCH_SIZE = 100
@@ -49,8 +49,10 @@ def sanitize_backtest_row(row):
     if schema is None:
         return {}, 0
     clean = sanitize_snapshot(schema)
-    count = _count_redactions(clean)
-    if count == 0:
+    # Only NEW redactions count: an already-purged row (markers in place) is
+    # an idempotent no-op, not perpetually "dirty" (audit 2026-07-18).
+    count = _count_redactions(clean) - _count_redactions(schema)
+    if count <= 0:
         return {}, 0
     return {"strategy_schema": clean}, count
 
@@ -71,7 +73,9 @@ class RethinkBackend:
             port=int(port or os.environ.get("RETHINKDB_PORT", "28015") or 28015),
             timeout=20,
         )
-        self._db = os.environ.get("RETHINKDB_DB", "test")
+        # Audit 2026-07-18: defaulted to "test" while every other module
+        # (interactive_utils, server, rethink_store) defaults "IntelliStock".
+        self._db = os.environ.get("RETHINKDB_DB", "IntelliStock")
 
     def _table(self):
         return self._r.db(self._db).table(TABLE)
@@ -94,8 +98,12 @@ class RethinkBackend:
             last_id = batch[-1]["id"]
 
     def update_row(self, row_id, patch, *, durability):
+        # r.literal prevents ReQL's recursive object merge from RETAINING
+        # nested secret fields under the redaction marker (audit 2026-07-18).
+        wrapped = {key: self._r.literal(value) if isinstance(value, dict) else value
+                   for key, value in patch.items()}
         self._table().get(row_id).update(
-            patch, durability=durability
+            wrapped, durability=durability
         ).run(self._conn)
 
     def get_row(self, row_id):

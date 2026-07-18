@@ -69,3 +69,13 @@ def test_challenger_is_never_tradable_eligible_by_default():
     out = challenger_forecasts(["AAA"], BARS, SPY, {}, {}, CTX)
     assert all(not f.eligibility for f in out)
     assert all("deterministic_research_control" in f.gate_reasons for f in out)
+
+
+def test_evening_utc_rollover_cannot_see_the_next_eastern_session():
+    """Audit finding 2: cutoff used the UTC date, so a 21:00-ET run (01:00
+    UTC next day) built features on the following session's close."""
+    late_utc = datetime(2026, 7, 15, 1, 0, tzinfo=timezone.utc)  # 7/14 21:00 ET
+    poisoned = BARS["AAA"] + [{"date": "2026-07-15", "close_adjusted": 9999.0}]
+    with_rollover = build_features(poisoned, SPY, event_score=0.0, as_of=late_utc)
+    clean = build_features(BARS["AAA"], SPY, event_score=0.0, as_of=late_utc)
+    assert with_rollover == clean  # the 07-15 bar must be invisible

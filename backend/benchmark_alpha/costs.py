@@ -39,6 +39,10 @@ def _mid(quote):
     bid, ask = quote.get("bid"), quote.get("ask")
     if not bid or not ask or bid <= 0 or ask <= 0:
         return None
+    # A crossed/locked quote is garbled market data, not a rebate (audit
+    # 2026-07-18: bid>ask produced a NEGATIVE half-spread "cost").
+    if float(bid) >= float(ask):
+        return None
     return (float(bid) + float(ask)) / 2.0
 
 
@@ -68,7 +72,9 @@ class EquityCostModel:
             move = (submit_mid - decision_mid) / decision_mid
             adverse = move if side == "buy" else -move
             latency_drift = max(0.0, adverse) * notional
-        elif submit_quote is None or decision_quote is None:
+        else:
+            # Missing OR malformed either quote: latency unpriceable —
+            # flag degraded, never silently free (audit 2026-07-18).
             degraded = True
 
         if adv_notional and adv_notional > 0:
@@ -114,7 +120,10 @@ class ImplementationShortfall:
     def observe(self, *, side, decision_reference_price, fills,
                 nbbo_at_decision=None, decision_to_fill_seconds=None):
         side = str(side).lower()
-        qty = sum(float(f.get("qty") or 0.0) for f in fills or ())
+        for fill in fills or ():
+            if fill.get("qty") is None or fill.get("price") is None:
+                raise ValueError(f"malformed fill (qty/price required): {fill}")
+        qty = sum(float(f["qty"]) for f in fills or ())
         if qty <= 0:
             raise ValueError("shortfall requires at least one fill")
         vwap = sum(float(f["qty"]) * float(f["price"]) for f in fills) / qty
@@ -131,6 +140,8 @@ class ImplementationShortfall:
             # a diagnostic proxy only (July 18 ~32.1 bps study).
             reference = float(decision_reference_price)
             basis = "reference_proxy"
+        if reference <= 0:
+            raise ValueError("shortfall reference price must be positive")
 
         signed = (vwap - reference) if side == "buy" else (reference - vwap)
         return ShortfallRecord(

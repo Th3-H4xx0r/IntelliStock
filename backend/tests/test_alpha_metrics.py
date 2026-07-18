@@ -71,3 +71,14 @@ def test_deflated_sharpe_probability_penalizes_trials():
     with pytest.raises(ValueError):
         deflated_sharpe_probability(1.0, sample_count=252, skew=0.0,
                                     kurtosis=3.0, trials=0)
+
+
+def test_tiny_sample_bootstrap_interval_is_not_a_zero_width_certainty():
+    """Audit: n <= block made every draw identical -> width 0 false certainty."""
+    idx = pd.to_datetime(["2026-07-06", "2026-07-07", "2026-07-08",
+                          "2026-07-09"], utc=True)
+    aligned = pd.DataFrame({"portfolio": [100.0, 103.0, 99.0, 104.0],
+                            "benchmark": [100.0, 100.5, 101.0, 101.5]},
+                           index=idx)
+    m = compute_active_metrics(aligned, bootstrap_seed=179)
+    assert m.bootstrap_active_high > m.bootstrap_active_low

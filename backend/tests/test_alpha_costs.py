@@ -100,3 +100,35 @@ def test_july18_diagnostic_fixture_is_not_promotion_evidence():
     assert record.basis == "reference_proxy"
     assert record.decision_to_fill_seconds == 390.0
     assert record.promotion_eligible is False
+
+
+def test_crossed_quote_never_produces_a_cost_rebate():
+    """Audit: bid>ask made half-spread negative — a garbled NBBO became a
+    rebate with degraded_inputs=False."""
+    est = _model().estimate(side="buy", notional=10_000.0,
+                            decision_quote={"bid": 100.2, "ask": 100.0},
+                            submit_quote={"bid": 100.2, "ask": 100.0},
+                            adv_notional=1_000_000.0)
+    assert est.half_spread_cost > 0
+    assert est.total_cost > 0
+    assert est.degraded_inputs is True
+
+
+def test_malformed_submit_quote_flags_degraded():
+    est = _model().estimate(side="buy", notional=1000.0,
+                            decision_quote=QUOTE,
+                            submit_quote={"bid": 0, "ask": 0},
+                            adv_notional=1_000_000.0)
+    assert est.degraded_inputs is True
+
+
+def test_shortfall_guards_zero_reference_and_malformed_fills():
+    with pytest.raises(ValueError):
+        ImplementationShortfall().observe(
+            side="buy", decision_reference_price=0.0,
+            fills=[{"qty": 1, "price": 10.0}], nbbo_at_decision=None)
+    with pytest.raises(ValueError):
+        ImplementationShortfall().observe(
+            side="buy", decision_reference_price=100.0,
+            fills=[{"qty": 1, "price": 10.0}, {"price": 11.0}],
+            nbbo_at_decision=None)

@@ -59,3 +59,23 @@ def test_serialization_is_json_not_pickle():
     from benchmark_alpha.calibration import CalibratedModel
     restored = CalibratedModel.from_json(payload)
     assert restored.predict(1.0) == model.predict(1.0)
+
+
+def test_pav_pooled_blocks_apply_from_their_left_edge():
+    """Audit finding 1: PAV kept the pooled block's RIGHT-edge x, so points
+    inside a merged block predicted the PREVIOUS block's value."""
+    from benchmark_alpha.calibration import _pav, _step_interpolate
+    curve = _pav([(0, 0.0), (1, 1.0), (2, 0.9), (3, 0.8), (4, 0.7)])
+    for x in (1.0, 2.0, 3.0, 4.0):
+        assert _step_interpolate(curve, x) == pytest.approx(0.85)
+    assert _step_interpolate(curve, 0.0) == pytest.approx(0.0)
+
+
+def test_rows_without_a_provable_date_are_excluded():
+    """Audit finding 7: None-date rows fell into every training fold and no
+    test fold. They are now excluded as unprovable."""
+    rows = [{"raw_score": (i % 41) / 10.0 - 2.0,
+             "excess_return": 0.01 * ((i % 41) / 10.0 - 2.0) + (0.004 if i % 7 == 0 else -0.002),
+             "as_of_date": None} for i in range(120)]
+    with pytest.raises(CalibrationError):
+        ForecastCalibrator().fit(rows, "DIRECT", 3)

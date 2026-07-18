@@ -251,3 +251,15 @@ def test_retention_plan_is_executable_and_scoped():
     for table, _, _ in plan:
         assert RETENTION_DAYS.get(table) is not None or table == "AlphaEvents"
     assert not any(t == "AlphaFills" for t, _, _ in plan)
+
+
+def test_pagination_never_drops_rows_sharing_the_boundary_timestamp():
+    """Audit finding 5: an as_of-only cursor with an open bound skipped every
+    row sharing the boundary timestamp."""
+    from benchmark_alpha.rethink_store import advance_page
+    rows = [{"id": f"r{i}", "as_of": "2026-07-10"} for i in range(3)]
+    page1, cursor1 = advance_page(rows, limit=2, cursor=None)
+    assert [r["id"] for r in page1] == ["r0", "r1"]
+    assert cursor1 is not None
+    page2, cursor2 = advance_page(rows, limit=2, cursor=cursor1)
+    assert [r["id"] for r in page2] == ["r2"]

@@ -105,3 +105,23 @@ def test_output_never_renders_secret_payloads(capsys):
     combined = capsys.readouterr().out
     assert "CANARY_SECRET_ONE" not in combined
     assert "alpaca_secret" not in combined
+
+
+def test_default_database_is_intellistock():
+    """Audit: the script defaulted to RethinkDB db 'test' while the real
+    BacktestResults lives in 'IntelliStock'."""
+    import inspect
+    from scripts import purge_backtest_secrets as pbs
+    assert 'RETHINKDB_DB", "IntelliStock"' in inspect.getsource(pbs.RethinkBackend)
+
+
+def test_already_redacted_rows_are_idempotent_no_ops():
+    """Audit: a previously-purged row re-flagged dirty forever."""
+    from persistence_safety import REDACTION_MARKER
+    patch, count = sanitize_backtest_row({
+        "id": "r9",
+        "strategy_schema": {"strategies": [{"config": {
+            "alpaca_key": dict(REDACTION_MARKER), "max_positions": 8}}]},
+    })
+    assert count == 0
+    assert patch == {}

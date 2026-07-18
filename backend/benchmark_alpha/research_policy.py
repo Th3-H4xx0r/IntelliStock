@@ -48,6 +48,12 @@ class ResearchPortfolioPolicy:
 
         eligible = []
         for forecast in forecasts or ():
+            if forecast.symbol == "SPY":
+                # SPY is the residual sleeve, never an active 8% slot; a
+                # silent clobber hid this (audit 2026-07-18).
+                rejections.append({"symbol": "SPY",
+                                   "reason": "spy_reserved_residual_sleeve"})
+                continue
             if not forecast.eligibility:
                 rejections.append({"symbol": forecast.symbol,
                                    "reason": "ineligible_forecast"})

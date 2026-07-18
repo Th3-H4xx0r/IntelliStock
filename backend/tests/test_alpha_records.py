@@ -272,3 +272,35 @@ class _ForcedId:
         doc = dict(self._inner.to_doc())
         doc["id"] = self._id
         return doc
+
+
+def test_fill_identity_is_numeric_type_insensitive():
+    """Audit finding 8: cumulative_qty=3 vs 3.0 produced different IDs."""
+    def fill(cum):
+        return FillRecord(broker_order_id="bo-1", activity_id=None,
+                          instance_id="alpaca-main", origin=RunOrigin.LIVE,
+                          symbol="AAPL", side="buy", cumulative_qty=cum,
+                          delta_qty=1.0, price=190.0, event_time=TS,
+                          sequence=1, owner_source=OwnerSource.STRATEGY)
+    assert fill(3).record_id == fill(3.0).record_id
+
+
+def test_forecast_identity_separates_instances_origins_and_runs():
+    """Audit finding 9: two instances emitting the same symbol/as_of forecast
+    collided with divergent docs -> spurious integrity errors."""
+    base = _forecast()
+    assert _forecast(instance_id="test").record_id != base.record_id
+    assert _forecast(origin=RunOrigin.BACKTEST).record_id != base.record_id
+    assert _forecast(run_id="run-2").record_id != base.record_id
+
+
+def test_write_record_tolerates_driver_number_roundtrip():
+    """Audit finding 4: RethinkDB returns integral doubles as ints; a
+    byte-identical retry must stay idempotent, not raise."""
+    backend = FakeRecordBackend()
+    store = AlphaRethinkStore.for_backend(backend)
+    f = _forecast(expected_excess_return=100.0)
+    assert store.write_record(f) is True
+    stored = backend.tables[f.TABLE][f.record_id]
+    stored["expected_excess_return"] = 100  # simulate driver round-trip
+    assert store.write_record(_forecast(expected_excess_return=100.0)) is False

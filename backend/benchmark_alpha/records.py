@@ -128,11 +128,18 @@ class Forecast(_AlphaRecord):
         object.__setattr__(self, "gate_reasons", tuple(self.gate_reasons or ()))
 
     def _identity(self):
+        # instance/origin/run are part of identity: live, lookback, and
+        # backtest attribution stay separate, and two instances emitting the
+        # same symbol/as_of forecast must not collide into a spurious
+        # integrity error (audit 2026-07-18).
         return {"producer": self.producer, "model_version": self.model_version,
                 "evidence_class": self.evidence_class.value,
                 "symbol": self.symbol, "as_of": self.as_of.isoformat(),
                 "horizon_trading_days": int(self.horizon_trading_days),
-                "revision": int(self.revision)}
+                "revision": int(self.revision),
+                "instance_id": self.instance_id,
+                "origin": self.origin.value,
+                "run_id": self.run_id}
 
 
 @dataclass(frozen=True)
@@ -342,7 +349,7 @@ class FillRecord(_AlphaRecord):
         if self.activity_id:
             return {"activity_id": self.activity_id}
         return {"broker_order_id": self.broker_order_id,
-                "cumulative_qty": self.cumulative_qty,
+                "cumulative_qty": float(self.cumulative_qty),
                 "event_time": self.event_time.isoformat(),
                 "sequence": int(self.sequence)}
 

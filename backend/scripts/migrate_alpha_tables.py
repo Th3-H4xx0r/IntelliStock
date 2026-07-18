@@ -56,7 +56,9 @@ RETENTION_DAYS = {
 def plan_migration(existing_tables, existing_indexes):
     """Pure migration planner: returns the ordered list of actions needed."""
     actions = []
-    for table in TABLES:
+    # Every index target must exist first (audit 2026-07-18: LiveOrderWAL was
+    # indexed but never created, crashing --apply on a fresh database).
+    for table in TABLES + tuple(t for t in INDEXES if t not in TABLES):
         if table not in existing_tables:
             actions.append({"action": "create_table", "table": table})
     for table, indexes in INDEXES.items():

@@ -112,3 +112,13 @@ def test_assert_secret_free_rejects_aws_and_openrouter_value_patterns():
         assert_secret_free({"note": "creds AKIAIOSFODNN7CANARY99 in text"})
     with pytest.raises(SecretMaterialError):
         assert_secret_free({"note": "sk-or-v1-abcdef0123456789abcdef0123456789"})
+
+
+def test_camel_case_secret_names_are_caught():
+    """Audit: fused camelCase (clientSecret, alpacaKey) bypassed the
+    segment split — exactly the shape frontend JSON produces."""
+    for key in ("clientSecret", "alpacaKey", "openRouterApiKey", "dbPassword"):
+        clean = sanitize_snapshot({key: "CANARY_CAMEL_VALUE"})
+        assert "CANARY_CAMEL_VALUE" not in json.dumps(clean), key
+        with pytest.raises(SecretMaterialError):
+            assert_secret_free({key: "CANARY_CAMEL_VALUE"})

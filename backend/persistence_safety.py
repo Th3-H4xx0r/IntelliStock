@@ -52,8 +52,12 @@ _VALUE_PATTERNS = tuple(re.compile(p) for p in (
 
 
 def _is_secret_key(key):
-    lowered = str(key).lower()
-    if lowered in _ALLOWLISTED_KEYS:
+    # camelCase splits BEFORE lowering (audit 2026-07-18: fused names like
+    # clientSecret/alpacaKey — exactly what frontend JSON produces —
+    # bypassed the segment check entirely).
+    decamel = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key))
+    lowered = decamel.lower()
+    if lowered in _ALLOWLISTED_KEYS or str(key).lower() in _ALLOWLISTED_KEYS:
         return False
     segments = re.split(r"[^a-z0-9]+", lowered)
     return any(seg in _SECRET_KEY_SEGMENTS for seg in segments if seg)
@@ -74,7 +78,9 @@ def _redact_string(value):
 
 
 def _is_redaction_marker(value):
-    return isinstance(value, dict) and value.get("redacted") is True
+    # Exact-match only: a deep-merged dict that RETAINS secret fields
+    # alongside the marker keys must not pass (audit 2026-07-18).
+    return value == REDACTION_MARKER
 
 
 def sanitize_snapshot(value):

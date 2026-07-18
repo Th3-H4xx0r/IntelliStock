@@ -136,3 +136,34 @@ def test_build_watchdog_command_is_pure_and_secret_free():
     assert "alpaca-main" in cmd
     joined = " ".join(cmd)
     assert "key" not in joined.lower() and "secret" not in joined.lower()
+
+
+class EmptyStateBackend:
+    def get_state_row(self, key):
+        return None  # healthy store, but nothing ever wrote the view
+
+    def health_probe(self):
+        return None
+
+
+def test_missing_persisted_view_escalates_instead_of_fail_open():
+    """Audit: the watchdog compared against a key nothing wrote, so it
+    reported OK forever. A healthy store with no view now escalates."""
+    probe = FakeProbe(equity=6000.0)
+    watchdog, _ = _watchdog(probe, backend=EmptyStateBackend())
+    assert watchdog.poll_once(NOW).status == "OK"
+    assert watchdog.poll_once(NOW).degraded_audit is True
+    result = watchdog.poll_once(NOW)  # third consecutive miss
+    assert result.status == "ALERT"
+    assert result.mismatches[0]["kind"] == "missing_persisted_view"
+
+
+def test_position_set_divergence_is_detected():
+    """Audit: the per-symbol mark loop was dead code — no mark check fired."""
+    probe = FakeProbe(equity=6000.0, positions={"MRNA": 4.0, "OKTA": 2.0})
+    watchdog, _ = _watchdog(probe, payload={
+        "equity": 6000.0, "marks": {"MRNA": 76.51, "GHOST": 12.0}})
+    result = watchdog.poll_once(NOW)
+    kinds = {(m["kind"], m.get("symbol")) for m in result.mismatches}
+    assert ("unmarked_position", "OKTA") in kinds
+    assert ("mark_without_position", "GHOST") in kinds

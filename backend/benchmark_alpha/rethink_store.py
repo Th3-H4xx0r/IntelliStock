@@ -37,9 +37,55 @@ class AlphaUnavailableError(Exception):
     """The store is unreachable/unhealthy. Never masquerades as empty data."""
 
 
+def _json_normalize(value):
+    """Normalize to what a JSON store round-trips: string keys, and all
+    non-bool numbers as floats (RethinkDB stores doubles; the driver returns
+    integral doubles as ints — audit 2026-07-18: a byte-identical retry of
+    equity=100.0 read back as 100 raised a false integrity error)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        return {str(k): _json_normalize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_normalize(v) for v in value]
+    return value
+
+
 def canonical_json(value):
     """Deterministic byte representation for content-identity comparison."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(_json_normalize(value), sort_keys=True,
+                      separators=(",", ":"), default=str)
+
+
+def advance_page(rows_from_boundary, limit, cursor):
+    """Boundary-safe pagination over rows ordered by ``as_of``.
+
+    ``rows_from_boundary`` are rows at-or-after the cursor's boundary
+    (CLOSED bound). The cursor carries the boundary ``as_of`` plus the ids
+    already emitted AT that boundary, so rows sharing the boundary
+    timestamp are never dropped (audit 2026-07-18: an open bound on an
+    as_of-only cursor skipped every tied row)."""
+    limit = int(limit)
+    state = json.loads(cursor) if cursor else {"as_of": None, "seen": []}
+    seen = set(state.get("seen") or [])
+    boundary = state.get("as_of")
+    page = []
+    for row in rows_from_boundary:
+        if boundary is not None and row.get("as_of") == boundary \
+                and row.get("id") in seen:
+            continue
+        page.append(row)
+        if len(page) >= limit:
+            break
+    if len(page) < limit:
+        return page, None
+    last_as_of = page[-1].get("as_of")
+    seen_at_boundary = [r.get("id") for r in page if r.get("as_of") == last_as_of]
+    if boundary == last_as_of:
+        seen_at_boundary = list(seen) + seen_at_boundary
+    return page, json.dumps({"as_of": last_as_of, "seen": seen_at_boundary})
 
 
 def _require_aware(name, value):
@@ -86,33 +132,56 @@ class _RethinkBackend:
         self._conn_factory = conn_factory
         self._db = db_name
 
-    def insert_event(self, doc, *, durability):
+    @staticmethod
+    def _is_duplicate_key_error(exc):
+        return "Duplicate primary key" in str(exc)
+
+    def _insert_once(self, table, doc, durability):
+        """Read-then-insert with the concurrent-duplicate race resolved: a
+        losing racer re-reads the winner's row and returns it as ``prior``
+        (audit 2026-07-18: the race previously surfaced as
+        AlphaUnavailableError instead of the idempotent/divergent verdict)."""
         with self._conn_factory() as conn:
-            existing = self._r.db(self._db).table(EVENTS_TABLE).get(doc["id"]).run(conn)
+            t = self._r.db(self._db).table(table)
+            existing = t.get(doc["id"]).run(conn)
             if existing is not None:
                 return existing
-            self._r.db(self._db).table(EVENTS_TABLE).insert(
-                doc, conflict="error", durability=durability).run(conn)
-            return None
+            try:
+                t.insert(doc, conflict="error", durability=durability).run(conn)
+                return None
+            except Exception as exc:
+                if self._is_duplicate_key_error(exc):
+                    return t.get(doc["id"]).run(conn)
+                raise
+
+    def insert_event(self, doc, *, durability):
+        return self._insert_once(EVENTS_TABLE, doc, durability)
 
     def insert_record(self, table, doc, *, durability):
-        with self._conn_factory() as conn:
-            existing = self._r.db(self._db).table(table).get(doc["id"]).run(conn)
-            if existing is not None:
-                return existing
-            self._r.db(self._db).table(table).insert(
-                doc, conflict="error", durability=durability).run(conn)
-            return None
+        return self._insert_once(table, doc, durability)
 
     def compare_and_swap_state(self, key, expected_version, doc, *, durability):
+        """Atomic server-side compare-and-swap (audit 2026-07-18: the prior
+        get-then-insert allowed two same-version writers to both succeed)."""
+        r = self._r
+        expected = int(expected_version)
         with self._conn_factory() as conn:
-            table = self._r.db(self._db).table(STATE_TABLE)
-            prior = table.get(key).run(conn)
-            version = 0 if prior is None else int(prior.get("version") or 0)
-            if version != expected_version:
-                return None
-            table.insert(doc, conflict="replace", durability=durability).run(conn)
-            return doc
+            table = r.db(self._db).table(STATE_TABLE)
+            if expected == 0:
+                try:
+                    table.insert(doc, conflict="error",
+                                 durability=durability).run(conn)
+                    return doc
+                except Exception as exc:
+                    if self._is_duplicate_key_error(exc):
+                        return None  # row exists: version 0 expectation stale
+                    raise
+            result = table.get(str(key)).replace(
+                lambda row: r.branch(
+                    row.eq(None), row,
+                    r.branch(row["version"].eq(expected), r.expr(doc), row)),
+                durability=durability).run(conn)
+            return doc if int(result.get("replaced", 0) or 0) == 1 else None
 
     def get_state_row(self, key):
         with self._conn_factory() as conn:
@@ -120,19 +189,19 @@ class _RethinkBackend:
 
     def read_by_index(self, table, index, key, *, limit, cursor):
         """One bounded page over a compound index whose last component is
-        ``as_of``. The cursor is the previous page's final ``as_of`` — an
-        opaque compound-index position to callers."""
+        ``as_of``. The cursor is an opaque boundary position (as_of + ids
+        already emitted at that as_of) so tied rows are never dropped."""
+        state = json.loads(cursor) if cursor else {"as_of": None, "seen": []}
+        boundary = state.get("as_of")
+        overfetch = int(limit) + len(state.get("seen") or []) + 1
         with self._conn_factory() as conn:
             t = self._r.db(self._db).table(table)
-            lo = list(key) + ([cursor] if cursor else [self._r.minval])
+            lo = list(key) + ([boundary] if boundary is not None else [self._r.minval])
             hi = list(key) + [self._r.maxval]
-            query = t.between(
-                lo, hi, index=index,
-                left_bound="open" if cursor else "closed",
-            ).order_by(index=index).limit(int(limit))
-            rows = list(query.run(conn))
-        next_cursor = rows[-1].get("as_of") if len(rows) == int(limit) else None
-        return rows, next_cursor
+            rows = list(
+                t.between(lo, hi, index=index, left_bound="closed")
+                .order_by(index=index).limit(overfetch).run(conn))
+        return advance_page(rows, limit, cursor)
 
     def health_probe(self):
         try:
