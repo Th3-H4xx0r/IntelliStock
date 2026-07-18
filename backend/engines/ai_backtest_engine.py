@@ -1544,7 +1544,12 @@ def _run_one_strategy(
 
         keep, notes = _validate_result_llm(summary, strategy_snapshot, validation_llm_config)
         decision = "KEEP" if keep else "TOSS"
-        stage1_info = {"pnl": pnl, "pnl_pct": pnl_pct, "decision": decision, "reason": (notes or "—")[:400]}
+        # Task 16 (benchmark-alpha): the LLM may summarize results but its
+        # KEEP/TOSS carries NO alpha-promotion authority — AI-engine results
+        # are permanently promotion-ineligible; only the registered
+        # walk-forward harness (benchmark_alpha/research.py) produces
+        # promotion-eligible evidence.
+        stage1_info = {"pnl": pnl, "pnl_pct": pnl_pct, "decision": decision, "reason": (notes or "—")[:400], "promotion_eligible": False}
         _safe_edit_discord_slot(idx, name, "Stage 1 complete", stage1=stage1_info, result=None if keep else "Tossed", color=0x2ECC71 if keep else 0xE67E22, reason=notes, period=period_str, stocks=stocks)
         _cycle_stages = [{"label": "Stage 1: Initial Backtest", "status": "passed" if keep else "tossed", "pnl": round(float(pnl), 2), "pnl_pct": round(float(pnl_pct), 2), "stocks": list(stocks), "details": (notes or "")[:300]}]
         _cycle_log_update(client, _cycle_log_id, _cycle_stages, "running" if keep else "tossed", None if keep else ("Tossed: %s" % (notes or "")[:150]))

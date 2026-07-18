@@ -7044,6 +7044,20 @@ def _ensure_nexus_trade_tables(conn):
         r.db(DB_NAME).table_create(_NEXUS_TRADE_CONTEXTS_TABLE).run(conn)
     if _NEXUS_TRADE_OUTCOMES_TABLE not in tables:
         r.db(DB_NAME).table_create(_NEXUS_TRADE_OUTCOMES_TABLE).run(conn)
+    # Task 8: function index on the base instance id (part before the first
+    # '|' of the scope-suffixed instance_id) so telemetry reads never scan
+    # the 100k-row tables with a lambda filter again.
+    for _tbl in (_NEXUS_TRADE_CONTEXTS_TABLE, _NEXUS_TRADE_OUTCOMES_TABLE):
+        try:
+            existing = r.db(DB_NAME).table(_tbl).index_list().run(conn)
+            if "base_instance_id" not in existing:
+                r.db(DB_NAME).table(_tbl).index_create(
+                    "base_instance_id",
+                    lambda doc: doc["instance_id"].default("").split("|").nth(0),
+                ).run(conn)
+                r.db(DB_NAME).table(_tbl).index_wait("base_instance_id").run(conn)
+        except Exception:
+            pass
 
 
 def action_nexus_trade_contexts(conn, instance_id, limit=40):
@@ -7053,12 +7067,13 @@ def action_nexus_trade_contexts(conn, instance_id, limit=40):
     if not instance_id:
         return {"contexts": []}
     _ensure_nexus_trade_tables(conn)
-    # The strategy writes instance_id scope-suffixed (e.g. 'alpaca-main|<hash>'),
-    # so match the base (part before the first '|').
+    # The strategy writes instance_id scope-suffixed (e.g. 'alpaca-main|<hash>');
+    # the base_instance_id function index matches the base directly (Task 8 —
+    # no full-table lambda filter).
     cursor = (
         r.db(DB_NAME)
         .table(_NEXUS_TRADE_CONTEXTS_TABLE)
-        .filter(lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
+        .get_all(instance_id, index="base_instance_id")
         .order_by(r.desc("date_key"))
         .limit(400)
         .run(conn)
@@ -7072,11 +7087,11 @@ def action_nexus_outcome_stats(conn, instance_id):
     if not instance_id:
         return summarize_outcomes([])
     _ensure_nexus_trade_tables(conn)
-    # Match the base of a scope-suffixed instance_id (see action_nexus_trade_contexts).
+    # Indexed base-instance read (see action_nexus_trade_contexts).
     cursor = (
         r.db(DB_NAME)
         .table(_NEXUS_TRADE_OUTCOMES_TABLE)
-        .filter(lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
+        .get_all(instance_id, index="base_instance_id")
         .limit(2000)
         .run(conn)
     )

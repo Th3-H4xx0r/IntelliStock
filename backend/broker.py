@@ -26,6 +26,7 @@ from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
 from robinhood_data_policy import robinhood_data_fallback_allowed
+from persistence_safety import SecretMaterialError, assert_secret_free, sanitize_snapshot
 
 try:
     from llm_telemetry import llm_call_context as telemetry_llm_call_context
@@ -2495,6 +2496,17 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
     key = key or os.environ.get("KEY", "")
     secret = secret or os.environ.get("SECRET", "")
     _last_prices_cache = getattr(portfolio_emulator, "_last_prices", {}) or {}
+    # Task 4 (July 10 incident): in LIVE mode typed timestamped marks are the
+    # first authority. The untimestamped ``_last_prices`` scalar cache is
+    # demoted to a valuation-only fallback AFTER an outbound fresh fetch —
+    # it must never be treated as fresh live data (it can be a fill price).
+    _live_marks = {}
+    if mode == MODE_LIVE:
+        try:
+            _get_marks = getattr(portfolio_emulator, "get_market_marks", None)
+            _live_marks = _get_marks() if callable(_get_marks) else {}
+        except Exception:
+            _live_marks = {}
     for sym in positions:
         if sym in prices and prices.get(sym) is not None and float(prices.get(sym) or 0) > 0:
             continue
@@ -2502,9 +2514,19 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
         if data and (data.get(sym) or []):
             one = _get_prices_at_time(data, [sym], current_time)
             p = one.get(sym)
-        # Adapter cache before outbound HTTP — reuses whatever came in via
-        # start_trade_updates() or reconcile_wal_with_broker().
-        if (p is None or p <= 0) and _last_prices_cache:
+        # LIVE: fresh typed mark (quote/trade/broker-position within the
+        # 120s broker-fallback SLA; execution-only fill marks excluded).
+        if (p is None or p <= 0) and _live_marks:
+            try:
+                _mk = _live_marks.get(sym)
+                if _mk is not None and getattr(_mk.quality, "value", "") != "execution_only" \
+                        and _mk.age_seconds(datetime.datetime.now(datetime.timezone.utc)) <= 120:
+                    p = float(_mk.price)
+            except Exception:
+                p = None
+        # BACKTEST only: adapter cache before outbound HTTP (bar-derived and
+        # deterministic there). LIVE skips this — see valuation fallback below.
+        if (p is None or p <= 0) and _last_prices_cache and mode != MODE_LIVE:
             try:
                 p = float(_last_prices_cache.get(sym) or 0) or None
             except Exception:
@@ -2514,6 +2536,14 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
                 sym, current_time, key=key, secret=secret, feed=data_feed,
                 allow_non_alpaca_fallback=(mode == MODE_LIVE),
             )
+        # LIVE valuation-only fallback: stale scalar beats a $0 mark for
+        # portfolio valuation, but it can never authorize an exposure
+        # increase (decision_price() fails closed independently of this).
+        if (p is None or p <= 0) and _last_prices_cache and mode == MODE_LIVE:
+            try:
+                p = float(_last_prices_cache.get(sym) or 0) or None
+            except Exception:
+                p = None
         # yfinance fallback for free-tier / rate-limited / delisted-feed cases.
         # ~15-minute delay vs Alpaca but better than $0 and a bypassed risk gate.
         if p is None or p <= 0:
@@ -2855,7 +2885,8 @@ def load_strategies_from_db():
             # via a synthesized run_once spec — no Strategies row required.
             _crypto_specs = _crypto_synthetic_specs(instance_doc)
             if _crypto_specs is not None:
-                return _crypto_specs
+                _c_specs, _c_sid, _c_schema = _crypto_specs
+                return _c_specs, _c_sid, sanitize_snapshot(_c_schema)
             strategy_id = instance_doc.get('strategy_id')
             if strategy_id is None:
                 return [], None, None
@@ -2866,11 +2897,13 @@ def load_strategies_from_db():
             strategies_array = strategy_doc.get('strategies', [])
             if not isinstance(strategies_array, list):
                 return [], None, None
-            # Snapshot of exact strategy schema for storing in BacktestResults (name + strategies at load time)
-            strategy_schema = {
+            # Snapshot of strategy schema for storing in BacktestResults (name +
+            # strategies at load time). Sanitized: credential values must never
+            # reach BacktestResults again (2026-07 plaintext-secret incident).
+            strategy_schema = sanitize_snapshot({
                 "name": strategy_doc.get("name"),
                 "strategies": list(strategies_array),
-            }
+            })
             specs = [s for s in strategies_array if isinstance(s, dict) and s.get('strategy') is not None and 'weight' in s]
             return specs, strategy_id, strategy_schema
         finally:
@@ -4219,6 +4252,92 @@ def _close_live_trading_log(reason: str = "shutdown") -> None:
     _live_trading_log_path = None
 
 
+def _load_containment_state(instance_id_val):
+    """Containment state for this instance from AlphaState (Tasks 0/6).
+
+    Missing row or missing table => not contained (``{}``). A READ FAILURE
+    returns ``None`` so ``legacy_live_order_block`` fails closed — a live
+    instance whose containment state cannot be read must not trade."""
+    try:
+        conn = get_conn()
+        try:
+            tables = list(r.db(DB_NAME).table_list().run(conn))
+            if 'AlphaState' not in tables:
+                return {}
+            row = r.db(DB_NAME).table('AlphaState').get(
+                f"containment:{instance_id_val}").run(conn)
+            return (row or {}).get("payload") or {}
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+_containment_gate_logged: set = set()
+
+
+def _write_containment_gate_event(instance_id_val, sym, side, reason):
+    """Best-effort hard-durability GATE event; storage failure never
+    weakens the block itself."""
+    try:
+        conn = get_conn()
+        try:
+            ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            eid = "gate-" + hashlib.sha256(
+                f"{instance_id_val}|{sym}|{side}|{ts}".encode()).hexdigest()[:24]
+            r.db(DB_NAME).table('AlphaEvents').insert({
+                "id": eid, "kind": "GATE",
+                "payload": {"instance_id": instance_id_val, "symbol": sym,
+                            "side": side, "reason": reason},
+                "created_at": ts,
+            }, durability="hard").run(conn)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _install_legacy_containment_gate(adapter, instance_id_val):
+    """Task 6: when RethinkDB containment disables legacy order authority for
+    this instance, wrap the adapter's ``execute_signal`` so EVERY legacy live
+    submission (buys AND sells) is blocked at the single choke point. The
+    typed reduce-only emergency path submits through ``submit_order``
+    directly and is unaffected. No OFF-mode setting or healthy mark-health
+    result clears containment — only an authenticated Task 18 promotion."""
+    containment = _load_containment_state(instance_id_val)
+    if isinstance(containment, dict) and not containment.get(
+            "legacy_order_authority_disabled"):
+        return adapter
+    from benchmark_alpha.risk import legacy_live_order_block
+    orig_execute = adapter.execute_signal
+
+    def _gated_execute_signal(sym, sig, *args, **kwargs):
+        side = "buy" if (sig or 0) > 0 else "sell"
+        reason = legacy_live_order_block(instance_id_val, side, containment)
+        if reason:
+            gate_key = (str(sym).upper(), side)
+            if gate_key not in _containment_gate_logged:
+                _containment_gate_logged.add(gate_key)
+                try:
+                    _log(f"[containment] {reason} ({sym})", "red")
+                except Exception:
+                    pass
+            _write_containment_gate_event(instance_id_val, str(sym), side, reason)
+            return False
+        return orig_execute(sym, sig, *args, **kwargs)
+
+    adapter.execute_signal = _gated_execute_signal
+    try:
+        _log(
+            f"[containment] legacy order authority DISABLED for {instance_id_val} "
+            "— all legacy live submissions will be blocked",
+            "red",
+        )
+    except Exception:
+        pass
+    return adapter
+
+
 def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     """Build the dict to upsert into LiveState. Read-only over the adapter.
 
@@ -4516,6 +4635,32 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
         _strat_tick = dict(_strategy_tick_state)
     except Exception:
         _strat_tick = {}
+    # Task 6: typed mark health over the adapter's current marks, and the
+    # persisted alpha risk state (telemetry; held count comes from snapshot
+    # positions, never per-cycle action counters).
+    _mark_health_payload = None
+    try:
+        from benchmark_alpha.risk import evaluate_mark_health as _emh
+        _mh_marks = adapter.get_market_marks() if hasattr(adapter, "get_market_marks") else {}
+        _mh_syms = [p.get("symbol") for p in (positions_payload or [])
+                    if isinstance(p, dict) and p.get("symbol")]
+        _mh = _emh(_mh_syms, _mh_marks,
+                   datetime.datetime.now(datetime.timezone.utc))
+        _mark_health_payload = {"ok": _mh.ok, "entries": list(_mh.entries)}
+    except Exception:
+        _mark_health_payload = None
+    _risk_payload = None
+    try:
+        _risk_conn = get_conn()
+        try:
+            _risk_row = r.db(DB_NAME).table('AlphaState').get(
+                f"risk:{instance_id_val}").run(_risk_conn)
+            if _risk_row:
+                _risk_payload = dict(_risk_row.get("payload") or {})
+        finally:
+            _risk_conn.close()
+    except Exception:
+        _risk_payload = None
     return {
         "trading_active": status_str == "active",
         "status": status_str,
@@ -4530,6 +4675,9 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
         "total_pnl": total_pnl,
         "total_pnl_pct": total_pnl_pct,
         "positions": positions_payload,
+        "held_positions_count": len(positions_payload or []),
+        "mark_health": _mark_health_payload,
+        "risk": _risk_payload,
         "recent_trades": recent_trades,
         "portfolio_history": portfolio_history,
         "broker": {
@@ -5659,6 +5807,11 @@ elif mode == MODE_LIVE:
                 seed_trades_from_broker=(not _clean_room_mode),
             )
             live_adapter.start_trade_updates()
+            # Task 6 containment: block every legacy live submission when
+            # this instance's RethinkDB containment state disables legacy
+            # order authority (fail closed if the state is unreadable).
+            live_adapter = _install_legacy_containment_gate(
+                live_adapter, str(instance_id))
         except _BrokerError as _be:
             _log(f"Failed to build live broker adapter: {_be}", "red")
             # Phase C (2026-04-29): Discord alert on adapter build failure.
@@ -6721,6 +6874,7 @@ if mode == MODE_BACKTEST:
                 stub['status'] = 'error'
                 stub['progress'] = 100.0
                 stub['error'] = err_msg[:2000]
+                assert_secret_free(stub)
                 r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
                 _log("Backtest validation failed: %s" % err_msg, "red")
                 _log("BacktestResults row written with status=error, progress=100.", "yellow")
@@ -6733,6 +6887,7 @@ if mode == MODE_BACKTEST:
                 sys.stderr.flush()
                 sys.exit(1)
             # Ensure row exists: insert with conflict='replace' so it works when broker runs standalone (no engine)
+            assert_secret_free(stub)
             r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
             _log(f"Backtest result row (id={_backtest_result_id}) ensured in DB, status=running", "green")
             # Keep connection open for all progress updates (avoids repeated connect/disconnect that can cause "lost connection")
@@ -7411,7 +7566,10 @@ while not shutdown_requested:
                                 'dual_cadence_backtest_simulation': bool(_dc_bt_sim),
                             }
                             
-                            # Update existing row if we have id, else insert
+                            # Update existing row if we have id, else insert.
+                            # Fail the write closed if any secret material slipped
+                            # into the payload (schema, logs, decisions, ...).
+                            assert_secret_free(backtest_result)
                             if _backtest_result_id is not None:
                                 r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(backtest_result).run(conn)
                                 _log(f"Updated backtest results in database (id={_backtest_result_id}, status=finished, P&L={final_pnl})", "green")

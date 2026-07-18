@@ -194,6 +194,20 @@ def _get_alpaca_client(instance_id: str, creds: dict):
     return client
 
 
+def resolve_inception(ph):
+    """Resolve inception value from portfolio history.
+
+    Returns ``(initial_value, history_unavailable)``. An empty/unusable
+    history returns ``(None, True)`` — NEVER current equity, which would
+    display total P&L as a false zero (benchmark-alpha root cause #10)."""
+    try:
+        if ph and ph[0].get("value") is not None:
+            return float(ph[0]["value"]), False
+    except (TypeError, ValueError, KeyError, IndexError):
+        pass
+    return None, True
+
+
 def _alpaca_portfolio_history(creds: dict) -> list[dict]:
     """Fetch /v2/account/portfolio/history (1M / 15Min) and map to the
     {ts, value} shape the UI consumes."""
@@ -284,9 +298,13 @@ def _fetch_alpaca(instance_id: str, creds: dict) -> dict:
 
     recent_trades = _alpaca_recent_trades(client)
     ph = _portfolio_history_cached(instance_id, lambda: _alpaca_portfolio_history(creds))
-    initial_value = ph[0]["value"] if ph else equity
-    total_pnl = equity - initial_value if initial_value else 0.0
-    total_pnl_pct = ((equity / initial_value) - 1.0) * 100.0 if initial_value > 0 else 0.0
+    # Task 9 fix (root cause #10): an empty history surfaces as
+    # history_unavailable — falling back to current equity displayed total
+    # P&L as a false zero.
+    initial_value, history_unavailable = resolve_inception(ph)
+    total_pnl = equity - initial_value if initial_value else None
+    total_pnl_pct = (((equity / initial_value) - 1.0) * 100.0
+                     if initial_value and initial_value > 0 else None)
     if last_equity > 0 and equity > 0:
         day_pnl = equity - last_equity
         day_pnl_pct = ((equity / last_equity) - 1.0) * 100.0
@@ -298,6 +316,7 @@ def _fetch_alpaca(instance_id: str, creds: dict) -> dict:
         "cash": cash, "equity": equity, "buying_power": buying_power, "last_equity": last_equity,
         "initial_value": initial_value, "day_pnl": day_pnl, "day_pnl_pct": day_pnl_pct,
         "total_pnl": total_pnl, "total_pnl_pct": total_pnl_pct,
+        "history_unavailable": history_unavailable,
         "positions": positions_payload, "recent_trades": recent_trades, "portfolio_history": ph,
         "broker": {"name": "AlpacaAdapter", "account_id": account_id,
                    "paper": bool(creds.get("paper", True)),

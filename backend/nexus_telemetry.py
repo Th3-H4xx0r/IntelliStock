@@ -25,7 +25,8 @@ def summarize_outcomes(docs: list) -> dict:
     docs = [d for d in (docs or []) if isinstance(d, dict)]
     n = len(docs)
     if n == 0:
-        return {"hit_rate": 0.0, "n": 0, "n_correct": 0, "avg_return": 0.0, "recent": []}
+        return {"hit_rate": 0.0, "n": 0, "n_correct": 0, "avg_return": 0.0,
+                "recent": [], "data_status": "legacy_untrusted"}
     n_correct = 0
     total_ret = 0.0
     for d in docs:
@@ -55,6 +56,12 @@ def summarize_outcomes(docs: list) -> dict:
         "n_correct": n_correct,
         "avg_return": total_ret / n,
         "recent": recent_view,
+        # Task 8 (benchmark-alpha review E04): the legacy corpus carries
+        # unknown intents, inverted sell semantics, zero-return rows, and
+        # unadjusted corporate actions. This scorecard is explicitly
+        # untrusted while any invalid historical rows remain and is never
+        # promotion evidence.
+        "data_status": "legacy_untrusted",
     }
 
 

@@ -650,6 +650,14 @@ def _normalize_action_intent(intent: str | None) -> str:
     return "unknown"
 
 
+def _outcome_row_allowed(action_intent: str) -> bool:
+    """Task 8 (benchmark-alpha E04): only a real directional prediction may
+    create a forward-outcome row. 'unknown' is a schema error (context row
+    only), 'hold' and queue/deferred states are not directional outcomes."""
+    intent = str(action_intent or "").strip().lower()
+    return intent in _VALID_ACTION_INTENTS and intent != "hold"
+
+
 def _load_evict_cooldown_from_db(conn, instance_id: str) -> dict:
     """Load persisted rotation eviction cooldown for this instance."""
     if conn is None or _r is None or not instance_id:
@@ -9645,7 +9653,7 @@ def _save_trade_contexts_and_outcomes(
             "dominant_event_type": feature_row.get("dominant_event_type") or "general",
         }
         docs.append(doc)
-        if action_intent != "hold" and _entry_px:
+        if _outcome_row_allowed(action_intent) and _entry_px:
             outcome_docs.append({
                 "id": trade_id,
                 "instance_id": instance_id,

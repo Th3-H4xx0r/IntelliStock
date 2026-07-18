@@ -3019,6 +3019,112 @@ def api_get_live_state(instance_id: str, conn=Depends(conn_dependency), current_
     return _run(action_get_live_state, conn, instance_id)
 
 
+# --- benchmark-alpha audit reads (Task 8): authenticated, index-scoped, ---
+# --- bounded; storage failure surfaces explicitly, never as empty data. ---
+
+
+def _alpha_store():
+    from contextlib import contextmanager
+
+    import interactive_utils as _iu
+    from benchmark_alpha.rethink_store import AlphaRethinkStore
+    from rethinkdb import RethinkDB
+
+    _alpha_r = RethinkDB()
+
+    @contextmanager
+    def _factory():
+        c = _iu.get_conn()
+        try:
+            yield c
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    return AlphaRethinkStore(_alpha_r, _factory)
+
+
+def _alpha_page(table, instance_id, origin, run_id, limit, cursor):
+    from benchmark_alpha.api_reads import read_alpha_records
+    from benchmark_alpha.rethink_store import AlphaUnavailableError
+    store = _alpha_store()
+    try:
+        rows, next_cursor = read_alpha_records(
+            store._backend, table, instance_id=instance_id, origin=origin,
+            run_id=run_id, limit=limit, cursor=cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AlphaUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=f"audit store unavailable: {exc}")
+    return {"rows": rows, "next_cursor": next_cursor}
+
+
+@app.get("/instances/{instance_id}/alpha/predictions", response_class=JSONResponse)
+def api_alpha_predictions(instance_id: str, origin: str = None, run_id: str = None,
+                          limit: int = None, cursor: str = None,
+                          current_user: dict = Depends(get_current_user)):
+    return _alpha_page("AlphaPredictions", instance_id, origin, run_id, limit, cursor)
+
+
+@app.get("/instances/{instance_id}/alpha/allocations", response_class=JSONResponse)
+def api_alpha_allocations(instance_id: str, origin: str = None, run_id: str = None,
+                          limit: int = None, cursor: str = None,
+                          current_user: dict = Depends(get_current_user)):
+    return _alpha_page("AlphaAllocations", instance_id, origin, run_id, limit, cursor)
+
+
+@app.get("/instances/{instance_id}/alpha/performance", response_class=JSONResponse)
+def api_alpha_performance(instance_id: str, origin: str = None, run_id: str = None,
+                          current_user: dict = Depends(get_current_user)):
+    from benchmark_alpha.rethink_store import AlphaUnavailableError
+    store = _alpha_store()
+    health = store.health()
+    payload = {"audit_store_health": {"available": health.available,
+                                      "error": health.error},
+               "risk": None, "inception": None,
+               "benchmark_metrics": None}  # Task 9 fills benchmark metrics
+    if health.available:
+        try:
+            risk = store.get_state(f"risk:{instance_id}")
+            payload["risk"] = risk.payload if risk else None
+            inception = store.get_state(f"inception:{instance_id}")
+            payload["inception"] = inception.payload if inception else None
+        except AlphaUnavailableError as exc:
+            payload["audit_store_health"] = {"available": False,
+                                             "error": str(exc)}
+    return payload
+
+
+@app.get("/instances/{instance_id}/alpha/readiness", response_class=JSONResponse)
+def api_alpha_readiness(instance_id: str,
+                        current_user: dict = Depends(get_current_user)):
+    from benchmark_alpha.rethink_store import AlphaUnavailableError
+    store = _alpha_store()
+    health = store.health()
+    reasons = []
+    containment = None
+    if not health.available:
+        reasons.append(f"audit store unavailable: {health.error}")
+    else:
+        try:
+            record = store.get_state(f"containment:{instance_id}")
+            containment = record.payload if record else None
+        except AlphaUnavailableError as exc:
+            reasons.append(f"containment state unreadable: {exc}")
+    if not containment:
+        reasons.append("containment state not persisted (Task 0 pending)")
+    reasons.append("promotion gates not evaluated (Tasks 16-18 pending)")
+    return {
+        "audit_store_health": {"available": health.available,
+                               "error": health.error},
+        "containment": containment,
+        "readiness_ok": False,  # honest default until Task 17 gates exist
+        "reasons": reasons,
+    }
+
+
 # --- iOS widget: one-call payload so the widget can self-refresh w/o the app ---
 
 
