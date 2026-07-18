@@ -92,3 +92,12 @@ def test_symbol_dedup_and_normalization():
     build_live_crypto_data(fetch, ["btc/usd ", "BTC/USD"], ["BTC/USD"], [],
                            MAJORS, NOW, 3600, 100)
     assert calls["syms"] == ["BTC/USD"]
+
+
+def test_band_increment_prefers_band_over_row_default():
+    from live_crypto_bars import band_increment_seconds
+    assert band_increment_seconds("low", 900) == 3600     # the fixed hardcode case
+    assert band_increment_seconds("HIGH", 3600) == 300
+    assert band_increment_seconds("medium", 3600) == 900
+    assert band_increment_seconds(None, 1234) == 1234     # unknown -> fallback
+    assert band_increment_seconds("weird", 1234) == 1234

@@ -27,6 +27,19 @@ import datetime
 from typing import Callable, Iterable, Mapping, Optional
 
 
+#: Bar size per crypto band — the cadence each strategy was validated on
+#: (band LOW = 60-min bars for meanrev/adaptive/connors).
+BAND_INCREMENT_SECONDS = {"high": 300, "medium": 900, "low": 3600}
+
+
+def band_increment_seconds(band, fallback: int) -> int:
+    """Bar size (seconds) for a crypto band; ``fallback`` when unknown.
+    Prefer this over the Instances row's granularity_time_increment, which
+    historically defaulted to 900 regardless of band (UI hardcode, fixed
+    2026-07-18) — the band is the validated source of truth."""
+    return BAND_INCREMENT_SECONDS.get(str(band or "").strip().lower(), fallback)
+
+
 def lookback_start(now_utc: datetime.datetime, increment_seconds: int,
                    lookback_bars: int) -> datetime.datetime:
     """Fetch-window start: lookback_bars * increment before now (plus one bar

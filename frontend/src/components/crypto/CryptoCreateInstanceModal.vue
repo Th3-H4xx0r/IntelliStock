@@ -300,6 +300,8 @@ async function submit() {
         body: JSON.stringify({
           name: name.value.trim(),
           brokerage_id: brokerageId.value,
+          // Keep the row's time increment in lockstep with the Band edit.
+          granularity: { high: '300', medium: '900', low: '3600' }[band.value] || '3600',
           crypto_config: cryptoConfig,
           stocks,
         }),
@@ -310,7 +312,10 @@ async function submit() {
       const payload = {
         id: instanceId.value.trim(),
         name: name.value.trim() || undefined,
-        granularity: '900',
+        // Granularity follows the Band — the bar size each strategy was
+        // validated on (low=60min). A hardcoded '900' here put band=low
+        // instances on 15-min bars (unvalidated cadence) in the live loop.
+        granularity: { high: '300', medium: '900', low: '3600' }[band.value] || '3600',
         run_command: false,
         kind: 'crypto',
         brokerage_id: brokerageId.value,

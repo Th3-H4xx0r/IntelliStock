@@ -409,6 +409,8 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
         await repo.updateInstance(widget.editInstanceId!, {
           'name': _name.text.trim(),
           if (_brokerageId.isNotEmpty) 'brokerage_id': _brokerageId,
+          // Keep the row's time increment in lockstep with the Band edit.
+          'granularity': const {'high': '300', 'medium': '900', 'low': '3600'}[_band] ?? '3600',
           'crypto_config': cryptoConfig,
           'stocks': fixedStocks,
         });
@@ -417,7 +419,9 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
         await repo.createInstance({
           'id': _id.text.trim(),
           if (_name.text.trim().isNotEmpty) 'name': _name.text.trim(),
-          'granularity': '900',
+          // Granularity follows the Band (bar size each strategy was
+          // validated on; low = 60-min bars) — was hardcoded '900'.
+          'granularity': const {'high': '300', 'medium': '900', 'low': '3600'}[_band] ?? '3600',
           'run_command': false,
           'kind': 'crypto',
           if (_brokerageId.isNotEmpty) 'brokerage_id': _brokerageId,

@@ -8125,12 +8125,21 @@ while not shutdown_requested:
                                 if _is_crypto_instance_runtime() and _tick_mode != "IDLE":
                                     try:
                                         from live_crypto_bars import build_live_crypto_data as _lcb_build
+                                        from live_crypto_bars import band_increment_seconds as _lcb_band_inc
                                         from strategies.crypto.meanrev import DEFAULT_MAJORS as _lcb_majors
                                         _lcb_now = datetime.datetime.now(datetime.timezone.utc)
                                         try:
                                             _lcb_inc = max(60, int(float(time_increment or 3600)))
                                         except (TypeError, ValueError):
                                             _lcb_inc = 3600
+                                        # Prefer the BAND's bar size (the validated cadence,
+                                        # low=60min) over the row's time increment, which UI
+                                        # creates historically hardcoded to 900.
+                                        try:
+                                            _ck_b, _ccfg_b = _instance_kind_and_crypto_config()
+                                            _lcb_inc = _lcb_band_inc((_ccfg_b or {}).get("band"), _lcb_inc)
+                                        except Exception:
+                                            pass
                                         _lcb_lookback = int(os.environ.get("LIVE_CRYPTO_LOOKBACK_BARS", "5040"))
                                         _lcb_tf = _time_increment_to_alpaca_timeframe(str(_lcb_inc))
                                         try:
