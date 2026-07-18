@@ -36,6 +36,13 @@ from broker_adapters.base import (
     AccountDTO,
     HealthStatus,
 )
+from market_marks import (
+    MarkQuality,
+    MarkSource,
+    MarketMark,
+    MarketMarkBook,
+    classify_session,
+)
 from broker_adapters.errors import (
     BrokerError,
     InsufficientBuyingPower,
@@ -242,6 +249,9 @@ class AlpacaAdapter(BrokerAdapter):
         self._trades: list[dict] = []
         self._cash: float = 0.0
         self._last_prices: dict[str, float] = {}
+        # Typed current-mark truth (Task 4). ``_last_prices`` is only a
+        # compatibility mirror of the newest mark price per symbol.
+        self._market_marks = MarketMarkBook()
         self._portfolio_snapshots: list[dict] = []
         # 2026-04-22 Round 4 Fix 5: track when positions snapshot went stale
         # due to a REST outage. When non-None, downstream gates know the
@@ -1188,13 +1198,30 @@ class AlpacaAdapter(BrokerAdapter):
                     "green",
                 )
                 self._positions_stale_since = None
-            # Seed market prices for positions but DON'T overwrite an
-            # existing entry — _on_trade_update writes authoritative fill
-            # prices, and REST market_value/qty is a stale mark.
+            # July 10 incident fix: a successful REST refresh writes EVERY
+            # positive market_value/qty broker mark unconditionally when it is
+            # newer. Broker marks replace fill-cache values by timestamped
+            # precedence — a fill price must never survive a refresh merely
+            # because a cache key exists. ``_last_prices`` mirrors the book's
+            # newest accepted price so legacy readers stop seeing stale fills.
             if new_last_prices:
+                _observed = datetime.now(timezone.utc)
+                _session = classify_session(_observed)
                 for _sym, _price in new_last_prices.items():
-                    if _sym not in self._last_prices or self._last_prices.get(_sym, 0.0) == 0.0:
-                        self._last_prices[_sym] = _price
+                    try:
+                        self._market_marks.update(MarketMark(
+                            symbol=_sym, price=_price, bid=None, ask=None,
+                            bid_size=None, ask_size=None,
+                            observed_at=_observed, received_at=_observed,
+                            source=MarkSource.BROKER_POSITION, feed="broker",
+                            quality=MarkQuality.BROKER_DERIVED,
+                            session=_session,
+                        ))
+                    except ValueError:
+                        continue
+                    _newest = self._market_marks.get(_sym)
+                    if _newest is not None:
+                        self._last_prices[_sym] = _newest.price
         return out
 
     def refresh_cash(self) -> CashDTO:
@@ -1411,11 +1438,24 @@ class AlpacaAdapter(BrokerAdapter):
                 # 2026-04-22 populate _last_prices on every fill so downstream
                 # price-readers (outcome tracking, snapshot UI, strategy
                 # sizing) always have a recent Alpaca-authoritative quote for
-                # any symbol we've traded today. Previously only
-                # save_portfolio_snapshot() or _ensure_prices_for_portfolio()
-                # wrote here — leaving a cold restart with no prices at all.
+                # any symbol we've traded today. Task 4: the fill goes into
+                # the mark book as an EXECUTION_ONLY mark — it can seed a cold
+                # cache but never outranks a quote/trade/broker mark and can
+                # never authorize an exposure increase.
                 if price > 0:
-                    self._last_prices[sym] = price
+                    try:
+                        self._market_marks.update(MarketMark(
+                            symbol=sym, price=price, bid=None, ask=None,
+                            bid_size=None, ask_size=None,
+                            observed_at=now_utc, received_at=now_utc,
+                            source=MarkSource.FILL, feed="execution",
+                            quality=MarkQuality.EXECUTION_ONLY,
+                            session=classify_session(now_utc),
+                        ))
+                    except ValueError:
+                        pass
+                    _newest = self._market_marks.get(sym)
+                    self._last_prices[sym] = _newest.price if _newest is not None else price
                 self._trades.append({
                     "timestamp": now_utc,
                     "action": "buy" if "buy" in side else "sell",
@@ -1758,7 +1798,32 @@ class AlpacaAdapter(BrokerAdapter):
     ) -> None:
         value = self.get_portfolio_value(prices)
         if prices:
-            self._last_prices.update(prices)
+            # Task 4: snapshot prices come from the live price-resolution
+            # pipeline (REST). Record them as timestamped REST_QUOTE marks so
+            # the book stays current; the mirror follows the newest mark.
+            _ts = timestamp if isinstance(timestamp, datetime) and timestamp.tzinfo else datetime.now(timezone.utc)
+            _session = classify_session(_ts)
+            for _sym, _px in prices.items():
+                try:
+                    _pxf = float(_px or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if _pxf <= 0:
+                    continue
+                try:
+                    self._market_marks.update(MarketMark(
+                        symbol=str(_sym), price=_pxf, bid=None, ask=None,
+                        bid_size=None, ask_size=None,
+                        observed_at=_ts, received_at=_ts,
+                        source=MarkSource.REST_QUOTE, feed="rest",
+                        quality=MarkQuality.SINGLE_EXCHANGE,
+                        session=_session,
+                    ))
+                except ValueError:
+                    continue
+                _newest = self._market_marks.get(str(_sym))
+                if _newest is not None:
+                    self._last_prices[str(_sym).upper()] = _newest.price
         self._portfolio_snapshots.append({
             "timestamp": timestamp,
             "value": value,

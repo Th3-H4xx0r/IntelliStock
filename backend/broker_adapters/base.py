@@ -84,6 +84,37 @@ class BrokerAdapter(ABC):
     # strategy NEVER reads this. For operator visibility (audit + alerts).
     _external_positions: dict[str, dict]
 
+    # --- Current market marks (Task 4, benchmark-alpha Stage A) ---
+    def get_market_marks(self) -> dict:
+        """Return a copy of the adapter's current typed market marks.
+
+        Adapters that maintain a ``MarketMarkBook`` (``_market_marks``) return
+        its snapshot; others return ``{}``. ``_last_prices`` remains a
+        temporary compatibility mirror of the newest mark price — it carries
+        no timestamp and must never be treated as fresh live data.
+        """
+        book = getattr(self, "_market_marks", None)
+        if book is None:
+            return {}
+        return dict(book.snapshot())
+
+    def decision_price(self, symbol: str, now: datetime):
+        """Resolve a price eligible to authorize an exposure increase.
+
+        Returns ``(price, PurposeCheck)`` from a mark passing the DECISION
+        purpose policy, or ``None``. Never falls back to a fill price, a
+        stale mark, or an untimestamped scalar cache — callers must fail
+        closed when this returns ``None``.
+        """
+        from market_marks import MarkPurpose, evaluate_mark
+        mark = self.get_market_marks().get(str(symbol).upper())
+        if mark is None:
+            return None
+        check = evaluate_mark(mark, MarkPurpose.DECISION, now)
+        if not check.allowed:
+            return None
+        return mark.price, check
+
     # --- External-position quarantine (clean-room mode) ---
     def get_external_positions(self) -> dict[str, dict]:
         """Return the quarantined external positions dict (empty if not

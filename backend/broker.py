@@ -2496,6 +2496,17 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
     key = key or os.environ.get("KEY", "")
     secret = secret or os.environ.get("SECRET", "")
     _last_prices_cache = getattr(portfolio_emulator, "_last_prices", {}) or {}
+    # Task 4 (July 10 incident): in LIVE mode typed timestamped marks are the
+    # first authority. The untimestamped ``_last_prices`` scalar cache is
+    # demoted to a valuation-only fallback AFTER an outbound fresh fetch —
+    # it must never be treated as fresh live data (it can be a fill price).
+    _live_marks = {}
+    if mode == MODE_LIVE:
+        try:
+            _get_marks = getattr(portfolio_emulator, "get_market_marks", None)
+            _live_marks = _get_marks() if callable(_get_marks) else {}
+        except Exception:
+            _live_marks = {}
     for sym in positions:
         if sym in prices and prices.get(sym) is not None and float(prices.get(sym) or 0) > 0:
             continue
@@ -2503,9 +2514,19 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
         if data and (data.get(sym) or []):
             one = _get_prices_at_time(data, [sym], current_time)
             p = one.get(sym)
-        # Adapter cache before outbound HTTP — reuses whatever came in via
-        # start_trade_updates() or reconcile_wal_with_broker().
-        if (p is None or p <= 0) and _last_prices_cache:
+        # LIVE: fresh typed mark (quote/trade/broker-position within the
+        # 120s broker-fallback SLA; execution-only fill marks excluded).
+        if (p is None or p <= 0) and _live_marks:
+            try:
+                _mk = _live_marks.get(sym)
+                if _mk is not None and getattr(_mk.quality, "value", "") != "execution_only" \
+                        and _mk.age_seconds(datetime.datetime.now(datetime.timezone.utc)) <= 120:
+                    p = float(_mk.price)
+            except Exception:
+                p = None
+        # BACKTEST only: adapter cache before outbound HTTP (bar-derived and
+        # deterministic there). LIVE skips this — see valuation fallback below.
+        if (p is None or p <= 0) and _last_prices_cache and mode != MODE_LIVE:
             try:
                 p = float(_last_prices_cache.get(sym) or 0) or None
             except Exception:
@@ -2515,6 +2536,14 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
                 sym, current_time, key=key, secret=secret, feed=data_feed,
                 allow_non_alpaca_fallback=(mode == MODE_LIVE),
             )
+        # LIVE valuation-only fallback: stale scalar beats a $0 mark for
+        # portfolio valuation, but it can never authorize an exposure
+        # increase (decision_price() fails closed independently of this).
+        if (p is None or p <= 0) and _last_prices_cache and mode == MODE_LIVE:
+            try:
+                p = float(_last_prices_cache.get(sym) or 0) or None
+            except Exception:
+                p = None
         # yfinance fallback for free-tier / rate-limited / delisted-feed cases.
         # ~15-minute delay vs Alpaca but better than $0 and a bypassed risk gate.
         if p is None or p <= 0:
