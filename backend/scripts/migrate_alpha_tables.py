@@ -39,6 +39,19 @@ INDEXES = {
     **{table: ("run_asof", "instance_origin_asof") for table in RECORD_TABLES},
 }
 
+# Task 8 retention policy (days; None = retain indefinitely unless policy
+# changes). Enforcement runs as a scheduled operator job that consumes this
+# mapping; this script only declares it.
+RETENTION_DAYS = {
+    "AlphaPredictions": 400,           # raw candidate predictions
+    "AlphaEvents:mark_health": 30,     # high-frequency mark-health events
+    "AlphaAllocations": None,
+    "AlphaOrderIntents": None,
+    "AlphaBrokerOrders": None,
+    "AlphaFills": None,
+    "AlphaPromotions": None,
+}
+
 
 def plan_migration(existing_tables, existing_indexes):
     """Pure migration planner: returns the ordered list of actions needed."""

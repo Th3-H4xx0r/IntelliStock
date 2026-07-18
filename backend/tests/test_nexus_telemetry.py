@@ -8,7 +8,8 @@ from nexus_telemetry import (
 
 def test_summarize_outcomes_empty():
     s = summarize_outcomes([])
-    assert s == {"hit_rate": 0.0, "n": 0, "n_correct": 0, "avg_return": 0.0, "recent": []}
+    assert s == {"hit_rate": 0.0, "n": 0, "n_correct": 0, "avg_return": 0.0,
+                 "recent": [], "data_status": "legacy_untrusted"}
 
 
 def test_summarize_outcomes_hit_rate_and_direction():

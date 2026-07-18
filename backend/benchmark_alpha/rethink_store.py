@@ -118,6 +118,22 @@ class _RethinkBackend:
         with self._conn_factory() as conn:
             return self._r.db(self._db).table(STATE_TABLE).get(key).run(conn)
 
+    def read_by_index(self, table, index, key, *, limit, cursor):
+        """One bounded page over a compound index whose last component is
+        ``as_of``. The cursor is the previous page's final ``as_of`` — an
+        opaque compound-index position to callers."""
+        with self._conn_factory() as conn:
+            t = self._r.db(self._db).table(table)
+            lo = list(key) + ([cursor] if cursor else [self._r.minval])
+            hi = list(key) + [self._r.maxval]
+            query = t.between(
+                lo, hi, index=index,
+                left_bound="open" if cursor else "closed",
+            ).order_by(index=index).limit(int(limit))
+            rows = list(query.run(conn))
+        next_cursor = rows[-1].get("as_of") if len(rows) == int(limit) else None
+        return rows, next_cursor
+
     def health_probe(self):
         try:
             with self._conn_factory() as conn:
