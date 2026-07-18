@@ -8113,10 +8113,83 @@ while not shutdown_requested:
                                     _set_strategy_tick_phase("strategy_run")
                                 except Exception:
                                     pass
+                                # 2026-07-18: LIVE crypto bars for run_once strategies.
+                                # Backtest builds price_history; live passed data=None, so
+                                # crypto strategies saw an EMPTY universe and exit_blind_held
+                                # would risk-off-sell every held coin each tick. Crypto-only
+                                # branch — equity live path still passes None (byte-identical).
+                                # On a failed fetch with no last-good snapshot we run the tick
+                                # with EMPTY specs (a no-op) instead of trading blind.
+                                _rr_data = None
+                                _rr_specs_eff = _run_once_specs
+                                if _is_crypto_instance_runtime() and _tick_mode != "IDLE":
+                                    try:
+                                        from live_crypto_bars import build_live_crypto_data as _lcb_build
+                                        from strategies.crypto.meanrev import DEFAULT_MAJORS as _lcb_majors
+                                        _lcb_now = datetime.datetime.now(datetime.timezone.utc)
+                                        try:
+                                            _lcb_inc = max(60, int(float(time_increment or 3600)))
+                                        except (TypeError, ValueError):
+                                            _lcb_inc = 3600
+                                        _lcb_lookback = int(os.environ.get("LIVE_CRYPTO_LOOKBACK_BARS", "5040"))
+                                        _lcb_tf = _time_increment_to_alpaca_timeframe(str(_lcb_inc))
+                                        try:
+                                            _lcb_held = list((portfolio_emulator.get_positions() or {}).keys()) if portfolio_emulator is not None else []
+                                        except Exception:
+                                            _lcb_held = []
+
+                                        def _lcb_fetch(_syms, _start, _end,
+                                                       _tf=_lcb_tf,
+                                                       _k=_strat_data_key,
+                                                       _s=_strat_data_secret):
+                                            _db = None
+                                            try:
+                                                _db = get_conn()
+                                            except Exception:
+                                                _db = None
+                                            try:
+                                                return fetch_alpaca_historical_bars(
+                                                    _syms, _start, _end, _k, _s,
+                                                    timeframe=_tf, db_conn=_db, feed=data_feed,
+                                                )
+                                            finally:
+                                                try:
+                                                    if _db is not None:
+                                                        _db.close()
+                                                except Exception:
+                                                    pass
+
+                                        _rr_data = _lcb_build(
+                                            _lcb_fetch,
+                                            list(symbols or []),
+                                            _lcb_held,
+                                            sorted(globals().get("_live_crypto_discovered") or set()),
+                                            list(_lcb_majors),
+                                            _lcb_now, _lcb_inc, _lcb_lookback,
+                                            last_good=globals().get("_live_crypto_bars_last_good"),
+                                            log=_log,
+                                        )
+                                        if _rr_data:
+                                            globals()["_live_crypto_bars_last_good"] = _rr_data
+                                        elif _rr_data is None:
+                                            _rr_specs_eff = []
+                                            _log(
+                                                "Live crypto bars unavailable (fetch failed, no last-good) — "
+                                                "skipping strategies this tick; will retry next tick.",
+                                                "red",
+                                            )
+                                    except Exception as _lcb_e:
+                                        _rr_data = None
+                                        _rr_specs_eff = []
+                                        _log(
+                                            f"Live crypto bars error: {type(_lcb_e).__name__}: {_lcb_e} — "
+                                            f"skipping strategies this tick.",
+                                            "red",
+                                        )
                                 _rr_fut = _PRICE_FETCH_EXECUTOR.submit(
                                     run_run_once_strategies,
-                                    _run_once_specs, list(symbols or []), prices, current_time,
-                                    None,
+                                    _rr_specs_eff, list(symbols or []), prices, current_time,
+                                    _rr_data,
                                     portfolio_emulator=portfolio_emulator,
                                     time_increment=time_increment,
                                     alpaca_key=_strat_data_key,
@@ -8546,6 +8619,15 @@ while not shutdown_requested:
                             else:
                                 expanded_symbols.discard(ns)
 
+            # 2026-07-18: live crypto bars — remember the discovered universe
+            # across ticks so the pre-dispatch bars fetch covers it next tick
+            # (expanded_symbols is rebuilt per tick and never persists).
+            # Live-only: backtest path byte-identical.
+            if mode == MODE_LIVE and nexus_discovered_syms and _is_crypto_instance_runtime():
+                try:
+                    globals().setdefault("_live_crypto_discovered", set()).update(nexus_discovered_syms)
+                except Exception:
+                    pass
             if nexus_discovered_syms:
                 new_syms = nexus_discovered_syms - expanded_symbols
                 if new_syms:
