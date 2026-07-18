@@ -74,6 +74,23 @@ def ensure_tables() -> None:
                 _r.db(DB_NAME).table_create(t).run(c)
 
 
+def ensure_alpha_wal_indexes() -> None:
+    """Create the LiveOrderWAL secondary indexes the benchmark-alpha system
+    queries by (Task 5): ``instance_id`` for instance-scoped reconciliation
+    and ``client_order_id`` for prefix scans that replace the full-table
+    filter in ``list_filled_for_prefix``. WAL rows carry ``instance_id``,
+    ``run_id``, ``allocation_id``, and ``intent_id`` as OPTIONAL fields
+    (existing callers unchanged; Task 14 threads them through
+    ``record_intent``)."""
+    _assert_table_allowed(WAL_TABLE)
+    with _conn() as c:
+        existing = set(_r.db(DB_NAME).table(WAL_TABLE).index_list().run(c))
+        for index in ("instance_id", "client_order_id"):
+            if index not in existing:
+                _r.db(DB_NAME).table(WAL_TABLE).index_create(index).run(c)
+                _r.db(DB_NAME).table(WAL_TABLE).index_wait(index).run(c)
+
+
 # ---- WAL store adapter ----
 
 class WALStore:
