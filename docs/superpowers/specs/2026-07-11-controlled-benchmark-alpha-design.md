@@ -2,6 +2,8 @@
 
 **Date:** 2026-07-11
 
+**Revised:** 2026-07-18 - Alpaca main performance forensics and release-blocking runtime corrections
+
 **Status:** Approved (auto-approval granted after interactive design review)
 
 **Target instance:** `alpaca-main`
@@ -37,9 +39,11 @@ require out-of-sample evidence before increasing real-money exposure.
 
 ## 2. Production Research Findings
 
-The findings below were derived from the production API, Alpaca account history,
-RethinkDB records, current source code, and live logs on 2026-07-11. Secrets and raw
-authenticated responses are intentionally excluded.
+Sections 2.1-2.8 preserve the initial July 11 cutoff so the research history is not
+rewritten after later observations. Sections 2.9-2.10 contain the authoritative July 18
+refresh from the complete production API, Alpaca account history, RethinkDB records,
+current source code, and live logs. Secrets and raw authenticated responses are
+intentionally excluded.
 
 ### 2.1 Performance and attribution
 
@@ -154,6 +158,70 @@ rotate them, purge existing plaintext, persist only secret references, and add r
 at storage and API/log boundaries. No credential values may enter tests, fixtures,
 design documents, or migration logs.
 
+### 2.9 July 18 Alpaca main forensic refresh
+
+The complete read-only broker ledger materially sharpens the original diagnosis:
+
+- Final-funded performance from June 8 through July 17 was -0.3437%, versus +0.8056%
+  for adjusted SPY, an active shortfall of 1.1493 percentage points.
+- The latest complete month lost 3.0104%, versus -0.4647% for SPY, an active shortfall
+  of 2.5457 percentage points.
+- The post-July 6 reset gained 0.7542% while SPY lost 1.0635%, but this covers only ten
+  sessions and cannot establish a persistent edge.
+- The account's 5.8259% maximum drawdown exceeded SPY's 3.1163% drawdown over the
+  final-funded window. Annualized daily volatility was approximately 23.17%, versus
+  15.89% for SPY.
+- Forty-six filled orders generated approximately 470.94% gross turnover. The 20 exits
+  split evenly between winners and losers, but the 0.7993 profit factor shows that losses
+  outweighed gains.
+- Strategy-owned exits lost $61.37 FIFO; eight identified Alpaca dashboard exits lost
+  $9.97. Manual exits therefore do not explain the strategy's negative economics.
+- All seven current positions exceeded the proposed 8% name cap. CNC and KNX were
+  approximately 14.31% and 13.01% of equity.
+- The account held 27.16% cash and no SPY. The legacy system still has no benchmark
+  residual sleeve.
+
+The first-funding time-weighted series appears to beat SPY only because most capital was
+not yet deposited or invested while SPY fell. Reporting must show first funding,
+final funding, strategy start, rolling one month, and promotion-inception lenses rather
+than selecting whichever start date is most favorable.
+
+The broker ledger reconciled within $0.0129 after FIFO realized P&L, current unrealized
+P&L, dividends, and fees. The full sanitized analysis is recorded in
+`docs/superpowers/reviews/2026-07-18-alpaca-main-performance-forensics.md`.
+
+### 2.10 Newly confirmed runtime blockers
+
+Source and decision-history review found additional correctness failures:
+
+- The daemon passes `FULL`, `MONITOR`, or `IDLE` through a parameter also used to infer
+  live execution mode. The resulting live-mode flag is false during live scheduler runs,
+  disabling several intended live-only safeguards.
+- Position refresh derives current broker marks but preserves an existing nonzero
+  last-price cache, commonly a fill price. Historical minute bars refresh only near
+  submission, after strategy and risk decisions have already consumed the stale mark.
+- A full-cycle completion date is persisted before allocation and order settlement.
+  Process death can suppress the rest of a day's intended allocation, while failed
+  persistence can permit a duplicate cycle.
+- Client order IDs encode symbol, date, and side rather than intent identity and revision.
+  Distinct same-day adjustments can collide, and terminal-negative orders cannot be
+  retried safely.
+- Partial fills, pending cash, and submitted sell proceeds are not represented by one
+  delta-idempotent order state machine.
+- Live decision logging runs best-effort in a daemon thread and suppresses every error.
+  It cannot be the authoritative audit contract.
+- The API portfolio-history fallback can replace inception with current equity and report
+  total P&L as zero.
+- `LiveDecisionAudit` was empty. Only 16 of 46 broker fills had any recomputed Graph scope
+  agreeing with the action, and only six had every scope agree; later lookback contexts
+  are not causal live evidence.
+- The current outcome scope contained 2,054 rows, 1,752 with `unknown` intent, plus
+  unadjusted corporate-action artifacts and inverted sell hit-rate semantics. Legacy
+  outcome statistics are excluded from promotion.
+
+These are release blockers independent of whether any forecast family ultimately proves
+alpha.
+
 ## 3. Success Contract
 
 Primary objective:
@@ -168,10 +236,15 @@ Promotion thresholds:
 - Target annualized active return +10 percentage points after modeled costs.
 - 90% bootstrap lower confidence bound for active return above zero.
 - Information ratio at least 0.75.
+- Net profit factor above 1.0 in unseen costed portfolio results; point estimate and
+  uncertainty are reported rather than using win rate alone.
 - Maximum portfolio drawdown no greater than 15%.
 - Portfolio beta normally between 0.8 and 1.1.
 - Positive active return in at least 60% of unseen quarters.
 - No margin or gross exposure above 100%.
+- Normal same-session traded notional no greater than the promoted active tier; emergency
+  reductions are exempt and separately attributed.
+- Complete decision-to-broker lineage and zero unresolved order ownership.
 - Operational and audit gates in Section 10 pass with no critical exceptions.
 
 Returns are compared at matching timestamps against dividend-adjusted SPY total return.
@@ -204,15 +277,18 @@ The allocator uses forecast excess return, calibrated confidence, volatility, co
 sector exposure, tax state, and turnover cost. It does not use a position-count target as
 a reason to buy an otherwise ineligible candidate.
 
-### 4.2 Tax-aware SPY sleeve
+### 4.2 Tax-aware SPY sleeve and active-symbol ledger
 
 - The lowest 18% SPY weight is the stable core. The additional 0-40% is the flexible
   benchmark sleeve.
 - Active buys and sells are netted before SPY orders are generated.
 - The flexible sleeve is normally rebalanced weekly or after at least five percentage
   points of allocation drift, rather than on every stock order.
-- A local FIFO-compatible lot ledger is built from actual fills and reconciled with
-  broker records. Alpaca's reporting remains authoritative for tax forms.
+- A RethinkDB-backed FIFO-compatible lot ledger is built from actual fills and reconciled
+  with broker records. Alpaca's reporting remains authoritative for tax forms.
+- The lot and 61-day acquisition/loss-sale window applies to every repeatedly traded
+  active symbol as well as SPY. SPY receives additional batching rules because it is the
+  residual funding sleeve.
 - A discretionary SPY sale that would realize a loss is blocked if SPY was acquired in
   the preceding 30 calendar days.
 - After an allowed SPY loss sale, discretionary SPY repurchases are blocked for 31 days.
@@ -251,7 +327,16 @@ degraded, but the degraded source and age must be recorded.
 
 Historical bars are not a substitute for a current quote. Risk reduction remains
 available through independently refreshed broker state. An out-of-process watchdog
-compares strategy marks, broker marks, positions, and account equity.
+compares strategy marks, broker marks, positions, and account equity. On a confirmed KILL
+state it can invoke only a narrowly scoped reduce-only executor that re-reads broker
+positions, rejects buys/shorts, and caps every sell to held quantity. It has no strategy,
+candidate, or arbitrary-order interface.
+
+A typed mark is required twice: once at forecast/allocation evaluation and again
+immediately before submission. The second observation must record drift from the decision
+reference and reject an exposure increase that is stale or outside its registered price
+collar. Broker-position marks replace fill-cache marks; they are never discarded merely
+because a nonzero cached scalar already exists.
 
 ### 5.2 Forecast producers
 
@@ -273,9 +358,12 @@ eligibility
 gate_reasons
 ```
 
-Graph direct evidence and graph propagation are distinct evidence classes. Propagation-
-only forecasts are shadow-only until incremental out-of-sample value is demonstrated.
-LLM output may contribute features but never bypasses typed eligibility gates.
+Graph direct evidence and graph propagation are distinct evidence classes. The initial
+challenger permits only a fresh, current-cycle direct forecast to become eligible.
+Propagation-only evidence, backfill, scheduled votes, breakout overrides, reserved slots,
+and high-conviction bypasses are research-only until their own registered unseen-data
+ablation proves incremental value. LLM output may contribute features but never bypasses
+typed eligibility gates.
 
 ### 5.3 PortfolioAllocator
 
@@ -283,11 +371,22 @@ Consumes fresh marks, forecasts, current positions, SPY lots, exposure, and risk
 It produces a complete target portfolio plus the reason for each delta. It has no broker
 credentials and cannot submit orders.
 
+It also requires a current `AuthorizationContext`. Active weight is capped at the minimum
+of the 80% absolute ceiling, the authorized tier (40/60/80%), and the risk-state cap.
+Missing, expired, or demoted authorization permits no exposure increase.
+
 ### 5.4 RiskAndExecutionEngine
 
 Validates target deltas against freshness, position, sector, beta, turnover, drawdown,
 tax, buying-power, and idempotency constraints. It generates broker orders with stable
 client-order IDs and records every rejection. No strategy-specific path can bypass it.
+
+Execution is a persisted state machine, not a precomputed list. A batch advances through
+`forecasted`, `allocated`, `intents_written`, `reductions_submitted`,
+`reductions_settled`, `increases_submitted`, and `settled_or_expired`. Restart resumes the
+first incomplete phase after broker reconciliation. Client IDs derive from a stable
+intent ID plus revision; partial fills update positions, cash, and residual quantity by
+monotonic fill deltas.
 
 ### 5.5 Ledgers and evaluator
 
@@ -295,6 +394,20 @@ Separate append-only records store predictions, gates, target allocations, order
 broker orders, fills, position episodes, tax lots, and horizon outcomes. Each record has
 `run_id`, `origin`, instance, strategy/config version, model version, data snapshot, and
 timestamps. Live, shadow, paper, lookback, and backtest origins never overwrite one another.
+
+Every order chain also carries allocation, forecast, intent, client-order, and broker-order
+IDs; source ownership (`strategy`, `dashboard`, or reconciled external); mark source and
+age; submitted, filled, and residual quantity; reserved cash; forecast expiry; and the
+exact gate or override. Decision audit writes are synchronous hard-durability events before
+normal side effects, never best-effort daemon work.
+
+RethinkDB is the sole application persistence database for these ledgers, versioned risk
+and inception state, experiments, promotions, and the order WAL. Normal PAPER/LIVE side
+effects require a successful hard-durability write. No secondary application database is
+introduced. Alpaca remains authoritative for positions, balances, orders, fills, and
+account activities and is reconciled into RethinkDB during every normal cycle. After a
+declared RethinkDB outage, the same broker history reconstructs deterministic,
+quantity-capped emergency reductions and backfills missing application events.
 
 ## 6. Signal and Position Lifecycle
 
@@ -308,8 +421,9 @@ chooses a horizon only from training/validation data. The sealed test set is use
 An entry is ineligible if any required data is stale, price quality is insufficient,
 quality checks fail, the evidence is absent, a negative-evidence limit is breached, the
 reason code is unknown, or the predicted edge does not exceed estimated cost and risk.
-"No graph signal" can never become a Graph Nexus order. Backfill, reserved slots, and
-break-glass paths use the same invariant gates.
+"No graph signal," failed quality, and negative trend evidence can never become a Graph
+Nexus order. No legacy backfill, scheduled-vote, breakout, propagation, reserved-slot, or
+high-conviction path may emit an alpha order.
 
 ### 6.3 Position sizing
 
@@ -329,16 +443,21 @@ fewer than ten positions.
   exits are driven by the new forecast and risk state.
 - Rotation requires the incoming expected excess return to exceed the incumbent after
   estimated cost, tax effect, and an anti-churn hurdle.
+- The incumbent and replacement use the same current-cycle information set. Queue age or
+  an old score can preserve research priority but can never preserve trading eligibility.
 
 ### 6.5 Loss and drawdown budgets
 
+- Drawdown is stored as the positive magnitude
+  `max(0, 1 - adjusted_equity / peak_adjusted_equity)`. Signed return fields are separate;
+  a negative drawdown magnitude is invalid.
 - Initial stop distance is approximately 1.5 ATR, constrained to a 5-8% price range.
 - Planned loss at the stop is at most approximately 0.6% of portfolio equity per position.
 - At 8% portfolio drawdown, the active ceiling falls to 40% and beta/exposure are reduced.
 - At 12% drawdown, new active entries stop and exposure is reduced under a deterministic
   liquidation schedule.
 - At 15% drawdown, the kill state cancels entries, liquidates active positions and
-  benchmark exposure to cash, and returns both forecast models to shadow mode.
+  benchmark exposure to cash, and returns both forecast models to OBSERVE mode.
 - Emergency risk actions override wash-sale and normal turnover guards.
 - Material rolling underperformance versus SPY freezes promotion even when absolute
   drawdown is below the thresholds.
@@ -349,7 +468,7 @@ fewer than ten positions.
 |---|---|
 | Price exceeds freshness SLA | Cancel/block exposure increases; alert; retain broker-backed risk reduction |
 | Stream disconnects | Reconnect with bounded backoff; switch to REST; mark quality degradation |
-| RethinkDB unavailable | Continue risk monitoring from local durable state; queue analytics writes |
+| RethinkDB unavailable | Block exposure increases and cancel entries; continue broker-backed risk monitoring in memory; permit only deterministic, quantity-capped risk reductions and backfill them from broker history after recovery |
 | LLM unavailable | Graph Nexus emits no tradable forecast; deterministic challenger remains independent |
 | Broker state unavailable | Cancel outstanding entries where possible; prohibit new exposure; page operator |
 | Unknown reason or intent | Reject persistence and trading action; raise a schema alert |
@@ -368,10 +487,21 @@ Discord, analytics endpoints, and the LLM are never dependencies for a risk exit
   arbitrary non-hold candidates.
 - Populate a complete decision ledger for eligible, rejected, held, rotated, and manual
   actions.
+- Ingest paginated Alpaca activities for fills, deposits, withdrawals, dividends, fees,
+  and corporate actions. Aggregate fill fragments by broker order ID before attribution.
+- Map Alpaca daily portfolio marks to the correct `America/New_York` trading session and
+  calculate cash-flow-adjusted returns for fixed, preregistered start-date lenses.
+- Report full-account, strategy-owned, dashboard/manual, and active-sleeve attribution
+  separately. An unknown owner blocks promotion rather than being silently assigned.
 - Correct MONITOR held/sell/hold counters and expose mark age/source in live state.
 - Preserve live inception equity and high-water marks across restarts; reconcile them
   daily with Alpaca portfolio history and cash activities.
-- Keep the operational risk path independent from analytics-table availability.
+- Use RethinkDB as the sole application persistence database. Normal orders require a
+  successful hard-durability WAL write. During a RethinkDB outage, the operational risk
+  path remains broker-backed: increases stop, entries are canceled, and a deterministic
+  client-order ID permits a strictly quantity-capped risk reduction to be recovered from
+  broker history. Non-broker analytics generated during a simultaneous database/process
+  failure may be unrecoverable and must mark the audit interval degraded.
 
 ## 9. Security Remediation
 
@@ -400,6 +530,12 @@ Every experiment is registered before execution. Stopped, failed, and rejected r
 remain visible. Hyperparameter selection occurs inside training/validation folds, not on
 the final holdout.
 
+A non-trading research portfolio policy supplies the same cash, SPY residual, name,
+sector, horizon, turnover, cost, and conservative tax constraints before production
+allocator/execution work begins. Stage B proceeds only when fresh-direct LIVE_40 passes
+the predeclared unseen net-of-cost gate. A deterministic-only result remains research and
+requires a new reviewed strategy decision.
+
 ### 10.2 Point-in-time walk-forward protocol
 
 - Use at least 24 months of point-in-time history covering bull, bear/high-volatility,
@@ -426,26 +562,34 @@ the final holdout.
   equivalent; the single-exchange IEX feed is not sufficient for that exposure tier.
 - No persisted or API-returned secret canaries.
 - No unknown prediction, decision, order, or outcome enum values.
-- Shadow and paper behavior use the same allocator and risk code as live mode.
+- SHADOW_PORTFOLIO and PAPER use the same allocator, cost, tax, and risk code as LIVE;
+  SHADOW_PORTFOLIO has no broker-submit capability.
 
 ## 11. Rollout
 
 1. **Containment:** pause new live equity orders; rotate credentials; preserve forensic
-   records; repair the market-mark and drawdown defects.
+   records; persist `legacy_order_authority_disabled=true` for `alpaca-main`; repair the
+   market-mark and drawdown defects. No safety-task completion restores legacy authority.
 2. **Measurement foundation:** implement immutable ledgers, indexed queries, benchmark
-   accounting, and a deterministic research harness.
-3. **Research:** run the registered ablations and sealed walk-forward program.
-4. **Shadow:** at least four weeks and 100 qualified forecasts with no safety breach.
+   accounting, a flow-adjusted risk series, and a costed shadow portfolio.
+3. **Research:** test fresh direct forecasts first at 1, 3, and 5 sessions. Keep all
+   legacy queue and override lanes non-executable; run their ablations only as separately
+   registered challengers.
+   If fresh-direct LIVE_40 fails the predeclared Stage B gate, stop portfolio/execution
+   development and retain SPY/cash plus completed safety fixes.
+4. **Shadow portfolio:** at least four weeks and 100 qualified forecasts with no safety
+   breach, using a reconciled quote-driven virtual portfolio and zero broker submissions.
 5. **Paper:** at least six weeks and 50 completed positions with positive active return
    and every promotion gate satisfied.
-6. **Live 40% active:** begin at the user-approved floor only after all prior gates pass.
+6. **Live 40% active:** begin at the user-approved target only after all prior gates pass.
+   It is not a forced eligibility floor; unallocated capital remains in SPY.
 7. **Live 60% active:** require at least eight incident-free live weeks plus continuing
    positive active performance and drawdown compliance.
 8. **Live 80% active:** require at least six live months, 150 completed positions, and
    continued compliance with the full success contract.
 
 Any critical data, reconciliation, security, or risk defect returns the affected model to
-shadow mode. Exposure increases are never automatic merely because time has elapsed.
+OBSERVE mode. Exposure increases are never automatic merely because time has elapsed.
 
 ## 12. Testing Strategy
 
@@ -458,6 +602,15 @@ shadow mode. Exposure increases are never automatic merely because time has elap
   MRNA or portfolio drawdown decisions.
 - Integration tests for stream loss, REST degradation, RethinkDB outage, LLM outage,
   broker timeout, restart continuity, partial fills, manual orders, and kill-state recovery.
+- Process-death tests proving the out-of-process KILL path either reduces the
+  broker-reconciled position or emits a critical operator alert with the exact unresolved
+  quantity; it never silently reports liquidation.
+- Crash-injection tests after forecast persistence, allocation persistence, WAL intent,
+  broker acceptance, every partial-fill delta, cancel/replace, and final settlement.
+- Regression fixtures for BDC and COHR `No graph signal`, BV quality rejection, and MRNA
+  negative trend evidence, proving each fails closed.
+- Reconciliation tests for the 46-order/127-activity broker baseline, two-fragment fills,
+  the eight dashboard exits, deposits, dividends, fees, and the $0.0129 rounding residual.
 - Security tests with canary keys through strategy snapshot, backtest persistence, logs,
   and API responses.
 - Golden walk-forward fixtures whose data, model outputs, trades, and metrics are
@@ -467,7 +620,7 @@ shadow mode. Exposure increases are never automatic merely because time has elap
 
 - Guaranteeing a specific return.
 - Enabling margin, options, short selling, or leveraged ETFs.
-- Treating the current 25 entries as sufficient statistical evidence.
+- Treating the current 26 entries as sufficient statistical evidence.
 - Blindly enabling the disabled ML leg.
 - Assuming ETF substitution eliminates wash-sale risk.
 - Tuning the current 446-key configuration before measurement and safety defects are fixed.
