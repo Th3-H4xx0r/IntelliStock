@@ -426,19 +426,29 @@ def _cleanup_stale_backtest_containers():
 
 
 CONTAINER_HEALTH_CHECK_INTERVAL = 120  # seconds between health checks
+# Belt-and-braces catch-up: periodically re-scan for pending rows the
+# changefeed missed (e.g. inserted during a RethinkDB outage/restart).
+PENDING_SWEEP_INTERVAL_SEC = 300
 CONTAINER_LAUNCH_GRACE_SEC = 300      # skip health check for containers launched within this window
 # Track launch times to avoid marking freshly-started containers as dead
 _container_launch_times: dict = {}  # row_id -> time.time()
 _container_launch_times_lock = threading.Lock()
 
-def _check_dead_backtest_containers(conn):
+def _check_dead_backtest_containers():
     """Every 2 minutes: for every backtest the DB thinks is running, verify its Docker
     container is actually alive. If it's gone, mark BacktestResults.status='stopped'
-    and BacktestInstances.run=False so the AI agent and UI see the correct state."""
+    and BacktestInstances.run=False so the AI agent and UI see the correct state.
+
+    2026-07-18: opens its OWN RethinkDB connection per invocation. It previously
+    reused main()'s boot-time connection, so a RethinkDB restart left it erroring
+    "Connection is closed" every cycle FOREVER (observed after the 09:41 outage) —
+    the health check never healed. A fresh conn per 2-min cycle self-heals."""
     docker_client = _get_docker_client()
     if not docker_client:
         return
+    conn = None
     try:
+        conn = get_conn()
         # Build set of names for all currently-running containers (fast single call)
         running_names = {c.name for c in docker_client.containers.list()}
 
@@ -476,22 +486,47 @@ def _check_dead_backtest_containers(conn):
                     f"Backtest {bid}: container '{expected_name}' not found in Docker — marking stopped.",
                     "yellow", service="BACKTEST_ENGINE",
                 )
-                # Mark instance row as not running
-                try:
-                    r.db(DB_NAME).table(TABLE_NAME).get(bid).update({"run": False}).run(conn)
-                except Exception:
-                    pass
-                # Mark BacktestResults as stopped so the UI and AI agent see it
+                # Paused runs idle with their container alive; a paused row
+                # whose container crashed must survive for operator resume —
+                # keep the row (run=False) instead of deleting it.
+                is_paused = False
                 if has_results_table:
                     try:
-                        r.db(DB_NAME).table("BacktestResults").get(bid).update({"status": "stopped"}).run(conn)
+                        _res = r.db(DB_NAME).table("BacktestResults").get(bid).pluck("status").run(conn)
+                        is_paused = "paused" in str((_res or {}).get("status") or "").lower()
+                    except Exception:
+                        is_paused = False
+                if is_paused:
+                    try:
+                        r.db(DB_NAME).table(TABLE_NAME).get(bid).update({"run": False}).run(conn)
                     except Exception:
                         pass
+                else:
+                    # DELETE the queue row: the queue-row contract is
+                    # delete-on-completion; leaving dead rows as
+                    # status='running'/run=False accumulated 100+ zombies
+                    # that clutter every scan (observed 2026-07-18).
+                    try:
+                        r.db(DB_NAME).table(TABLE_NAME).get(bid).delete().run(conn)
+                    except Exception:
+                        pass
+                    if has_results_table:
+                        try:
+                            r.db(DB_NAME).table("BacktestResults").get(bid).update({"status": "stopped"}).run(conn)
+                        except Exception:
+                            pass
+                with _queued_or_active_lock:
+                    _queued_or_active_ids.discard(bid)
                 with _container_launch_times_lock:
                     _container_launch_times.pop(bid, None)
     except Exception as e:
         intellistock_logger.log(f"Container health check failed: {e}", "yellow", service="BACKTEST_ENGINE")
     finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         try:
             docker_client.close()
         except Exception:
@@ -822,12 +857,45 @@ def _changefeed_run_once(conn):
             _backtest_queue.put(new_val)
 
 
+def _sweep_pending(conn, label="sweep"):
+    """Queue every pending row not already queued/active. The changefeed only
+    delivers events it was connected for — a row inserted while RethinkDB was
+    down/restarting (or the feed reconnecting) is otherwise ORPHANED until an
+    engine restart. Called at boot, on every changefeed (re)connect, and
+    periodically from the main loop. Dedup-guarded: never double-queues."""
+    try:
+        cursor = r.db(DB_NAME).table(TABLE_NAME).filter(
+            r.row['status'].eq('pending')
+        ).order_by('id').run(conn)
+        picked = 0
+        for row in cursor:
+            row_id = row.get('id')
+            with _queued_or_active_lock:
+                if row_id in _queued_or_active_ids:
+                    continue
+                _queued_or_active_ids.add(row_id)
+            _backtest_queue.put(row)
+            picked += 1
+        if picked:
+            intellistock_logger.log(
+                f"Pending sweep ({label}): queued {picked} missed backtest(s).",
+                "green", service="BACKTEST_ENGINE",
+            )
+        return picked
+    except Exception as e:
+        intellistock_logger.log(f"Pending sweep ({label}) error: {e}", "yellow", service="BACKTEST_ENGINE")
+        return 0
+
+
 def _changefeed_worker():
     delay = 5
     while True:
         conn = None
         try:
             conn = get_conn()
+            # Catch-up BEFORE re-entering the feed: rows inserted while the
+            # feed was down never produce an event on the new feed.
+            _sweep_pending(conn, label="changefeed reconnect")
             _changefeed_run_once(conn)
         except Exception as e:
             if _is_replica_unavailable_error(e):
@@ -880,21 +948,10 @@ def _ensure_backtest_result_row(conn, row, status):
 
 
 def _load_initial_queue(conn):
-    """Load only pending rows. Running rows are already being executed by brokers; re-queuing them would cause duplicate container launches (409 Conflict)."""
-    try:
-        cursor = r.db(DB_NAME).table(TABLE_NAME).filter(
-            r.row['status'].eq('pending')
-        ).order_by('id').run(conn)
-        rows = list(cursor)
-        for row in rows:
-            row_id = row.get('id')
-            with _queued_or_active_lock:
-                _queued_or_active_ids.add(row_id)
-            _backtest_queue.put(row)
-        if rows:
-            intellistock_logger.log(f"Loaded {len(rows)} pending backtest(s) into queue.", "green", service="BACKTEST_ENGINE")
-    except Exception as e:
-        intellistock_logger.log(f"Load queue error: {e}", "red", service="BACKTEST_ENGINE")
+    """Load only pending rows. Running rows are already being executed by brokers;
+    re-queuing them would cause duplicate container launches (409 Conflict).
+    Delegates to the dedup-guarded sweep (set is empty at boot => identical)."""
+    _sweep_pending(conn, label="startup")
 
 
 def _harvest_completed(active_futures):
@@ -934,18 +991,36 @@ def main():
         changefeed_thread.start()
         active_futures = {}  # future -> (row_id, is_high) for harvest and high-difficulty count
         _last_health_check = time.time()
+        _last_pending_sweep = time.time()
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_POOL_WORKERS) as executor:
             while True:
                 _harvest_completed(active_futures)
 
-                # Periodic Docker container health check (every 2 minutes)
+                # Periodic Docker container health check (every 2 minutes).
+                # Opens its own conn per cycle — self-heals after DB restarts.
                 now = time.time()
                 if now - _last_health_check >= CONTAINER_HEALTH_CHECK_INTERVAL:
                     _last_health_check = now
                     try:
-                        _check_dead_backtest_containers(conn)
+                        _check_dead_backtest_containers()
                     except Exception as _hc_err:
                         intellistock_logger.log(f"Health check error: {_hc_err}", "yellow", service="BACKTEST_ENGINE")
+
+                # Periodic pending-row sweep (belt-and-braces vs changefeed gaps).
+                if now - _last_pending_sweep >= PENDING_SWEEP_INTERVAL_SEC:
+                    _last_pending_sweep = now
+                    _sw_conn = None
+                    try:
+                        _sw_conn = get_conn()
+                        _sweep_pending(_sw_conn, label="periodic")
+                    except Exception as _sw_err:
+                        intellistock_logger.log(f"Periodic sweep error: {_sw_err}", "yellow", service="BACKTEST_ENGINE")
+                    finally:
+                        if _sw_conn is not None:
+                            try:
+                                _sw_conn.close()
+                            except Exception:
+                                pass
                 with _high_difficulty_lock:
                     n_high = _high_difficulty_running
 
