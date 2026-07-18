@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "Adaptive", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "low", "switch_ma": 4800, "confirm_ma": 1200, "rebalance_drift": 0.5, "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14}}
+# INTELLISTOCK_SCHEMA: {"strategy": "Adaptive", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "low", "switch_ma": 4800, "confirm_ma": 1200, "rebalance_drift": 0, "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14}}
 # INTELLISTOCK_DESCRIPTION: Regime-adaptive crypto strategy: holds the equal-weight basket (buy & hold) while the universe basket trades above BOTH its slow switch MA (switch_ma, default 4800 hourly bars = 200 days) and its fast confirm MA (confirm_ma, default 1200 = 50 days); the moment the regime breaks it liquidates the basket and hands control to the MeanRev dip-buyer running with the crash-bear entry gate. Bulls get real market exposure: prod backtest Oct-2023..Mar-2024 at Binance.US fees = +132% vs MeanRev's +56% (EW buy&hold +181%). Crash protection is strong but UNIVERSE-DEPENDENT: 2022 on the 5 old majors was positive (+8.6% faithful) but the prod 7-coin 2022 incl. SOL(-94%)/AVAX(-90%) lost -19% — still ~55 pts better than buy&hold's -74.5%. Chop is its weak regime (~-21% vs B&H -35%). Pick MeanRev for max bear safety, Adaptive for bull participation.
 # DIFFICULTY: 3
 """
@@ -116,11 +116,12 @@ class Adaptive:
         self.confirm_ma = 1200  # 50d fast confirm; doubles as bear-mode entry gate
         self.top_k = 2
         # Bull-mode drift rebalancing: act when a coin's weight leaves
-        # [tgt*(1-band), tgt*(1+band)] (relative band; 0 disables). Faithful
-        # sweep 2021-2026: band 0.5 adds ~+1 pt/interval (the crypto
-        # rebalancing premium), improving 7 of 9 regime windows; 0.25/0.10
-        # also positive — robust sign, 0.5 best (fewest trades).
-        self.rebalance_drift = 0.5
+        # [tgt*(1-band), tgt*(1+band)] (relative band). DEFAULT 0 = OFF:
+        # the faithful sim said +1 pt/interval, but the controlled PROD A/B
+        # (2026-07-18, bt 355497 drift=0 +132.06 byte-identical to baseline
+        # vs bt 153661 drift=0.5 +125.43) showed it COSTS ~6.6 pts through
+        # the real decision pipeline — prod evidence wins. Opt-in only.
+        self.rebalance_drift = 0.0
         self._meanrev = Meanrev()
 
     def run_once(

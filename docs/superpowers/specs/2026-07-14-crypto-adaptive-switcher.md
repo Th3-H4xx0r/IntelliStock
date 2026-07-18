@@ -97,3 +97,21 @@ to the validated majors LOSES on every recent bear (OOS −4.9, tgt −1.0,
 fullrec −6.1). The 2022 lesson does not generalize: alt dips hurt in
 crash-bears but are PROFITABLE in mild bears. Universe filtering by "safety"
 is a net cost — do not re-attempt without new evidence.
+
+## ADDENDUM 2026-07-18 (later) — rebalance_drift default flipped to 0 (OFF)
+
+Controlled prod A/B on the 2324 bull window (same 7 coins, deterministic data
+verified — the drift=0 run bt 355497 reproduced the pre-rebalancer baseline
+bt 792625 BYTE-IDENTICALLY at +132.0628 / 357 trades):
+
+| config | pnl | trades |
+|---|---|---|
+| rebalance_drift=0 | +132.06% | 357 |
+| rebalance_drift=0.5 | +125.43% | 360 |
+
+The rebalancer COSTS ~6.6 pts through the real decision pipeline, despite the
+faithful sim predicting +1.5 on this window (+1.0 mean across 9). Same lesson
+class as the exit=50 mirage: local sims of execution mechanics OVER-state —
+prod evidence wins. Default flipped to 0; the feature stays as opt-in config.
+Instance `test` explicitly set to rebalance_drift: 0 (deep-merge would have
+kept 0.5 overriding the new default).

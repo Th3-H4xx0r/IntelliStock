@@ -163,7 +163,7 @@ def test_bull_rebalance_trims_overweight_and_tops_up_underweight():
         "LTC/USD": 2500.0 / prices["LTC/USD"],
         "BCH/USD": 2000.0 / prices["BCH/USD"],
     }
-    out = _run(data, positions=pos)
+    out = _run(data, positions=pos, config={"rebalance_drift": 0.5})  # opt-in
     sizes = out["_nexus_position_sizes"]
     assert out["BTC/USD"] == -1                              # trim the 50%er
     assert 0.0 < sizes["BTC/USD"]["sell_fraction"] < 1.0     # fractional, not exit
@@ -173,12 +173,14 @@ def test_bull_rebalance_trims_overweight_and_tops_up_underweight():
     assert out["LTC/USD"] == 0 and out["BCH/USD"] == 0       # in band: hold
 
 
-def test_bull_rebalance_disabled_with_zero_drift():
+def test_bull_rebalance_off_by_default():
     data = _bull_universe()
     prices = {s: data[s][-1]["c"] for s in data}
     pos = {"BTC/USD": 5000.0 / prices["BTC/USD"],
            "ETH/USD": 500.0 / prices["ETH/USD"],
            "LTC/USD": 2500.0 / prices["LTC/USD"],
            "BCH/USD": 2000.0 / prices["BCH/USD"]}
-    out = _run(data, positions=pos, config={"rebalance_drift": 0})
+    # DEFAULT is off (prod A/B 2026-07-18: rebalancing cost ~6.6 pts through
+    # the real decision pipeline despite the faithful sim predicting a gain).
+    out = _run(data, positions=pos)
     assert all(out.get(s) == 0 for s in data)                # pure hold
