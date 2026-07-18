@@ -291,9 +291,18 @@ async function submit() {
     const stocks = buildStocks()
 
     if (isEdit.value) {
+      // Send EVERY editable field of this modal — the PATCH previously carried
+      // only {crypto_config, stocks}, so Name and Brokerage changes silently
+      // reverted on save (the backend supports both; brokerage_id is validated
+      // server-side against BrokerageAccounts).
       const res = await fetch(`${API_BASE}/instances/${encodeURIComponent(props.editInstance.id)}`, {
         method: 'PATCH', headers: authHeaders(),
-        body: JSON.stringify({ crypto_config: cryptoConfig, stocks }),
+        body: JSON.stringify({
+          name: name.value.trim(),
+          brokerage_id: brokerageId.value,
+          crypto_config: cryptoConfig,
+          stocks,
+        }),
       })
       if (!res.ok) { const d = await res.json().catch(() => ({})); err.value = d.detail || `Save failed (HTTP ${res.status})`; return }
       emit('saved')
@@ -373,6 +382,9 @@ async function submit() {
               </select>
               <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
             </div>
+            <p v-if="isEdit" class="text-[11px] text-slate-500 mt-1">
+              A brokerage change applies on the next instance (re)start — a running broker keeps its boot-time credentials.
+            </p>
           </div>
           <div>
             <label class="block text-xs font-medium text-slate-400 mb-1.5">Band <span class="text-slate-600 font-normal">· monitor cadence</span></label>

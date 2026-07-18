@@ -403,7 +403,12 @@ class _CryptoInstanceSheetState extends ConsumerState<CryptoInstanceSheet> {
     try {
       final repo = ref.read(cryptoRepositoryProvider);
       if (_isEdit) {
+        // Send EVERY editable field — the PATCH previously carried only
+        // {crypto_config, stocks}, so Name and Brokerage edits silently
+        // reverted on save (same bug as the web modal, fixed together).
         await repo.updateInstance(widget.editInstanceId!, {
+          'name': _name.text.trim(),
+          if (_brokerageId.isNotEmpty) 'brokerage_id': _brokerageId,
           'crypto_config': cryptoConfig,
           'stocks': fixedStocks,
         });
