@@ -81,3 +81,19 @@ Also found during the A/B: prod serves a FROZEN SOL price ($20.1715) for
 adaptive bull run (bt 316587, +114.4%) carried SOL as dead 1/8 weight; the
 792625 rerun pins `stocks` to real-data coins. And `POST /backtests` granularity
 is SECONDS (default "60" = 1-minute stepping) — always pass "3600" for band=low.
+
+## ADDENDUM 2026-07-18 — P&L boost evaluation (faithful, PortfolioEmulator, 0.02%)
+
+**SHIPPED — bull-mode drift rebalancing** (`rebalance_drift`, default 0.5 =
+act when a coin's weight leaves [0.5x, 1.5x] of equal-weight target; 0
+disables): trim overweight via fractional `sell_fraction`, top up underweight
+via `buy_cash` (overlay_allocations semantics; broker honors fractional sells
+at ~line 9431). Faithful sweep: mean +25.57 vs +24.56 buy-and-drift
+(+1.0 pt/interval), improves 7 of 9 windows (late24 +4.0, chop +2.3, tgt +1.4,
+OOS +1.2, fullrec +1.2); bands 0.25/0.10 also positive — robust sign, 0.5 best.
+
+**REJECTED — bear-mode majors-only universe**: restricting gated-MR dip-buys
+to the validated majors LOSES on every recent bear (OOS −4.9, tgt −1.0,
+fullrec −6.1). The 2022 lesson does not generalize: alt dips hurt in
+crash-bears but are PROFITABLE in mild bears. Universe filtering by "safety"
+is a net cost — do not re-attempt without new evidence.

@@ -84,8 +84,14 @@ def test_bull_holds_the_basket():
 
 
 def test_bull_does_not_churn_held_coins():
+    # Held coins AT target weight (~25% of the 10k stub pv) must hold (0) —
+    # only non-held coins get bought. (Out-of-band held coins are covered by
+    # the drift-rebalancing test below.)
     data = _bull_universe()
-    out = _run(data, positions={"BTC/USD": 1.0, "ETH/USD": 2.0})
+    prices = {s: data[s][-1]["c"] for s in data}
+    pos = {"BTC/USD": 2500.0 / prices["BTC/USD"],
+           "ETH/USD": 2500.0 / prices["ETH/USD"]}
+    out = _run(data, positions=pos)
     assert out.get("BTC/USD") == 0 and out.get("ETH/USD") == 0   # hold, no rebuy
     assert out.get("LTC/USD") == 1 and out.get("BCH/USD") == 1   # top up the rest
 
@@ -143,3 +149,36 @@ def test_fail_open_to_bull_on_short_history():
 
 def test_idle_mode_noop():
     assert Adaptive().run_once([], {}, None, {}, {}, data={}, mode="IDLE") == {}
+
+
+def test_bull_rebalance_trims_overweight_and_tops_up_underweight():
+    # BTC massively overweight, ETH underweight, LTC/BCH in band. pv=10k,
+    # 4 coins -> target 25% each; band 0.5 -> act outside [12.5%, 37.5%].
+    data = _bull_universe()
+    prices = {s: data[s][-1]["c"] for s in data}
+    # qty chosen so BTC ~50% of pv, ETH ~5%, LTC ~25%, BCH ~20%
+    pos = {
+        "BTC/USD": 5000.0 / prices["BTC/USD"],
+        "ETH/USD": 500.0 / prices["ETH/USD"],
+        "LTC/USD": 2500.0 / prices["LTC/USD"],
+        "BCH/USD": 2000.0 / prices["BCH/USD"],
+    }
+    out = _run(data, positions=pos)
+    sizes = out["_nexus_position_sizes"]
+    assert out["BTC/USD"] == -1                              # trim the 50%er
+    assert 0.0 < sizes["BTC/USD"]["sell_fraction"] < 1.0     # fractional, not exit
+    assert abs(sizes["BTC/USD"]["sell_fraction"] - 0.5) < 0.05   # (50-25)/50
+    assert out["ETH/USD"] == 1                               # top up the 5%er
+    assert abs(sizes["ETH/USD"]["buy_cash"] - 2000.0) < 60.0     # (25-5)% of 10k
+    assert out["LTC/USD"] == 0 and out["BCH/USD"] == 0       # in band: hold
+
+
+def test_bull_rebalance_disabled_with_zero_drift():
+    data = _bull_universe()
+    prices = {s: data[s][-1]["c"] for s in data}
+    pos = {"BTC/USD": 5000.0 / prices["BTC/USD"],
+           "ETH/USD": 500.0 / prices["ETH/USD"],
+           "LTC/USD": 2500.0 / prices["LTC/USD"],
+           "BCH/USD": 2000.0 / prices["BCH/USD"]}
+    out = _run(data, positions=pos, config={"rebalance_drift": 0})
+    assert all(out.get(s) == 0 for s in data)                # pure hold

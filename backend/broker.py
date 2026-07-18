@@ -2771,7 +2771,7 @@ _CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference", "meanrev
 _CRYPTO_STRATEGY_TUNABLES = (
     "rsi_period", "rsi_buy", "rsi_exit", "regime_ma", "top_k", "exit_ma",  # meanrev/connors
     "sizing", "atr_period", "bear_gate_ma",                            # meanrev sizing + crash-bear gate
-    "switch_ma", "confirm_ma",                                         # adaptive regime switcher
+    "switch_ma", "confirm_ma", "rebalance_drift",                      # adaptive regime switcher
     "fast_ema", "slow_ema", "momentum_lookback", "adx_period", "adx_min",  # momentum
     "entry_window", "exit_window", "trend_ma",                        # fast
 )

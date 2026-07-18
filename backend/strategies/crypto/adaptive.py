@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "Adaptive", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "low", "switch_ma": 4800, "confirm_ma": 1200, "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14}}
+# INTELLISTOCK_SCHEMA: {"strategy": "Adaptive", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"band": "low", "switch_ma": 4800, "confirm_ma": 1200, "rebalance_drift": 0.5, "rsi_period": 14, "rsi_buy": 35, "rsi_exit": 55, "regime_ma": 200, "top_k": 2, "sizing": "vol", "atr_period": 14}}
 # INTELLISTOCK_DESCRIPTION: Regime-adaptive crypto strategy: holds the equal-weight basket (buy & hold) while the universe basket trades above BOTH its slow switch MA (switch_ma, default 4800 hourly bars = 200 days) and its fast confirm MA (confirm_ma, default 1200 = 50 days); the moment the regime breaks it liquidates the basket and hands control to the MeanRev dip-buyer running with the crash-bear entry gate. Bulls get real market exposure: prod backtest Oct-2023..Mar-2024 at Binance.US fees = +132% vs MeanRev's +56% (EW buy&hold +181%). Crash protection is strong but UNIVERSE-DEPENDENT: 2022 on the 5 old majors was positive (+8.6% faithful) but the prod 7-coin 2022 incl. SOL(-94%)/AVAX(-90%) lost -19% — still ~55 pts better than buy&hold's -74.5%. Chop is its weak regime (~-21% vs B&H -35%). Pick MeanRev for max bear safety, Adaptive for bull participation.
 # DIFFICULTY: 3
 """
@@ -115,6 +115,12 @@ class Adaptive:
         self.switch_ma = 4800   # 200d of hourly bars
         self.confirm_ma = 1200  # 50d fast confirm; doubles as bear-mode entry gate
         self.top_k = 2
+        # Bull-mode drift rebalancing: act when a coin's weight leaves
+        # [tgt*(1-band), tgt*(1+band)] (relative band; 0 disables). Faithful
+        # sweep 2021-2026: band 0.5 adds ~+1 pt/interval (the crypto
+        # rebalancing premium), improving 7 of 9 regime windows; 0.25/0.10
+        # also positive — robust sign, 0.5 best (fewest trades).
+        self.rebalance_drift = 0.5
         self._meanrev = Meanrev()
 
     def run_once(
@@ -148,6 +154,10 @@ class Adaptive:
         except (TypeError, ValueError):
             confirm_ma = self.confirm_ma
         top_k = max(1, int(settings.get("top_k", self.top_k)))
+        try:
+            rebalance_drift = max(0.0, float(settings.get("rebalance_drift", self.rebalance_drift)))
+        except (TypeError, ValueError):
+            rebalance_drift = self.rebalance_drift
 
         data = data or {}
         seed = [str(s).strip().upper() for s in (symbols or []) if str(s).strip()]
@@ -177,24 +187,48 @@ class Adaptive:
         prev_mode = cache.get(_MODE_KEY) if cache else None
 
         if _is_bull(data, universe, switch_ma, confirm_ma):
-            # BULL: buy every non-held coin at pv/N, hold the rest. No churn.
+            # BULL: buy every non-held coin at pv/N; held coins hold, EXCEPT
+            # when drift rebalancing is on and a coin's weight left the band —
+            # then trim the overweight (fractional sell) / top up the
+            # underweight (buy_cash), mirroring overlay_allocations semantics.
             pv = 0.0
+            positions = {}
             if portfolio_emulator is not None:
                 try:
                     pv = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
                 except Exception:
                     pv = 0.0
+                try:
+                    positions = portfolio_emulator.get_positions() or {}
+                except Exception:
+                    positions = {}
             per = round(pv / len(universe), 2) if pv > 0 else 0.0
+            tgt_w = 1.0 / len(universe)
             sizes = result.get("_nexus_position_sizes")
             if not isinstance(sizes, dict):
                 sizes = {}
             for sym in universe:
-                if sym in held:
-                    result[sym] = 0
-                else:
+                if sym not in held:
                     result[sym] = 1
                     if per > 0:
                         sizes[sym] = {"buy_cash": per, "asset_class": "crypto"}
+                    continue
+                result[sym] = 0
+                if rebalance_drift <= 0 or pv <= 0:
+                    continue
+                px = prices.get(sym)
+                qty = core.position_qty(positions, sym)
+                if not px or px <= 0 or qty <= 0:
+                    continue
+                w = (qty * float(px)) / pv
+                if w > tgt_w * (1 + rebalance_drift):
+                    result[sym] = -1
+                    sizes[sym] = {"sell_fraction": round((w - tgt_w) / w, 6),
+                                  "asset_class": "crypto"}
+                elif w < tgt_w * (1 - rebalance_drift):
+                    result[sym] = 1
+                    sizes[sym] = {"buy_cash": round((tgt_w - w) * pv, 2),
+                                  "asset_class": "crypto"}
             sizes["_cash_reserve_floor_pct"] = 0.0
             sizes["_buy_price_floor"] = 0.0
             result["_nexus_position_sizes"] = sizes
