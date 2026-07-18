@@ -179,6 +179,13 @@ class BacktestDetailController
         );
       } else if (st == 'paused') {
         _stopPoll();
+      } else {
+        // Still running — refresh the summary so the stat tiles and the crypto
+        // Fees card update live (the broker rewrites pnl/trades/fees each loop).
+        try {
+          final sum = await _repo.summary(id);
+          state = state.copyWith(summary: sum);
+        } catch (_) {}
       }
     } catch (_) {}
   }
@@ -250,6 +257,7 @@ class BacktestDetailController
       'end_date': s.endDate,
       'granularity': s.granularity ?? '60',
       'initial_cash': s.initialCash ?? 100000,
+      'emulate_fee_venue': s.emulateFeeVenue ?? 'default',
     };
     return _repo.create(body);
   }

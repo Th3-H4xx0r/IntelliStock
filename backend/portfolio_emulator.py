@@ -5,6 +5,17 @@ and portfolio value snapshots over time.
 
 import copy
 
+# Crypto is NEVER commission-free: backtest fills must model the taker fee.
+# Source the fee from the crypto core so sizing and fills stay in lock-step;
+# guard the import so any failure falls back to the known taker fee and never
+# breaks the (commission-free) equity paths. Only ever applied to crypto
+# symbols (detected via "/" in the ticker — equities never contain a slash).
+try:  # pragma: no cover - trivial import guard
+    from strategies.crypto.core import CRYPTO_FEES as _CRYPTO_FEES
+    _CRYPTO_TAKER_FEE = float(_CRYPTO_FEES["taker"])
+except Exception:  # pragma: no cover - fall back so equity paths never break
+    _CRYPTO_TAKER_FEE = 0.0025
+
 
 class PortfolioEmulator:
     """
@@ -13,13 +24,22 @@ class PortfolioEmulator:
     value history at the end of a backtest.
     """
 
-    def __init__(self, initial_cash=100000.0):
+    def __init__(self, initial_cash=100000.0, taker_fee=None):
         self._cash = float(initial_cash)
         self._initial_value = float(initial_cash)  # Track original portfolio value
+        # Crypto taker fee applied to fills (equities are commission-free). Defaults
+        # to the module constant (Alpaca 0.25%); a Binance.US backtest passes
+        # 0.0002 (0.02%) so low-fee/high-frequency strategies value correctly.
+        self._taker_fee = float(taker_fee) if taker_fee is not None else _CRYPTO_TAKER_FEE
         self._positions = {}  # ticker -> shares (float)
         self._trades = []    # list of { timestamp, action, ticker, shares, price, total, cash_after }
         self._portfolio_snapshots = []  # list of { timestamp, value, cash, positions_snapshot, prices }
         self._last_prices = {}  # V7.3: track last known prices for portfolio valuation fallback
+        # Crypto fee accounting (equities are commission-free, so these stay 0):
+        # total taker fees actually charged, and total crypto notional traded
+        # (gross, both legs) — the base for per-platform fee estimates.
+        self._crypto_fees_paid = 0.0
+        self._crypto_volume = 0.0
 
     def buy(self, ticker, shares, price, timestamp=None):
         """
@@ -36,17 +56,27 @@ class PortfolioEmulator:
         if total > self._cash:
             return False
         self._cash -= total
-        self._positions[ticker] = self._positions.get(ticker, 0.0) + shares
+        # Crypto is NOT commission-free: the taker fee is charged on notional, so
+        # the same cash (the full `total`, still decremented above) buys fewer
+        # coins. Equity symbols (no "/") keep the EXACT commission-free math.
+        filled_shares = shares
+        if "/" in ticker:
+            filled_shares = shares * (1.0 - self._taker_fee)
+            # The taker fee is embedded as fewer coins; record it (and the gross
+            # notional) for the backtest fee summary.
+            self._crypto_fees_paid += total * self._taker_fee
+            self._crypto_volume += total
+        self._positions[ticker] = self._positions.get(ticker, 0.0) + filled_shares
         self._trades.append({
             "timestamp": timestamp,
             "action": "buy",
             "ticker": ticker,
-            "shares": shares,
+            "shares": filled_shares,
             "price": price,
             "total": total,
             "cash_after": self._cash,
         })
-        print(f"TRADE: Buy {shares} shares of {ticker} at {price} for a total of {total} cash_after: {self._cash}")
+        print(f"TRADE: Buy {filled_shares} shares of {ticker} at {price} for a total of {total} cash_after: {self._cash}")
         return True
 
     def sell(self, ticker, shares, price, timestamp=None):
@@ -62,6 +92,13 @@ class PortfolioEmulator:
         if shares <= 0:
             return False
         total = shares * price
+        # Crypto is NOT commission-free: the taker fee is charged on notional, so
+        # proceeds credited to cash are net of the fee. Equity symbols (no "/")
+        # keep the EXACT commission-free math.
+        if "/" in ticker:
+            self._crypto_fees_paid += total * self._taker_fee
+            self._crypto_volume += total
+            total = total * (1.0 - self._taker_fee)
         self._cash += total
         self._positions[ticker] = current - shares
         if self._positions[ticker] <= 0:
@@ -114,6 +151,18 @@ class PortfolioEmulator:
     def get_trade_history(self):
         """Return list of all trades, each with timestamp, action, ticker, shares, price, total, cash_after."""
         return list(self._trades)
+
+    def get_fee_summary(self):
+        """Crypto fee accounting for the backtest. Equities are commission-free so
+        these are 0 for pure-equity runs. ``total_fees`` is the taker fee actually
+        charged; ``total_volume`` is gross crypto notional traded across both legs
+        (the base for per-platform fee estimates); ``taker_rate`` is the applied
+        rate."""
+        return {
+            "total_fees": round(self._crypto_fees_paid, 6),
+            "total_volume": round(self._crypto_volume, 2),
+            "taker_rate": self._taker_fee,
+        }
 
     def get_portfolio_history(self):
         """Return list of all snapshots: timestamp and value (and optionally cash/positions)."""

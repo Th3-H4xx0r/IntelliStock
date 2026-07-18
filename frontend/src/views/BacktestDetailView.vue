@@ -22,8 +22,46 @@ function authHeaders() {
     : { 'Content-Type': 'application/json' }
 }
 
+// ── Crypto fees (per-platform estimate; only for crypto backtests) ──────────────
+// `summary.fees` = { total_fees, total_volume, taker_rate } from the backend
+// (None for equity runs). Alpaca is the fee actually charged; other venues are
+// estimated at their listed taker rate (volume × rate).
+const CRYPTO_FEE_PLATFORMS = [
+  { id: 'binanceus', name: 'Binance.US', rate: 0.0002 },
+  { id: 'alpaca', name: 'Alpaca', rate: 0.0025 },
+  { id: 'kraken', name: 'Kraken', rate: 0.0026 },
+  { id: 'coinbase', name: 'Coinbase Advanced', rate: 0.006 },
+]
+
 // ── State ─────────────────────────────────────────────────────────────────────
 const summary   = ref(null)
+const feeSummary = computed(() => summary.value?.fees || null)
+const feeVolume  = computed(() => Number(feeSummary.value?.total_volume) || 0)
+// Rate actually applied to fills (may be an emulated venue's fee).
+const appliedRate = computed(() => Number(feeSummary.value?.taker_rate) || 0)
+const feeEmulated = computed(() => !!feeSummary.value?.emulated)
+const appliedVenueLabel = computed(() => {
+  const v = String(feeSummary.value?.venue || '').toLowerCase()
+  const byId = CRYPTO_FEE_PLATFORMS.find((p) => p.id === v)
+  if (byId) return byId.name
+  const byRate = CRYPTO_FEE_PLATFORMS.find((p) => Math.abs(p.rate - appliedRate.value) < 1e-9)
+  return byRate ? byRate.name : (feeSummary.value?.venue || '—')
+})
+const feeRows = computed(() => {
+  const fs = feeSummary.value
+  if (!fs || feeVolume.value <= 0) return []
+  const actual = Number(fs.total_fees) || 0
+  const rate = appliedRate.value
+  return CRYPTO_FEE_PLATFORMS.map((p) => {
+    const applied = Math.abs(p.rate - rate) < 1e-9
+    return {
+      name: p.name,
+      rate: p.rate,
+      applied,
+      fee: applied ? (actual || feeVolume.value * p.rate) : feeVolume.value * p.rate,
+    }
+  })
+})
 const graphData = shallowRef(null)
 const loading   = ref(true)
 const error     = ref('')
@@ -93,6 +131,11 @@ async function fetchStatus() {
       await Promise.all([fetchSummary(), fetchGraphData(), fetchLlmCost()])
     } else if (st === 'paused') {
       stopPolling()
+    } else {
+      // Still running/queued — refresh the summary so the stat tiles and the
+      // crypto Fees card update live (the broker rewrites pnl / trades / fees
+      // into the result doc each loop iteration).
+      void fetchSummary()
     }
   } catch { /* non-critical */ }
 }
@@ -169,9 +212,14 @@ function fmtPnl(v) {
   return (n >= 0 ? '+' : '') + fmtMoney(n)
 }
 function fmtPct(v) {
-  if (v == null) return '—'
   const n = Number(v)
+  if (v == null || Number.isNaN(n)) return '—'
   return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
+}
+// stock_price_change[sym] is a dict {start_price,end_price,change_percent};
+// tolerate the legacy flat-number shape too.
+function priceChangePct(v) {
+  return (v && typeof v === 'object') ? v.change_percent : v
 }
 function fmtElapsed(seconds) {
   const n = Number(seconds)
@@ -258,6 +306,7 @@ async function executeAction() {
           end_date:     s.end_date,
           granularity:  String(s.granularity ?? '60'),
           initial_cash: s.initial_cash ?? 100000,
+          emulate_fee_venue: s.emulate_fee_venue || 'default',
         }),
       })
       const data = await res.json().catch(() => ({}))
@@ -408,6 +457,12 @@ const portfolioOpts = computed(() => ({
     crosshairs: { show: true, stroke: { color: '#38bdf8', width: 1, dashArray: 3 } },
   },
   yaxis:   {
+    // forceNiceScale + decimalsInFloat are CORE options applied on every
+    // (re)render, so even when ApexCharts drops the custom formatter on a
+    // running-backtest data update the labels stay clean ("$10,500") instead
+    // of raw float precision ("10500.000000000000").
+    forceNiceScale: true,
+    decimalsInFloat: 0,
     labels: {
       formatter: v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }),
       style: { colors: AXIS_COLOR },
@@ -482,7 +537,7 @@ function stockOpts(sym) {
     colors:  ['#0ea5e9', '#34d399', '#f87171'],
     xaxis:   { type: 'datetime', labels: { style: { colors: AXIS_COLOR } },
                crosshairs: { show: true, stroke: { color: '#475569', width: 1, dashArray: 3 } } },
-    yaxis:   { labels: { formatter: v => '$' + Number(v).toFixed(2), style: { colors: AXIS_COLOR } } },
+    yaxis:   { forceNiceScale: true, decimalsInFloat: 2, labels: { formatter: v => '$' + Number(v).toFixed(2), style: { colors: AXIS_COLOR } } },
     tooltip: {
       shared: true,
       intersect: false,
@@ -904,6 +959,45 @@ function onLogScroll(e) {
           </div>
         </div>
 
+        <!-- ── Fees (crypto backtests only) ──────────────────────────────────── -->
+        <section v-if="feeRows.length" class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
+          <div class="px-5 py-4 border-b border-border-subtle flex items-center gap-3">
+            <div class="size-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-primary text-lg">receipt_long</span>
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500">Fees · crypto</p>
+              <p class="text-sm font-semibold text-slate-200">Estimated fees per platform</p>
+            </div>
+            <span v-if="feeEmulated"
+                  class="shrink-0 text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 bg-amber-500/10 rounded-full px-2 py-0.5"
+                  :title="`Fills were charged ${appliedVenueLabel} fees, not this instance's brokerage.`">
+              Emulated · {{ appliedVenueLabel }}
+            </span>
+          </div>
+          <div class="px-5 py-4">
+            <div class="flex items-center justify-between text-sm mb-3 pb-3 border-b border-border-subtle">
+              <span class="text-slate-400">Crypto volume traded</span>
+              <span class="text-slate-100 font-semibold tabular-nums">{{ fmtMoney(feeVolume) }}</span>
+            </div>
+            <div class="space-y-2">
+              <div v-for="row in feeRows" :key="row.name" class="flex items-center gap-3 text-sm">
+                <span class="text-slate-200 flex-1 flex items-center gap-2 min-w-0">
+                  <span class="truncate">{{ row.name }}</span>
+                  <span v-if="row.applied" class="shrink-0 text-[10px] uppercase tracking-wide text-primary border border-primary/40 bg-primary/10 rounded-full px-1.5 py-0.5">applied</span>
+                </span>
+                <span class="text-slate-500 tabular-nums w-16 text-right">{{ (row.rate * 100).toFixed(2) }}%</span>
+                <span class="tabular-nums w-24 text-right font-semibold" :class="row.applied ? 'text-slate-100' : 'text-slate-400'">{{ fmtMoney(row.fee) }}</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-600 mt-3 leading-snug">
+              <template v-if="feeEmulated"><span class="text-amber-400">{{ appliedVenueLabel }}</span> fees were <b>emulated</b> here (not your instance's brokerage) — it's the “applied” row.</template>
+              <template v-else><span class="text-slate-400">{{ appliedVenueLabel }}</span> is the fee actually charged in this backtest.</template>
+              Other venues are estimates at their listed taker rate (volume × rate) — actual tiers vary.
+            </p>
+          </div>
+        </section>
+
         <!-- ── AI credits / LLM cost card ────────────────────────────────────── -->
         <section class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
           <div class="flex items-center justify-between gap-3 px-5 py-4 border-b border-border-subtle">
@@ -1266,8 +1360,8 @@ function onLogScroll(e) {
                   <td class="px-4 py-3 text-right font-mono" :class="pnlClass(summary.pnl_percent_per_stock?.[sym])">
                     {{ fmtPct(summary.pnl_percent_per_stock?.[sym]) }}
                   </td>
-                  <td class="px-4 py-3 text-right font-mono" :class="pnlClass(summary.stock_price_change?.[sym])">
-                    {{ fmtPct(summary.stock_price_change?.[sym]) }}
+                  <td class="px-4 py-3 text-right font-mono" :class="pnlClass(priceChangePct(summary.stock_price_change?.[sym]))">
+                    {{ fmtPct(priceChangePct(summary.stock_price_change?.[sym])) }}
                   </td>
                 </tr>
               </tbody>

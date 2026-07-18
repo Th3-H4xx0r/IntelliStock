@@ -28,6 +28,24 @@ import os as _os
 from typing import Any
 
 
+def downsample_history(hist, cap: int = 3000):
+    """Evenly downsample a portfolio-value-history list to at most ``cap`` points,
+    ALWAYS keeping the first and last, order preserved.
+
+    Used for the RUNNING BacktestResults write: a long or high-cadence backtest
+    accumulates far more than ``cap`` snapshots, and tail-slicing (``[-cap:]``)
+    dropped the early history so the live chart started mid-run with a bogus
+    ``portfolio_start_value``. Downsampling keeps the true start + shape.
+    """
+    hist = list(hist or [])
+    n = len(hist)
+    if cap is None or cap < 2 or n <= cap:
+        return hist
+    step = (n - 1) / float(cap - 1)
+    idxs = sorted({int(round(i * step)) for i in range(cap)})
+    return [hist[i] for i in idxs]
+
+
 def _collect_prompt_versions(cfg: dict) -> dict:
     """Pluck prompt version constants from a strategy config dict."""
     cfg = cfg or {}

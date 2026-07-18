@@ -476,6 +476,11 @@ class CreateInstanceBody(BaseModel):
     created_by: Optional[str] = "user"
     brokerage_id: Optional[str] = None
     max_usage: Optional[float] = None
+    # Crypto instances: kind="crypto" + a crypto_config blob (band + allocations)
+    # + an optional fixed symbol universe. Ignored for equity instances.
+    kind: Optional[str] = None
+    crypto_config: Optional[dict] = None
+    stocks: Optional[List[str]] = None
 
 
 class EditInstanceBody(BaseModel):
@@ -483,6 +488,8 @@ class EditInstanceBody(BaseModel):
     granularity: Optional[str] = None
     max_usage: Optional[float] = None
     brokerage_id: Optional[str] = None
+    crypto_config: Optional[dict] = None
+    stocks: Optional[List[str]] = None
 
 
 class DeleteInstanceBody(BaseModel):
@@ -654,6 +661,10 @@ class CreateBacktestBody(BaseModel):
     key: Optional[str] = None
     secret: Optional[str] = None
     initial_cash: Optional[float] = 100000.0
+    # Crypto only: emulate a specific venue's taker fee instead of the instance's
+    # own brokerage. None / "default" = use the instance's linked brokerage.
+    # Recognized: binanceus | alpaca | kraken | coinbase (see broker_adapters.fees).
+    emulate_fee_venue: Optional[str] = None
 
 
 class KalshiBacktestBody(BaseModel):
@@ -818,7 +829,7 @@ class FetchRobinhoodAccountsBody(BaseModel):
 
 
 class LinkBrokerageBody(BaseModel):
-    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood|kalshi)$")
+    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood|kalshi|binanceus)$")
     account_name: str = Field(..., min_length=1)
     # Kalshi (RSA-PSS v2): API key id + PEM private key + demo/live environment.
     kalshi_key_id: Optional[str] = None
@@ -1935,6 +1946,9 @@ def api_create_instance(body: CreateInstanceBody, conn=Depends(conn_dependency),
         created_by=body.created_by or "user",
         brokerage_id=body.brokerage_id,
         max_usage=body.max_usage,
+        kind=body.kind,
+        crypto_config=body.crypto_config,
+        stocks=body.stocks,
     )
 
 
@@ -1953,6 +1967,8 @@ def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(con
         granularity_time_increment=body.granularity,
         max_usage=body.max_usage,
         brokerage_id=body.brokerage_id,
+        crypto_config=body.crypto_config,
+        stocks=body.stocks,
     )
 
 
@@ -2887,6 +2903,7 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
         key=body.key,
         secret=body.secret,
         initial_cash=body.initial_cash,
+        emulate_fee_venue=body.emulate_fee_venue,
     )
 
 
@@ -3496,6 +3513,25 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
         except Exception:
             pass
         return {"ok": True, "id": bid, "brokerage_type": "kalshi", "environment": row["kalshi_environment"]}
+    elif body.brokerage_type == "binanceus":
+        if not body.key or not body.secret:
+            raise HTTPException(status_code=400, detail="key and secret are required for Binance.US")
+        import uuid as _uuid
+        from secret_store import encrypt as _encrypt
+        bid = str(_uuid.uuid4())
+        row = {
+            "id": bid,
+            "brokerage_type": "binanceus",
+            "account_name": body.account_name,
+            "binanceus_key": _encrypt(body.key.strip()),      # Fernet at rest
+            "binanceus_secret": _encrypt(body.secret.strip()),
+            # Reuse the row-level paper flag broker.py reads (alpaca_paper);
+            # Binance.US has no native sandbox so paper == platform-simulated.
+            "alpaca_paper": (body.paper if body.paper is not None else True),
+            "created_at": _r_auth.now(),
+        }
+        _r_auth.db("IntelliStock").table("BrokerageAccounts").insert(row).run(conn)
+        return {"ok": True, "id": bid, "brokerage_type": "binanceus", "paper": row["alpaca_paper"]}
     else:
         if not body.access_token or not body.refresh_token:
             raise HTTPException(status_code=400, detail="access_token and refresh_token are required for Robinhood")

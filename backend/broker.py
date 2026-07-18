@@ -462,6 +462,14 @@ Examples:
         metavar="ID",
         help="Backtest row ID (backtest mode only; supplied by backtest engine).",
     )
+    parser.add_argument(
+        "--taker-fee",
+        type=float,
+        default=None,
+        metavar="RATE",
+        help="Crypto taker fee to EMULATE in a backtest (fraction, e.g. 0.0002). "
+             "Overrides the instance venue's fee. Backtest mode only.",
+    )
     args = parser.parse_args()
 
     start_date = _null_or_value(args.start_date)
@@ -486,6 +494,7 @@ Examples:
         symbols=args.symbols,
         initial_cash=args.initial_cash,
         backtest_row_id=args.backtest_id,
+        emulated_taker_fee=args.taker_fee,
     )
 
 
@@ -653,6 +662,18 @@ def _load_live_credentials_from_db(instance_id):
                             )
                             return None, None, broker_type, paper, brokerage_id
                         return k, s, broker_type, paper, brokerage_id
+                    if broker_type in ("binanceus", "binance", "binance_us", "binance.us"):
+                        try:
+                            k = decrypt(b_doc.get("binanceus_key")) or None
+                            s = decrypt(b_doc.get("binanceus_secret")) or None
+                        except Exception as _e:
+                            _early_log(
+                                f"Decrypt failed for BrokerageAccount {brokerage_id} "
+                                f"(is INTELLISTOCK_CRED_KEY set?): {type(_e).__name__}: {_e}",
+                                "red",
+                            )
+                            return None, None, broker_type, paper, brokerage_id
+                        return k, s, broker_type, paper, brokerage_id
             # No brokerage_id - instance-level legacy fields (decrypt passes
             # plaintext through unchanged).
             try:
@@ -757,6 +778,7 @@ key = secret = ""
 symbols = []
 initial_cash = 100000.0
 backtest_row_id = None
+emulated_taker_fee = None  # --taker-fee: crypto fee to emulate in this backtest (else None = instance venue)
 backtest_difficulty = None  # Set from BACKTEST_DIFFICULTY env by backtest engine (1-10)
 backtest_high_usage = False  # Set from BACKTEST_HIGH_USAGE env when backtest has high-difficulty substrategy
 try:
@@ -771,8 +793,74 @@ try:
     symbols = parsed.symbols
     initial_cash = parsed.initial_cash
     backtest_row_id = parsed.backtest_row_id
+    emulated_taker_fee = parsed.emulated_taker_fee
 except SystemExit:
     sys.exit(2)
+
+# 2026-07-11: Crypto instances run through THIS SAME broker, marked
+# kind="crypto" on the Instances row (they are NOT a forked module). A small
+# set of kind-gated branches (24/7 scheduler, market-hours bypass, crypto bars
+# endpoint, gtc/no-extended orders) switch behavior; equity instances see
+# kind=None and byte-identical behavior. The kind + crypto_config are read once
+# and cached here so the hot loop never re-hits the DB.
+_INSTANCE_KIND_CACHE = {"loaded": False, "kind": None, "crypto_config": {}, "broker_type": None}
+
+
+def _instance_kind_and_crypto_config():
+    """Return (kind, crypto_config) for this instance, read once and cached.
+    kind is 'crypto' for crypto instances, else None/other. Fails closed to
+    (None, {}) on any DB error so equities are never affected."""
+    if _INSTANCE_KIND_CACHE["loaded"]:
+        return _INSTANCE_KIND_CACHE["kind"], _INSTANCE_KIND_CACHE["crypto_config"]
+    try:
+        _c = get_conn()
+        try:
+            _doc = r.db(DB_NAME).table("Instances").get(str(instance_id)).run(_c) or {}
+            # broker_type for the fee model: the Instances row usually lacks it
+            # (action_create_instance only stores brokerage_id), so resolve the
+            # venue from the LINKED brokerage. Without this a Binance.US-linked
+            # crypto instance would backtest at Alpaca's 0.25% instead of 0.02%.
+            bt = (_doc.get("broker_type") or "").strip().lower() or None
+            if not bt:
+                _bid = _doc.get("brokerage_id")
+                if _bid:
+                    try:
+                        _bdoc = r.db(DB_NAME).table("BrokerageAccounts").get(str(_bid)).run(_c) or {}
+                        bt = (_bdoc.get("brokerage_type") or "").strip().lower() or None
+                    except Exception:
+                        pass
+        finally:
+            try:
+                _c.close()
+            except Exception:
+                pass
+        kind = _doc.get("kind")
+        cc = _doc.get("crypto_config") or {}
+        # Cache ONLY on a SUCCESSFUL read. RethinkDB is memory-starved/flaky here;
+        # caching a transient-error result would permanently mis-classify a real
+        # crypto instance as equity for the whole process lifetime.
+        _INSTANCE_KIND_CACHE.update({"loaded": True, "kind": kind, "crypto_config": cc, "broker_type": bt})
+        return kind, cc
+    except Exception:
+        # Transient failure — do NOT cache; retry on the next tick.
+        return None, {}
+
+
+def _is_crypto_instance_runtime():
+    """True iff this broker process is running a kind='crypto' instance."""
+    return _instance_kind_and_crypto_config()[0] == "crypto"
+
+
+def _instance_crypto_taker_fee():
+    """Crypto taker fee for THIS instance's venue, for the backtest fee model:
+    Binance.US = 0.02%, else Alpaca 0.25%. Returns None (PortfolioEmulator's
+    default 0.25%) on any error so equity + Alpaca crypto backtests are unchanged."""
+    try:
+        _instance_kind_and_crypto_config()  # ensure the cache is loaded
+        from broker_adapters.fees import crypto_taker_fee
+        return crypto_taker_fee(_INSTANCE_KIND_CACHE.get("broker_type"))
+    except Exception:
+        return None
 
 # Live-mode broker configuration: resolved from DB, not argv.
 # data_key/data_secret are for market-data API calls (bars, news); they can be
@@ -1193,19 +1281,34 @@ def fetch_alpaca_historical_bars(
 
     def _do_fetch_one_chunk(sym, chunk_start, chunk_end, log_empty_once=None, retry_smaller=False):
         """Perform the actual Alpaca HTTP request for one chunk. Returns list of bars."""
-        url = f"{ALPACA_DATA_BASE}/stocks/{sym}/bars"
+        # Crypto (kind="crypto") uses the v1beta3 crypto bars endpoint: symbols
+        # as a query param, NO feed, and a symbol-keyed response dict. Equities
+        # keep the /v2/stocks/{sym}/bars path unchanged.
+        _is_crypto = _is_crypto_instance_runtime()
         start_iso = to_iso(chunk_start)
         end_iso = to_iso(chunk_end)
         if not start_iso or not end_iso:
             return []
-        params = {
-            "start": start_iso,
-            "end": end_iso,
-            "timeframe": timeframe,
-            "limit": 10000,
-            "feed": feed,
-            "sort": "asc",
-        }
+        if _is_crypto:
+            url = "https://data.alpaca.markets/v1beta3/crypto/us/bars"
+            params = {
+                "symbols": sym,
+                "start": start_iso,
+                "end": end_iso,
+                "timeframe": timeframe,
+                "limit": 10000,
+                "sort": "asc",
+            }
+        else:
+            url = f"{ALPACA_DATA_BASE}/stocks/{sym}/bars"
+            params = {
+                "start": start_iso,
+                "end": end_iso,
+                "timeframe": timeframe,
+                "limit": 10000,
+                "feed": feed,
+                "sort": "asc",
+            }
         collected = []
         # Live-readiness P0 #4: 429 retry/backoff on Alpaca data API. Under live
         # load (every 5 min × hundreds of tickers via discovery) IEX free tier
@@ -1232,7 +1335,13 @@ def fetch_alpaca_historical_bars(
                 except NameError:
                     pass
                 break
-            r = requests.get(url, headers=headers, params=params, timeout=60)
+            # Alpaca's v1beta3 crypto market-data endpoint is PUBLIC (no auth). If
+            # we send the instance's trading-account auth headers and they aren't
+            # authorized for the data API (e.g. paper keys), Alpaca rejects the
+            # request with 401 — even though an unauthenticated request succeeds.
+            # So for crypto, omit auth entirely; equities keep their required auth.
+            _req_headers = {"accept": "application/json"} if _is_crypto else headers
+            r = requests.get(url, headers=_req_headers, params=params, timeout=60)
             if r.status_code == 429 and _429_attempts < _429_max_attempts:
                 _429_attempts += 1
                 _retry_after = r.headers.get("Retry-After", "2")
@@ -1248,7 +1357,11 @@ def fetch_alpaca_historical_bars(
                 continue
             r.raise_for_status()
             data = r.json()
-            bars = data.get("bars") or []
+            if _is_crypto:
+                # v1beta3 crypto response is symbol-keyed: {"bars": {"BTC/USD": [...]}}
+                bars = (data.get("bars") or {}).get(sym, []) or []
+            else:
+                bars = data.get("bars") or []
             collected.extend(bars)
             if log_empty_once is not None and len(bars) == 0 and not log_empty_once[0]:
                 log_empty_once[0] = True
@@ -1266,8 +1379,25 @@ def fetch_alpaca_historical_bars(
                 break
             params = dict(params)
             params["page_token"] = next_token
-            params.pop("start", None)
-            params.pop("end", None)
+            if not _is_crypto:
+                # Equities (v2 /stocks/{sym}/bars): preserve the pre-existing
+                # pagination behavior exactly — drop start/end and resume from
+                # page_token. Equity chunks fit under `limit` in a single page,
+                # so this branch is effectively unreachable for equities and
+                # the real-money path stays byte-identical.
+                params.pop("start", None)
+                params.pop("end", None)
+            # Crypto (v1beta3 /crypto/us/bars): KEEP start/end on every page.
+            # That endpoint caps each page at ~1000 bars (far below our
+            # limit=10000) and returns a next_page_token for ANY multi-day
+            # window, so crypto always paginates. Dropping `end` (as the
+            # equity path does) leaves the follow-up pages unbounded, so a
+            # single 20-day chunk over-fetches from its start to the end of
+            # ALL available data (observed: ~17.3k bars / 26 pages for a
+            # 20-day 15Min window that should be ~1.9k / 3 pages). Keeping
+            # start+end bounds each chunk to its requested window; the
+            # page_token still resumes correctly and the response drops the
+            # token once `end` is reached.
         # If chunk returned 0 bars and retry_smaller is enabled, try splitting into smaller chunks
         if len(collected) == 0 and retry_smaller and (chunk_end - chunk_start).days > 7:
             mid_point = chunk_start + (chunk_end - chunk_start) / 2
@@ -1855,13 +1985,26 @@ def _load_strategy_class(strategy_name):
     if broker_dir not in sys.path:
         sys.path.insert(0, broker_dir)
     try:
-        spec = importlib.util.find_spec("strategies." + module_name)
-        if spec is None or spec.origin is None:
-            _log(f"Module 'strategies.{module_name}' not found for strategy '{strategy_name}'", "yellow")
+        # Resolve the flat equity path first (strategies.<module>); fall back to
+        # the crypto subpackage (strategies.crypto.<module>) so crypto strategies
+        # load through this same loader. Flat-first keeps equity behavior intact.
+        spec = None
+        _resolved_mod_path = None
+        for _mod_path in ("strategies." + module_name, "strategies.crypto." + module_name):
+            try:
+                _cand = importlib.util.find_spec(_mod_path)
+            except (ImportError, AttributeError, ValueError):
+                _cand = None
+            if _cand is not None and _cand.origin is not None:
+                spec = _cand
+                _resolved_mod_path = _mod_path
+                break
+        if spec is None:
+            _log(f"Module 'strategies.{module_name}' (nor strategies.crypto.{module_name}) found for strategy '{strategy_name}'", "yellow")
             return None
         module = importlib.util.module_from_spec(spec)
         # Register module in sys.modules before execution (required for dataclass decorators)
-        sys.modules["strategies." + module_name] = module
+        sys.modules[_resolved_mod_path] = module
         spec.loader.exec_module(module)
         cls = getattr(module, class_name, None)
         if cls is None:
@@ -2423,6 +2566,35 @@ def watch_strategies_changefeed():
                                 _log(f"Instance strategy_id changed ({old_sid} -> {new_sid}). Exiting broker to reload...", "yellow")
                                 shutdown_requested = True
                                 return
+                            # 2026-07-18: crypto_config edits must reach the RUNNING
+                            # loop. _instance_kind_and_crypto_config caches read-once,
+                            # so without invalidation a PATCH (allocations, band,
+                            # bear_gate_ma, rebalance_drift, ...) silently did NOTHING
+                            # until restart — caught by the end-to-end paper-trade
+                            # test (5% BTC allocation never bought). The injected
+                            # config is re-read from this cache every tick, so
+                            # invalidation alone suffices — EXCEPT a strategy switch,
+                            # whose run_once spec was synthesized at boot: that needs
+                            # the same exit-to-reload as strategy_id.
+                            _old_cc = change['old_val'].get('crypto_config') or {}
+                            _new_cc = change['new_val'].get('crypto_config') or {}
+                            if _old_cc != _new_cc:
+                                if _old_cc.get('strategy') != _new_cc.get('strategy'):
+                                    _log(
+                                        f"crypto_config.strategy changed ({_old_cc.get('strategy')} -> "
+                                        f"{_new_cc.get('strategy')}). Exiting broker to reload...",
+                                        "yellow",
+                                    )
+                                    shutdown_requested = True
+                                    return
+                                try:
+                                    _INSTANCE_KIND_CACHE["loaded"] = False
+                                except Exception:
+                                    pass
+                                _log(
+                                    "crypto_config changed — cache invalidated; next tick reads the new config.",
+                                    "yellow",
+                                )
                 except Exception as e:
                     _log(f"Instance changefeed error ({e}); reconnecting...", "yellow")
                 finally:
@@ -2621,6 +2793,49 @@ def _ensure_strategies_table(conn):
         _log(f"Could not ensure Strategies table: {e}", "yellow")
 
 
+_CRYPTO_STRATEGY_NAMES = ("momentum", "allocator", "fast", "reference", "meanrev", "connors", "adaptive")
+
+# crypto_config tuning knobs forwarded into the synthesized strategy config so a
+# user can tune a crypto strategy from crypto_config without a Strategies row.
+_CRYPTO_STRATEGY_TUNABLES = (
+    "rsi_period", "rsi_buy", "rsi_exit", "regime_ma", "top_k", "exit_ma",  # meanrev/connors
+    "sizing", "atr_period", "bear_gate_ma",                            # meanrev sizing + crash-bear gate
+    "switch_ma", "confirm_ma", "rebalance_drift",                      # adaptive regime switcher
+    "fast_ema", "slow_ema", "momentum_lookback", "adx_period", "adx_min",  # momentum
+    "entry_window", "exit_window", "trend_ma",                        # fast
+)
+
+
+def _crypto_synthetic_specs(instance_doc):
+    """For a crypto instance, synthesize a run_once strategy spec from
+    ``crypto_config.strategy`` (momentum/allocator/fast/reference) so it runs
+    without needing a Strategies-table row. Returns the ``(specs, id, schema)``
+    tuple, or ``None`` for non-crypto instances (fall through to the DB loader)."""
+    try:
+        if (instance_doc or {}).get("kind") != "crypto":
+            return None
+        cc = instance_doc.get("crypto_config") or {}
+        name = str(cc.get("strategy") or "momentum").strip().lower()
+        if name not in _CRYPTO_STRATEGY_NAMES:
+            name = "momentum"
+        cfg = {"band": cc.get("band", "medium")}
+        for _k in _CRYPTO_STRATEGY_TUNABLES:
+            if _k in cc:
+                cfg[_k] = cc[_k]
+        spec = {
+            "strategy": name,
+            "weight": 1.0,
+            "execution_position": 0,
+            "decision_phase": "pre",
+            "execution_scope": "run_once",
+            "config": cfg,
+            "conditions": {},
+        }
+        return [spec], None, {"name": "crypto:%s" % name, "strategies": [spec]}
+    except Exception:
+        return None
+
+
 def load_strategies_from_db():
     """Load strategy list from DB table Strategies via instance.strategy_id. Returns tuple: (list of strategy specs, strategy_row_id), or ([], None) on error/missing."""
     try:
@@ -2636,6 +2851,11 @@ def load_strategies_from_db():
             instance_doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
             if not instance_doc:
                 return [], None, None
+            # Crypto instances run the strategy named in crypto_config.strategy
+            # via a synthesized run_once spec — no Strategies row required.
+            _crypto_specs = _crypto_synthetic_specs(instance_doc)
+            if _crypto_specs is not None:
+                return _crypto_specs
             strategy_id = instance_doc.get('strategy_id')
             if strategy_id is None:
                 return [], None, None
@@ -2766,6 +2986,17 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
         if instance_id and not config.get("instance_id"):
             config["instance_id"] = instance_id
             conditions["instance_id"] = instance_id
+        # Crypto instances: pass the instance-level crypto_config (band +
+        # per-coin allocations) into the strategy so it can honor fixed
+        # weights + a dynamic remainder. Uses the already-cached blob (no
+        # per-tick DB hit); equity instances are unaffected.
+        try:
+            _ck_inj, _ccfg_inj = _instance_kind_and_crypto_config()
+            if _ck_inj == "crypto" and _ccfg_inj and not config.get("crypto_config"):
+                config["crypto_config"] = dict(_ccfg_inj)
+                conditions["crypto_config"] = dict(_ccfg_inj)
+        except Exception:
+            pass
         # 2026-04-22: inject a live-mode marker so the strategy's destructive
         # session-cleanup paths (designed for backtest reproducibility) can
         # detect they are running against a live instance and skip the
@@ -5146,8 +5377,11 @@ portfolio_emulator = None
 live_adapter = None
 live_wal = None
 if mode == MODE_BACKTEST:
-    portfolio_emulator = PortfolioEmulator(initial_cash=initial_cash)
-    _log("PortfolioEmulator initialized for backtest (initial_cash=%s)." % initial_cash, "green")
+    # Emulated-fee override (--taker-fee) wins; else resolve from the instance venue.
+    _bt_taker_fee = emulated_taker_fee if emulated_taker_fee is not None else _instance_crypto_taker_fee()
+    portfolio_emulator = PortfolioEmulator(initial_cash=initial_cash, taker_fee=_bt_taker_fee)
+    _log("PortfolioEmulator initialized for backtest (initial_cash=%s, taker_fee=%s%s)."
+         % (initial_cash, _bt_taker_fee, " [emulated]" if emulated_taker_fee is not None else ""), "green")
 elif mode == MODE_LIVE:
     try:
         from nexus_runtime_state import ensure_tables as _ensure_live_tables, WALStore as _WALStore
@@ -6098,24 +6332,10 @@ if mode == MODE_LIVE:
     except Exception as e:
         _log(f"Could not start strategies watcher thread: {e}", "yellow")
 
-def _bar_time_to_datetime(t_str):
-    """Parse Alpaca bar timestamp (ISO string) to naive datetime for comparison with backtest current_time."""
-    if t_str is None:
-        return None
-    if isinstance(t_str, datetime.datetime):
-        dt = t_str
-    else:
-        try:
-            from dateutil import parser as dateutil_parser
-            dt = dateutil_parser.parse(t_str)
-        except Exception:
-            try:
-                dt = datetime.datetime.fromisoformat(t_str.replace("Z", "+00:00"))
-            except Exception:
-                return None
-    if getattr(dt, "tzinfo", None) is not None:
-        dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-    return dt
+# 2026-07-12: parse extracted to bar_time.py (import-safe, fromisoformat-first
+# ~50x faster than dateutil on Alpaca ISO timestamps; output identical). Kept
+# the private name so all call sites and the injected-helper usage still work.
+from bar_time import bar_time_to_datetime as _bar_time_to_datetime
 
 def _current_time_to_utc(current_time):
     """Convert current_time to naive UTC for comparison with Alpaca bar times (which are in UTC)."""
@@ -6168,6 +6388,7 @@ from broker_session import (
     is_within_live_session as _is_within_live_session,
     next_legacy_pt_open_utc as _next_legacy_pt_open_utc,
     next_market_open_utc as _next_live_market_open_utc,
+    advance_backtest_time as _advance_backtest_time,
 )
 
 
@@ -6221,14 +6442,24 @@ def _can_use_same_day_daily_bar(current_utc: datetime.datetime) -> bool:
         return False
 
 
-def _get_prices_at_time(data, symbols, current_time):
-    """Get close price ('c') for each symbol at the bar that corresponds to current_time (latest bar at or before current_time)."""
+def _get_prices_at_time(data, symbols, current_time, use_cursor=False):
+    """Get close price ('c') for each symbol at the bar that corresponds to current_time (latest bar at or before current_time).
+
+    ``use_cursor=True`` (passed only from the monotonic main backtest loop, which
+    always uses the master ``data``) takes the O(new_bars)/call cursor path for
+    the non-daily case; every other call site keeps the O(n) full scan so the
+    cursor never has to reason about a different ``data`` object or the daily
+    same-day-bar rule."""
     prices = {}
     current_utc = _current_time_to_utc(current_time)
     if current_utc is None:
         return prices
     daily_mode = _is_daily_backtest_timeframe()
     allow_same_day_daily = _can_use_same_day_daily_bar(current_utc)
+    if use_cursor and mode == MODE_BACKTEST and not daily_mode:
+        return _bprices_cursor.latest_price_at(
+            data, symbols, current_utc, bar_time_to_datetime=_bar_time_to_datetime,
+        )
     for sym in symbols:
         bars = data.get(sym) or []
         bar_at_time = None
@@ -6279,6 +6510,7 @@ def _backtest_symbol_price_lookup_block_reason(data, symbol, current_time):
 # in `backtest_price_history` so they can be tested without importing
 # broker.py (not import-safe — runs argparse + main path at load).
 import backtest_price_history as _bph
+import backtest_prices_cursor as _bprices_cursor
 
 
 def _invalidate_price_history_cursor() -> None:
@@ -6469,7 +6701,17 @@ if mode == MODE_BACKTEST:
             validation_errors = []
             if not instance_id or not str(instance_id).strip():
                 validation_errors.append("instance_id is missing or empty")
-            if _strategy_row_id is None:
+            # Crypto instances have NO Strategies-table row — their strategy is a
+            # synthesized run_once spec built from crypto_config.strategy, so
+            # strategy_id is legitimately null while the specs + schema ARE loaded
+            # (schema name "crypto:<name>", see _crypto_synthetic_specs). Only flag a
+            # genuinely missing strategy. The equity path (strategy_id present, or
+            # truly absent) stays byte-identical.
+            _crypto_synth_loaded = bool(
+                _backtest_strategy_schema
+                and str((_backtest_strategy_schema or {}).get("name", "")).startswith("crypto:")
+            )
+            if _strategy_row_id is None and not _crypto_synth_loaded:
                 validation_errors.append("no strategy linked to instance (strategy_id is null)")
             # V7.3: Allow empty symbols for Nexus pure discovery mode
             # if not symbols or not [s for s in symbols if s and str(s).strip()]:
@@ -6934,8 +7176,21 @@ while not shutdown_requested:
                     _tick_marker = _gn_cache.get("_nexus_full_cycle_completed_date")
                 except Exception:
                     pass
+                # Crypto instances get a 24/7 scheduler config (no NYSE hours,
+                # band-paced monitor cadence); equities pass config=None → the
+                # existing equity DEFAULT_CONFIG. Fail-closed to None on any error.
+                _sched_cfg = None
+                try:
+                    _ck, _ccfg = _instance_kind_and_crypto_config()
+                    if _ck == "crypto":
+                        from strategies.crypto import core as _crypto_core
+                        _sched_cfg = _crypto_core.crypto_scheduler_config(
+                            (_ccfg or {}).get("band", "medium")
+                        )
+                except Exception:
+                    _sched_cfg = None
                 _next_wake_utc, _tick_mode = _scheduler_get_next_wake(
-                    _now_utc_for_sched, _tick_marker, config=None,
+                    _now_utc_for_sched, _tick_marker, config=_sched_cfg,
                 )
                 _scheduler_call_ok = True
                 _strategy_tick_n += 1
@@ -7138,6 +7393,8 @@ while not shutdown_requested:
                                 'progress': 100.0,
                                 'pnl': final_pnl,
                                 'pnl_percent': round(final_pnl_percent, 4) if final_pnl_percent is not None else None,
+                                # Crypto fee accounting (None for equity runs).
+                                'fees': _bt_summary.get("fees"),
                                 'pnl_per_stock': pnl_per_stock,
                                 'pnl_percent_per_stock': pnl_percent_per_stock,
                                 'stock_price_change': stock_price_change,
@@ -7361,7 +7618,7 @@ while not shutdown_requested:
                 sys.exit(0)
             else:
                 # current_time <= end_date: fetch prices and run this tick
-                prices = _get_prices_at_time(data, symbols, current_time)
+                prices = _get_prices_at_time(data, symbols, current_time, use_cursor=True)
                 price_history = get_price_history_up_to_current(data, symbols_for_data, current_time)
         else:
             # get_live_prices() hits Robinhood's batch-quotes endpoint. Only call it
@@ -7555,7 +7812,11 @@ while not shutdown_requested:
                     break
         except Exception:
             _dc_enabled_any = False
-        if mode == MODE_LIVE:
+        if _is_crypto_instance_runtime():
+            # Crypto trades 24/7/365 — never "outside session". Skip all NYSE
+            # market-hours gating so strategies + execution run round the clock.
+            within_session = True
+        elif mode == MODE_LIVE:
             if _dc_enabled_any:
                 # Force extended-hours gate (NYSE pre-market + RTH + after-hours)
                 # regardless of RH_RTH_ONLY. The dual-cadence gate in the
@@ -7881,10 +8142,92 @@ while not shutdown_requested:
                                     _set_strategy_tick_phase("strategy_run")
                                 except Exception:
                                     pass
+                                # 2026-07-18: LIVE crypto bars for run_once strategies.
+                                # Backtest builds price_history; live passed data=None, so
+                                # crypto strategies saw an EMPTY universe and exit_blind_held
+                                # would risk-off-sell every held coin each tick. Crypto-only
+                                # branch — equity live path still passes None (byte-identical).
+                                # On a failed fetch with no last-good snapshot we run the tick
+                                # with EMPTY specs (a no-op) instead of trading blind.
+                                _rr_data = None
+                                _rr_specs_eff = _run_once_specs
+                                if _is_crypto_instance_runtime() and _tick_mode != "IDLE":
+                                    try:
+                                        from live_crypto_bars import build_live_crypto_data as _lcb_build
+                                        from live_crypto_bars import band_increment_seconds as _lcb_band_inc
+                                        from strategies.crypto.meanrev import DEFAULT_MAJORS as _lcb_majors
+                                        _lcb_now = datetime.datetime.now(datetime.timezone.utc)
+                                        try:
+                                            _lcb_inc = max(60, int(float(time_increment or 3600)))
+                                        except (TypeError, ValueError):
+                                            _lcb_inc = 3600
+                                        # Prefer the BAND's bar size (the validated cadence,
+                                        # low=60min) over the row's time increment, which UI
+                                        # creates historically hardcoded to 900.
+                                        try:
+                                            _ck_b, _ccfg_b = _instance_kind_and_crypto_config()
+                                            _lcb_inc = _lcb_band_inc((_ccfg_b or {}).get("band"), _lcb_inc)
+                                        except Exception:
+                                            pass
+                                        _lcb_lookback = int(os.environ.get("LIVE_CRYPTO_LOOKBACK_BARS", "5040"))
+                                        _lcb_tf = _time_increment_to_alpaca_timeframe(str(_lcb_inc))
+                                        try:
+                                            _lcb_held = list((portfolio_emulator.get_positions() or {}).keys()) if portfolio_emulator is not None else []
+                                        except Exception:
+                                            _lcb_held = []
+
+                                        def _lcb_fetch(_syms, _start, _end,
+                                                       _tf=_lcb_tf,
+                                                       _k=_strat_data_key,
+                                                       _s=_strat_data_secret):
+                                            _db = None
+                                            try:
+                                                _db = get_conn()
+                                            except Exception:
+                                                _db = None
+                                            try:
+                                                return fetch_alpaca_historical_bars(
+                                                    _syms, _start, _end, _k, _s,
+                                                    timeframe=_tf, db_conn=_db, feed=data_feed,
+                                                )
+                                            finally:
+                                                try:
+                                                    if _db is not None:
+                                                        _db.close()
+                                                except Exception:
+                                                    pass
+
+                                        _rr_data = _lcb_build(
+                                            _lcb_fetch,
+                                            list(symbols or []),
+                                            _lcb_held,
+                                            sorted(globals().get("_live_crypto_discovered") or set()),
+                                            list(_lcb_majors),
+                                            _lcb_now, _lcb_inc, _lcb_lookback,
+                                            last_good=globals().get("_live_crypto_bars_last_good"),
+                                            log=_log,
+                                        )
+                                        if _rr_data:
+                                            globals()["_live_crypto_bars_last_good"] = _rr_data
+                                        elif _rr_data is None:
+                                            _rr_specs_eff = []
+                                            _log(
+                                                "Live crypto bars unavailable (fetch failed, no last-good) — "
+                                                "skipping strategies this tick; will retry next tick.",
+                                                "red",
+                                            )
+                                    except Exception as _lcb_e:
+                                        _rr_data = None
+                                        _rr_specs_eff = []
+                                        _log(
+                                            f"Live crypto bars error: {type(_lcb_e).__name__}: {_lcb_e} — "
+                                            f"skipping strategies this tick.",
+                                            "red",
+                                        )
                                 _rr_fut = _PRICE_FETCH_EXECUTOR.submit(
                                     run_run_once_strategies,
-                                    _run_once_specs, list(symbols or []), prices, current_time,
-                                    None,
+                                    _rr_specs_eff, list(symbols or []), prices, current_time,
+                                    _rr_data,
                                     portfolio_emulator=portfolio_emulator,
                                     time_increment=time_increment,
                                     alpaca_key=_strat_data_key,
@@ -8314,6 +8657,15 @@ while not shutdown_requested:
                             else:
                                 expanded_symbols.discard(ns)
 
+            # 2026-07-18: live crypto bars — remember the discovered universe
+            # across ticks so the pre-dispatch bars fetch covers it next tick
+            # (expanded_symbols is rebuilt per tick and never persists).
+            # Live-only: backtest path byte-identical.
+            if mode == MODE_LIVE and nexus_discovered_syms and _is_crypto_instance_runtime():
+                try:
+                    globals().setdefault("_live_crypto_discovered", set()).update(nexus_discovered_syms)
+                except Exception:
+                    pass
             if nexus_discovered_syms:
                 new_syms = nexus_discovered_syms - expanded_symbols
                 if new_syms:
@@ -8774,7 +9126,7 @@ while not shutdown_requested:
             # mirrors the "Outside session" / "Running" pattern so we only
             # print on transitions + periodic heartbeats.
             _live_market_open_this_tick = True
-            if mode == MODE_LIVE and portfolio_emulator is not None and _exec_order:
+            if (not _is_crypto_instance_runtime()) and mode == MODE_LIVE and portfolio_emulator is not None and _exec_order:
                 try:
                     # 2026-05-06: bound the market-open check at 10s. Some
                     # adapter implementations make an HTTP call here; a
@@ -9284,7 +9636,10 @@ while not shutdown_requested:
                                 _max_single_pct = float(os.environ.get("BROKER_MAX_SINGLE_POSITION_PCT", "0.15") or "0.15")
                             except (ValueError, TypeError):
                                 _max_single_pct = 0.15
-                            if _max_single_pct > 0 and mode == MODE_LIVE:
+                            # Crypto instances set explicit per-coin allocations
+                            # (e.g. 20%, 50%), so the equity 15% single-position
+                            # safety cap must NOT trim them — honor the user's donut.
+                            if _max_single_pct > 0 and mode == MODE_LIVE and not _is_crypto_instance_runtime():
                                 try:
                                     # Q4 fix: use CURRENT portfolio value (cash + positions) so
                                     # the cap scales with equity growth, not stuck at start-equity.
@@ -9807,8 +10162,12 @@ while not shutdown_requested:
                         except Exception:
                             pass
                         try:
+                            # Downsample (keep true start + shape), not tail-slice,
+                            # so a long/high-cadence RUNNING backtest shows the real
+                            # start value and curve instead of a mid-run window.
+                            from broker_snapshot_helpers import downsample_history as _downsample_history
                             update_payload['portfolio_value_history'] = _convert_datetimes_to_iso(
-                                list(portfolio_emulator.get_portfolio_history() or [])[-3000:]
+                                _downsample_history(list(portfolio_emulator.get_portfolio_history() or []), 3000)
                             )
                         except Exception:
                             pass
@@ -9910,19 +10269,20 @@ while not shutdown_requested:
             if shutdown_requested:
                 break
             print("Time Increment: ", time_increment)
-            if _is_within_trading_session_pt(current_time):
-                current_time = current_time + backtest_increment_td
-            else:
-                # Outside trading hours (e.g. weekend): skip to next market open instead of looping with granularity
-                next_open = _next_market_open_utc(current_time)
-                if next_open is not None:
-                    current_time = next_open
-                    try:
-                        _log("Skipped to next market open: %s" % current_time, "cyan")
-                    except NameError:
-                        pass
-                else:
-                    current_time = current_time + backtest_increment_td
+            # Crypto trades 24/7 — never apply the equity session gate / market-
+            # open skip. Equity keeps the legacy skip-to-next-open behavior.
+            _adv_is_crypto = _is_crypto_instance_runtime()
+            _adv_next = _advance_backtest_time(
+                current_time, backtest_increment_td, _adv_is_crypto,
+                _is_within_trading_session_pt, _next_market_open_utc,
+            )
+            if (not _adv_is_crypto) and _adv_next != current_time + backtest_increment_td:
+                # Equity, outside trading hours: skipped to the next market open.
+                try:
+                    _log("Skipped to next market open: %s" % _adv_next, "cyan")
+                except NameError:
+                    pass
+            current_time = _adv_next
         else:
             # 2026-05-07 scheduler refactor (commit 4): sleep until the
             # `_next_wake_utc` computed at the TOP of this loop iteration by

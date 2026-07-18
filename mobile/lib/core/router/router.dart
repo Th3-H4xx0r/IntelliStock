@@ -21,6 +21,8 @@ import '../../features/brokerages/presentation/brokerages_screen.dart';
 import '../../features/agent_runs/presentation/agent_runs_screen.dart';
 import '../../features/nexus/presentation/nexus_screen.dart';
 import '../../features/kalshi/presentation/kalshi_screen.dart';
+import '../../features/crypto/presentation/crypto_instance_detail_screen.dart';
+import '../../features/crypto/presentation/crypto_screen.dart';
 import '../../features/kalshi/presentation/kalshi_instance_detail_screen.dart';
 import '../../features/kalshi/presentation/kalshi_backtest_screen.dart';
 import '../../features/kalshi/presentation/kalshi_backtest_result_screen.dart';
@@ -166,6 +168,19 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/brokerages',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const BrokeragesScreen(),
+      ),
+      // Crypto (24/7 kind='crypto') instances get their own screen, reached from
+      // the More sheet and pushed over the shell.
+      GoRoute(
+        path: '/crypto',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const CryptoScreen(),
+      ),
+      GoRoute(
+        path: '/crypto/instances/:id',
+        parentNavigatorKey: _rootKey,
+        builder: (_, s) =>
+            CryptoInstanceDetailScreen(instanceId: s.pathParameters['id']!),
       ),
       GoRoute(
         path: '/stock/:symbol',

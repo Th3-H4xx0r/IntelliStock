@@ -15,10 +15,21 @@ class Instance {
     this.brokerage,
     this.strategy,
     this.alpacaDataBrokerageId,
+    this.kind,
+    this.cryptoConfig,
   });
 
   final String id;
   final String name;
+
+  /// Instance kind: 'kalshi' | 'crypto' | null (equity). Drives which screen the
+  /// instance is surfaced on (crypto/Kalshi bots have their own dedicated tabs).
+  final String? kind;
+
+  /// Crypto allocation blob (`{band, allocations:[{symbol,pct}]}`) for
+  /// kind='crypto' instances. Present only when the API surfaces it; used to
+  /// prefill the crypto edit sheet with exact per-coin weights.
+  final Map<String, dynamic>? cryptoConfig;
 
   /// 'user' | 'ai'
   final String createdBy;
@@ -73,6 +84,8 @@ class Instance {
       stocks: stocks,
       brokerage: j['brokerage'] as Map<String, dynamic>?,
       strategy: j['strategy'] as Map<String, dynamic>?,
+      kind: j['kind']?.toString(),
+      cryptoConfig: j['crypto_config'] as Map<String, dynamic>?,
     );
   }
 
@@ -91,6 +104,8 @@ class Instance {
     List<String>? stocks,
     Object? brokerage = _sentinel,
     Object? strategy = _sentinel,
+    Object? kind = _sentinel,
+    Object? cryptoConfig = _sentinel,
   }) =>
       Instance(
         id: id ?? this.id,
@@ -118,6 +133,10 @@ class Instance {
             brokerage == _sentinel ? this.brokerage : brokerage as Map<String, dynamic>?,
         strategy:
             strategy == _sentinel ? this.strategy : strategy as Map<String, dynamic>?,
+        kind: kind == _sentinel ? this.kind : kind as String?,
+        cryptoConfig: cryptoConfig == _sentinel
+            ? this.cryptoConfig
+            : cryptoConfig as Map<String, dynamic>?,
       );
 }
 

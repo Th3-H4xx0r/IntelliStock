@@ -96,6 +96,27 @@ def next_market_open_utc(current_time: datetime.datetime) -> Optional[datetime.d
         return None
 
 
+def advance_backtest_time(current_time, increment_td, is_crypto, is_within_session, next_market_open):
+    """Advance the backtest clock by one step.
+
+    Crypto trades 24/7/365, so it always advances by the raw cadence increment
+    with NO session gate. Equity advances by the increment while inside the
+    trading session, otherwise skips to the next market open (overnight/weekend).
+
+    ``is_within_session`` and ``next_market_open`` are injected callables of
+    ``current_time`` (broker.py passes its mode-aware wrappers) so this helper
+    stays free of broker.py's import-time side effects. Returns the next
+    ``current_time``; the caller logs the "skip" only when the returned time is
+    not the raw increment (equity, outside session).
+    """
+    if is_crypto:
+        return current_time + increment_td
+    if is_within_session(current_time):
+        return current_time + increment_td
+    nxt = next_market_open(current_time)
+    return nxt if nxt is not None else current_time + increment_td
+
+
 def next_legacy_pt_open_utc(
     current_time: datetime.datetime,
     start_hour: int = _TRADING_DAY_START_HOUR_LIVE,

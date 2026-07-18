@@ -1,0 +1,303 @@
+<title>Crypto Allocation — Setup</title>
+<style>
+  :root{
+    --canvas:#04040c; --surface:#0f0a1c; --panel:#120c22; --border:#231a3d;
+    --primary:#a78bfa; --primary-dim:#7c5ce6;
+    --hi:#f3f0ff; --md:#c8bfe6; --muted:#8a80a6; --dim:#5a5273;
+    --good:#34d399; --bad:#f87171; --dynamic:#6b6488;
+    --ring:0 0 0 1px var(--border);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:
+     radial-gradient(1200px 700px at 78% -10%, rgba(124,92,230,.16), transparent 60%),
+     radial-gradient(900px 600px at -5% 110%, rgba(80,50,160,.12), transparent 55%),
+     var(--canvas);
+     color:var(--hi);font-family:var(--font);-webkit-font-smoothing:antialiased;
+     font-variant-numeric:tabular-nums;min-height:100vh}
+  .wrap{max-width:960px;margin:0 auto;padding:28px 20px 56px}
+  .eyebrow{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--primary);font-weight:600}
+  h1{font-size:23px;margin:6px 0 2px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+  .sub{color:var(--muted);font-size:13.5px;margin-bottom:22px;max-width:60ch;line-height:1.5}
+  .glass{background:linear-gradient(180deg, rgba(30,20,55,.55), rgba(15,10,28,.62));
+     border:1px solid var(--border);border-radius:20px;backdrop-filter:blur(14px)}
+  .grid{display:grid;grid-template-columns:340px 1fr;gap:18px;align-items:stretch}
+  @media(max-width:720px){.grid{grid-template-columns:1fr}}
+  /* donut card */
+  .donut-card{padding:20px 18px 16px;display:flex;flex-direction:column;align-items:center;gap:2px}
+  .donut-wrap{position:relative;width:280px;height:280px}
+  canvas{width:280px;height:280px;display:block}
+  .center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+  .center .big{font-size:34px;font-weight:800;letter-spacing:-.02em;line-height:1}
+  .center .lbl{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-top:6px}
+  .center .val{font-size:12px;color:var(--md);margin-top:3px}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 12px;justify-content:center;margin-top:12px}
+  .legend span{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--md)}
+  .dot{width:9px;height:9px;border-radius:3px;box-shadow:0 0 0 1px rgba(255,255,255,.06)}
+  /* table card */
+  .table-card{padding:16px 16px 14px;display:flex;flex-direction:column;gap:2px}
+  .thead{display:grid;grid-template-columns:22px 1fr 84px 92px 26px;gap:8px;align-items:center;
+     padding:0 4px 8px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+  .row{display:grid;grid-template-columns:22px 1fr 84px 92px 26px;gap:8px;align-items:center;
+     padding:8px 4px;border-top:1px solid rgba(35,26,61,.7)}
+  .sym{font-weight:600;font-size:14px;letter-spacing:.01em}
+  .sym small{display:block;color:var(--muted);font-weight:400;font-size:11px;letter-spacing:0}
+  .inp{width:100%;background:var(--surface);border:1px solid var(--border);border-radius:9px;
+     color:var(--hi);font:inherit;font-size:13.5px;padding:7px 9px;text-align:right;outline:none;transition:border-color .15s}
+  .inp:focus{border-color:var(--primary)}
+  .inp.usd{color:var(--md)}
+  .suffix{position:relative}
+  .del{background:none;border:none;color:var(--dim);cursor:pointer;font-size:16px;line-height:1;padding:4px;border-radius:6px;transition:color .15s,background .15s}
+  .del:hover{color:var(--bad);background:rgba(248,113,113,.1)}
+  .row.dynamic{background:linear-gradient(90deg, rgba(124,92,230,.08), transparent);border-radius:10px;border-top:1px dashed rgba(124,92,230,.4)}
+  .row.dynamic .sym small{color:var(--primary)}
+  .pill{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--primary);
+     border:1px solid rgba(167,139,250,.4);background:rgba(167,139,250,.12);border-radius:999px;padding:3px 8px;justify-self:start}
+  /* add + toggle row */
+  .addbar{display:flex;gap:8px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
+  select,.addsym{background:var(--surface);border:1px solid var(--border);border-radius:9px;color:var(--hi);font:inherit;font-size:13px;padding:8px 9px;outline:none}
+  select:focus{border-color:var(--primary)}
+  .add{margin-left:auto;background:rgba(167,139,250,.14);border:1px solid rgba(167,139,250,.45);color:var(--primary);
+     font:inherit;font-weight:600;font-size:13px;padding:8px 14px;border-radius:9px;cursor:pointer;transition:background .15s}
+  .add:hover{background:rgba(167,139,250,.24)}
+  /* segmented toggle */
+  .seg{display:inline-flex;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:2px}
+  .seg button{background:none;border:none;color:var(--muted);font:inherit;font-size:12.5px;font-weight:600;padding:6px 12px;border-radius:7px;cursor:pointer}
+  .seg button.on{background:var(--primary);color:#0c0820}
+  /* footer meter */
+  .meter{margin-top:16px}
+  .bar{height:8px;border-radius:999px;background:var(--surface);overflow:hidden;display:flex;box-shadow:inset 0 0 0 1px var(--border)}
+  .bar i{display:block;height:100%}
+  .meta{display:flex;justify-content:space-between;margin-top:9px;font-size:12px;color:var(--muted)}
+  .meta b{color:var(--hi);font-weight:600}
+  .warn{color:var(--bad)}
+  .toolbar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+  .equity{font-size:12px;color:var(--muted)}
+  .equity b{color:var(--md)}
+  .cta{margin-top:20px;display:flex;gap:10px;justify-content:flex-end}
+  .btn{font:inherit;font-weight:600;font-size:14px;padding:11px 20px;border-radius:11px;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--md)}
+  .btn.primary{background:linear-gradient(180deg,#b79bff,#8a63e6);border:none;color:#100a24;box-shadow:0 6px 18px -6px rgba(138,99,230,.7)}
+  .note{font-size:11.5px;color:var(--dim);margin-top:16px;text-align:center}
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">New crypto instance · Allocation</div>
+  <h1>Set your coin allocation</h1>
+  <p class="sub">Pin fixed weights for the coins you want, and leave the rest <b style="color:var(--primary)">Dynamic</b> — auto-discovered and traded for you. Empty means 100% dynamic.</p>
+
+  <div class="toolbar">
+    <div class="seg">
+      <button id="mPct" class="on">%</button>
+      <button id="mUsd">$</button>
+    </div>
+    <span class="equity">Account equity <b id="eq">$5,942</b> · linked Alpaca paper</span>
+  </div>
+
+  <div class="grid">
+    <div class="glass donut-card">
+      <div class="donut-wrap">
+        <canvas id="donut" width="560" height="560"></canvas>
+        <div class="center">
+          <div class="big" id="cBig">70%</div>
+          <div class="lbl" id="cLbl">Dynamic</div>
+          <div class="val" id="cVal">auto-discovered</div>
+        </div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </div>
+
+    <div class="glass table-card">
+      <div class="thead"><span></span><span>Coin</span><span style="text-align:right">Weight</span><span style="text-align:right">≈ USD</span><span></span></div>
+      <div id="rows"></div>
+
+      <div class="addbar">
+        <select id="addSel"></select>
+        <button class="add" id="addBtn">＋ Add coin</button>
+      </div>
+
+      <div class="meter">
+        <div class="bar" id="bar"></div>
+        <div class="meta">
+          <span>Fixed <b id="fixedPct">30%</b> · Dynamic <b id="dynPct" style="color:var(--primary)">70%</b></span>
+          <span id="rem">$4,159 flexible</span>
+        </div>
+      </div>
+
+      <div class="cta">
+        <button class="btn">Cancel</button>
+        <button class="btn primary">Create instance</button>
+      </div>
+    </div>
+  </div>
+  <div class="note">Mockup · live donut updates as you edit · mobile reuses the 3D sector ring, web mirrors this donut</div>
+</div>
+
+<script>
+const EQUITY = 5942;
+const PALETTE = ['#a78bfa','#7c9bff','#5ad1e0','#5ee6b8','#f0b354','#f3799f','#b98bff'];
+// symbol -> hue color assigned on add
+let coins = [
+  {sym:'BTC', name:'Bitcoin', pct:10, color:'#a78bfa'},
+  {sym:'ETH', name:'Ethereum', pct:20, color:'#7c9bff'},
+];
+const CATALOG = [
+  ['BTC','Bitcoin'],['ETH','Ethereum'],['SOL','Solana'],['LINK','Chainlink'],
+  ['AVAX','Avalanche'],['DOT','Polkadot'],['LTC','Litecoin'],['UNI','Uniswap'],
+  ['AAVE','Aave'],['DOGE','Dogecoin'],['BCH','Bitcoin Cash'],['MKR','Maker'],
+];
+let mode='pct';
+let hover=null; // index or 'dynamic'
+
+const cv=document.getElementById('donut'), ctx=cv.getContext('2d');
+const DPR=2; // canvas is 560 backing for 280 css
+
+function fixedSum(){return coins.reduce((s,c)=>s+(+c.pct||0),0);}
+function dynPct(){return Math.max(0,100-fixedSum());}
+function over(){return fixedSum()>100;}
+
+function fmtUsd(n){return '$'+Math.round(n).toLocaleString();}
+
+// ---- donut ----
+function slice(cx,cy,r0,r1,a0,a1,color,{muted=false,hatch=false,sheen=true,bright=1}={}){
+  // metallic radial-ish fill using a linear gradient across the wedge
+  const mid=(a0+a1)/2;
+  const gx0=cx+Math.cos(mid)*r0, gy0=cy+Math.sin(mid)*r0;
+  const gx1=cx+Math.cos(mid)*r1, gy1=cy+Math.sin(mid)*r1;
+  const g=ctx.createLinearGradient(gx0,gy0,gx1,gy1);
+  const c=hexToRgb(color);
+  const lo=mix(c,[26,17,49],muted?.7:.45), hi=mix([235,224,255],c,muted?.75:.35);
+  g.addColorStop(0, rgba(mix(hi,[255,255,255],.15),muted?.5:.95));
+  g.addColorStop(.28, rgba(hi,muted?.5:1));
+  g.addColorStop(.7, rgba(c,muted?.42:1));
+  g.addColorStop(1, rgba(lo,muted?.42:1));
+  ctx.beginPath();
+  ctx.arc(cx,cy,r1,a0,a1); ctx.arc(cx,cy,r0,a1,a0,true); ctx.closePath();
+  ctx.fillStyle=g; ctx.fill();
+  if(hatch){
+    ctx.save(); ctx.clip();
+    ctx.strokeStyle='rgba(167,139,250,.28)'; ctx.lineWidth=2;
+    for(let x=-r1;x<r1*2;x+=9){ctx.beginPath();ctx.moveTo(cx-r1+x,cy-r1);ctx.lineTo(cx-r1+x-2*r1,cy+r1);ctx.stroke();}
+    ctx.restore();
+  }
+  if(sheen){ // top specular arc
+    ctx.beginPath(); ctx.arc(cx,cy,r1-1,a0,a1);
+    ctx.strokeStyle='rgba(255,255,255,'+(muted?.06:.16)+')'; ctx.lineWidth=1.5; ctx.stroke();
+  }
+}
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  const cx=cv.width/2, cy=cv.height/2, r1=cv.width*0.40, r0=cv.width*0.255;
+  let segs=coins.map((c,i)=>({...c,i})).filter(c=>c.pct>0);
+  const dp=dynPct();
+  let a=-Math.PI/2; const gap=0.045;
+  const total=100;
+  const drawList=[...segs.map(s=>({pct:s.pct,color:s.color,i:s.i,dyn:false})),
+                  ...(dp>0?[{pct:dp,color:'#7c5ce6',i:'dynamic',dyn:true}]:[])];
+  drawList.forEach(s=>{
+    const sweep=(s.pct/total)*(Math.PI*2);
+    const a0=a+gap/2, a1=a+sweep-gap/2;
+    if(a1>a0){
+      const isHover=hover===s.i;
+      slice(cx,cy,r0,r1+(isHover?10:0),a0,a1,s.color,{muted:s.dyn,hatch:s.dyn,bright:isHover?1.2:1});
+    }
+    a+=sweep;
+  });
+  // subtle inner hole ring
+  ctx.beginPath();ctx.arc(cx,cy,r0,0,Math.PI*2);ctx.strokeStyle='rgba(35,26,61,.9)';ctx.lineWidth=2;ctx.stroke();
+}
+function hexToRgb(h){h=h.replace('#','');return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
+function mix(a,b,t){return a.map((v,i)=>Math.round(v+(b[i]-v)*t));}
+function rgba(c,al){return 'rgba('+c[0]+','+c[1]+','+c[2]+','+al+')';}
+
+// ---- table ----
+function rowsHtml(){
+  const rows=document.getElementById('rows');
+  rows.innerHTML='';
+  coins.forEach((c,i)=>{
+    const usd=(c.pct/100)*EQUITY;
+    const el=document.createElement('div'); el.className='row';
+    el.innerHTML=`
+      <span class="dot" style="background:${c.color}"></span>
+      <span class="sym">${c.sym}<small>${c.name}</small></span>
+      <span class="suffix"><input class="inp" data-i="${i}" data-f="pct" value="${c.pct}" inputmode="decimal"></span>
+      <span class="suffix"><input class="inp usd" data-i="${i}" data-f="usd" value="${Math.round(usd)}" inputmode="decimal"></span>
+      <button class="del" data-del="${i}" title="Remove">×</button>`;
+    rows.appendChild(el);
+  });
+  // dynamic row
+  const dp=dynPct(), dusd=(dp/100)*EQUITY;
+  const d=document.createElement('div'); d.className='row dynamic';
+  d.innerHTML=`
+    <span class="dot" style="background:#7c5ce6;box-shadow:0 0 0 1px rgba(167,139,250,.4)"></span>
+    <span class="sym">Dynamic<small>auto-discover & trade</small></span>
+    <span style="text-align:right;font-weight:600;color:var(--primary)">${dp.toFixed(0)}%</span>
+    <span style="text-align:right;color:var(--md)">${fmtUsd(dusd)}</span>
+    <span class="pill">auto</span>`;
+  rows.appendChild(d);
+}
+function meter(){
+  const bar=document.getElementById('bar'); bar.innerHTML='';
+  coins.filter(c=>c.pct>0).forEach(c=>{const i=document.createElement('i');i.style.width=Math.min(c.pct,100)+'%';i.style.background=c.color;bar.appendChild(i);});
+  const dp=dynPct();
+  if(dp>0){const i=document.createElement('i');i.style.width=dp+'%';i.style.background='repeating-linear-gradient(45deg,#5a4a86,#5a4a86 4px,#4a3c6e 4px,#4a3c6e 8px)';bar.appendChild(i);}
+  document.getElementById('fixedPct').textContent=fixedSum().toFixed(0)+'%';
+  const dpel=document.getElementById('dynPct');
+  dpel.textContent=dp.toFixed(0)+'%';
+  const rem=document.getElementById('rem');
+  if(over()){rem.className='warn';rem.textContent='Over-allocated — reduce by '+(fixedSum()-100).toFixed(0)+'%';}
+  else{rem.className='';rem.textContent=fmtUsd((dp/100)*EQUITY)+' flexible';}
+}
+function center(){
+  const b=document.getElementById('cBig'), l=document.getElementById('cLbl'), v=document.getElementById('cVal');
+  if(hover==='dynamic'||hover===null){const dp=dynPct();b.textContent=dp.toFixed(0)+'%';b.style.color='var(--primary)';l.textContent='Dynamic';v.textContent='auto-discovered';}
+  else{const c=coins[hover];b.textContent=(+c.pct).toFixed(0)+'%';b.style.color=c.color;l.textContent=c.sym;v.textContent=fmtUsd((c.pct/100)*EQUITY);}
+}
+function legend(){
+  const L=document.getElementById('legend'); L.innerHTML='';
+  coins.filter(c=>c.pct>0).forEach((c,idx)=>{const s=document.createElement('span');s.innerHTML=`<span class="dot" style="background:${c.color}"></span>${c.sym} ${(+c.pct).toFixed(0)}%`;L.appendChild(s);});
+  if(dynPct()>0){const s=document.createElement('span');s.innerHTML=`<span class="dot" style="background:#7c5ce6"></span>Dynamic ${dynPct().toFixed(0)}%`;L.appendChild(s);}
+}
+function refreshAddSel(){
+  const sel=document.getElementById('addSel'); sel.innerHTML='';
+  const have=new Set(coins.map(c=>c.sym));
+  CATALOG.filter(([s])=>!have.has(s)).forEach(([s,n])=>{const o=document.createElement('option');o.value=s;o.textContent=`${s} · ${n}`;sel.appendChild(o);});
+}
+function render(){rowsHtml();meter();center();legend();draw();}
+
+document.getElementById('rows').addEventListener('input',e=>{
+  const i=+e.target.dataset.i, f=e.target.dataset.f; if(isNaN(i))return;
+  let val=parseFloat(e.target.value)||0;
+  if(f==='usd'){val=(val/EQUITY)*100;}
+  coins[i].pct=Math.max(0,Math.min(100,val));
+  meter();center();legend();draw();
+  // update the sibling field
+  const usdField=document.querySelector(`.inp.usd[data-i="${i}"]`);
+  if(f==='pct'&&usdField)usdField.value=Math.round((coins[i].pct/100)*EQUITY);
+});
+document.getElementById('rows').addEventListener('click',e=>{
+  const d=e.target.dataset.del; if(d===undefined)return;
+  coins.splice(+d,1);refreshAddSel();render();
+});
+document.getElementById('addBtn').onclick=()=>{
+  const sel=document.getElementById('addSel'); if(!sel.value)return;
+  const [s,n]=CATALOG.find(([x])=>x===sel.value);
+  coins.push({sym:s,name:n,pct:0,color:PALETTE[coins.length%PALETTE.length]});
+  refreshAddSel();render();
+};
+document.getElementById('mPct').onclick=()=>{mode='pct';document.getElementById('mPct').classList.add('on');document.getElementById('mUsd').classList.remove('on');};
+document.getElementById('mUsd').onclick=()=>{mode='usd';document.getElementById('mUsd').classList.add('on');document.getElementById('mPct').classList.remove('on');};
+
+// hover on donut → highlight slice
+cv.addEventListener('mousemove',e=>{
+  const r=cv.getBoundingClientRect();const x=(e.clientX-r.left)/r.width*cv.width-cv.width/2, y=(e.clientY-r.top)/r.height*cv.height-cv.height/2;
+  const dist=Math.hypot(x,y);
+  if(dist<cv.width*0.255||dist>cv.width*0.42){hover=null;center();draw();return;}
+  let ang=Math.atan2(y,x); if(ang<-Math.PI/2)ang+=Math.PI*2; let a=-Math.PI/2; let found=null;
+  const list=[...coins.map((c,i)=>({pct:c.pct,i})).filter(c=>c.pct>0),(dynPct()>0?{pct:dynPct(),i:'dynamic'}:null)].filter(Boolean);
+  for(const s of list){const sw=(s.pct/100)*Math.PI*2; if(ang>=a&&ang<a+sw){found=s.i;break;} a+=sw;}
+  if(found!==hover){hover=found;center();draw();}
+});
+cv.addEventListener('mouseleave',()=>{hover=null;center();draw();});
+
+refreshAddSel();render();
+</script>

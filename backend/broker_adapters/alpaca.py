@@ -1603,12 +1603,20 @@ class AlpacaAdapter(BrokerAdapter):
         cid = make_client_order_id(
             self._instance_id, ticker, ts.isoformat(), "buy", 0
         )
-        style = self._order_style_for_now(price, "buy", ts)
+        # Crypto pairs (symbol contains "/") trade 24/7 and REJECT tif="day" and
+        # extended_hours; use a plain market order with tif="gtc". Equities keep
+        # the RTH/extended-hours auto-styling unchanged.
+        if "/" in (ticker or ""):
+            style = {"order_type": "market", "limit_price": None, "extended_hours": False}
+            _tif = "gtc"
+        else:
+            style = self._order_style_for_now(price, "buy", ts)
+            _tif = "day"
         try:
             self.submit_order(
                 ticker, "buy", qty=shares, notional=None,
                 order_type=style["order_type"],
-                limit_price=style["limit_price"], tif="day",
+                limit_price=style["limit_price"], tif=_tif,
                 extended_hours=style["extended_hours"],
                 client_order_id=cid,
             )
@@ -1625,7 +1633,13 @@ class AlpacaAdapter(BrokerAdapter):
     ) -> bool:
         if shares <= 0 or price <= 0:
             return False
-        current = self._positions.get(ticker, 0.0)
+        # Crypto positions may be keyed WITHOUT the slash (Alpaca can return
+        # 'BTCUSD' for a 'BTC/USD' order); look up both forms so exits match and
+        # a held crypto position can always be sold/de-risked.
+        current = self._positions.get(ticker)
+        if current is None and "/" in (ticker or ""):
+            current = self._positions.get(ticker.replace("/", ""))
+        current = current if current is not None else 0.0
         if current < shares:
             shares = current
         if shares <= 0:
@@ -1634,12 +1648,20 @@ class AlpacaAdapter(BrokerAdapter):
         cid = make_client_order_id(
             self._instance_id, ticker, ts.isoformat(), "sell", 0
         )
-        style = self._order_style_for_now(price, "sell", ts)
+        # Crypto pairs (symbol contains "/") trade 24/7 and REJECT tif="day" and
+        # extended_hours; use a plain market order with tif="gtc". Equities keep
+        # the RTH/extended-hours auto-styling unchanged.
+        if "/" in (ticker or ""):
+            style = {"order_type": "market", "limit_price": None, "extended_hours": False}
+            _tif = "gtc"
+        else:
+            style = self._order_style_for_now(price, "sell", ts)
+            _tif = "day"
         try:
             self.submit_order(
                 ticker, "sell", qty=shares, notional=None,
                 order_type=style["order_type"],
-                limit_price=style["limit_price"], tif="day",
+                limit_price=style["limit_price"], tif=_tif,
                 extended_hours=style["extended_hours"],
                 client_order_id=cid,
             )

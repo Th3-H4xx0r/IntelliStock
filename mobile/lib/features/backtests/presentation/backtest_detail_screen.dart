@@ -246,6 +246,14 @@ class _BacktestDetailScreenState
                   ),
                 ),
 
+                // ── Fees card (crypto backtests only) ─────────────────────────
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                    child: _CryptoFeesCard(summary: state.summary!),
+                  ),
+                ),
+
                 // ── Strategy collapsible ──────────────────────────────────────
                 if (state.summary!.strategySchema != null)
                   SliverToBoxAdapter(
@@ -2235,6 +2243,152 @@ class _RoundTripStats extends StatelessWidget {
                   value: fmtMoney(summary.avgLosingRoundTrip),
                   valueColor: AppColors.danger),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Crypto fees card (per-platform estimate; crypto backtests only) ─────────────
+
+class _CryptoFeesCard extends StatelessWidget {
+  const _CryptoFeesCard({required this.summary});
+  final BacktestSummary summary;
+
+  // (name, id, taker rate). The row whose rate matches the applied taker_rate is
+  // flagged 'applied'; the rest are estimates.
+  static const _platforms = <(String, String, double)>[
+    ('Binance.US', 'binanceus', 0.0002),
+    ('Alpaca', 'alpaca', 0.0025),
+    ('Kraken', 'kraken', 0.0026),
+    ('Coinbase Advanced', 'coinbase', 0.006),
+  ];
+
+  String _appliedLabel(double rate) {
+    final v = (summary.feeVenue ?? '').toLowerCase();
+    for (final p in _platforms) {
+      if (p.$2 == v) return p.$1;
+    }
+    for (final p in _platforms) {
+      if ((p.$3 - rate).abs() < 1e-9) return p.$1;
+    }
+    return summary.feeVenue ?? '—';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fees = summary.fees;
+    final volume = (fees?['total_volume'] ?? 0).toDouble();
+    if (fees == null || volume <= 0) return const SizedBox.shrink();
+    final actual = (fees['total_fees'] ?? 0).toDouble();
+    final appliedRate = (fees['taker_rate'] ?? 0.0025).toDouble();
+    final emulated = summary.feeEmulated == true;
+    final appliedLabel = _appliedLabel(appliedRate);
+
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.receipt_long_outlined, size: 18, color: AppColors.primary),
+            const SizedBox(width: 8),
+            Text('FEES · CRYPTO', style: AppTextStyles.eyebrow),
+            const Spacer(),
+            if (emulated)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: AppColors.fill(AppColors.warning),
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(color: AppColors.stroke(AppColors.warning)),
+                ),
+                child: Text('Emulated · $appliedLabel',
+                    style: AppTextStyles.nano.copyWith(
+                        color: AppColors.warning, fontWeight: FontWeight.w700)),
+              ),
+          ]),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Crypto volume traded',
+                  style: AppTextStyles.meta.copyWith(color: AppColors.textDim)),
+              Text(fmtMoney(volume),
+                  style: AppTextStyles.body.copyWith(
+                      color: AppColors.textHi, fontWeight: FontWeight.w600)),
+            ],
+          ),
+          const Divider(height: 20, color: AppColors.border),
+          for (final p in _platforms)
+            Builder(builder: (_) {
+              final applied = (p.$3 - appliedRate).abs() < 1e-9;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Row(children: [
+                        Flexible(
+                          child: Text(p.$1,
+                              style: AppTextStyles.body
+                                  .copyWith(color: AppColors.textMd),
+                              overflow: TextOverflow.ellipsis),
+                        ),
+                        if (applied) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: AppColors.fill(AppColors.primary),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                  color: AppColors.stroke(AppColors.primary)),
+                            ),
+                            child: Text('applied',
+                                style: AppTextStyles.nano.copyWith(
+                                    color: AppColors.primary,
+                                    fontWeight: FontWeight.w700)),
+                          ),
+                        ],
+                      ]),
+                    ),
+                    SizedBox(
+                      width: 52,
+                      child: Text('${(p.$3 * 100).toStringAsFixed(2)}%',
+                          textAlign: TextAlign.right,
+                          style: AppTextStyles.nano
+                              .copyWith(color: AppColors.textDim)),
+                    ),
+                    const SizedBox(width: 10),
+                    SizedBox(
+                      width: 84,
+                      child: Text(
+                        fmtMoney(applied
+                            ? (actual > 0 ? actual : volume * p.$3)
+                            : volume * p.$3),
+                        textAlign: TextAlign.right,
+                        style: AppTextStyles.body.copyWith(
+                            color: applied
+                                ? AppColors.textHi
+                                : AppColors.textMuted,
+                            fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          const SizedBox(height: 2),
+          Text(
+            emulated
+                ? '$appliedLabel fees were emulated here (not your instance\'s brokerage) — the "applied" row. '
+                    'Other venues are estimates (volume × rate); actual tiers vary.'
+                : '$appliedLabel is the fee actually charged in this backtest; other venues are '
+                    'estimates at their listed taker rate (volume × rate) — actual tiers vary.',
+            style: AppTextStyles.nano
+                .copyWith(color: AppColors.textFaint, height: 1.3),
           ),
         ],
       ),
