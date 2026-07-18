@@ -2566,6 +2566,35 @@ def watch_strategies_changefeed():
                                 _log(f"Instance strategy_id changed ({old_sid} -> {new_sid}). Exiting broker to reload...", "yellow")
                                 shutdown_requested = True
                                 return
+                            # 2026-07-18: crypto_config edits must reach the RUNNING
+                            # loop. _instance_kind_and_crypto_config caches read-once,
+                            # so without invalidation a PATCH (allocations, band,
+                            # bear_gate_ma, rebalance_drift, ...) silently did NOTHING
+                            # until restart — caught by the end-to-end paper-trade
+                            # test (5% BTC allocation never bought). The injected
+                            # config is re-read from this cache every tick, so
+                            # invalidation alone suffices — EXCEPT a strategy switch,
+                            # whose run_once spec was synthesized at boot: that needs
+                            # the same exit-to-reload as strategy_id.
+                            _old_cc = change['old_val'].get('crypto_config') or {}
+                            _new_cc = change['new_val'].get('crypto_config') or {}
+                            if _old_cc != _new_cc:
+                                if _old_cc.get('strategy') != _new_cc.get('strategy'):
+                                    _log(
+                                        f"crypto_config.strategy changed ({_old_cc.get('strategy')} -> "
+                                        f"{_new_cc.get('strategy')}). Exiting broker to reload...",
+                                        "yellow",
+                                    )
+                                    shutdown_requested = True
+                                    return
+                                try:
+                                    _INSTANCE_KIND_CACHE["loaded"] = False
+                                except Exception:
+                                    pass
+                                _log(
+                                    "crypto_config changed — cache invalidated; next tick reads the new config.",
+                                    "yellow",
+                                )
                 except Exception as e:
                     _log(f"Instance changefeed error ({e}); reconnecting...", "yellow")
                 finally:
