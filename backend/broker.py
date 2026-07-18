@@ -26,6 +26,7 @@ from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
 from robinhood_data_policy import robinhood_data_fallback_allowed
+from persistence_safety import SecretMaterialError, assert_secret_free, sanitize_snapshot
 
 try:
     from llm_telemetry import llm_call_context as telemetry_llm_call_context
@@ -2855,7 +2856,8 @@ def load_strategies_from_db():
             # via a synthesized run_once spec — no Strategies row required.
             _crypto_specs = _crypto_synthetic_specs(instance_doc)
             if _crypto_specs is not None:
-                return _crypto_specs
+                _c_specs, _c_sid, _c_schema = _crypto_specs
+                return _c_specs, _c_sid, sanitize_snapshot(_c_schema)
             strategy_id = instance_doc.get('strategy_id')
             if strategy_id is None:
                 return [], None, None
@@ -2866,11 +2868,13 @@ def load_strategies_from_db():
             strategies_array = strategy_doc.get('strategies', [])
             if not isinstance(strategies_array, list):
                 return [], None, None
-            # Snapshot of exact strategy schema for storing in BacktestResults (name + strategies at load time)
-            strategy_schema = {
+            # Snapshot of strategy schema for storing in BacktestResults (name +
+            # strategies at load time). Sanitized: credential values must never
+            # reach BacktestResults again (2026-07 plaintext-secret incident).
+            strategy_schema = sanitize_snapshot({
                 "name": strategy_doc.get("name"),
                 "strategies": list(strategies_array),
-            }
+            })
             specs = [s for s in strategies_array if isinstance(s, dict) and s.get('strategy') is not None and 'weight' in s]
             return specs, strategy_id, strategy_schema
         finally:
@@ -6721,6 +6725,7 @@ if mode == MODE_BACKTEST:
                 stub['status'] = 'error'
                 stub['progress'] = 100.0
                 stub['error'] = err_msg[:2000]
+                assert_secret_free(stub)
                 r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
                 _log("Backtest validation failed: %s" % err_msg, "red")
                 _log("BacktestResults row written with status=error, progress=100.", "yellow")
@@ -6733,6 +6738,7 @@ if mode == MODE_BACKTEST:
                 sys.stderr.flush()
                 sys.exit(1)
             # Ensure row exists: insert with conflict='replace' so it works when broker runs standalone (no engine)
+            assert_secret_free(stub)
             r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
             _log(f"Backtest result row (id={_backtest_result_id}) ensured in DB, status=running", "green")
             # Keep connection open for all progress updates (avoids repeated connect/disconnect that can cause "lost connection")
@@ -7411,7 +7417,10 @@ while not shutdown_requested:
                                 'dual_cadence_backtest_simulation': bool(_dc_bt_sim),
                             }
                             
-                            # Update existing row if we have id, else insert
+                            # Update existing row if we have id, else insert.
+                            # Fail the write closed if any secret material slipped
+                            # into the payload (schema, logs, decisions, ...).
+                            assert_secret_free(backtest_result)
                             if _backtest_result_id is not None:
                                 r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(backtest_result).run(conn)
                                 _log(f"Updated backtest results in database (id={_backtest_result_id}, status=finished, P&L={final_pnl})", "green")
