@@ -10107,11 +10107,11 @@ while not shutdown_requested:
                             # symbol is reserved for the sleeve — a strategy
                             # position in it would collide with the leg's
                             # protective exit / stop-loss accounting.
-                            _rsv_cfg = _residual_sleeve_config(cached_strategies)
+                            _rsv_cfg = _residual_sleeve_config(_cached_strategies)
                             if _rsv_cfg.get("enabled") and symbol == (_rsv_cfg.get("bear_symbol") or None):
                                 _log(f"SKIP BUY {symbol} — reserved sleeve bear symbol", "yellow")
                                 continue
-                            _rc = _regime_position_cap_hard(cached_strategies)
+                            _rc = _regime_position_cap_hard(_cached_strategies)
                             if _rc is not None:
                                 _rc_positions = getattr(portfolio_emulator, "_positions", {}) or {}
                                 _rc_held_qty = float(_rc_positions.get(symbol, 0.0) or 0.0)
