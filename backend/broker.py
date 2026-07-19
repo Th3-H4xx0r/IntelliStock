@@ -2648,6 +2648,12 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
         sym = cfg["symbol"]
         px = float((prices or {}).get(sym) or 0.0)
         if px <= 0:
+            # Loud, throttled: a priceless sleeve symbol means the sleeve is
+            # inert — that silence hid the BULL_F/BEAR_F no-op entirely.
+            if not globals().get("_sleeve_no_price_logged"):
+                globals()["_sleeve_no_price_logged"] = True
+                _log(f"[sleeve] ENABLED but no {sym} price available — sleeve "
+                     "is inert (is the symbol in the bar universe?)", "red")
             return
         nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
         if nav <= 0:
@@ -5548,6 +5554,15 @@ if mode == MODE_BACKTEST:
                 symbols_for_fetch.append('SPY')
                 _log(f"Adding SPY to bar data for {name} strategy market filter", "cyan")
             # Don't break - check all strategies
+        # P&L sweep 2026-07-19: the residual sleeve trades its own symbol —
+        # without bars it has no price and silently no-ops (BULL_F/BEAR_F ran
+        # with a completely inert sleeve because SPY was never fetched).
+        _sleeve_cfg = (s.get('config') or {})
+        if bool(_sleeve_cfg.get('residual_sleeve_enabled', False)):
+            _sleeve_sym = str(_sleeve_cfg.get('residual_sleeve_symbol', 'SPY')).upper()
+            if _sleeve_sym and _sleeve_sym not in symbols_for_fetch:
+                symbols_for_fetch.append(_sleeve_sym)
+                _log(f"Adding {_sleeve_sym} to bar data for the residual sleeve", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)
