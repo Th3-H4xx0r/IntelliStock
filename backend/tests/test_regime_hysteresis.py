@@ -58,3 +58,19 @@ def test_unknown_raw_passthrough():
     # Defensive: an unexpected label neither crashes nor corrupts state.
     out = _run(["chop", "weird", "chop"])
     assert out[0] == "chop" and out[2] == "chop"
+
+
+def test_blind_bars_freeze_state():
+    # Adversarial review MED-HIGH: blind bars must not advance the upgrade
+    # counter — 3 blind-chop bars would spuriously confirm chop and dump the
+    # bear leg on a data outage.
+    cache = {}
+    assert g._apply_regime_hysteresis(cache, "bear", {}) == "bear"
+    for _ in range(4):
+        cache["_market_regime_diag"] = {"raw": "blind->chop"}
+        assert g._apply_regime_hysteresis(cache, "chop", {}) == "bear"
+    # Data returns: genuine chop raws start counting from zero.
+    cache["_market_regime_diag"] = {"raw": "chop"}
+    assert g._apply_regime_hysteresis(cache, "chop", {}) == "bear"
+    assert g._apply_regime_hysteresis(cache, "chop", {}) == "bear"
+    assert g._apply_regime_hysteresis(cache, "chop", {}) == "chop"

@@ -6170,6 +6170,25 @@ def _detect_market_regime(
 _REGIME_RANK = {"crash": 0, "bear": 1, "chop": 2, "bull": 3}
 
 
+def _sleeve_symbols(config: dict) -> set:
+    """Symbols managed by the broker-level residual sleeve (bull SPY leg /
+    inverse bear leg). The 2026-07-19 adversarial review confirmed the
+    strategy's monitor/kill machinery and the broker sleeve were selling
+    what the other immediately rebought (kill<->deploy churn, FLC cutting
+    the hedge on routine bounces) — sleeve positions are therefore
+    invisible to strategy scoring, monitoring, and the kill loop."""
+    try:
+        if not bool(config.get("residual_sleeve_enabled", False)):
+            return set()
+        syms = {str(config.get("residual_sleeve_symbol", "SPY") or "SPY").upper()}
+        bear = str(config.get("residual_sleeve_bear_symbol", "") or "").upper()
+        if bear:
+            syms.add(bear)
+        return syms
+    except Exception:
+        return set()
+
+
 def _regime_position_cap(config: dict, regime: str) -> int:
     """Z4.1 per-regime max_positions cap (mirrors the capacity-gate table)."""
     _max_positions = int(config.get("max_positions", 15) or 15)
@@ -6229,6 +6248,17 @@ def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
             return st.get("cur") or "chop"
         if not isinstance(strategy_cache, dict):
             return raw
+        # 2026-07-19 adversarial review MED-HIGH: BLIND detector bars (data
+        # outage → fallback raw) must not advance the upgrade counter — 3
+        # consecutive blind bars would otherwise "confirm" chop and spuriously
+        # liquidate the bear leg mid-crash on pipeline health alone. A blind
+        # bar freezes the current confirmed regime (state, incl. pending
+        # counters, untouched); cold start (no state yet) still seeds below.
+        _hyst_diag = strategy_cache.get("_market_regime_diag") or {}
+        _hyst_blind = str(_hyst_diag.get("raw") or "").startswith("blind")
+        _hyst_st = strategy_cache.get("_regime_hyst")
+        if _hyst_blind and isinstance(_hyst_st, dict) and _hyst_st.get("cur") in _REGIME_RANK:
+            return _hyst_st["cur"]
         k = max(1, int(config.get("regime_upgrade_confirm_bars", 3) or 3))
         st = strategy_cache.get("_regime_hyst")
         if not isinstance(st, dict) or st.get("cur") not in _REGIME_RANK:
@@ -17855,7 +17885,15 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
                 _held_positions = getattr(portfolio_emulator, "_positions", None) or {}
             _existing_set = set(symbols_list or [])
             _held_added: list[str] = []
+            # 2026-07-19: sleeve legs are broker-managed cash parking — they
+            # must NOT enter the scoring universe or the monitor's stop-loss
+            # machinery would sell the hedge on routine bounces (adversarial
+            # review HIGH: FLC at -7% fires on a ~2.3% QQQ bounce vs SQQQ,
+            # then the sleeve rebuys same bar — serial loss crystallization).
+            _z22_sleeve_syms = _sleeve_symbols(config)
             for _sym, _qty in _held_positions.items():
+                if _sym in _z22_sleeve_syms:
+                    continue
                 if _qty and _qty > 0 and _sym and _sym not in _existing_set:
                     _existing_set.add(_sym)
                     _held_added.append(_sym)
@@ -20283,6 +20321,13 @@ def _apply_portfolio_drawdown_halt(
                 _held_syms = list((portfolio_emulator.get_positions() or {}).keys())
         except Exception:
             _held_syms = []
+        # 2026-07-19 adversarial review CRITICAL: the kill tier must NOT
+        # liquidate the sleeve legs — in a crash the inverse leg is the
+        # position generating gains, and selling it triggered an infinite
+        # kill<->deploy churn loop (sleeve re-parks at cycle end, dd stays
+        # >= kill, repeat every bar).
+        _kill_sleeve_syms = _sleeve_symbols(config)
+        _held_syms = [s for s in _held_syms if s not in _kill_sleeve_syms]
         _killed = []
         for sym in _held_syms:
             sc = scores.get(sym) if isinstance(scores.get(sym), dict) else {}
