@@ -9078,6 +9078,20 @@ while not shutdown_requested:
                     nexus_discovered_syms.add(d)
                 for s in (meta.get("_nexus_sell_enforcement") or []):
                     nexus_sell_enforcement.add(s)
+            # 2026-07-19 BULL_F7d forensics: trend-reversal sell enforcement
+            # was flattening the sleeve's SQQQ leg every bar it was parked
+            # ("overriding SQQQ from 0 to -1") — the sleeve then re-parked at
+            # cycle end, churning realized losses. Sleeve legs are broker-
+            # managed; enforcement never applies to them.
+            _enf_sleeve_cfg = _residual_sleeve_config(_cached_strategies)
+            if _enf_sleeve_cfg.get("enabled"):
+                _enf_sleeve_syms = {_enf_sleeve_cfg.get("symbol") or "",
+                                    _enf_sleeve_cfg.get("bear_symbol") or ""} - {""}
+                _enf_dropped = nexus_sell_enforcement & _enf_sleeve_syms
+                if _enf_dropped:
+                    _log(f"Sell enforcement: sleeve leg(s) exempted: "
+                         f"{', '.join(sorted(_enf_dropped))}", "yellow")
+                    nexus_sell_enforcement -= _enf_dropped
                 for sym, hint in (meta.get("_nexus_position_sizes") or {}).items():
                     nexus_position_sizes[sym] = hint
                 for sym in (meta.get("_nexus_executable_buys") or []):

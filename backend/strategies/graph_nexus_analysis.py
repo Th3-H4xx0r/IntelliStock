@@ -23679,8 +23679,13 @@ class GraphNexusAnalysis:
         if portfolio_emulator is not None:
             _open_pos = portfolio_emulator._positions or {}
             _safety_syms = set(symbols_list)
+            # 2026-07-19: sleeve legs stay out of the universe here too —
+            # this net was re-adding SQQQ past the Z2.2 exclusion, feeding
+            # it to the monitor/LLM/rotation machinery (BULL_F7d forensics).
+            _safety_sleeve = _sleeve_symbols(config)
             _safety_added = [t for t, qty in _open_pos.items()
-                             if float(qty or 0) > 0 and t not in _safety_syms]
+                             if float(qty or 0) > 0 and t not in _safety_syms
+                             and t not in _safety_sleeve]
             for _st in _safety_added:
                 symbols_list.append(_st)
             if _safety_added:
