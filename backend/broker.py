@@ -2583,10 +2583,23 @@ def _residual_sleeve_config(cached_strategies):
     return {"enabled": False}
 
 
+def _sleeve_market_regime():
+    """Current V31 regime from the nexus strategy cache (bull/chop/bear/crash;
+    '' when unavailable — treated as NOT bull, conservative)."""
+    try:
+        cache = (globals().get("_strategy_cache") or {}).get(
+            "graph_nexus_analysis") or {}
+        return str(cache.get("_market_regime") or "").strip().lower()
+    except Exception:
+        return ""
+
+
 def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_strategies):
-    """Cycle start: free the sleeve for active picks — but only when cash is
-    actually low (hysteresis keeps the sleeve from round-tripping every bar).
-    The sleeve is always subordinate to the strategy's own signals."""
+    """Cycle start: free the sleeve for active picks when cash is low, and
+    ALWAYS liquidate it when the regime turns bear/crash (BEAR_F guardrail
+    failure 2026-07-19: an exit-less sleeve rode SPY down −8%, flipping the
+    bear window from +0.87% to −7.77%). The trend-conditioned regime gate —
+    not a drawdown gate — is what the measured counterfactuals prescribe."""
     try:
         cfg = _residual_sleeve_config(cached_strategies)
         if not cfg["enabled"] or portfolio_emulator is None:
@@ -2599,14 +2612,17 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
         if px <= 0:
             _log(f"[sleeve] no {sym} price this bar — holding sleeve", "yellow")
             return
+        regime = _sleeve_market_regime()
         nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
         cash = float(portfolio_emulator.get_cash() or 0.0)
-        if nav <= 0 or cash >= cfg["release_cash_pct"] * nav:
+        protective = regime in ("bear", "crash")
+        if not protective and (nav <= 0 or cash >= cfg["release_cash_pct"] * nav):
             return  # enough cash for active buys; keep the sleeve invested
         ok = portfolio_emulator.execute_signal(
             sym, -1, px, timestamp=current_time, sell_fraction=1.0)
-        _log(f"[sleeve] released {qty:.4f} {sym} @ {px:.2f} for active "
-             f"allocation (cash was {cash / nav * 100.0:.1f}% of NAV, ok={ok})",
+        why = f"regime={regime} protective exit" if protective else (
+            f"cash was {cash / nav * 100.0:.1f}% of NAV")
+        _log(f"[sleeve] released {qty:.4f} {sym} @ {px:.2f} ({why}, ok={ok})",
              "cyan")
     except Exception as _sleeve_exc:
         try:
@@ -2622,6 +2638,12 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
     try:
         cfg = _residual_sleeve_config(cached_strategies)
         if not cfg["enabled"] or portfolio_emulator is None:
+            return
+        # BEAR_F guardrail fix (2026-07-19): the sleeve is a BULL-capture
+        # tool. Deploy only in a confirmed bull regime; stay in cash through
+        # bear/crash/chop and cold starts (regime unknown => not bull).
+        regime = _sleeve_market_regime()
+        if regime != "bull":
             return
         sym = cfg["symbol"]
         px = float((prices or {}).get(sym) or 0.0)
