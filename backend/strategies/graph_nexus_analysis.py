@@ -17309,7 +17309,18 @@ def _evaluate_position_risk(
                     # BEAR had 0 fires — a cut this early is noise, not
                     # information. A position younger than min-hold is spared;
                     # the trailing stop and drawdown halt still protect it.
+                    # BEAR_F lesson (-7.77%): suppression is BULL/CHOP-only —
+                    # in a bear/crash regime the cut must fire immediately
+                    # (the baseline bear had 0 fires unsuppressed, so this is
+                    # strictly behavior-preserving there).
+                    _flc_regime = (
+                        str((strategy_cache or {}).get("_market_regime") or "")
+                        if isinstance(strategy_cache, dict) else ""
+                    ).strip().lower()
+                    _flc_suppression_allowed = _flc_regime not in ("bear", "crash")
                     _flc_min_hold_days = int(config.get("fast_loser_cut_min_hold_days", 0) or 0)
+                    if not _flc_suppression_allowed:
+                        _flc_min_hold_days = 0
                     _flc_min_hold_ok = True
                     if _flc_min_hold_days > 0:
                         try:
@@ -17331,6 +17342,8 @@ def _evaluate_position_risk(
                         except Exception:
                             _flc_min_hold_ok = True
                     _flc_runup_block_pct = float(config.get("fast_loser_cut_recent_runup_block_pct", 0.0) or 0.0)
+                    if not _flc_suppression_allowed:
+                        _flc_runup_block_pct = 0.0  # bear/crash: never spare a -10% loss
                     _flc_runup_lookback = int(config.get("fast_loser_cut_recent_runup_lookback_bars", 20) or 20)
                     _flc_block_runup, _flc_runup_pct = _recent_runup_protect(
                         sym, price_history, _flc_runup_block_pct, _flc_runup_lookback,
