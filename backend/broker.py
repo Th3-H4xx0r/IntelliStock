@@ -2589,6 +2589,38 @@ def _residual_sleeve_config(cached_strategies):
 _RESIDUAL_SLEEVE_STATE: dict = {"last_park_ts": None}
 
 
+def _regime_position_cap_hard(cached_strategies):
+    """(regime, cap) for the airtight execution-time regime position cap, or
+    None when disabled, no nexus spec, or no regime stamped yet.
+
+    BEAR_F6 (2026-07-19) proved the strategy-side Z4.1 capacity gate is
+    porous: the backfill-queue drain, momentum-watchlist and direct-reserved
+    lanes kept buying with the book at 9-11 names against a bear cap of 2.
+    Every lane's buys pass through the broker execution gate, so the cap is
+    re-enforced there via this helper. Mirrors Z4.1's cap table defaults.
+    """
+    try:
+        for spec in (cached_strategies or []):
+            cfg = (spec or {}).get("config") or {}
+            if str((spec or {}).get("strategy") or "") == "graph_nexus_analysis":
+                if not bool(cfg.get("regime_position_cap_hard_enforce", True)):
+                    return None
+                regime = _sleeve_market_regime()
+                if regime not in ("bull", "chop", "bear", "crash"):
+                    return None  # no regime stamped yet — legacy behavior
+                mx = int(cfg.get("max_positions", 15) or 15)
+                caps = {
+                    "bull": int(cfg.get("max_positions_bull", mx) or mx),
+                    "chop": int(cfg.get("max_positions_chop", min(mx, 12)) or 12),
+                    "bear": int(cfg.get("max_positions_bear", min(mx, 8)) or 8),
+                    "crash": int(cfg.get("max_positions_crash", 0) or 0),
+                }
+                return regime, caps[regime]
+        return None
+    except Exception:
+        return None
+
+
 def _sleeve_market_regime():
     """Current V31 regime from the nexus strategy cache (bull/chop/bear/crash;
     '' when unavailable — treated as NOT bull, conservative)."""
@@ -9939,6 +9971,40 @@ while not shutdown_requested:
                                 })
                                 _log(f"Gate skips reported back: {symbol} ({_skip_code})", "magenta")
                             continue
+                        # 2026-07-19 regime-safety: airtight per-regime position
+                        # cap at the ONE choke point every buy lane passes
+                        # through (backfill queue, momentum watchlist,
+                        # direct-reserved, rotations, initial buys). A buy for
+                        # a symbol NOT already held is refused whenever the
+                        # book already fills the regime cap. Held-symbol adds
+                        # (winner adds, partial fills) are exempt.
+                        if decision == 1:
+                            _rc = _regime_position_cap_hard(cached_strategies)
+                            if _rc is not None:
+                                _rc_positions = getattr(portfolio_emulator, "_positions", {}) or {}
+                                _rc_held_qty = float(_rc_positions.get(symbol, 0.0) or 0.0)
+                                _rc_open = sum(1 for _q in _rc_positions.values() if float(_q or 0.0) > 0.0)
+                                if _rc_held_qty <= 0.0 and _rc_open >= _rc[1]:
+                                    _log(
+                                        f"REGIME CAP HARD BLOCK: {symbol} skipped — "
+                                        f"held={_rc_open} >= cap={_rc[1]} (regime={_rc[0]})",
+                                        "yellow",
+                                    )
+                                    _nexus_cache = _strategy_cache.get("graph_nexus_analysis")
+                                    if _nexus_cache is not None:
+                                        _nexus_cache.setdefault("_broker_skipped_buys", []).append({
+                                            "ticker": symbol,
+                                            "allocated": round(float(cash_per_trade or 0.0), 2),
+                                            "reason": "regime_cap",
+                                            "price": round(float(price), 4),
+                                            "raw_net_score": round(float(nexus_hint.get("raw_net_score", 0.0) or 0.0), 4),
+                                            "signal_source": str(nexus_hint.get("signal_source") or ""),
+                                            "is_watchlist_member": bool(nexus_hint.get("is_watchlist_member")),
+                                            "is_watchlist_priority": bool(nexus_hint.get("is_watchlist_priority")),
+                                            "is_propagation_expansion": bool(nexus_hint.get("is_propagation_expansion")),
+                                        })
+                                        _log(f"Gate skips reported back: {symbol} (regime_cap)", "magenta")
+                                    continue
                         cash_to_use = cash_per_trade
                         if decision == 1:
                             _cash_floor_pct = float((nexus_position_sizes or {}).get("_cash_reserve_floor_pct", 0.10))

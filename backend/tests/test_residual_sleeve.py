@@ -130,3 +130,39 @@ def test_no_deploy_outside_bull():
         emu = _Emu(cash=1800.0, nav=6000.0)
         b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 3, 2, 15), SPEC)
         assert emu.signals == [], f"sleeve must not deploy in regime={regime!r}"
+
+
+# ── 2026-07-19: airtight regime position cap helper (BEAR_F6 fix) ──
+_WANTED2 = {"_regime_position_cap_hard"}
+for _node in _tree.body:
+    if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED2:
+        _mod = ast.Module(body=[_node], type_ignores=[])
+        exec(compile(_mod, "broker.py", "exec"), _ns)
+assert "_regime_position_cap_hard" in _ns
+b._regime_position_cap_hard = _ns["_regime_position_cap_hard"]
+
+CAP_SPEC = [{"strategy": "graph_nexus_analysis", "config": {
+    "max_positions": 14, "max_positions_bull": 14,
+    "max_positions_chop": 8, "max_positions_bear": 2,
+}}]
+
+
+def test_cap_hard_returns_regime_cap():
+    _set_regime("bear")
+    assert b._regime_position_cap_hard(CAP_SPEC) == ("bear", 2)
+    _set_regime("chop")
+    assert b._regime_position_cap_hard(CAP_SPEC) == ("chop", 8)
+    _set_regime("bull")
+    assert b._regime_position_cap_hard(CAP_SPEC) == ("bull", 14)
+    _set_regime("crash")
+    assert b._regime_position_cap_hard(CAP_SPEC) == ("crash", 0)
+
+
+def test_cap_hard_none_when_no_regime_or_disabled():
+    _set_regime("")
+    assert b._regime_position_cap_hard(CAP_SPEC) is None
+    _set_regime("bear")
+    off = [{"strategy": "graph_nexus_analysis",
+            "config": {"regime_position_cap_hard_enforce": False}}]
+    assert b._regime_position_cap_hard(off) is None
+    assert b._regime_position_cap_hard([{"strategy": "other", "config": {}}]) is None
