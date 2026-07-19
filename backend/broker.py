@@ -2594,6 +2594,41 @@ def _sleeve_market_regime():
         return ""
 
 
+def _residual_sleeve_prepare(data, prices, current_time, cached_strategies,
+                             key=None, secret=None):
+    """Make the sleeve symbol priceable this bar. Pure-discovery backtests
+    skip the bulk symbol fetch, so the sleeve symbol must ride the SAME
+    incremental loader discovered symbols use; live mode falls back to a
+    direct price fetch. Without this the sleeve silently no-ops (BEAR_F2:
+    '[sleeve] ENABLED but no SPY price')."""
+    try:
+        cfg = _residual_sleeve_config(cached_strategies)
+        if not cfg["enabled"]:
+            return
+        sym = cfg["symbol"]
+        if (prices or {}).get(sym):
+            return
+        if mode == MODE_BACKTEST and isinstance(data, dict):
+            if sym not in data:
+                _ensure_backtest_history_for_symbols(
+                    data, [sym], key=key, secret=secret)
+            if data.get(sym):
+                p = (_get_prices_at_time(data, [sym], current_time) or {}).get(sym)
+                if p and float(p) > 0 and isinstance(prices, dict):
+                    prices[sym] = float(p)
+        elif mode == MODE_LIVE and isinstance(prices, dict):
+            p = _fetch_price_for_symbol(
+                sym, current_time, key=key, secret=secret, feed=data_feed,
+                allow_non_alpaca_fallback=True)
+            if p and float(p) > 0:
+                prices[sym] = float(p)
+    except Exception as _sp_exc:
+        try:
+            _log(f"[sleeve] prepare skipped: {_sp_exc}", "yellow")
+        except Exception:
+            pass
+
+
 def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_strategies):
     """Cycle start: free the sleeve for active picks when cash is low, and
     ALWAYS liquidate it when the regime turns bear/crash (BEAR_F guardrail
@@ -9583,6 +9618,9 @@ while not shutdown_requested:
             # Residual sleeve (P&L sweep 2026-07-19): free sleeve capital for
             # active picks BEFORE the execution pass when cash runs low.
             # Inert unless residual_sleeve_enabled=true in the nexus config.
+            _residual_sleeve_prepare(
+                data, prices, current_time, _cached_strategies,
+                key=key, secret=secret)
             _residual_sleeve_release(
                 portfolio_emulator, prices, current_time, _cached_strategies)
             for symbol in _exec_order:
