@@ -17303,6 +17303,33 @@ def _evaluate_position_risk(
                         "magenta",
                     )
                 elif fresh_score >= 0 and _unrealized_pct <= _fast_cut_pct:
+                    # P&L sweep 2026-07-19 (config-gated, default 0=off):
+                    # day-one whipsaw guard. NEUTRAL lost $415 to 49 fast cuts
+                    # (three same-day cuts were the entire window loss) while
+                    # BEAR had 0 fires — a cut this early is noise, not
+                    # information. A position younger than min-hold is spared;
+                    # the trailing stop and drawdown halt still protect it.
+                    _flc_min_hold_days = int(config.get("fast_loser_cut_min_hold_days", 0) or 0)
+                    _flc_min_hold_ok = True
+                    if _flc_min_hold_days > 0:
+                        try:
+                            _flc_entry = entry_buy_ts
+                            if _flc_entry is not None and date_key:
+                                if hasattr(_flc_entry, "date"):
+                                    _flc_entry_date = _flc_entry.date()
+                                else:
+                                    _flc_entry_date = _dt.date.fromisoformat(str(_flc_entry)[:10])
+                                _flc_held = (_dt.date.fromisoformat(date_key[:10])
+                                             - _flc_entry_date).days
+                                if 0 <= _flc_held < _flc_min_hold_days:
+                                    _flc_min_hold_ok = False
+                                    _log(
+                                        f"FLC min-hold guard: {sym} held {_flc_held}d < "
+                                        f"{_flc_min_hold_days}d — not cutting day-one noise",
+                                        "yellow",
+                                    )
+                        except Exception:
+                            _flc_min_hold_ok = True
                     _flc_runup_block_pct = float(config.get("fast_loser_cut_recent_runup_block_pct", 0.0) or 0.0)
                     _flc_runup_lookback = int(config.get("fast_loser_cut_recent_runup_lookback_bars", 20) or 20)
                     _flc_block_runup, _flc_runup_pct = _recent_runup_protect(
@@ -17316,7 +17343,7 @@ def _evaluate_position_risk(
                             f"(volatility on hot entry)",
                             "yellow",
                         )
-                    if _flc_block_runup:
+                    if _flc_block_runup or not _flc_min_hold_ok:
                         pass  # fall through, no cut
                     else:
                         fresh_score = -1
@@ -19704,6 +19731,32 @@ def _apply_quality_filter(
         if portfolio_emulator is not None:
             _pos_qty = float((portfolio_emulator._positions or {}).get(sym, 0))
             if _pos_qty > 0:
+                continue
+
+        # P&L sweep 2026-07-19 (config-gated, default 0=off): buy-side
+        # price-extension gate. The 3-regime forensics showed every large
+        # whipsaw loss was a momentum name bought at a local top (BULL: TXG
+        # entered +34% above its base, -13.5% realized on a +14.5% stock;
+        # NEUTRAL: AVGO/OUST/LRCX same-day cuts = -$269 ≈ the whole window
+        # loss). Blocks NEW entries whose recent close range ran up more
+        # than the threshold. ETFs were already exempted above.
+        _ext_block_pct = float(config.get("entry_extension_block_pct", 0.0) or 0.0)
+        if _ext_block_pct > 0:
+            _ext_lookback = int(config.get("entry_extension_lookback_bars", 20) or 20)
+            _ext_hit, _ext_runup = _recent_runup_protect(
+                sym, price_history, _ext_block_pct, _ext_lookback)
+            if _ext_hit:
+                sc["score"] = 0
+                sc["action_intent"] = "hold"
+                orig_reason = str(sc.get("reason") or "")
+                sc["reason"] = (
+                    f"Entry extension gate: recent {_ext_lookback}-bar range ran "
+                    f"+{_ext_runup:.1f}% > {_ext_block_pct:.0f}% — not chasing a "
+                    f"local top | {orig_reason}")[:1500]
+                filtered_count += 1
+                _log(
+                    f"Entry extension gate: {sym} recent runup +{_ext_runup:.1f}% > "
+                    f"{_ext_block_pct:.0f}% — buy blocked", "yellow")
                 continue
 
         quality_meta = _extract_quality_metadata(

@@ -2563,6 +2563,88 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
     return prices
 
 
+def _residual_sleeve_config(cached_strategies):
+    """P&L sweep 2026-07-19: config for the residual SPY sleeve (idle cash
+    parks in a broad ETF instead of dragging at 0% — the 3-regime forensics
+    measured 28% avg idle cash costing −3.8pp in a +13.6% SPY window).
+    Config-gated on the nexus strategy spec; DEFAULT OFF (legacy behavior
+    byte-identical when disabled)."""
+    for spec in (cached_strategies or []):
+        cfg = (spec or {}).get("config") or {}
+        if str((spec or {}).get("strategy") or "") == "graph_nexus_analysis" \
+                or "residual_sleeve_enabled" in cfg:
+            return {
+                "enabled": bool(cfg.get("residual_sleeve_enabled", False)),
+                "symbol": str(cfg.get("residual_sleeve_symbol", "SPY")).upper(),
+                "buffer_pct": float(cfg.get("residual_sleeve_buffer_pct", 0.02) or 0.02),
+                "min_deploy_pct": float(cfg.get("residual_sleeve_min_deploy_pct", 0.05) or 0.05),
+                "release_cash_pct": float(cfg.get("residual_sleeve_release_cash_pct", 0.15) or 0.15),
+            }
+    return {"enabled": False}
+
+
+def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_strategies):
+    """Cycle start: free the sleeve for active picks — but only when cash is
+    actually low (hysteresis keeps the sleeve from round-tripping every bar).
+    The sleeve is always subordinate to the strategy's own signals."""
+    try:
+        cfg = _residual_sleeve_config(cached_strategies)
+        if not cfg["enabled"] or portfolio_emulator is None:
+            return
+        sym = cfg["symbol"]
+        qty = float((portfolio_emulator.get_positions() or {}).get(sym, 0.0) or 0.0)
+        if qty <= 0:
+            return
+        px = float((prices or {}).get(sym) or 0.0)
+        if px <= 0:
+            _log(f"[sleeve] no {sym} price this bar — holding sleeve", "yellow")
+            return
+        nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
+        cash = float(portfolio_emulator.get_cash() or 0.0)
+        if nav <= 0 or cash >= cfg["release_cash_pct"] * nav:
+            return  # enough cash for active buys; keep the sleeve invested
+        ok = portfolio_emulator.execute_signal(
+            sym, -1, px, timestamp=current_time, sell_fraction=1.0)
+        _log(f"[sleeve] released {qty:.4f} {sym} @ {px:.2f} for active "
+             f"allocation (cash was {cash / nav * 100.0:.1f}% of NAV, ok={ok})",
+             "cyan")
+    except Exception as _sleeve_exc:
+        try:
+            _log(f"[sleeve] release skipped: {_sleeve_exc}", "yellow")
+        except Exception:
+            pass
+
+
+def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_strategies):
+    """Cycle end: park idle cash above the operational buffer into the sleeve
+    symbol. Delta-buy only; deploys only when idle exceeds the hysteresis
+    threshold so a post-release remainder does not immediately round-trip."""
+    try:
+        cfg = _residual_sleeve_config(cached_strategies)
+        if not cfg["enabled"] or portfolio_emulator is None:
+            return
+        sym = cfg["symbol"]
+        px = float((prices or {}).get(sym) or 0.0)
+        if px <= 0:
+            return
+        nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
+        if nav <= 0:
+            return
+        cash = float(portfolio_emulator.get_cash() or 0.0)
+        idle = cash - cfg["buffer_pct"] * nav
+        if idle < max(50.0, cfg["min_deploy_pct"] * nav):
+            return
+        ok = portfolio_emulator.execute_signal(
+            sym, 1, px, timestamp=current_time, cash_per_trade=idle)
+        _log(f"[sleeve] parked ${idle:.2f} idle cash in {sym} @ {px:.2f} "
+             f"(cash was {cash / nav * 100.0:.1f}% of NAV, ok={ok})", "cyan")
+    except Exception as _sleeve_exc:
+        try:
+            _log(f"[sleeve] deploy skipped: {_sleeve_exc}", "yellow")
+        except Exception:
+            pass
+
+
 def watch_strategies_changefeed():
     """Watch Instances table for strategy_id changes and Strategies table for strategy config changes. Exit broker when changes detected."""
     global shutdown_requested, instance_id
@@ -9461,6 +9543,11 @@ while not shutdown_requested:
                 except Exception:
                     _scp_enabled = True
 
+            # Residual sleeve (P&L sweep 2026-07-19): free sleeve capital for
+            # active picks BEFORE the execution pass when cash runs low.
+            # Inert unless residual_sleeve_enabled=true in the nexus config.
+            _residual_sleeve_release(
+                portfolio_emulator, prices, current_time, _cached_strategies)
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
                 normalized = None  # reset per-symbol to avoid stale values from previous iteration
@@ -10271,6 +10358,12 @@ while not shutdown_requested:
                             portfolio_emulator, prices, current_time,
                             data=data, symbols=symbols, key=key, secret=secret,
                         )
+                        # Residual sleeve (P&L sweep 2026-07-19): park idle
+                        # cash above the buffer at cycle end. Inert unless
+                        # residual_sleeve_enabled=true.
+                        _residual_sleeve_deploy(
+                            portfolio_emulator, prices, current_time,
+                            _cached_strategies)
                     if not _skip_snapshot:
                         portfolio_emulator.save_portfolio_snapshot(prices, timestamp=current_time)
     
