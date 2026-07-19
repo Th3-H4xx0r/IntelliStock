@@ -6026,77 +6026,196 @@ def _enforce_sector_portfolio_cap(
 # else QQQ as a tech-heavy proxy, else returns "bull" (safe default).
 # Result is stored in strategy_cache["_market_regime"] for downstream consumers
 # (notably the grace period escape hatch C in _in_initial_grace_period).
+def _point_in_time_closes(bars, date_str: str) -> list[float]:
+    """Valid closes from a bar list, filtered to bars dated <= date_str."""
+    closes: list[float] = []
+    if not isinstance(bars, list):
+        return closes
+    for b in bars:
+        if not isinstance(b, dict):
+            continue
+        try:
+            ts_str = str(b.get("t", b.get("date", "")) or "")[:10]
+        except Exception:
+            continue
+        if not ts_str or ts_str > date_str:
+            continue
+        try:
+            c_val = float(b.get("c", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if c_val > 0:
+            closes.append(c_val)
+    return closes
+
+
+def _daily_closes_from_intraday(bars, date_str: str) -> list[float]:
+    """Resample intraday bars (e.g. the engine's 1h backtest universe) to
+    one close per day, point-in-time filtered. Bars are assumed
+    chronological (the engine loads them that way)."""
+    daily: dict[str, float] = {}
+    if not isinstance(bars, list):
+        return []
+    for b in bars:
+        if not isinstance(b, dict):
+            continue
+        try:
+            ts_str = str(b.get("t", b.get("date", "")) or "")[:10]
+            c_val = float(b.get("c", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not ts_str or ts_str > date_str or c_val <= 0:
+            continue
+        daily[ts_str] = c_val  # last bar of the day wins
+    return [daily[d] for d in sorted(daily)]
+
+
 def _detect_market_regime(
     strategy_cache: dict | None,
     config: dict,
     date_key: str,
+    data=None,
 ) -> str:
-    # Codex V31 review HIGH-2: malformed-cache hardening. Skip non-dict bars,
-    # guard float parsing, fall back to "bull" instead of throwing. This helper
-    # is called near the top of run_once so a single bad cache entry must NOT
-    # abort the bar.
+    """V31 Section 4.5 bull/bear/chop detector.
+
+    2026-07-19 regime-safety rework (see docs/superpowers/specs/
+    2026-07-19-bear-neutral-regime-safety-design.md): the old version picked
+    the first proxy with ANY bars and silently returned "bull" whenever the
+    overlay cache was blind — which it was for every pre-May-2026 backtest
+    window (poisoned per-symbol cache rows). Now:
+    - the proxy is chosen by USABLE point-in-time closes (>=21), so a row
+      whose bars all post-date the sim clock cannot shadow a healthy one;
+    - when the overlay cache is blind, the engine-supplied `data` bar
+      universe (SPY/QQQ/VOO, intraday resampled to daily) is consulted;
+    - with no usable input at all the detector fails safe to
+      `regime_blind_fallback` (default "chop" — neutral capacity) and logs
+      LOUDLY, once per sim day. Fail-open bull is opt-in only.
+    Diagnostics land in strategy_cache["_market_regime_diag"].
+    """
+    diag = {"proxy": None, "closes": 0, "ret20": None, "raw": None}
     try:
         if not bool(config.get("regime_detector_enabled", True)):
             return "bull"
         if not isinstance(strategy_cache, dict):
             return "bull"
+        strategy_cache["_market_regime_diag"] = diag
+        date_str = str(date_key or "")[:10]
         bars_cache = strategy_cache.get("_overlay_bars_raw") or {}
         if not isinstance(bars_cache, dict):
-            return "bull"
-        proxy_ticker = None
-        for candidate in ("SPY", "QQQ", "VOO"):
-            cand_bars = bars_cache.get(candidate)
-            if isinstance(cand_bars, list) and cand_bars:
-                proxy_ticker = candidate
-                break
-        if not proxy_ticker:
-            return "bull"
-        bars = bars_cache.get(proxy_ticker) or []
-        if not isinstance(bars, list):
-            return "bull"
-        date_str = str(date_key or "")[:10]
-        filtered: list[dict] = []
-        for b in bars:
-            if not isinstance(b, dict):
-                continue
-            ts = b.get("t", b.get("date", ""))
-            try:
-                ts_str = str(ts or "")[:10]
-            except Exception:
-                continue
-            if ts_str <= date_str:
-                filtered.append(b)
+            bars_cache = {}
+
         closes: list[float] = []
-        for b in filtered:
-            c_raw = b.get("c", 0)
-            try:
-                c_val = float(c_raw) if c_raw is not None else 0.0
-            except (TypeError, ValueError):
-                continue
-            if c_val > 0:
-                closes.append(c_val)
-        if len(closes) < 21:
-            return "bull"
+        # 1) Overlay cache proxies, by usable point-in-time closes.
+        for candidate in ("SPY", "QQQ", "VOO"):
+            cand = _point_in_time_closes(bars_cache.get(candidate), date_str)
+            if len(cand) >= 21:
+                closes = cand
+                diag["proxy"] = candidate
+                break
+        # 2) Engine bar universe fallback (backtests always carry their own
+        #    bars; a broken external fetch must not blind the detector).
+        if not closes and isinstance(data, dict):
+            for candidate in ("SPY", "QQQ", "VOO"):
+                entry = data.get(candidate)
+                cand_bars = entry.get("bars") if isinstance(entry, dict) else entry
+                cand = _daily_closes_from_intraday(cand_bars, date_str)
+                if len(cand) >= 21:
+                    closes = cand
+                    diag["proxy"] = f"{candidate}(data)"
+                    break
+        if not closes:
+            fb = str(config.get("regime_blind_fallback", "chop") or "chop").lower()
+            if fb not in ("bull", "chop", "bear"):
+                fb = "chop"
+            diag["raw"] = f"blind->{fb}"
+            _warn_key = f"_regime_blind_warned_{date_str}"
+            if not strategy_cache.get(_warn_key):
+                strategy_cache[_warn_key] = True
+                _log(
+                    "V31 regime detector BLIND: no proxy (SPY/QQQV/VOO) has >=21 "
+                    f"point-in-time closes for {date_str} — failing safe to "
+                    f"'{fb}'. Check GraphNexusOverlayBarsCache coverage.",
+                    "red",
+                )
+            return fb
+
+        diag["closes"] = len(closes)
         current = closes[-1]
         ret_20d = ((current - closes[-21]) / closes[-21]) * 100.0 if closes[-21] > 0 else 0.0
+        diag["ret20"] = round(ret_20d, 2)
         ma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else current
         ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else current
         bear_dd_pct = float(config.get("regime_bear_spy_drawdown_pct", 5.0) or 5.0)
         # Bear: 20d return < -bear_dd_pct OR current < 200-day MA
         if ret_20d < -bear_dd_pct:
+            diag["raw"] = "bear"
             return "bear"
         if len(closes) >= 200 and current < ma_200:
+            diag["raw"] = "bear"
             return "bear"
         # Bull: 20d return > 0 AND current > 50-day MA
         if ret_20d > 0 and (len(closes) < 50 or current > ma_50):
+            diag["raw"] = "bull"
             return "bull"
+        diag["raw"] = "chop"
         return "chop"
     except Exception as e:
         try:
             _log(f"V31 regime detector tolerated unexpected error: {e}", "yellow")
         except Exception:
             pass
-        return "bull"
+        return "chop"
+
+
+_REGIME_RANK = {"crash": 0, "bear": 1, "chop": 2, "bull": 3}
+
+
+def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
+    """Asymmetric regime smoothing (2026-07-19 regime-safety spec, Phase 2).
+
+    Downgrades apply IMMEDIATELY (fast to de-risk); upgrades require
+    `regime_upgrade_confirm_bars` (default 3) consecutive raw signals (slow
+    to re-risk). The first-ever call seeds directly: the detector computes
+    from full history, so bar 1 already reflects the true regime and must
+    not pay a dwell penalty. State lives in strategy_cache["_regime_hyst"].
+    """
+    try:
+        raw = str(raw or "").strip().lower()
+        if raw not in _REGIME_RANK:
+            st = (strategy_cache or {}).get("_regime_hyst") or {}
+            return st.get("cur") or "chop"
+        if not isinstance(strategy_cache, dict):
+            return raw
+        k = max(1, int(config.get("regime_upgrade_confirm_bars", 3) or 3))
+        st = strategy_cache.get("_regime_hyst")
+        if not isinstance(st, dict) or st.get("cur") not in _REGIME_RANK:
+            strategy_cache["_regime_hyst"] = {"cur": raw, "pend": None, "n": 0}
+            return raw
+        cur = st["cur"]
+        if raw == cur:
+            st["pend"] = None
+            st["n"] = 0
+            return cur
+        if _REGIME_RANK[raw] < _REGIME_RANK[cur]:
+            # Downgrade: apply now.
+            st["cur"] = raw
+            st["pend"] = None
+            st["n"] = 0
+            return raw
+        # Upgrade: confirm over k consecutive bars.
+        if st.get("pend") == raw:
+            st["n"] = int(st.get("n", 0)) + 1
+        else:
+            st["pend"] = raw
+            st["n"] = 1
+        if st["n"] >= k:
+            st["cur"] = raw
+            st["pend"] = None
+            st["n"] = 0
+            return raw
+        return cur
+    except Exception:
+        return raw if raw in _REGIME_RANK else "chop"
 
 
 def _nexus_regime_classify(
@@ -22406,9 +22525,17 @@ class GraphNexusAnalysis:
         # by the grace-period escape hatch C (in _in_initial_grace_period).
         # Falls back to "bull" if no proxy bars are available.
         if strategy_cache is not None and bool(config.get("regime_detector_enabled", True)):
-            _v31_regime = _detect_market_regime(strategy_cache, config, date_key)
+            _v31_raw = _detect_market_regime(strategy_cache, config, date_key,
+                                             data=data)
+            _v31_regime = _apply_regime_hysteresis(strategy_cache, _v31_raw, config)
             strategy_cache["_market_regime"] = _v31_regime
-            _log(f"V31 market regime: {_v31_regime}", "cyan")
+            _v31_diag = strategy_cache.get("_market_regime_diag") or {}
+            _log(
+                f"V31 market regime: {_v31_regime} "
+                f"(raw={_v31_raw}, proxy={_v31_diag.get('proxy')}, "
+                f"closes={_v31_diag.get('closes')}, ret20={_v31_diag.get('ret20')})",
+                "cyan",
+            )
         else:
             if strategy_cache is not None:
                 strategy_cache["_market_regime"] = "bull"
