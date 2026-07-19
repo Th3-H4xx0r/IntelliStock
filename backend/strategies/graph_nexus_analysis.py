@@ -5961,7 +5961,7 @@ def _enforce_sector_portfolio_cap(
                             _eta_g_held_sym, config, strategy_cache, propagated
                         )
                         _eta_g_regime = str(
-                            (strategy_cache or {}).get("_market_regime") or "bull"
+                            (strategy_cache or {}).get("_market_regime") or "chop"
                         )
                         _eta_g_in_grace, _eta_g_esc, _ = _in_initial_grace_period(
                             int(_eta_g_age),
@@ -7478,7 +7478,7 @@ def _evaluate_trend_sell_enforcement(
     _grace_unrealized_pct = 0.0
     if _grace_entry_price > 0.0 and _grace_current_price > 0.0:
         _grace_unrealized_pct = ((_grace_current_price - _grace_entry_price) / _grace_entry_price) * 100.0
-    _grace_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
+    _grace_regime = str((strategy_cache or {}).get("_market_regime") or "chop")
     # Phase ε.C.0' (2026-05-19): resolve the live conviction tier so grace
     # escape_A's catastrophic threshold is tier-aware. SNDK at HIGH tier in
     # BT294837 was force-sold at -18.3% via tier-blind escape_A — γ.5 wiring
@@ -17676,7 +17676,7 @@ def _evaluate_position_risk(
             )
             if fresh_score == -1 and not _hold_limit_forced and not _is_risk_exit_sell:
                 _grace_days = held_days
-                _grace_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
+                _grace_regime = str((strategy_cache or {}).get("_market_regime") or "chop")
                 # Mirror the inlined original: grace fires only when _ep>0 and _cp>0 (which
                 # is when _unrealized_pct was defined). Otherwise pnl unknown — skip grace.
                 if _unrealized_pct is None:
@@ -24463,7 +24463,7 @@ class GraphNexusAnalysis:
                 # Set nexus_regime_capacity_gating_enabled=false to disable.
                 if bool(config.get("nexus_regime_capacity_gating_enabled", True)):
                     _z41_spy_20d = _spy_20d_return(strategy_cache, date_key)
-                    _z41_v31 = str((strategy_cache or {}).get("_market_regime") or "bull")
+                    _z41_v31 = str((strategy_cache or {}).get("_market_regime") or "chop")
                     _z41_vix = (strategy_cache or {}).get("_vix_latest") if isinstance(strategy_cache, dict) else None
                     _z41_regime = _nexus_regime_classify(_z41_spy_20d, _z41_v31, _z41_vix)
                     # BT136708 calibration (2026-05-18): chop default 8 caused
@@ -24531,7 +24531,7 @@ class GraphNexusAnalysis:
                     _breach_healed = 0
                     _breach_wlock_bypassed = 0
                     if _breach_auto_heal and portfolio_emulator is not None:
-                        _breach_regime = str((strategy_cache or {}).get("_market_regime") or "bull")
+                        _breach_regime = str((strategy_cache or {}).get("_market_regime") or "chop")
                         _breach_candidates: list[tuple[str, float, int]] = []
                         for _bh_sym, _bh_q in (getattr(portfolio_emulator, "_positions", {}) or {}).items():
                             if float(_bh_q or 0) <= 0:
@@ -24898,7 +24898,7 @@ class GraphNexusAnalysis:
                                         config=config,
                                         incoming_meta=_incoming_meta,
                                         # Phase ε.C.2: regime-aware time-floor decay
-                                        market_regime=str((strategy_cache or {}).get("_market_regime") or "bull"),
+                                        market_regime=str((strategy_cache or {}).get("_market_regime") or "chop"),
                                         # Task 12: symbol for the ROTATION_GRAPH_GATE log line.
                                         held_sym=_wt,
                                     )
@@ -24969,7 +24969,7 @@ class GraphNexusAnalysis:
                                                 int(_held_days_value or 0),
                                                 float(_wd.get("unrealized_pct", 0.0) or 0.0),
                                                 config,
-                                                str((strategy_cache or {}).get("_market_regime") or "bull"),
+                                                str((strategy_cache or {}).get("_market_regime") or "chop"),
                                                 conviction_tier=_eta_d_tier,
                                             )
                                             if (
