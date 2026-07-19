@@ -6170,6 +6170,49 @@ def _detect_market_regime(
 _REGIME_RANK = {"crash": 0, "bear": 1, "chop": 2, "bull": 3}
 
 
+def _regime_position_cap(config: dict, regime: str) -> int:
+    """Z4.1 per-regime max_positions cap (mirrors the capacity-gate table)."""
+    _max_positions = int(config.get("max_positions", 15) or 15)
+    caps = {
+        "bull": int(config.get("max_positions_bull", _max_positions) or _max_positions),
+        "chop": int(config.get("max_positions_chop", min(_max_positions, 12)) or 12),
+        "bear": int(config.get("max_positions_bear", min(_max_positions, 8)) or 8),
+        "crash": int(config.get("max_positions_crash", 0) or 0),
+    }
+    return caps.get(str(regime or "").lower(), _max_positions)
+
+
+def _rotation_lane_allowed(strategy_cache, portfolio_emulator, config) -> tuple[bool, str]:
+    """Regime gate for the momentum rotation / portfolio-swap / backfill
+    rotation lanes (2026-07-19 regime-safety spec, Phase 3).
+
+    These lanes execute sell+buy pairs and historically BYPASSED the
+    position cap (BEAR_F3 held 15 with cap 14; ANAB entered a full book via
+    momentum_watchlist_rotation during the true-bear stretch and lost
+    -$112). Outside bull: lanes are OFF in bear/crash; in chop they may only
+    swap while the book is inside the chop cap.
+    """
+    try:
+        if not bool(config.get("rotation_lanes_regime_gated", True)):
+            return True, ""
+        regime = str((strategy_cache or {}).get("_market_regime") or "chop").lower()
+        if regime in ("bear", "crash"):
+            return False, f"regime={regime}"
+        if regime == "chop":
+            held = 0
+            try:
+                if portfolio_emulator is not None and hasattr(portfolio_emulator, "get_positions"):
+                    held = len(portfolio_emulator.get_positions() or {})
+            except Exception:
+                held = 0
+            cap = _regime_position_cap(config, "chop")
+            if held > cap:
+                return False, f"regime=chop held={held}>cap={cap}"
+        return True, ""
+    except Exception:
+        return True, ""
+
+
 def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
     """Asymmetric regime smoothing (2026-07-19 regime-safety spec, Phase 2).
 
@@ -9159,6 +9202,13 @@ def _compute_available_buy_budget(
         ramp_bar = _get_deployment_ramp_bar_index(strategy_cache, current_time, date_key)
         if ramp_bar <= len(ramp_caps):
             ramp_cap_pct = max(0.0, min(1.0, float(ramp_caps[ramp_bar - 1] or 0.0)))
+            # 2026-07-19 regime-safety Phase 3: in chop, deploy slower — the
+            # bull ramp (e.g. 0.9 on bar 1) is what turned classifier lag
+            # into a fully-deployed book at the worst moment.
+            _ramp_regime = str((strategy_cache or {}).get("_market_regime") or "chop")
+            if _ramp_regime == "chop":
+                _chop_scale = max(0.0, min(1.0, float(config.get("deployment_ramp_chop_scale", 0.6) or 0.6)))
+                ramp_cap_pct *= _chop_scale
             current_positions_value = _position_value_with_fallback(portfolio_emulator, prices, price_history)
             post_sell_positions_value = max(0.0, current_positions_value - sell_proceeds)
             ramp_room = max(0.0, (initial_value * ramp_cap_pct) - post_sell_positions_value)
@@ -25885,6 +25935,14 @@ class GraphNexusAnalysis:
                     recent_sell_cooldown=_mw_rot_cooldown_set,
                 )
                 if _mw_sell and _mw_buy and portfolio_emulator is not None:
+                    # 2026-07-19 regime-safety Phase 3: lane regime gate.
+                    _mw_lane_ok, _mw_lane_why = _rotation_lane_allowed(
+                        strategy_cache, portfolio_emulator, config)
+                    if not _mw_lane_ok:
+                        _log(f"ROTATION lane blocked ({_mw_lane_why}): "
+                             f"mw_rotation {_mw_sell}->{_mw_buy} skipped", "yellow")
+                        _mw_sell, _mw_buy = None, None
+                if _mw_sell and _mw_buy and portfolio_emulator is not None:
                     # V32 Phase 3 B-1: blacklist check (same fix as mw_buy lane).
                     _fl_bl_mwr = _normalize_cache_mapping(strategy_cache, "_fast_loser_blacklist") if strategy_cache else {}
                     if _mw_buy in _fl_bl_mwr:
@@ -26098,6 +26156,14 @@ class GraphNexusAnalysis:
                     )
                     # V31.1 bug-sweep fix: skip if buy ticker already sized this
                     # bar via another path (breakout_boost, propagation, BFQ).
+                    if _mw_pf_sell and _mw_pf_buy and _mw_pf_buy not in nexus_position_sizes:
+                        # 2026-07-19 regime-safety Phase 3: lane regime gate.
+                        _mw_pf_lane_ok, _mw_pf_lane_why = _rotation_lane_allowed(
+                            strategy_cache, portfolio_emulator, config)
+                        if not _mw_pf_lane_ok:
+                            _log(f"ROTATION lane blocked ({_mw_pf_lane_why}): "
+                                 f"mw_swap {_mw_pf_sell}->{_mw_pf_buy} skipped", "yellow")
+                            _mw_pf_sell, _mw_pf_buy = None, None
                     if _mw_pf_sell and _mw_pf_buy and _mw_pf_buy not in nexus_position_sizes:
                         # V32 Phase 3 B-1: blacklist check (same fix as mw_buy/mw_rotation).
                         _fl_bl_mws = _normalize_cache_mapping(strategy_cache, "_fast_loser_blacklist") if strategy_cache else {}
@@ -27029,6 +27095,16 @@ class GraphNexusAnalysis:
                     _bfq_mw_size_floor_pct = float(config.get("momentum_position_size_floor_pct", 0.10) or 0.10)
                     if config.get("momentum_watchlist_enabled", False) and isinstance(strategy_cache, dict):
                         _mw_keys_for_bfq = set((strategy_cache.get("_momentum_watchlist") or {}).keys())
+                    # 2026-07-19 regime-safety Phase 3: lane regime gate —
+                    # backfill rotation is a swap lane too and must not add
+                    # names over the cap in chop or at all in bear/crash.
+                    _bfq_lane_ok, _bfq_lane_why = _rotation_lane_allowed(
+                        strategy_cache, portfolio_emulator, config)
+                    if not _bfq_lane_ok and _bfq_unfilled:
+                        _log(f"ROTATION lane blocked ({_bfq_lane_why}): "
+                             f"backfill rotation disabled this bar "
+                             f"({len(_bfq_unfilled)} candidate(s) dropped)", "yellow")
+                        _bfq_unfilled = []
                     for _bfq_candidate in _bfq_unfilled:
                         if _bfq_rotation_count >= _bfq_rotation_max:
                             break

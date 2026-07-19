@@ -1150,8 +1150,10 @@ def test_v31_grace_period_does_not_mask_circuit_breaker():
 
 def test_v31_detect_market_regime_tolerates_malformed_overlay_bars():
     """V31 Codex review HIGH-2: _detect_market_regime must NOT crash on
-    malformed _overlay_bars_raw entries. A bad cache entry should fall back
-    to 'bull' instead of aborting the bar."""
+    malformed _overlay_bars_raw entries. 2026-07-19 regime-safety update:
+    the blind fallback is now CHOP (fail-safe), not bull (fail-open) — the
+    old fail-open default let a poisoned bars cache trade a -8% bear month
+    at full bull aggression."""
     cache = {
         "_overlay_bars_raw": {
             "SPY": [
@@ -1165,15 +1167,18 @@ def test_v31_detect_market_regime_tolerates_malformed_overlay_bars():
         }
     }
     cfg = {"regime_detector_enabled": True, "regime_bear_spy_drawdown_pct": 5}
-    # Should not crash; falls back to "bull" because closes < 21
+    # Should not crash; fails safe to "chop" because usable closes < 21
     result = gna._detect_market_regime(cache, cfg, "2026-01-10")
-    assert result == "bull"
+    assert result == "chop"
     # Empty cache fallback
-    assert gna._detect_market_regime({}, cfg, "2026-01-10") == "bull"
-    # None cache fallback
+    assert gna._detect_market_regime({}, cfg, "2026-01-10") == "chop"
+    # None cache fallback (no strategy_cache at all → legacy bull cold-start)
     assert gna._detect_market_regime(None, cfg, "2026-01-10") == "bull"
-    # Disabled flag fallback
+    # Disabled flag keeps the explicit bull default
     assert gna._detect_market_regime(cache, {"regime_detector_enabled": False}, "2026-01-10") == "bull"
+    # Operator can opt back into fail-open bull
+    cfg_open = dict(cfg, regime_blind_fallback="bull")
+    assert gna._detect_market_regime({}, cfg_open, "2026-01-10") == "bull"
 
 
 def test_v31_recent_sell_block_skips_already_rebought():
