@@ -2579,8 +2579,14 @@ def _residual_sleeve_config(cached_strategies):
                 "buffer_pct": float(cfg.get("residual_sleeve_buffer_pct", 0.02) or 0.02),
                 "min_deploy_pct": float(cfg.get("residual_sleeve_min_deploy_pct", 0.05) or 0.05),
                 "release_cash_pct": float(cfg.get("residual_sleeve_release_cash_pct", 0.15) or 0.15),
+                "min_park_hours": float(cfg.get("residual_sleeve_min_park_hours", 24.0) or 24.0),
             }
     return {"enabled": False}
+
+
+# 2026-07-19 sleeve-hysteresis fix: sim-clock timestamp of the last park so
+# release can enforce a min-park duration (per-process; resets per backtest).
+_RESIDUAL_SLEEVE_STATE: dict = {"last_park_ts": None}
 
 
 def _sleeve_market_regime():
@@ -2653,11 +2659,35 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
         protective = regime in ("bear", "crash")
         if not protective and (nav <= 0 or cash >= cfg["release_cash_pct"] * nav):
             return  # enough cash for active buys; keep the sleeve invested
+        if not protective:
+            # 2026-07-19 sleeve-hysteresis fix: (a) honor the min-park
+            # duration so a fresh park cannot round-trip on the next cycle;
+            # (b) release only enough to refill the dry-powder target, not
+            # the whole sleeve (BEAR_F3 logged ~53 full park/release
+            # round-trips per month — free in the fee model, a real
+            # slippage bleed live).
+            _last_park = _RESIDUAL_SLEEVE_STATE.get("last_park_ts")
+            if _last_park is not None and current_time is not None:
+                try:
+                    _held_hours = (current_time - _last_park).total_seconds() / 3600.0
+                    if _held_hours < cfg["min_park_hours"]:
+                        return
+                except (TypeError, AttributeError):
+                    pass
+            needed = max(0.0, cfg["release_cash_pct"] * nav - cash)
+            sell_qty = min(qty, needed / px) if px > 0 else qty
+            if sell_qty <= 0:
+                return
+            frac = min(1.0, sell_qty / qty) if qty > 0 else 1.0
+        else:
+            sell_qty = qty
+            frac = 1.0
         ok = portfolio_emulator.execute_signal(
-            sym, -1, px, timestamp=current_time, sell_fraction=1.0)
+            sym, -1, px, timestamp=current_time, sell_fraction=frac)
         why = f"regime={regime} protective exit" if protective else (
-            f"cash was {cash / nav * 100.0:.1f}% of NAV")
-        _log(f"[sleeve] released {qty:.4f} {sym} @ {px:.2f} ({why}, ok={ok})",
+            f"cash was {cash / nav * 100.0:.1f}% of NAV, refill "
+            f"{sell_qty:.4f}/{qty:.4f}")
+        _log(f"[sleeve] released {sell_qty:.4f} {sym} @ {px:.2f} ({why}, ok={ok})",
              "cyan")
     except Exception as _sleeve_exc:
         try:
@@ -2694,11 +2724,19 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
         if nav <= 0:
             return
         cash = float(portfolio_emulator.get_cash() or 0.0)
-        idle = cash - cfg["buffer_pct"] * nav
+        # 2026-07-19 sleeve-hysteresis fix: park only cash ABOVE the release
+        # threshold + buffer. The old floor (buffer alone, 2%) left post-park
+        # cash below the 15% release trigger, guaranteeing a full release the
+        # very next cycle — a per-bar park/release oscillation.
+        park_floor_pct = max(cfg["buffer_pct"],
+                             cfg["release_cash_pct"] + cfg["buffer_pct"])
+        idle = cash - park_floor_pct * nav
         if idle < max(50.0, cfg["min_deploy_pct"] * nav):
             return
         ok = portfolio_emulator.execute_signal(
             sym, 1, px, timestamp=current_time, cash_per_trade=idle)
+        if ok:
+            _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
         _log(f"[sleeve] parked ${idle:.2f} idle cash in {sym} @ {px:.2f} "
              f"(cash was {cash / nav * 100.0:.1f}% of NAV, ok={ok})", "cyan")
     except Exception as _sleeve_exc:
