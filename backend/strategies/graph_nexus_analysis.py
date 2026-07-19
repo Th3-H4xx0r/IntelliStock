@@ -7372,6 +7372,20 @@ def _recent_runup_protect(sym, price_history, block_pct, lookback_bars) -> tuple
     return (runup_pct > _bp), runup_pct
 
 
+def _recent_return_pct(sym, price_history, lookback_bars) -> float | None:
+    """Close-over-close % return across the last lookback_bars bars, or None
+    when history is missing/too short. Same bar shape as
+    _recent_runup_protect (2026-07-19 bear relative-strength gate)."""
+    if not isinstance(price_history, dict):
+        return None
+    bars = (price_history.get(sym) or [])[-max(2, int(lookback_bars or 0)):]
+    closes = [float(b.get("close") or b.get("c") or 0.0) for b in bars if isinstance(b, dict)]
+    closes = [c for c in closes if c > 0.0]
+    if len(closes) < 2:
+        return None
+    return ((closes[-1] - closes[0]) / closes[0]) * 100.0
+
+
 def _llm_sell_conviction_bypass(config: dict, raw_score, pnl_pct) -> bool:
     """True when a high-conviction LLM sell may bypass min-hold/grace on a
     losing position (fills the -3%..-10% exit dead zone from run 185254,
@@ -19980,6 +19994,34 @@ def _apply_quality_filter(
                     f"Entry extension gate: {sym} recent runup +{_ext_runup:.1f}% > "
                     f"{_ext_block_pct:.0f}% — buy blocked", "yellow")
                 continue
+
+        # 2026-07-19 bear relative-strength gate (config-gated, default ON):
+        # in a confirmed bear the few allowed slots are reserved for names
+        # actually going UP while the market falls — CE/CVX-class winners.
+        # A new entry must show a non-negative recent return over the RS
+        # lookback; everything else waits for the regime to improve. The
+        # extension gate above already blocks the over-extended end of the
+        # momentum spectrum, so together: bear buys = rising but not frothy.
+        if bool(config.get("bear_entry_rs_filter_enabled", True)):
+            _rs_regime = str((strategy_cache or {}).get("_market_regime") or "").lower()
+            if _rs_regime in ("bear", "crash"):
+                _rs_lookback = int(config.get("bear_entry_rs_lookback_bars", 20) or 20)
+                _rs_min = float(config.get("bear_entry_rs_min_return_pct", 0.0) or 0.0)
+                _rs_ret = _recent_return_pct(sym, price_history, _rs_lookback)
+                if _rs_ret is None or _rs_ret < _rs_min:
+                    sc["score"] = 0
+                    sc["action_intent"] = "hold"
+                    orig_reason = str(sc.get("reason") or "")
+                    _rs_txt = "unknown" if _rs_ret is None else f"{_rs_ret:+.1f}%"
+                    sc["reason"] = (
+                        f"Bear RS gate: {_rs_lookback}-bar return {_rs_txt} < "
+                        f"{_rs_min:+.1f}% required in {_rs_regime} — only "
+                        f"relative-strength names may enter | {orig_reason}")[:1500]
+                    filtered_count += 1
+                    _log(
+                        f"Bear RS gate: {sym} {_rs_lookback}-bar return {_rs_txt} — "
+                        f"buy blocked in {_rs_regime}", "yellow")
+                    continue
 
         quality_meta = _extract_quality_metadata(
             sym,
