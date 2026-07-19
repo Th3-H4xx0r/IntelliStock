@@ -10118,7 +10118,7 @@ while not shutdown_requested:
                                 # Sleeve legs (SPY bull leg / inverse bear leg)
                                 # are broker-level cash parking, not strategy
                                 # positions — they must not consume cap slots.
-                                _rc_sleeve_cfg = _residual_sleeve_config(cached_strategies)
+                                _rc_sleeve_cfg = _residual_sleeve_config(_cached_strategies)
                                 _rc_exclude = {_rc_sleeve_cfg.get("symbol") or "",
                                                _rc_sleeve_cfg.get("bear_symbol") or ""}
                                 _rc_open = sum(
