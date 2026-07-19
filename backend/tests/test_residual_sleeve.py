@@ -166,3 +166,70 @@ def test_cap_hard_none_when_no_regime_or_disabled():
             "config": {"regime_position_cap_hard_enforce": False}}]
     assert b._regime_position_cap_hard(off) is None
     assert b._regime_position_cap_hard([{"strategy": "other", "config": {}}]) is None
+
+
+# ── 2026-07-19: inverse-ETF bear leg (auto-buy in bear, auto-sell after) ──
+BEAR_SPEC = [{"strategy": "graph_nexus_analysis", "config": {
+    "residual_sleeve_enabled": True,
+    "residual_sleeve_symbol": "SPY",
+    "residual_sleeve_bear_symbol": "SQQQ",
+    "residual_sleeve_bear_alloc_pct": 0.35,
+    "residual_sleeve_buffer_pct": 0.02,
+    "residual_sleeve_min_deploy_pct": 0.05,
+    "residual_sleeve_release_cash_pct": 0.15,
+}}]
+
+
+class _Emu2(_Emu):
+    """Emulator with an arbitrary positions map."""
+    def __init__(self, cash, nav, positions=None):
+        super().__init__(cash, nav)
+        self._pos = dict(positions or {})
+
+    def get_positions(self):
+        return dict(self._pos)
+
+
+def test_bear_leg_deploys_in_bear_capped_at_alloc():
+    _set_regime("bear")
+    # $6000 NAV, 100% cash: idle above 17% floor = 4980; cap 35% NAV = 2100.
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 3, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1
+    assert emu.signals[0]["sym"] == "SQQQ"
+    assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+def test_bear_leg_respects_existing_position_room():
+    _set_regime("bear")
+    # Already holding $1800 of SQQQ → room = 2100-1800 = 300 = 5% NAV min ✓
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 60.0})
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 4, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 300.0) < 1e-6
+
+
+def test_bear_leg_auto_sells_when_bear_over():
+    _set_regime("chop")
+    b._RESIDUAL_SLEEVE_STATE["last_park_ts"] = datetime(2026, 3, 20, 14)  # fresh park
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 28.0}, datetime(2026, 3, 20, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1
+    assert emu.signals[0]["sym"] == "SQQQ"
+    assert emu.signals[0]["sell_fraction"] == 1.0, "bear leg must fully auto-sell on upgrade"
+
+
+def test_bear_leg_held_through_bear():
+    _set_regime("bear")
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 28.0}, datetime(2026, 3, 20, 15), BEAR_SPEC)
+    assert emu.signals == [], "bear leg holds while regime stays bear"
+
+
+def test_no_bear_leg_in_chop_or_bull():
+    for regime in ("chop", "bull", ""):
+        _set_regime(regime)
+        emu = _Emu2(cash=6000.0, nav=6000.0)
+        b._residual_sleeve_deploy(emu, {"SQQQ": 30.0, "SPY": 600.0},
+                                  datetime(2026, 3, 3, 15), BEAR_SPEC)
+        assert all(s["sym"] != "SQQQ" for s in emu.signals), f"regime={regime!r}"

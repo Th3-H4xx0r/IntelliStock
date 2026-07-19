@@ -2580,6 +2580,11 @@ def _residual_sleeve_config(cached_strategies):
                 "min_deploy_pct": float(cfg.get("residual_sleeve_min_deploy_pct", 0.05) or 0.05),
                 "release_cash_pct": float(cfg.get("residual_sleeve_release_cash_pct", 0.15) or 0.15),
                 "min_park_hours": float(cfg.get("residual_sleeve_min_park_hours", 24.0) or 24.0),
+                # 2026-07-19 bear leg: park into an inverse ETF during
+                # CONFIRMED bear/crash so the sleeve earns the downtrend
+                # instead of hiding in cash. "" = disabled (default).
+                "bear_symbol": str(cfg.get("residual_sleeve_bear_symbol", "") or "").upper(),
+                "bear_alloc_pct": float(cfg.get("residual_sleeve_bear_alloc_pct", 0.35) or 0.35),
             }
     return {"enabled": False}
 
@@ -2643,23 +2648,23 @@ def _residual_sleeve_prepare(data, prices, current_time, cached_strategies,
         cfg = _residual_sleeve_config(cached_strategies)
         if not cfg["enabled"]:
             return
-        sym = cfg["symbol"]
-        if (prices or {}).get(sym):
-            return
-        if mode == MODE_BACKTEST and isinstance(data, dict):
-            if sym not in data:
-                _ensure_backtest_history_for_symbols(
-                    data, [sym], key=key, secret=secret)
-            if data.get(sym):
-                p = (_get_prices_at_time(data, [sym], current_time) or {}).get(sym)
-                if p and float(p) > 0 and isinstance(prices, dict):
+        _sleeve_syms = [s for s in (cfg["symbol"], cfg.get("bear_symbol") or "")
+                        if s and not (prices or {}).get(s)]
+        for sym in _sleeve_syms:
+            if mode == MODE_BACKTEST and isinstance(data, dict):
+                if sym not in data:
+                    _ensure_backtest_history_for_symbols(
+                        data, [sym], key=key, secret=secret)
+                if data.get(sym):
+                    p = (_get_prices_at_time(data, [sym], current_time) or {}).get(sym)
+                    if p and float(p) > 0 and isinstance(prices, dict):
+                        prices[sym] = float(p)
+            elif mode == MODE_LIVE and isinstance(prices, dict):
+                p = _fetch_price_for_symbol(
+                    sym, current_time, key=key, secret=secret, feed=data_feed,
+                    allow_non_alpaca_fallback=True)
+                if p and float(p) > 0:
                     prices[sym] = float(p)
-        elif mode == MODE_LIVE and isinstance(prices, dict):
-            p = _fetch_price_for_symbol(
-                sym, current_time, key=key, secret=secret, feed=data_feed,
-                allow_non_alpaca_fallback=True)
-            if p and float(p) > 0:
-                prices[sym] = float(p)
     except Exception as _sp_exc:
         try:
             _log(f"[sleeve] prepare skipped: {_sp_exc}", "yellow")
@@ -2677,6 +2682,25 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
         cfg = _residual_sleeve_config(cached_strategies)
         if not cfg["enabled"] or portfolio_emulator is None:
             return
+        regime = _sleeve_market_regime()
+        # ── Bear leg (inverse ETF): auto-sell the moment the bear is over.
+        # Runs FIRST — before any SPY-leg early return — and is an
+        # unconditional protective exit on upgrade to chop/bull, ignoring
+        # the min-park duration and cash thresholds by design.
+        bsym = cfg.get("bear_symbol") or ""
+        if bsym and regime not in ("bear", "crash"):
+            bqty = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0)
+            if bqty > 0:
+                bpx = float((prices or {}).get(bsym) or 0.0)
+                if bpx > 0:
+                    bok = portfolio_emulator.execute_signal(
+                        bsym, -1, bpx, timestamp=current_time, sell_fraction=1.0)
+                    _log(f"[sleeve] released {bqty:.4f} {bsym} @ {bpx:.2f} "
+                         f"(bear over: regime={regime or 'unknown'} protective exit, ok={bok})",
+                         "cyan")
+                else:
+                    _log(f"[sleeve] bear leg {bsym} needs exit (regime={regime or 'unknown'}) "
+                         "but no price this bar — retrying next bar", "yellow")
         sym = cfg["symbol"]
         qty = float((portfolio_emulator.get_positions() or {}).get(sym, 0.0) or 0.0)
         if qty <= 0:
@@ -2685,7 +2709,6 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
         if px <= 0:
             _log(f"[sleeve] no {sym} price this bar — holding sleeve", "yellow")
             return
-        regime = _sleeve_market_regime()
         nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
         cash = float(portfolio_emulator.get_cash() or 0.0)
         protective = regime in ("bear", "crash")
@@ -2736,10 +2759,40 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
         cfg = _residual_sleeve_config(cached_strategies)
         if not cfg["enabled"] or portfolio_emulator is None:
             return
-        # BEAR_F guardrail fix (2026-07-19): the sleeve is a BULL-capture
-        # tool. Deploy only in a confirmed bull regime; stay in cash through
-        # bear/crash/chop and cold starts (regime unknown => not bull).
+        # BEAR_F guardrail fix (2026-07-19): deploy the SPY leg only in a
+        # confirmed bull. 2026-07-19 bear leg: in confirmed bear/crash park
+        # into the inverse ETF instead (capped at bear_alloc_pct of NAV) so
+        # the sleeve earns the downtrend. Chop and cold starts stay in cash.
         regime = _sleeve_market_regime()
+        if regime in ("bear", "crash") and cfg.get("bear_symbol"):
+            bsym = cfg["bear_symbol"]
+            bpx = float((prices or {}).get(bsym) or 0.0)
+            if bpx <= 0:
+                if not globals().get("_sleeve_bear_no_price_logged"):
+                    globals()["_sleeve_bear_no_price_logged"] = True
+                    _log(f"[sleeve] bear leg ENABLED but no {bsym} price available — "
+                         "bear leg is inert (is the symbol in the bar universe?)", "red")
+                return
+            nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
+            if nav <= 0:
+                return
+            cash = float(portfolio_emulator.get_cash() or 0.0)
+            park_floor_pct = max(cfg["buffer_pct"],
+                                 cfg["release_cash_pct"] + cfg["buffer_pct"])
+            idle = cash - park_floor_pct * nav
+            cur_val = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0) * bpx
+            room = max(0.0, cfg["bear_alloc_pct"] * nav - cur_val)
+            deploy = min(idle, room)
+            if deploy < max(50.0, cfg["min_deploy_pct"] * nav):
+                return
+            bok = portfolio_emulator.execute_signal(
+                bsym, 1, bpx, timestamp=current_time, cash_per_trade=deploy)
+            if bok:
+                _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
+            _log(f"[sleeve] parked ${deploy:.2f} in BEAR leg {bsym} @ {bpx:.2f} "
+                 f"(regime={regime}, leg={cur_val + deploy:.0f}/"
+                 f"{cfg['bear_alloc_pct'] * nav:.0f} cap, ok={bok})", "cyan")
+            return
         if regime != "bull":
             return
         sym = cfg["symbol"]
@@ -9983,7 +10036,15 @@ while not shutdown_requested:
                             if _rc is not None:
                                 _rc_positions = getattr(portfolio_emulator, "_positions", {}) or {}
                                 _rc_held_qty = float(_rc_positions.get(symbol, 0.0) or 0.0)
-                                _rc_open = sum(1 for _q in _rc_positions.values() if float(_q or 0.0) > 0.0)
+                                # Sleeve legs (SPY bull leg / inverse bear leg)
+                                # are broker-level cash parking, not strategy
+                                # positions — they must not consume cap slots.
+                                _rc_sleeve_cfg = _residual_sleeve_config(cached_strategies)
+                                _rc_exclude = {_rc_sleeve_cfg.get("symbol") or "",
+                                               _rc_sleeve_cfg.get("bear_symbol") or ""}
+                                _rc_open = sum(
+                                    1 for _s, _q in _rc_positions.items()
+                                    if float(_q or 0.0) > 0.0 and _s not in _rc_exclude)
                                 if _rc_held_qty <= 0.0 and _rc_open >= _rc[1]:
                                     _log(
                                         f"REGIME CAP HARD BLOCK: {symbol} skipped — "
