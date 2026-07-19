@@ -4985,6 +4985,23 @@ def _v32_momentum_ath_or_mcap_block(
         - T2-a: market_cap < min threshold (if metadata available)
     Either fail-open when data missing (never blocks on unknown-mcap or thin history).
     """
+    # 2026-07-19 BULL_F7e forensics: the entry-extension gate now also guards
+    # the momentum lanes, with NO conviction bypass — CAR (raw 5.56) bypassed
+    # the ATH gate via the 2.50 conviction escape, entered parabolic at the
+    # top and gapped -33% through the cut in a day. Every historical parabolic
+    # disaster (TXG, AMPX, CAR) carried an "extraordinary conviction" score.
+    _mext_pct = float(config.get("entry_extension_block_pct", 0.0) or 0.0)
+    if _mext_pct > 0:
+        _mext_lb = int(config.get("entry_extension_lookback_bars", 20) or 20)
+        _mext_hit, _mext_runup = _recent_runup_protect(
+            symbol, price_history, _mext_pct, _mext_lb)
+        if _mext_hit:
+            if log_fn:
+                log_fn(f"V32 {lane} extension-block: {symbol} recent runup "
+                       f"+{_mext_runup:.1f}% > {_mext_pct:.0f}% — no conviction bypass",
+                       "yellow")
+            return True, f"extension_runup_{_mext_runup:.0f}pct"
+
     # T1-c near-ATH gate
     # Z1.2 (2026-05-15): default flipped to True. Backtest 299903 showed AIOS
     # bought at $22.33 after +5,200% YTD parabolic; this gate already existed

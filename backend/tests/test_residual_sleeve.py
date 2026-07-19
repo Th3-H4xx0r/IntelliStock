@@ -81,6 +81,7 @@ def setup_function(_fn):
     b._RESIDUAL_SLEEVE_STATE["last_park_ts"] = None
     b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
     b._RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = None
+    b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
     b._ns["_sleeve_circuit_tier"] = lambda: ""
     _set_regime("bull")
 
@@ -284,3 +285,24 @@ def test_bear_deploy_sets_entry_basis():
     emu = _Emu2(cash=6000.0, nav=6000.0)
     b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 3, 15), BEAR_SPEC)
     assert abs(b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] - 30.0) < 1e-9
+
+
+# ── 2026-07-19 BULL_F7e fix: one stop-out per bear episode ──
+def test_one_stop_per_bear_episode():
+    _set_regime("bear")
+    b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True  # stopped out earlier
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 4, 2, 15), BEAR_SPEC)
+    assert emu.signals == [], "no re-deploy after a stop-out in the same episode"
+
+
+def test_episode_latch_rearms_on_regime_upgrade():
+    b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True
+    _set_regime("chop")  # bear over → latch re-arms
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 4, 8, 15), BEAR_SPEC)
+    assert emu.signals == []  # chop never deploys the bear leg
+    assert b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] is False
+    _set_regime("bear")  # NEW bear episode → deploys again
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 4, 20, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1

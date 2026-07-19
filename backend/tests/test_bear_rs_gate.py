@@ -65,3 +65,22 @@ def test_min_return_configurable():
     sc = _run("bear", [100.0] * 10 + [104.0] * 10,
               cfg={"bear_entry_rs_min_return_pct": 5.0})
     assert sc["score"] == 0, "+4% must fail a +5% RS floor"
+
+
+def test_momentum_lane_extension_block_no_bypass():
+    # BULL_F7e: CAR raw=5.56 bypassed the ATH gate's conviction escape and
+    # entered parabolic. The extension gate has NO bypass.
+    hist = {"CAR": [{"close": 450.0}] * 5 + [{"close": 665.0}] * 15}  # +48% runup
+    blocked, why = g._v32_momentum_ath_or_mcap_block(
+        "CAR", 665.0, hist, {}, {"entry_extension_block_pct": 25.0}, 5.56,
+        lane="mw_swap")
+    assert blocked and "extension" in why
+
+
+def test_momentum_lane_extension_allows_calm_names():
+    hist = {"CVX": [{"close": 185.0}] * 10 + [{"close": 190.0}] * 10}  # +2.7%
+    blocked, _ = g._v32_momentum_ath_or_mcap_block(
+        "CVX", 190.0, hist, {}, {"entry_extension_block_pct": 25.0,
+                                 "portfolio_swap_ath_gate_enabled": False}, 1.0,
+        lane="mw_swap")
+    assert not blocked

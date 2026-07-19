@@ -2721,6 +2721,10 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                 if _bentry and _bstop > 0 and bpx <= float(_bentry) * (1.0 - _bstop / 100.0):
                     _bear_exit_why = (f"leg stop-loss: {bpx:.2f} <= "
                                       f"{float(_bentry):.2f} -{_bstop:.0f}%")
+                    # BULL_F7e forensics: one stop-out per bear episode. The
+                    # 24h dwell alone re-entered the day after the first stop,
+                    # straight into the rally, for a second -10% (-$484 total).
+                    _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True
                 else:
                     # Demand refill (adversarial review MED): in bear the
                     # inverse leg is the only sleeve — when cash cannot fund
@@ -2817,8 +2821,14 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
         # while the drawdown circuit is at hard/kill.
         if _sleeve_circuit_tier() in ("hard", "kill"):
             return
+        if regime not in ("bear", "crash"):
+            # Regime left bear: the next bear is a NEW episode — re-arm the
+            # one-stop-per-episode latch.
+            _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
         if regime in ("bear", "crash") and cfg.get("bear_symbol"):
             bsym = cfg["bear_symbol"]
+            if _RESIDUAL_SLEEVE_STATE.get("bear_stop_episode"):
+                return  # already stopped out this bear episode — stay in cash
             # Re-entry dwell after any bear-leg exit (stop-loss/protective):
             # prevents same-day sell/rebuy churn (PDT-class live risk).
             _lbx = _RESIDUAL_SLEEVE_STATE.get("last_bear_exit_ts")
