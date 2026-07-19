@@ -9205,7 +9205,10 @@ def _compute_available_buy_budget(
             # 2026-07-19 regime-safety Phase 3: in chop, deploy slower — the
             # bull ramp (e.g. 0.9 on bar 1) is what turned classifier lag
             # into a fully-deployed book at the worst moment.
-            _ramp_regime = str((strategy_cache or {}).get("_market_regime") or "chop")
+            # Scale only on an EXPLICIT chop reading — unknown regime keeps
+            # legacy ramp behavior (production stamps the regime before
+            # allocation runs, so unknown only happens in isolated calls).
+            _ramp_regime = str((strategy_cache or {}).get("_market_regime") or "")
             if _ramp_regime == "chop":
                 _chop_scale = max(0.0, min(1.0, float(config.get("deployment_ramp_chop_scale", 0.6) or 0.6)))
                 ramp_cap_pct *= _chop_scale
@@ -20201,6 +20204,10 @@ def _apply_portfolio_drawdown_halt(
     #  hard (9%): halt regardless of corroboration + tighten the fast-loser
     #             cut floor (default -7%) so losers exit sooner.
     #  kill (12%): protective liquidation of every held position + halt.
+    # A legacy up-days resume re-bases the peak to the current value, so the
+    # circuit measures from the operator-accepted new baseline (dd = 0).
+    if resumed_now:
+        drawdown_pct = 0.0
     circuit_tier = None
     if bool(config.get("drawdown_circuit_enabled", True)):
         _soft_pct = float(config.get("portfolio_dd_soft_pct", 5.0) or 5.0)
