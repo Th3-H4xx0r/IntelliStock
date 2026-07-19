@@ -17462,6 +17462,14 @@ def _evaluate_position_risk(
                             _peak_protected = True
 
                 _fast_cut_pct = float(config.get("fast_loser_cut_pct", -10.0))
+                # 2026-07-19 regime-safety Phase 4: hard/kill drawdown-circuit
+                # tiers tighten the cut floor (e.g. -10% -> -7%).
+                _dd_floor_override = (strategy_cache or {}).get("_dd_cut_floor_override")
+                if _dd_floor_override is not None:
+                    try:
+                        _fast_cut_pct = max(_fast_cut_pct, float(_dd_floor_override))
+                    except (TypeError, ValueError):
+                        pass
                 if fresh_score >= 0 and _unrealized_pct <= _fast_cut_pct and _peak_protected:
                     _log(
                         f"Peak protection BYPASS fast-loser-cut: {sym} "
@@ -20184,9 +20192,72 @@ def _apply_portfolio_drawdown_halt(
     elif strategy_cache is not None:
         strategy_cache["_bfq_halt_budget_pct"] = 1.0
 
-    if not halt_active:
+    # ── 2026-07-19 regime-safety Phase 4: tiered drawdown circuit ──
+    # Classifier-independent safety net (the V31 detector has one proven
+    # blind-failure mode; this layer only needs the portfolio's own NAV).
+    #  soft (5%): halt new buys, but only when SPY's 20d return corroborates
+    #             a falling market — a healthy-bull pullback keeps buying.
+    #             Blind SPY counts as corroborated (fail-safe).
+    #  hard (9%): halt regardless of corroboration + tighten the fast-loser
+    #             cut floor (default -7%) so losers exit sooner.
+    #  kill (12%): protective liquidation of every held position + halt.
+    circuit_tier = None
+    if bool(config.get("drawdown_circuit_enabled", True)):
+        _soft_pct = float(config.get("portfolio_dd_soft_pct", 5.0) or 5.0)
+        _hard_pct = float(config.get("portfolio_dd_hard_pct", 9.0) or 9.0)
+        _kill_pct = float(config.get("portfolio_dd_kill_pct", 12.0) or 12.0)
+        if drawdown_pct >= _kill_pct:
+            circuit_tier = "kill"
+        elif drawdown_pct >= _hard_pct:
+            circuit_tier = "hard"
+        elif drawdown_pct >= _soft_pct:
+            _spy20 = _spy_20d_return(strategy_cache, date_key)
+            if _spy20 is None or _spy20 < 0:
+                circuit_tier = "soft"
+        if circuit_tier and state.get("circuit_tier") != circuit_tier:
+            _log(
+                f"Drawdown circuit {circuit_tier.upper()}: -{drawdown_pct:.1f}% from peak "
+                f"(${peak_value:.0f} -> ${current_value:.0f})",
+                "red",
+            )
+    state["circuit_tier"] = circuit_tier or ""
+    if circuit_tier in ("hard", "kill"):
+        strategy_cache["_dd_cut_floor_override"] = float(
+            config.get("portfolio_dd_hard_cut_floor_pct", -7.0) or -7.0)
+    else:
+        strategy_cache.pop("_dd_cut_floor_override", None)
+
+    if circuit_tier == "kill":
+        _held_syms = []
+        try:
+            if hasattr(portfolio_emulator, "get_positions"):
+                _held_syms = list((portfolio_emulator.get_positions() or {}).keys())
+        except Exception:
+            _held_syms = []
+        _killed = []
+        for sym in _held_syms:
+            sc = scores.get(sym) if isinstance(scores.get(sym), dict) else {}
+            sc["score"] = -1
+            sc["action_intent"] = "sell_override"
+            # "Circuit breaker" tag keeps this a risk exit that survives the
+            # grace gates (_RISK_EXIT_TAGS).
+            sc["reason"] = (
+                f"Circuit breaker: drawdown circuit KILL at -{drawdown_pct:.1f}% "
+                f"from peak — protective liquidation")
+            scores[sym] = sc
+            _killed.append(sym)
+        if _killed:
+            _log(
+                f"Drawdown circuit KILL: liquidating {len(_killed)} position(s): "
+                f"{', '.join(sorted(_killed))}",
+                "red",
+            )
+
+    if not halt_active and circuit_tier is None:
         return scores
 
+    _halt_why = (f"circuit {circuit_tier}" if circuit_tier else
+                 f"halt -{drawdown_pct:.1f}%")
     demoted = []
     for sym in symbols_list:
         sc = scores.get(sym)
@@ -20196,13 +20267,13 @@ def _apply_portfolio_drawdown_halt(
         sc["action_intent"] = "hold"
         orig_reason = str(sc.get("reason") or "")
         sc["reason"] = (
-            f"DRAWDOWN_HALT: buys paused after -{drawdown_pct:.1f}% drawdown "
+            f"DRAWDOWN_HALT ({_halt_why}): buys paused after -{drawdown_pct:.1f}% drawdown "
             f"(resume after {resume_up_days} up days) | {orig_reason}"
         )[:1500]
         demoted.append(sym)
 
     if demoted:
-        _log(f"Portfolio drawdown halt: demoted {len(demoted)} buy(s) to hold", "yellow")
+        _log(f"Portfolio drawdown halt ({_halt_why}): demoted {len(demoted)} buy(s) to hold", "yellow")
 
     return scores
 
