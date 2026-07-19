@@ -17870,29 +17870,47 @@ def _ensure_overlay_bars_table(conn):
         pass
 
 
-def _overlay_bars_cache_get(conn, symbol: str) -> list[dict] | None:
-    """Load cached bars for a symbol from RethinkDB."""
+def _overlay_bars_cache_get(conn, symbol: str) -> dict | None:
+    """Load the cached bars DOC for a symbol from RethinkDB.
+
+    Returns the whole row (bars + fetch_start/fetch_end coverage) so the
+    caller can validate coverage. Rows with empty bars are treated as
+    missing — the 2026-07-19 regime forensics found empty rows persisting
+    forever and silently blinding the V31 regime detector.
+    """
     if conn is None:
         return None
     try:
         _ensure_overlay_bars_table(conn)
         doc = _r.db(DB_NAME).table(NEXUS_OVERLAY_BARS_TABLE).get(symbol).run(conn)
-        if not doc:
+        if not doc or not doc.get("bars"):
             return None
-        return doc.get("bars")
+        return doc
     except Exception:
         return None
 
 
-def _overlay_bars_cache_set(conn, symbol: str, bars: list[dict]) -> None:
-    """Store bars for a symbol in RethinkDB."""
-    if conn is None:
+def _overlay_bars_cache_set(conn, symbol: str, bars: list[dict],
+                            fetch_start: str | None = None,
+                            fetch_end: str | None = None) -> None:
+    """Store bars for a symbol in RethinkDB.
+
+    Empty results are never persisted (a failed fetch must retry next run,
+    not poison every later run). Coverage metadata lets readers detect rows
+    that do not extend far enough back for their window.
+    """
+    if conn is None or not bars:
         return
     try:
         _ensure_overlay_bars_table(conn)
+        doc = {"id": symbol, "bars": bars,
+               "cached_at": datetime.utcnow().isoformat()}
+        if fetch_start:
+            doc["fetch_start"] = fetch_start
+        if fetch_end:
+            doc["fetch_end"] = fetch_end
         _r.db(DB_NAME).table(NEXUS_OVERLAY_BARS_TABLE).insert(
-            {"id": symbol, "bars": bars, "cached_at": datetime.utcnow().isoformat()},
-            conflict="replace",
+            doc, conflict="replace",
         ).run(conn)
     except Exception:
         pass
@@ -17963,21 +17981,30 @@ def _ensure_overlay_bars_cached(
             still_missing.append(sym)
             continue
         rdb_checked.add(sym)
-        rdb_bars = _overlay_bars_cache_get(conn, sym)
-        if rdb_bars is not None:
-            # Check if cached bars cover the needed end date (prevent stale lookback data)
-            if rdb_bars:
-                _last_bar_date = str(rdb_bars[-1].get("t", rdb_bars[-1].get("date", "")))[:10]
-                # If bars end more than 7 days before fetch_end, re-fetch for wider range
-                if _last_bar_date and _last_bar_date < fetch_end:
-                    try:
-                        from datetime import datetime as _dt_check
-                        _gap = (_dt_check.strptime(fetch_end, "%Y-%m-%d") - _dt_check.strptime(_last_bar_date, "%Y-%m-%d")).days
-                        if _gap > 7:
-                            still_missing.append(sym)
-                            continue
-                    except (ValueError, AttributeError):
-                        pass
+        rdb_doc = _overlay_bars_cache_get(conn, sym)
+        if rdb_doc is not None:
+            rdb_bars = rdb_doc.get("bars") or []
+            # Coverage check (2026-07-19 regime forensics): the row must
+            # cover the requested range on BOTH ends. The old code only
+            # checked the end, so rows fetched by a recent-window run
+            # silently blinded every earlier-window backtest (regime
+            # detector saw <21 point-in-time closes → permanent "bull").
+            _last_bar_date = str(rdb_bars[-1].get("t", rdb_bars[-1].get("date", "")))[:10]
+            _doc_start = str(rdb_doc.get("fetch_start") or "")[:10]
+            if not _doc_start:
+                # Legacy rows carry no coverage metadata — use the first bar.
+                _doc_start = str(rdb_bars[0].get("t", rdb_bars[0].get("date", "")))[:10]
+            try:
+                from datetime import datetime as _dt_check
+                _end_gap = (_dt_check.strptime(fetch_end, "%Y-%m-%d")
+                            - _dt_check.strptime(_last_bar_date, "%Y-%m-%d")).days if _last_bar_date else 999
+                _start_gap = (_dt_check.strptime(_doc_start, "%Y-%m-%d")
+                              - _dt_check.strptime(fetch_start, "%Y-%m-%d")).days if _doc_start else 999
+            except (ValueError, AttributeError):
+                _end_gap = _start_gap = 0
+            if _end_gap > 7 or _start_gap > 7:
+                still_missing.append(sym)
+                continue
             bars_cache[sym] = rdb_bars
         else:
             still_missing.append(sym)
@@ -18002,7 +18029,9 @@ def _ensure_overlay_bars_cached(
         for sym in batch:
             sym_bars = fetched.get(sym) or []
             bars_cache[sym] = sym_bars
-            _overlay_bars_cache_set(conn, sym, sym_bars)
+            _overlay_bars_cache_set(conn, sym, sym_bars,
+                                    fetch_start=fetch_start,
+                                    fetch_end=fetch_end)
 
     loaded = sum(1 for s in still_missing if bars_cache.get(s))
     # Track symbols with 0 bars so discovery pruning can remove them next day
