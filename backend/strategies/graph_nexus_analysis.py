@@ -6179,8 +6179,25 @@ def _detect_market_regime(
         bear_dd_pct = float(config.get("regime_bear_spy_drawdown_pct", 5.0) or 5.0)
         # Bear: 20d return < -bear_dd_pct OR current < 200-day MA
         if ret_20d < -bear_dd_pct:
-            diag["raw"] = "bear"
-            return "bear"
+            # 2026-07-20 stale-trigger guard (default 0 = off): a ret20 drawdown
+            # that has already bounced >= X of its peak-to-trough range off the
+            # low is NOT a fresh bear — it is a recovering dip (bt 148462: the
+            # bull window opened "bear" on a -8.18% ret20 inherited from the
+            # prior month, already recovered). Only suppresses the ret20 branch;
+            # the structural (< 200d MA) bear below is never suppressed.
+            _stale = float(config.get("regime_bear_stale_recovery_pct", 0.0) or 0.0)
+            _suppress_bear = False
+            if _stale > 0 and len(closes) >= 21:
+                _win = closes[-21:]
+                _hi, _lo = max(_win), min(_win)
+                if _hi > _lo:
+                    _recov = (current - _lo) / (_hi - _lo)
+                    if _recov >= _stale:
+                        _suppress_bear = True
+                        diag["stale_recovery"] = round(_recov, 3)
+            if not _suppress_bear:
+                diag["raw"] = "bear"
+                return "bear"
         if len(closes) >= 200 and current < ma_200:
             diag["raw"] = "bear"
             return "bear"
