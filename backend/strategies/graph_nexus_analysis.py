@@ -4977,6 +4977,7 @@ def _v32_momentum_ath_or_mcap_block(
     raw_net_score: float,
     log_fn=None,
     lane: str = "momentum",
+    date_key=None,
 ) -> tuple[bool, str]:
     """Combined V32 T1-c (near-ATH) + T2-a (market-cap) guard.
 
@@ -4992,15 +4993,28 @@ def _v32_momentum_ath_or_mcap_block(
     # disaster (TXG, AMPX, CAR) carried an "extraordinary conviction" score.
     _mext_pct = float(config.get("entry_extension_block_pct", 0.0) or 0.0)
     if _mext_pct > 0:
-        _mext_lb = int(config.get("entry_extension_lookback_bars", 20) or 20)
+        # 2026-07-20: scale the lookback to the run's cadence (20 bars ≈ ~3
+        # trading days at 1h, but ~a month at 1d) and resolve as-of bars from
+        # the overlay cache when the broker `price_history` is blind on an
+        # age-0 discovery — the gate was never once reachable before this.
+        _mext_lb = _scale_bars(int(config.get("entry_extension_lookback_bars", 20) or 20), config)
+        _mext_bars = _resolve_asof_bars(symbol, price_history, strategy_cache, date_key)
         _mext_hit, _mext_runup = _recent_runup_protect(
-            symbol, price_history, _mext_pct, _mext_lb)
+            symbol, {symbol: _mext_bars}, _mext_pct, _mext_lb)
         if _mext_hit:
             if log_fn:
                 log_fn(f"V32 {lane} extension-block: {symbol} recent runup "
                        f"+{_mext_runup:.1f}% > {_mext_pct:.0f}% — no conviction bypass",
                        "yellow")
             return True, f"extension_runup_{_mext_runup:.0f}pct"
+        # Fail-closed posture (opt-in): a discovery-lane entry we still can't
+        # price cannot be runup-checked; mirror the Bear RS gate rather than
+        # admitting a blind parabolic. Default off preserves current behavior.
+        if len(_mext_bars) < 2 and bool(config.get("entry_extension_require_bars", False)):
+            if log_fn:
+                log_fn(f"V32 {lane} extension-block: {symbol} no as-of bars — "
+                       f"fail-closed (entry_extension_require_bars)", "yellow")
+            return True, "extension_no_bars"
 
     # T1-c near-ATH gate
     # Z1.2 (2026-05-15): default flipped to True. Backtest 299903 showed AIOS
@@ -7431,6 +7445,43 @@ def _recent_return_pct(sym, price_history, lookback_bars) -> float | None:
     if len(closes) < 2:
         return None
     return ((closes[-1] - closes[0]) / closes[0]) * 100.0
+
+
+def _resolve_asof_bars(sym, price_history, strategy_cache, date_key=None, min_bars=2):
+    """As-of-correct bars for ``sym``, preferring the broker-supplied
+    ``price_history`` (already point-in-time in a backtest) and falling back to
+    ``strategy_cache["_overlay_bars_raw"]`` when that has fewer than ``min_bars``.
+
+    2026-07-20 bull-alpha (bt 148462 forensics): age-0 discovery entries (e.g.
+    CAR) are emitted by the momentum lanes BEFORE the broker fetches their bars,
+    so ``price_history`` is empty for them and every price-extension gate fell
+    open. The momentum SCORER that picks them already reads the overlay cache —
+    this makes the entry GATES read the same bars.
+
+    The overlay cache holds a symbol's FULL history (including bars that
+    post-date the sim clock), so the fallback is filtered to ``<= date_key`` to
+    prevent lookahead. Returns a list of bar dicts (possibly empty). Bar shape
+    is heterogeneous: broker bars use ``close``; overlay bars use ``c`` with a
+    ``t``/``date`` timestamp — downstream helpers already read both.
+    """
+    bars = []
+    if isinstance(price_history, dict):
+        bars = price_history.get(sym) or []
+    if len(bars) >= min_bars:
+        return bars
+    overlay = (strategy_cache or {}).get("_overlay_bars_raw") if isinstance(strategy_cache, dict) else None
+    if not isinstance(overlay, dict):
+        return bars
+    raw = overlay.get(sym) or []
+    if not raw:
+        return bars
+    if date_key:
+        dk = str(date_key)[:10]
+        raw = [
+            b for b in raw
+            if isinstance(b, dict) and str(b.get("t", b.get("date", "")))[:10] <= dk
+        ]
+    return raw if len(raw) >= min_bars else bars
 
 
 def _llm_sell_conviction_bypass(config: dict, raw_score, pnl_pct) -> bool:
@@ -19982,6 +20033,7 @@ def _apply_quality_filter(
     portfolio_emulator,
     config: dict,
     strategy_cache: dict | None = None,
+    date_key=None,
 ) -> dict:
     """V9: Filter out low-quality stocks based on market cap, volume, and propagation depth.
 
@@ -20033,9 +20085,12 @@ def _apply_quality_filter(
         # than the threshold. ETFs were already exempted above.
         _ext_block_pct = float(config.get("entry_extension_block_pct", 0.0) or 0.0)
         if _ext_block_pct > 0:
-            _ext_lookback = int(config.get("entry_extension_lookback_bars", 20) or 20)
+            # 2026-07-20: cadence-scaled lookback + as-of overlay fallback so the
+            # gate is reachable for age-0 discovery entries (see _resolve_asof_bars).
+            _ext_lookback = _scale_bars(int(config.get("entry_extension_lookback_bars", 20) or 20), config)
+            _ext_bars = _resolve_asof_bars(sym, price_history, strategy_cache, date_key)
             _ext_hit, _ext_runup = _recent_runup_protect(
-                sym, price_history, _ext_block_pct, _ext_lookback)
+                sym, {sym: _ext_bars}, _ext_block_pct, _ext_lookback)
             if _ext_hit:
                 sc["score"] = 0
                 sc["action_intent"] = "hold"
@@ -23735,7 +23790,7 @@ class GraphNexusAnalysis:
             )
         scores = _apply_portfolio_circuit_breaker(scores, symbols_list, portfolio_emulator, config)
         scores = _apply_buy_price_floor(scores, symbols_list, prices, data, portfolio_emulator, config)
-        scores = _apply_quality_filter(scores, symbols_list, prices, data, portfolio_emulator, config, strategy_cache=strategy_cache)
+        scores = _apply_quality_filter(scores, symbols_list, prices, data, portfolio_emulator, config, strategy_cache=strategy_cache, date_key=date_key)
         scores = _apply_sector_concentration_limit(scores, symbols_list, config, strategy_cache=strategy_cache)
         _queue_buy_candidates = [s for s in symbols_list if (scores.get(s) or {}).get("score") == 1]
         scores = _apply_portfolio_drawdown_halt(
@@ -24593,6 +24648,7 @@ class GraphNexusAnalysis:
                             _v32_blocked, _v32_reason = _v32_momentum_ath_or_mcap_block(
                                 _mp_ticker, _mp_buy_price, data, strategy_cache,
                                 config, _mp_raw, log_fn=_log, lane="mw_buy",
+                                date_key=date_key,
                             )
                             if _v32_blocked:
                                 continue
@@ -26144,6 +26200,7 @@ class GraphNexusAnalysis:
                     _mw_gate_blocked, _ = _v32_momentum_ath_or_mcap_block(
                         _mw_buy, _mw_buy_price_for_gate, data, strategy_cache,
                         config, float(_mw_buy_score or 0.0), log_fn=_log, lane="mw_rotation",
+                        date_key=date_key,
                     )
                     if _mw_gate_blocked:
                         # Skip this rotation pair; keep current holding.
@@ -26366,6 +26423,7 @@ class GraphNexusAnalysis:
                         _mw_pf_gate_blocked, _ = _v32_momentum_ath_or_mcap_block(
                             _mw_pf_buy, _mw_pf_buy_price_for_gate, data, strategy_cache,
                             config, float(_mw_pf_score or 0.0), log_fn=_log, lane="mw_swap",
+                            date_key=date_key,
                         )
                         if _mw_pf_gate_blocked:
                             _mw_pf_sell, _mw_pf_buy = None, None
