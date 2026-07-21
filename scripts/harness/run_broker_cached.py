@@ -49,14 +49,23 @@ def _install_cache() -> "object|None":
     except Exception as e:  # pragma: no cover
         print(f"[run_broker_cached] llm_utils import failed ({e}); running WITHOUT local cache", file=sys.stderr)
         return None
+    # Guaranteed provider force AT THE DISPATCH — the single chokepoint every
+    # LLM call funnels through. The resolver-level force (below) misses roles
+    # that resolve via [ModelResolver] (e.g. overlay), so this is the real
+    # catch-all: no call can reach OpenRouter/nemotron.
+    fp = (os.environ.get("HARNESS_FORCE_LLM_PROVIDER") or "").strip() or None
+    fm = (os.environ.get("HARNESS_FORCE_LLM_MODEL") or "haiku").strip() if fp else None
     patched = []
     if hasattr(llm_utils, "call_structured_llm_by_provider"):
-        llm_utils.call_structured_llm_by_provider = cache.wrap_structured(llm_utils.call_structured_llm_by_provider)
+        llm_utils.call_structured_llm_by_provider = cache.wrap_structured(
+            llm_utils.call_structured_llm_by_provider, force_provider=fp, force_model=fm)
         patched.append("structured")
     if hasattr(llm_utils, "call_llm_by_provider"):
-        llm_utils.call_llm_by_provider = cache.wrap_plain(llm_utils.call_llm_by_provider)
+        llm_utils.call_llm_by_provider = cache.wrap_plain(
+            llm_utils.call_llm_by_provider, force_provider=fp, force_model=fm)
         patched.append("plain")
-    print(f"[run_broker_cached] local LLM cache ON at {cache.cache_dir()} (patched: {', '.join(patched) or 'none'})",
+    _forced = f" + FORCED dispatch->{fp}/{fm}" if fp else ""
+    print(f"[run_broker_cached] local LLM cache ON at {cache.cache_dir()} (patched: {', '.join(patched) or 'none'}){_forced}",
           file=sys.stderr)
     _install_forced_provider()
     return cache

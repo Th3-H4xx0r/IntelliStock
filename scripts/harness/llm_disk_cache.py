@@ -126,12 +126,21 @@ def put(key: str, value: dict) -> None:
         _bump("error")
 
 
-def wrap_structured(orig: Callable) -> Callable:
+def wrap_structured(orig: Callable, force_provider=None, force_model=None) -> Callable:
     """Wrap `call_structured_llm_by_provider(provider, api_key, model, prompt,
     output_type, **kw)`. On a local-cache hit, reconstruct the validated model
     with `output_type.model_validate(...)`; on miss, call through and store.
+
+    When `force_provider` is set, the provider/model are REWRITTEN before the
+    real call — this is the guaranteed catch-all that forces every dispatch to
+    claude-cli regardless of how the role resolved (the overlay role resolves
+    via [ModelResolver], bypassing _resolve_role_llm_config). The cache key uses
+    the rewritten (claude) identity so re-runs replay consistently.
     """
     def wrapped(provider, api_key, model, prompt, output_type, **kw):
+        if force_provider:
+            provider = force_provider
+            model = force_model or model
         if cache_dir() is None or output_type is None:
             return orig(provider, api_key, model, prompt, output_type, **kw)
         key = None
@@ -162,10 +171,14 @@ def wrap_structured(orig: Callable) -> Callable:
     return wrapped
 
 
-def wrap_plain(orig: Callable) -> Callable:
+def wrap_plain(orig: Callable, force_provider=None, force_model=None) -> Callable:
     """Wrap the plain-text `call_llm_by_provider(provider, api_key, model,
-    prompt, **kw) -> str`. Caches the returned string."""
+    prompt, **kw) -> str`. Caches the returned string. `force_provider` rewrites
+    the provider/model before the real call (see wrap_structured)."""
     def wrapped(provider, api_key, model, prompt, **kw):
+        if force_provider:
+            provider = force_provider
+            model = force_model or model
         if cache_dir() is None:
             return orig(provider, api_key, model, prompt, **kw)
         key = None
