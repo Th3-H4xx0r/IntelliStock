@@ -1,5 +1,7 @@
 # Bull-Alpha Optimization — Design (2026-07-20)
 
+> **OUTCOME (2026-07-21): approach DISPROVEN — do not retry the entry-gate path. See "Outcome" at the bottom.** Three paired backtests under the fixes made BOTH windows worse (bear +2.29→−1.03%, bull +6.60→+2.82%). Decision: keep the two known-good configs as separate regime profiles (`scripts/doc179_profile_bull.json`, `scripts/doc179_profile_bear.json`); code left inert on `feat/controlled-benchmark-alpha`, not merged. doc-179 reverted to bear-safe baseline; live wake OFF.
+
 **Goal:** raise the bull-window return (bt 148462: +6.60%, 2026-03-30→04-27, SPY +13.6%) well above SPY while preserving the bear-window result (bt 726941: +2.29%, 2026-03-02→03-30, SPY −8%).
 
 **Targets:** bull ≥ +16% (SPY + ~2.5pp or better); bear stays positive and within 0.5pp of its re-validated baseline.
@@ -89,3 +91,27 @@ After Phases 1–3, if bull < +16% but > SPY, present results and stop; further 
 - BULL (03-30→04-27): ≥ +16% (vs SPY +13.6%), with the extension gate observed firing (or correctly passing with bars visible) in the log.
 - Full cycle: compounded ≥ +18% vs SPY ≈ +4.5%.
 - 2,688-test suite green; new unit tests for gate fallback/fail-closed/scaling.
+
+## Outcome (2026-07-21) — approach disproven
+
+Three paired backtests on alpaca-main ($6k, 3600s):
+
+| Config | Bear (03-02→03-30) | Bull (03-30→04-27) |
+|---|---|---|
+| Original (two separate configs) | +2.29% (726941) | +6.60% (148462) |
+| v1: ext gate @25%, require_bars, stale-guard 0.5 | +1.09% (374000) | +2.14% (314428) |
+| v2: ext @120%, glitch ceiling 250 | −1.03% (197777) | +2.82% (345073) |
+
+**Why it failed:**
+1. **The extension gate cannot isolate CAR from the winners.** CAR runs up ~166%, but FLY/VIAV/COIN/DELL/RKLB run up 25–86% — healthy bull momentum. At 25% the gate nuked the winners (v1, 417 fires); at 120%+ceiling, CAR's parabola read above the 250 glitch ceiling on its entry bar and slipped through (v2, CAR −$492). No threshold separates them. The original +6.60% had this gate **off**.
+2. **Every config change reshuffles the whole portfolio** (path-dependence) into different, usually worse, names — you are not turning a dial, you are bouncing between unstable basins.
+3. **The stale-bear guard is inert** (0 `stale_recovery` fires in all runs). The day-1 SQQQ −$236 park is identical across every run including the +6.60% original, so it was never the differentiator.
+4. **The bear degradation is the config, not the code.** Under the fullstack patch the bear month loads up to 11 concurrent longs on chop days via `initial_buy`/`queued_backfill` because `max_positions_chop=10` and `confirm_bars=2` (the *bull* values); those longs bleed as the market falls, and the Bear RS gate only guards bear/crash regime, not chop. The original +2.29% bear used `chop cap=8` / `confirm=3`.
+
+**Root conclusion:** `max_positions_chop` and `regime_upgrade_confirm_bars` are **shared keys** the bull wants loose (participation) and the bear wants tight (containment). A weak chop day at a bear bottom is indistinguishable from one at a pre-rally bottom without lookahead, so no single static config delivers both +6.60% bull and +2.29% bear. (Consistent with the campaign's prior "asymmetric objective is hard" finding.)
+
+**Decision (user, 2026-07-21): accept the split.** Keep the two known-good configs as separate regime profiles:
+- `scripts/doc179_profile_bull.json` — reproduces +6.60% (confirm=2, chop cap=10, extension gate **explicitly 0** since the deployed code now makes it reachable).
+- `scripts/doc179_profile_bear.json` — the +2.29% lever values (confirm=3, chop cap=8, ramp=0.6) on current code with the SQQQ hedge; **NOT re-validated at +2.29% on HEAD** (726941 predated the sleeve-invisibility fixes) — run one paired backtest before any live use.
+
+The experimental code (`_resolve_asof_bars`, extension reachability + glitch ceiling, `regime_bear_stale_recovery_pct`) stays on `feat/controlled-benchmark-alpha`, config-gated and inert with baseline/profile configs (all extension/stale keys 0). **Not merged to main.** No further tuning runs.
