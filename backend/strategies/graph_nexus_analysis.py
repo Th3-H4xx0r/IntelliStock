@@ -6191,25 +6191,36 @@ def _detect_market_regime(
         bear_dd_pct = float(config.get("regime_bear_spy_drawdown_pct", 5.0) or 5.0)
         # Bear: 20d return < -bear_dd_pct OR current < 200-day MA
         if ret_20d < -bear_dd_pct:
-            # 2026-07-20 stale-trigger guard (default 0 = off): a ret20 drawdown
-            # that has already bounced >= X of its peak-to-trough range off the
-            # low is NOT a fresh bear — it is a recovering dip (bt 148462: the
-            # bull window opened "bear" on a -8.18% ret20 inherited from the
-            # prior month, already recovered). Only suppresses the ret20 branch;
-            # the structural (< 200d MA) bear below is never suppressed.
-            _stale = float(config.get("regime_bear_stale_recovery_pct", 0.0) or 0.0)
-            _suppress_bear = False
-            if _stale > 0 and len(closes) >= 21:
-                _win = closes[-21:]
-                _hi, _lo = max(_win), min(_win)
-                if _hi > _lo:
-                    _recov = (current - _lo) / (_hi - _lo)
-                    if _recov >= _stale:
-                        _suppress_bear = True
-                        diag["stale_recovery"] = round(_recov, 3)
-            if not _suppress_bear:
-                diag["raw"] = "bear"
-                return "bear"
+            # 2026-07-21 recovery-override (default OFF): a ret20 that reads
+            # bearish ONLY because a prior-month drawdown is still inside the
+            # 20-day window can be a market that has already TURNED UP (bt 148462:
+            # the bull window opened "bear" on a -8.18% ret20 inherited from the
+            # prior month, then rallied +13.6%). Distinguish "recovering off lows
+            # / bull turn" from "deepening bear" with THREE agreeing signals —
+            #   (1) acceleration: ret5 >= X% (short-term thrust up),
+            #   (2) trend reclaim: price back above the 20-day MA,
+            #   (3) recovery depth: price >= Y of the way off the 20-day low —
+            # so a weak dead-cat bounce (which fails at least one) can't flip us
+            # out of bear. When all fire, treat as chop (participate: cap lifts,
+            # SQQQ skipped, bear RS-gate bypassed), or bull on a very strong
+            # thrust. The structural (< 200d MA) bear below is never overridden.
+            if bool(config.get("regime_recovery_override_enabled", False)) and len(closes) >= 21:
+                _ret5 = ((current - closes[-6]) / closes[-6] * 100.0) if (len(closes) >= 6 and closes[-6] > 0) else 0.0
+                _ma20 = sum(closes[-20:]) / min(len(closes), 20)
+                _lo20, _hi20 = min(closes[-20:]), max(closes[-20:])
+                _off_low = (current - _lo20) / (_hi20 - _lo20) if _hi20 > _lo20 else 0.0
+                _ret5_min = float(config.get("regime_recovery_ret5_min_pct", 2.0) or 2.0)
+                _off_low_min = float(config.get("regime_recovery_off_low_pct", 0.5) or 0.5)
+                _bull_ret5 = float(config.get("regime_recovery_bull_ret5_pct", 5.0) or 5.0)
+                if _ret5 >= _ret5_min and current > _ma20 and _off_low >= _off_low_min:
+                    diag["recovery"] = {"ret5": round(_ret5, 2), "off_low": round(_off_low, 3)}
+                    if _ret5 >= _bull_ret5:
+                        diag["raw"] = "recover->bull"
+                        return "bull"
+                    diag["raw"] = "recover->chop"
+                    return "chop"
+            diag["raw"] = "bear"
+            return "bear"
         if len(closes) >= 200 and current < ma_200:
             diag["raw"] = "bear"
             return "bear"
