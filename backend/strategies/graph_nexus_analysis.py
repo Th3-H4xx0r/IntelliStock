@@ -7437,6 +7437,32 @@ def _slot_min_notional(config: dict, portfolio_value: float) -> float:
     return float(portfolio_value) * (_pct / 100.0) if _pct > 0 else 0.0
 
 
+def _convert_min_loss_threshold(config: dict, regime) -> float:
+    """CONVERT loss threshold for the V28.8.1 loser-displacement gate (2026-07-21
+    bull-alpha). A queued high-conviction name may displace a HELD loser only if
+    that loser's P&L is <= this threshold, so a 50% partial-trim rotation can
+    convert to a net-zero full exit while at cap. In bt 148462 INTC (+97% window)
+    was starved because its only displaceable holding, USL at -1.7%, sat just
+    above the -2.0 threshold. The bull-only override lets confirmed-bull runs
+    widen it (e.g. -1.0) to fund starved winners.
+
+    Bear-safety: only the `"bull"` branch is widened; bear/chop keep the base
+    v32_convert_min_loss_pct. Structurally, bear losers full-exit
+    (sell_fraction=1.0) and never reach the partial-trim convert gate at all
+    (0 V28.8.1 skips across the bt 726941 bear log), so the bear +2.29% is
+    untouched. Default = base value → byte-identical no-op until configured."""
+    try:
+        base = float(config.get("v32_convert_min_loss_pct", -2.0))
+    except (TypeError, ValueError):
+        base = -2.0
+    if str(regime or "").lower() == "bull":
+        try:
+            return float(config.get("v32_convert_min_loss_pct_bull", base))
+        except (TypeError, ValueError):
+            return base
+    return base
+
+
 def _recent_runup_protect(sym, price_history, block_pct, lookback_bars) -> tuple[bool, float]:
     """True when a position's recent close range ran up more than block_pct
     over the last lookback_bars bars (volatile momentum on a hot entry).
@@ -25375,10 +25401,11 @@ class GraphNexusAnalysis:
                                             # V32 S1-d2: configurable CONVERT loss threshold. Default -2.0
                                             # preserves V31.7 behaviour; paired with shield=False the threshold
                                             # can be widened to -4.0 (or similar) so CONVERT fires later.
-                                            try:
-                                                _v32_convert_min_loss = float(config.get("v32_convert_min_loss_pct", -2.0))
-                                            except (TypeError, ValueError):
-                                                _v32_convert_min_loss = -2.0
+                                            # 2026-07-21 bull-alpha: bull-only widen via
+                                            # v32_convert_min_loss_pct_bull (funds starved winners, e.g. INTC;
+                                            # bear/chop keep the base — see _convert_min_loss_threshold).
+                                            _v288_regime = str((strategy_cache or {}).get("_market_regime") or "chop").lower()
+                                            _v32_convert_min_loss = _convert_min_loss_threshold(config, _v288_regime)
                                             _v289_can_convert_loser = (
                                                 _rotation_mode == "v28_hc_losing_break_glass"
                                                 and _v289_held_pnl_pct <= _v32_convert_min_loss
