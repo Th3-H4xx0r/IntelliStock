@@ -5001,6 +5001,18 @@ def _v32_momentum_ath_or_mcap_block(
         _mext_bars = _resolve_asof_bars(symbol, price_history, strategy_cache, date_key)
         _mext_hit, _mext_runup = _recent_runup_protect(
             symbol, {symbol: _mext_bars}, _mext_pct, _mext_lb)
+        # 2026-07-21: glitch ceiling. The overlay cache carries split-unadjusted
+        # / poisoned rows that yield impossible runups (ORGN +3281%, PSTV
+        # +4553%); acting on those blocked good names. Above the ceiling the
+        # runup is data garbage, not a real parabola — fail OPEN (other gates
+        # still apply). 0 = disabled.
+        _mext_glitch = float(config.get("entry_extension_glitch_ceiling_pct", 0.0) or 0.0)
+        if _mext_hit and _mext_glitch > 0 and _mext_runup > _mext_glitch:
+            if log_fn:
+                log_fn(f"V32 {lane} extension pass-thru: {symbol} runup "
+                       f"+{_mext_runup:.0f}% > glitch ceiling {_mext_glitch:.0f}% "
+                       f"— treating as bad bars, not blocking", "yellow")
+            _mext_hit = False
         if _mext_hit:
             if log_fn:
                 log_fn(f"V32 {lane} extension-block: {symbol} recent runup "
@@ -20108,6 +20120,13 @@ def _apply_quality_filter(
             _ext_bars = _resolve_asof_bars(sym, price_history, strategy_cache, date_key)
             _ext_hit, _ext_runup = _recent_runup_protect(
                 sym, {sym: _ext_bars}, _ext_block_pct, _ext_lookback)
+            # 2026-07-21 glitch ceiling: impossible runups from split-unadjusted
+            # / poisoned overlay bars fail OPEN (see momentum-lane site). 0=off.
+            _ext_glitch = float(config.get("entry_extension_glitch_ceiling_pct", 0.0) or 0.0)
+            if _ext_hit and _ext_glitch > 0 and _ext_runup > _ext_glitch:
+                _log(f"Entry extension pass-thru: {sym} runup +{_ext_runup:.0f}% > "
+                     f"glitch ceiling {_ext_glitch:.0f}% — bad bars, not blocking", "yellow")
+                _ext_hit = False
             if _ext_hit:
                 sc["score"] = 0
                 sc["action_intent"] = "hold"

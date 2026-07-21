@@ -92,6 +92,38 @@ def test_gate_fail_open_on_missing_bars_by_default():
     assert not blocked
 
 
+def test_glitch_ceiling_fails_open_on_absurd_runup():
+    # A poisoned overlay row: close collapses to 1.0 then back to 100 -> a
+    # ~9900% "runup". With a glitch ceiling this must NOT block (bad data).
+    overlay = {"_overlay_bars_raw": {"ORGN": _ohlc([
+        ("2026-04-10", 100.0), ("2026-04-11", 1.0), ("2026-04-13", 100.0)])}}
+    cfg = _cfg(entry_extension_glitch_ceiling_pct=250.0)
+    blocked, _ = g._v32_momentum_ath_or_mcap_block(
+        "ORGN", 100.0, {}, overlay, cfg, 1.5, lane="mw_buy", date_key="2026-04-13")
+    assert not blocked, "impossible runup = bad bars -> fail open"
+
+
+def test_glitch_ceiling_still_blocks_real_parabola():
+    # CAR-class: a real +166% runup is below the 250% glitch ceiling and above
+    # the 120% block threshold -> still blocked.
+    overlay = {"_overlay_bars_raw": {"CAR": _ohlc([
+        ("2026-04-10", 120.0), ("2026-04-13", 320.0)])}}  # +166%
+    cfg = _cfg(entry_extension_block_pct=120.0, entry_extension_glitch_ceiling_pct=250.0)
+    blocked, why = g._v32_momentum_ath_or_mcap_block(
+        "CAR", 320.0, {}, overlay, cfg, 1.839, lane="mw_rotation", date_key="2026-04-13")
+    assert blocked and "extension" in why
+
+
+def test_high_threshold_spares_healthy_momentum_winner():
+    # FLY-class winner: +60% runup passes a 120% threshold (was nuked at 25%).
+    overlay = {"_overlay_bars_raw": {"FLY": _ohlc([
+        ("2026-04-06", 100.0), ("2026-04-07", 160.0)])}}  # +60%
+    cfg = _cfg(entry_extension_block_pct=120.0, entry_extension_glitch_ceiling_pct=250.0)
+    blocked, _ = g._v32_momentum_ath_or_mcap_block(
+        "FLY", 160.0, {}, overlay, cfg, 1.2, lane="mw_buy", date_key="2026-04-07")
+    assert not blocked, "healthy +60% momentum must pass a 120% parabola gate"
+
+
 def test_lookback_scaled_to_granularity():
     # 20 bars tuned at 3600s becomes 60 bars at 1200s (same wall-clock window).
     assert g._scale_bars(20, {"_resolved_time_increment_sec": 1200}) == 60
