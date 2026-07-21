@@ -268,3 +268,8 @@ frontend/.vite/
 
 # Local Kalshi data dump (regenerable, not source)
 kalshi_data_dump/
+
+# Local backtest harness (generated, do not commit)
+.backtest_llm_cache/
+backtests/local/
+scripts/local_backtest_bear_baseline.json

@@ -1,0 +1,11 @@
+{
+  "_comment": "Multi-window validation suite for the local backtest harness. Anti-overfit: a bull-alpha change must improve the BULL-mean across windows while every BEAR window stays within tolerance (see --assert-bear-unchanged). The two 'known' windows are calibrated (bull +6.60% bt148462, bear +2.29% bt726941 on the official engine); the out-of-sample windows are best-guess regimes to CONFIRM from the harness log's V31 regime path on first run — adjust dates/labels as needed. The mechanism (running a set, not one window) is the point.",
+  "windows": [
+    {"name": "bull_known_2026-03-30", "instance": "alpaca-main", "start": "2026-03-30", "end": "2026-04-27", "regime": "bull", "granularity": 3600, "cash": 6000, "calibrated_official_pnl_pct": 6.60, "note": "bt 148462"},
+    {"name": "bear_known_2026-03-02", "instance": "alpaca-main", "start": "2026-03-02", "end": "2026-03-30", "regime": "bear", "granularity": 3600, "cash": 6000, "calibrated_official_pnl_pct": 2.29, "note": "bt 726941"},
+    {"name": "bull_oos_2026-01-05", "instance": "alpaca-main", "start": "2026-01-05", "end": "2026-02-02", "regime": "bull", "granularity": 3600, "cash": 6000, "note": "OOS — confirm regime from log"},
+    {"name": "bull_oos_2025-10-06", "instance": "alpaca-main", "start": "2025-10-06", "end": "2025-11-03", "regime": "bull", "granularity": 3600, "cash": 6000, "note": "OOS — confirm regime from log"},
+    {"name": "bear_oos_2025-12-01", "instance": "alpaca-main", "start": "2025-12-01", "end": "2025-12-29", "regime": "bear", "granularity": 3600, "cash": 6000, "note": "OOS — confirm regime from log"},
+    {"name": "bear_oos_2026-04-27", "instance": "alpaca-main", "start": "2026-04-27", "end": "2026-05-25", "regime": "bear", "granularity": 3600, "cash": 6000, "note": "OOS — confirm regime from log"}
+  ]
+}
