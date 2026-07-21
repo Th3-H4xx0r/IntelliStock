@@ -116,7 +116,12 @@ def _claude_allowlist() -> str:
 
 def _build_env(base: dict, provider: str, model: str, effort: str, key: str, secret: str) -> dict:
     env = dict(base)
-    # Cheap LLM for ALL strategy roles (single resolver fallback).
+    # Cheap LLM for ALL strategy roles. The env-fallback path (below) is not
+    # enough on its own because the resolver checks config BEFORE env, so
+    # doc-179's llm_provider=openrouter/nemotron would win — HARNESS_FORCE_*
+    # makes the launcher monkeypatch the resolver to override config outright.
+    env["HARNESS_FORCE_LLM_PROVIDER"] = provider
+    env["HARNESS_FORCE_LLM_MODEL"] = model
     env["GRAPH_NEXUS_LLM_PROVIDER"] = provider
     env["GRAPH_NEXUS_LLM_MODEL"] = model
     env["GRAPH_NEXUS_LLM_REASONING_EFFORT"] = effort
@@ -133,7 +138,14 @@ def _build_env(base: dict, provider: str, model: str, effort: str, key: str, sec
     # Faithful infra + creds (same vars the engine forwards to the container).
     env["KEY"] = key
     env["SECRET"] = secret
-    env["NEO4J_URI"] = base.get("NEO4J_URI", "bolt://localhost:7687")
+    # Neo4j (contagion propagation — essential to fidelity). If .env doesn't set
+    # NEO4J_URI, default to the same Tailscale host as RethinkDB on 7687 (the
+    # prod graph lives there); creds fall back to the deployment defaults.
+    _neo_uri = (base.get("NEO4J_URI") or "").strip()
+    if not _neo_uri:
+        _rh = (base.get("RETHINKDB_HOST") or "").strip()
+        _neo_uri = f"bolt://{_rh}:7687" if _rh else "bolt://localhost:7687"
+    env["NEO4J_URI"] = _neo_uri
     env["NEO4J_USER"] = base.get("NEO4J_USER", "neo4j")
     env["NEO4J_PASSWORD"] = base.get("NEO4J_PASSWORD", "intellistock")
     env["INTELLISTOCK_BACKEND_DIR"] = str(_BACKEND)
