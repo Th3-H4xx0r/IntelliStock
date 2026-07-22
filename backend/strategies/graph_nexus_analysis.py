@@ -27967,6 +27967,11 @@ class GraphNexusAnalysis:
         nexus_position_sizes["_cash_reserve_hard_min_positions"] = int(config.get("cash_reserve_hard_min_positions", 5))
         nexus_position_sizes["_cash_reserve_release_after_min_positions"] = bool(config.get("cash_reserve_release_after_min_positions", True))
         nexus_position_sizes["_buy_price_floor"] = float(config.get("buy_price_floor", 5.0) or 0.0)
+        # 2026-07-22 peak-defense: let the broker force-include held momentum-
+        # watchlist names carrying a retained profit-take partial trim into the
+        # sell-execution set (else the trim is dropped and the winner round-trips
+        # — bt701112 CAR +142% -> -18%). Default OFF; plumbed via this control key.
+        nexus_position_sizes["_momentum_partial_trim_execution_enabled"] = bool(config.get("momentum_partial_trim_execution_enabled", False))
         scores["_nexus_position_sizes"] = nexus_position_sizes
         scores["_nexus_executable_buys"] = _nexus_executable_buys
         scores["_nexus_action_intents"] = action_intents

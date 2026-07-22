@@ -2563,6 +2563,39 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
     return prices
 
 
+def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, positions):
+    """2026-07-22 peak-defense: held tickers carrying a PARTIAL (0 < sell_fraction
+    < 1) sell hint — i.e. a retained profit-take tier trim — that are NOT in
+    expanded_symbols. Such a name (a momentum-watchlist holding not re-discovered
+    this bar) is silently dropped by the _sell_first filter
+    (``[s for s in sorted(expanded_symbols) if s in _nexus_sell_set]``), so its
+    trim never executes and the winner round-trips (bt701112: CAR +142% -> -18%).
+    This returns the set to force-include, exactly as the V7.5 block does for
+    enforcement sells. Pure/testable — no I/O, no side effects.
+
+    Guards: only dict hints with a partial sell_fraction and no ``buy_cash`` key
+    (never a buy, never a 100% liquidation), the symbol absent from
+    expanded_symbols, and a currently-held position (>0 shares). Control keys in
+    nexus_position_sizes (floats/bools like ``_cash_reserve_floor_pct``) are
+    skipped by the isinstance(dict) test."""
+    out = set()
+    for sym, hint in (nexus_position_sizes or {}).items():
+        if not isinstance(hint, dict) or "buy_cash" in hint:
+            continue
+        try:
+            sf = float(hint.get("sell_fraction", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < sf < 1.0 and sym not in expanded_symbols:
+            try:
+                held = float((positions or {}).get(sym, 0) or 0)
+            except (TypeError, ValueError):
+                held = 0.0
+            if held > 0:
+                out.add(sym)
+    return out
+
+
 def _residual_sleeve_config(cached_strategies):
     """P&L sweep 2026-07-19: config for the residual SPY sleeve (idle cash
     parks in a broad ETF instead of dragging at 0% — the 3-regime forensics
@@ -9346,6 +9379,35 @@ while not shutdown_requested:
                                 prices[_enf_sym] = _enf_p
                             else:
                                 _log(f"V7.5 sell enforcement: could not fetch price for {_enf_sym}; forced sell may be skipped", "yellow")
+
+            # Momentum partial-trim execution (2026-07-22 peak-defense): a
+            # profit-take trim retained on a momentum-watchlist holding is sized
+            # into nexus_position_sizes but, if that name is not in the current
+            # discovery/expansion set, it never reaches _sell_first (the filter
+            # below keeps only expanded_symbols) and the trim silently drops — the
+            # winner rides the full parabola untrimmed and round-trips
+            # (bt701112: CAR +142% -> -18%). Mirror the V7.5 enforcement injector
+            # for partial-trim sells so they execute like a normal holding.
+            # Default OFF (byte-identical until momentum_partial_trim_execution_enabled).
+            if bool((nexus_position_sizes or {}).get("_momentum_partial_trim_execution_enabled", False)) and portfolio_emulator is not None:
+                _mpt_missing = _momentum_partial_trim_missing(
+                    nexus_position_sizes, expanded_symbols, portfolio_emulator._positions
+                )
+                if _mpt_missing:
+                    _log(f"Momentum partial-trim injection: {len(_mpt_missing)} held ticker(s) added to execution: {', '.join(sorted(_mpt_missing))}", "yellow")
+                    expanded_symbols |= _mpt_missing
+                    # R15 backtest cred fix + price backfill, same as V7.5 above.
+                    _mpt_k = data_key or key or os.environ.get("KEY", "")
+                    _mpt_s = data_secret or secret or os.environ.get("SECRET", "")
+                    if mode == MODE_BACKTEST:
+                        _ensure_backtest_history_for_symbols(data, list(_mpt_missing), key=_mpt_k, secret=_mpt_s)
+                    for _mpt_sym in _mpt_missing:
+                        if _mpt_sym not in prices or not prices.get(_mpt_sym):
+                            _mpt_p = _get_prices_at_time(data, [_mpt_sym], current_time).get(_mpt_sym) if isinstance(data, dict) else None
+                            if _mpt_p and _mpt_p > 0:
+                                prices[_mpt_sym] = _mpt_p
+                            else:
+                                _log(f"Momentum partial-trim: could not fetch price for {_mpt_sym}; trim may be skipped this tick", "yellow")
 
             reserved_total = 0.0
             # Reserved-capital accounting applies in BOTH modes: without it,
