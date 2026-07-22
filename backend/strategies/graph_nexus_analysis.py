@@ -6204,8 +6204,12 @@ def _detect_market_regime(
             # out of bear. When all fire, treat as chop (participate: cap lifts,
             # SQQQ skipped, bear RS-gate bypassed), or bull on a very strong
             # thrust. The structural (< 200d MA) bear below is never overridden.
+            # 5-day proxy return: exposed in the diag so the SQQQ bear-leg sleeve
+            # (broker.py) can gate on a FRESH decline vs a stale ret20 — a stale
+            # bear (ret20 down from a prior month, ret5 flat/up) shouldn't hedge.
+            _ret5 = ((current - closes[-6]) / closes[-6] * 100.0) if (len(closes) >= 6 and closes[-6] > 0) else 0.0
+            diag["ret5"] = round(_ret5, 2)
             if bool(config.get("regime_recovery_override_enabled", False)) and len(closes) >= 21:
-                _ret5 = ((current - closes[-6]) / closes[-6] * 100.0) if (len(closes) >= 6 and closes[-6] > 0) else 0.0
                 _ma20 = sum(closes[-20:]) / min(len(closes), 20)
                 _lo20, _hi20 = min(closes[-20:]), max(closes[-20:])
                 _off_low = (current - _lo20) / (_hi20 - _lo20) if _hi20 > _lo20 else 0.0

@@ -2589,6 +2589,10 @@ def _residual_sleeve_config(cached_strategies):
                 # by up to 9 trading days; a leg-level stop (default -10% ≈ a
                 # 3.3% market rally on a 3x inverse) exits on rally day ~2.
                 "bear_stop_loss_pct": float(cfg.get("residual_sleeve_bear_stop_loss_pct", 10.0) or 10.0),
+                # 2026-07-22 fresh-decline gate: only hedge when the recent 5-day
+                # proxy move is down at least this much. 0 = off (always hedge in
+                # bear). Skips the -$236 SQQQ drag in a stale-bear-bull-opening.
+                "bear_require_fresh_pct": float(cfg.get("residual_sleeve_bear_require_fresh_pct", 0.0) or 0.0),
             }
     return {"enabled": False}
 
@@ -2827,6 +2831,21 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
             _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
         if regime in ("bear", "crash") and cfg.get("bear_symbol"):
             bsym = cfg["bear_symbol"]
+            # 2026-07-22 fresh-decline gate: don't hedge a STALE bear (ret20 down
+            # from a prior month but the recent 5-day move flat/up — the bull-
+            # window-open case that cost -$236 on SQQQ). Only hedge on a genuinely
+            # fresh decline (ret5 <= -require_pct); a real bear is still falling so
+            # ret5 stays negative and the hedge fires normally (keeps its +$285 edge).
+            _fresh_req = float(cfg.get("bear_require_fresh_pct", 0.0) or 0.0)
+            if _fresh_req > 0:
+                try:
+                    _diag = ((globals().get("_strategy_cache") or {}).get("graph_nexus_analysis") or {}).get("_market_regime_diag") or {}
+                    _r5 = _diag.get("ret5")
+                    if _r5 is not None and float(_r5) > -_fresh_req:
+                        _log(f"[sleeve] bear leg SKIPPED — stale bear (ret5={float(_r5):+.1f}% > -{_fresh_req:.1f}%; not a fresh decline)", "cyan")
+                        return
+                except (TypeError, ValueError, AttributeError):
+                    pass
             if _RESIDUAL_SLEEVE_STATE.get("bear_stop_episode"):
                 return  # already stopped out this bear episode — stay in cash
             # Re-entry dwell after any bear-leg exit (stop-loss/protective):
