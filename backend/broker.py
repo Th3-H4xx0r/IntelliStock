@@ -9140,6 +9140,23 @@ while not shutdown_requested:
                     nexus_discovered_syms.add(d)
                 for s in (meta.get("_nexus_sell_enforcement") or []):
                     nexus_sell_enforcement.add(s)
+                # 2026-07-22 fix (BUG A): these three channels had been regressed
+                # INTO the residual-sleeve `if` below (commit ba7712f) where they
+                # read a STALE post-loop `meta`. With the sleeve DISABLED the whole
+                # position-sizes sell channel (every sell_fraction trim AND full
+                # sell), executable-buys, and action-intents silently emptied —
+                # every buy fell back to the default $1000 and every position-sizes
+                # sell was dropped; with >1 nexus spec only the last spec's meta
+                # survived. Extract them here in loop A off the fresh per-spec
+                # `meta`, matching `main`. The sleeve `if` keeps ONLY its own
+                # enforcement subtraction. (Byte-identical for the sleeve-on,
+                # single-spec case; a genuine fix for sleeve-off / multi-spec.)
+                for sym, hint in (meta.get("_nexus_position_sizes") or {}).items():
+                    nexus_position_sizes[sym] = hint
+                for sym in (meta.get("_nexus_executable_buys") or []):
+                    nexus_executable_buys.add(sym)
+                for sym, intent in (meta.get("_nexus_action_intents") or {}).items():
+                    nexus_action_intents_merged[sym] = intent
             # 2026-07-19 BULL_F7d forensics: trend-reversal sell enforcement
             # was flattening the sleeve's SQQQ leg every bar it was parked
             # ("overriding SQQQ from 0 to -1") — the sleeve then re-parked at
@@ -9154,12 +9171,6 @@ while not shutdown_requested:
                     _log(f"Sell enforcement: sleeve leg(s) exempted: "
                          f"{', '.join(sorted(_enf_dropped))}", "yellow")
                     nexus_sell_enforcement -= _enf_dropped
-                for sym, hint in (meta.get("_nexus_position_sizes") or {}).items():
-                    nexus_position_sizes[sym] = hint
-                for sym in (meta.get("_nexus_executable_buys") or []):
-                    nexus_executable_buys.add(sym)
-                for sym, intent in (meta.get("_nexus_action_intents") or {}).items():
-                    nexus_action_intents_merged[sym] = intent
 
             # Fix 15: Extract propagation-expansion BUY tickers from run_once results
             nexus_expansion_buys = set()
