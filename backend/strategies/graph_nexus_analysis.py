@@ -20333,6 +20333,23 @@ def _apply_portfolio_drawdown_halt(
     drawdown_pct = ((peak_value - current_value) / peak_value) * 100.0 if peak_value > 0 else 0.0
     triggered_now = False
 
+    # 2026-07-22 profit-ratchet (default OFF): once the portfolio has PEAKED above
+    # arm_pct gain, tighten the halt so a sharp reversal banks near the top
+    # (bt 855815: a +29.6% peak round-tripped to +8.45%). It is INACTIVE during
+    # the climb (peak_gain < arm_pct), so it never whipsaws the way a globally-
+    # tight halt did (v3: 11 kills). Only bites at a real cliff after a big run.
+    if bool(config.get("portfolio_profit_ratchet_enabled", False)) and initial_value > 0:
+        _pr_arm = float(config.get("portfolio_profit_ratchet_arm_pct", 15.0) or 15.0)
+        _pr_peak_gain = (peak_value - initial_value) / initial_value * 100.0
+        if _pr_peak_gain >= _pr_arm:
+            _pr_dd = float(config.get("portfolio_profit_ratchet_drawdown_pct", 10.0) or 10.0)
+            if 0.0 < _pr_dd < halt_pct:
+                halt_pct = _pr_dd
+                if not state.get("ratchet_armed"):
+                    state["ratchet_armed"] = True
+                    _log(f"Profit-ratchet ARMED: peak +{_pr_peak_gain:.1f}% >= +{_pr_arm:.0f}% "
+                         f"— halt tightened to -{_pr_dd:.0f}% from peak to bank gains", "green")
+
     resumed_now = False
 
     if not halt_active and drawdown_pct >= halt_pct:
