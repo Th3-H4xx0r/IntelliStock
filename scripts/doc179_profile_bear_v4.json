@@ -1,0 +1,9 @@
+{
+ "residual_sleeve_bear_alloc_scale_enabled": true,
+ "residual_sleeve_bear_alloc_max_pct": 0.70,
+ "residual_sleeve_bear_scale_start_pct": 4.0,
+ "residual_sleeve_bear_scale_slope": 0.10,
+ "residual_sleeve_bear_scale_min_days": 3,
+ "residual_sleeve_bear_scale_ret5_floor_pct": 0.5,
+ "residual_sleeve_release_cash_pct_deep": 0.05
+}

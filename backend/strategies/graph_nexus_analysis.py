@@ -6216,6 +6216,13 @@ def _detect_market_regime(
         current = closes[-1]
         ret_20d = ((current - closes[-21]) / closes[-21]) * 100.0 if closes[-21] > 0 else 0.0
         diag["ret20"] = round(ret_20d, 2)
+        # 2026-07-23: 5-day proxy return stamped UNCONDITIONALLY. The SQQQ bear
+        # sleeve + conviction-scaled hedge gate on ret5 momentum; on a raw-chop
+        # bar that hysteresis still CONFIRMS as bear, the old in-branch stamp left
+        # diag["ret5"] absent and the gate went blind. Also feeds the recovery-
+        # override below.
+        _ret5 = ((current - closes[-6]) / closes[-6] * 100.0) if (len(closes) >= 6 and closes[-6] > 0) else 0.0
+        diag["ret5"] = round(_ret5, 2)
         ma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else current
         ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else current
         bear_dd_pct = float(config.get("regime_bear_spy_drawdown_pct", 5.0) or 5.0)
@@ -6234,11 +6241,7 @@ def _detect_market_regime(
             # out of bear. When all fire, treat as chop (participate: cap lifts,
             # SQQQ skipped, bear RS-gate bypassed), or bull on a very strong
             # thrust. The structural (< 200d MA) bear below is never overridden.
-            # 5-day proxy return: exposed in the diag so the SQQQ bear-leg sleeve
-            # (broker.py) can gate on a FRESH decline vs a stale ret20 — a stale
-            # bear (ret20 down from a prior month, ret5 flat/up) shouldn't hedge.
-            _ret5 = ((current - closes[-6]) / closes[-6] * 100.0) if (len(closes) >= 6 and closes[-6] > 0) else 0.0
-            diag["ret5"] = round(_ret5, 2)
+            # (_ret5 / diag["ret5"] are computed unconditionally above.)
             if bool(config.get("regime_recovery_override_enabled", False)) and len(closes) >= 21:
                 _ma20 = sum(closes[-20:]) / min(len(closes), 20)
                 _lo20, _hi20 = min(closes[-20:]), max(closes[-20:])
@@ -22975,6 +22978,21 @@ class GraphNexusAnalysis:
                                              data=data)
             _v31_regime = _apply_regime_hysteresis(strategy_cache, _v31_raw, config)
             strategy_cache["_market_regime"] = _v31_regime
+            # 2026-07-23 shared bear-conviction primitive: consecutive confirmed
+            # bear/crash TRADING DAYS (increments once per new date_key while
+            # confirmed bear/crash; ANY upgrade to chop/bull resets it). Single
+            # source of truth read by BOTH the conviction-scaled SQQQ hedge and
+            # the deep-bear long de-risk (broker-side, via the strategy_cache
+            # global) — so the hedge scale-up and the long cut arm together on a
+            # sustained downtrend, not a 1-day flip. Inert unless those features
+            # are enabled; the count itself is harmless.
+            if _v31_regime in ("bear", "crash"):
+                if strategy_cache.get("_bear_dwell_last_date") != date_key:
+                    strategy_cache["_bear_dwell_bars"] = int(strategy_cache.get("_bear_dwell_bars", 0) or 0) + 1
+                    strategy_cache["_bear_dwell_last_date"] = date_key
+            else:
+                strategy_cache["_bear_dwell_bars"] = 0
+                strategy_cache["_bear_dwell_last_date"] = None
             _v31_diag = strategy_cache.get("_market_regime_diag") or {}
             _log(
                 f"V31 market regime: {_v31_regime} "

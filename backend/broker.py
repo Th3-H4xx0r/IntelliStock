@@ -2607,6 +2607,43 @@ def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, posit
     return out
 
 
+def _conviction_bear_alloc(cfg, regime, ret20, ret5, dwell, prev_ratchet):
+    """2026-07-23 conviction-scaled SQQQ NAV cap. Returns (alloc, new_ratchet).
+    Pure/testable. Default (scale disabled) -> static bear_alloc_pct. crash ->
+    alloc_max. Else scale by ret20 DEPTH once the bear is CONFIRMED-sustained
+    (dwell >= min_days) AND still falling (ret5 <= -floor); ratcheted so it never
+    shrinks within an episode (delta-buy only; room goes to 0, never forces
+    sells). Stays at base in choppy/early bear -> dodges the 3x-inverse decay."""
+    base = float(cfg.get("bear_alloc_pct", 0.35) or 0.35)
+    if not cfg.get("bear_alloc_scale_enabled"):
+        return base, prev_ratchet
+    try:
+        ret20 = float(ret20)
+    except (TypeError, ValueError):
+        ret20 = 0.0
+    try:
+        ret5 = float(ret5)
+    except (TypeError, ValueError):
+        ret5 = 0.0
+    try:
+        dwell = int(dwell)
+    except (TypeError, ValueError):
+        dwell = 0
+    alloc_max = float(cfg.get("bear_alloc_max_pct", 0.70) or 0.70)
+    if str(regime) == "crash":
+        alloc = alloc_max
+    else:
+        depth = max(0.0, -ret20 - float(cfg.get("bear_scale_start_pct", 4.0) or 4.0))
+        if (dwell >= int(cfg.get("bear_scale_min_days", 3) or 3)
+                and ret5 <= -float(cfg.get("bear_scale_ret5_floor_pct", 0.5) or 0.5)
+                and depth > 0.0):
+            alloc = min(alloc_max, base + float(cfg.get("bear_scale_slope", 0.10) or 0.10) * depth)
+        else:
+            alloc = base
+    alloc = max(alloc, float(prev_ratchet or 0.0), base)
+    return alloc, alloc
+
+
 def _residual_sleeve_config(cached_strategies):
     """P&L sweep 2026-07-19: config for the residual SPY sleeve (idle cash
     parks in a broad ETF instead of dragging at 0% — the 3-regime forensics
@@ -2637,6 +2674,20 @@ def _residual_sleeve_config(cached_strategies):
                 # proxy move is down at least this much. 0 = off (always hedge in
                 # bear). Skips the -$236 SQQQ drag in a stale-bear-bull-opening.
                 "bear_require_fresh_pct": float(cfg.get("residual_sleeve_bear_require_fresh_pct", 0.0) or 0.0),
+                # 2026-07-23 conviction-scaled hedge (default OFF -> static
+                # bear_alloc_pct). Scale the SQQQ NAV cap UP with downtrend
+                # conviction: alloc = clamp(base + slope*max(0,-ret20-start),
+                # base, alloc_max), gated by >= scale_min_days consecutive
+                # confirmed-bear days AND ret5 <= -ret5_floor (still falling).
+                # Ratcheted per episode (no churn); light in choppy/early bear
+                # to dodge the 3x-inverse decay.
+                "bear_alloc_scale_enabled": bool(cfg.get("residual_sleeve_bear_alloc_scale_enabled", False)),
+                "bear_alloc_max_pct": float(cfg.get("residual_sleeve_bear_alloc_max_pct", 0.70) or 0.70),
+                "bear_scale_start_pct": float(cfg.get("residual_sleeve_bear_scale_start_pct", 4.0) or 4.0),
+                "bear_scale_slope": float(cfg.get("residual_sleeve_bear_scale_slope", 0.10) or 0.10),
+                "bear_scale_min_days": int(cfg.get("residual_sleeve_bear_scale_min_days", 3) or 3),
+                "bear_scale_ret5_floor_pct": float(cfg.get("residual_sleeve_bear_scale_ret5_floor_pct", 0.5) or 0.5),
+                "bear_release_cash_pct_deep": float(cfg.get("residual_sleeve_release_cash_pct_deep", 0.0) or 0.0),
             }
     return {"enabled": False}
 
@@ -2871,8 +2922,9 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
             return
         if regime not in ("bear", "crash"):
             # Regime left bear: the next bear is a NEW episode — re-arm the
-            # one-stop-per-episode latch.
+            # one-stop-per-episode latch and reset the conviction ratchet.
             _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
+            _RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
         if regime in ("bear", "crash") and cfg.get("bear_symbol"):
             bsym = cfg["bear_symbol"]
             # 2026-07-22 fresh-decline gate: don't hedge a STALE bear (ret20 down
@@ -2912,11 +2964,30 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
             if nav <= 0:
                 return
             cash = float(portfolio_emulator.get_cash() or 0.0)
-            park_floor_pct = max(cfg["buffer_pct"],
-                                 cfg["release_cash_pct"] + cfg["buffer_pct"])
+            # 2026-07-23 conviction-scaled alloc (default = static bear_alloc_pct
+            # when scale disabled). Scale the SQQQ NAV cap UP with downtrend
+            # conviction: depth (ret20 below -start), persistence (>= min_days
+            # consecutive confirmed-bear days), momentum floor (ret5 still
+            # falling). Ratcheted per episode so an oscillating ret20 doesn't
+            # churn the cap. crash = max conviction.
+            _alloc = float(cfg["bear_alloc_pct"])
+            _release_cash = float(cfg["release_cash_pct"])
+            if cfg.get("bear_alloc_scale_enabled"):
+                _sc = ((globals().get("_strategy_cache") or {}).get("graph_nexus_analysis") or {})
+                _sdiag = _sc.get("_market_regime_diag") or {}
+                _dwell = int(_sc.get("_bear_dwell_bars", 0) or 0)
+                _alloc, _rt = _conviction_bear_alloc(
+                    cfg, regime, _sdiag.get("ret20"), _sdiag.get("ret5"),
+                    _dwell, _RESIDUAL_SLEEVE_STATE.get("bear_alloc_ratchet"))
+                _RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = _rt
+                # free more cash for the scaled hedge once the bear is sustained
+                if (float(cfg.get("bear_release_cash_pct_deep", 0.0) or 0.0) > 0.0
+                        and _dwell >= int(cfg["bear_scale_min_days"])):
+                    _release_cash = float(cfg["bear_release_cash_pct_deep"])
+            park_floor_pct = max(cfg["buffer_pct"], _release_cash + cfg["buffer_pct"])
             idle = cash - park_floor_pct * nav
             cur_val = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0) * bpx
-            room = max(0.0, cfg["bear_alloc_pct"] * nav - cur_val)
+            room = max(0.0, _alloc * nav - cur_val)
             deploy = min(idle, room)
             if deploy < max(50.0, cfg["min_deploy_pct"] * nav):
                 return
@@ -2935,7 +3006,7 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
                     _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = bpx
             _log(f"[sleeve] parked ${deploy:.2f} in BEAR leg {bsym} @ {bpx:.2f} "
                  f"(regime={regime}, leg={cur_val + deploy:.0f}/"
-                 f"{cfg['bear_alloc_pct'] * nav:.0f} cap, ok={bok})", "cyan")
+                 f"{_alloc * nav:.0f} cap, alloc={_alloc:.0%}, ok={bok})", "cyan")
             return
         if regime != "bull":
             return
