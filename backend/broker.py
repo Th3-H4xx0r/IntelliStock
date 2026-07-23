@@ -3433,6 +3433,40 @@ def load_strategies_from_db():
             pass
         return [], None, None
 
+def _apply_regime_profile(config, regime):
+    """2026-07-23 regime auto-switch. Overlay config["regime_profiles"][regime]
+    onto a COPY of config so the strategy's levers switch by the confirmed market
+    regime each cycle (bull -> bull v9 aggressive; chop/bear/crash -> the
+    bear-defensive base). Pure + DEFAULT-SAFE: when there is no "regime_profiles"
+    key, or no overlay for this regime, returns config UNCHANGED (identity), so a
+    config without the feature is byte-identical to today. Shallow merge — the
+    overlay's keys win; every unlisted key stays at the base value. Transition
+    levers (regime_upgrade_confirm_bars, regime_recovery_override_enabled,
+    residual_sleeve_bear_require_fresh_pct, regime_detector_enabled) must live in
+    the BASE, never an overlay — they drive the very detection that picks the
+    profile."""
+    if not isinstance(config, dict):
+        return config
+    profiles = config.get("regime_profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        return config
+    overlay = profiles.get(str(regime or "").strip().lower())
+    if not isinstance(overlay, dict) or not overlay:
+        return config
+    # Defensive: NEVER let a transition/detection lever ride in an overlay — it
+    # would make _detect_market_regime read a regime-dependent value to decide
+    # the regime (circular), and per-regime max_positions must stay base-indexed.
+    # These belong in the base only (adversarial-review gap #3).
+    _safe = {k: v for k, v in overlay.items()
+             if not (k.startswith("regime_") or k.startswith("max_positions")
+                     or k == "residual_sleeve_bear_require_fresh_pct")}
+    if not _safe:
+        return config
+    merged = dict(config)
+    merged.update(_safe)
+    return merged
+
+
 def run_run_once_strategies(specs, symbols, prices, current_time, data=None, portfolio_emulator=None, time_increment=None, alpaca_key=None, alpaca_secret=None, strategy_caches=None, alpaca_data_feed=None, mode=None):
     """
     Run strategies that have execution_scope "run_once". Each returns a dict mapping symbol -> score (and optional reason).
@@ -3449,6 +3483,42 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
     """
     if not specs:  # V7.3: removed `or not symbols` -- Nexus can discover from scratch
         return []
+    # 2026-07-23 regime AUTO-SWITCH (adversarial-review-hardened). Overlay the
+    # confirmed-regime profile onto the graph_nexus_analysis config BEFORE the
+    # model-ref re-resolution loop (so refs resolve on the merged config each
+    # cycle) and before gna/the sleeve read the SHARED spec. Uses the PREVIOUS
+    # full cycle's stamped regime (one-bar lag — regimes persist via
+    # regime_upgrade_confirm_bars). Reads the cache from the strategy_caches
+    # param, FALLING BACK to the module-global _strategy_cache (gap #1: the MAIN
+    # loop passes no strategy_caches, so without the fallback the overlay would
+    # never apply). Snapshots the RAW base config once per spec. DEFAULT-SAFE: a
+    # spec with no regime_profiles key is untouched (helper returns identity). In
+    # LIVE, the fail-closed LIVE_OVERRIDES are re-applied AFTER the overlay so a
+    # bull profile can never disarm a live safety clamp (gap #2).
+    try:
+        _rp_cache = strategy_caches if isinstance(strategy_caches, dict) else _strategy_cache
+        _rp_regime = str((((_rp_cache or {}).get("graph_nexus_analysis") or {}).get(
+            "_market_regime")) or "").strip().lower()
+        _rp_is_live = (globals().get("mode") == MODE_LIVE)
+        for _rp_spec in specs:
+            if not (isinstance(_rp_spec, dict)
+                    and str(_rp_spec.get("strategy") or "") == "graph_nexus_analysis"
+                    and isinstance(_rp_spec.get("config"), dict)
+                    and "regime_profiles" in _rp_spec["config"]):
+                continue
+            _rp_base = _rp_spec.get("_regime_base_config")
+            if not isinstance(_rp_base, dict):
+                _rp_base = dict(_rp_spec["config"])  # snapshot the RAW base ONCE
+                _rp_spec["_regime_base_config"] = _rp_base
+            _rp_merged = _apply_regime_profile(_rp_base, _rp_regime)
+            if _rp_is_live:
+                _rp_merged = _apply_live_overrides(_rp_merged)
+            _rp_spec["config"] = _rp_merged
+    except Exception as _rp_e:
+        try:
+            _log(f"regime-profile merge skipped: {_rp_e}", "yellow")
+        except Exception:
+            pass
     # Re-resolve *_llm_model_id references on every invocation so changes
     # made via the Models UI (PUT /models/{id} or a fresh POST + strategy
     # re-pointing) propagate to the running broker without a restart.
@@ -3564,7 +3634,13 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
         # killable via NEXUS_BACKTEST_DETERMINISM=0. Gated on mode -> never live.
         try:
             from _phase_alpha_helpers import resolve_backtest_determinism as _resolve_bt_det
-            _bt_det_flag = _resolve_bt_det(mode == MODE_BACKTEST, os.environ)
+            # BUG FIX 2026-07-23: the `mode` PARAM here is the scheduler mode
+            # ("FULL"/"MONITOR"/None — the main loop passes none), NOT the run
+            # mode. Comparing it to MODE_BACKTEST was always False, so
+            # determinism never engaged (0 "deterministic" cache lines observed
+            # in bt#272041). Use the module-global run mode via globals().
+            _run_mode = globals().get("mode")
+            _bt_det_flag = _resolve_bt_det(_run_mode == MODE_BACKTEST, os.environ)
         except Exception:
             _bt_det_flag = False
         config["nexus_backtest_deterministic"] = _bt_det_flag
