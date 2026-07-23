@@ -295,6 +295,51 @@ def test_bear_deploy_sets_entry_basis():
     assert abs(b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] - 30.0) < 1e-9
 
 
+# ── 2026-07-23 hold-through-chop: don't whipsaw the SQQQ hedge on chop ──
+HOLD_CHOP_SPEC = [{"strategy": "graph_nexus_analysis", "config": {
+    "residual_sleeve_enabled": True,
+    "residual_sleeve_symbol": "SPY",
+    "residual_sleeve_bear_symbol": "SQQQ",
+    "residual_sleeve_bear_alloc_pct": 0.35,
+    "residual_sleeve_buffer_pct": 0.02,
+    "residual_sleeve_min_deploy_pct": 0.05,
+    "residual_sleeve_release_cash_pct": 0.15,
+    "residual_sleeve_bear_hold_through_chop": True,
+}}]
+
+
+def test_bear_leg_holds_through_chop_when_enabled():
+    # regime downgraded to chop but cash is ample (no refill needed) → with the
+    # flag ON the hedge is HELD, not dumped (was: full protective exit).
+    _set_regime("chop")
+    b._RESIDUAL_SLEEVE_STATE["last_park_ts"] = datetime(2026, 3, 6, 14)
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 75.0
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 27.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 72.0}, datetime(2026, 3, 6, 15), HOLD_CHOP_SPEC)
+    assert emu.signals == [], "hold-through-chop: chop must NOT force-sell the hedge"
+
+
+def test_bear_leg_still_exits_on_bull_with_hold_through_chop():
+    # Only CHOP is held; a confirmed BULL still closes the leg.
+    _set_regime("bull")
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 75.0
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 27.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 72.0}, datetime(2026, 3, 20, 15), HOLD_CHOP_SPEC)
+    assert len(emu.signals) == 1 and emu.signals[0]["sell_fraction"] == 1.0, \
+        "confirmed bull must still fully exit the bear leg"
+
+
+def test_leg_stop_loss_fires_while_holding_through_chop():
+    # A held-through-chop position is STILL V-bottom protected: price below the
+    # -10% leg stop fires a full exit even in chop (the elif->guarded-if change).
+    _set_regime("chop")
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 80.0  # stop at 72.0
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 27.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 71.0}, datetime(2026, 3, 21, 15), HOLD_CHOP_SPEC)
+    assert len(emu.signals) == 1 and emu.signals[0]["sell_fraction"] == 1.0, \
+        "leg stop-loss must stay active on a held-through-chop bar"
+
+
 # ── 2026-07-23 churn fix: conviction refill mirrors the deploy deep floor ──
 # bt#336180 did 27 ping-pong SQQQ sells because deploy parked cash down to the
 # deep floor (7%) while release trimmed back to the un-deepened 15%. The refill

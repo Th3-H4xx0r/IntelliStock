@@ -2688,6 +2688,11 @@ def _residual_sleeve_config(cached_strategies):
                 "bear_scale_min_days": int(cfg.get("residual_sleeve_bear_scale_min_days", 3) or 3),
                 "bear_scale_ret5_floor_pct": float(cfg.get("residual_sleeve_bear_scale_ret5_floor_pct", 0.5) or 0.5),
                 "bear_release_cash_pct_deep": float(cfg.get("residual_sleeve_release_cash_pct_deep", 0.0) or 0.0),
+                # 2026-07-23 hold-through-chop (default OFF). When True the SQQQ
+                # bear leg is NOT sold on a regime downgrade to chop (only on a
+                # confirmed bull, the -10% leg stop, or crash) — so a choppy bear
+                # doesn't whipsaw the hedge out and it holds the sustained leg.
+                "bear_hold_through_chop": bool(cfg.get("residual_sleeve_bear_hold_through_chop", False)),
             }
     return {"enabled": False}
 
@@ -2810,8 +2815,22 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
             bpx = float((prices or {}).get(bsym) or 0.0)
             _bear_exit_why = None
             if bqty > 0 and regime not in ("bear", "crash"):
-                _bear_exit_why = f"bear over: regime={regime or 'unknown'} protective exit"
-            elif bqty > 0 and bpx > 0:
+                # 2026-07-23 hold-through-chop (default-OFF). In a choppy bear the
+                # V31 regime oscillates bear<->chop; the blanket chop exit whipsaws
+                # the SQQQ hedge out at the chop low and misses the sustained leg
+                # (bt#363166: sold 03-06 @71.87 / 03-17 @71.57, rebought higher).
+                # When enabled, treat CHOP as HOLD — only a confirmed BULL (or the
+                # -10% leg stop / crash, both still active below) closes the leg.
+                # A confirmed-bull exit still fires; unknown/'' regime still exits
+                # (conservative). Flag absent -> _hold_chop False -> byte-identical.
+                _hold_chop = (regime == "chop"
+                              and bool(cfg.get("bear_hold_through_chop", False)))
+                if not _hold_chop:
+                    _bear_exit_why = f"bear over: regime={regime or 'unknown'} protective exit"
+            # Runs when NOT force-exiting (regime bear/crash, OR a held-through
+            # chop bar): keep the leg stop-loss + demand refill active so a held
+            # chop position is still V-bottom protected and can fund the longs.
+            if _bear_exit_why is None and bqty > 0 and bpx > 0:
                 # Leg stop-loss (scenario-sim E): the regime exit lags a
                 # V-bottom by up to 9 trading days; a -10% leg stop (~3.3%
                 # market rally on 3x) exits on rally day ~2 instead.
