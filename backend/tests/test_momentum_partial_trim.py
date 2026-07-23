@@ -15,19 +15,24 @@ import pathlib
 _BROKER = pathlib.Path(__file__).resolve().parents[1] / "broker.py"
 
 
-def _load_fn(name):
+def _load_fns(*names):
+    """Exec the named top-level functions from broker.py in ONE shared namespace
+    (so functions that call each other resolve). broker.py runs argparse at
+    import, so we extract real source via ast instead of importing the module."""
     src = _BROKER.read_text(encoding="utf-8")
     tree = ast.parse(src)
+    wanted = set(names)
+    ns = {}
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            seg = ast.get_source_segment(src, node)
-            ns = {}
-            exec(seg, ns)
-            return ns[name]
-    raise AssertionError(f"{name} not found in broker.py")
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            exec(ast.get_source_segment(src, node), ns)
+    for n in names:
+        if n not in ns:
+            raise AssertionError(f"{n} not found in broker.py")
+    return tuple(ns[n] for n in names)
 
 
-missing = _load_fn("_momentum_partial_trim_missing")
+partial_trim_syms, missing = _load_fns("_partial_trim_syms", "_momentum_partial_trim_missing")
 
 
 def test_partial_trim_not_in_expanded_is_included():
@@ -87,3 +92,30 @@ def test_multiple_names_mixed():
     }
     held = {"CAR": 2.68, "TOYO": 42.0, "FLY": 24.0, "MARA": 7.9}
     assert missing(nps, {"FLY"}, held) == {"CAR", "TOYO"}
+
+
+# --- _partial_trim_syms (the set kept alive through the allowed_syms score filter) ---
+
+def test_partial_trim_syms_selects_partials_only():
+    nps = {
+        "CAR": {"sell_fraction": 0.4},          # partial -> in
+        "TOYO": {"sell_fraction": 0.6},         # partial -> in
+        "MARA": {"sell_fraction": 1.0},         # full -> out
+        "GOOGL": {"buy_cash": 500.0},           # buy -> out
+        "X": {"sell_fraction": 0.0},            # zero -> out
+        "_cash_reserve_floor_pct": 0.10,        # control key -> out
+        "_momentum_partial_trim_execution_enabled": True,  # flag -> out
+    }
+    assert partial_trim_syms(nps) == {"CAR", "TOYO"}
+
+
+def test_partial_trim_syms_empty():
+    assert partial_trim_syms({}) == set()
+    assert partial_trim_syms(None) == set()
+
+
+def test_missing_is_subset_of_partial_trim_syms():
+    # The execution-order injection can only ever target partial-trim names.
+    nps = {"CAR": {"sell_fraction": 0.4}, "MARA": {"sell_fraction": 1.0}}
+    held = {"CAR": 2.68, "MARA": 7.9}
+    assert missing(nps, set(), held) <= partial_trim_syms(nps)

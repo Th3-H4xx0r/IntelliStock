@@ -2563,21 +2563,11 @@ def _ensure_prices_include_positions(portfolio_emulator, prices, current_time, d
     return prices
 
 
-def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, positions):
-    """2026-07-22 peak-defense: held tickers carrying a PARTIAL (0 < sell_fraction
-    < 1) sell hint — i.e. a retained profit-take tier trim — that are NOT in
-    expanded_symbols. Such a name (a momentum-watchlist holding not re-discovered
-    this bar) is silently dropped by the _sell_first filter
-    (``[s for s in sorted(expanded_symbols) if s in _nexus_sell_set]``), so its
-    trim never executes and the winner round-trips (bt701112: CAR +142% -> -18%).
-    This returns the set to force-include, exactly as the V7.5 block does for
-    enforcement sells. Pure/testable — no I/O, no side effects.
-
-    Guards: only dict hints with a partial sell_fraction and no ``buy_cash`` key
-    (never a buy, never a 100% liquidation), the symbol absent from
-    expanded_symbols, and a currently-held position (>0 shares). Control keys in
-    nexus_position_sizes (floats/bools like ``_cash_reserve_floor_pct``) are
-    skipped by the isinstance(dict) test."""
+def _partial_trim_syms(nexus_position_sizes):
+    """2026-07-22 peak-defense: the symbols in nexus_position_sizes carrying a
+    PARTIAL (0 < sell_fraction < 1) sell hint — i.e. retained profit-take tier
+    trims. Control keys (non-dict floats/bools like ``_cash_reserve_floor_pct``)
+    and buys (``buy_cash`` present) are excluded. Pure/testable."""
     out = set()
     for sym, hint in (nexus_position_sizes or {}).items():
         if not isinstance(hint, dict) or "buy_cash" in hint:
@@ -2586,7 +2576,28 @@ def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, posit
             sf = float(hint.get("sell_fraction", 0.0) or 0.0)
         except (TypeError, ValueError):
             continue
-        if 0.0 < sf < 1.0 and sym not in expanded_symbols:
+        if 0.0 < sf < 1.0:
+            out.add(sym)
+    return out
+
+
+def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, positions):
+    """2026-07-22 peak-defense: held tickers carrying a PARTIAL profit-take trim
+    that are NOT in expanded_symbols. Such a name (a momentum-watchlist holding
+    not re-discovered this bar) is silently dropped by the _sell_first filter
+    (``[s for s in sorted(expanded_symbols) if s in _nexus_sell_set]``), so its
+    trim never executes and the winner round-trips (bt701112: CAR +142% -> -18%).
+    Returns the set to force-include, exactly as the V7.5 block does for
+    enforcement sells. Pure/testable — no I/O, no side effects.
+
+    NOTE: force-including into expanded_symbols is necessary but not sufficient —
+    the sell SIGNAL (score=-1) is dropped one stage earlier by the run_once
+    ``allowed_syms`` filter unless the symbol is also kept there (see
+    _partial_trim_syms use at the metadata-extraction site); otherwise
+    execute_signal sees no score and HOLDS the trim."""
+    out = set()
+    for sym in _partial_trim_syms(nexus_position_sizes):
+        if sym not in expanded_symbols:
             try:
                 held = float((positions or {}).get(sym, 0) or 0)
             except (TypeError, ValueError):
@@ -3493,6 +3504,16 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                     metadata["_nexus_executable_buys"] = list(nexus_executable_buys)
                 # Allow original symbols, discovered symbols, expansion buys, and executable buys (V20b: includes backfill rotation buys)
                 allowed_syms = set(symbols) | set(nexus_discovered) | set(nexus_expansion_buys) | set(nexus_executable_buys)
+                # 2026-07-22 peak-defense: a momentum-watchlist HELD name carrying
+                # a profit-take partial trim emits score=-1 but is NOT in the
+                # discovery/buy universe, so without this its SELL SIGNAL is
+                # dropped right here (only the SIZE survives in metadata) and
+                # execute_signal later sees "0 strategies" and HOLDS the trim
+                # (bt701112/#531981: CAR trims triggered + injected but held).
+                # Keep such names so their -1 reaches execution. Default OFF (flag
+                # is a control key in nexus_position_sizes).
+                if bool((nexus_position_sizes or {}).get("_momentum_partial_trim_execution_enabled", False)):
+                    allowed_syms |= _partial_trim_syms(nexus_position_sizes)
                 for sym, val in raw.items():
                     if sym not in allowed_syms:
                         continue
