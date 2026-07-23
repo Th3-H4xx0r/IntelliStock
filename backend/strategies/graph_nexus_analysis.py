@@ -5324,6 +5324,36 @@ def _extract_quality_metadata(
     }
 
 
+def _open_run_entry_map(history) -> dict[str, Any]:
+    """Per-ticker timestamp of the buy that opened the CURRENT continuous holding
+    run, tracked by running net qty. A PARTIAL sell (qty stays > 0) keeps the
+    original entry; only a full close (qty -> 0) resets it, and the next buy
+    re-opens it. This is what lets tiered profit-take and held-days survive a
+    partial trim — the legacy "earliest buy after the most recent sell" nulls the
+    entry for a still-held name after the first tier sells. Pure/testable."""
+    entry: dict[str, Any] = {}
+    qty: dict[str, float] = {}
+    for trade in history or []:
+        t = trade.get("ticker") or ""
+        if not t:
+            continue
+        ts = trade.get("timestamp")
+        action = str(trade.get("action") or "").strip().lower()
+        try:
+            shares = abs(float(trade.get("shares", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            shares = 0.0
+        if action == "buy":
+            if qty.get(t, 0.0) <= 1e-9 and ts is not None:
+                entry[t] = ts
+            qty[t] = qty.get(t, 0.0) + shares
+        elif action == "sell":
+            qty[t] = max(0.0, qty.get(t, 0.0) - shares) if shares > 0.0 else 0.0
+            if qty[t] <= 1e-9:
+                entry.pop(t, None)
+    return entry
+
+
 def _get_open_position_entry_trade(portfolio_emulator, ticker: str) -> dict[str, Any] | None:
     if portfolio_emulator is None:
         return None
@@ -18056,28 +18086,37 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     _entry_buy: dict[str, Any] = {}
     if portfolio_emulator is not None and max_hold_days > 0:
         history = portfolio_emulator.get_trade_history() or []
-        # Pass 1: find the most recent sell timestamp per ticker
-        _last_sell: dict[str, Any] = {}
-        for trade in history:
-            if trade.get("action") == "sell":
-                t = trade.get("ticker", "")
-                ts = trade.get("timestamp")
-                if t and ts is not None:
-                    existing = _last_sell.get(t)
-                    if existing is None or ts > existing:
-                        _last_sell[t] = ts
-        # Pass 2: find the earliest buy AFTER the last sell (= entry date for current position)
-        for trade in history:
-            if trade.get("action") == "buy":
-                t = trade.get("ticker", "")
-                ts = trade.get("timestamp")
-                if t and ts is not None:
-                    last_sell = _last_sell.get(t)
-                    if last_sell is not None and ts <= last_sell:
-                        continue  # This buy was before or at last sell — not the current entry
-                    existing = _entry_buy.get(t)
-                    if existing is None or ts < existing:
-                        _entry_buy[t] = ts
+        if bool(config.get("entry_survives_partial_sell_enabled", False)):
+            # 2026-07-23 FIX (tiered profit-take): entry = the buy that opened the
+            # CURRENT continuous holding run (running net qty). The legacy two-pass
+            # below treats a PARTIAL profit-take trim as if it closed+reopened the
+            # position — after tier 1 sells, the original buy is "before the last
+            # sell" -> no entry for a still-held name -> entry_key="" -> the tiered
+            # profit-take STOPS after tier 1 and held_days resets. See helper.
+            _entry_buy = _open_run_entry_map(history)
+        else:
+            # Legacy two-pass: find the most recent sell timestamp per ticker,
+            # then the earliest buy AFTER it. (Buggy on partial sells — see above.)
+            _last_sell: dict[str, Any] = {}
+            for trade in history:
+                if trade.get("action") == "sell":
+                    t = trade.get("ticker", "")
+                    ts = trade.get("timestamp")
+                    if t and ts is not None:
+                        existing = _last_sell.get(t)
+                        if existing is None or ts > existing:
+                            _last_sell[t] = ts
+            for trade in history:
+                if trade.get("action") == "buy":
+                    t = trade.get("ticker", "")
+                    ts = trade.get("timestamp")
+                    if t and ts is not None:
+                        last_sell = _last_sell.get(t)
+                        if last_sell is not None and ts <= last_sell:
+                            continue  # This buy was before or at last sell — not the current entry
+                        existing = _entry_buy.get(t)
+                        if existing is None or ts < existing:
+                            _entry_buy[t] = ts
         # Remove tickers with no current open position
         positions = portfolio_emulator._positions or {}
         for t in list(_entry_buy.keys()):
