@@ -49,7 +49,20 @@ instead of round-tripping.
 Config-gated, **default OFF** → byte-identical for live `alpaca-main`/doc-179
 until enabled.
 
-### Changes (two files, both additive, default-off)
+### Update (2026-07-22, after bt #531981): the drop is at TWO stages, not one
+
+The first cut fixed only the execution-ORDER filter (`expanded_symbols` →
+`_sell_first`). bt #531981 proved that insufficient: the injection fired
+(`Momentum partial-trim injection: CAR` ×3) and the tiers triggered
+(+21/+49/+114%), yet CAR executed as `hold (weighted scores from 0 strategies)`
+and round-tripped again. The sell **SIGNAL** (`score=-1`) is dropped one stage
+earlier, at the `run_once` **`allowed_syms`** filter (`broker.py:3495-3498` =
+`symbols | discovered | expansion_buys | executable_buys`); a held name outside
+all four never reaches `out_scores`, so `execute_signal` sees no score and holds
+— the `sell_fraction` SIZE survives in metadata but is useless without the
+signal. Full fix requires keeping the partial-trim symbols in `allowed_syms` too.
+
+### Changes (both additive, default-off)
 
 1. **`backend/broker.py`** — a pure, testable helper
    `_momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols,
