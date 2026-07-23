@@ -1,0 +1,22 @@
+{
+ "deployment_ramp_chop_scale": 0.6,
+ "max_positions_chop": 8,
+ "regime_upgrade_confirm_bars": 3,
+ "trailing_stop_activation_pct": 15,
+ "trailing_stop_pct": 12,
+ "trailing_stop_pnl_scaling_enabled": true,
+ "trailing_stop_activation_vol_multiplier": 0.75,
+ "mega_winner_protect_enabled": false,
+ "profit_take_enabled": true,
+ "profit_take_tiers": [[20, 0.33], [40, 0.5]],
+ "portfolio_drawdown_halt_enabled": true,
+ "portfolio_drawdown_halt_pct": 8,
+ "entry_extension_block_pct": 25,
+ "v32_convert_min_loss_pct": -4,
+ "residual_sleeve_bear_require_fresh_pct": 0.0,
+ "regime_recovery_override_enabled": false,
+ "nexus_dual_cadence_backtest_simulation": true,
+ "nexus_monitor_risk_exit_execution_enabled": false,
+ "entry_survives_partial_sell_enabled": false,
+ "momentum_partial_trim_execution_enabled": false
+}
