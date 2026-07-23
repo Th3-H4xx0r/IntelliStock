@@ -396,6 +396,20 @@ def test_trail_gap_through_stop_latches_episode():
     assert b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] is True, "1b: gap-through-stop latches"
 
 
+def test_full_leg_exit_resets_conviction_ratchet():
+    # bt#869125: a trail-bank while regime stays bear left the 0.70 ratchet in
+    # place, so the 04-02 re-park went max-size (70%) into the recovery (-$506).
+    # Any full leg exit must reset the ratchet so a re-park re-earns its size.
+    _set_regime("bear")
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 75.0
+    b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = 90.0
+    b._RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.70  # carried from deep bear
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 50.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 80.0}, datetime(2026, 3, 21, 15), TRAIL_SPEC)
+    assert len(emu.signals) == 1, "trail-banks (90 peak, 80 = -11%)"
+    assert b._RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] == 0.0, "full exit resets the ratchet"
+
+
 def test_avg_down_repark_blends_peak():
     # bug-sweep 6c: an average-DOWN add blends the peak toward the add price so a
     # never-armed high can't retro-arm after the weighted entry drops.

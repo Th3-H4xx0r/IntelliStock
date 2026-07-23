@@ -2922,6 +2922,7 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                                 _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
                                 _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
                                 _RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = current_time
+                                _RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
                             _log(f"[sleeve] released {_bsell_qty:.4f} {bsym} @ {bpx:.2f} "
                                  f"(bear-leg refill: cash {_bcash / _bnav * 100.0:.1f}% -> "
                                  f"target {_brel * 100.0:.0f}% of NAV, ok={_bok})", "cyan")
@@ -2933,6 +2934,15 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                         _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
                         _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None  # reset trail high on exit
                         _RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = current_time
+                        # 2026-07-24 (bt#869125): a full leg exit ENDS the
+                        # conviction episode — the banked/stopped size was cashed,
+                        # so a re-park must RE-EARN its size from current depth/
+                        # dwell, not inherit the stale ratchet. Without this a
+                        # trail-bank (regime still bear) re-parked at the old 70%
+                        # cap the next day (04-02) straight into the recovery
+                        # (-$506). Deploy already resets on a regime upgrade; this
+                        # covers the same-regime trail-bank/stop case.
+                        _RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
                     _log(f"[sleeve] released {bqty:.4f} {bsym} @ {bpx:.2f} "
                          f"({_bear_exit_why}, ok={bok})", "cyan")
                 else:

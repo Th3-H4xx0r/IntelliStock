@@ -17650,6 +17650,22 @@ def _evaluate_position_risk(
                             f"floor={_z31_floor_effective:.1f}% (base={_cb_floor_pct:.0f}%) | result=fired",
                             "red",
                         )
+                    # 2026-07-24 (bt#869125 CAR -$185): monitor-mode CB exits
+                    # EXECUTE (c88101c) but never set _momentum_sell_cooldown
+                    # (that writes only in full-cycle bookkeeping), so the
+                    # momentum swap lane re-bought CAR 21h after stopping it out.
+                    # Write a re-entry blacklist HERE (fires in BOTH side_effect
+                    # modes) reusing _fast_loser_blacklist — every buy lane already
+                    # consults it. Config default 0 = OFF -> byte-identical (no
+                    # write, no read-side change). Don't buy a name you just
+                    # circuit-breaker-stopped out of.
+                    _cb_bl_bars = int(config.get("circuit_breaker_reentry_blacklist_bars", 0) or 0)
+                    if _cb_bl_bars > 0 and strategy_cache is not None:
+                        _cb_bl = _normalize_cache_mapping(strategy_cache, "_fast_loser_blacklist")
+                        if sym not in _cb_bl:
+                            _cb_bl[sym] = {"date": date_key, "bars_remaining": _cb_bl_bars,
+                                           "_created_this_bar": True}
+                            _log(f"CB re-entry BLACKLIST: {sym} blocked for {_cb_bl_bars} bars", "red")
 
                 _peak_protected = False
                 _peak_pnl_pct_for_log = 0.0
