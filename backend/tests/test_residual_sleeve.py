@@ -83,6 +83,7 @@ def setup_function(_fn):
     b._RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = None
     b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
     b._RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
+    b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
     b._ns["_sleeve_circuit_tier"] = lambda: ""
     b._ns.pop("_strategy_cache", None)  # churn-fix tests inject dwell here
     _set_regime("bull")
@@ -293,6 +294,119 @@ def test_bear_deploy_sets_entry_basis():
     emu = _Emu2(cash=6000.0, nav=6000.0)
     b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 3, 15), BEAR_SPEC)
     assert abs(b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] - 30.0) < 1e-9
+
+
+# ── 2026-07-24 hedge peak-banking trailing stop (bank the SQQQ leg's high) ──
+TRAIL_SPEC = [{"strategy": "graph_nexus_analysis", "config": {
+    "residual_sleeve_enabled": True,
+    "residual_sleeve_symbol": "SPY",
+    "residual_sleeve_bear_symbol": "SQQQ",
+    "residual_sleeve_bear_alloc_pct": 0.35,
+    "residual_sleeve_buffer_pct": 0.02,
+    "residual_sleeve_min_deploy_pct": 0.05,
+    "residual_sleeve_release_cash_pct": 0.15,
+    "residual_sleeve_bear_hold_through_chop": True,        # trail must override this
+    "residual_sleeve_bear_leg_trail_activation_pct": 10.0,  # arm at +10% from entry
+    "residual_sleeve_bear_leg_trail_pct": 10.0,             # bank at -10% from peak
+}}]
+
+
+def _run_trail(prices_seq, regime="bear", entry=75.0, qty=50.0):
+    """Feed a SQQQ price sequence through release() bar-by-bar; return the bar
+    index where the leg was sold (or None). Peak tracks across bars."""
+    _set_regime(regime)
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = entry
+    b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": qty})
+    for i, px in enumerate(prices_seq):
+        emu.signals = []
+        b._residual_sleeve_release(emu, {"SQQQ": px}, datetime(2026, 3, 10 + i, 15), TRAIL_SPEC)
+        if emu.signals:
+            return i, emu.signals[0]
+    return None, None
+
+
+def test_trailing_stop_banks_the_peak_on_recovery():
+    # entry 75 -> rises to 90 (armed at +10%=82.5) -> falls to 80 (< 90*0.9=81) -> BANK.
+    i, sig = _run_trail([76, 82, 88, 90, 85, 80], entry=75.0)
+    assert i == 5 and sig["sell_fraction"] == 1.0, "must fully bank when 10% below the 90 peak"
+
+
+def test_trailing_stop_not_armed_holds_through_shallow_move():
+    # entry 75, never rises past +10% (max 80 < 82.5) then dips: NOT armed -> hold.
+    i, sig = _run_trail([76, 78, 80, 79, 77, 76], entry=75.0, regime="bear")
+    assert i is None, "unarmed (peak never reached activation) -> no trailing exit"
+
+
+def test_trailing_stop_holds_through_midbear_chop_then_continues():
+    # entry 75 -> 80 -> dips to 77 (not armed, only +6.7% peak) -> resumes to 92:
+    # a mid-bear pullback before the hedge is deep in profit must NOT bank.
+    i, sig = _run_trail([78, 80, 77, 79, 85, 92], entry=75.0)
+    assert i is None, "mid-bear chop below activation must not trip the trailing stop"
+
+
+def test_trailing_stop_overrides_hold_through_chop():
+    # In CHOP with hold_through_chop on, an armed+fallen leg still banks (the
+    # trailing stop fires regardless of regime).
+    i, sig = _run_trail([82, 90, 88, 80], entry=75.0, regime="chop")
+    assert i == 3 and sig["sell_fraction"] == 1.0, "trail overrides hold-through-chop"
+
+
+def test_trailing_stop_default_off_is_byte_identical():
+    # activation/trail unset (0) -> no trailing exit even on a big peak->drop.
+    _set_regime("bear")
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 75.0
+    b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
+    spec = [{"strategy": "graph_nexus_analysis", "config": {
+        "residual_sleeve_enabled": True, "residual_sleeve_symbol": "SPY",
+        "residual_sleeve_bear_symbol": "SQQQ", "residual_sleeve_bear_alloc_pct": 0.35,
+        "residual_sleeve_buffer_pct": 0.02, "residual_sleeve_min_deploy_pct": 0.05,
+        "residual_sleeve_release_cash_pct": 0.15,  # no trail keys -> default off
+    }}]
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 50.0})
+    for px in [82, 90, 80]:
+        emu.signals = []
+        b._residual_sleeve_release(emu, {"SQQQ": px}, datetime(2026, 3, 20, 15), spec)
+    assert emu.signals == [], "default-off: no trailing exit"
+
+
+def test_refill_full_liquidation_resets_trail_state():
+    # bug-sweep 6b: a refill that sells the WHOLE (tiny) leg must reset entry+peak
+    # so the next leg can't inherit this stale high and instantly self-destruct.
+    _set_regime("bear")
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 78.0
+    b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = 90.0
+    emu = _Emu2(cash=50.0, nav=6000.0, positions={"SQQQ": 2.0})  # cash-starved, tiny leg
+    b._residual_sleeve_release(emu, {"SQQQ": 80.0}, datetime(2026, 3, 21, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1 and abs(emu.signals[0]["sell_fraction"] - 1.0) < 1e-9
+    assert b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] is None, "6b: full refill resets peak"
+    assert b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] is None, "6b: full refill resets entry"
+
+
+def test_trail_gap_through_stop_latches_episode():
+    # bug-sweep 1b: a gap that banks BELOW the -10% entry stop is a stop-out —
+    # latch one-stop-per-episode so deploy doesn't re-enter into the rally.
+    _set_regime("bear")
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 75.0
+    b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = 90.0
+    b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 50.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 66.0}, datetime(2026, 3, 21, 15), TRAIL_SPEC)
+    assert len(emu.signals) == 1, "gap-down banks"
+    assert b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] is True, "1b: gap-through-stop latches"
+
+
+def test_avg_down_repark_blends_peak():
+    # bug-sweep 6c: an average-DOWN add blends the peak toward the add price so a
+    # never-armed high can't retro-arm after the weighted entry drops.
+    _set_regime("bear")
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 100.0
+    b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = 108.0
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 10.0})
+    b._residual_sleeve_deploy(emu, {"SQQQ": 95.0}, datetime(2026, 3, 20, 15), TRAIL_SPEC)
+    assert len(emu.signals) == 1, "should add to the leg"
+    pk = b._RESIDUAL_SLEEVE_STATE["bear_peak_px"]
+    assert pk is not None and 95.0 < pk < 108.0, f"6c: peak blended down (got {pk})"
 
 
 # ── 2026-07-23 hold-through-chop: don't whipsaw the SQQQ hedge on chop ──

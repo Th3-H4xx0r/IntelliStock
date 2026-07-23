@@ -2693,6 +2693,15 @@ def _residual_sleeve_config(cached_strategies):
                 # confirmed bull, the -10% leg stop, or crash) — so a choppy bear
                 # doesn't whipsaw the hedge out and it holds the sustained leg.
                 "bear_hold_through_chop": bool(cfg.get("residual_sleeve_bear_hold_through_chop", False)),
+                # 2026-07-24 hedge peak-banking trailing stop (default OFF: 0/0).
+                # Arm when the SQQQ leg is up >= activation% from its weighted
+                # entry, then fully exit when it falls trail% from its running
+                # high — banks the hedge's peak in a bear->recovery instead of
+                # round-tripping. General arm-then-trail (mirrors the long
+                # trailing stops); the activation gate keeps it from tripping on
+                # early/mid-bear chop.
+                "bear_leg_trail_activation_pct": float(cfg.get("residual_sleeve_bear_leg_trail_activation_pct", 0.0) or 0.0),
+                "bear_leg_trail_pct": float(cfg.get("residual_sleeve_bear_leg_trail_pct", 0.0) or 0.0),
             }
     return {"enabled": False}
 
@@ -2813,8 +2822,40 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
         if bsym:
             bqty = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0)
             bpx = float((prices or {}).get(bsym) or 0.0)
+            # 2026-07-24 hedge PEAK-BANKING trailing stop. Track the leg's HIGH
+            # since entry; once the hedge is meaningfully in profit
+            # (peak >= entry*(1+activation)) bank it when it falls trail% from
+            # that high. Same arm-then-trail pattern as the long trailing stops,
+            # so it is GENERAL not window-tuned: the activation gate means it only
+            # arms near a real top, so early/mid-bear chop (hedge not yet up
+            # activation%) never trips it — hold-through-chop keeps capturing the
+            # leg — while a genuine recovery banks the peak instead of round-
+            # tripping (transition bt#491940: SQQQ 74->89.80 peak, held all the
+            # way back to 75.52, gave back ~$724). Fires in ANY regime; overrides
+            # hold-through-chop. DEFAULT-OFF (activation or trail = 0 -> identical).
+            if bqty > 0 and bpx > 0:
+                _pk = float(_RESIDUAL_SLEEVE_STATE.get("bear_peak_px") or 0.0)
+                if bpx > _pk:
+                    _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = bpx
             _bear_exit_why = None
-            if bqty > 0 and regime not in ("bear", "crash"):
+            _leg_trail_act = float(cfg.get("bear_leg_trail_activation_pct", 0.0) or 0.0)
+            _leg_trail_pct = float(cfg.get("bear_leg_trail_pct", 0.0) or 0.0)
+            if bqty > 0 and bpx > 0 and _leg_trail_act > 0 and _leg_trail_pct > 0:
+                _tentry = _RESIDUAL_SLEEVE_STATE.get("bear_entry_px")
+                _tpeak = float(_RESIDUAL_SLEEVE_STATE.get("bear_peak_px") or 0.0)
+                if (_tentry and _tpeak >= float(_tentry) * (1.0 + _leg_trail_act / 100.0)
+                        and bpx <= _tpeak * (1.0 - _leg_trail_pct / 100.0)):
+                    _bear_exit_why = (f"leg trailing stop: bank peak {bpx:.2f} <= "
+                                      f"{_tpeak:.2f} -{_leg_trail_pct:.0f}% "
+                                      f"(armed +{_leg_trail_act:.0f}% from {float(_tentry):.2f})")
+                    # bug-sweep 1b: if a sharp gap banks BELOW the -10% entry
+                    # stop, this is a stop-out, not a peak-bank — latch the
+                    # one-stop-per-episode guard (BULL_F7e) so deploy doesn't
+                    # re-enter into the rally for a second -10%.
+                    _bstop_lvl = float(cfg.get("bear_stop_loss_pct", 10.0) or 10.0)
+                    if _bstop_lvl > 0 and bpx <= float(_tentry) * (1.0 - _bstop_lvl / 100.0):
+                        _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True
+            if _bear_exit_why is None and bqty > 0 and regime not in ("bear", "crash"):
                 # 2026-07-23 hold-through-chop (default-OFF). In a choppy bear the
                 # V31 regime oscillates bear<->chop; the blanket chop exit whipsaws
                 # the SQQQ hedge out at the chop low and misses the sustained leg
@@ -2873,6 +2914,14 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                             _bok = portfolio_emulator.execute_signal(
                                 bsym, -1, bpx, timestamp=current_time,
                                 sell_fraction=_bfrac)
+                            # bug-sweep 6b: a refill that liquidates the WHOLE leg
+                            # is a full exit — reset entry/peak/exit-ts so the
+                            # NEXT leg doesn't inherit this leg's stale high (which
+                            # would instantly retro-arm + destroy the new hedge).
+                            if _bok and _bfrac >= 1.0:
+                                _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
+                                _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
+                                _RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = current_time
                             _log(f"[sleeve] released {_bsell_qty:.4f} {bsym} @ {bpx:.2f} "
                                  f"(bear-leg refill: cash {_bcash / _bnav * 100.0:.1f}% -> "
                                  f"target {_brel * 100.0:.0f}% of NAV, ok={_bok})", "cyan")
@@ -2882,6 +2931,7 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                         bsym, -1, bpx, timestamp=current_time, sell_fraction=1.0)
                     if bok:
                         _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
+                        _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None  # reset trail high on exit
                         _RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = current_time
                     _log(f"[sleeve] released {bqty:.4f} {bsym} @ {bpx:.2f} "
                          f"({_bear_exit_why}, ok={bok})", "cyan")
@@ -3037,6 +3087,16 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
                 if _prev_entry > 0 and _prev_qty > 0 and (_prev_qty + _new_qty) > 0:
                     _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = (
                         (_prev_qty * _prev_entry + _new_qty * bpx) / (_prev_qty + _new_qty))
+                    # bug-sweep 6c: blend the trail PEAK the same way as entry, so
+                    # an average-DOWN add can't lower the entry and retro-arm the
+                    # trail (which would "bank" a loss). Scale-ups into a rising
+                    # leg add at ~the running peak -> peak unchanged (bt#491940
+                    # parks 75.45/78.75/85.38 keep peak 89.80); avg-downs pull the
+                    # blended peak toward the add price, keeping arm honest.
+                    _prev_peak = float(_RESIDUAL_SLEEVE_STATE.get("bear_peak_px") or 0.0)
+                    if _prev_peak > 0:
+                        _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = (
+                            (_prev_qty * _prev_peak + _new_qty * bpx) / (_prev_qty + _new_qty))
                 else:
                     _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = bpx
             _log(f"[sleeve] parked ${deploy:.2f} in BEAR leg {bsym} @ {bpx:.2f} "
