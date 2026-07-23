@@ -34,6 +34,7 @@ from backend._phase_alpha_helpers import (
     backtest_determinism_env_vars,
     derive_backtest_seed,
     neo4j_snapshot_key,
+    resolve_backtest_determinism,
     resolve_use_sentiment_cache,
 )
 
@@ -1460,6 +1461,29 @@ def test_alpha3_determinism_env_blank_pythonhashseed_falls_back_to_zero():
 def test_alpha3_determinism_env_forwards_backtest_seed_only_when_set():
     assert "BACKTEST_SEED" not in backtest_determinism_env_vars({})
     assert backtest_determinism_env_vars({"BACKTEST_SEED": "42"})["BACKTEST_SEED"] == "42"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 2026-07-23 deterministic-backtest gate (LLM structured-cache + seed).
+# ON by default in backtest mode; killable via NEXUS_BACKTEST_DETERMINISM=0;
+# NEVER active in live mode regardless of the env var.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_backtest_determinism_on_by_default_in_backtest():
+    assert resolve_backtest_determinism(True, {}) is True
+
+
+def test_backtest_determinism_never_in_live():
+    assert resolve_backtest_determinism(False, {}) is False
+    assert resolve_backtest_determinism(False, {"NEXUS_BACKTEST_DETERMINISM": "1"}) is False
+
+
+def test_backtest_determinism_operator_killswitch():
+    for off in ("0", "false", "no", "off", "OFF", "False"):
+        assert resolve_backtest_determinism(True, {"NEXUS_BACKTEST_DETERMINISM": off}) is False
+    for on in ("1", "true", "yes", "", "anything"):
+        assert resolve_backtest_determinism(True, {"NEXUS_BACKTEST_DETERMINISM": on}) is True
 
 
 # ──────────────────────────────────────────────────────────────────────────

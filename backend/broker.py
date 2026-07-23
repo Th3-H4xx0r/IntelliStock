@@ -2828,10 +2828,26 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                     # Demand refill (adversarial review MED): in bear the
                     # inverse leg is the only sleeve — when cash cannot fund
                     # the (few) allowed bear slots, partially release it.
+                    # 2026-07-23 churn fix (bt#336180: 27 ping-pong sells):
+                    # mirror the DEPLOY-side deep cash floor. Once the bear is
+                    # sustained, deploy parks cash down to deep+buffer (7%);
+                    # trimming back to the un-deepened release_cash_pct (15%)
+                    # here re-sold the fresh park every bar -> tick-by-tick
+                    # 7%<->15% ping-pong. Use the SAME deep floor + gate as
+                    # deploy (2984-2986) so the hysteresis invariant holds
+                    # (park_floor = release + buffer). Default-OFF: scale
+                    # disabled or deep=0 -> byte-identical to legacy 15% refill.
+                    _brel = float(cfg["release_cash_pct"])
+                    if cfg.get("bear_alloc_scale_enabled"):
+                        _bdeep = float(cfg.get("bear_release_cash_pct_deep", 0.0) or 0.0)
+                        _bdwell = int(((globals().get("_strategy_cache") or {}).get(
+                            "graph_nexus_analysis") or {}).get("_bear_dwell_bars", 0) or 0)
+                        if _bdeep > 0.0 and _bdwell >= int(cfg["bear_scale_min_days"]):
+                            _brel = _bdeep
                     _bnav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
                     _bcash = float(portfolio_emulator.get_cash() or 0.0)
-                    if _bnav > 0 and _bcash < cfg["release_cash_pct"] * _bnav:
-                        _bneeded = max(0.0, cfg["release_cash_pct"] * _bnav - _bcash)
+                    if _bnav > 0 and _bcash < _brel * _bnav:
+                        _bneeded = max(0.0, _brel * _bnav - _bcash)
                         _bsell_qty = min(bqty, _bneeded / bpx)
                         if _bsell_qty > 0:
                             _bfrac = min(1.0, _bsell_qty / bqty)
@@ -2839,8 +2855,8 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                                 bsym, -1, bpx, timestamp=current_time,
                                 sell_fraction=_bfrac)
                             _log(f"[sleeve] released {_bsell_qty:.4f} {bsym} @ {bpx:.2f} "
-                                 f"(bear-leg refill: cash {_bcash / _bnav * 100.0:.1f}% of NAV, "
-                                 f"ok={_bok})", "cyan")
+                                 f"(bear-leg refill: cash {_bcash / _bnav * 100.0:.1f}% -> "
+                                 f"target {_brel * 100.0:.0f}% of NAV, ok={_bok})", "cyan")
             if _bear_exit_why and bqty > 0:
                 if bpx > 0:
                     bok = portfolio_emulator.execute_signal(
@@ -3522,6 +3538,18 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
         # which Fix B's "orders today" cache depends on for restart safety.
         config["_nexus_is_live_mode"] = (mode == MODE_LIVE)
         conditions["_nexus_is_live_mode"] = (mode == MODE_LIVE)
+        # 2026-07-23 backtest determinism: flag deterministic backtest mode so
+        # the strategy routes every structured LLM call (learning summary,
+        # overlay) through the content-hash cache -> paired API backtests of the
+        # same window+config are reproducible. ON by default in backtest mode;
+        # killable via NEXUS_BACKTEST_DETERMINISM=0. Gated on mode -> never live.
+        try:
+            from _phase_alpha_helpers import resolve_backtest_determinism as _resolve_bt_det
+            _bt_det_flag = _resolve_bt_det(mode == MODE_BACKTEST, os.environ)
+        except Exception:
+            _bt_det_flag = False
+        config["nexus_backtest_deterministic"] = _bt_det_flag
+        conditions["nexus_backtest_deterministic"] = _bt_det_flag
         strategy_cache = cache_store.setdefault(name, {})
         try:
             instance = cls()
@@ -7273,8 +7301,14 @@ if mode == MODE_BACKTEST:
     # _phase_alpha_helpers.derive_backtest_seed for unit testability. Bare
     # import (not `backend.`) because prod Docker layout is flat at /app/.
     from _phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
+    from _phase_alpha_helpers import resolve_backtest_determinism as _resolve_bt_det_seed
+    # 2026-07-23: in deterministic mode drop the per-run backtest_row_id from the
+    # seed so PAIRED re-runs of the same window+universe share a seed (the id
+    # differs every POST /backtests and was silently de-syncing the RNG). Explicit
+    # BACKTEST_SEED still wins; a non-deterministic run keeps the id-based seed.
+    _bt_det_seed = _resolve_bt_det_seed(mode == MODE_BACKTEST, os.environ)
     _seed_int, _seed_source = _derive_backtest_seed(
-        backtest_row_id,
+        None if _bt_det_seed else backtest_row_id,
         symbols,
         env_seed=os.environ.get("BACKTEST_SEED"),
     )

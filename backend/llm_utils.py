@@ -5390,6 +5390,13 @@ _PROMPT_CACHE_TABLE = "GraphNexusLLMPromptCache"
 _prompt_cache_lock = threading.Lock()
 _prompt_cache_conn = None
 _prompt_cache_enabled: bool = False
+# 2026-07-23 backtest determinism: when True (deterministic backtest mode),
+# route EVERY structured call through the content-hash cache — not just the
+# callers that opt in via use_prompt_cache=True. The learning-summary and
+# per-candidate overlay fan-out are structured calls that were NOT opting in,
+# and their fresh run-to-run results were the dominant A/B non-determinism.
+# Independent of _prompt_cache_enabled being on; both must be True to force it.
+_prompt_cache_structured: bool = False
 _prompt_cache_db: str = "IntelliStock"
 _prompt_cache_tbl_ok: bool = False  # Renamed to avoid collision with line 2269
 _prompt_cache_stats: dict[str, int] = {"hits": 0, "misses": 0, "stores": 0}
@@ -5453,12 +5460,20 @@ def _ensure_prompt_cache_table_if_needed() -> None:
 
 def configure_llm_prompt_cache(
     conn=None, enabled: bool = False, db: str = "IntelliStock",
+    structured: bool = False,
 ) -> None:
-    """Enable/disable prompt-hash caching.  Each operation creates its own connection."""
-    global _prompt_cache_conn, _prompt_cache_enabled, _prompt_cache_db, _prompt_cache_tbl_ok, _prompt_cache_fail_count
+    """Enable/disable prompt-hash caching.  Each operation creates its own connection.
+
+    ``structured=True`` additionally forces the STRUCTURED path (learning
+    summary, per-candidate overlay, event maintenance, ...) through the cache
+    even when the caller did not pass ``use_prompt_cache=True``. Used only in
+    deterministic backtest mode; default False keeps today's behavior (plain
+    path cached on-flag, structured cached only when the caller opts in)."""
+    global _prompt_cache_conn, _prompt_cache_enabled, _prompt_cache_db, _prompt_cache_tbl_ok, _prompt_cache_fail_count, _prompt_cache_structured
     with _prompt_cache_lock:
         _prompt_cache_conn = None  # No longer used — kept for compat
         _prompt_cache_enabled = bool(enabled)
+        _prompt_cache_structured = bool(enabled) and bool(structured)
         _prompt_cache_db = db or "IntelliStock"
         _prompt_cache_tbl_ok = False
         _prompt_cache_fail_count = 0
@@ -5818,6 +5833,14 @@ def _call_structured_llm_with_critical_guard(
         import llm_critical_guard
     except ImportError:
         from backend import llm_critical_guard
+
+    # 2026-07-23 backtest determinism: force EVERY structured call through the
+    # content-hash prompt cache when structured caching is on (deterministic
+    # backtest mode). Respects an explicit caller value; live/non-deterministic
+    # runs leave _prompt_cache_structured False -> byte-identical to today.
+    if (_prompt_cache_enabled and _prompt_cache_structured
+            and "use_prompt_cache" not in kw):
+        kw["use_prompt_cache"] = True
 
     if llm_critical_guard.was_already_raised():
         # Another worker already triggered abort. Pass the call through once so

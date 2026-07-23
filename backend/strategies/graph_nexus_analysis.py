@@ -22309,11 +22309,17 @@ class GraphNexusAnalysis:
         #    without affecting live-bar behavior.
         _fast_mode = bool(config.get("nexus_fast_mode", False))
         _lookback_cache_enabled = bool(config.get("nexus_lookback_cache_enabled", True))
-        _cache_should_enable = _fast_mode or (_lookback_cache_enabled and historical_lookback_mode)
+        # 2026-07-23 backtest determinism: in deterministic backtest mode cache
+        # across ALL bars (historic + main) AND route structured calls (learning
+        # summary, overlay) through the content-hash cache so paired re-runs are
+        # reproducible. Gated: never engages in live (`_GN_LIVE_MODE_FLAG`).
+        _det = bool(config.get("nexus_backtest_deterministic", False)) and not _GN_LIVE_MODE_FLAG
+        _cache_should_enable = _fast_mode or (_lookback_cache_enabled and historical_lookback_mode) or _det
         if conn_trends is not None:
-            configure_llm_prompt_cache(enabled=_cache_should_enable)
+            configure_llm_prompt_cache(enabled=_cache_should_enable, structured=_det)
             if _cache_should_enable:
-                _mode_label = "fast_mode" if _fast_mode else "lookback_only"
+                _mode_label = ("deterministic" if _det else
+                               "fast_mode" if _fast_mode else "lookback_only")
                 _log(f"LLM prompt cache ENABLED ({_mode_label})", "cyan")
 
         if trend_tracking and conn_trends:

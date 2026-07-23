@@ -33,6 +33,24 @@ def resolve_use_sentiment_cache(config: dict) -> tuple[bool, bool]:
     return use_sentiment_cache, force_applied
 
 
+def resolve_backtest_determinism(is_backtest: bool, environ: dict) -> bool:
+    """Phase α (2026-07-23): is deterministic-backtest mode active?
+
+    Deterministic mode makes paired API backtests of the same window+config
+    reproducible by (1) routing EVERY structured LLM call (learning summary,
+    per-candidate overlay) through the content-hash prompt cache and (2)
+    deriving the RNG seed from the universe instead of the per-run backtest id.
+    ON by default in backtest mode; an operator can disable it by setting
+    ``NEXUS_BACKTEST_DETERMINISM=0`` on the backtest-engine/container env. It is
+    NEVER active in live mode (``is_backtest`` gates it), so live trading is
+    byte-identical regardless of the env var.
+    """
+    if not is_backtest:
+        return False
+    val = str((environ or {}).get("NEXUS_BACKTEST_DETERMINISM", "1")).strip().lower()
+    return val not in ("0", "false", "no", "off")
+
+
 def derive_backtest_seed(
     backtest_row_id,
     symbols,
@@ -108,6 +126,14 @@ def backtest_determinism_env_vars(environ: dict) -> dict:
     bt = (environ.get("BACKTEST_SEED") or "").strip()
     if bt:
         out["BACKTEST_SEED"] = bt
+    # 2026-07-23: forward the deterministic-backtest kill-switch into the
+    # spawned container only when the operator set it explicitly (default is
+    # ON, so an unset var already yields deterministic mode in the broker —
+    # see resolve_backtest_determinism). Forwarding lets an operator disable
+    # determinism from the engine env without a code change.
+    det = (environ.get("NEXUS_BACKTEST_DETERMINISM") or "").strip()
+    if det:
+        out["NEXUS_BACKTEST_DETERMINISM"] = det
     return out
 
 

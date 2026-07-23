@@ -82,8 +82,16 @@ def setup_function(_fn):
     b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
     b._RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = None
     b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
+    b._RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
     b._ns["_sleeve_circuit_tier"] = lambda: ""
+    b._ns.pop("_strategy_cache", None)  # churn-fix tests inject dwell here
     _set_regime("bull")
+
+
+def _set_dwell(n):
+    """Inject the shared confirmed-bear dwell the conviction refill gate reads
+    (globals() inside the extracted fn resolves to _ns)."""
+    b._ns["_strategy_cache"] = {"graph_nexus_analysis": {"_bear_dwell_bars": int(n)}}
 
 
 def test_park_floor_keeps_cash_above_release_threshold():
@@ -285,6 +293,83 @@ def test_bear_deploy_sets_entry_basis():
     emu = _Emu2(cash=6000.0, nav=6000.0)
     b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 3, 15), BEAR_SPEC)
     assert abs(b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] - 30.0) < 1e-9
+
+
+# ── 2026-07-23 churn fix: conviction refill mirrors the deploy deep floor ──
+# bt#336180 did 27 ping-pong SQQQ sells because deploy parked cash down to the
+# deep floor (7%) while release trimmed back to the un-deepened 15%. The refill
+# must use the SAME deep floor + gate (scale on AND deep>0 AND dwell>=min_days).
+DEEP_SPEC = [{"strategy": "graph_nexus_analysis", "config": {
+    "residual_sleeve_enabled": True,
+    "residual_sleeve_symbol": "SPY",
+    "residual_sleeve_bear_symbol": "SQQQ",
+    "residual_sleeve_bear_alloc_pct": 0.35,
+    "residual_sleeve_buffer_pct": 0.02,
+    "residual_sleeve_min_deploy_pct": 0.05,
+    "residual_sleeve_release_cash_pct": 0.15,
+    "residual_sleeve_bear_alloc_scale_enabled": True,
+    "residual_sleeve_release_cash_pct_deep": 0.05,
+    "residual_sleeve_bear_scale_min_days": 3,
+}}]
+
+
+def test_conviction_refill_no_churn_at_deep_floor():
+    # THE regression test. Sustained bear (dwell=5>=3), scale on, deep=0.05.
+    # cash = 7% of NAV = $420, which is ABOVE the deep 5% floor ($300) but was
+    # below the old 15% floor ($900). Pre-fix: sold SQQQ to reach 15% (churn).
+    # Post-fix: effective floor is 5% → cash already sufficient → NO sell.
+    _set_regime("bear")
+    _set_dwell(5)
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 30.0  # avoid the stop-loss path
+    emu = _Emu2(cash=420.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 30.0}, datetime(2026, 3, 21, 15), DEEP_SPEC)
+    assert emu.signals == [], "deep-mode refill must NOT re-sell a fresh park (no ping-pong)"
+
+
+def test_conviction_refill_deep_floor_still_refills_when_truly_starved():
+    # Below even the deep floor: cash 3% ($180) < 5% ($300) → partial refill
+    # sized to the DEEP target, not 15%.
+    _set_regime("bear")
+    _set_dwell(5)
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 30.0
+    emu = _Emu2(cash=180.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 30.0}, datetime(2026, 3, 21, 15), DEEP_SPEC)
+    assert len(emu.signals) == 1
+    frac = emu.signals[0]["sell_fraction"]
+    # needed = 0.05*6000 - 180 = 120 → 120/30 = 4 sh → 4/70 ≈ 0.057
+    assert 0.0 < frac < 0.10, "deep refill sizes to the 5% target, not 15%"
+
+
+def test_conviction_refill_before_dwell_uses_shallow_floor():
+    # Same deep config but dwell=2 < min_days → deep NOT engaged → legacy 15%
+    # floor: cash 7% ($420) < 15% ($900) → refill fires (matches bear_v3).
+    _set_regime("bear")
+    _set_dwell(2)
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 30.0
+    emu = _Emu2(cash=420.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 30.0}, datetime(2026, 3, 21, 15), DEEP_SPEC)
+    assert len(emu.signals) == 1, "before the dwell gate, the shallow 15% floor applies"
+
+
+def test_conviction_refill_scale_off_is_byte_identical():
+    # Deep value present but scale DISABLED (default) → shallow 15% floor:
+    # the fix is default-off. cash 7% ($420) < 15% ($900) → refill fires.
+    _set_regime("bear")
+    _set_dwell(5)  # dwell high, but scale off → deep must not engage
+    b._RESIDUAL_SLEEVE_STATE["bear_entry_px"] = 30.0
+    off_spec = [{"strategy": "graph_nexus_analysis", "config": {
+        "residual_sleeve_enabled": True,
+        "residual_sleeve_symbol": "SPY",
+        "residual_sleeve_bear_symbol": "SQQQ",
+        "residual_sleeve_bear_alloc_pct": 0.35,
+        "residual_sleeve_buffer_pct": 0.02,
+        "residual_sleeve_min_deploy_pct": 0.05,
+        "residual_sleeve_release_cash_pct": 0.15,
+        "residual_sleeve_release_cash_pct_deep": 0.05,  # set, but scale off
+    }}]
+    emu = _Emu2(cash=420.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 30.0}, datetime(2026, 3, 21, 15), off_spec)
+    assert len(emu.signals) == 1, "scale disabled → legacy 15% refill (byte-identical)"
 
 
 # ── 2026-07-19 BULL_F7e fix: one stop-out per bear episode ──
