@@ -20982,6 +20982,15 @@ class GraphNexusAnalysis:
                 _entry["score"] == -1
                 and _is_pre_market_now
                 and not _execute_pre_open
+                # 2026-07-23: in a backtest every hourly bar is fillable, so the
+                # live pre-market defer (RH rejects market+day pre-open) is wrong
+                # here — it would push an intraday risk exit into the next bar's
+                # gap-down. Skip the defer for backtest ticks when monitor
+                # risk-exit execution is enabled. Live behavior is unchanged.
+                and not (
+                    bool(config.get("nexus_monitor_risk_exit_execution_enabled", False))
+                    and bool(config.get("nexus_dual_cadence_backtest_simulation", False))
+                )
             ):
                 _orig_reason = _entry.get("reason") or ""
                 _entry["score"] = 0
@@ -21083,10 +21092,27 @@ class GraphNexusAnalysis:
         # Pass-through any existing sell-enforcement set from the day's full
         # cycle so the broker's sell-enforcement gate still applies.
         _existing_se = (strategy_cache or {}).get("_nexus_sell_enforcement_last")
-        if isinstance(_existing_se, (list, set, tuple)):
-            out["_nexus_sell_enforcement"] = list(_existing_se)
-        else:
-            out["_nexus_sell_enforcement"] = []
+        _se_out = list(_existing_se) if isinstance(_existing_se, (list, set, tuple)) else []
+        # 2026-07-23 PEAK-DEFENSE: route the monitor's OWN freshly-triggered
+        # forced-exit sells (Trailing stop / Circuit breaker / Fast loser /
+        # Hold-limit) into enforcement so they EXECUTE this intraday tick. Without
+        # this, the monitor computes and logs the risk exit but returns only the
+        # prior FULL cycle's enforcement + empty per-symbol sizes, so the sell is
+        # silently dropped and a rolling-over winner rides its parabola all the
+        # way down (bt701112/#288005: CAR peaks +142% $752 -> exits $253 -18%).
+        # The broker executes enforcement sells via V7.5 injection + the
+        # decision override, independent of the (empty) discovery universe.
+        # Default OFF; live behavior byte-identical until enabled.
+        if bool(config.get("nexus_monitor_risk_exit_execution_enabled", False)):
+            for _msym, _mentry in out.items():
+                if (
+                    isinstance(_mentry, dict)
+                    and _mentry.get("score") == -1
+                    and _mentry.get("_forced_exit")
+                    and _msym not in _se_out
+                ):
+                    _se_out.append(_msym)
+        out["_nexus_sell_enforcement"] = _se_out
         out["_nexus_active_events"] = []
         out["_nexus_expansion_buys"] = []
 
