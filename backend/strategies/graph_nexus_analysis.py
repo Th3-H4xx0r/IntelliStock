@@ -18481,6 +18481,18 @@ def _overlay_bars_compute_range(config: dict, date_key: str) -> tuple[str, str]:
         base = datetime.utcnow()
     # Start: enough history for the overlay lookback from the earliest possible day
     start = base - timedelta(days=overlay_lookback + int(overlay_lookback * 0.6) + 30)
+    # 2026-07-24 (default OFF): the momentum watchlist scores over up to
+    # momentum_watchlist_history_bars TRADING bars, but the prefetch above only
+    # reaches ~55 trading bars back — so most names are unscoreable early and ALL
+    # 60-day returns come back 0.0, causing adverse selection (weak names pass while
+    # strong ones trip a parabolic ceiling on a false 0.0) and cache-luck
+    # nondeterminism. When overlay_bars_min_history_bars is set, extend the start to
+    # cover that many trading bars (~*1.5 calendar days + buffer).
+    _min_hist_bars = int(config.get("overlay_bars_min_history_bars", 0) or 0)
+    if _min_hist_bars > 0:
+        _hist_start = base - timedelta(days=int(_min_hist_bars * 1.5) + 30)
+        if _hist_start < start:
+            start = _hist_start
     # End: cover the full backtest range (same logic as Benzinga bulk),
     # but cap at today to avoid fetching future dates (which always return 0 bars
     # and cause Alpaca to split into unnecessary chunks).
@@ -20357,6 +20369,32 @@ def _apply_quality_filter(
                     f"+{_ext_runup:.1f}% > {_ext_block_pct:.0f}% — not chasing a "
                     f"local top | {orig_reason}")[:1500]
                 filtered_count += 1
+                # 2026-07-24 (default OFF): keep the blocked name visible to the
+                # momentum watchlist so it stays priced+scored and is buyable once it
+                # is no longer extended, instead of vanishing after a one-shot signal.
+                # EVALUATION only — the buy is still blocked here.
+                if bool(config.get("momentum_watchlist_track_extension_blocked", False)) and isinstance(strategy_cache, dict):
+                    # BEAR/CRASH gate: never track in a downtrend. The momentum
+                    # reserved-buy lane injects picks AFTER this filter and bypasses
+                    # the bear RS gate, so feeding it the frothiest +25%-runup names
+                    # in a bear would knife-catch fading rallies and regress the bear
+                    # leg. Track only outside bear (chop/bull) — this still catches a
+                    # name blocked during a recovery-chop (the CAR case).
+                    _eb_reg = str((strategy_cache or {}).get("_market_regime") or "").lower()
+                    if _eb_reg not in ("bear", "crash"):
+                        _eb = strategy_cache.setdefault("_extension_blocked_track", {})
+                        _eb_sym = str(sym).strip().upper()
+                        _eb.pop(_eb_sym, None)   # recency: re-blocked -> move to newest
+                        _eb[_eb_sym] = str(date_key or "")[:10]
+                        try:
+                            _eb_cap = int(config.get("momentum_watchlist_track_extension_blocked_max", 50) or 50)
+                        except (TypeError, ValueError):
+                            _eb_cap = 50
+                        if _eb_cap < 1:
+                            _eb_cap = 50
+                        if len(_eb) > _eb_cap:
+                            for _old in list(_eb.keys())[:len(_eb) - _eb_cap]:
+                                _eb.pop(_old, None)
                 _log(
                     f"Entry extension gate: {sym} recent runup +{_ext_runup:.1f}% > "
                     f"{_ext_block_pct:.0f}% — buy blocked", "yellow")
@@ -23865,9 +23903,19 @@ class GraphNexusAnalysis:
                     # Trend-tracked tickers (source of V31 sell enforcement, includes SNDK)
                     try:
                         _trend_tickers: list[str] = []
+                        # 2026-07-24: trends store their list under "affected_tickers";
+                        # the old "tickers" key was always absent, so this discovery
+                        # source was silently empty every bar. GATED (default off) so
+                        # reference runs — which had it empty — stay byte-identical
+                        # unless momentum_watchlist_trend_source_enabled is set; when on,
+                        # read the correct field. (Feeds the same lane as the reserved
+                        # momentum-buy path, so it's a deliberate behavioral change.)
+                        _trend_field = ("affected_tickers"
+                                        if bool(config.get("momentum_watchlist_trend_source_enabled", False))
+                                        else "tickers")
                         for _tr in (active_trends or []):
                             if isinstance(_tr, dict):
-                                for _tkr in (_tr.get("tickers") or []):
+                                for _tkr in (_tr.get(_trend_field) or []):
                                     _s = str(_tkr).strip().upper()
                                     if _s:
                                         _trend_tickers.append(_s)
@@ -23887,6 +23935,23 @@ class GraphNexusAnalysis:
                     # Note: has_score source removed — scores dict is finalized at line ~16948,
                     # which is AFTER this block. Scored tickers will be captured by the
                     # _prop_expansion_set_alloc source on bar N+1 due to watchlist persistence.
+                    # 2026-07-24 extension-blocked tracking (default OFF): a NEW entry the
+                    # extension gate blocked (over-extended runup) is otherwise dropped from
+                    # discovery entirely — if its signal was one-shot it vanishes, so a real
+                    # mover that first appears already-extended (e.g. a name that ran before
+                    # we saw it) is never priced/scored and can't be bought once it pulls
+                    # back into range. Feed those blocked names into the watchlist so they
+                    # stay priced+scored (EVALUATION ONLY — the buy stays blocked by the gate
+                    # until the name is no longer extended). Pruned to a recent lookback.
+                    try:
+                        if bool(config.get("momentum_watchlist_track_extension_blocked", False)):
+                            _eb_track = (strategy_cache or {}).get("_extension_blocked_track") or {}
+                            _eb_keep = int(config.get("momentum_watchlist_track_extension_blocked_max", 50) or 50)
+                            _mw_extra_sources["extension_blocked"] = [
+                                str(_s).strip().upper() for _s in list(_eb_track.keys())[-_eb_keep:] if _s
+                            ]
+                    except Exception:
+                        pass
                     # Sell enforcement tickers (where SNDK lives)
                     try:
                         _mw_extra_sources["sell_enforce"] = [
@@ -24359,6 +24424,12 @@ class GraphNexusAnalysis:
         # remain in the persistent momentum watchlist.
         if _v31_blocked_set and config.get("momentum_watchlist_enabled", False) and strategy_cache is not None:
             _mw_all = set((strategy_cache.get("_momentum_watchlist") or {}).keys())
+            # 2026-07-24: a name in the watchlist ONLY because the extension gate
+            # blocked it (Fix A tracking) must NOT gain re-entry-blacklist exemption —
+            # a just-stopped-out name should stay locked out, not become re-buyable via
+            # the tracking path. Exclude the tracked set from the exemption (inert when
+            # Fix A is off: the tracked set is empty).
+            _mw_all = _mw_all - set((strategy_cache.get("_extension_blocked_track") or {}).keys())
             if _mw_all:
                 _exempt = _v31_blocked_set & _mw_all
                 if _exempt:
