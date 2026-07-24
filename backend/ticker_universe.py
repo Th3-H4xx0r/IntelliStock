@@ -155,6 +155,89 @@ def is_valid_us_ticker(ticker: str, *, strict: bool = True) -> bool:
     return t in universe
 
 
+# --- Breadth universe (market-wide momentum screen source, 2026-07-24) ---
+# The Nasdaq screener `download=true` rows carry marketCap / lastsale / volume
+# columns that _fetch_universe discards. get_breadth_universe keeps them and
+# returns a liquidity-floored, dollar-volume-ranked symbol list — the candidate
+# pool for the breadth momentum scanner (EVALUATION only; buys stay gated).
+_BREADTH_CACHE: list[str] | None = None
+_BREADTH_CACHE_KEY: tuple | None = None
+_BREADTH_FETCHED_AT: float = 0.0
+
+
+def _parse_money(v) -> float:
+    """'$1,234,567' / '1234567' / 1234567 -> float; junk -> 0.0."""
+    try:
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v or "").strip().replace("$", "").replace(",", "").replace("%", "")
+        if not s or s in ("N/A", "--"):
+            return 0.0
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fetch_universe_meta() -> list[dict]:
+    """Nasdaq screener rows WITH metadata: [{sym, price, volume, mcap}]. Best-
+    effort; empty list on any error (caller falls back to the narrow universe)."""
+    try:
+        import requests
+        r = requests.get(
+            NASDAQ_SCREENER_URL, headers=NASDAQ_SCREENER_HEADERS,
+            params={"tableonly": "true", "limit": 10000, "offset": 0, "download": "true"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        rows = ((r.json().get("data") or {}).get("rows")) or []
+        out: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sym = (row.get("symbol") or row.get("ticker") or "").strip().upper()
+            if not sym or sym in ("N/A", ""):
+                continue
+            out.append({
+                "sym": sym.replace(".", "-"),   # Alpaca dash form
+                "price": _parse_money(row.get("lastsale")),
+                "volume": _parse_money(row.get("volume")),
+                "mcap": _parse_money(row.get("marketCap")),
+            })
+        return out
+    except Exception:
+        return []
+
+
+def get_breadth_universe(min_mcap: float = 2e9, min_dollar_volume: float = 5e6,
+                         price_floor: float = 5.0, top_n: int = 500) -> list[str]:
+    """Liquidity-floored, dollar-volume-ranked US-equity symbols for the breadth
+    scan. Cached (24h TTL, keyed by the floors). Fails open to [] so the caller
+    keeps its existing (narrow) universe. Pure metadata — NOT price history, so
+    no look-ahead in a backtest; the momentum signal is computed from as-of bars
+    downstream. (Universe membership uses current listings — a mild survivorship
+    proxy for the liquidity floor, acceptable for a coarse candidate gate.)"""
+    global _BREADTH_CACHE, _BREADTH_CACHE_KEY, _BREADTH_FETCHED_AT
+    key = (round(min_mcap), round(min_dollar_volume), round(price_floor, 2), int(top_n))
+    now = time.time()
+    with _UNIVERSE_LOCK:
+        if (_BREADTH_CACHE is not None and _BREADTH_CACHE_KEY == key
+                and (now - _BREADTH_FETCHED_AT) <= _UNIVERSE_TTL_SEC):
+            return list(_BREADTH_CACHE)
+    meta = _fetch_universe_meta()
+    ranked = []
+    for m in meta:
+        if (m["price"] >= price_floor and m["mcap"] >= min_mcap
+                and m["price"] * m["volume"] >= min_dollar_volume
+                and _TICKER_RE.match(m["sym"])):
+            ranked.append((m["price"] * m["volume"], m["sym"]))
+    ranked.sort(reverse=True)
+    result = [s for _dv, s in ranked[:max(0, int(top_n))]]
+    if result:
+        with _UNIVERSE_LOCK:
+            _BREADTH_CACHE, _BREADTH_CACHE_KEY, _BREADTH_FETCHED_AT = result, key, time.time()
+    return list(result)
+
+
 # Crypto pairs use Alpaca's slash form (e.g. BTC/USD, SHIB/USD, ETH/BTC): a
 # 2-10 char alphanumeric base and a 3-4 letter quote (USD/USDT/USDC/BTC).
 _CRYPTO_PAIR_RE = re.compile(r"^[A-Z0-9]{2,10}/[A-Z]{3,4}$")

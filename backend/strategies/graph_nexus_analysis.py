@@ -18503,6 +18503,101 @@ def _overlay_bars_compute_range(config: dict, date_key: str) -> tuple[str, str]:
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
 
+def _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_secret):
+    """2026-07-24 market-wide BREADTH momentum scanner (default OFF).
+
+    The stock finder only ever looked at ~100-250 symbols (trend ETFs + graph
+    neighbours of holdings), so a genuine market mover unconnected to the book
+    was invisible until news propagation surfaced it late (CAR: seen at +166%,
+    bought the top). This rotates through a liquidity-floored full-market
+    universe, prices each name AS-OF date_key (no look-ahead — bars are read
+    `<= date_key`), and admits FRESH momentum movers to an evaluation set fed to
+    the momentum watchlist. Safeguards vs today's two failure modes:
+      - GLITCH filter: skip split-unadjusted/poisoned bars (adjacent close ratio
+        outside [0.4, 2.5]) so a +2119% ghost can't be admitted.
+      - PARABOLIC cap: skip already-blown-off names (r20 > cap / r60 > cap) so we
+        catch movers EARLY, not at the top.
+    EVALUATION ONLY — admitted names still face every buy gate (extension, V32
+    ATH/mcap, circuit-breaker, fast-loser blacklist, cap, bear RS). The pool is
+    built only in the configured regimes (default bull/chop); the bear reserved-
+    buy lane is separately blocked from breadth names (they persist across flips).
+    Returns the cumulative admitted symbol list. Never raises."""
+    if not isinstance(strategy_cache, dict):
+        return []
+    _admitted = strategy_cache.setdefault("_breadth_scan_admitted", {})
+    try:
+        if not bool(config.get("breadth_scan_enabled", False)):
+            return list(_admitted.keys())
+        _regs = [str(x).lower() for x in (config.get("breadth_scan_regimes") or ["bull", "chop"])]
+        _reg = str(strategy_cache.get("_market_regime") or "").lower()
+        if _reg not in _regs:
+            # In bear/crash, DROP the admitted pool entirely: the reserved
+            # momentum-buy lane bypasses the bear RS gate, so a breadth name left
+            # in the watchlist could be bought into a downtrend (knife-catch).
+            # Clearing it here (default on) means no breadth name is ever visible
+            # to buys in bear; it rebuilds when the regime recovers.
+            if _reg in ("bear", "crash") and bool(config.get("breadth_scan_bear_reserved_lane_block", True)):
+                _admitted.clear()
+            return list(_admitted.keys())   # off-regime: don't grow the pool
+        from ticker_universe import get_breadth_universe
+        _uni = get_breadth_universe(
+            min_mcap=float(config.get("breadth_scan_min_mcap", 2e9) or 2e9),
+            min_dollar_volume=float(config.get("breadth_scan_min_dollar_volume", 5e6) or 5e6),
+            price_floor=float(config.get("buy_price_floor", 5.0) or 5.0),
+            top_n=int(config.get("breadth_scan_universe_size", 500) or 500),
+        )
+        if not _uni:
+            return list(_admitted.keys())
+        _batch_n = max(1, int(config.get("breadth_scan_batch_per_bar", 50) or 50))
+        _cur = int(strategy_cache.get("_breadth_cursor", 0) or 0) % len(_uni)
+        _batch = _uni[_cur:_cur + _batch_n]
+        if len(_batch) < _batch_n:
+            _batch += _uni[:_batch_n - len(_batch)]
+        strategy_cache["_breadth_cursor"] = (_cur + _batch_n) % len(_uni)
+        _ensure_overlay_bars_cached(_batch, alpaca_key, alpaca_secret, strategy_cache, config, date_key)
+        _bars_all = strategy_cache.get("_overlay_bars_raw") or {}
+        _ds = str(date_key or "")[:10]
+        _r5_min = float(config.get("breadth_scan_r5_min_pct", 7.0) or 7.0)
+        _r20_min = float(config.get("breadth_scan_r20_min_pct", 12.0) or 12.0)
+        _r20_cap = float(config.get("breadth_scan_r20_parabolic_cap_pct", 60.0) or 60.0)
+        _r60_cap = float(config.get("breadth_scan_r60_parabolic_cap_pct", 150.0) or 150.0)
+        _admit_per_bar = max(1, int(config.get("breadth_scan_admit_per_bar", 3) or 3))
+        _admit_max = int(config.get("breadth_scan_admit_max", 150) or 150)
+        _cands = []
+        for _sym in _batch:
+            if _sym in _admitted:
+                continue
+            _c = _point_in_time_closes(_bars_all.get(_sym), _ds)
+            if len(_c) < 21 or _c[-1] <= 0:
+                continue
+            _glitch = False
+            for _i in range(len(_c) - 20, len(_c)):
+                if _c[_i - 1] > 0 and not (0.4 <= _c[_i] / _c[_i - 1] <= 2.5):
+                    _glitch = True
+                    break
+            if _glitch:
+                continue
+            _cur_px = _c[-1]
+            _r5 = (_cur_px - _c[-6]) / _c[-6] * 100 if _c[-6] > 0 else 0.0
+            _r20 = (_cur_px - _c[-21]) / _c[-21] * 100 if _c[-21] > 0 else 0.0
+            _r60 = ((_cur_px - _c[-61]) / _c[-61] * 100) if (len(_c) >= 61 and _c[-61] > 0) else _r20
+            if _r20 > _r20_cap or _r60 > _r60_cap:
+                continue
+            if _r5 >= _r5_min or _r20 >= _r20_min:
+                _cands.append((_r5, _sym))
+        _cands.sort(reverse=True)
+        for _r5v, _sym in _cands[:_admit_per_bar]:
+            if len(_admitted) >= _admit_max:
+                break
+            _admitted[_sym] = _ds
+    except Exception as _e:
+        try:
+            _log(f"breadth scan tolerated error: {_e}", "yellow")
+        except Exception:
+            pass
+    return list(_admitted.keys())
+
+
 def _ensure_overlay_bars_cached(
     symbols: list[str],
     alpaca_key: str,
@@ -23959,6 +24054,16 @@ class GraphNexusAnalysis:
                             for _s in (nexus_sell_enforcement or set())
                             if _s
                         ]
+                    except Exception:
+                        pass
+                    # 2026-07-24 breadth scan (default OFF): market-wide momentum
+                    # movers -> evaluation only. Regime-gated pool + glitch/parabolic
+                    # filtered inside _breadth_scan_movers; every buy stays gated. The
+                    # bear reserved-buy lane is separately blocked from these names.
+                    try:
+                        _bsm = _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_secret)
+                        if _bsm:
+                            _mw_extra_sources["breadth_scan"] = _bsm
                     except Exception:
                         pass
 
