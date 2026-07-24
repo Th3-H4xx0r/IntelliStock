@@ -6295,6 +6295,22 @@ def _detect_market_regime(
             diag["raw"] = "bear"
             return "bear"
         if len(closes) >= 200 and current < ma_200:
+            # 2026-07-25 (default OFF): this branch made the regime depend on how
+            # much HISTORY the run holds rather than on the market. It needs >=200
+            # closes to exist at all, so the identical tape classified bear on a
+            # 2-month window and chop on a 1-month one (2026-04-06/07: ret20 =
+            # -2.02 / -2.81, comfortably above the -3 bear threshold, so the
+            # OVERRIDABLE ret20 branch never fired -- only this one did). Under the
+            # resulting bear, max_positions dropped 14->2, the bear RS gate blocked
+            # entries, and the extension gate deleted the recovery leaders from
+            # discovery outright. Apply the SAME recovery guard that already
+            # protects the ret20 branch: ret5 thrust + short-MA reclaim + off-low
+            # depth, so a genuine downtrend under its 200d MA still reads bear
+            # (every deepening-bear bar has ret5 < 0).
+            if bool(config.get("regime_structural_bear_recovery_override_enabled", False)):
+                _ro = _recovery_override_regime(closes, current, _ret5, config, diag)
+                if _ro is not None:
+                    return _ro
             diag["raw"] = "bear"
             return "bear"
         # Bull: 20d return > 0 AND current > 50-day MA
