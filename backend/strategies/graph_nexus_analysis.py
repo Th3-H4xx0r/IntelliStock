@@ -18525,19 +18525,35 @@ def _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_se
     if not isinstance(strategy_cache, dict):
         return []
     _admitted = strategy_cache.setdefault("_breadth_scan_admitted", {})
+
+    def _rollback():
+        # Remove breadth-admitted names from the (never-evicting) momentum
+        # watchlist and clear the pool. Merged watchlist membership — NOT just the
+        # admitted set — is what feeds the reserved-buy lane AND momentum_breakout_add
+        # (both bypass the bear RS gate; the latter uses the GLOBAL cap). So a plain
+        # pool-clear leaves breadth names buyable in bear. Evicting them is what
+        # actually makes the bear-block / disable real. A name that also has a
+        # legitimate source re-enters via that source on the next eligible bar.
+        _wl = strategy_cache.get("_momentum_watchlist")
+        if isinstance(_wl, dict):
+            for _s in list(_admitted.keys()):
+                _wl.pop(_s, None)
+        _admitted.clear()
+
     try:
         if not bool(config.get("breadth_scan_enabled", False)):
-            return list(_admitted.keys())
+            # Disable = real rollback (evict + clear), so toggling OFF stops it.
+            if _admitted:
+                _rollback()
+            return []
         _regs = [str(x).lower() for x in (config.get("breadth_scan_regimes") or ["bull", "chop"])]
         _reg = str(strategy_cache.get("_market_regime") or "").lower()
         if _reg not in _regs:
-            # In bear/crash, DROP the admitted pool entirely: the reserved
-            # momentum-buy lane bypasses the bear RS gate, so a breadth name left
-            # in the watchlist could be bought into a downtrend (knife-catch).
-            # Clearing it here (default on) means no breadth name is ever visible
-            # to buys in bear; it rebuilds when the regime recovers.
+            # In bear/crash, EVICT breadth names from the watchlist (not just clear
+            # the pool) so neither the reserved-buy lane nor momentum_breakout_add can
+            # knife-catch them into a downtrend. Rebuilds when the regime recovers.
             if _reg in ("bear", "crash") and bool(config.get("breadth_scan_bear_reserved_lane_block", True)):
-                _admitted.clear()
+                _rollback()
             return list(_admitted.keys())   # off-regime: don't grow the pool
         from ticker_universe import get_breadth_universe
         _uni = get_breadth_universe(
@@ -18570,8 +18586,11 @@ def _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_se
             _c = _point_in_time_closes(_bars_all.get(_sym), _ds)
             if len(_c) < 21 or _c[-1] <= 0:
                 continue
+            # Scan the FULL r60 window (not just r20) for split-signature jumps:
+            # an unadjusted split in bars -60..-22 would leave r20 clean but make
+            # r60 spuriously negative, defeating the r60 parabolic cap.
             _glitch = False
-            for _i in range(len(_c) - 20, len(_c)):
+            for _i in range(max(1, len(_c) - 60), len(_c)):
                 if _c[_i - 1] > 0 and not (0.4 <= _c[_i] / _c[_i - 1] <= 2.5):
                     _glitch = True
                     break

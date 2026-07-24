@@ -163,6 +163,7 @@ def is_valid_us_ticker(ticker: str, *, strict: bool = True) -> bool:
 _BREADTH_CACHE: list[str] | None = None
 _BREADTH_CACHE_KEY: tuple | None = None
 _BREADTH_FETCHED_AT: float = 0.0
+_BREADTH_LAST_FAIL_AT: float = 0.0
 
 
 def _parse_money(v) -> float:
@@ -216,14 +217,22 @@ def get_breadth_universe(min_mcap: float = 2e9, min_dollar_volume: float = 5e6,
     no look-ahead in a backtest; the momentum signal is computed from as-of bars
     downstream. (Universe membership uses current listings — a mild survivorship
     proxy for the liquidity floor, acceptable for a coarse candidate gate.)"""
-    global _BREADTH_CACHE, _BREADTH_CACHE_KEY, _BREADTH_FETCHED_AT
+    global _BREADTH_CACHE, _BREADTH_CACHE_KEY, _BREADTH_FETCHED_AT, _BREADTH_LAST_FAIL_AT
     key = (round(min_mcap), round(min_dollar_volume), round(price_floor, 2), int(top_n))
     now = time.time()
     with _UNIVERSE_LOCK:
         if (_BREADTH_CACHE is not None and _BREADTH_CACHE_KEY == key
                 and (now - _BREADTH_FETCHED_AT) <= _UNIVERSE_TTL_SEC):
             return list(_BREADTH_CACHE)
+        # Failure throttle: don't re-hit a down/429ing Nasdaq every bar (a 30s
+        # timeout per call would stall each backtest bar / live tick).
+        if (now - _BREADTH_LAST_FAIL_AT) < _UNIVERSE_MIN_RETRY_SEC:
+            return list(_BREADTH_CACHE or [])
     meta = _fetch_universe_meta()
+    if not meta:
+        with _UNIVERSE_LOCK:
+            _BREADTH_LAST_FAIL_AT = time.time()
+        return list(_BREADTH_CACHE or [])
     ranked = []
     for m in meta:
         if (m["price"] >= price_floor and m["mcap"] >= min_mcap

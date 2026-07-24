@@ -98,3 +98,49 @@ def test_off_regime_holds_but_no_growth():
     # with the bear-block off would hold (not clear). Here verify crash clears.
     sc = _cache("crash")
     assert breadth(CFG_ON, sc, "2026-04-02", "k", "s") == []
+
+
+def test_bear_EVICTS_from_watchlist_not_just_pool():
+    """The critical bug-sweep fix: admitted names get merged into the never-evicting
+    _momentum_watchlist, from which two buy lanes (reserved + momentum_breakout_add)
+    can buy in bear bypassing the RS gate. Bear/crash must EVICT them, not just
+    clear the pool."""
+    sc = _cache("bull")
+    sc["_momentum_watchlist"] = {}
+    breadth(CFG_ON, sc, "2026-04-02", "k", "s")
+    # simulate _build_momentum_watchlist merging the admitted names
+    for s in list(sc["_breadth_scan_admitted"]):
+        sc["_momentum_watchlist"][s] = {"first_seen_bar": 1}
+    assert sc["_momentum_watchlist"], "precondition: admitted names merged into watchlist"
+    sc["_market_regime"] = "bear"
+    breadth(CFG_ON, sc, "2026-04-06", "k", "s")
+    assert not sc["_momentum_watchlist"], "bear must EVICT breadth names from the watchlist"
+    assert not sc["_breadth_scan_admitted"]
+
+
+def test_disable_rolls_back_watchlist_and_pool():
+    """Kill-switch: disabling must evict + clear (not keep feeding the stale pool)."""
+    sc = _cache("bull")
+    breadth(CFG_ON, sc, "2026-04-02", "k", "s")
+    for s in list(sc["_breadth_scan_admitted"]):
+        sc.setdefault("_momentum_watchlist", {})[s] = {"first_seen_bar": 1}
+    assert breadth({}, sc, "2026-04-06", "k", "s") == []   # disabled
+    assert not sc["_breadth_scan_admitted"]
+    assert not sc.get("_momentum_watchlist")
+
+
+def test_wide_glitch_scan_catches_r60_window_split():
+    """A split-signature jump in the r60 window (bars -60..-22) — clean r20 — must
+    still be glitch-filtered (the r60-hole fix)."""
+    # 62 closes: a 3x jump ~40 bars back, then clean recent action (clean r20).
+    series = [30.0] * 20 + [90.0] * 42
+    sc = {"_market_regime": "bull", "_overlay_bars_raw": {"SPLIT60": list(series)}}
+    global _UNIVERSE
+    _save = _UNIVERSE
+    try:
+        _UNIVERSE = ["SPLIT60"]
+        out = breadth({**CFG_ON, "breadth_scan_r20_min_pct": 0.0, "breadth_scan_r5_min_pct": 0.0},
+                      sc, "2026-04-02", "k", "s")
+        assert "SPLIT60" not in out, "split in the r60 window must be caught"
+    finally:
+        _UNIVERSE = _save
