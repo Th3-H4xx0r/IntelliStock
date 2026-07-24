@@ -1,0 +1,10 @@
+{
+  "regime_recovery_override_enabled": true,
+  "regime_recovery_ma_bars": 10,
+  "regime_recovery_ret5_min_pct": 1.5,
+  "regime_recovery_off_low_pct": 0.5,
+  "regime_recovery_bull_ret5_pct": 4,
+  "regime_recovery_bull_zone_enabled": true,
+  "regime_recovery_fast_confirm_enabled": true,
+  "regime_recovery_bull_latch_enabled": true
+}

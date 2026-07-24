@@ -6425,8 +6425,24 @@ def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
             st["pend"] = None
             st["n"] = 0
             return cur
+        # 2026-07-24 recovery-bull LATCH (default OFF): once a recovery flipped us to
+        # bull, hold bull through a mild chop pullback instead of downgrading — the
+        # live detector's ret5 wiggles around the bull threshold in the early
+        # recovery (bt#594050: bull 04-07 -> chop 04-08 flip-flop churned 83 trades
+        # and mistimed CAR -$312 vs the static run's +887). Only a genuine BEAR raw
+        # (fresh decline) clears the latch and downgrades, so v9 is held cleanly
+        # through the recovery, matching the static +28.6% run's deployment.
+        if (bool(config.get("regime_recovery_bull_latch_enabled", False))
+                and strategy_cache.get("_recovery_bull_latch")
+                and cur == "bull" and raw == "chop"):
+            st["pend"] = None
+            st["n"] = 0
+            return "bull"
         if _REGIME_RANK[raw] < _REGIME_RANK[cur]:
             # Downgrade: apply now.
+            if raw == "bear":
+                # A genuine decline clears the recovery-bull latch.
+                strategy_cache["_recovery_bull_latch"] = False
             st["cur"] = raw
             st["pend"] = None
             st["n"] = 0
@@ -6452,6 +6468,10 @@ def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
             st["cur"] = raw
             st["pend"] = None
             st["n"] = 0
+            if raw == "bull":
+                # Arm the recovery-bull latch so a subsequent chop pullback holds
+                # bull (see the latch block above) instead of flip-flopping.
+                strategy_cache["_recovery_bull_latch"] = True
             return raw
         # Upgrade: confirm over k consecutive bars.
         if st.get("pend") == raw:

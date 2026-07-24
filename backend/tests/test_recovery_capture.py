@@ -200,6 +200,39 @@ def test_bull_zone_disabled_is_ordinary_chop():
                        regime_recovery_bull_zone_enabled=False) == "chop"
 
 
+# ---------- v4: recovery-bull latch (hold bull through mild chop) ----------
+
+def test_recovery_bull_latch_holds_bull_through_chop():
+    """v4: once a recovery flips to bull, a chop raw HOLDS bull (latch) instead of
+    flip-flopping (the bt#594050 bull 04-07 -> chop 04-08 churn)."""
+    sc = {"_regime_hyst": {"cur": "chop", "pend": None, "n": 0},
+          "_market_regime_diag": {"raw": "recover->bull"}}
+    cfg = {"regime_upgrade_confirm_bars": 3, "regime_recovery_fast_confirm_enabled": True,
+           "regime_recovery_bull_latch_enabled": True}
+    assert hysteresis(sc, "bull", cfg) == "bull"        # arm latch
+    assert sc.get("_recovery_bull_latch") is True
+    sc["_market_regime_diag"] = {"raw": "recover->chop"}
+    assert hysteresis(sc, "chop", cfg) == "bull"        # HOLD bull, no downgrade
+    sc["_market_regime_diag"] = {"raw": "chop"}
+    assert hysteresis(sc, "chop", cfg) == "bull"        # ordinary chop also held while latched
+
+
+def test_recovery_bull_latch_clears_on_bear():
+    """A genuine bear raw clears the latch and downgrades immediately."""
+    sc = {"_regime_hyst": {"cur": "bull", "pend": None, "n": 0},
+          "_recovery_bull_latch": True, "_market_regime_diag": {"raw": "bear"}}
+    cfg = {"regime_recovery_bull_latch_enabled": True}
+    assert hysteresis(sc, "bear", cfg) == "bear"
+    assert sc.get("_recovery_bull_latch") is False
+
+
+def test_latch_disabled_still_downgrades():
+    """Default-safe: without the latch flag, a chop after bull downgrades (v3)."""
+    sc = {"_regime_hyst": {"cur": "bull", "pend": None, "n": 0},
+          "_recovery_bull_latch": True, "_market_regime_diag": {"raw": "chop"}}
+    assert hysteresis(sc, "chop", {}) == "chop"          # downgrades (latch flag off)
+
+
 def test_fast_confirm_downgrade_still_immediate():
     """After fast-tracking to chop, a fresh-decline bear raw downgrades at once."""
     sc = _seed()
