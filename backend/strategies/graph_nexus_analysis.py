@@ -20494,8 +20494,20 @@ def _apply_quality_filter(
                     # in a bear would knife-catch fading rallies and regress the bear
                     # leg. Track only outside bear (chop/bull) — this still catches a
                     # name blocked during a recovery-chop (the CAR case).
+                    #
+                    # 2026-07-25 (..._in_bear, default OFF): V31 keeps confirming
+                    # BEAR for ~8 sessions after a V-bottom (ret20 lags the price
+                    # low), so the names LEADING the recovery are blocked-and-
+                    # forgotten exactly when it matters — bt#211684 blocked CAR once,
+                    # on 04-07 under `regime: bear`, and never priced it again until
+                    # the top. When enabled, RECORD in bear/crash too; the injection
+                    # site still withholds every tracked name while the regime reads
+                    # bear/crash, so the reserved-buy lane can never knife-catch a
+                    # fading rally in a genuine downtrend.
                     _eb_reg = str((strategy_cache or {}).get("_market_regime") or "").lower()
-                    if _eb_reg not in ("bear", "crash"):
+                    _eb_in_bear = bool(config.get(
+                        "momentum_watchlist_track_extension_blocked_in_bear", False))
+                    if _eb_reg not in ("bear", "crash") or _eb_in_bear:
                         _eb = strategy_cache.setdefault("_extension_blocked_track", {})
                         _eb_sym = str(sym).strip().upper()
                         _eb.pop(_eb_sym, None)   # recency: re-blocked -> move to newest
@@ -24059,11 +24071,21 @@ class GraphNexusAnalysis:
                     # until the name is no longer extended). Pruned to a recent lookback.
                     try:
                         if bool(config.get("momentum_watchlist_track_extension_blocked", False)):
-                            _eb_track = (strategy_cache or {}).get("_extension_blocked_track") or {}
-                            _eb_keep = int(config.get("momentum_watchlist_track_extension_blocked_max", 50) or 50)
-                            _mw_extra_sources["extension_blocked"] = [
-                                str(_s).strip().upper() for _s in list(_eb_track.keys())[-_eb_keep:] if _s
-                            ]
+                            # Containment (2026-07-25): tracked names are NEVER fed to
+                            # the watchlist while the regime reads bear/crash — the
+                            # reserved momentum-buy lane bypasses the bear RS gate, so
+                            # injecting the frothiest recent runups into a real
+                            # downtrend would knife-catch fading rallies. They are
+                            # released the first non-bear bar (bt#211684: blocked
+                            # 04-07 bear -> released 04-08 chop -> rankable by 04-13
+                            # bull). This guard also bounds ..._in_bear recording.
+                            _eb_reg_now = str((strategy_cache or {}).get("_market_regime") or "").lower()
+                            if _eb_reg_now not in ("bear", "crash"):
+                                _eb_track = (strategy_cache or {}).get("_extension_blocked_track") or {}
+                                _eb_keep = int(config.get("momentum_watchlist_track_extension_blocked_max", 50) or 50)
+                                _mw_extra_sources["extension_blocked"] = [
+                                    str(_s).strip().upper() for _s in list(_eb_track.keys())[-_eb_keep:] if _s
+                                ]
                     except Exception:
                         pass
                     # Sell enforcement tickers (where SNDK lives)
