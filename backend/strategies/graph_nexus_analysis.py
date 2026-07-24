@@ -6243,13 +6243,32 @@ def _detect_market_regime(
             # thrust. The structural (< 200d MA) bear below is never overridden.
             # (_ret5 / diag["ret5"] are computed unconditionally above.)
             if bool(config.get("regime_recovery_override_enabled", False)) and len(closes) >= 21:
-                _ma20 = sum(closes[-20:]) / min(len(closes), 20)
+                # 2026-07-24: the reclaim guard's MA window is configurable
+                # (regime_recovery_ma_bars, default 20 = byte-identical). Near a
+                # V-bottom the 20-day MA is still propped up by pre-crash highs and
+                # is never reclaimed, so this override was a no-op for the exact case
+                # it was built for (bt#252937: raw=bear pinned 03-31->04-02 while
+                # QQQ was already +4.8% off the low). A shorter MA (e.g. 10) is
+                # reclaimed within a bar or two of a genuine turn, while the
+                # ret5-thrust + off-low depth guards still reject a deepening-bear
+                # dead-cat (every deep-bear bar has ret5 < 0).
+                # Robust coercion: any bad value (non-numeric, <2, True) falls back
+                # to the safe no-op default 20 rather than crashing (the outer except
+                # would swallow it and return "chop", disabling bear protection) or
+                # degenerating to a ~2-bar MA. This is a live-config operator knob.
+                try:
+                    _ma_bars = int(config.get("regime_recovery_ma_bars", 20) or 20)
+                except (TypeError, ValueError):
+                    _ma_bars = 20
+                if _ma_bars < 2:
+                    _ma_bars = 20
+                _ma_reclaim = sum(closes[-_ma_bars:]) / min(len(closes), _ma_bars)
                 _lo20, _hi20 = min(closes[-20:]), max(closes[-20:])
                 _off_low = (current - _lo20) / (_hi20 - _lo20) if _hi20 > _lo20 else 0.0
                 _ret5_min = float(config.get("regime_recovery_ret5_min_pct", 2.0) or 2.0)
                 _off_low_min = float(config.get("regime_recovery_off_low_pct", 0.5) or 0.5)
                 _bull_ret5 = float(config.get("regime_recovery_bull_ret5_pct", 5.0) or 5.0)
-                if _ret5 >= _ret5_min and current > _ma20 and _off_low >= _off_low_min:
+                if _ret5 >= _ret5_min and current > _ma_reclaim and _off_low >= _off_low_min:
                     diag["recovery"] = {"ret5": round(_ret5, 2), "off_low": round(_off_low, 3)}
                     if _ret5 >= _bull_ret5:
                         diag["raw"] = "recover->bull"
@@ -6383,6 +6402,27 @@ def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
             st["pend"] = None
             st["n"] = 0
             return raw
+        # 2026-07-24 recovery fast-track (default OFF). A chop raw produced by the
+        # recovery-override (diag raw starts "recover") upgrades bear->chop
+        # IMMEDIATELY, skipping the k-bar dwell. Rationale: the confirmed regime
+        # lags a V-bottom ~8 td (ret20 stays negative from stale prior-month
+        # losses) and then pays another k-1 bars of dwell, so the position cap
+        # stays pinned at the bear value through the sharpest recovery leg
+        # (bt#252937: ~49% of the recovery happened while capped at 2). The
+        # recovery signal is itself a strict, faster confirm (ret5 thrust +
+        # off-low depth + short-MA reclaim), so it substitutes for the dwell — but
+        # ONLY for bear->chop from a recovery bar. A bull upgrade still needs the
+        # full k bars (so v9's aggressive extension gate is never re-armed early),
+        # a blind bar was already frozen above, and the asymmetric immediate
+        # downgrade (above) still fires so a dead-cat that resumes falling drops
+        # back to bear on the very next bar.
+        if (bool(config.get("regime_recovery_fast_confirm_enabled", False))
+                and cur == "bear" and raw == "chop"
+                and str(_hyst_diag.get("raw") or "").startswith("recover")):
+            st["cur"] = "chop"
+            st["pend"] = None
+            st["n"] = 0
+            return "chop"
         # Upgrade: confirm over k consecutive bars.
         if st.get("pend") == raw:
             st["n"] = int(st.get("n", 0)) + 1

@@ -3512,9 +3512,10 @@ def _apply_regime_profile(config, regime):
     config without the feature is byte-identical to today. Shallow merge — the
     overlay's keys win; every unlisted key stays at the base value. Transition
     levers (regime_upgrade_confirm_bars, regime_recovery_override_enabled,
+    regime_recovery_ma_bars, regime_recovery_fast_confirm_enabled,
     residual_sleeve_bear_require_fresh_pct, regime_detector_enabled) must live in
     the BASE, never an overlay — they drive the very detection that picks the
-    profile."""
+    profile. (The regime_*/max_positions* strip below enforces this.)"""
     if not isinstance(config, dict):
         return config
     profiles = config.get("regime_profiles")
