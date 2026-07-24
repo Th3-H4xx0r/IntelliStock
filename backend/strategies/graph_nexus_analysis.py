@@ -6143,6 +6143,39 @@ def _daily_closes_from_intraday(bars, date_str: str) -> list[float]:
     return [daily[d] for d in sorted(daily)]
 
 
+def _recovery_override_regime(closes, current, ret5, config, diag):
+    """2026-07-21/24 recovery-override (default OFF). When a genuine recovery is
+    detected off a bottom — short-term thrust (ret5 >= regime_recovery_ret5_min_pct)
+    + reclaim of a short MA (regime_recovery_ma_bars) + depth off the 20-day low
+    (off_low >= regime_recovery_off_low_pct) — read the regime EARLY as bull (very
+    strong thrust, ret5 >= regime_recovery_bull_ret5_pct) or chop, before the
+    trailing-20-day return catches up. Returns "bull"/"chop" when it fires, else
+    None (caller keeps its normal label). Every deepening-bear bar has ret5 < 0, so
+    the ret5 thrust gate is the dead-cat filter. Pure; mutates diag for logs only."""
+    if not bool(config.get("regime_recovery_override_enabled", False)) or len(closes) < 21:
+        return None
+    try:
+        _ma_bars = int(config.get("regime_recovery_ma_bars", 20) or 20)
+    except (TypeError, ValueError):
+        _ma_bars = 20
+    if _ma_bars < 2:
+        _ma_bars = 20
+    _ma_reclaim = sum(closes[-_ma_bars:]) / min(len(closes), _ma_bars)
+    _lo20, _hi20 = min(closes[-20:]), max(closes[-20:])
+    _off_low = (current - _lo20) / (_hi20 - _lo20) if _hi20 > _lo20 else 0.0
+    _ret5_min = float(config.get("regime_recovery_ret5_min_pct", 2.0) or 2.0)
+    _off_low_min = float(config.get("regime_recovery_off_low_pct", 0.5) or 0.5)
+    _bull_ret5 = float(config.get("regime_recovery_bull_ret5_pct", 5.0) or 5.0)
+    if ret5 >= _ret5_min and current > _ma_reclaim and _off_low >= _off_low_min:
+        diag["recovery"] = {"ret5": round(ret5, 2), "off_low": round(_off_low, 3)}
+        if ret5 >= _bull_ret5:
+            diag["raw"] = "recover->bull"
+            return "bull"
+        diag["raw"] = "recover->chop"
+        return "chop"
+    return None
+
+
 def _detect_market_regime(
     strategy_cache: dict | None,
     config: dict,
@@ -6256,25 +6289,9 @@ def _detect_market_regime(
                 # to the safe no-op default 20 rather than crashing (the outer except
                 # would swallow it and return "chop", disabling bear protection) or
                 # degenerating to a ~2-bar MA. This is a live-config operator knob.
-                try:
-                    _ma_bars = int(config.get("regime_recovery_ma_bars", 20) or 20)
-                except (TypeError, ValueError):
-                    _ma_bars = 20
-                if _ma_bars < 2:
-                    _ma_bars = 20
-                _ma_reclaim = sum(closes[-_ma_bars:]) / min(len(closes), _ma_bars)
-                _lo20, _hi20 = min(closes[-20:]), max(closes[-20:])
-                _off_low = (current - _lo20) / (_hi20 - _lo20) if _hi20 > _lo20 else 0.0
-                _ret5_min = float(config.get("regime_recovery_ret5_min_pct", 2.0) or 2.0)
-                _off_low_min = float(config.get("regime_recovery_off_low_pct", 0.5) or 0.5)
-                _bull_ret5 = float(config.get("regime_recovery_bull_ret5_pct", 5.0) or 5.0)
-                if _ret5 >= _ret5_min and current > _ma_reclaim and _off_low >= _off_low_min:
-                    diag["recovery"] = {"ret5": round(_ret5, 2), "off_low": round(_off_low, 3)}
-                    if _ret5 >= _bull_ret5:
-                        diag["raw"] = "recover->bull"
-                        return "bull"
-                    diag["raw"] = "recover->chop"
-                    return "chop"
+                _ro = _recovery_override_regime(closes, current, _ret5, config, diag)
+                if _ro is not None:
+                    return _ro
             diag["raw"] = "bear"
             return "bear"
         if len(closes) >= 200 and current < ma_200:
@@ -6284,6 +6301,18 @@ def _detect_market_regime(
         if ret_20d > 0 and (len(closes) < 50 or current > ma_50):
             diag["raw"] = "bull"
             return "bull"
+        # 2026-07-24 recovery bull-zone extension (default OFF): in the sub-bull
+        # ret20 zone [-bear_dd, 0] a strong short-term thrust off the bottom reads
+        # bull early — before ret20 crosses 0 — so the auto-switch applies v9 during
+        # the recovery RAMP (the 04-06..04-13 window in bt#252937 where the static
+        # +28.6% run bought AMD/BITO/MARA/CAR) instead of the bear-defensive base.
+        # Gated separately from the <-bear_dd override so existing configs are
+        # unaffected. ret5-thrust + off-low + short-MA reclaim (plus the asymmetric
+        # immediate downgrade in hysteresis) bound the dead-cat risk.
+        if bool(config.get("regime_recovery_bull_zone_enabled", False)):
+            _ro = _recovery_override_regime(closes, current, _ret5, config, diag)
+            if _ro is not None:
+                return _ro
         diag["raw"] = "chop"
         return "chop"
     except Exception as e:
@@ -6410,19 +6439,20 @@ def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
         # stays pinned at the bear value through the sharpest recovery leg
         # (bt#252937: ~49% of the recovery happened while capped at 2). The
         # recovery signal is itself a strict, faster confirm (ret5 thrust +
-        # off-low depth + short-MA reclaim), so it substitutes for the dwell — but
-        # ONLY for bear->chop from a recovery bar. A bull upgrade still needs the
-        # full k bars (so v9's aggressive extension gate is never re-armed early),
-        # a blind bar was already frozen above, and the asymmetric immediate
-        # downgrade (above) still fires so a dead-cat that resumes falling drops
-        # back to bear on the very next bar.
+        # off-low depth + short-MA reclaim), so it substitutes for the dwell for
+        # ANY recovery-produced UPGRADE (bear->chop, bear->bull, chop->bull) — so
+        # the auto-switch reaches the v9 bull profile at the recovery turn (~04-06
+        # in bt#252937), not ~11 td later. A normal (non-recovery) chop/bull still
+        # serves the full k bars. A blind bar was already frozen above, and the
+        # asymmetric immediate downgrade (above) still fires so a dead-cat that
+        # resumes falling drops back to bear on the very next bar.
         if (bool(config.get("regime_recovery_fast_confirm_enabled", False))
-                and cur == "bear" and raw == "chop"
-                and str(_hyst_diag.get("raw") or "").startswith("recover")):
-            st["cur"] = "chop"
+                and str(_hyst_diag.get("raw") or "").startswith("recover")
+                and raw in _REGIME_RANK and _REGIME_RANK[raw] > _REGIME_RANK[cur]):
+            st["cur"] = raw
             st["pend"] = None
             st["n"] = 0
-            return "chop"
+            return raw
         # Upgrade: confirm over k consecutive bars.
         if st.get("pend") == raw:
             st["n"] = int(st.get("n", 0)) + 1

@@ -24,7 +24,7 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
 _WANTED = {"_detect_market_regime", "_apply_regime_hysteresis",
-           "_next_recovery_flag", "_apply_recovery_cap"}
+           "_recovery_override_regime", "_next_recovery_flag", "_apply_recovery_cap"}
 _src = open(os.path.join(_backend, "strategies", "graph_nexus_analysis.py")).read()
 _tree = ast.parse(_src)
 
@@ -151,13 +151,53 @@ def test_fast_confirm_does_not_fast_track_non_recovery_chop():
     assert hysteresis(sc, "chop", cfg) == "bear"   # no fast-track
 
 
-def test_fast_confirm_never_fast_tracks_bull():
-    """A strong recovery->bull must still serve the full dwell (v9's aggressive
-    extension gate is never re-armed early)."""
+def test_fast_confirm_fast_tracks_recovery_bull():
+    """v3: a recovery-produced bull (diag 'recover->bull') fast-tracks the UPGRADE
+    immediately — bear->bull in one bar — so the auto-switch reaches the v9 bull
+    profile at the recovery turn instead of ~11 td later."""
     sc = {"_regime_hyst": {"cur": "bear", "pend": None, "n": 0},
           "_market_regime_diag": {"raw": "recover->bull"}}
     cfg = {"regime_upgrade_confirm_bars": 3, "regime_recovery_fast_confirm_enabled": True}
-    assert hysteresis(sc, "bull", cfg) == "bear"   # bar 1, no fast-track to bull
+    assert hysteresis(sc, "bull", cfg) == "bull"   # immediate bear->bull
+
+
+def test_fast_confirm_fast_tracks_chop_to_bull():
+    """chop->bull also fast-tracks when recovery-produced (the 04-06 flip after a
+    04-02 recover->chop in bt#252937)."""
+    sc = {"_regime_hyst": {"cur": "chop", "pend": None, "n": 0},
+          "_market_regime_diag": {"raw": "recover->bull"}}
+    cfg = {"regime_upgrade_confirm_bars": 3, "regime_recovery_fast_confirm_enabled": True}
+    assert hysteresis(sc, "bull", cfg) == "bull"   # immediate chop->bull
+
+
+def test_fast_confirm_normal_bull_still_dwells():
+    """A NORMAL (non-recovery) bull raw must still serve the full k dwell."""
+    sc = {"_regime_hyst": {"cur": "bear", "pend": None, "n": 0},
+          "_market_regime_diag": {"raw": "bull"}}
+    cfg = {"regime_upgrade_confirm_bars": 3, "regime_recovery_fast_confirm_enabled": True}
+    assert hysteresis(sc, "bull", cfg) == "bear"   # bar 1, no fast-track (not recovery)
+
+
+# ret20 in (-3,0) (sub-bull chop zone) but a strong 5-day thrust off the low:
+# current 99 vs 21-back 100 -> ret20=-1.0; vs 6-back 95 -> ret5=+4.2; off_low 0.83;
+# price 99 > 10d-MA 96.8. So it's ordinary chop by the normal path, but the bull-zone
+# override reads it BULL on the thrust.
+CHOP_ZONE_THRUST = [100] * 9 + [99, 98, 97, 96, 95, 94, 95, 96.5, 98, 98.5, 99, 99]
+
+
+def test_bull_zone_extension_fires_bull_in_chop_zone():
+    """v3 bull-zone: with regime_recovery_bull_zone_enabled, a strong ret5 thrust in
+    the ret20 in [-bear_dd, 0] zone reads BULL early (before ret20 crosses 0)."""
+    assert _run_detect(CHOP_ZONE_THRUST, regime_recovery_ma_bars=10,
+                       regime_recovery_bull_ret5_pct=3,
+                       regime_recovery_bull_zone_enabled=True) == "bull"
+
+
+def test_bull_zone_disabled_is_ordinary_chop():
+    """Default-safe: without the bull-zone flag, the same bar is ordinary chop."""
+    assert _run_detect(CHOP_ZONE_THRUST, regime_recovery_ma_bars=10,
+                       regime_recovery_bull_ret5_pct=3,
+                       regime_recovery_bull_zone_enabled=False) == "chop"
 
 
 def test_fast_confirm_downgrade_still_immediate():
