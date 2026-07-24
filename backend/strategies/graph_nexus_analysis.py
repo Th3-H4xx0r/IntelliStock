@@ -6537,6 +6537,36 @@ def _apply_recovery_cap(base_cap: int, recovery_flag, config: dict) -> int:
         return base_cap
 
 
+def _bfq_regime_headroom(config: dict, regime, recovery_flag, held: int,
+                         planned: int = 0) -> int:
+    """2026-07-25 (default OFF). Position headroom for the backfill-queue BUY
+    lane.
+
+    The queue sized its headroom off the RAW `max_positions` while every other
+    entry path derives it from the regime, so in a confirmed bear with
+    `max_positions_bear=2` the queue still saw room for 14 and kept opening
+    fresh longs into the downtrend. Same defect class `_rotation_lane_allowed`
+    exists for ("historically BYPASSED the position cap") -- but only the queue
+    ROTATION path was ever gated, never the BUY path.
+
+    When `backfill_queue_regime_cap_enabled` is set, use the regime cap (plus
+    the recovery raise, so a confirmed recovery is not pinned at the bear cap).
+    Default OFF returns the raw-`max_positions` value, byte-identical to today.
+    Pure."""
+    try:
+        _raw = int(config.get("max_positions", 15) or 15)
+    except (TypeError, ValueError):
+        _raw = 15
+    cap = _raw
+    if bool(config.get("backfill_queue_regime_cap_enabled", False)):
+        cap = _regime_position_cap(config, regime)
+        cap = _apply_recovery_cap(cap, recovery_flag, config)
+    try:
+        return max(0, int(cap) - int(held) - int(planned))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _nexus_regime_classify(
     spy_20d_return: float | None,
     v31_regime: str | None,
@@ -27505,7 +27535,17 @@ class GraphNexusAnalysis:
             # 50 to 15, but BFQ path still used the old 50 default, so BFQ dequeue could
             # admit buys past the V28.7 cap. Match the default so a config without the
             # key produces consistent headroom across ALL buy paths.
-            _bfq_headroom = max(0, int(config.get("max_positions", 15) or 15) - _bfq_positions - _planned_new_positions)
+            # 2026-07-25: derive headroom from the REGIME cap (default OFF keeps
+            # the raw max_positions value byte-identically) — see
+            # _bfq_regime_headroom. Without this the queue opened fresh longs in a
+            # confirmed bear where every other lane was capped at 2.
+            _bfq_headroom = _bfq_regime_headroom(
+                config,
+                (strategy_cache or {}).get("_market_regime"),
+                (strategy_cache or {}).get("_market_regime_recovery"),
+                _bfq_positions,
+                _planned_new_positions,
+            )
             _bfq_min_pos = _min_position_size
             _bfq_processed = []
             _bfq_removed = []
