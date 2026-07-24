@@ -3570,6 +3570,15 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
         _rp_cache = strategy_caches if isinstance(strategy_caches, dict) else _strategy_cache
         _rp_regime = str((((_rp_cache or {}).get("graph_nexus_analysis") or {}).get(
             "_market_regime")) or "").strip().lower()
+        # 2026-07-24 v2: a confirmed recovery (chop that originated from the
+        # recovery-override) selects the "recovery" profile overlay instead of the
+        # chop/base one, so the recovery can carry bull-class capture levers (let
+        # winners run) while keeping a moderate extension block (no CAR chase).
+        # Default-safe: if regime_profiles has no "recovery" key the helper returns
+        # identity (base), exactly as before.
+        _rp_recovery = bool((((_rp_cache or {}).get("graph_nexus_analysis") or {}).get(
+            "_market_regime_recovery")))
+        _rp_effective = "recovery" if (_rp_regime == "chop" and _rp_recovery) else _rp_regime
         _rp_is_live = (globals().get("mode") == MODE_LIVE)
         for _rp_spec in specs:
             if not (isinstance(_rp_spec, dict)
@@ -3581,7 +3590,7 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
             if not isinstance(_rp_base, dict):
                 _rp_base = dict(_rp_spec["config"])  # snapshot the RAW base ONCE
                 _rp_spec["_regime_base_config"] = _rp_base
-            _rp_merged = _apply_regime_profile(_rp_base, _rp_regime)
+            _rp_merged = _apply_regime_profile(_rp_base, _rp_effective)
             if _rp_is_live:
                 _rp_merged = _apply_live_overrides(_rp_merged)
             _rp_spec["config"] = _rp_merged

@@ -6439,6 +6439,38 @@ def _apply_regime_hysteresis(strategy_cache, raw: str, config: dict) -> str:
         return raw if raw in _REGIME_RANK else "chop"
 
 
+def _next_recovery_flag(prev_flag, confirmed: str, diag_raw: str) -> bool:
+    """2026-07-24 v2 recovery-regime flag (pure).
+
+    True iff the confirmed regime is `chop` AND that chop either originated from
+    the recovery-override this bar (diag raw starts "recover") OR the flag was
+    already set. Sticky within a chop stretch; cleared the instant the confirmed
+    regime leaves chop (down to bear on a fresh decline, or up to bull). Consumed
+    by the Z4.1 capacity gate (max_positions_recovery) and the broker profile
+    merge (regime_profiles["recovery"]) — both default-safe, so this flag is
+    inert unless those keys are configured."""
+    if confirmed == "chop" and (str(diag_raw or "").startswith("recover") or bool(prev_flag)):
+        return True
+    return False
+
+
+def _apply_recovery_cap(base_cap: int, recovery_flag, config: dict) -> int:
+    """2026-07-24 v2 (pure). A confirmed recovery raises the position cap to
+    `max_positions_recovery` so leaders that surface a few bars after the turn are
+    not cap-locked out (the slot-preemption that cost the chop-fix its #1 winner).
+    Only ever RAISES the cap, and only when the flag is set AND the key present;
+    otherwise returns base_cap unchanged (default-safe identity)."""
+    if not recovery_flag:
+        return base_cap
+    _rec = config.get("max_positions_recovery")
+    if _rec is None:
+        return base_cap
+    try:
+        return max(int(base_cap), int(_rec))
+    except (TypeError, ValueError):
+        return base_cap
+
+
 def _nexus_regime_classify(
     spy_20d_return: float | None,
     v31_regime: str | None,
@@ -23040,6 +23072,10 @@ class GraphNexusAnalysis:
                                              data=data)
             _v31_regime = _apply_regime_hysteresis(strategy_cache, _v31_raw, config)
             strategy_cache["_market_regime"] = _v31_regime
+            # 2026-07-24 recovery-regime flag (v2) — see _next_recovery_flag.
+            _v31_diag_raw = str(((strategy_cache.get("_market_regime_diag") or {}).get("raw")) or "")
+            strategy_cache["_market_regime_recovery"] = _next_recovery_flag(
+                strategy_cache.get("_market_regime_recovery"), _v31_regime, _v31_diag_raw)
             # 2026-07-23 shared bear-conviction primitive: consecutive confirmed
             # bear/crash TRADING DAYS (increments once per new date_key while
             # confirmed bear/crash; ANY upgrade to chop/bull resets it). Single
@@ -25010,6 +25046,16 @@ class GraphNexusAnalysis:
                         "crash": int(config.get("max_positions_crash", 0) or 0),
                     }
                     _z41_capped = _z41_caps.get(_z41_regime, _max_positions)
+                    # 2026-07-24 recovery capacity (v2) — see _apply_recovery_cap.
+                    _z41_pre_rec = _z41_capped
+                    _z41_capped = _apply_recovery_cap(
+                        _z41_capped, (strategy_cache or {}).get("_market_regime_recovery"), config)
+                    if _z41_capped != _z41_pre_rec:
+                        _log(
+                            f"Recovery capacity (v2): regime={_z41_regime} recovery-flag ON, "
+                            f"cap {_z41_pre_rec}->{_z41_capped}",
+                            "cyan",
+                        )
                     if _z41_capped != _max_positions:
                         _log(
                             f"Regime capacity gate (Z4.1): regime={_z41_regime} "

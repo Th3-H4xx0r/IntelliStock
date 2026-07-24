@@ -82,3 +82,21 @@ def test_empty_profiles_dict_is_identity():
 def test_non_dict_config_returned_as_is():
     assert apply_regime_profile(None, "bull") is None
     assert apply_regime_profile("nope", "bull") == "nope"
+
+
+def test_recovery_profile_overlay_applies():
+    """v2 (2026-07-24): a distinct "recovery" overlay (used when the broker maps a
+    recovery-confirmed chop to effective regime "recovery") applies its capture
+    levers over the bear-defensive base, exactly like the bull overlay."""
+    RECOVERY = {"profit_take_gain_pct": 100, "entry_extension_block_pct": 25,
+                "momentum_partial_trim_execution_enabled": True}
+    cfg = {**BASE, "regime_profiles": {"bull": BULL, "recovery": RECOVERY}}
+    out = apply_regime_profile(cfg, "recovery")
+    assert out is not cfg
+    assert out["profit_take_gain_pct"] == 100          # capture lever wins
+    assert out["entry_extension_block_pct"] == 25       # moderate ext-block (no CAR)
+    assert out["momentum_partial_trim_execution_enabled"] is True
+    # base-only transition levers survive
+    assert out["regime_upgrade_confirm_bars"] == 3
+    # a config WITHOUT a recovery overlay still maps recovery -> base (identity)
+    assert apply_regime_profile(BASE, "recovery") is BASE

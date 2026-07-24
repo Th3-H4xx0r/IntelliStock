@@ -23,7 +23,8 @@ _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
-_WANTED = {"_detect_market_regime", "_apply_regime_hysteresis"}
+_WANTED = {"_detect_market_regime", "_apply_regime_hysteresis",
+           "_next_recovery_flag", "_apply_recovery_cap"}
 _src = open(os.path.join(_backend, "strategies", "graph_nexus_analysis.py")).read()
 _tree = ast.parse(_src)
 
@@ -41,6 +42,8 @@ for _node in _tree.body:
         exec(compile(ast.Module(body=[_node], type_ignores=[]), "gna.py", "exec"), _ns)
 detect = _ns["_detect_market_regime"]
 hysteresis = _ns["_apply_regime_hysteresis"]
+next_recovery_flag = _ns["_next_recovery_flag"]
+apply_recovery_cap = _ns["_apply_recovery_cap"]
 
 # A V-bottom: high plateau -> decline -> partial recovery. Numerically:
 #   ret20 = -4.8% (< -3 -> bear branch eligible), ret5 = +3.48% (in [1.5,5) -> chop
@@ -164,3 +167,47 @@ def test_fast_confirm_downgrade_still_immediate():
     assert hysteresis(sc, "chop", cfg) == "chop"
     sc["_market_regime_diag"] = {"raw": "bear"}
     assert hysteresis(sc, "bear", cfg) == "bear"   # immediate downgrade
+
+
+# ---------- v2: recovery-regime flag lifecycle ----------
+
+def test_recovery_flag_set_on_recovery_produced_chop():
+    assert next_recovery_flag(False, "chop", "recover->chop") is True
+
+
+def test_recovery_flag_sticky_within_chop():
+    # already in recovery, ordinary chop bar (raw no longer 'recover') -> stays True
+    assert next_recovery_flag(True, "chop", "chop") is True
+
+
+def test_recovery_flag_false_for_ordinary_chop():
+    # entered chop via a non-recovery path and was never in recovery -> False
+    assert next_recovery_flag(False, "chop", "chop") is False
+
+
+def test_recovery_flag_cleared_when_leaving_chop():
+    for conf in ("bear", "bull", "crash"):
+        assert next_recovery_flag(True, conf, "recover->chop") is False, conf
+
+
+# ---------- v2: recovery capacity ----------
+
+def test_recovery_cap_raises_when_flag_and_key():
+    assert apply_recovery_cap(8, True, {"max_positions_recovery": 14}) == 14
+
+
+def test_recovery_cap_only_raises_never_lowers():
+    assert apply_recovery_cap(20, True, {"max_positions_recovery": 14}) == 20
+
+
+def test_recovery_cap_identity_without_flag():
+    assert apply_recovery_cap(8, False, {"max_positions_recovery": 14}) == 8
+
+
+def test_recovery_cap_identity_without_key():
+    assert apply_recovery_cap(8, True, {}) == 8
+
+
+def test_recovery_cap_bad_value_falls_back_to_base():
+    for bad in ("abc", None, float("nan")):
+        assert apply_recovery_cap(8, True, {"max_positions_recovery": bad}) == 8, bad
