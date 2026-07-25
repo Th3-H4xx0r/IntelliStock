@@ -96,6 +96,20 @@ def test_kill_tier_liquidates_held():
     assert out["NEW"]["score"] == 0
 
 
+def test_kill_tier_marks_forced_exit():
+    """2026-07-25 regression: the kill tier set score/reason but NOT
+    `_forced_exit`, so the sweep at gna.py:27338 never added the symbol to
+    `nexus_sell_enforcement` — and the broker's allowed_syms filter
+    (broker.py:3790) then SILENTLY DROPPED the liquidation for any held name
+    that had aged out of the discovery universe. The score assertion above
+    passes either way, which is why this went unnoticed."""
+    out, _ = _run(5200.0, spy_ret20=-4.0,  # -13.3% dd
+                  positions={"AAA": 1.0, "BBB": 2.0})
+    for sym in ("AAA", "BBB"):
+        assert out[sym].get("_forced_exit") is True, (
+            f"{sym} kill order would be dropped at broker.py:3790")
+
+
 def test_circuit_disabled_by_config():
     out, cache = _run(5200.0, spy_ret20=-4.0, cfg={"drawdown_circuit_enabled": False})
     assert cache["_portfolio_drawdown_state"]["circuit_tier"] == ""

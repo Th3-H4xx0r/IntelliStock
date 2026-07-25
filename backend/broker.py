@@ -2656,7 +2656,9 @@ def _residual_sleeve_config(cached_strategies):
                 or "residual_sleeve_enabled" in cfg:
             return {
                 "enabled": bool(cfg.get("residual_sleeve_enabled", False)),
-                "symbol": str(cfg.get("residual_sleeve_symbol", "SPY")).upper(),
+                # .strip() before .upper() — see _sleeve_symbols: a padded value
+                # breaks the sleeve exemption and the hedge gets sold.
+                "symbol": str(cfg.get("residual_sleeve_symbol", "SPY")).strip().upper(),
                 "buffer_pct": float(cfg.get("residual_sleeve_buffer_pct", 0.02) or 0.02),
                 "min_deploy_pct": float(cfg.get("residual_sleeve_min_deploy_pct", 0.05) or 0.05),
                 "release_cash_pct": float(cfg.get("residual_sleeve_release_cash_pct", 0.15) or 0.15),
@@ -2664,7 +2666,7 @@ def _residual_sleeve_config(cached_strategies):
                 # 2026-07-19 bear leg: park into an inverse ETF during
                 # CONFIRMED bear/crash so the sleeve earns the downtrend
                 # instead of hiding in cash. "" = disabled (default).
-                "bear_symbol": str(cfg.get("residual_sleeve_bear_symbol", "") or "").upper(),
+                "bear_symbol": str(cfg.get("residual_sleeve_bear_symbol", "") or "").strip().upper(),
                 "bear_alloc_pct": float(cfg.get("residual_sleeve_bear_alloc_pct", 0.35) or 0.35),
                 # Scenario-sim E (V-bottom): the regime exit lags the bottom
                 # by up to 9 trading days; a leg-level stop (default -10% ≈ a

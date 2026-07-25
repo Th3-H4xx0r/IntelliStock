@@ -6352,8 +6352,14 @@ def _sleeve_symbols(config: dict) -> set:
     try:
         if not bool(config.get("residual_sleeve_enabled", False)):
             return set()
-        syms = {str(config.get("residual_sleeve_symbol", "SPY") or "SPY").upper()}
-        bear = str(config.get("residual_sleeve_bear_symbol", "") or "").upper()
+        # .strip() before .upper(): a whitespace-padded config value (" SQQQ ")
+        # produced an exemption set that no live position key ever matches, so
+        # every consumer of this set — the kill tier, the bear-book trim, the
+        # broker's enforcement exemption — would happily SELL THE HEDGE. In a
+        # backtest the emulator keys positions by the same padded string, so the
+        # exemption appears to work and the bug never surfaces until live.
+        syms = {str(config.get("residual_sleeve_symbol", "SPY") or "SPY").strip().upper()}
+        bear = str(config.get("residual_sleeve_bear_symbol", "") or "").strip().upper()
         if bear:
             syms.add(bear)
         return syms
@@ -6535,6 +6541,72 @@ def _apply_recovery_cap(base_cap: int, recovery_flag, config: dict) -> int:
         return max(int(base_cap), int(_rec))
     except (TypeError, ValueError):
         return base_cap
+
+
+def _bear_book_trim_targets(config: dict, regime, bear_bars, held_pnl_pct,
+                            recovery_flag=False, book_size=None) -> list:
+    """2026-07-25 (default OFF). Symbols to sell so a sustained bear reduces the
+    long book toward the regime position cap.
+
+    `max_positions_bear` is only an ENTRY gate: a book opened during chop is
+    never trimmed when the regime downgrades, so the portfolio carries decaying
+    longs ALONGSIDE the inverse sleeve -- long and short the same market, paying
+    both. Measured: the bear-tuned reference kept longs to -$175 and finished
+    +6.88%; this config bleeds ~-420..-470 on longs for the same SQQQ gain.
+
+    Guards, in order:
+      * a dwell requirement (`bear_book_trim_min_bear_bars`), because the regime
+        flip-flops (bear/chop/bear/chop over three weeks) and trimming on every
+        bear bar would churn the book and realise a loss at each local bottom;
+      * a per-bar ceiling (`bear_book_trim_max_per_bar`), so de-risking bleeds
+        out gradually instead of dumping at one price;
+      * the sleeve legs are NEVER trimmed -- in a bear that is the position
+        generating the gains, and selling it caused a kill<->deploy churn loop;
+      * a confirmed recovery raises the cap (`max_positions_recovery`), so the
+        trim stops liquidating into the turn.
+
+    Worst-unrealised-P&L first: in a downtrend the losers keep losing (ALM ran
+    -15.2% into a circuit breaker and kept falling). Pure."""
+    if not bool(config.get("bear_book_trim_enabled", False)):
+        return []
+    _reg = str(regime or "").strip().lower()
+    if _reg not in ("bear", "crash"):
+        return []
+    # NB: explicit None-check, not `or 3` — `0` is a meaningful operator value
+    # ("trim from the first bear day") and `or` would silently rewrite it to 3.
+    _raw_min = config.get("bear_book_trim_min_bear_bars")
+    try:
+        # Default 3 to match residual_sleeve_bear_scale_min_days=3, so the long
+        # cut and the conviction SQQQ scale-up arm on the same day rather than
+        # de-risking the book before the hedge has grown.
+        _min_bars = 3 if _raw_min is None else int(_raw_min)
+    except (TypeError, ValueError):
+        _min_bars = 3
+    try:
+        if int(bear_bars or 0) < _min_bars:
+            return []
+    except (TypeError, ValueError):
+        return []
+    cap = _apply_recovery_cap(_regime_position_cap(config, _reg), recovery_flag, config)
+    _sleeve = _sleeve_symbols(config)
+    longs = [(s, v) for s, v in (held_pnl_pct or {}).items() if s not in _sleeve]
+    # `book_size` = the TRUE non-sleeve long count. held_pnl_pct only contains
+    # names whose entry trade AND current price both resolved, so using it as
+    # the denominator silently under-counts: 12 held with 5 unpriceable reads as
+    # 7, and against a cap of 8 the feature no-ops exactly when the book is most
+    # bloated. Rank on what we can price; measure excess against the real book.
+    _book = len(longs) if book_size is None else max(len(longs), int(book_size))
+    excess = _book - max(0, int(cap))
+    if excess <= 0:
+        return []
+    _raw_per_bar = config.get("bear_book_trim_max_per_bar")
+    try:
+        _per_bar = 3 if _raw_per_bar is None else int(_raw_per_bar)
+    except (TypeError, ValueError):
+        _per_bar = 3
+    _per_bar = max(1, _per_bar)
+    longs.sort(key=lambda kv: (float(kv[1] if kv[1] is not None else 0.0), str(kv[0])))
+    return [s for s, _ in longs[:min(excess, _per_bar)]]
 
 
 def _bfq_regime_headroom(config: dict, regime, recovery_flag, held: int,
@@ -20894,6 +20966,14 @@ def _apply_portfolio_drawdown_halt(
             sc["reason"] = (
                 f"Circuit breaker: drawdown circuit KILL at -{drawdown_pct:.1f}% "
                 f"from peak — protective liquidation")
+            # 2026-07-25 BUGFIX: _forced_exit was never set here. _finalize_scores
+            # computes it from the reason at :18484 — but that runs BEFORE this
+            # halt overwrites the reason, so a killed position kept
+            # _forced_exit=False. The sweep at :27338 only adds forced exits to
+            # nexus_sell_enforcement, so a held name outside the broker's
+            # allowed_syms (broker.py:3790) had its KILL order silently dropped,
+            # and a momentum-protected name would be stripped at :28541.
+            sc["_forced_exit"] = True
             scores[sym] = sc
             _killed.append(sym)
         if _killed:
@@ -24386,6 +24466,84 @@ class GraphNexusAnalysis:
             date_key,
         )
         _drawdown_halt_active = bool((((strategy_cache or {}).get("_portfolio_drawdown_state")) or {}).get("halt_active", False))
+
+        # ── 2026-07-25 bear-book trim (default OFF) ──────────────────────────
+        # `max_positions_bear` is only an ENTRY gate: a book opened during chop
+        # is never trimmed when the regime downgrades, so the portfolio carries
+        # decaying longs ALONGSIDE the inverse sleeve — long and short the same
+        # market, paying both. Injected HERE, after the ML overlay (:24416) and
+        # the drawdown halt (:24442), so it bypasses grace / winner-protect /
+        # sell_block exactly the way the kill tier does.
+        #
+        # `_forced_exit=True` is the load-bearing flag: the forced-exit sweep
+        # (search `_forced_exit` + `nexus_sell_enforcement.add`) is what puts the
+        # symbol into nexus_sell_enforcement with sell_fraction=1.0. Enforcement
+        # is then what actually moves it — the broker's V7.5 injector adds held
+        # enforcement names to expanded_symbols and the decision override forces
+        # decision=-1 (search `nexus_sell_enforcement` in broker.py). Without the
+        # flag the sweep skips the symbol and the sell can be dropped for any
+        # held name that has aged out of the discovery universe.
+        # The "Circuit breaker" reason is kept for consistency with the kill tier
+        # and for log greppability, but note it is NOT load-bearing here:
+        # _finalize_scores computes _forced_exit from the reason EARLIER in the
+        # cycle than this injection, so we must set the flag explicitly.
+        # KNOWN LIMITATION (measured, not theoretical): `sell_syms` is rebuilt
+        # downstream from score==-1 and feeds _compute_available_buy_budget, so
+        # trim proceeds DO raise the same bar's buy budget. The regime position
+        # caps (Z4.1 + the backfill headroom gate) are what stop that budget
+        # being spent in a bear; this block does not prevent it on its own.
+        # KNOWN LIMITATION 2: the V31.3 max-positions breach auto-heal runs later
+        # in the cycle over the same book with the same worst-first ordering and
+        # is NOT bounded by bear_book_trim_max_per_bar, so on a bar with buy
+        # candidates the combined sell count can exceed the per-bar ceiling.
+        if bool(config.get("bear_book_trim_enabled", False)) and portfolio_emulator is not None:
+            try:
+                _bbt_regime = str((strategy_cache or {}).get("_market_regime") or "")
+                # Read the EXISTING per-day counter (:23411), not a per-bar one:
+                # it is the single source of truth shared with the conviction
+                # SQQQ scale-up (broker.py:2904/3073), so the hedge scale-up and
+                # the long cut arm on the same bar.
+                _bbt_dwell = int((strategy_cache or {}).get("_bear_dwell_bars", 0) or 0)
+                _bbt_sleeve = _sleeve_symbols(config)
+                _bbt_pnl = {}
+                _bbt_book = 0
+                for _bbt_sym, _bbt_qty in (portfolio_emulator.get_positions() or {}).items():
+                    if float(_bbt_qty or 0.0) <= 0.0 or _bbt_sym in _bbt_sleeve:
+                        continue
+                    _bbt_book += 1   # TRUE book size, even if we cannot price it
+                    _bbt_ent = _get_open_position_entry_trade(portfolio_emulator, _bbt_sym)
+                    _bbt_ep = float((_bbt_ent or {}).get("price", 0.0) or 0.0)
+                    _bbt_cp = _resolve_symbol_price(
+                        _bbt_sym, prices, data, portfolio_emulator=portfolio_emulator)
+                    if _bbt_ep > 0 and _bbt_cp > 0:
+                        _bbt_pnl[_bbt_sym] = ((_bbt_cp / _bbt_ep) - 1.0) * 100.0
+                _bbt_targets = _bear_book_trim_targets(
+                    config, _bbt_regime, _bbt_dwell, _bbt_pnl,
+                    recovery_flag=(strategy_cache or {}).get("_market_regime_recovery"),
+                    book_size=_bbt_book,
+                )
+                _bbt_done = []
+                for _bbt_sym in _bbt_targets:
+                    _sc = scores.get(_bbt_sym) if isinstance(scores.get(_bbt_sym), dict) else {}
+                    if _sc.get("score") == -1:
+                        continue  # kill tier / risk pipeline is already exiting it
+                    _sc["score"] = -1
+                    _sc["action_intent"] = "sell_override"
+                    _sc["reason"] = (
+                        f"Circuit breaker: bear book trim — {_bbt_dwell} consecutive "
+                        f"bear day(s), book {_bbt_book} > cap "
+                        f"{_regime_position_cap(config, _bbt_regime)} "
+                        f"(pnl {_bbt_pnl.get(_bbt_sym, 0.0):+.1f}%)")[:1500]
+                    _sc["_forced_exit"] = True
+                    scores[_bbt_sym] = _sc
+                    _bbt_done.append(_bbt_sym)
+                if _bbt_done:
+                    _log(f"Bear book trim: selling {len(_bbt_done)} long(s) "
+                         f"(dwell={_bbt_dwell}d, regime={_bbt_regime}): "
+                         f"{', '.join(_bbt_done)}", "red")
+            except Exception as _bbt_exc:
+                _log(f"Bear book trim skipped (non-fatal): "
+                     f"{type(_bbt_exc).__name__}: {_bbt_exc}", "yellow")
 
         # ── A4 post_sell_watch re-entry phase (BT136708 P1.7, 2026-05-18) ────
         # The Tier-3 spec defined the data plumbing for forced-exit re-entry
