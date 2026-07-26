@@ -7964,6 +7964,25 @@ def _credit_guard_or_raise(*, call_site: str) -> str:
     402: backtest → clean-stop paused_credits; live → live_critical_abort +
     exit(7). Testable logic lives in openrouter_credits.py; this wrapper is
     the thin lazy-import wiring (broker.py is not import-safe)."""
+    # 2026-07-27: the guard decides from the SPEC's configured provider, but the
+    # local harness (scripts/local_backtest.py) monkeypatches DISPATCH to a
+    # different provider and never calls OpenRouter at all. A zero OpenRouter
+    # balance was therefore halting runs that could not spend a cent of it:
+    #   [credit-guard] OpenRouter balance at/below halt threshold ...
+    #   Backtest paused (insufficient credits) ... top up credits and re-queue
+    # Skip when dispatch is force-routed away from OpenRouter. Only the harness
+    # sets these vars; unset (every normal run) is byte-identical to before.
+    try:
+        _forced = str(os.environ.get("HARNESS_FORCE_LLM_PROVIDER")
+                      or os.environ.get("GRAPH_NEXUS_LLM_PROVIDER")
+                      or "").strip().lower()
+        if _forced and _forced != "openrouter":
+            _log(f"[credit-guard] skipped — dispatch force-routed to "
+                 f"'{_forced}', OpenRouter will not be called", "cyan")
+            return "skip"
+    except Exception:
+        pass
+
     try:
         from openrouter_credits import run_credit_guard as _run_credit_guard
     except Exception:
