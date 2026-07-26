@@ -27314,6 +27314,17 @@ class GraphNexusAnalysis:
                     # so a missing config key doesn't silently throttle the momentum-watchlist
                     # breakout-add path below the global cap.
                     _mw_ba_max_positions = int(config.get("max_positions", 15) or 15)
+                    # 2026-07-25 (default OFF): use the REGIME cap, not the raw
+                    # global one. bt#500437 logged `Buy gate inputs for FTH:
+                    # ... open_pos=11 ... -> PASS` against a cap of 8 -- this
+                    # lane counted against max_positions while every other lane
+                    # was capped by regime, so it opened positions the book was
+                    # not allowed to hold. Same defect class as the backfill
+                    # queue's headroom (see _bfq_regime_headroom).
+                    if bool(config.get("momentum_breakout_add_respect_gates", False)):
+                        _mw_ba_max_positions = min(_mw_ba_max_positions, _apply_recovery_cap(
+                            _regime_position_cap(config, (strategy_cache or {}).get("_market_regime")),
+                            (strategy_cache or {}).get("_market_regime_recovery"), config))
                     _mw_ba_buy_price_floor = float(config.get("buy_price_floor", 8.0) or 8.0)
                     _mw_ba_current_positions = len(_mw_open_set)
                     # V31.1 bug-sweep fix: count only NEW-entry buys (tickers not
@@ -27354,6 +27365,35 @@ class GraphNexusAnalysis:
                         # V31.1 bug-sweep fix: skip tickers being force-sold
                         if _mw_ba_sym_u in (nexus_sell_enforcement or set()):
                             continue
+                        # ── 2026-07-25 (default OFF): honour the gates that the
+                        # SIBLING lanes apply. Forensics on bt#500437: this lane
+                        # fired 5 times for $3,513 and produced 0 winners
+                        # (-$376.97 = 45% of every loss in the run; 7/7 losers
+                        # counting bt#211684). EVERY fill was on a bar where
+                        # mw_buy/mw_swap had already REFUSED the same ticker --
+                        # "mw_buy extension-block: ALM runup +82.4% > 25%" then
+                        # "Momentum breakout add: buy ALM ($720 from free cash)";
+                        # "mw_buy blacklist-block: FTH (5 bars remaining)" then
+                        # "Momentum breakout add: buy FTH ($702)". It is a
+                        # consistency hole, not a strategy: the same bar cannot
+                        # both refuse and buy a ticker.
+                        if bool(config.get("momentum_breakout_add_respect_gates", False)):
+                            _mw_ba_bl = (_normalize_cache_mapping(strategy_cache, "_fast_loser_blacklist")
+                                         if strategy_cache else {})
+                            if _mw_ba_sym_u in _mw_ba_bl:
+                                _mw_ba_rem = (_mw_ba_bl.get(_mw_ba_sym_u) or {}).get("bars_remaining", 0)
+                                _log(f"Momentum breakout add blacklist-block: {_mw_ba_sym_u} "
+                                     f"({_mw_ba_rem} bars remaining)", "yellow")
+                                continue
+                            _mw_ba_gate_px = _resolve_symbol_price(
+                                _mw_ba_sym_u, prices, data, portfolio_emulator=portfolio_emulator)
+                            _mw_ba_gate_blocked, _mw_ba_gate_why = _v32_momentum_ath_or_mcap_block(
+                                _mw_ba_sym_u, _mw_ba_gate_px, data, strategy_cache, config,
+                                float(_mw_ba_score or 0.0), log_fn=_log, lane="mw_breakout_add",
+                                date_key=date_key,
+                            )
+                            if _mw_ba_gate_blocked:
+                                continue
                         # V31.1 bug-sweep fix: skip tickers below price floor
                         _mw_ba_price = _resolve_symbol_price(
                             _mw_ba_sym_u, prices, data, portfolio_emulator=portfolio_emulator,
@@ -27362,6 +27402,17 @@ class GraphNexusAnalysis:
                             continue
                         _mw_ba_target = portfolio_total * _mw_ba_pos_pct if portfolio_total > 0 else 0.0
                         _mw_ba_alloc = min(_mw_ba_free_cash * 0.95, max(_mw_ba_min_pos, _mw_ba_target))
+                        # 2026-07-25 (default 0 = OFF): hard NAV ceiling. This
+                        # lane self-sizes at momentum_breakout_position_pct (0.12)
+                        # of NAV "from free cash" and ignores the normal slate
+                        # sizing, so it produced the single largest position in
+                        # the bear book (ALM $720 = 12.0% of NAV, vs the +6.88%
+                        # reference's largest at 6.9%). Count-based limits cannot
+                        # fix this -- they trim the tail of the size distribution,
+                        # never the head; only a dollar limiter binds.
+                        _mw_ba_nav_cap = float(config.get("momentum_breakout_max_nav_pct", 0.0) or 0.0)
+                        if _mw_ba_nav_cap > 0 and portfolio_total > 0:
+                            _mw_ba_alloc = min(_mw_ba_alloc, portfolio_total * _mw_ba_nav_cap)
                         if _mw_ba_alloc < _mw_ba_min_pos:
                             continue
                         # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
