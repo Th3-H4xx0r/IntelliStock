@@ -51,7 +51,7 @@ def _nxt(prev, regime, recovery=False, cfg=None):
 # ---------------------------------------------------------------- default-safe
 def test_disabled_by_default():
     for regime in ("bear", "crash", "chop", "bull"):
-        assert _nxt(True, regime, False, _OFF) is False
+        assert not _nxt(True, regime, False, _OFF)
 
 
 def test_capacity_regime_is_identity_without_the_latch():
@@ -62,17 +62,17 @@ def test_capacity_regime_is_identity_without_the_latch():
 
 # ---------------------------------------------------------------- latching
 def test_latches_on_bear_and_crash():
-    assert _nxt(False, "bear", recovery=False) is True
-    assert _nxt(False, "crash", recovery=False) is True
+    assert _nxt(False, "bear", recovery=False)
+    assert _nxt(False, "crash", recovery=False)
 
 
 def test_holds_through_a_chop_interlude():
     """The 03-06..03-11 stretch that rebuilt the book."""
     latch = _nxt(False, "bear")                 # 03-03
-    assert latch is True
+    assert latch
     for _ in range(6):                          # 03-04..03-11, PLAIN chop
         latch = _nxt(latch, "chop", recovery=False)
-    assert latch is True, "latch must survive a 6-session plain-chop interlude"
+    assert latch, "latch must survive a 6-session plain-chop interlude"
 
 
 def test_capacity_regime_maps_latched_chop_to_bear():
@@ -86,27 +86,27 @@ def test_capacity_regime_maps_latched_chop_to_bear():
 # ---------------------------------------------------------------- releasing
 def test_releases_on_confirmed_bull():
     """04-13 in the real sequence."""
-    assert _nxt(True, "bull") is False
+    assert not _nxt(True, "bull")
 
 
 def test_releases_on_the_recovery_flag():
     """The April turn is `recover->chop`, which sets _market_regime_recovery."""
-    assert _nxt(True, "chop", recovery=True) is False
+    assert not _nxt(True, "chop", recovery=True)
     # recovery beats even a bear label -- the turn is the turn
-    assert _nxt(True, "bear", recovery=True) is False
+    assert not _nxt(True, "bear", recovery=True)
 
 
 def test_plain_chop_never_releases_however_deep():
     """PROVENANCE, not depth, distinguishes the bars. A plain chop bar keeps the
     cap regardless of how the tape looks."""
     for _ in range(10):
-        assert _nxt(True, "chop", recovery=False) is True
+        assert _nxt(True, "chop", recovery=False)
 
 
 def test_falsy_recovery_values_do_not_release():
     """Fail safe: absent/None recovery state must not silently drop the cap."""
     for val in (None, 0, "", False):
-        assert _nxt(True, "chop", val) is True
+        assert _nxt(True, "chop", val)
 
 
 def test_full_march_to_april_sequence():
@@ -124,9 +124,51 @@ def test_full_march_to_april_sequence():
     for regime, rec in seq:
         latch = _nxt(latch, regime, rec)
         history.append(latch)
-    assert history[1] is True, "03-03 bear latches"
+    assert history[1], "03-03 bear latches"
     assert all(history[4:8]), ("03-06..03-11 plain chop must stay latched", history[4:8])
-    assert history[11] is True, "03-17 single chop bar must not release"
+    assert history[11], "03-17 single chop bar must not release"
     assert all(history[12:23]), "the long 03-18..04-01 bear stays latched"
-    assert history[23] is False, "04-02 recover->chop must RELEASE for the rebuild"
+    assert not history[23], "04-02 recover->chop must RELEASE for the rebuild"
     assert not any(history[23:]), "stays released through the recovery and bull leg"
+
+
+# ---------------------------------------------------------------- bug-sweep regressions
+def test_fail_safe_bounds_an_unreleased_latch():
+    """The ONLY releases are confirmed-bull and the recovery flag -- and that
+    flag comes from `regime_recovery_override_enabled`, a SEPARATE default-off
+    feature. With it off, a tape drifting in ret20 [-bear_dd, 0] labels chop
+    forever and the book would stay pinned at max_positions_bear with no escape
+    (the latch persists across restarts). Bound it."""
+    cfg = dict(_ON, bear_capacity_latch_max_bars=5)
+    latch = _nxt(False, "bear", cfg=cfg)
+    for _ in range(20):
+        latch = _nxt(latch, "chop", recovery=False, cfg=cfg)
+    assert not latch, "latch must self-release after bear_capacity_latch_max_bars"
+
+
+def test_fail_safe_does_not_fire_early():
+    cfg = dict(_ON, bear_capacity_latch_max_bars=5)
+    latch = _nxt(False, "bear", cfg=cfg)
+    for _ in range(3):
+        latch = _nxt(latch, "chop", recovery=False, cfg=cfg)
+    assert latch, "must still be latched well inside the bound"
+
+
+def test_fail_safe_can_be_disabled_with_zero():
+    cfg = dict(_ON, bear_capacity_latch_max_bars=0)
+    latch = _nxt(False, "bear", cfg=cfg)
+    for _ in range(200):
+        latch = _nxt(latch, "chop", recovery=False, cfg=cfg)
+    assert latch, "0 means unbounded"
+
+
+def test_a_bear_bar_resets_the_fail_safe_counter():
+    """A fresh bear bar restarts the clock -- the bound is on how long a latch
+    survives on CHOP alone, not on total downtrend length."""
+    cfg = dict(_ON, bear_capacity_latch_max_bars=5)
+    latch = _nxt(False, "bear", cfg=cfg)
+    for _ in range(4):
+        latch = _nxt(latch, "chop", recovery=False, cfg=cfg)
+    before = latch
+    latch = _nxt(latch, "bear", recovery=False, cfg=cfg)
+    assert latch > before, "a bear bar advances, it does not release"

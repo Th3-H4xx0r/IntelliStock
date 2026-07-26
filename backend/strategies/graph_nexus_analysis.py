@@ -6555,6 +6555,9 @@ def _next_bear_capacity_latch(prev, confirmed_regime, recovery_flag, config: dic
     bear-leg entries were opened on CHOP bars; zero on bear bars. The +6.88%
     reference had no trim, stayed full, and was hard-blocked from buying at all.
 
+    Returns the latch AGE in bars (0 = released) rather than a bool, so the
+    fail-safe below can bound it; every consumer treats it as truthy/falsy.
+
     Latch ON in bear/crash; hold through chop; release on a genuine turn —
     confirmed bull, or the RECOVERY flag (a chop produced by the recovery
     override, i.e. diag raw "recover->*"). The release matters as much as the
@@ -6568,15 +6571,34 @@ def _next_bear_capacity_latch(prev, confirmed_regime, recovery_flag, config: dic
     actually separates them is provenance: March chop is PLAIN chop, the April
     turn is `recover->chop` from `_recovery_override_regime`. Pure."""
     if not bool(config.get("bear_capacity_latch_enabled", False)):
-        return False
+        return 0
     _reg = str(confirmed_regime or "").strip().lower()
     if _reg == "bull":
-        return False
+        return 0
     if bool(recovery_flag):
-        return False        # a confirmed recovery is the turn — let the book rebuild
+        return 0            # a confirmed recovery is the turn — let the book rebuild
+    try:
+        _held = int(prev or 0)
+    except (TypeError, ValueError):
+        _held = 1 if prev else 0
     if _reg in ("bear", "crash"):
-        return True
-    return bool(prev)       # plain chop inside a downtrend -> keep the bear cap
+        return _held + 1
+    if _held <= 0:
+        return 0            # plain chop with no latch running -> nothing to hold
+    # FAIL-SAFE (2026-07-26 bug sweep): the ONLY release conditions above are a
+    # confirmed bull and the recovery flag -- and the recovery flag can only be
+    # set by `regime_recovery_override_enabled`, a SEPARATE default-off feature.
+    # With that off, a tape drifting in ret20 [-bear_dd, 0] labels chop forever,
+    # never reaches bull, and the book stays pinned at max_positions_bear with
+    # no code-path escape (the latch persists across restarts). Bound it.
+    _max_bars = config.get("bear_capacity_latch_max_bars")
+    try:
+        _max_bars = 30 if _max_bars is None else int(_max_bars)
+    except (TypeError, ValueError):
+        _max_bars = 30
+    if _max_bars > 0 and _held >= _max_bars:
+        return 0
+    return _held + 1        # plain chop inside a downtrend -> keep the bear cap
 
 
 def _capacity_regime(regime, latch) -> str:
@@ -25558,16 +25580,7 @@ class GraphNexusAnalysis:
                     _z41_v31 = str((strategy_cache or {}).get("_market_regime") or "chop")
                     _z41_vix = (strategy_cache or {}).get("_vix_latest") if isinstance(strategy_cache, dict) else None
                     _z41_regime = _nexus_regime_classify(_z41_spy_20d, _z41_v31, _z41_vix)
-                    # 2026-07-25 (default OFF): a latched chop bar inside a
-                    # downtrend keeps the BEAR cap, so the trim's freed slots are
-                    # not immediately refilled. Capacity only — the regime label,
-                    # profile selection and sleeve are untouched.
-                    _z41_pre_latch = _z41_regime
-                    _z41_regime = _capacity_regime(
-                        _z41_regime, (strategy_cache or {}).get("_bear_capacity_latch"))
-                    if _z41_regime != _z41_pre_latch:
-                        _log(f"Bear capacity latch: {_z41_pre_latch} bar held at "
-                             f"{_z41_regime} cap (downtrend not yet released)", "yellow")
+                    _z41_latch_on = bool((strategy_cache or {}).get("_bear_capacity_latch"))
                     # BT136708 calibration (2026-05-18): chop default 8 caused
                     # 9-10/8 V28.8.1 breach for ~95% of the run (BFQ stuck at
                     # 48-60 for 175 days, avg 1.98 buys/day vs 6+ capacity).
@@ -25590,6 +25603,34 @@ class GraphNexusAnalysis:
                             f"cap {_z41_pre_rec}->{_z41_capped}",
                             "cyan",
                         )
+                    # 2026-07-26 bear capacity latch (default OFF). Hold the BEAR
+                    # cap through a plain-chop interlude so the bear-book trim's
+                    # freed slots are not immediately refilled.
+                    #
+                    # FLOORED AT THE CURRENT BOOK, deliberately. `_max_positions`
+                    # is not only the entry cap -- it is also the breach trigger
+                    # below (`_current_positions > _max_positions`), and the
+                    # breach auto-heal has NO per-bar ceiling. An unfloored latch
+                    # took a book of 8 to cap 2 and force-liquidated 6 names in a
+                    # single bar, then the unlatched lanes refilled it: strictly
+                    # worse churn than the bug this fixes. Flooring means the
+                    # latch can only ever set headroom to 0 (block NEW entries);
+                    # reducing the book stays the trim's job, which does it
+                    # gradually and worst-first.
+                    if _z41_latch_on and str(_z41_regime or "").strip().lower() == "chop":
+                        _z41_held_now = 0
+                        try:
+                            if portfolio_emulator is not None and hasattr(portfolio_emulator, "get_positions"):
+                                _z41_held_now = len(portfolio_emulator.get_positions() or {})
+                        except Exception:
+                            _z41_held_now = 0
+                        _z41_latched = max(_regime_position_cap(config, "bear"), _z41_held_now)
+                        if _z41_latched < _z41_capped:
+                            _log(f"Bear capacity latch: chop bar held at cap "
+                                 f"{_z41_capped}->{_z41_latched} (book={_z41_held_now}, "
+                                 f"downtrend not released) — blocks new entries only",
+                                 "yellow")
+                            _z41_capped = _z41_latched
                     if _z41_capped != _max_positions:
                         _log(
                             f"Regime capacity gate (Z4.1): regime={_z41_regime} "
@@ -27385,8 +27426,12 @@ class GraphNexusAnalysis:
                     # not allowed to hold. Same defect class as the backfill
                     # queue's headroom (see _bfq_regime_headroom).
                     if bool(config.get("momentum_breakout_add_respect_gates", False)):
+                        # _capacity_regime so the bear-capacity latch binds this
+                        # lane too (2026-07-26) -- see the BFQ headroom call.
                         _mw_ba_max_positions = min(_mw_ba_max_positions, _apply_recovery_cap(
-                            _regime_position_cap(config, (strategy_cache or {}).get("_market_regime")),
+                            _regime_position_cap(config, _capacity_regime(
+                                (strategy_cache or {}).get("_market_regime"),
+                                (strategy_cache or {}).get("_bear_capacity_latch"))),
                             (strategy_cache or {}).get("_market_regime_recovery"), config))
                     _mw_ba_buy_price_floor = float(config.get("buy_price_floor", 8.0) or 8.0)
                     _mw_ba_current_positions = len(_mw_open_set)
@@ -27811,9 +27856,14 @@ class GraphNexusAnalysis:
             # the raw max_positions value byte-identically) — see
             # _bfq_regime_headroom. Without this the queue opened fresh longs in a
             # confirmed bear where every other lane was capped at 2.
+            # 2026-07-26: route through _capacity_regime so the bear-capacity
+            # latch binds this lane too. Without it the latch throttles only the
+            # main slate and the queue happily refills the book on the same chop
+            # bar -- the exact refill the latch exists to stop.
             _bfq_headroom = _bfq_regime_headroom(
                 config,
-                (strategy_cache or {}).get("_market_regime"),
+                _capacity_regime((strategy_cache or {}).get("_market_regime"),
+                                 (strategy_cache or {}).get("_bear_capacity_latch")),
                 (strategy_cache or {}).get("_market_regime_recovery"),
                 _bfq_positions,
                 _planned_new_positions,
