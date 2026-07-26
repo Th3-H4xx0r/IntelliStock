@@ -6543,6 +6543,51 @@ def _apply_recovery_cap(base_cap: int, recovery_flag, config: dict) -> int:
         return base_cap
 
 
+def _next_bear_capacity_latch(prev, confirmed_regime, recovery_flag, config: dict) -> bool:
+    """2026-07-25 (default OFF). Hold the BEAR position cap through chop
+    interludes inside a downtrend.
+
+    `max_positions_bear` releases the instant the label leaves bear, so a chop
+    bar restores full chop capacity (8) and the book refills — and the bear-book
+    trim's own success is what creates the room. Measured on bt#500437: the trim
+    cut to 2 on 03-05, chop 03-06..03-11 rebuilt to 8, bear resumed 03-12 and the
+    dwell restarted, so the rebuilt book bled untouched until 03-16. 19 of 19
+    bear-leg entries were opened on CHOP bars; zero on bear bars. The +6.88%
+    reference had no trim, stayed full, and was hard-blocked from buying at all.
+
+    Latch ON in bear/crash; hold through chop; release on a genuine turn —
+    confirmed bull, or the RECOVERY flag (a chop produced by the recovery
+    override, i.e. diag raw "recover->*"). The release matters as much as the
+    latch: blocking the April rebuild (04-02..04-07) costs -$342 in forgone
+    AMD/MARA/PYPL/AAOI, so this must let go at the turn.
+
+    The release deliberately does NOT key on ret20. That signal is INVERTED
+    here: the bleeding March chop bars ran ret20 -2.20 / +0.46 / -0.30 / -2.43 /
+    -1.76 while the PROFITABLE April chop bars ran -3.76 / -3.76 / -2.02 /
+    -2.81 — so any depth threshold releases on exactly the wrong bars. What
+    actually separates them is provenance: March chop is PLAIN chop, the April
+    turn is `recover->chop` from `_recovery_override_regime`. Pure."""
+    if not bool(config.get("bear_capacity_latch_enabled", False)):
+        return False
+    _reg = str(confirmed_regime or "").strip().lower()
+    if _reg == "bull":
+        return False
+    if bool(recovery_flag):
+        return False        # a confirmed recovery is the turn — let the book rebuild
+    if _reg in ("bear", "crash"):
+        return True
+    return bool(prev)       # plain chop inside a downtrend -> keep the bear cap
+
+
+def _capacity_regime(regime, latch) -> str:
+    """The regime the POSITION CAP should use. A latched chop bar is treated as
+    bear for capacity only — the regime label itself is unchanged, so detection,
+    profile selection and the sleeve are untouched."""
+    if latch and str(regime or "").strip().lower() == "chop":
+        return "bear"
+    return regime
+
+
 def _bear_book_trim_targets(config: dict, regime, bear_bars, held_pnl_pct,
                             recovery_flag=False, book_size=None) -> list:
     """2026-07-25 (default OFF). Symbols to sell so a sustained bear reduces the
@@ -23432,6 +23477,14 @@ class GraphNexusAnalysis:
                 strategy_cache["_bear_dwell_bars"] = 0
                 strategy_cache["_bear_dwell_last_date"] = None
             _v31_diag = strategy_cache.get("_market_regime_diag") or {}
+            # 2026-07-25 bear-capacity latch (default OFF): the dwell counter
+            # above RESETS on any chop bar, which is correct for the trim but
+            # wrong for capacity — a single chop bar restores full chop capacity
+            # and the book refills mid-downtrend. The latch persists the bear cap
+            # across those interludes and releases only on a real turn.
+            strategy_cache["_bear_capacity_latch"] = _next_bear_capacity_latch(
+                strategy_cache.get("_bear_capacity_latch"), _v31_regime,
+                strategy_cache.get("_market_regime_recovery"), config)
             _log(
                 f"V31 market regime: {_v31_regime} "
                 f"(raw={_v31_raw}, proxy={_v31_diag.get('proxy')}, "
@@ -25505,6 +25558,16 @@ class GraphNexusAnalysis:
                     _z41_v31 = str((strategy_cache or {}).get("_market_regime") or "chop")
                     _z41_vix = (strategy_cache or {}).get("_vix_latest") if isinstance(strategy_cache, dict) else None
                     _z41_regime = _nexus_regime_classify(_z41_spy_20d, _z41_v31, _z41_vix)
+                    # 2026-07-25 (default OFF): a latched chop bar inside a
+                    # downtrend keeps the BEAR cap, so the trim's freed slots are
+                    # not immediately refilled. Capacity only — the regime label,
+                    # profile selection and sleeve are untouched.
+                    _z41_pre_latch = _z41_regime
+                    _z41_regime = _capacity_regime(
+                        _z41_regime, (strategy_cache or {}).get("_bear_capacity_latch"))
+                    if _z41_regime != _z41_pre_latch:
+                        _log(f"Bear capacity latch: {_z41_pre_latch} bar held at "
+                             f"{_z41_regime} cap (downtrend not yet released)", "yellow")
                     # BT136708 calibration (2026-05-18): chop default 8 caused
                     # 9-10/8 V28.8.1 breach for ~95% of the run (BFQ stuck at
                     # 48-60 for 175 days, avg 1.98 buys/day vs 6+ capacity).
