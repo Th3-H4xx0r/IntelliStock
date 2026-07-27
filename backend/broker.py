@@ -7450,6 +7450,45 @@ def _backtest_bar_interval() -> datetime.timedelta:
     return interval_for_timeframe(_backtest_alpaca_timeframe)
 
 
+def _aware_bar_label(bar):
+    """Return a legacy bar label as aware UTC for explicit compatibility."""
+    from event_time import aware_utc
+
+    label = _bar_time_to_datetime((bar or {}).get("t"))
+    if label is None:
+        raise ValueError("bar timestamp is unavailable")
+    if getattr(label, "tzinfo", None) is None:
+        label = label.replace(tzinfo=datetime.timezone.utc)
+    return aware_utc(label, field="bar.t")
+
+
+def _non_equity_compatibility_bar_availability_resolver(
+    *,
+    for_history=False,
+):
+    """Preserve legacy Kalshi/crypto visibility in non-promotable backtests."""
+    interval = _backtest_bar_interval()
+
+    def _resolve(bar):
+        label = _aware_bar_label(bar)
+        if interval < datetime.timedelta(days=1):
+            return label
+        if for_history:
+            next_day = label.date() + datetime.timedelta(days=1)
+            return datetime.datetime.combine(
+                next_day,
+                datetime.time.min,
+                tzinfo=datetime.timezone.utc,
+            )
+        return datetime.datetime.combine(
+            label.date(),
+            datetime.time(23, 59),
+            tzinfo=datetime.timezone.utc,
+        )
+
+    return _resolve
+
+
 def _equity_daily_bar_session_close(bar_start):
     """Resolve an equity daily bar to its authoritative exchange close."""
     try:
@@ -7467,13 +7506,17 @@ def _equity_daily_bar_session_close(bar_start):
         return None
 
 
-def _backtest_bar_availability_resolver():
+def _backtest_bar_availability_resolver(*, for_history=False):
     """Bind fetched granularity and the correct equity/continuous calendar."""
     from event_time import make_bar_availability_resolver
 
+    if _is_non_equity_instance_runtime():
+        return _non_equity_compatibility_bar_availability_resolver(
+            for_history=for_history,
+        )
     interval = _backtest_bar_interval()
     session_close_resolver = None
-    if interval >= datetime.timedelta(days=1) and not _is_crypto_instance_runtime():
+    if interval >= datetime.timedelta(days=1):
         session_close_resolver = _equity_daily_bar_session_close
     return make_bar_availability_resolver(
         interval=interval,
@@ -7570,7 +7613,9 @@ def get_price_history_up_to_current(data, symbols, current_time):
         data, symbols, current_time,
         bar_time_to_datetime=_bar_time_to_datetime,
         current_time_to_utc=_aware_backtest_clock,
-        bar_available_at=_backtest_bar_availability_resolver(),
+        bar_available_at=_backtest_bar_availability_resolver(
+            for_history=True,
+        ),
     )
 
 print("Time Increment:", time_increment)
