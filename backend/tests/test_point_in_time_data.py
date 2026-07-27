@@ -105,3 +105,41 @@ def test_live_context_is_explicit_and_still_uses_aware_utc_time():
     assert context.is_live is True
     assert context.strict is False
     assert context.as_of == _ts("2026-03-02T19:00:00Z")
+
+
+def test_immutable_snapshot_store_copies_and_freezes_nested_payloads():
+    from point_in_time_data import ImmutableSnapshotStore, load_snapshot_payload
+
+    source = {
+        "fundamentals": [
+            {
+                "manifest_id": _manifest().manifest_id,
+                "effective_at": _ts("2026-03-02T12:00:00Z"),
+                "available_at": _ts("2026-03-02T12:05:00Z"),
+                "payload": {
+                    "AAPL": {
+                        "market_cap": 1_000_000_000_000,
+                        "tags": ["mega-cap"],
+                    }
+                },
+            }
+        ]
+    }
+    store = ImmutableSnapshotStore(source)
+    source["fundamentals"][0]["payload"]["AAPL"]["market_cap"] = 9
+    source["fundamentals"][0]["payload"]["AAPL"]["tags"].append("mutated")
+    context = PointInTimeContext(
+        as_of=_ts("2026-03-02T14:00:00Z"),
+        manifest=_manifest(),
+    )
+
+    payload = load_snapshot_payload(
+        store,
+        dataset="fundamentals",
+        context=context,
+    )
+
+    assert payload["AAPL"]["market_cap"] == 1_000_000_000_000
+    assert payload["AAPL"]["tags"] == ("mega-cap",)
+    with pytest.raises(TypeError):
+        payload["AAPL"]["market_cap"] = 9

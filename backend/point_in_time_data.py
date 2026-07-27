@@ -9,10 +9,10 @@ provide the availability timestamp for their own record type.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, TypeVar
+from typing import Any, Callable, Iterable, Iterator, Mapping, TypeVar
 
 
 UTC = timezone.utc
@@ -21,6 +21,131 @@ _RecordT = TypeVar("_RecordT")
 
 class PointInTimeDataError(RuntimeError):
     """Raised when a strict historical input cannot be proven point-in-time."""
+
+
+class _FrozenDict(dict):
+    """``dict``-compatible recursively frozen mapping used by snapshot payloads."""
+
+    @staticmethod
+    def _immutable(*args, **kwargs):
+        raise TypeError("immutable snapshot mappings cannot be modified")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+
+def _freeze_snapshot_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _FrozenDict(
+            {
+                key: _freeze_snapshot_value(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_snapshot_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_snapshot_value(item) for item in value)
+    return value
+
+
+class ImmutableSnapshotStore(Mapping[str, Any]):
+    """Owned, recursively frozen copy of dated research snapshots.
+
+    Provider handles such as an already-open graph driver remain opaque
+    objects; all mapping/sequence structure around them is copied and frozen.
+    This prevents a prefetched source mapping from being mutated after a
+    historical run has started.
+    """
+
+    __slots__ = ("_datasets",)
+
+    def __init__(self, snapshots: Mapping[str, Any]):
+        if not isinstance(snapshots, Mapping):
+            raise PointInTimeDataError(
+                "point-in-time snapshot store must be a mapping"
+            )
+        frozen = _freeze_snapshot_value(snapshots)
+        if not isinstance(frozen, Mapping):
+            raise PointInTimeDataError(
+                "point-in-time snapshot store could not be frozen"
+            )
+        self._datasets = frozen
+
+    @classmethod
+    def coerce(cls, snapshots: Any) -> "ImmutableSnapshotStore":
+        if isinstance(snapshots, cls):
+            return snapshots
+        return cls(snapshots)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._datasets[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._datasets)
+
+    def __len__(self) -> int:
+        return len(self._datasets)
+
+
+def coerce_dataset_manifest(value: Any) -> "DatasetManifest":
+    """Return a validated manifest from a manifest object or stored mapping."""
+
+    if isinstance(value, DatasetManifest):
+        return value
+    if not isinstance(value, Mapping):
+        raise PointInTimeDataError(
+            "point-in-time manifest is required for historical Graph Nexus"
+        )
+    return DatasetManifest(
+        manifest_id=value.get("manifest_id"),
+        source_hashes=value.get("source_hashes"),
+        created_at=value.get("created_at"),
+    )
+
+
+def resolve_nyse_session_close(session_date: date) -> datetime:
+    """Resolve an exact NYSE regular-session close without network I/O.
+
+    Strict historical execution does not use the weekday approximation from
+    the live calendar fallback because it cannot prove holidays or early
+    closes. Missing calendar dependencies therefore fail closed.
+    """
+
+    if isinstance(session_date, datetime):
+        session_date = session_date.date()
+    if not isinstance(session_date, date):
+        raise PointInTimeDataError("session close requires a session date")
+    try:
+        import exchange_calendars as exchange_calendars
+        import pandas as pandas
+    except Exception as exc:
+        raise PointInTimeDataError(
+            "strict historical session calendar is unavailable"
+        ) from exc
+    try:
+        calendar = exchange_calendars.get_calendar("XNYS")
+        session = pandas.Timestamp(session_date)
+        if not bool(calendar.is_session(session)):
+            raise PointInTimeDataError(
+                f"{session_date.isoformat()} is not an NYSE trading session"
+            )
+        close = calendar.session_close(session)
+        if hasattr(close, "to_pydatetime"):
+            close = close.to_pydatetime()
+        return require_aware_utc(close, field="NYSE session close")
+    except PointInTimeDataError:
+        raise
+    except Exception as exc:
+        raise PointInTimeDataError(
+            f"NYSE session close is unavailable for {session_date.isoformat()}"
+        ) from exc
 
 
 def require_aware_utc(value: Any, *, field: str) -> datetime:
@@ -310,9 +435,12 @@ def load_snapshot_payload(
 
 __all__ = [
     "DatasetManifest",
+    "ImmutableSnapshotStore",
     "PointInTimeContext",
     "PointInTimeDataError",
+    "coerce_dataset_manifest",
     "filter_available",
     "load_snapshot_payload",
     "require_aware_utc",
+    "resolve_nyse_session_close",
 ]

@@ -112,3 +112,39 @@ def test_explicit_live_context_preserves_current_overlay_behavior():
     )
 
     assert regime == "bull"
+
+
+def test_intraday_daily_close_sorts_shuffled_regular_session_bars():
+    bars = [
+        {"t": "2026-03-02T20:00:00Z", "c": 103.0},
+        {"t": "2026-03-02T15:00:00Z", "c": 101.0},
+        {"t": "2026-02-27T20:00:00Z", "c": 99.0},
+        {"t": "2026-03-02T19:00:00Z", "c": 102.0},
+    ]
+
+    closes = graph._daily_closes_from_intraday(
+        bars,
+        "2026-03-02",
+        context=_context("2026-03-02T21:00:00Z"),
+        session_close_resolver=_session_close,
+    )
+
+    assert closes == [99.0, 103.0]
+
+
+def test_intraday_daily_close_excludes_pre_market_and_after_hours_bars():
+    bars = [
+        {"t": "2026-03-02T22:00:00Z", "c": 999.0},
+        {"t": "2026-03-02T20:00:00Z", "c": 103.0},
+        {"t": "2026-03-02T13:00:00Z", "c": 888.0},
+        {"t": "2026-03-02T19:00:00Z", "c": 102.0},
+    ]
+
+    closes = graph._daily_closes_from_intraday(
+        bars,
+        "2026-03-02",
+        context=_context("2026-03-02T21:00:00Z"),
+        session_close_resolver=_session_close,
+    )
+
+    assert closes == [103.0]

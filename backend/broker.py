@@ -3849,6 +3849,107 @@ def _apply_regime_profile(config, regime):
     return merged
 
 
+def _run_graph_nexus_with_point_in_time(
+    instance,
+    symbols,
+    prices,
+    current_time,
+    config,
+    conditions,
+    *,
+    data,
+    portfolio_emulator,
+    strategy_cache,
+    time_increment,
+    scheduler_mode,
+):
+    """Dispatch Graph Nexus through an explicit live or strict historical boundary."""
+    from datetime import datetime as _datetime, timezone as _timezone
+    from point_in_time_data import (
+        DatasetManifest,
+        ImmutableSnapshotStore,
+        PointInTimeContext,
+        PointInTimeDataError,
+        coerce_dataset_manifest,
+    )
+
+    as_of = current_time
+    if not isinstance(as_of, _datetime):
+        raise PointInTimeDataError(
+            "Graph Nexus decision time must be a datetime"
+        )
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=_timezone.utc)
+    else:
+        as_of = as_of.astimezone(_timezone.utc)
+
+    if globals().get("mode") == MODE_BACKTEST:
+        manifest = coerce_dataset_manifest(
+            config.get("point_in_time_manifest")
+        )
+        store = ImmutableSnapshotStore.coerce(
+            config.get("point_in_time_store")
+        )
+        resolver = config.get("point_in_time_session_close_resolver")
+        if not callable(resolver):
+            raise PointInTimeDataError(
+                "historical Graph Nexus snapshot inputs require a "
+                "session close resolver"
+            )
+        context = PointInTimeContext(
+            as_of=as_of,
+            manifest=manifest,
+            strict=True,
+            is_live=False,
+        )
+        return instance.run_historical(
+            list(symbols),
+            prices,
+            current_time,
+            config,
+            conditions,
+            data=data,
+            portfolio_emulator=portfolio_emulator,
+            strategy_cache=strategy_cache,
+            time_increment=time_increment,
+            mode=scheduler_mode,
+            context=context,
+            point_in_time_store=store,
+            session_close_resolver=resolver,
+        )
+
+    manifest_value = config.get("point_in_time_manifest")
+    if manifest_value is None:
+        manifest = DatasetManifest(
+            manifest_id="graph-nexus-live-current",
+            source_hashes={"live": "current-state"},
+            created_at=as_of,
+        )
+    else:
+        manifest = coerce_dataset_manifest(manifest_value)
+    context = PointInTimeContext.for_live(
+        as_of=as_of,
+        manifest=manifest,
+    )
+    return instance.run_once(
+        list(symbols),
+        prices,
+        current_time,
+        config,
+        conditions,
+        data=data,
+        portfolio_emulator=portfolio_emulator,
+        strategy_cache=strategy_cache,
+        time_increment=time_increment,
+        mode=scheduler_mode,
+        point_in_time_context=context,
+        point_in_time_store=config.get("point_in_time_store"),
+        session_close_resolver=config.get(
+            "point_in_time_session_close_resolver"
+        ),
+    )
+
+
 def run_run_once_strategies(specs, symbols, prices, current_time, data=None, portfolio_emulator=None, time_increment=None, alpaca_key=None, alpaca_secret=None, strategy_caches=None, alpaca_data_feed=None, mode=None):
     """
     Run strategies that have execution_scope "run_once". Each returns a dict mapping symbol -> score (and optional reason).
@@ -4054,12 +4155,33 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 backtest_id=broker_backtest_id or None,
                 instance_id=broker_instance_id or None,
             ):
-                raw = instance.run_once(
-                    list(symbols), prices, current_time, config, conditions,
-                    data=data, portfolio_emulator=portfolio_emulator,
-                    strategy_cache=strategy_cache, time_increment=time_increment,
-                    mode=mode,
-                )
+                if name.strip().lower() == "graph_nexus_analysis":
+                    raw = _run_graph_nexus_with_point_in_time(
+                        instance,
+                        list(symbols),
+                        prices,
+                        current_time,
+                        config,
+                        conditions,
+                        data=data,
+                        portfolio_emulator=portfolio_emulator,
+                        strategy_cache=strategy_cache,
+                        time_increment=time_increment,
+                        scheduler_mode=mode,
+                    )
+                else:
+                    raw = instance.run_once(
+                        list(symbols),
+                        prices,
+                        current_time,
+                        config,
+                        conditions,
+                        data=data,
+                        portfolio_emulator=portfolio_emulator,
+                        strategy_cache=strategy_cache,
+                        time_increment=time_increment,
+                        mode=mode,
+                    )
             if isinstance(raw, dict):
                 out_scores = {}
                 out_reasons = {}
@@ -4121,6 +4243,11 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 _log(f"Run-once strategy '{name}' returned scores for {len(out_scores)} symbols{extra}", "cyan")
         except Exception as e:
             _log(f"Run-once strategy '{name}' error: {e}", "red")
+            if name.strip().lower() == "graph_nexus_analysis":
+                from point_in_time_data import PointInTimeDataError
+
+                if isinstance(e, PointInTimeDataError):
+                    raise
     return results
 
 

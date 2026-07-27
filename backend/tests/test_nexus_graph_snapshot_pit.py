@@ -314,5 +314,206 @@ def test_historical_entrypoint_preloads_snapshots_and_delegates(monkeypatch):
 
     assert result == {"AAPL": {"score": 0}}
     assert captured["point_in_time_context"] is context
-    assert captured["point_in_time_store"] is store
+    assert type(captured["point_in_time_store"]).__name__ == (
+        "ImmutableSnapshotStore"
+    )
+    assert captured["point_in_time_fundamentals"]["AAPL"]["market_cap"] == (
+        1_500_000_000_000
+    )
     assert captured["session_close_resolver"] is resolver
+
+
+def test_historical_entrypoint_requires_strict_context():
+    context = PointInTimeContext(
+        as_of=_ts("2026-03-02T14:00:00Z"),
+        manifest=_manifest(),
+        strict=False,
+        is_live=False,
+    )
+
+    with pytest.raises(PointInTimeDataError, match="strict"):
+        graph.GraphNexusAnalysis().run_historical(
+            [],
+            {},
+            context.as_of,
+            {},
+            {},
+            context=context,
+            point_in_time_store={},
+            session_close_resolver=lambda session_date: _ts(
+                f"{session_date.isoformat()}T21:00:00Z"
+            ),
+        )
+
+
+def test_historical_run_once_rejects_missing_context_before_pipeline(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        graph,
+        "_activate_point_in_time_graph_scope",
+        lambda *args, **kwargs: pytest.fail(
+            "historical context must be checked before pipeline activation"
+        ),
+    )
+
+    with pytest.raises(PointInTimeDataError, match="historical.*context"):
+        graph.GraphNexusAnalysis().run_once(
+            [],
+            {},
+            _ts("2026-03-02T14:00:00Z"),
+            {},
+            {},
+            data={},
+            strategy_cache={},
+        )
+
+
+def test_historical_run_once_rejects_non_strict_context_before_pipeline(
+    monkeypatch,
+):
+    context = PointInTimeContext(
+        as_of=_ts("2026-03-02T14:00:00Z"),
+        manifest=_manifest(),
+        strict=False,
+        is_live=False,
+    )
+    monkeypatch.setattr(
+        graph,
+        "_activate_point_in_time_graph_scope",
+        lambda *args, **kwargs: pytest.fail(
+            "strict context must be checked before pipeline activation"
+        ),
+    )
+
+    with pytest.raises(PointInTimeDataError, match="strict"):
+        graph.GraphNexusAnalysis().run_once(
+            [],
+            {},
+            context.as_of,
+            {},
+            {},
+            data={},
+            strategy_cache={},
+            point_in_time_context=context,
+            point_in_time_store={},
+            session_close_resolver=lambda session_date: _ts(
+                f"{session_date.isoformat()}T21:00:00Z"
+            ),
+        )
+
+
+def test_strict_market_cap_consumers_use_only_dated_fundamentals(monkeypatch):
+    context = _historical_context()
+    fundamentals = {"AAPL": {"market_cap": 1_500_000_000_000}}
+    cache = {
+        "_yf_market_cap_cache": {"AAPL": 9_999_999_999_999},
+        "_ticker_metadata": {
+            "AAPL": {"market_cap": 8_888_888_888_888},
+        },
+        "_symbol_quality_metadata": {
+            "AAPL": {"market_cap": 7_777_777_777_777},
+        },
+    }
+    monkeypatch.setitem(
+        graph._neo4j_market_cap_cache,
+        "AAPL",
+        6_666_666_666_666,
+    )
+
+    assert graph._v32_get_market_cap(
+        "AAPL",
+        cache,
+        {},
+        context=context,
+        fundamentals=fundamentals,
+    ) == 1_500_000_000_000
+    assert graph._resolve_position_market_cap(
+        "AAPL",
+        cache,
+        context=context,
+        fundamentals=fundamentals,
+    ) == 1_500_000_000_000
+    quality = graph._extract_quality_metadata(
+        "AAPL",
+        {"quality_metadata": {"market_cap": 5_555_555_555_555}},
+        {"AAPL": 100.0},
+        {},
+        strategy_cache=cache,
+        context=context,
+        fundamentals=fundamentals,
+    )
+    assert quality["market_cap"] == 1_500_000_000_000
+    assert "yfinance" not in quality["sources"]
+    assert "neo4j" not in quality["sources"]
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    [
+        lambda context: graph._v32_get_market_cap(
+            "AAPL",
+            {"_ticker_metadata": {"AAPL": {"market_cap": 9e12}}},
+            {},
+            context=context,
+            fundamentals={},
+        ),
+        lambda context: graph._resolve_position_market_cap(
+            "AAPL",
+            {"_yf_market_cap_cache": {"AAPL": 9e12}},
+            context=context,
+            fundamentals={},
+        ),
+        lambda context: graph._extract_quality_metadata(
+            "AAPL",
+            {"quality_metadata": {"market_cap": 9e12}},
+            {"AAPL": 100.0},
+            {},
+            strategy_cache={},
+            context=context,
+            fundamentals={},
+        ),
+    ],
+)
+def test_strict_market_cap_consumers_fail_closed_when_dated_value_missing(
+    consumer,
+):
+    with pytest.raises(PointInTimeDataError, match="market_cap.*AAPL"):
+        consumer(_historical_context())
+
+
+def test_institutional_cache_binding_includes_manifest_and_exact_as_of():
+    early = _historical_context()
+    late = PointInTimeContext(
+        as_of=_ts("2026-03-02T14:00:01Z"),
+        manifest=_manifest(),
+    )
+
+    early_key, early_metadata = graph._institutional_cache_binding(
+        early,
+        "main-instance",
+        "2026-03-02",
+    )
+    late_key, _ = graph._institutional_cache_binding(
+        late,
+        "main-instance",
+        "2026-03-02",
+    )
+
+    assert "pit-manifest" in early_key
+    assert "2026-03-02T14:00:00Z" in early_key
+    assert early_key != late_key
+    assert early_metadata == {
+        "manifest_id": "pit-manifest",
+        "as_of": "2026-03-02T14:00:00Z",
+    }
+
+
+def test_strict_institutional_cache_rejects_legacy_unscoped_row():
+    context = _historical_context()
+    legacy = {
+        "id": "inst_co_holdings|main-instance|2026-03",
+        "edges": [{"left": "AAPL", "right": "MSFT"}],
+    }
+
+    assert graph._institutional_cache_row_matches(legacy, context) is False

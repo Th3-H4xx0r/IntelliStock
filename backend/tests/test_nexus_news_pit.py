@@ -250,3 +250,65 @@ def test_cached_article_reader_does_not_swallow_strict_timestamp_errors(
             "2026-03-02",
             context=_context("2026-03-02T14:00:00Z"),
         )
+
+
+def _install_cached_benzinga_module(monkeypatch):
+    fake_benzinga = types.SimpleNamespace(
+        fetch_benzinga_bulk=lambda *args, **kwargs: pytest.fail(
+            "preloaded bulk cache must not make a provider call"
+        ),
+        _strip_future_actuals=lambda data_type, records, date_key: list(records),
+        _FORWARD_LOOKING_TYPES=set(),
+        set_benzinga_backtest_mode=lambda enabled: None,
+    )
+    monkeypatch.setitem(sys.modules, "benzinga_client", fake_benzinga)
+
+
+def test_benzinga_cache_is_filtered_on_aware_publication_time(monkeypatch):
+    _install_cached_benzinga_module(monkeypatch)
+    cache = {
+        "_bz_bulk_range": ("2026-02-01", "2026-04-01"),
+        "_bz_bulk_data": {
+            "ratings": [
+                {
+                    "ticker": "AAPL",
+                    "date": "2026-03-02",
+                    "published_at": "2026-03-02T13:59:00Z",
+                },
+                {
+                    "ticker": "MSFT",
+                    "date": "2026-03-02",
+                    "published_at": "2026-03-02T14:01:00Z",
+                },
+            ]
+        },
+    }
+
+    result = graph._fetch_all_benzinga(
+        {"benzinga_api_key": "test-key"},
+        "2026-03-02",
+        ["AAPL", "MSFT"],
+        strategy_cache=cache,
+        context=_context("2026-03-02T14:00:00Z"),
+    )
+
+    assert [row["ticker"] for row in result["ratings"]] == ["AAPL"]
+
+
+def test_benzinga_strict_history_rejects_undated_cached_records(monkeypatch):
+    _install_cached_benzinga_module(monkeypatch)
+    cache = {
+        "_bz_bulk_range": ("2026-02-01", "2026-04-01"),
+        "_bz_bulk_data": {
+            "ratings": [{"ticker": "AAPL", "date": "2026-03-02"}],
+        },
+    }
+
+    with pytest.raises(PointInTimeDataError, match="availability timestamp"):
+        graph._fetch_all_benzinga(
+            {"benzinga_api_key": "test-key"},
+            "2026-03-02",
+            ["AAPL"],
+            strategy_cache=cache,
+            context=_context("2026-03-02T14:00:00Z"),
+        )
