@@ -4,6 +4,26 @@ and portfolio value snapshots over time.
 """
 
 import copy
+from datetime import timedelta
+
+try:
+    from simulated_execution import (
+        DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+        ExecutionCostModel,
+        NextEventExecutionSimulator,
+        SimulationFill,
+        SimulationOrder,
+        SimulationQuote,
+    )
+except ImportError:  # Package import path used by repository-root pytest.
+    from backend.simulated_execution import (
+        DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+        ExecutionCostModel,
+        NextEventExecutionSimulator,
+        SimulationFill,
+        SimulationOrder,
+        SimulationQuote,
+    )
 
 # Crypto is NEVER commission-free: backtest fills must model the taker fee.
 # Source the fee from the crypto core so sizing and fills stay in lock-step;
@@ -24,7 +44,14 @@ class PortfolioEmulator:
     value history at the end of a backtest.
     """
 
-    def __init__(self, initial_cash=100000.0, taker_fee=None):
+    def __init__(
+        self,
+        initial_cash=100000.0,
+        taker_fee=None,
+        *,
+        execution_simulator=None,
+        execution_delay=None,
+    ):
         self._cash = float(initial_cash)
         self._initial_value = float(initial_cash)  # Track original portfolio value
         # Crypto taker fee applied to fills (equities are commission-free). Defaults
@@ -40,6 +67,28 @@ class PortfolioEmulator:
         # (gross, both legs) — the base for per-platform fee estimates.
         self._crypto_fees_paid = 0.0
         self._crypto_volume = 0.0
+        if (
+            execution_simulator is not None
+            and not isinstance(execution_simulator, NextEventExecutionSimulator)
+        ):
+            raise ValueError(
+                "execution_simulator must be a NextEventExecutionSimulator"
+            )
+        if execution_delay is None:
+            execution_delay = timedelta(0)
+        if (
+            not isinstance(execution_delay, timedelta)
+            or execution_delay.total_seconds() < 0
+        ):
+            raise ValueError("execution_delay must be a nonnegative timedelta")
+        self._execution_simulator = execution_simulator
+        self._execution_delay = execution_delay
+        self._simulation_order_sequence = 0
+        self._recorded_orders = []
+        self._applied_cumulative_fills = {}
+        self._confirmed_simulation_fills = []
+        self._execution_cash_reservations = {}
+        self._execution_position_reservations = {}
 
     def buy(self, ticker, shares, price, timestamp=None):
         """
@@ -189,7 +238,182 @@ class PortfolioEmulator:
                 v += shares * float(p)
         return v
 
-    def execute_signal(self, ticker, signal, price, timestamp=None, cash_per_trade=1000.0, sell_fraction=1.0):
+    def record_order(self, order):
+        """Record a simulated order without mutating portfolio accounting."""
+        if not isinstance(order, SimulationOrder):
+            raise ValueError("order must be a SimulationOrder")
+        if self._execution_simulator is not None:
+            self._execution_simulator.submit(order)
+        self._recorded_orders.append(order)
+
+    def apply_fill(self, fill):
+        """Apply only the new cumulative quantity from a confirmed fill event."""
+        if not isinstance(fill, SimulationFill):
+            raise ValueError("fill must be a SimulationFill")
+        previous = float(
+            self._applied_cumulative_fills.get(fill.order_id, 0.0) or 0.0
+        )
+        if fill.cumulative_quantity < previous - 1e-12:
+            raise ValueError(
+                "cumulative_quantity cannot move backwards for an order"
+            )
+        delta = fill.cumulative_quantity - previous
+        if abs(delta) <= 1e-12:
+            return
+        if not abs(delta - fill.incremental_quantity) <= 1e-9:
+            raise ValueError(
+                "incremental_quantity must equal the new cumulative delta"
+            )
+
+        gross = delta * fill.price
+        if fill.side == "buy":
+            cash_delta = gross + fill.fees
+            if cash_delta > self._cash + 1e-9:
+                raise ValueError("confirmed buy fill exceeds available cash")
+            new_cash = self._cash - cash_delta
+            new_quantity = self._positions.get(fill.symbol, 0.0) + delta
+            trade_total = cash_delta
+        else:
+            current = float(self._positions.get(fill.symbol, 0.0) or 0.0)
+            if delta > current + 1e-9:
+                raise ValueError(
+                    "confirmed sell fill exceeds the current position"
+                )
+            cash_delta = gross - fill.fees
+            if cash_delta < -1e-9:
+                raise ValueError("confirmed sell fees exceed gross proceeds")
+            new_cash = self._cash + cash_delta
+            new_quantity = current - delta
+            trade_total = cash_delta
+
+        self._cash = new_cash
+        if new_quantity > 1e-12:
+            self._positions[fill.symbol] = new_quantity
+        else:
+            self._positions.pop(fill.symbol, None)
+        self._last_prices[fill.symbol] = fill.price
+        self._applied_cumulative_fills[fill.order_id] = (
+            fill.cumulative_quantity
+        )
+        self._confirmed_simulation_fills.append(fill)
+        self._trades.append({
+            "timestamp": fill.executed_at,
+            "action": fill.side,
+            "ticker": fill.symbol,
+            "shares": delta,
+            "price": fill.price,
+            "total": trade_total,
+            "fees": fill.fees,
+            "spread_cost": fill.spread_cost,
+            "slippage_cost": fill.slippage_cost,
+            "order_id": fill.order_id,
+            "cumulative_quantity": fill.cumulative_quantity,
+            "quote_timestamp": fill.quote_timestamp,
+            "cost_model_version": fill.cost_model_version,
+            "source": fill.source,
+            "cash_after": self._cash,
+        })
+
+    def process_quote(self, quote):
+        """Apply all normalized fills emitted for one quote event."""
+        if self._execution_simulator is None:
+            return ()
+        if not isinstance(quote, SimulationQuote):
+            raise ValueError("quote must be a SimulationQuote")
+        fills = self._execution_simulator.on_quote(quote)
+        for fill in fills:
+            self.apply_fill(fill)
+            if fill.side == "buy":
+                spent = fill.incremental_quantity * fill.price + fill.fees
+                remaining = max(
+                    0.0,
+                    float(
+                        self._execution_cash_reservations.get(
+                            fill.order_id, 0.0
+                        )
+                        or 0.0
+                    )
+                    - spent,
+                )
+                self._execution_cash_reservations[fill.order_id] = remaining
+            else:
+                remaining = max(
+                    0.0,
+                    float(
+                        self._execution_position_reservations.get(
+                            fill.order_id, 0.0
+                        )
+                        or 0.0
+                    )
+                    - fill.incremental_quantity,
+                )
+                self._execution_position_reservations[
+                    fill.order_id
+                ] = remaining
+        pending_ids = {
+            order.order_id for order in self._execution_simulator.pending_orders
+        }
+        for reservations in (
+            self._execution_cash_reservations,
+            self._execution_position_reservations,
+        ):
+            for order_id in tuple(reservations):
+                if order_id not in pending_ids:
+                    reservations.pop(order_id, None)
+        return fills
+
+    def pending_execution_symbols(self):
+        if self._execution_simulator is None:
+            return ()
+        return self._execution_simulator.pending_symbols
+
+    def process_price_event(self, prices, *, timestamp):
+        """Convert midpoint bar prices into two-sided quotes and apply fills."""
+        if self._execution_simulator is None:
+            return ()
+        emitted = []
+        for symbol in self.pending_execution_symbols():
+            mid = (prices or {}).get(symbol)
+            try:
+                mid = float(mid)
+            except (TypeError, ValueError):
+                continue
+            if mid <= 0:
+                continue
+            quote = SimulationQuote.from_mid(
+                symbol=symbol,
+                timestamp=timestamp,
+                mid=mid,
+                spread_bps=self._execution_simulator.cost_model.spread_bps,
+            )
+            emitted.extend(self.process_quote(quote))
+        return tuple(emitted)
+
+    def get_execution_summary(self):
+        if self._execution_simulator is None:
+            return {
+                "execution_provenance_complete": False,
+                "execution_cost_model_version": None,
+                "execution_cost_model": None,
+                "total_fees": None,
+                "spread_cost": None,
+                "slippage_cost": None,
+                "unfilled_order_count": None,
+                "rejected_order_count": None,
+                "fill_provenance": [],
+            }
+        return self._execution_simulator.execution_summary()
+
+    def execute_signal(
+        self,
+        ticker,
+        signal,
+        price,
+        timestamp=None,
+        cash_per_trade=1000.0,
+        sell_fraction=1.0,
+        order_source="equity_backtest",
+    ):
         """
         Convenience: execute a strategy signal (1=buy, -1=sell, 0=hold) with a simple rule.
         Buy: invest up to cash_per_trade; if cash is less than cash_per_trade, use all available cash so the trade still goes through.
@@ -198,6 +422,66 @@ class PortfolioEmulator:
         """
         if price is None or price <= 0:
             return False
+        if self._execution_simulator is not None and signal in (1, -1):
+            if timestamp is None:
+                raise ValueError(
+                    "next-event execution requires a decision timestamp"
+                )
+            self._simulation_order_sequence += 1
+            order_id = (
+                f"sim-{self._simulation_order_sequence:012d}-"
+                f"{str(ticker).strip().upper()}"
+            )
+            if signal == 1:
+                reserved_cash = sum(
+                    float(value or 0.0)
+                    for value in self._execution_cash_reservations.values()
+                )
+                amount_to_use = min(
+                    float(cash_per_trade),
+                    max(0.0, self._cash - reserved_cash),
+                )
+                if amount_to_use <= 0:
+                    return False
+                shares = self._execution_simulator.affordable_buy_quantity(
+                    amount_to_use, price
+                )
+                side = "buy"
+            else:
+                total_shares = float(self._positions.get(ticker, 0.0) or 0.0)
+                reserved_shares = sum(
+                    float(value or 0.0)
+                    for order_key, value
+                    in self._execution_position_reservations.items()
+                    if order_key.endswith(
+                        f"-{str(ticker).strip().upper()}"
+                    )
+                )
+                total_shares = max(0.0, total_shares - reserved_shares)
+                if total_shares <= 0:
+                    return False
+                frac = max(0.0, min(1.0, float(sell_fraction)))
+                shares = (
+                    total_shares * frac if frac < 1.0 else total_shares
+                )
+                if shares <= 0:
+                    return False
+                side = "sell"
+            order = SimulationOrder(
+                order_id=order_id,
+                symbol=ticker,
+                side=side,
+                quantity=shares,
+                decision_at=timestamp,
+                execute_not_before=timestamp + self._execution_delay,
+                source=order_source,
+            )
+            self.record_order(order)
+            if side == "buy":
+                self._execution_cash_reservations[order_id] = amount_to_use
+            else:
+                self._execution_position_reservations[order_id] = shares
+            return True
         if signal == 1:
             amount_to_use = min(cash_per_trade, self._cash)
             if amount_to_use <= 0:
@@ -288,3 +572,29 @@ class PortfolioEmulator:
             log(f"  Sells:           {sell_count}", "white")
         
         log("=" * 70, "cyan")
+
+
+def create_backtest_emulator(
+    *,
+    initial_cash,
+    taker_fee,
+    is_crypto,
+    execution_delay,
+    cost_model=None,
+):
+    """Build the broker's emulator without changing crypto compatibility."""
+    if is_crypto:
+        return PortfolioEmulator(
+            initial_cash=initial_cash,
+            taker_fee=taker_fee,
+        )
+    if cost_model is None:
+        cost_model = DEFAULT_EQUITY_EXECUTION_COST_MODEL
+    if not isinstance(cost_model, ExecutionCostModel):
+        raise ValueError("cost_model must be an ExecutionCostModel")
+    return PortfolioEmulator(
+        initial_cash=initial_cash,
+        taker_fee=taker_fee,
+        execution_simulator=NextEventExecutionSimulator(cost_model),
+        execution_delay=execution_delay,
+    )

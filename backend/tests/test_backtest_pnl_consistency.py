@@ -8,6 +8,8 @@ same end date, plus a divergent snapshot mark. Asserts:
 """
 import datetime as _dt
 
+import pytest
+
 from backend.backtest_summary import (
     compute_backtest_summary,
     build_backtest_price_series,
@@ -15,6 +17,8 @@ from backend.backtest_summary import (
     compute_per_stock_pnl,
     compute_stock_price_change,
 )
+from backend.portfolio_emulator import PortfolioEmulator
+from backend.simulated_execution import SimulationFill
 
 
 def _bar_time_to_datetime(t):
@@ -237,9 +241,43 @@ def test_per_stock_pnl_reconciles_with_headline_pnl():
         TRADES, POSITIONS, dict(LATER_LOWER_CLOSE), ["AAPL", "MSFT"],
     )
     assert sum(wrong_pnl.values()) != headline
-
     # pnl_percent is against cost basis (buys).
     assert pnl_pct["AAPL"] == round(pnl_per_stock["AAPL"] / 25000.0 * 100.0, 4)
+
+
+def test_confirmed_fill_totals_reconcile_per_stock_and_headline_pnl():
+    emulator = PortfolioEmulator(10_000.0)
+    fill_at = _dt.datetime(2026, 7, 1, 15, 0, tzinfo=_dt.timezone.utc)
+    emulator.apply_fill(
+        SimulationFill(
+            order_id="costed-buy",
+            symbol="AAPL",
+            side="buy",
+            incremental_quantity=10.0,
+            cumulative_quantity=10.0,
+            price=101.0,
+            fees=1.0,
+            spread_cost=5.0,
+            slippage_cost=2.0,
+            quote_timestamp=fill_at,
+            executed_at=fill_at,
+            cost_model_version="equity-next-event-v1",
+            source="main_signal",
+        )
+    )
+    emulator.save_portfolio_snapshot({"AAPL": 100.0}, timestamp=fill_at)
+
+    snapshots = emulator.get_portfolio_history()
+    headline = compute_backtest_summary(emulator, snapshots, 10_000.0)
+    per_stock, _ = compute_per_stock_pnl(
+        emulator.get_trade_history(),
+        emulator.get_positions(),
+        {"AAPL": 100.0},
+        ["AAPL"],
+    )
+
+    assert headline["pnl"] == pytest.approx(-11.0)
+    assert per_stock["AAPL"] == pytest.approx(headline["pnl"])
 
 
 def test_stock_price_change_end_price_is_snapshot_mark():

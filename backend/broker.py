@@ -21,7 +21,7 @@ import re
 import dotenv
 from contextlib import contextmanager
 from typing import Any, Optional
-from portfolio_emulator import PortfolioEmulator
+from portfolio_emulator import PortfolioEmulator, create_backtest_emulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
@@ -6363,9 +6363,16 @@ live_wal = None
 if mode == MODE_BACKTEST:
     # Emulated-fee override (--taker-fee) wins; else resolve from the instance venue.
     _bt_taker_fee = emulated_taker_fee if emulated_taker_fee is not None else _instance_crypto_taker_fee()
-    portfolio_emulator = PortfolioEmulator(initial_cash=initial_cash, taker_fee=_bt_taker_fee)
-    _log("PortfolioEmulator initialized for backtest (initial_cash=%s, taker_fee=%s%s)."
-         % (initial_cash, _bt_taker_fee, " [emulated]" if emulated_taker_fee is not None else ""), "green")
+    _bt_is_crypto = _is_crypto_instance_runtime()
+    portfolio_emulator = create_backtest_emulator(
+        initial_cash=initial_cash,
+        taker_fee=_bt_taker_fee,
+        is_crypto=_bt_is_crypto,
+        execution_delay=backtest_increment_td,
+    )
+    _bt_execution_kind = "legacy-immediate-crypto" if _bt_is_crypto else "equity-next-event-v1"
+    _log("PortfolioEmulator initialized for backtest (initial_cash=%s, taker_fee=%s%s, execution=%s)."
+         % (initial_cash, _bt_taker_fee, " [emulated]" if emulated_taker_fee is not None else "", _bt_execution_kind), "green")
 elif mode == MODE_LIVE:
     try:
         from nexus_runtime_state import ensure_tables as _ensure_live_tables, WALStore as _WALStore
@@ -8509,6 +8516,17 @@ while not shutdown_requested:
                                 'pnl_percent': round(final_pnl_percent, 4) if final_pnl_percent is not None else None,
                                 # Crypto fee accounting (None for equity runs).
                                 'fees': _bt_summary.get("fees"),
+                                # Promotable equity runs require complete,
+                                # versioned next-event execution provenance.
+                                'execution_provenance_complete': _bt_summary.get("execution_provenance_complete", False),
+                                'execution_cost_model_version': _bt_summary.get("execution_cost_model_version"),
+                                'execution_cost_model': _bt_summary.get("execution_cost_model"),
+                                'total_fees': _bt_summary.get("total_fees"),
+                                'spread_cost': _bt_summary.get("spread_cost"),
+                                'slippage_cost': _bt_summary.get("slippage_cost"),
+                                'unfilled_order_count': _bt_summary.get("unfilled_order_count"),
+                                'rejected_order_count': _bt_summary.get("rejected_order_count"),
+                                'fill_provenance': _bt_summary.get("fill_provenance", []),
                                 'pnl_per_stock': pnl_per_stock,
                                 'pnl_percent_per_stock': pnl_percent_per_stock,
                                 'stock_price_change': stock_price_change,
@@ -8745,6 +8763,41 @@ while not shutdown_requested:
             # per-symbol fetchers + pre-submit quote refresh cover the rest.
             prices = get_live_prices(symbols) if robinhood_data_fallback_allowed(live_broker_type) else {}
             price_history = None
+
+        # Promotable equity backtests apply pending orders from the previous
+        # decision event before this tick may emit anything new.  Crypto uses
+        # the legacy immediate emulator and therefore has no pending symbols.
+        if mode == MODE_BACKTEST and portfolio_emulator is not None:
+            _bt_pending_symbols = portfolio_emulator.pending_execution_symbols()
+            if _bt_pending_symbols:
+                _bt_pending_prices = _get_prices_at_time(
+                    data,
+                    _bt_pending_symbols,
+                    current_time,
+                    use_cursor=True,
+                )
+                if _bt_pending_prices:
+                    prices.update(_bt_pending_prices)
+                _bt_fills = portfolio_emulator.process_price_event(
+                    prices,
+                    timestamp=current_time,
+                )
+                for _bt_fill in _bt_fills:
+                    _log(
+                        "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
+                        "price=%.6f fees=%.6f quote=%s model=%s"
+                        % (
+                            _bt_fill.side.upper(),
+                            _bt_fill.symbol,
+                            _bt_fill.incremental_quantity,
+                            _bt_fill.cumulative_quantity,
+                            _bt_fill.price,
+                            _bt_fill.fees,
+                            _bt_fill.quote_timestamp,
+                            _bt_fill.cost_model_version,
+                        ),
+                        "green",
+                    )
 
         # Backtest: every bar, execute any pending future trades for TODAY before running strategies.
         # NOTE: loops over _strategy_cache (all strategies that ever scheduled trades), NOT _run_once_specs,

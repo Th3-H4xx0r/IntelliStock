@@ -82,7 +82,29 @@ def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values
                 fees = fs
         except Exception:
             fees = None
-    summary = {"final_value": final_value, "pnl": pnl, "pnl_percent": pnl_percent, "fees": fees}
+    summary = {
+        "final_value": final_value,
+        "pnl": pnl,
+        "pnl_percent": pnl_percent,
+        "fees": fees,
+        "execution_provenance_complete": False,
+        "execution_cost_model_version": None,
+        "execution_cost_model": None,
+        "total_fees": None,
+        "spread_cost": None,
+        "slippage_cost": None,
+        "unfilled_order_count": None,
+        "rejected_order_count": None,
+        "fill_provenance": [],
+    }
+    if emulator is not None and hasattr(emulator, "get_execution_summary"):
+        try:
+            execution_summary = emulator.get_execution_summary()
+            if isinstance(execution_summary, dict):
+                summary.update(execution_summary)
+        except Exception:
+            # A legacy/compatibility run remains explicitly non-promotable.
+            pass
 
     # Task 9 (benchmark-alpha): MERGE benchmark-relative fields when a
     # benchmark value series is supplied. Existing P&L fields are never
