@@ -455,12 +455,17 @@ def _check_dead_backtest_containers():
         # Build set of names for all currently-running containers (fast single call)
         running_names = {c.name for c in docker_client.containers.list()}
 
-        # Find all BacktestInstances rows where run=True
+        # Reconcile only rows that have actually transitioned to running.
+        # Pending/deferred rows also carry run=True, but do not have a container
+        # yet and must remain queued until a worker slot is available.
         ensure_table(conn)
         running_rows = list(
             r.db(DB_NAME).table(TABLE_NAME)
-            .filter(r.row["run"].eq(True))
-            .pluck("id", "instance")
+            .filter(
+                r.row["run"].eq(True)
+                & r.row["status"].eq("running")
+            )
+            .pluck("id", "instance", "status")
             .run(conn)
         )
         if not running_rows:
@@ -471,6 +476,8 @@ def _check_dead_backtest_containers():
         now = time.time()
 
         for row in running_rows:
+            if str(row.get("status") or "").strip().lower() != "running":
+                continue
             bid        = row.get("id")
             instance_id = str(row.get("instance") or "")
             expected_name = _backtest_container_name(instance_id, bid)
