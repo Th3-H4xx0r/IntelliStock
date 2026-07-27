@@ -2943,6 +2943,7 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                 if bpx > _pk:
                     _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = bpx
             _bear_exit_why = None
+            _bear_stop_episode_exit = False
             _leg_trail_act = float(cfg.get("bear_leg_trail_activation_pct", 0.0) or 0.0)
             _leg_trail_pct = float(cfg.get("bear_leg_trail_pct", 0.0) or 0.0)
             if bqty > 0 and bpx > 0 and _leg_trail_act > 0 and _leg_trail_pct > 0:
@@ -2959,7 +2960,7 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                     # re-enter into the rally for a second -10%.
                     _bstop_lvl = float(cfg.get("bear_stop_loss_pct", 10.0) or 10.0)
                     if _bstop_lvl > 0 and bpx <= float(_tentry) * (1.0 - _bstop_lvl / 100.0):
-                        _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True
+                        _bear_stop_episode_exit = True
             if _bear_exit_why is None and bqty > 0 and regime not in ("bear", "crash"):
                 # 2026-07-23 hold-through-chop (default-OFF). In a choppy bear the
                 # V31 regime oscillates bear<->chop; the blanket chop exit whipsaws
@@ -2988,7 +2989,8 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                     # BULL_F7e forensics: one stop-out per bear episode. The
                     # 24h dwell alone re-entered the day after the first stop,
                     # straight into the rally, for a second -10% (-$484 total).
-                    _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True
+                    # The stop episode latches only after its exit fill.
+                    _bear_stop_episode_exit = True
                 else:
                     # Demand refill (adversarial review MED): in bear the
                     # inverse leg is the only sleeve — when cash cannot fund
@@ -3016,14 +3018,27 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                         _bsell_qty = min(bqty, _bneeded / bpx)
                         if _bsell_qty > 0:
                             _bfrac = min(1.0, _bsell_qty / bqty)
-                            _bok = portfolio_emulator.execute_signal(
-                                bsym, -1, bpx, timestamp=current_time,
-                                sell_fraction=_bfrac)
+                            _bok = _submit_portfolio_signal(
+                                portfolio_emulator,
+                                bsym,
+                                -1,
+                                bpx,
+                                timestamp=current_time,
+                                sell_fraction=_bfrac,
+                                order_source=(
+                                    "residual_bear_full_exit"
+                                    if _bfrac >= 1.0
+                                    else "residual_bear_refill"
+                                ),
+                            )
                             # bug-sweep 6b: a refill that liquidates the WHOLE leg
                             # is a full exit — reset entry/peak/exit-ts so the
                             # NEXT leg doesn't inherit this leg's stale high (which
                             # would instantly retro-arm + destroy the new hedge).
-                            if _bok and _bfrac >= 1.0:
+                            if (
+                                _signal_result_is_confirmed(_bok)
+                                and _bfrac >= 1.0
+                            ):
                                 _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
                                 _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
                                 _RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = current_time
@@ -3033,9 +3048,21 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                                  f"target {_brel * 100.0:.0f}% of NAV, ok={_bok})", "cyan")
             if _bear_exit_why and bqty > 0:
                 if bpx > 0:
-                    bok = portfolio_emulator.execute_signal(
-                        bsym, -1, bpx, timestamp=current_time, sell_fraction=1.0)
-                    if bok:
+                    _bear_exit_source = (
+                        "residual_bear_stop_exit"
+                        if _bear_stop_episode_exit
+                        else "residual_bear_protective_exit"
+                    )
+                    bok = _submit_portfolio_signal(
+                        portfolio_emulator,
+                        bsym,
+                        -1,
+                        bpx,
+                        timestamp=current_time,
+                        sell_fraction=1.0,
+                        order_source=_bear_exit_source,
+                    )
+                    if _signal_result_is_confirmed(bok):
                         _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
                         _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None  # reset trail high on exit
                         _RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = current_time
@@ -3048,6 +3075,8 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                         # (-$506). Deploy already resets on a regime upgrade; this
                         # covers the same-regime trail-bank/stop case.
                         _RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
+                        if _bear_stop_episode_exit:
+                            _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True
                     _log(f"[sleeve] released {bqty:.4f} {bsym} @ {bpx:.2f} "
                          f"({_bear_exit_why}, ok={bok})", "cyan")
                 else:
@@ -3089,8 +3118,19 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
         else:
             sell_qty = qty
             frac = 1.0
-        ok = portfolio_emulator.execute_signal(
-            sym, -1, px, timestamp=current_time, sell_fraction=frac)
+        ok = _submit_portfolio_signal(
+            portfolio_emulator,
+            sym,
+            -1,
+            px,
+            timestamp=current_time,
+            sell_fraction=frac,
+            order_source=(
+                "residual_bull_protective_exit"
+                if protective
+                else "residual_bull_refill"
+            ),
+        )
         why = f"regime={regime} protective exit" if protective else (
             f"cash was {cash / nav * 100.0:.1f}% of NAV, refill "
             f"{sell_qty:.4f}/{qty:.4f}")
@@ -3191,9 +3231,16 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
             deploy = min(idle, room)
             if deploy < max(50.0, cfg["min_deploy_pct"] * nav):
                 return
-            bok = portfolio_emulator.execute_signal(
-                bsym, 1, bpx, timestamp=current_time, cash_per_trade=deploy)
-            if bok:
+            bok = _submit_portfolio_signal(
+                portfolio_emulator,
+                bsym,
+                1,
+                bpx,
+                timestamp=current_time,
+                cash_per_trade=deploy,
+                order_source="residual_bear_deploy",
+            )
+            if _signal_result_is_confirmed(bok):
                 _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
                 # Weighted avg entry for the leg stop-loss.
                 _prev_entry = float(_RESIDUAL_SLEEVE_STATE.get("bear_entry_px") or 0.0)
@@ -3243,9 +3290,16 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
         idle = cash - park_floor_pct * nav
         if idle < max(50.0, cfg["min_deploy_pct"] * nav):
             return
-        ok = portfolio_emulator.execute_signal(
-            sym, 1, px, timestamp=current_time, cash_per_trade=idle)
-        if ok:
+        ok = _submit_portfolio_signal(
+            portfolio_emulator,
+            sym,
+            1,
+            px,
+            timestamp=current_time,
+            cash_per_trade=idle,
+            order_source="residual_bull_deploy",
+        )
+        if _signal_result_is_confirmed(ok):
             _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
         _log(f"[sleeve] parked ${idle:.2f} idle cash in {sym} @ {px:.2f} "
              f"(cash was {cash / nav * 100.0:.1f}% of NAV, ok={ok})", "cyan")
@@ -7576,6 +7630,146 @@ def _get_prices_at_time(data, symbols, current_time, use_cursor=False):
     return prices
 
 
+def _get_price_events_at_time(data, symbols, current_time):
+    """Return latest observable closes with their real availability time."""
+    from simulated_execution import SimulationPriceEvent
+
+    events = {}
+    current_utc = _aware_backtest_clock(current_time)
+    if current_utc is None:
+        return events
+    try:
+        availability = _backtest_bar_availability_resolver()
+    except (TypeError, ValueError):
+        return events
+    for sym in symbols or ():
+        selected = None
+        selected_available = None
+        for bar in data.get(sym) or ():
+            label = _bar_time_to_datetime((bar or {}).get("t"))
+            if label is None:
+                continue
+            try:
+                available_at = availability(bar)
+            except (TypeError, ValueError):
+                continue
+            if available_at <= current_utc:
+                selected = bar
+                selected_available = available_at
+            else:
+                break
+        if (
+            selected is None
+            or selected_available is None
+            or "c" not in selected
+        ):
+            continue
+        label = _bar_time_to_datetime(selected.get("t"))
+        if label is None:
+            continue
+        if getattr(label, "tzinfo", None) is None:
+            label = label.replace(tzinfo=datetime.timezone.utc)
+        try:
+            events[sym] = SimulationPriceEvent(
+                symbol=sym,
+                price=selected["c"],
+                available_at=selected_available,
+                bar_timestamp=label,
+            )
+        except (TypeError, ValueError):
+            continue
+    return events
+
+
+def _submit_portfolio_signal(
+    portfolio,
+    ticker,
+    signal,
+    price,
+    *,
+    timestamp,
+    cash_per_trade=1000.0,
+    sell_fraction=1.0,
+    order_source,
+):
+    """Submit with source provenance only when using next-event execution."""
+    kwargs = {
+        "timestamp": timestamp,
+        "cash_per_trade": cash_per_trade,
+        "sell_fraction": sell_fraction,
+    }
+    if bool(getattr(portfolio, "has_next_event_execution", False)):
+        kwargs["order_source"] = order_source
+    return portfolio.execute_signal(ticker, signal, price, **kwargs)
+
+
+def _signal_result_is_confirmed(result):
+    """Legacy adapters return fill-like bools; simulation receipts do not."""
+    return bool(result) and bool(getattr(result, "filled", True))
+
+
+def _apply_backtest_confirmed_fill_state(fill):
+    """Apply strategy/sleeve metadata only after incremental fill accounting."""
+    source = str(getattr(fill, "source", "") or "")
+    symbol = str(getattr(fill, "symbol", "") or "").strip().upper()
+    side = str(getattr(fill, "side", "") or "").strip().lower()
+    qty = float(getattr(fill, "incremental_quantity", 0.0) or 0.0)
+    price = float(getattr(fill, "price", 0.0) or 0.0)
+    if not symbol or side not in {"buy", "sell"} or qty <= 0:
+        return
+
+    if source.startswith(("scheduled_start:", "scheduled_same_bar:")):
+        strategy_name = source.split(":", 1)[1]
+        cache = (_strategy_cache or {}).get(strategy_name)
+        positions = cache.get("_earnings_positions") if cache else None
+        if isinstance(positions, dict):
+            prior = float(positions.get(symbol, 0.0) or 0.0)
+            updated = prior + qty if side == "buy" else max(0.0, prior - qty)
+            if updated > 1e-12:
+                positions[symbol] = updated
+            else:
+                positions.pop(symbol, None)
+
+    if source.startswith("residual_bear"):
+        confirmed = float(
+            _RESIDUAL_SLEEVE_STATE.get("_bear_confirmed_qty", 0.0) or 0.0
+        )
+        if side == "buy":
+            prior_entry = float(
+                _RESIDUAL_SLEEVE_STATE.get("bear_entry_px", 0.0) or 0.0
+            )
+            total = confirmed + qty
+            _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = (
+                ((confirmed * prior_entry) + (qty * price)) / total
+                if confirmed > 0 and prior_entry > 0
+                else price
+            )
+            _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = max(
+                float(
+                    _RESIDUAL_SLEEVE_STATE.get("bear_peak_px", 0.0) or 0.0
+                ),
+                price,
+            )
+            _RESIDUAL_SLEEVE_STATE["_bear_confirmed_qty"] = total
+            _RESIDUAL_SLEEVE_STATE["last_park_ts"] = fill.executed_at
+        else:
+            remaining = max(0.0, confirmed - qty)
+            _RESIDUAL_SLEEVE_STATE["_bear_confirmed_qty"] = remaining
+            if bool(getattr(fill, "is_final", False)) and any(
+                token in source
+                for token in ("full_exit", "stop_exit", "protective_exit")
+            ):
+                _RESIDUAL_SLEEVE_STATE["bear_entry_px"] = None
+                _RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
+                _RESIDUAL_SLEEVE_STATE["last_bear_exit_ts"] = fill.executed_at
+                _RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
+                if "stop_exit" in source:
+                    _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = True
+    elif source.startswith("residual_bull"):
+        if side == "buy":
+            _RESIDUAL_SLEEVE_STATE["last_park_ts"] = fill.executed_at
+
+
 def _backtest_symbol_price_lookup_block_reason(data, symbol, current_time):
     symbol = str(symbol or "").strip().upper()
     if mode != MODE_BACKTEST or not isinstance(data, dict) or not symbol:
@@ -8527,6 +8721,8 @@ while not shutdown_requested:
                                 'unfilled_order_count': _bt_summary.get("unfilled_order_count"),
                                 'rejected_order_count': _bt_summary.get("rejected_order_count"),
                                 'fill_provenance': _bt_summary.get("fill_provenance", []),
+                                'execution_promotion_eligible': _bt_summary.get("execution_promotion_eligible", False),
+                                'execution_promotion_error': _bt_summary.get("execution_promotion_error"),
                                 'pnl_per_stock': pnl_per_stock,
                                 'pnl_percent_per_stock': pnl_percent_per_stock,
                                 'stock_price_change': stock_price_change,
@@ -8770,19 +8966,21 @@ while not shutdown_requested:
         if mode == MODE_BACKTEST and portfolio_emulator is not None:
             _bt_pending_symbols = portfolio_emulator.pending_execution_symbols()
             if _bt_pending_symbols:
-                _bt_pending_prices = _get_prices_at_time(
+                _bt_pending_events = _get_price_events_at_time(
                     data,
                     _bt_pending_symbols,
                     current_time,
-                    use_cursor=True,
                 )
-                if _bt_pending_prices:
-                    prices.update(_bt_pending_prices)
-                _bt_fills = portfolio_emulator.process_price_event(
-                    prices,
-                    timestamp=current_time,
+                if _bt_pending_events:
+                    prices.update({
+                        _sym: _event.price
+                        for _sym, _event in _bt_pending_events.items()
+                    })
+                _bt_fills = portfolio_emulator.process_price_events(
+                    _bt_pending_events,
                 )
                 for _bt_fill in _bt_fills:
+                    _apply_backtest_confirmed_fill_state(_bt_fill)
                     _log(
                         "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
                         "price=%.6f fees=%.6f quote=%s model=%s"
@@ -8918,14 +9116,18 @@ while not shutdown_requested:
                                     _log("MAX_POSITIONS_GATE: blocked %s (held=%d, cap=%d)" % (sym, _pnd_proj, _pnd_cap), "yellow")
                                     continue
                                 remaining_budget -= cash_use
-                                shares_before = portfolio_emulator._positions.get(sym, 0.0)
-                                portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
-                                    cash_per_trade=cash_use, sell_fraction=1.0)
-                                shares_after = portfolio_emulator._positions.get(sym, 0.0)
+                                _pnd_buy_result = _submit_portfolio_signal(
+                                    portfolio_emulator,
+                                    sym,
+                                    sig,
+                                    price_sym,
+                                    timestamp=current_time,
+                                    cash_per_trade=cash_use,
+                                    sell_fraction=1.0,
+                                    order_source=f"scheduled_start:{_sname}",
+                                )
                                 if _pnd_cap is not None and sym not in _pnd_held:
                                     _pnd_new_emitted.add(sym)
-                                if _epos is not None:
-                                    _epos[sym] = _epos.get(sym, 0.0) + max(0.0, shares_after - shares_before)
                             else:
                                 # Sell: only sell shares this strategy bought (tracked in _earnings_positions)
                                 sell_frac = 1.0
@@ -8933,19 +9135,32 @@ while not shutdown_requested:
                                     total_shares = portfolio_emulator._positions.get(sym, 0.0)
                                     if total_shares > 0:
                                         sell_frac = min(1.0, _epos[sym] / total_shares)
-                                _pnd_sell_ok = portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
-                                    cash_per_trade=1000.0, sell_fraction=sell_frac)
+                                _pnd_sell_ok = _submit_portfolio_signal(
+                                    portfolio_emulator,
+                                    sym,
+                                    sig,
+                                    price_sym,
+                                    timestamp=current_time,
+                                    cash_per_trade=1000.0,
+                                    sell_fraction=sell_frac,
+                                    order_source=f"scheduled_start:{_sname}",
+                                )
                                 # Task 7 review-fix (IMPORTANT 2): credit the
                                 # freed slot only when the sell actually
                                 # executed/submitted (execute_signal -> True).
-                                if _pnd_cap is not None and _pnd_sell_ok and sell_frac >= 0.999 and sym in _pnd_held:
+                                if (
+                                    _pnd_cap is not None
+                                    and _signal_result_is_confirmed(
+                                        _pnd_sell_ok
+                                    )
+                                    and sell_frac >= 0.999
+                                    and sym in _pnd_held
+                                ):
                                     _pnd_full_exits.add(sym)
-                                if _epos is not None and sym in _epos:
-                                    _epos.pop(sym, None)
                                 # After sell frees cash, update remaining_budget so subsequent buys can use it
                                 remaining_budget = min(reserved_budget, portfolio_emulator.get_cash())
                             executed_start += 1
-                            _log("[Pending] EXECUTED %s %s @ %.2f (strategy=%s, alloc=%.0f%%)" % (
+                            _log("[Pending] SUBMITTED %s %s @ %.2f (strategy=%s, alloc=%.0f%%)" % (
                                 "buy" if sig == 1 else "sell", sym, price_sym, _sname,
                                 t.get("allocation_pct", 0) or 0), "green")
                     _log("[Pending] Start-of-bar done: %d executed, %d skipped(no price: %s), %d skipped(no cash: %s)" % (
@@ -10160,14 +10375,20 @@ while not shutdown_requested:
                                         _log("MAX_POSITIONS_GATE: blocked %s (held=%d, cap=%d)" % (sym, _sbg_proj, _sbg_cap), "yellow")
                                         continue
                                     remaining2 -= cash_use
-                                    shares_before = portfolio_emulator._positions.get(sym, 0.0)
-                                    portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
-                                        cash_per_trade=cash_use, sell_fraction=1.0)
-                                    shares_after = portfolio_emulator._positions.get(sym, 0.0)
+                                    _sbg_buy_result = _submit_portfolio_signal(
+                                        portfolio_emulator,
+                                        sym,
+                                        sig,
+                                        price_sym,
+                                        timestamp=current_time,
+                                        cash_per_trade=cash_use,
+                                        sell_fraction=1.0,
+                                        order_source=(
+                                            f"scheduled_same_bar:{_sname2}"
+                                        ),
+                                    )
                                     if _sbg_cap is not None and sym not in _sbg_held:
                                         _sbg_new_emitted.add(sym)
-                                    if _epos2 is not None:
-                                        _epos2[sym] = _epos2.get(sym, 0.0) + max(0.0, shares_after - shares_before)
                                 else:
                                     # Sell: only sell shares this strategy bought (tracked in _earnings_positions)
                                     sell_frac = 1.0
@@ -10175,18 +10396,33 @@ while not shutdown_requested:
                                         total_shares = portfolio_emulator._positions.get(sym, 0.0)
                                         if total_shares > 0:
                                             sell_frac = min(1.0, _epos2[sym] / total_shares)
-                                    _sbg_sell_ok = portfolio_emulator.execute_signal(sym, sig, price_sym, timestamp=current_time,
-                                        cash_per_trade=1000.0, sell_fraction=sell_frac)
+                                    _sbg_sell_ok = _submit_portfolio_signal(
+                                        portfolio_emulator,
+                                        sym,
+                                        sig,
+                                        price_sym,
+                                        timestamp=current_time,
+                                        cash_per_trade=1000.0,
+                                        sell_fraction=sell_frac,
+                                        order_source=(
+                                            f"scheduled_same_bar:{_sname2}"
+                                        ),
+                                    )
                                     # Task 7 review-fix (IMPORTANT 2): credit the
                                     # freed slot only on actual execution.
-                                    if _sbg_cap is not None and _sbg_sell_ok and sell_frac >= 0.999 and sym in _sbg_held:
+                                    if (
+                                        _sbg_cap is not None
+                                        and _signal_result_is_confirmed(
+                                            _sbg_sell_ok
+                                        )
+                                        and sell_frac >= 0.999
+                                        and sym in _sbg_held
+                                    ):
                                         _sbg_full_exits.add(sym)
-                                    if _epos2 is not None and sym in _epos2:
-                                        _epos2.pop(sym, None)
                                     # After sell frees cash, update remaining budget so subsequent buys can use it
                                     remaining2 = min(rbudget, portfolio_emulator.get_cash())
                                 executed_same += 1
-                                _log("[Pending] EXECUTED %s %s @ %.2f (strategy=%s, alloc=%.0f%%)" % (
+                                _log("[Pending] SUBMITTED %s %s @ %.2f (strategy=%s, alloc=%.0f%%)" % (
                                     "buy" if sig == 1 else "sell", sym, price_sym, _sname2,
                                     t.get("allocation_pct", 0) or 0), "green")
                         _log("[Pending] Same-bar done: %d executed, %d skipped(no price: %s), %d skipped(no cash: %s)" % (
@@ -11175,11 +11411,15 @@ while not shutdown_requested:
                             if mode == MODE_LIVE:
                                 try:
                                     _es_fut = _PRICE_FETCH_EXECUTOR.submit(
-                                        portfolio_emulator.execute_signal,
-                                        symbol, decision, price,
+                                        _submit_portfolio_signal,
+                                        portfolio_emulator,
+                                        symbol,
+                                        decision,
+                                        price,
                                         timestamp=current_time,
                                         cash_per_trade=cash_to_use,
                                         sell_fraction=sell_fraction,
+                                        order_source="main_signal",
                                     )
                                     _es_placed = _es_fut.result(timeout=90.0)
                                     _mpg_submit_ok = bool(_es_placed)
@@ -11207,7 +11447,17 @@ while not shutdown_requested:
                                         "yellow",
                                     )
                             else:
-                                _mpg_submit_ok = bool(portfolio_emulator.execute_signal(symbol, decision, price, timestamp=current_time, cash_per_trade=cash_to_use, sell_fraction=sell_fraction))
+                                _mpg_result = _submit_portfolio_signal(
+                                    portfolio_emulator,
+                                    symbol,
+                                    decision,
+                                    price,
+                                    timestamp=current_time,
+                                    cash_per_trade=cash_to_use,
+                                    sell_fraction=sell_fraction,
+                                    order_source="main_signal",
+                                )
+                                _mpg_submit_ok = bool(_mpg_result)
 
                             # ── Task 7: keep the running cycle counts current so
                             # later buys in this _exec_order see this emission. A

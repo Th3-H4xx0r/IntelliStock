@@ -34,7 +34,137 @@ locally (same pattern as backtest_bar_snapshot / backtest_price_history).
 """
 from __future__ import annotations
 
+from datetime import datetime
+import math
 from typing import Any, Callable, Iterable
+
+
+class ExecutionProvenanceError(ValueError):
+    """Raised when an equity backtest cannot be considered promotable."""
+
+
+def _finite_nonnegative(value, *, field: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ExecutionProvenanceError(f"{field} must be numeric") from exc
+    if not math.isfinite(number) or number < 0:
+        raise ExecutionProvenanceError(
+            f"{field} must be finite and nonnegative"
+        )
+    return number
+
+
+def _aware_timestamp(value, *, field: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ExecutionProvenanceError(f"{field} must be an ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ExecutionProvenanceError(
+            f"{field} must be an ISO timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ExecutionProvenanceError(f"{field} must be timezone-aware")
+    return parsed
+
+
+def assert_execution_provenance_promotable(summary) -> None:
+    """Fail closed unless execution inputs and every fill are auditable."""
+    if not isinstance(summary, dict):
+        raise ExecutionProvenanceError("execution summary must be a mapping")
+    if summary.get("execution_provenance_complete") is not True:
+        raise ExecutionProvenanceError("execution provenance is incomplete")
+    version = summary.get("execution_cost_model_version")
+    if not isinstance(version, str) or not version.strip():
+        raise ExecutionProvenanceError("execution cost model version is missing")
+    model = summary.get("execution_cost_model")
+    if not isinstance(model, dict):
+        raise ExecutionProvenanceError("execution cost model is missing")
+    for key in (
+        "spread_bps",
+        "slippage_bps",
+        "fee_bps",
+        "latency_seconds",
+    ):
+        _finite_nonnegative(model.get(key), field=f"execution_cost_model.{key}")
+    for key in ("total_fees", "spread_cost", "slippage_cost"):
+        _finite_nonnegative(summary.get(key), field=key)
+    for key in ("unfilled_order_count", "rejected_order_count"):
+        value = summary.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ExecutionProvenanceError(
+                f"{key} must be a nonnegative integer"
+            )
+        if value:
+            raise ExecutionProvenanceError(
+                f"{key} must be zero for promotion"
+            )
+    fills = summary.get("fill_provenance")
+    if not isinstance(fills, list):
+        raise ExecutionProvenanceError("fill_provenance must be a list")
+    required = {
+        "order_id",
+        "symbol",
+        "side",
+        "incremental_quantity",
+        "cumulative_quantity",
+        "price",
+        "fees",
+        "spread_cost",
+        "slippage_cost",
+        "quote_timestamp",
+        "executed_at",
+        "cost_model_version",
+        "source",
+    }
+    for index, fill in enumerate(fills):
+        if not isinstance(fill, dict) or not required.issubset(fill):
+            raise ExecutionProvenanceError(
+                f"fill_provenance[{index}] is incomplete"
+            )
+        if fill.get("cost_model_version") != version:
+            raise ExecutionProvenanceError(
+                f"fill_provenance[{index}] cost model mismatch"
+            )
+        if str(fill.get("side") or "").lower() not in {"buy", "sell"}:
+            raise ExecutionProvenanceError(
+                f"fill_provenance[{index}] side is invalid"
+            )
+        source = str(fill.get("source") or "").strip()
+        if not source or source == "equity_backtest":
+            raise ExecutionProvenanceError(
+                f"fill_provenance[{index}] source is not explicit"
+            )
+        for key in (
+            "incremental_quantity",
+            "cumulative_quantity",
+            "price",
+            "fees",
+            "spread_cost",
+            "slippage_cost",
+        ):
+            number = _finite_nonnegative(
+                fill.get(key),
+                field=f"fill_provenance[{index}].{key}",
+            )
+            if key in {"incremental_quantity", "cumulative_quantity", "price"}:
+                if number <= 0:
+                    raise ExecutionProvenanceError(
+                        f"fill_provenance[{index}].{key} must be positive"
+                    )
+        quote_at = _aware_timestamp(
+            fill.get("quote_timestamp"),
+            field=f"fill_provenance[{index}].quote_timestamp",
+        )
+        executed_at = _aware_timestamp(
+            fill.get("executed_at"),
+            field=f"fill_provenance[{index}].executed_at",
+        )
+        if executed_at < quote_at:
+            raise ExecutionProvenanceError(
+                f"fill_provenance[{index}] executes before its quote"
+            )
 
 
 def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values=None) -> dict:
@@ -96,6 +226,8 @@ def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values
         "unfilled_order_count": None,
         "rejected_order_count": None,
         "fill_provenance": [],
+        "execution_promotion_eligible": False,
+        "execution_promotion_error": "execution provenance is incomplete",
     }
     if emulator is not None and hasattr(emulator, "get_execution_summary"):
         try:
@@ -105,6 +237,13 @@ def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values
         except Exception:
             # A legacy/compatibility run remains explicitly non-promotable.
             pass
+    try:
+        assert_execution_provenance_promotable(summary)
+        summary["execution_promotion_eligible"] = True
+        summary["execution_promotion_error"] = None
+    except ExecutionProvenanceError as exc:
+        summary["execution_promotion_eligible"] = False
+        summary["execution_promotion_error"] = str(exc)
 
     # Task 9 (benchmark-alpha): MERGE benchmark-relative fields when a
     # benchmark value series is supplied. Existing P&L fields are never

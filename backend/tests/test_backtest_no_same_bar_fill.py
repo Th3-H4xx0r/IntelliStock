@@ -162,3 +162,86 @@ def test_non_equity_daily_compatibility_keeps_legacy_price_and_history_cutoffs()
         0,
         tzinfo=timezone.utc,
     )
+
+
+def test_completed_bar_signal_changes_accounting_only_on_later_bar_event():
+    import datetime as datetime_module
+
+    from bar_time import bar_time_to_datetime
+    from portfolio_emulator import create_backtest_emulator
+
+    namespace = {
+        "datetime": datetime_module,
+        "MODE_BACKTEST": "backtest",
+        "mode": "backtest",
+        "_backtest_alpaca_timeframe": "1Hour",
+        "_is_non_equity_instance_runtime": lambda: False,
+        "_current_time_to_utc": lambda value: value,
+        "_bar_time_to_datetime": bar_time_to_datetime,
+    }
+    _load_broker_functions(
+        "_aware_backtest_clock",
+        "_backtest_bar_interval",
+        "_equity_daily_bar_session_close",
+        "_backtest_bar_availability_resolver",
+        "_get_prices_at_time",
+        "_get_price_events_at_time",
+        namespace=namespace,
+    )
+    data = {
+        "SPY": [
+            {"t": "2026-03-02T14:00:00Z", "c": 100.0},
+            {"t": "2026-03-02T15:00:00Z", "c": 110.0},
+        ],
+    }
+    decision_at = datetime(2026, 3, 2, 15, 0)
+    later_event = datetime(2026, 3, 2, 16, 0)
+    decision_prices = namespace["_get_prices_at_time"](
+        data,
+        ["SPY"],
+        decision_at,
+    )
+    assert decision_prices == {"SPY": 100.0}
+
+    emulator = create_backtest_emulator(
+        initial_cash=10_000.0,
+        taker_fee=None,
+        is_crypto=False,
+        execution_delay=timedelta(0),
+    )
+    before_cash = emulator.get_cash()
+    receipt = emulator.execute_signal(
+        "SPY",
+        1,
+        decision_prices["SPY"],
+        timestamp=decision_at,
+        cash_per_trade=1_000.0,
+        order_source="main_signal",
+    )
+    assert receipt.accepted and not receipt.filled
+    assert emulator.get_cash() == before_cash
+    assert emulator.get_positions() == {}
+
+    same_event = namespace["_get_price_events_at_time"](
+        data,
+        ["SPY"],
+        decision_at,
+    )
+    assert emulator.process_price_events(same_event) == ()
+    assert emulator.process_price_events(same_event) == ()
+
+    later_events = namespace["_get_price_events_at_time"](
+        data,
+        ["SPY"],
+        later_event,
+    )
+    fills = emulator.process_price_events(later_events)
+
+    assert later_events["SPY"].price == 110.0
+    assert len(fills) == 1
+    assert fills[0].quote_timestamp == datetime(
+        2026, 3, 2, 16, 0, tzinfo=timezone.utc
+    )
+    assert fills[0].price > 110.0
+    assert emulator.get_cash() < before_cash
+    assert emulator.get_positions()["SPY"] > 0

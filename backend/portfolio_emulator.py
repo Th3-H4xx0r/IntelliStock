@@ -5,6 +5,7 @@ and portfolio value snapshots over time.
 
 import copy
 from datetime import timedelta
+import math
 
 try:
     from simulated_execution import (
@@ -13,7 +14,9 @@ try:
         NextEventExecutionSimulator,
         SimulationFill,
         SimulationOrder,
+        SimulationPriceEvent,
         SimulationQuote,
+        SimulationSubmission,
     )
 except ImportError:  # Package import path used by repository-root pytest.
     from backend.simulated_execution import (
@@ -22,7 +25,9 @@ except ImportError:  # Package import path used by repository-root pytest.
         NextEventExecutionSimulator,
         SimulationFill,
         SimulationOrder,
+        SimulationPriceEvent,
         SimulationQuote,
+        SimulationSubmission,
     )
 
 # Crypto is NEVER commission-free: backtest fills must model the taker fee.
@@ -52,12 +57,32 @@ class PortfolioEmulator:
         execution_simulator=None,
         execution_delay=None,
     ):
-        self._cash = float(initial_cash)
-        self._initial_value = float(initial_cash)  # Track original portfolio value
+        try:
+            initial_cash = float(initial_cash)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("initial_cash must be finite and nonnegative") from exc
+        if not math.isfinite(initial_cash) or initial_cash < 0:
+            raise ValueError("initial_cash must be finite and nonnegative")
+        self._cash = initial_cash
+        self._initial_value = initial_cash  # Track original portfolio value
         # Crypto taker fee applied to fills (equities are commission-free). Defaults
         # to the module constant (Alpaca 0.25%); a Binance.US backtest passes
         # 0.0002 (0.02%) so low-fee/high-frequency strategies value correctly.
-        self._taker_fee = float(taker_fee) if taker_fee is not None else _CRYPTO_TAKER_FEE
+        try:
+            resolved_taker_fee = (
+                float(taker_fee)
+                if taker_fee is not None
+                else float(_CRYPTO_TAKER_FEE)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("taker_fee must be finite and between 0 and 1") from exc
+        if (
+            not math.isfinite(resolved_taker_fee)
+            or resolved_taker_fee < 0
+            or resolved_taker_fee >= 1
+        ):
+            raise ValueError("taker_fee must be finite and between 0 and 1")
+        self._taker_fee = resolved_taker_fee
         self._positions = {}  # ticker -> shares (float)
         self._trades = []    # list of { timestamp, action, ticker, shares, price, total, cash_after }
         self._portfolio_snapshots = []  # list of { timestamp, value, cash, positions_snapshot, prices }
@@ -78,6 +103,7 @@ class PortfolioEmulator:
             execution_delay = timedelta(0)
         if (
             not isinstance(execution_delay, timedelta)
+            or not math.isfinite(execution_delay.total_seconds())
             or execution_delay.total_seconds() < 0
         ):
             raise ValueError("execution_delay must be a nonnegative timedelta")
@@ -89,6 +115,11 @@ class PortfolioEmulator:
         self._confirmed_simulation_fills = []
         self._execution_cash_reservations = {}
         self._execution_position_reservations = {}
+        self._execution_event_provenance_complete = True
+
+    @property
+    def has_next_event_execution(self):
+        return self._execution_simulator is not None
 
     def buy(self, ticker, shares, price, timestamp=None):
         """
@@ -320,9 +351,11 @@ class PortfolioEmulator:
             return ()
         if not isinstance(quote, SimulationQuote):
             raise ValueError("quote must be a SimulationQuote")
-        fills = self._execution_simulator.on_quote(quote)
+        fills = self._execution_simulator.on_quote(
+            quote,
+            accept_fill=self.apply_fill,
+        )
         for fill in fills:
-            self.apply_fill(fill)
             if fill.side == "buy":
                 spent = fill.incremental_quantity * fill.price + fill.fees
                 remaining = max(
@@ -368,9 +401,10 @@ class PortfolioEmulator:
         return self._execution_simulator.pending_symbols
 
     def process_price_event(self, prices, *, timestamp):
-        """Convert midpoint bar prices into two-sided quotes and apply fills."""
+        """Legacy timestamp relabeling facade; never promotable."""
         if self._execution_simulator is None:
             return ()
+        self._execution_event_provenance_complete = False
         emitted = []
         for symbol in self.pending_execution_symbols():
             mid = (prices or {}).get(symbol)
@@ -389,6 +423,30 @@ class PortfolioEmulator:
             emitted.extend(self.process_quote(quote))
         return tuple(emitted)
 
+    def process_price_events(self, events):
+        """Apply typed events carrying the source bar's true availability."""
+        if self._execution_simulator is None:
+            return ()
+        emitted = []
+        for symbol in self.pending_execution_symbols():
+            event = (events or {}).get(symbol)
+            if event is None:
+                continue
+            if not isinstance(event, SimulationPriceEvent):
+                raise ValueError(
+                    "price events must be SimulationPriceEvent instances"
+                )
+            if event.symbol != str(symbol).strip().upper():
+                raise ValueError("price event symbol does not match its key")
+            quote = SimulationQuote.from_mid(
+                symbol=event.symbol,
+                timestamp=event.available_at,
+                mid=event.price,
+                spread_bps=self._execution_simulator.cost_model.spread_bps,
+            )
+            emitted.extend(self.process_quote(quote))
+        return tuple(emitted)
+
     def get_execution_summary(self):
         if self._execution_simulator is None:
             return {
@@ -402,7 +460,16 @@ class PortfolioEmulator:
                 "rejected_order_count": None,
                 "fill_provenance": [],
             }
-        return self._execution_simulator.execution_summary()
+        summary = self._execution_simulator.execution_summary()
+        summary["execution_provenance_complete"] = bool(
+            summary.get("execution_provenance_complete")
+            and self._execution_event_provenance_complete
+        )
+        if not self._execution_event_provenance_complete:
+            summary["execution_provenance_error"] = (
+                "price event availability was relabeled"
+            )
+        return summary
 
     def execute_signal(
         self,
@@ -412,7 +479,7 @@ class PortfolioEmulator:
         timestamp=None,
         cash_per_trade=1000.0,
         sell_fraction=1.0,
-        order_source="equity_backtest",
+        order_source=None,
     ):
         """
         Convenience: execute a strategy signal (1=buy, -1=sell, 0=hold) with a simple rule.
@@ -420,25 +487,47 @@ class PortfolioEmulator:
         Sell: sell sell_fraction (0-1) of shares of ticker; default 1.0 = sell all.
         Returns True if a trade was executed.
         """
-        if price is None or price <= 0:
+        if price is None:
+            return False
+        try:
+            price = float(price)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("price must be finite and positive") from exc
+        if not math.isfinite(price):
+            raise ValueError("price must be finite and positive")
+        if price <= 0:
             return False
         if self._execution_simulator is not None and signal in (1, -1):
+            if not isinstance(order_source, str) or not order_source.strip():
+                raise ValueError(
+                    "order_source is required for next-event execution"
+                )
             if timestamp is None:
                 raise ValueError(
                     "next-event execution requires a decision timestamp"
                 )
-            self._simulation_order_sequence += 1
+            next_sequence = self._simulation_order_sequence + 1
             order_id = (
-                f"sim-{self._simulation_order_sequence:012d}-"
+                f"sim-{next_sequence:012d}-"
                 f"{str(ticker).strip().upper()}"
             )
             if signal == 1:
+                try:
+                    cash_per_trade = float(cash_per_trade)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "cash_per_trade must be finite and positive"
+                    ) from exc
+                if not math.isfinite(cash_per_trade):
+                    raise ValueError(
+                        "cash_per_trade must be finite and positive"
+                    )
                 reserved_cash = sum(
                     float(value or 0.0)
                     for value in self._execution_cash_reservations.values()
                 )
                 amount_to_use = min(
-                    float(cash_per_trade),
+                    cash_per_trade,
                     max(0.0, self._cash - reserved_cash),
                 )
                 if amount_to_use <= 0:
@@ -448,6 +537,14 @@ class PortfolioEmulator:
                 )
                 side = "buy"
             else:
+                try:
+                    sell_fraction = float(sell_fraction)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "sell_fraction must be finite"
+                    ) from exc
+                if not math.isfinite(sell_fraction):
+                    raise ValueError("sell_fraction must be finite")
                 total_shares = float(self._positions.get(ticker, 0.0) or 0.0)
                 reserved_shares = sum(
                     float(value or 0.0)
@@ -460,7 +557,7 @@ class PortfolioEmulator:
                 total_shares = max(0.0, total_shares - reserved_shares)
                 if total_shares <= 0:
                     return False
-                frac = max(0.0, min(1.0, float(sell_fraction)))
+                frac = max(0.0, min(1.0, sell_fraction))
                 shares = (
                     total_shares * frac if frac < 1.0 else total_shares
                 )
@@ -474,14 +571,21 @@ class PortfolioEmulator:
                 quantity=shares,
                 decision_at=timestamp,
                 execute_not_before=timestamp + self._execution_delay,
-                source=order_source,
+                source=order_source.strip(),
+                notional_limit=amount_to_use if side == "buy" else None,
             )
             self.record_order(order)
+            self._simulation_order_sequence = next_sequence
             if side == "buy":
                 self._execution_cash_reservations[order_id] = amount_to_use
             else:
                 self._execution_position_reservations[order_id] = shares
-            return True
+            return SimulationSubmission(
+                order_id=order.order_id,
+                symbol=order.symbol,
+                side=order.side,
+                source=order.source,
+            )
         if signal == 1:
             amount_to_use = min(cash_per_trade, self._cash)
             if amount_to_use <= 0:

@@ -193,3 +193,40 @@ def test_duplicate_order_id_is_rejected_and_counted():
 def test_non_finite_nonpositive_or_crossed_inputs_are_rejected(factory, message):
     with pytest.raises(ValueError, match=message):
         factory()
+
+
+def test_rejected_accounting_callback_leaves_simulator_state_uncommitted():
+    simulator = NextEventExecutionSimulator(COSTS)
+    simulator.submit(_order())
+
+    def reject_accounting(_fill):
+        raise RuntimeError("accounting rejected")
+
+    with pytest.raises(RuntimeError, match="accounting rejected"):
+        simulator.on_quote(_quote(T1), accept_fill=reject_accounting)
+
+    assert simulator.pending_order_count == 1
+    assert simulator.fills == ()
+
+
+def test_zero_spread_cost_model_can_construct_and_fill_a_quote():
+    costs = ExecutionCostModel(
+        version="zero-spread-v1",
+        spread_bps=0.0,
+        slippage_bps=1.0,
+        fee_bps=0.0,
+        latency=timedelta(0),
+    )
+    quote = SimulationQuote.from_mid(
+        symbol="SPY",
+        timestamp=T1,
+        mid=100.0,
+        spread_bps=costs.spread_bps,
+    )
+    simulator = NextEventExecutionSimulator(costs)
+    simulator.submit(_order())
+
+    fills = simulator.on_quote(quote)
+
+    assert quote.bid == quote.ask == 100.0
+    assert len(fills) == 1

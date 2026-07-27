@@ -99,6 +99,7 @@ class SimulationOrder:
     decision_at: datetime
     execute_not_before: datetime
     source: str = "equity_backtest"
+    notional_limit: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.order_id, str) or not self.order_id.strip():
@@ -120,6 +121,50 @@ class SimulationOrder:
         object.__setattr__(self, "side", side)
         object.__setattr__(self, "quantity", quantity)
         object.__setattr__(self, "source", str(self.source or "equity_backtest"))
+        notional_limit = self.notional_limit
+        if notional_limit is not None:
+            notional_limit = _finite_number(
+                notional_limit,
+                field="notional_limit",
+                positive=True,
+            )
+            if side != "buy":
+                raise ValueError("notional_limit is only valid for buy orders")
+        object.__setattr__(self, "notional_limit", notional_limit)
+
+
+@dataclass(frozen=True)
+class SimulationSubmission:
+    """A durable simulation intent receipt; it is not a confirmed fill."""
+
+    order_id: str
+    symbol: str
+    side: str
+    source: str
+    accepted: bool = True
+    filled: bool = False
+
+    def __bool__(self) -> bool:
+        return self.accepted
+
+
+@dataclass(frozen=True)
+class SimulationPriceEvent:
+    """A price paired with the source bar's real availability time."""
+
+    symbol: str
+    price: float
+    available_at: datetime
+    bar_timestamp: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not self.symbol.strip():
+            raise ValueError("symbol must be a non-empty string")
+        price = _finite_number(self.price, field="price", positive=True)
+        _event_seconds(self.available_at, field="available_at")
+        _event_seconds(self.bar_timestamp, field="bar_timestamp")
+        object.__setattr__(self, "symbol", self.symbol.strip().upper())
+        object.__setattr__(self, "price", price)
 
 
 @dataclass(frozen=True)
@@ -136,7 +181,7 @@ class SimulationQuote:
         _event_seconds(self.timestamp, field="timestamp")
         bid = _finite_number(self.bid, field="bid", positive=True)
         ask = _finite_number(self.ask, field="ask", positive=True)
-        if bid >= ask:
+        if bid > ask:
             raise ValueError("bid must be less than ask")
         available = self.available_quantity
         if available is not None:
@@ -160,7 +205,7 @@ class SimulationQuote:
     ) -> "SimulationQuote":
         mid_value = _finite_number(mid, field="mid", positive=True)
         spread = _finite_number(spread_bps, field="spread_bps")
-        if spread <= 0 or spread >= 20_000:
+        if spread < 0 or spread >= 20_000:
             raise ValueError("spread_bps must be between 0 and 20000")
         half = spread / 20_000.0
         return cls(
@@ -187,6 +232,8 @@ class SimulationFill:
     executed_at: datetime
     cost_model_version: str
     source: str = "equity_backtest"
+    order_quantity: float | None = None
+    is_final: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.order_id, str) or not self.order_id.strip():
@@ -241,6 +288,19 @@ class SimulationFill:
             self, "cost_model_version", self.cost_model_version.strip()
         )
         object.__setattr__(self, "source", str(self.source or "equity_backtest"))
+        order_quantity = self.order_quantity
+        if order_quantity is not None:
+            order_quantity = _finite_number(
+                order_quantity,
+                field="order_quantity",
+                positive=True,
+            )
+            if cumulative > order_quantity + 1e-9:
+                raise ValueError(
+                    "cumulative_quantity cannot exceed order_quantity"
+                )
+        object.__setattr__(self, "order_quantity", order_quantity)
+        object.__setattr__(self, "is_final", bool(self.is_final))
 
     def as_dict(self) -> dict:
         result = asdict(self)
@@ -253,6 +313,7 @@ class SimulationFill:
 class _PendingOrder:
     order: SimulationOrder
     cumulative_quantity: float = 0.0
+    cumulative_cost: float = 0.0
     last_fill_quote_seconds: float | None = None
 
 
@@ -310,9 +371,22 @@ class NextEventExecutionSimulator:
         )
         return cash_value / all_in_per_share
 
-    def on_quote(self, quote: SimulationQuote) -> tuple[SimulationFill, ...]:
+    def on_quote(
+        self,
+        quote: SimulationQuote,
+        *,
+        accept_fill=None,
+    ) -> tuple[SimulationFill, ...]:
+        """Propose, account, then commit each fill.
+
+        When ``accept_fill`` is supplied it runs before simulator state changes.
+        If accounting rejects the candidate, the order remains pending and no
+        fill provenance is recorded.
+        """
         if not isinstance(quote, SimulationQuote):
             raise ValueError("quote must be a SimulationQuote")
+        if accept_fill is not None and not callable(accept_fill):
+            raise ValueError("accept_fill must be callable")
         quote_seconds = _event_seconds(quote.timestamp, field="timestamp")
         liquidity = (
             math.inf
@@ -346,11 +420,6 @@ class NextEventExecutionSimulator:
             ):
                 continue
 
-            remaining = order.quantity - state.cumulative_quantity
-            incremental = min(remaining, liquidity)
-            if incremental <= 0:
-                continue
-
             mid = (quote.bid + quote.ask) / 2.0
             modeled_half_spread = (
                 mid * self.cost_model.spread_bps / 20_000.0
@@ -368,8 +437,41 @@ class NextEventExecutionSimulator:
             fill_price = _finite_number(
                 fill_price, field="fill price", positive=True
             )
+            remaining = order.quantity - state.cumulative_quantity
+            incremental = min(remaining, liquidity)
+            if order.notional_limit is not None:
+                remaining_cash = max(
+                    0.0,
+                    order.notional_limit - state.cumulative_cost,
+                )
+                all_in_per_share = fill_price * (
+                    1.0 + self.cost_model.fee_bps / 10_000.0
+                )
+                incremental = min(
+                    incremental,
+                    remaining_cash / all_in_per_share,
+                )
+            if incremental <= 1e-12:
+                completed.append(order_id)
+                continue
+
             cumulative = state.cumulative_quantity + incremental
             notional = incremental * fill_price
+            fees = notional * self.cost_model.fee_bps / 10_000.0
+            fill_cost = notional + fees if order.side == "buy" else 0.0
+            final_by_quantity = math.isclose(
+                cumulative,
+                order.quantity,
+                rel_tol=0,
+                abs_tol=1e-12,
+            )
+            final_by_notional = (
+                order.notional_limit is not None
+                and order.notional_limit
+                - (state.cumulative_cost + fill_cost)
+                <= max(1e-9, order.notional_limit * 1e-12)
+            )
+            is_final = final_by_quantity or final_by_notional
             fill = SimulationFill(
                 order_id=order.order_id,
                 symbol=order.symbol,
@@ -377,20 +479,25 @@ class NextEventExecutionSimulator:
                 incremental_quantity=incremental,
                 cumulative_quantity=cumulative,
                 price=fill_price,
-                fees=notional * self.cost_model.fee_bps / 10_000.0,
+                fees=fees,
                 spread_cost=abs(touch_price - mid) * incremental,
                 slippage_cost=abs(fill_price - touch_price) * incremental,
                 quote_timestamp=quote.timestamp,
                 executed_at=quote.timestamp,
                 cost_model_version=self.cost_model.version,
                 source=order.source,
+                order_quantity=order.quantity,
+                is_final=is_final,
             )
+            if accept_fill is not None:
+                accept_fill(fill)
             state.cumulative_quantity = cumulative
+            state.cumulative_cost += fill_cost
             state.last_fill_quote_seconds = quote_seconds
             self._fills.append(fill)
             emitted.append(fill)
             liquidity -= incremental
-            if math.isclose(cumulative, order.quantity, rel_tol=0, abs_tol=1e-12):
+            if is_final:
                 completed.append(order_id)
 
         for order_id in completed:

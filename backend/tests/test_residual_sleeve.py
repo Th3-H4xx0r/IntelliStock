@@ -17,8 +17,13 @@ if _backend not in sys.path:
 # broker.py is NOT import-safe (argparse at module level SystemExits under
 # pytest) — use the established extraction pattern: pull just the sleeve
 # functions out of the source and exec them into a stub namespace.
-_WANTED = {"_residual_sleeve_config", "_residual_sleeve_release",
-           "_residual_sleeve_deploy"}
+_WANTED = {
+    "_residual_sleeve_config",
+    "_residual_sleeve_release",
+    "_residual_sleeve_deploy",
+    "_submit_portfolio_signal",
+    "_signal_result_is_confirmed",
+}
 _src = open(os.path.join(_backend, "broker.py")).read()
 _tree = ast.parse(_src)
 b = types.SimpleNamespace()

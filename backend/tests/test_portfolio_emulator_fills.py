@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import math
 
 import pytest
 
@@ -206,7 +207,8 @@ def test_each_equity_broker_emission_shape_waits_for_next_quote(
         order_source=broker_path,
     )
 
-    assert accepted is True
+    assert accepted.accepted is True
+    assert accepted.filled is False
     assert emulator.get_cash() == before_cash
     assert emulator.get_positions() == before_positions
     assert simulator.pending_orders[-1].source == broker_path
@@ -258,7 +260,12 @@ def test_broker_factory_activates_next_event_only_for_equity_backtests():
     )
 
     assert equity.execute_signal(
-        "SPY", 1, 100.0, timestamp=T0, cash_per_trade=100.0
+        "SPY",
+        1,
+        100.0,
+        timestamp=T0,
+        cash_per_trade=100.0,
+        order_source="main_signal",
     )
     assert equity.get_cash() == 1_000.0
     assert equity.pending_execution_symbols() == ("SPY",)
@@ -280,10 +287,20 @@ def test_broker_price_event_fills_all_pending_symbols_from_mid_prices():
         cost_model=COSTS,
     )
     assert emulator.execute_signal(
-        "SPY", 1, 100.0, timestamp=T0, cash_per_trade=1_000.0
+        "SPY",
+        1,
+        100.0,
+        timestamp=T0,
+        cash_per_trade=1_000.0,
+        order_source="main_signal",
     )
     assert emulator.execute_signal(
-        "AAPL", 1, 200.0, timestamp=T0, cash_per_trade=1_000.0
+        "AAPL",
+        1,
+        200.0,
+        timestamp=T0,
+        cash_per_trade=1_000.0,
+        order_source="main_signal",
     )
 
     assert emulator.process_price_event(
@@ -295,3 +312,95 @@ def test_broker_price_event_fills_all_pending_symbols_from_mid_prices():
 
     assert {fill.symbol for fill in fills} == {"SPY", "AAPL"}
     assert emulator.pending_execution_symbols() == ()
+
+
+def test_gap_up_all_cash_buy_cannot_orphan_a_committed_fill():
+    emulator, simulator = _configured_emulator(cash=100.0)
+    receipt = emulator.execute_signal(
+        "SPY",
+        1,
+        100.0,
+        timestamp=T0,
+        cash_per_trade=100.0,
+        order_source="main_signal",
+    )
+
+    fills = emulator.process_quote(
+        SimulationQuote.from_mid(
+            symbol="SPY",
+            timestamp=T1,
+            mid=101.0,
+            spread_bps=COSTS.spread_bps,
+        )
+    )
+
+    assert receipt.accepted is True
+    assert receipt.filled is False
+    assert len(fills) == 1
+    assert simulator.fills == fills
+    assert simulator.pending_order_count == 0
+    assert emulator.get_cash() >= -1e-9
+    assert emulator.get_positions()["SPY"] > 0
+    assert (
+        fills[0].incremental_quantity * fills[0].price + fills[0].fees
+        <= 100.0 + 1e-9
+    )
+
+
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    [
+        (lambda: PortfolioEmulator(math.nan), "initial_cash"),
+        (lambda: PortfolioEmulator(100.0, taker_fee=math.inf), "taker_fee"),
+    ],
+)
+def test_non_finite_constructor_inputs_fail_closed(factory, message):
+    with pytest.raises(ValueError, match=message):
+        factory()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"price": math.nan}, "price"),
+        ({"cash_per_trade": math.inf}, "cash_per_trade"),
+        ({"signal": -1, "sell_fraction": math.nan}, "sell_fraction"),
+    ],
+)
+def test_non_finite_signal_inputs_do_not_mutate_sequence_or_reservations(
+    kwargs,
+    message,
+):
+    emulator, simulator = _configured_emulator()
+    emulator.apply_fill(_fill(order_id="seed", fees=0.0))
+    values = {
+        "ticker": "SPY",
+        "signal": 1,
+        "price": 100.0,
+        "timestamp": T0,
+        "cash_per_trade": 100.0,
+        "sell_fraction": 1.0,
+        "order_source": "main_signal",
+    }
+    values.update(kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        emulator.execute_signal(**values)
+
+    assert simulator.pending_orders == ()
+    assert emulator._simulation_order_sequence == 0
+
+
+def test_promotable_emulator_requires_an_explicit_order_source():
+    emulator, simulator = _configured_emulator()
+
+    with pytest.raises(ValueError, match="order_source"):
+        emulator.execute_signal(
+            "SPY",
+            1,
+            100.0,
+            timestamp=T0,
+            cash_per_trade=100.0,
+        )
+
+    assert simulator.pending_orders == ()
