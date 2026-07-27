@@ -6582,7 +6582,14 @@ def _next_bear_capacity_latch(prev, confirmed_regime, recovery_flag, config: dic
     except (TypeError, ValueError):
         _held = 1 if prev else 0
     if _reg in ("bear", "crash"):
-        return _held + 1
+        # 2026-07-27 FIX: a bear bar RE-ARMS at 1 rather than advancing the
+        # fail-safe counter. Previously it incremented, so a bear leg lasting
+        # >= bear_capacity_latch_max_bars left the age already at/over the
+        # bound — and the very first chop bar afterwards released instantly,
+        # silently disabling the latch for that whole chop stretch. That is the
+        # refill this feature exists to prevent, re-opened after any long bear.
+        # The bound is now genuinely on CHOP-only survival, as documented.
+        return 1
     if _held <= 0:
         return 0            # plain chop with no latch running -> nothing to hold
     # FAIL-SAFE (2026-07-26 bug sweep): the ONLY release conditions above are a
@@ -25661,6 +25668,25 @@ class GraphNexusAnalysis:
                     # 3 months because portfolio was at 9/8 breach.
                     _breach_auto_heal = bool(config.get("max_positions_breach_auto_rotate", True))
                     _breach_slots_to_free = max(1, _current_positions - _max_positions)
+                    # 2026-07-27 LIVE SAFETY: bound the per-bar liquidation.
+                    # This is unbounded by construction, and the regime caps make
+                    # the gap large: on the FIRST confirmed bear bar with a full
+                    # book, max_positions_bear=2 gives 14-2 = 12 slots to free, so
+                    # a single bar emits TWELVE simultaneous market sells into a
+                    # falling tape. The bear-book trim already bleeds out under
+                    # `bear_book_trim_max_per_bar` for exactly this reason; this
+                    # path had no equivalent. 0 = unbounded (previous behaviour).
+                    try:
+                        _breach_max_per_bar = int(
+                            config.get("max_positions_breach_max_per_bar", 0) or 0)
+                    except (TypeError, ValueError):
+                        _breach_max_per_bar = 0
+                    if _breach_max_per_bar > 0 and _breach_slots_to_free > _breach_max_per_bar:
+                        _log(f"Breach auto-heal: capping liquidation at "
+                             f"{_breach_max_per_bar}/bar (wanted {_breach_slots_to_free}; "
+                             f"held={_current_positions} cap={_max_positions}) — "
+                             f"remainder bleeds out on subsequent bars", "yellow")
+                        _breach_slots_to_free = _breach_max_per_bar
                     _breach_min_hold_days = int(config.get("max_positions_breach_heal_min_hold_days", 3) or 3)
                     # Phase γ.3 (2026-05-18, BT232179 follow-up): adversarial review
                     # of BT232179 found the breach-heal loop was firing on 78% of

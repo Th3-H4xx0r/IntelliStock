@@ -162,6 +162,23 @@ def test_fail_safe_can_be_disabled_with_zero():
     assert latch, "0 means unbounded"
 
 
+def test_long_bear_does_not_pre_exhaust_the_fail_safe():
+    """REGRESSION (2026-07-27): bear bars used to ADVANCE the counter, so a bear
+    leg >= max_bars left the age at/over the bound and the FIRST chop bar after
+    it released instantly — silently disabling the latch for that whole chop
+    stretch, which is the refill it exists to prevent."""
+    cfg = dict(_ON, bear_capacity_latch_max_bars=5)
+    latch = False
+    for _ in range(40):                       # a long bear, well past the bound
+        latch = _nxt(latch, "bear", recovery=False, cfg=cfg)
+    assert latch, "still latched at the end of the bear"
+    latch = _nxt(latch, "chop", recovery=False, cfg=cfg)
+    assert latch, "the first chop bar after a long bear must NOT release"
+    for _ in range(10):
+        latch = _nxt(latch, "chop", recovery=False, cfg=cfg)
+    assert not latch, "but it must still self-release after max_bars of chop"
+
+
 def test_a_bear_bar_resets_the_fail_safe_counter():
     """A fresh bear bar restarts the clock -- the bound is on how long a latch
     survives on CHOP alone, not on total downtrend length."""
@@ -169,6 +186,5 @@ def test_a_bear_bar_resets_the_fail_safe_counter():
     latch = _nxt(False, "bear", cfg=cfg)
     for _ in range(4):
         latch = _nxt(latch, "chop", recovery=False, cfg=cfg)
-    before = latch
     latch = _nxt(latch, "bear", recovery=False, cfg=cfg)
-    assert latch > before, "a bear bar advances, it does not release"
+    assert latch == 1, "a bear bar RE-ARMS at 1 (resets the chop-survival clock)"
