@@ -42,7 +42,7 @@ class IncompleteBenchmarkError(ValueError):
 def _normalized_value_series(values, name):
     series = pd.Series(values, copy=True)
     try:
-        series.index = pd.to_datetime(series.index, utc=True).normalize()
+        series.index = pd.to_datetime(series.index, utc=True)
         series = series.astype(float)
     except (TypeError, ValueError) as exc:
         raise IncompleteBenchmarkError(
@@ -53,7 +53,7 @@ def _normalized_value_series(values, name):
             {stamp.isoformat() for stamp in series.index[series.index.duplicated(False)]}
         )
         raise IncompleteBenchmarkError(
-            f"{name} has duplicate normalized valuation dates: {duplicates}"
+            f"{name} has duplicate exact valuation timestamps: {duplicates}"
         )
     array = series.to_numpy(dtype=float)
     if not np.isfinite(array).all() or (array <= 0).any():

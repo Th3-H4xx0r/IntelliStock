@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,7 @@ from benchmark_alpha.benchmark import (
 
 T0 = datetime(2026, 6, 4, tzinfo=timezone.utc)
 SPY_MANIFEST = {
+    "manifest_id": "spy-adjusted-2026-07-08--2026-07-10",
     "symbol": "SPY",
     "timeframe": "1Day",
     "adjustment": "all",
@@ -27,7 +29,28 @@ SPY_MANIFEST = {
     "feed": "iex",
     "start_date": "2026-07-08",
     "end_date": "2026-07-10",
+    "valuation_rule": "xnys_session_close",
+    "valuation_timestamps": [
+        "2026-07-08T20:00:00Z",
+        "2026-07-09T20:00:00Z",
+        "2026-07-10T20:00:00Z",
+    ],
+    "content_hash": "spy-sha256-" + "0" * 64,
 }
+
+
+def _spy_manifest(values, *, start_date="2026-07-08",
+                  end_date="2026-07-10", **patch):
+    from backtest_summary import canonical_spy_content_hash
+
+    return {
+        **SPY_MANIFEST,
+        "start_date": start_date,
+        "end_date": end_date,
+        "valuation_timestamps": sorted(values),
+        "content_hash": canonical_spy_content_hash(values),
+        **patch,
+    }
 
 
 def _snap(day, value):
@@ -122,16 +145,24 @@ def test_backtest_summary_merges_benchmark_fields_without_replacing_pnl():
     base = compute_backtest_summary(None, snapshots, 100.0)
     assert base["pnl"] == pytest.approx(1.0)
     assert "benchmark_return" not in base or base["benchmark_return"] is None
+    benchmark_values = {
+        "2026-07-10T20:00:00Z": 101.0,
+        "2026-07-08T20:00:00Z": 100.0,
+        "2026-07-09T20:00:00Z": 101.0,
+    }
     with_benchmark = compute_backtest_summary(
         None,
         snapshots,
         100.0,
-        benchmark_values={
-            "2026-07-10T04:00:00Z": 101.0,
-            "2026-07-08T04:00:00Z": 100.0,
-            "2026-07-09T04:00:00Z": 101.0,
-        },
-        benchmark_manifest=SPY_MANIFEST,
+        benchmark_values=benchmark_values,
+        benchmark_manifest=_spy_manifest(
+            benchmark_values,
+            valuation_timestamps=[
+                "2026-07-08T20:00:00Z",
+                "2026-07-09T20:00:00Z",
+                "2026-07-10T20:00:00Z",
+            ],
+        ),
         trials=7,
     )
     assert with_benchmark["pnl"] == pytest.approx(1.0)  # merged, not replaced
@@ -153,9 +184,9 @@ def test_backtest_summary_aligns_benchmark_by_timestamp_not_mapping_order():
         _snap("2026-07-10", 121.0),
     ]
     benchmark_out_of_order = {
-        "2026-07-10T04:00:00Z": 104.0,
-        "2026-07-08T04:00:00Z": 100.0,
-        "2026-07-09T04:00:00Z": 102.0,
+        "2026-07-10T20:00:00Z": 104.0,
+        "2026-07-08T20:00:00Z": 100.0,
+        "2026-07-09T20:00:00Z": 102.0,
     }
 
     summary = compute_backtest_summary(
@@ -163,7 +194,7 @@ def test_backtest_summary_aligns_benchmark_by_timestamp_not_mapping_order():
         snapshots,
         100.0,
         benchmark_values=benchmark_out_of_order,
-        benchmark_manifest=SPY_MANIFEST,
+        benchmark_manifest=_spy_manifest(benchmark_out_of_order),
         trials=11,
     )
 
@@ -181,18 +212,19 @@ def test_intraday_snapshots_use_the_last_daily_valuation_against_spy_close():
         {"timestamp": "2026-07-09T14:30:00Z", "value": 102.0},
         {"timestamp": "2026-07-09T20:00:00Z", "value": 103.0},
     ]
+    benchmark_values = {
+        "2026-07-08T20:00:00Z": 500.0,
+        "2026-07-09T20:00:00Z": 500.0,
+    }
     summary = compute_backtest_summary(
         None,
         snapshots,
         100.0,
-        benchmark_values={
-            "2026-07-08T04:00:00Z": 500.0,
-            "2026-07-09T04:00:00Z": 500.0,
-        },
-        benchmark_manifest={
-            **SPY_MANIFEST,
-            "end_date": "2026-07-09",
-        },
+        benchmark_values=benchmark_values,
+        benchmark_manifest=_spy_manifest(
+            benchmark_values,
+            end_date="2026-07-09",
+        ),
         trials=5,
     )
 
@@ -209,15 +241,23 @@ def test_missing_benchmark_date_is_explicitly_incomplete_not_dropped():
         _snap("2026-07-09", 101.0),
         _snap("2026-07-10", 102.0),
     ]
+    benchmark_values = {
+        "2026-07-08T20:00:00Z": 500.0,
+        "2026-07-10T20:00:00Z": 505.0,
+    }
     summary = compute_backtest_summary(
         None,
         snapshots,
         100.0,
-        benchmark_values={
-            "2026-07-08T04:00:00Z": 500.0,
-            "2026-07-10T04:00:00Z": 505.0,
-        },
-        benchmark_manifest=SPY_MANIFEST,
+        benchmark_values=benchmark_values,
+        benchmark_manifest=_spy_manifest(
+            benchmark_values,
+            valuation_timestamps=[
+                "2026-07-08T20:00:00Z",
+                "2026-07-09T20:00:00Z",
+                "2026-07-10T20:00:00Z",
+            ],
+        ),
         trials=3,
     )
 
@@ -230,15 +270,19 @@ def test_missing_benchmark_date_is_explicitly_incomplete_not_dropped():
 def test_missing_registry_trial_count_is_explicitly_incomplete():
     from backtest_summary import compute_backtest_summary
 
+    benchmark_values = {
+        "2026-07-08T20:00:00Z": 500.0,
+        "2026-07-09T20:00:00Z": 501.0,
+    }
     summary = compute_backtest_summary(
         None,
         [_snap("2026-07-08", 100.0), _snap("2026-07-09", 101.0)],
         100.0,
-        benchmark_values={
-            "2026-07-08T04:00:00Z": 500.0,
-            "2026-07-09T04:00:00Z": 501.0,
-        },
-        benchmark_manifest=SPY_MANIFEST,
+        benchmark_values=benchmark_values,
+        benchmark_manifest=_spy_manifest(
+            benchmark_values,
+            end_date="2026-07-09",
+        ),
         trials=None,
     )
 
@@ -264,15 +308,20 @@ def test_wrong_spy_price_convention_is_explicitly_incomplete(
 ):
     from backtest_summary import compute_backtest_summary
 
-    manifest = {**SPY_MANIFEST, **manifest_patch}
+    benchmark_values = {
+        "2026-07-08T20:00:00Z": 500.0,
+        "2026-07-09T20:00:00Z": 501.0,
+    }
+    manifest = _spy_manifest(
+        benchmark_values,
+        end_date="2026-07-09",
+        **manifest_patch,
+    )
     summary = compute_backtest_summary(
         None,
         [_snap("2026-07-08", 100.0), _snap("2026-07-09", 101.0)],
         100.0,
-        benchmark_values={
-            "2026-07-08T04:00:00Z": 500.0,
-            "2026-07-09T04:00:00Z": 501.0,
-        },
+        benchmark_values=benchmark_values,
         benchmark_manifest=manifest,
         trials=3,
     )
@@ -294,6 +343,13 @@ def test_adjusted_spy_close_series_uses_exact_window_and_close_field():
         ],
         start_date="2026-07-08",
         end_date="2026-07-10",
+        session_close_resolver=lambda day: datetime(
+            day.year,
+            day.month,
+            day.day,
+            20,
+            tzinfo=timezone.utc,
+        ),
     )
 
     assert list(values.values()) == [500.0, 502.0, 503.0]
@@ -309,6 +365,11 @@ def test_broker_requests_adjusted_daily_spy_for_exact_user_window():
     calls = []
     start = datetime(2026, 7, 8)
     end = datetime(2026, 7, 10, 23, 59, 59)
+    benchmark_values = {
+        "2026-07-08T20:00:00Z": 500.0,
+        "2026-07-09T20:00:00Z": 502.0,
+        "2026-07-10T20:00:00Z": 503.0,
+    }
 
     def fake_fetch(symbols, start_date, end_date, **kwargs):
         calls.append((symbols, start_date, end_date, kwargs))
@@ -327,6 +388,14 @@ def test_broker_requests_adjusted_daily_spy_for_exact_user_window():
         key="test-key",
         secret="test-secret",
         feed="iex",
+        registered_manifest=_spy_manifest(benchmark_values),
+        session_close_resolver=lambda day: datetime(
+            day.year,
+            day.month,
+            day.day,
+            20,
+            tzinfo=timezone.utc,
+        ),
     )
 
     symbols, called_start, called_end, kwargs = calls[0]
@@ -354,9 +423,9 @@ def test_broker_result_summary_passes_timestamp_keyed_spy_and_trials():
     captured = {}
     bundle = {
         "values": {
-            "2026-07-10T04:00:00Z": 503.0,
-            "2026-07-08T04:00:00Z": 500.0,
-            "2026-07-09T04:00:00Z": 502.0,
+            "2026-07-10T20:00:00Z": 503.0,
+            "2026-07-08T20:00:00Z": 500.0,
+            "2026-07-09T20:00:00Z": 502.0,
         },
         "manifest": SPY_MANIFEST,
     }
@@ -440,71 +509,57 @@ def test_crypto_backtest_schema_never_requests_the_equity_benchmark():
         "_backtest_uses_equity_benchmark"
     )
 
+    registered = SimpleNamespace(
+        spec=SimpleNamespace(benchmark_manifest=SPY_MANIFEST)
+    )
     assert uses_equity_benchmark(
         {"name": "crypto:momentum"},
-        is_crypto_runtime=False,
+        is_non_equity_runtime=False,
+        registered_experiment=registered,
     ) is False
     assert uses_equity_benchmark(
         {"name": "equity-alpha"},
-        is_crypto_runtime=True,
+        is_non_equity_runtime=True,
+        registered_experiment=registered,
     ) is False
     assert uses_equity_benchmark(
         {"name": "equity-alpha"},
-        is_crypto_runtime=False,
+        is_non_equity_runtime=False,
+        registered_experiment=None,
+    ) is False
+    assert uses_equity_benchmark(
+        {"name": "equity-alpha"},
+        is_non_equity_runtime=False,
+        registered_experiment=registered,
     ) is True
 
 
 def test_broker_reads_the_registered_count_for_one_declared_search_scope():
-    declared_scope, trial_count = _extract_broker_functions(
-        "_declared_experiment_search_scope",
-        "_registered_trial_count",
-    )
+    from backtest_experiments import BacktestExperimentContext
+
     schema = {
         "name": "equity-alpha",
-        "strategies": [
-            {
-                "strategy": "graph_nexus_analysis",
-                "config": {
-                    "experiment_search_scope": "fresh-direct/live-40"
-                },
-            }
-        ],
+        "experiment_search_scope": "untrusted-arbitrary-scope",
     }
     calls = []
 
-    class Query:
-        def db(self, name):
-            calls.append(("db", name))
-            return self
-
-        def table(self, name):
-            calls.append(("table", name))
-            return self
-
-        def filter(self, value):
-            calls.append(("filter", value))
-            return self
-
-        def count(self):
-            calls.append(("count",))
-            return self
-
-        def run(self, conn):
-            calls.append(("run", conn))
+    class Registry:
+        def trial_count(self, *, scope):
+            calls.append(scope)
             return 17
 
-    scope = declared_scope(schema)
-    assert scope == "fresh-direct/live-40"
-    assert trial_count(Query(), "connection", "IntelliStock", scope) == 17
-    assert ("filter", {"search_scope": scope}) in calls
+    context = BacktestExperimentContext(
+        registry=Registry(),
+        registration=SimpleNamespace(
+            experiment_id="attempt-1",
+            fingerprint="expfp-test",
+            search_scope="stored-registered-scope",
+        ),
+    )
 
-    conflicting = {
-        "strategies": [
-            {"experiment_search_scope": "scope-a"},
-            {"experiment_search_scope": "scope-b"},
-        ]
-    }
-    assert declared_scope(conflicting) is None
+    assert context.trial_count() == 17
+    assert calls == ["stored-registered-scope"]
+    assert schema["experiment_search_scope"] != context.search_scope
 
 
 def test_live_broker_fetch_inception_fallback_is_removed():
@@ -553,20 +608,21 @@ def test_backtest_summary_skips_unusable_snapshots_and_never_emits_nan():
         _snap("2026-07-09", 110.0),
         _snap("2026-07-10", 120.0),
     ]
+    benchmark_values = {
+        "2026-07-07T20:00:00Z": 100.0,
+        "2026-07-08T20:00:00Z": 101.0,
+        "2026-07-09T20:00:00Z": 102.0,
+        "2026-07-10T20:00:00Z": 103.0,
+    }
     summary = compute_backtest_summary(
         None,
         snapshots,
         100.0,
-        benchmark_values={
-            "2026-07-07T04:00:00Z": 100.0,
-            "2026-07-08T04:00:00Z": 101.0,
-            "2026-07-09T04:00:00Z": 102.0,
-            "2026-07-10T04:00:00Z": 103.0,
-        },
-        benchmark_manifest={
-            **SPY_MANIFEST,
-            "start_date": "2026-07-07",
-        },
+        benchmark_values=benchmark_values,
+        benchmark_manifest=_spy_manifest(
+            benchmark_values,
+            start_date="2026-07-07",
+        ),
         trials=4,
     )
     for key, value in summary.items():

@@ -159,6 +159,40 @@ def next_close_utc(after_utc: datetime, *, extended: bool = False) -> Optional[d
     return candidate_et.astimezone(timezone.utc)
 
 
+def nyse_session_close_utc(session_date) -> datetime:
+    """Return the authoritative regular-session close for one XNYS session.
+
+    Promotion evidence must honor holidays and early closes, so this helper
+    deliberately has no weekday approximation. If the exchange calendar is
+    unavailable or ``session_date`` is not an XNYS session, it fails closed.
+    """
+    if not _HAS_LIB or _CAL is None:
+        raise RuntimeError(
+            "exchange_calendars is required for authoritative XNYS closes"
+        )
+    try:
+        import pandas as _pd
+
+        session = _pd.Timestamp(session_date)
+        if session.tzinfo is not None:
+            session = session.tz_convert("UTC").tz_localize(None)
+        session = session.normalize()
+        if not bool(_CAL.is_session(session)):
+            raise ValueError(f"{session.date()} is not an XNYS session")
+        return (
+            _CAL.session_close(session)
+            .tz_convert("UTC")
+            .to_pydatetime()
+            .astimezone(timezone.utc)
+        )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not resolve authoritative XNYS close for {session_date!r}"
+        ) from exc
+
+
 def is_early_close(now_utc: datetime) -> bool:
     """True if today is an early-close day (1pm ET) per NYSE calendar."""
     now_utc = _ensure_utc(now_utc)

@@ -1,5 +1,4 @@
 """Immutable experiment-attempt provenance and trial accounting."""
-from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -17,6 +16,40 @@ from benchmark_alpha.rethink_store import (
 
 
 REGISTERED_AT = datetime(2026, 7, 27, 6, 30, tzinfo=timezone.utc)
+
+
+def _source_manifest(manifest_id, source, content_hash):
+    return {
+        "manifest_id": manifest_id,
+        "source_hashes": {source: content_hash},
+        "created_at": REGISTERED_AT.isoformat(),
+    }
+
+
+def _benchmark_manifest(
+    *,
+    manifest_id="spy-1",
+    content_hash="spy-sha256-" + "4" * 64,
+    start_date="2024-01-02",
+    end_date="2026-06-30",
+):
+    return {
+        "manifest_id": manifest_id,
+        "symbol": "SPY",
+        "timeframe": "1Day",
+        "adjustment": "all",
+        "price_field": "c",
+        "total_return": True,
+        "feed": "iex",
+        "start_date": start_date,
+        "end_date": end_date,
+        "valuation_rule": "xnys_session_close",
+        "valuation_timestamps": [
+            f"{start_date}T20:00:00Z",
+            f"{end_date}T20:00:00Z",
+        ],
+        "content_hash": content_hash,
+    }
 
 
 def _spec(**overrides):
@@ -37,18 +70,23 @@ def _spec(**overrides):
         "model_settings": {"temperature": 0.0},
         "seed": 179,
         "predeclared_repeats": 3,
-        "dataset_manifest": {"id": "dataset-1", "hash": "sha256:data"},
-        "graph_manifest": {"id": "graph-1", "hash": "sha256:graph"},
-        "universe_manifest": {"id": "universe-1", "hash": "sha256:universe"},
-        "benchmark_manifest": {
-            "id": "spy-1",
-            "symbol": "SPY",
-            "timeframe": "1Day",
-            "adjustment": "all",
-            "price_field": "close",
-            "hash": "sha256:spy",
+        "dataset_manifest": _source_manifest(
+            "dataset-1", "bars", "sha256:data"
+        ),
+        "graph_manifest": _source_manifest(
+            "graph-1", "graph", "sha256:graph"
+        ),
+        "universe_manifest": _source_manifest(
+            "universe-1", "universe", "sha256:universe"
+        ),
+        "benchmark_manifest": _benchmark_manifest(),
+        "execution_cost_model": {
+            "version": "cost-v1",
+            "spread_bps": 1.0,
+            "slippage_bps": 1.0,
+            "fee_bps": 1.0,
+            "latency_seconds": 0.0,
         },
-        "execution_cost_model": {"version": "cost-v1", "fee_bps": 1.0},
         "start_date": "2024-01-02",
         "end_date": "2026-06-30",
         "fold": "walk-forward-03",
@@ -114,11 +152,37 @@ def test_repeated_attempts_have_new_ids_but_the_same_configuration_fingerprint()
         ("model_settings", {"temperature": 0.2}),
         ("seed", 180),
         ("predeclared_repeats", 4),
-        ("dataset_manifest", {"id": "dataset-2", "hash": "sha256:data2"}),
-        ("graph_manifest", {"id": "graph-2", "hash": "sha256:graph2"}),
-        ("universe_manifest", {"id": "universe-2", "hash": "sha256:universe2"}),
-        ("benchmark_manifest", {"id": "spy-2", "hash": "sha256:spy2"}),
-        ("execution_cost_model", {"version": "cost-v2", "fee_bps": 2.0}),
+        (
+            "dataset_manifest",
+            _source_manifest("dataset-2", "bars", "sha256:data2"),
+        ),
+        (
+            "graph_manifest",
+            _source_manifest("graph-2", "graph", "sha256:graph2"),
+        ),
+        (
+            "universe_manifest",
+            _source_manifest(
+                "universe-2", "universe", "sha256:universe2"
+            ),
+        ),
+        (
+            "benchmark_manifest",
+            _benchmark_manifest(
+                manifest_id="spy-2",
+                content_hash="spy-sha256-" + "5" * 64,
+            ),
+        ),
+        (
+            "execution_cost_model",
+            {
+                "version": "cost-v2",
+                "spread_bps": 2.0,
+                "slippage_bps": 2.0,
+                "fee_bps": 2.0,
+                "latency_seconds": 1.0,
+            },
+        ),
         ("start_date", "2024-02-01"),
         ("end_date", "2026-05-31"),
         ("fold", "walk-forward-04"),
@@ -128,7 +192,16 @@ def test_every_required_provenance_dimension_changes_fingerprint(
     field, replacement
 ):
     original = _spec()
-    changed = replace(original, **{field: replacement})
+    changes = {field: replacement}
+    if field == "start_date":
+        changes["benchmark_manifest"] = _benchmark_manifest(
+            start_date=replacement
+        )
+    elif field == "end_date":
+        changes["benchmark_manifest"] = _benchmark_manifest(
+            end_date=replacement
+        )
+    changed = _spec(**changes)
     assert changed.fingerprint != original.fingerprint
 
 
@@ -182,12 +255,15 @@ class _ImmutableBackend:
         key = (table, doc["id"])
         prior = self.rows.get(key)
         if prior is None:
-            # Mirror RethinkDB's numeric JSON round-trip (integral doubles can
-            # return as ints/floats without changing record identity).
+            # Preserve the JSON numeric token type. Fingerprint
+            # canonicalization intentionally distinguishes a declared integer
+            # from a floating-point value.
             def normalize(value):
                 if isinstance(value, bool):
                     return value
-                if isinstance(value, (int, float)):
+                if isinstance(value, int):
+                    return int(value)
+                if isinstance(value, float):
                     return float(value)
                 if isinstance(value, dict):
                     return {str(k): normalize(v) for k, v in value.items()}

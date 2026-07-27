@@ -408,6 +408,9 @@ _backtest_fetch_start_dt = None
 _backtest_fetch_end_dt = None
 _backtest_no_history_symbols = set()
 _backtest_spy_benchmark = None
+_backtest_experiment_context = None
+_backtest_seed_int = None
+_backtest_seed_source = None
 
 dotenv.load_dotenv()
 
@@ -933,7 +936,7 @@ def _is_crypto_instance_runtime():
 
 
 def _is_non_equity_instance_runtime():
-    """True only for explicitly marked compatibility runtimes."""
+    """True for every runtime that must never request an equity benchmark."""
     kind = str(_instance_kind_and_crypto_config()[0] or "").strip().lower()
     return kind in {"crypto", "kalshi"}
 
@@ -1749,9 +1752,18 @@ def _fetch_adjusted_spy_benchmark(
     key,
     secret,
     feed,
+    registered_manifest,
+    session_close_resolver=None,
 ):
     """Fetch the promoted benchmark independently of strategy/warm-up bars."""
-    from backtest_summary import build_adjusted_spy_close_series
+    from backtest_summary import (
+        build_adjusted_spy_close_series,
+        canonical_spy_content_hash,
+    )
+    from experiment_registry import validate_benchmark_manifest
+    from live_calendar import nyse_session_close_utc
+
+    expected_manifest = validate_benchmark_manifest(registered_manifest)
 
     rows = fetch_bars(
         ["SPY"],
@@ -1769,19 +1781,40 @@ def _fetch_adjusted_spy_benchmark(
         (rows or {}).get("SPY") or (),
         start_date=start_date,
         end_date=end_date,
+        session_close_resolver=(
+            session_close_resolver or nyse_session_close_utc
+        ),
     )
+    actual_manifest = {
+        "manifest_id": expected_manifest["manifest_id"],
+        "symbol": "SPY",
+        "timeframe": "1Day",
+        "adjustment": "all",
+        "price_field": "c",
+        "total_return": True,
+        "feed": str(feed or "").lower(),
+        "start_date": str(start_date)[:10],
+        "end_date": str(end_date)[:10],
+        "valuation_rule": "xnys_session_close",
+        "valuation_timestamps": [
+            timestamp.isoformat().replace("+00:00", "Z")
+            for timestamp in values
+        ],
+        "content_hash": canonical_spy_content_hash(values),
+    }
+    if actual_manifest != expected_manifest:
+        differing = sorted(
+            field
+            for field in set(actual_manifest) | set(expected_manifest)
+            if actual_manifest.get(field) != expected_manifest.get(field)
+        )
+        raise ValueError(
+            "fetched SPY content does not match the registered benchmark "
+            f"manifest fields: {differing}"
+        )
     return {
         "values": values,
-        "manifest": {
-            "symbol": "SPY",
-            "timeframe": "1Day",
-            "adjustment": "all",
-            "price_field": "c",
-            "total_return": True,
-            "feed": str(feed or "").lower(),
-            "start_date": str(start_date)[:10],
-            "end_date": str(end_date)[:10],
-        },
+        "manifest": actual_manifest,
     }
 
 
@@ -1808,52 +1841,85 @@ def _compute_backtest_summary_with_benchmark(
 
 
 def _backtest_uses_equity_benchmark(
-    strategy_schema, *, is_crypto_runtime
+    strategy_schema,
+    *,
+    is_non_equity_runtime,
+    registered_experiment,
 ):
-    """Return False for crypto even if the runtime kind lookup is transient."""
-    if is_crypto_runtime:
+    """Only a preregistered promotable equity experiment receives SPY."""
+    if is_non_equity_runtime or registered_experiment is None:
         return False
     if isinstance(strategy_schema, dict):
         name = str(strategy_schema.get("name") or "").strip().lower()
         if name.startswith("crypto:"):
             return False
-    return True
+    try:
+        manifest = registered_experiment.spec.benchmark_manifest
+        return (
+            manifest["symbol"] == "SPY"
+            and manifest["valuation_rule"] == "xnys_session_close"
+        )
+    except (AttributeError, KeyError, TypeError):
+        return False
 
 
-def _declared_experiment_search_scope(strategy_schema):
-    """Return one explicitly declared immutable-registry scope, or ``None``."""
+def _preregister_backtest_experiment(
+    strategy_schema,
+    *,
+    effective_strategies,
+    symbols,
+    start_date,
+    end_date,
+    time_increment,
+    initial_cash,
+    seed,
+):
+    """Durably preregister a declared equity experiment before execution."""
     if not isinstance(strategy_schema, dict):
         return None
-    scopes = set()
-    direct = strategy_schema.get("experiment_search_scope")
-    if direct:
-        scopes.add(str(direct))
-    for strategy in strategy_schema.get("strategies") or ():
-        if not isinstance(strategy, dict):
-            continue
-        value = strategy.get("experiment_search_scope")
-        config = strategy.get("config") or {}
-        if not value and isinstance(config, dict):
-            value = config.get("experiment_search_scope")
-        if value:
-            scopes.add(str(value))
-    return next(iter(scopes)) if len(scopes) == 1 else None
-
-
-def _registered_trial_count(r_module, conn, db_name, search_scope):
-    """Read the complete append-only trial ledger for a declared scope."""
-    if not search_scope:
+    declaration = strategy_schema.get("experiment_spec")
+    if declaration is None:
         return None
-    from benchmark_alpha.rethink_store import EXPERIMENTS_TABLE
 
-    count = int(
-        r_module.db(db_name)
-        .table(EXPERIMENTS_TABLE)
-        .filter({"search_scope": str(search_scope)})
-        .count()
-        .run(conn)
+    from backtest_experiments import preregister_backtest_experiment
+    from benchmark_alpha.rethink_store import AlphaRethinkStore
+    from experiment_registry import ExperimentRegistry
+
+    @contextmanager
+    def connection_factory():
+        connection = get_conn()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    effective_config = sanitize_snapshot(
+        {
+            "strategy_name": strategy_schema.get("name"),
+            "strategies": list(effective_strategies or ()),
+            "symbols": list(symbols or ()),
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
+            "time_increment": time_increment,
+            "initial_cash": initial_cash,
+        }
     )
-    return count if count > 0 else None
+    assert_secret_free(effective_config)
+    registry = ExperimentRegistry(
+        store=AlphaRethinkStore(
+            r,
+            connection_factory,
+            db_name=DB_NAME,
+        )
+    )
+    return preregister_backtest_experiment(
+        declaration,
+        effective_config=effective_config,
+        seed=seed,
+        start_date=start_date,
+        end_date=end_date,
+        registry=registry,
+    )
 
 
 def _resolve_data_brokerage_creds_now():
@@ -3939,6 +4005,7 @@ def load_strategies_from_db():
             strategy_schema = sanitize_snapshot({
                 "name": strategy_doc.get("name"),
                 "strategies": list(strategies_array),
+                "experiment_spec": strategy_doc.get("experiment_spec"),
             })
             specs = [s for s in strategies_array if isinstance(s, dict) and s.get('strategy') is not None and 'weight' in s]
             return specs, strategy_id, strategy_schema
@@ -6857,6 +6924,7 @@ if mode == MODE_BACKTEST:
     _backtest_fetch_end_dt = None
     _backtest_no_history_symbols = set()
     _backtest_spy_benchmark = None
+    _backtest_experiment_context = None
     _backtest_start_dt_input = start_dt
     _backtest_end_dt_input = end_dt_input
     # Treat end date as inclusive for backtests: run through the full calendar day.
@@ -6905,6 +6973,42 @@ if mode == MODE_BACKTEST:
         except Exception as _e:
             _log(f"Model resolution warning: {_e}", "yellow")
         _cached_strategies = sorted(_cached_strategies, key=lambda s: int(s.get('execution_position', 0)))
+        if isinstance(_backtest_strategy_schema, dict):
+            _backtest_strategy_schema["strategies"] = sanitize_snapshot(
+                list(_cached_strategies)
+            )
+    # Resolve the exact runtime seed and persist a complete immutable
+    # registration before data preparation or any strategy/model execution.
+    from _phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
+    from _phase_alpha_helpers import resolve_backtest_determinism as _resolve_bt_det_seed
+    _registration_deterministic = _resolve_bt_det_seed(
+        mode == MODE_BACKTEST,
+        os.environ,
+    )
+    _backtest_seed_int, _backtest_seed_source = _derive_backtest_seed(
+        None if _registration_deterministic else backtest_row_id,
+        symbols,
+        env_seed=os.environ.get("BACKTEST_SEED"),
+    )
+    if not _is_non_equity_instance_runtime():
+        _backtest_experiment_context = _preregister_backtest_experiment(
+            _backtest_strategy_schema,
+            effective_strategies=_cached_strategies,
+            symbols=symbols,
+            start_date=start_dt,
+            end_date=end_dt_input,
+            time_increment=time_increment,
+            initial_cash=initial_cash,
+            seed=_backtest_seed_int,
+        )
+        if _backtest_experiment_context is not None:
+            _log(
+                "Preregistered immutable experiment "
+                f"{_backtest_experiment_context.experiment_id} "
+                f"({_backtest_experiment_context.fingerprint}) before "
+                "strategy/model execution",
+                "cyan",
+            )
     # Split into pre-decision (voting) and post-decision (order size, pricing). Post = decision_phase "post" or name position_sizing (backward compat).
     _post_decision_specs = [
         s for s in (_cached_strategies or [])
@@ -6958,7 +7062,12 @@ if mode == MODE_BACKTEST:
     # legacy summary path and do not request an equity benchmark.
     if _backtest_uses_equity_benchmark(
         _backtest_strategy_schema,
-        is_crypto_runtime=_is_crypto_instance_runtime(),
+        is_non_equity_runtime=_is_non_equity_instance_runtime(),
+        registered_experiment=(
+            _backtest_experiment_context.registration
+            if _backtest_experiment_context is not None
+            else None
+        ),
     ):
         try:
             _backtest_spy_benchmark = _fetch_adjusted_spy_benchmark(
@@ -6968,6 +7077,10 @@ if mode == MODE_BACKTEST:
                 key=key,
                 secret=secret,
                 feed=data_feed,
+                registered_manifest=(
+                    _backtest_experiment_context.registration.spec
+                    .benchmark_manifest
+                ),
             )
         except Exception as _spy_exc:
             _log(
@@ -6977,16 +7090,10 @@ if mode == MODE_BACKTEST:
             )
             _backtest_spy_benchmark = {
                 "values": {},
-                "manifest": {
-                    "symbol": "SPY",
-                    "timeframe": "1Day",
-                    "adjustment": "all",
-                    "price_field": "c",
-                    "total_return": True,
-                    "feed": str(data_feed or "").lower(),
-                    "start_date": str(start_dt)[:10],
-                    "end_date": str(end_date)[:10],
-                },
+                "manifest": dict(
+                    _backtest_experiment_context.registration.spec
+                    .benchmark_manifest
+                ),
             }
     # Approximate expected bars for requested range (trading hours ~6.5/day, ~252 trading days/year)
     req_days = (end_date - extended_start).days if (end_date and extended_start) else 0
@@ -8579,18 +8686,17 @@ if mode == MODE_BACKTEST:
     # var still wins for back-compat. Derivation extracted to
     # _phase_alpha_helpers.derive_backtest_seed for unit testability. Bare
     # import (not `backend.`) because prod Docker layout is flat at /app/.
-    from _phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
-    from _phase_alpha_helpers import resolve_backtest_determinism as _resolve_bt_det_seed
-    # 2026-07-23: in deterministic mode drop the per-run backtest_row_id from the
-    # seed so PAIRED re-runs of the same window+universe share a seed (the id
-    # differs every POST /backtests and was silently de-syncing the RNG). Explicit
-    # BACKTEST_SEED still wins; a non-deterministic run keeps the id-based seed.
-    _bt_det_seed = _resolve_bt_det_seed(mode == MODE_BACKTEST, os.environ)
-    _seed_int, _seed_source = _derive_backtest_seed(
-        None if _bt_det_seed else backtest_row_id,
-        symbols,
-        env_seed=os.environ.get("BACKTEST_SEED"),
-    )
+    _seed_int = _backtest_seed_int
+    _seed_source = _backtest_seed_source
+    if _seed_int is None:
+        from _phase_alpha_helpers import derive_backtest_seed as _derive_backtest_seed
+        from _phase_alpha_helpers import resolve_backtest_determinism as _resolve_bt_det_seed
+        _bt_det_seed = _resolve_bt_det_seed(mode == MODE_BACKTEST, os.environ)
+        _seed_int, _seed_source = _derive_backtest_seed(
+            None if _bt_det_seed else backtest_row_id,
+            symbols,
+            env_seed=os.environ.get("BACKTEST_SEED"),
+        )
     _log(f"RNG seed: {_seed_int} ({_seed_source})", "cyan")
     try:
         random.seed(_seed_int)
@@ -8670,6 +8776,21 @@ if mode == MODE_BACKTEST:
                 'timestamp': _now_iso,
                 'strategy_id': _strategy_row_id,
                 'strategy_schema': _backtest_strategy_schema,
+                'experiment_id': (
+                    _backtest_experiment_context.experiment_id
+                    if _backtest_experiment_context is not None
+                    else None
+                ),
+                'experiment_fingerprint': (
+                    _backtest_experiment_context.fingerprint
+                    if _backtest_experiment_context is not None
+                    else None
+                ),
+                'experiment_search_scope': (
+                    _backtest_experiment_context.search_scope
+                    if _backtest_experiment_context is not None
+                    else None
+                ),
                 'status': 'running',
                 'progress': 0,
                 'pnl': None,
@@ -9385,19 +9506,12 @@ while not shutdown_requested:
                             # construction — never from a separately-resolved
                             # end-date bar that can disagree (the +$437 vs
                             # -$2,318 half of incident 586767).
-                            _bt_search_scope = (
-                                _declared_experiment_search_scope(
-                                    _backtest_strategy_schema
-                                )
-                            )
                             _bt_trials = None
-                            if _bt_search_scope:
+                            if _backtest_experiment_context is not None:
                                 try:
-                                    _bt_trials = _registered_trial_count(
-                                        r,
-                                        conn,
-                                        DB_NAME,
-                                        _bt_search_scope,
+                                    _bt_trials = (
+                                        _backtest_experiment_context
+                                        .trial_count()
                                     )
                                 except Exception as _trial_exc:
                                     _log(
@@ -9433,6 +9547,21 @@ while not shutdown_requested:
                                 'timestamp': _dt.now().isoformat(),
                                 'strategy_id': strategy_row_id,
                                 'strategy_schema': _backtest_strategy_schema,
+                                'experiment_id': (
+                                    _backtest_experiment_context.experiment_id
+                                    if _backtest_experiment_context is not None
+                                    else None
+                                ),
+                                'experiment_fingerprint': (
+                                    _backtest_experiment_context.fingerprint
+                                    if _backtest_experiment_context is not None
+                                    else None
+                                ),
+                                'experiment_search_scope': (
+                                    _backtest_experiment_context.search_scope
+                                    if _backtest_experiment_context is not None
+                                    else None
+                                ),
                                 'status': 'finished',
                                 'progress': 100.0,
                                 'pnl': final_pnl,

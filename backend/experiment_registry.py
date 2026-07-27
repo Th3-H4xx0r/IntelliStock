@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -88,7 +89,9 @@ def _canonical_json(value) -> str:
     def normalize_numbers(item):
         if isinstance(item, bool):
             return item
-        if isinstance(item, (int, float)):
+        if isinstance(item, int):
+            return item
+        if isinstance(item, float):
             return float(item)
         if isinstance(item, dict):
             return {
@@ -113,6 +116,177 @@ def _require_text(name: str, value: Any) -> str:
     if not text:
         raise ValueError(f"{name} is required")
     return text
+
+
+def _require_aware_timestamp(name: str, value: Any) -> None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = _require_text(name, value)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must be timezone-aware")
+
+
+def _validate_source_manifest(name: str, value: Mapping[str, Any]) -> None:
+    required = ("manifest_id", "source_hashes", "created_at")
+    missing = [field for field in required if field not in value]
+    if missing:
+        raise ValueError(f"{name} missing required field {missing[0]}")
+    _require_text(f"{name}.manifest_id", value["manifest_id"])
+    source_hashes = value["source_hashes"]
+    if not isinstance(source_hashes, Mapping) or not source_hashes:
+        raise ValueError(f"{name}.source_hashes must be a non-empty mapping")
+    for source, content_hash in source_hashes.items():
+        _require_text(f"{name}.source_hashes key", source)
+        _require_text(
+            f"{name}.source_hashes[{str(source)!r}]",
+            content_hash,
+        )
+    _require_aware_timestamp(f"{name}.created_at", value["created_at"])
+
+
+_SPY_CONTENT_HASH = re.compile(r"^spy-sha256-[0-9a-f]{64}$")
+
+
+def validate_benchmark_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the immutable adjusted-SPY promotion contract."""
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("benchmark_manifest must be a non-empty mapping")
+    manifest = dict(value)
+    required = (
+        "manifest_id",
+        "symbol",
+        "timeframe",
+        "adjustment",
+        "price_field",
+        "total_return",
+        "feed",
+        "start_date",
+        "end_date",
+        "valuation_rule",
+        "valuation_timestamps",
+        "content_hash",
+    )
+    missing = [field for field in required if field not in manifest]
+    if missing:
+        raise ValueError(
+            f"benchmark_manifest missing required field {missing[0]}"
+        )
+    _require_text("benchmark_manifest.manifest_id", manifest["manifest_id"])
+    expected = {
+        "symbol": "SPY",
+        "timeframe": "1Day",
+        "adjustment": "all",
+        "price_field": "c",
+        "total_return": True,
+        "valuation_rule": "xnys_session_close",
+    }
+    for field, required_value in expected.items():
+        if manifest[field] != required_value:
+            raise ValueError(
+                f"benchmark_manifest.{field} must be {required_value!r}"
+            )
+    if str(manifest["feed"]).strip().lower() not in {"iex", "sip"}:
+        raise ValueError("benchmark_manifest.feed must be 'iex' or 'sip'")
+    try:
+        start = date.fromisoformat(str(manifest["start_date"]))
+        end = date.fromisoformat(str(manifest["end_date"]))
+    except ValueError as exc:
+        raise ValueError(
+            "benchmark_manifest start_date and end_date must be ISO dates"
+        ) from exc
+    if end < start:
+        raise ValueError(
+            "benchmark_manifest.end_date must not precede start_date"
+        )
+    valuation_timestamps = manifest["valuation_timestamps"]
+    if (
+        not isinstance(valuation_timestamps, (list, tuple))
+        or not valuation_timestamps
+    ):
+        raise ValueError(
+            "benchmark_manifest.valuation_timestamps must be a non-empty list"
+        )
+    canonical_timestamps = []
+    for raw_timestamp in valuation_timestamps:
+        text = _require_text(
+            "benchmark_manifest.valuation_timestamps item",
+            raw_timestamp,
+        )
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                "benchmark_manifest.valuation_timestamps items must be "
+                "ISO-8601 timestamps"
+            ) from exc
+        if parsed.tzinfo is None:
+            raise ValueError(
+                "benchmark_manifest.valuation_timestamps items must be "
+                "timezone-aware"
+            )
+        canonical = (
+            parsed.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        if text != canonical:
+            raise ValueError(
+                "benchmark_manifest.valuation_timestamps items must use "
+                "canonical UTC Z form"
+            )
+        if not start <= parsed.date() <= end:
+            raise ValueError(
+                "benchmark_manifest.valuation_timestamps must stay within "
+                "the manifest date window"
+            )
+        canonical_timestamps.append(canonical)
+    if canonical_timestamps != sorted(set(canonical_timestamps)):
+        raise ValueError(
+            "benchmark_manifest.valuation_timestamps must be unique and sorted"
+        )
+    content_hash = str(manifest["content_hash"] or "").strip()
+    if _SPY_CONTENT_HASH.fullmatch(content_hash) is None:
+        raise ValueError(
+            "benchmark_manifest.content_hash must be a canonical "
+            "spy-sha256 digest"
+        )
+    return manifest
+
+
+def _validate_execution_cost_model(value: Mapping[str, Any]) -> None:
+    required = (
+        "version",
+        "spread_bps",
+        "slippage_bps",
+        "fee_bps",
+        "latency_seconds",
+    )
+    missing = [field for field in required if field not in value]
+    if missing:
+        raise ValueError(
+            f"execution_cost_model missing required field {missing[0]}"
+        )
+    _require_text("execution_cost_model.version", value["version"])
+    for field in required[1:]:
+        raw = value[field]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(
+                f"execution_cost_model.{field} must be a finite number"
+            )
+        number = float(raw)
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(
+                f"execution_cost_model.{field} must be finite and nonnegative"
+            )
+        if field.endswith("_bps") and number >= 10_000:
+            raise ValueError(
+                f"execution_cost_model.{field} must be less than 10000"
+            )
 
 
 @dataclass(frozen=True)
@@ -176,6 +350,25 @@ class ExperimentSpec:
         object.__setattr__(self, "predeclared_repeats", repeats)
 
         for name in (
+            "dataset_manifest",
+            "graph_manifest",
+            "universe_manifest",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping) or not value:
+                raise ValueError(f"{name} must be a non-empty mapping")
+            _validate_source_manifest(name, value)
+        validate_benchmark_manifest(self.benchmark_manifest)
+        if (
+            not isinstance(self.execution_cost_model, Mapping)
+            or not self.execution_cost_model
+        ):
+            raise ValueError(
+                "execution_cost_model must be a non-empty mapping"
+            )
+        _validate_execution_cost_model(self.execution_cost_model)
+
+        for name in (
             "effective_config",
             "prompt_hashes",
             "model_settings",
@@ -203,6 +396,15 @@ class ExperimentSpec:
         end = date.fromisoformat(self.end_date)
         if end < start:
             raise ValueError("end_date must not precede start_date")
+        benchmark = self.benchmark_manifest
+        if benchmark["start_date"] != self.start_date:
+            raise ValueError(
+                "benchmark_manifest.start_date must match experiment start_date"
+            )
+        if benchmark["end_date"] != self.end_date:
+            raise ValueError(
+                "benchmark_manifest.end_date must match experiment end_date"
+            )
 
         fingerprint_payload = {
             "parent_experiment_id": self.parent_experiment_id,

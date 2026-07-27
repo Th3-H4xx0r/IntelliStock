@@ -46,12 +46,12 @@ def test_align_rejects_duplicate_normalized_dates_and_non_finite_values():
     duplicate_day = pd.Series(
         [100.0, 101.0],
         index=pd.to_datetime(
-            ["2026-07-08T14:00:00Z", "2026-07-08T20:00:00Z"]
+            ["2026-07-08T20:00:00Z", "2026-07-08T20:00:00Z"]
         ),
     )
     spy = pd.Series(
         [500.0],
-        index=pd.to_datetime(["2026-07-08T04:00:00Z"]),
+        index=pd.to_datetime(["2026-07-08T20:00:00Z"]),
     )
     with pytest.raises(IncompleteBenchmarkError, match="duplicate"):
         align_return_series(duplicate_day, spy)

@@ -34,8 +34,12 @@ locally (same pattern as backtest_bar_snapshot / backtest_price_history).
 """
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+import json
 import math
+from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable
 
 
@@ -182,23 +186,75 @@ def _date_only(value) -> date:
     return date.fromisoformat(text[:10])
 
 
+def canonical_spy_content_hash(values: Mapping) -> str:
+    """Hash sorted exact UTC valuation timestamps and adjusted closes."""
+    import pandas as pd
+
+    if not isinstance(values, Mapping):
+        raise ValueError("SPY values must be a timestamp-keyed mapping")
+    canonical = []
+    seen = set()
+    for raw_timestamp, raw_close in values.items():
+        try:
+            timestamp = pd.to_datetime(raw_timestamp, utc=True)
+            close = Decimal(str(raw_close))
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(
+                "SPY content requires parseable timestamps and closes"
+            ) from exc
+        if pd.isna(timestamp):
+            raise ValueError("SPY content timestamp must be parseable")
+        if timestamp in seen:
+            raise ValueError(
+                f"duplicate SPY valuation timestamp {timestamp.isoformat()}"
+            )
+        seen.add(timestamp)
+        if not close.is_finite() or close <= 0:
+            raise ValueError("SPY adjusted closes must be finite and positive")
+        timestamp_text = (
+            timestamp.isoformat()
+            .replace("+00:00", "Z")
+        )
+        close_text = format(close.normalize(), "f")
+        canonical.append([timestamp_text, close_text])
+    canonical.sort(key=lambda item: item[0])
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"spy-sha256-{hashlib.sha256(encoded).hexdigest()}"
+
+
 def build_adjusted_spy_close_series(
-    bars, *, start_date, end_date
+    bars,
+    *,
+    start_date,
+    end_date,
+    session_close_resolver=None,
 ) -> dict:
     """Return timestamp-keyed adjusted SPY daily closes for the user window.
 
     The caller is responsible for requesting Alpaca ``adjustment=all``. This
     helper deliberately consumes the returned ``c`` field (not VWAP or an
     intraday strategy price), filters out warm-up/out-of-window bars, and
-    rejects duplicate or invalid daily observations.
+    rekeys each daily label to the authoritative XNYS session close. It never
+    normalizes the valuation timestamp to midnight.
     """
     import pandas as pd
 
+    if session_close_resolver is None:
+        from live_calendar import nyse_session_close_utc
+
+        session_close_resolver = nyse_session_close_utc
+    if not callable(session_close_resolver):
+        raise TypeError("session_close_resolver must be callable")
     start = _date_only(start_date)
     end = _date_only(end_date)
     if end < start:
         raise ValueError("SPY benchmark end_date precedes start_date")
     values = {}
+    seen_days = set()
     for bar in bars or ():
         try:
             timestamp = pd.to_datetime((bar or {}).get("t"), utc=True)
@@ -210,44 +266,51 @@ def build_adjusted_spy_close_series(
             continue
         if not math.isfinite(close) or close <= 0:
             raise ValueError(f"SPY adjusted close must be finite and positive on {day}")
-        normalized = timestamp.normalize()
-        if normalized in values:
+        if day in seen_days:
             raise ValueError(f"duplicate SPY daily benchmark bar on {day}")
-        values[normalized] = close
+        seen_days.add(day)
+        try:
+            valuation_timestamp = pd.to_datetime(
+                session_close_resolver(day),
+                utc=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"authoritative XNYS close is unavailable for {day}"
+            ) from exc
+        if pd.isna(valuation_timestamp):
+            raise ValueError(
+                f"authoritative XNYS close is unavailable for {day}"
+            )
+        if valuation_timestamp in values:
+            raise ValueError(
+                "duplicate authoritative SPY valuation timestamp "
+                f"{valuation_timestamp.isoformat()}"
+            )
+        values[valuation_timestamp] = close
     return dict(sorted(values.items(), key=lambda pair: pair[0]))
 
 
 def _validate_spy_benchmark_manifest(manifest) -> dict:
-    if not isinstance(manifest, Mapping):
-        raise ValueError("benchmark manifest is required")
-    manifest = dict(manifest)
-    expected = {
-        "symbol": "SPY",
-        "timeframe": "1Day",
-        "adjustment": "all",
-        "price_field": "c",
-        "total_return": True,
-    }
-    for field, required in expected.items():
-        if manifest.get(field) != required:
-            raise ValueError(
-                f"benchmark manifest {field} must be {required!r}, "
-                f"got {manifest.get(field)!r}"
-            )
-    if str(manifest.get("feed") or "").lower() not in {"iex", "sip"}:
-        raise ValueError("benchmark manifest feed must be 'iex' or 'sip'")
-    start = _date_only(manifest.get("start_date"))
-    end = _date_only(manifest.get("end_date"))
-    if end < start:
-        raise ValueError("benchmark manifest end_date precedes start_date")
-    return manifest
+    from experiment_registry import validate_benchmark_manifest
+
+    return validate_benchmark_manifest(manifest)
 
 
-def _daily_portfolio_value_series(snapshots):
-    """Select the final recorded portfolio valuation on each UTC day."""
+def _daily_portfolio_value_series(snapshots, valuation_timestamps):
+    """Select portfolio values only at the exact benchmark timestamps."""
     import pandas as pd
 
-    daily = {}
+    try:
+        authoritative = {
+            pd.to_datetime(timestamp, utc=True)
+            for timestamp in valuation_timestamps
+        }
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "benchmark valuation timestamps must be parseable"
+        ) from exc
+    values = {}
     seen_timestamps = set()
     for snapshot in snapshots or ():
         try:
@@ -266,12 +329,10 @@ def _daily_portfolio_value_series(snapshots):
                 f"duplicate portfolio snapshot timestamp {timestamp.isoformat()}"
             )
         seen_timestamps.add(timestamp)
-        day = timestamp.normalize()
-        prior = daily.get(day)
-        if prior is None or timestamp > prior[0]:
-            daily[day] = (timestamp, (snapshot or {}).get("value"))
+        if timestamp in authoritative:
+            values[timestamp] = (snapshot or {}).get("value")
     return pd.Series(
-        {day: pair[1] for day, pair in daily.items()},
+        values,
         dtype=object,
     )
 
@@ -392,6 +453,41 @@ def compute_backtest_summary(
                     "benchmark_values must be timestamp-keyed; positional "
                     "benchmark sequences are forbidden"
                 )
+            import pandas as pd
+
+            expected_timestamps = pd.DatetimeIndex(
+                pd.to_datetime(
+                    manifest["valuation_timestamps"],
+                    utc=True,
+                )
+            )
+            actual_timestamps = pd.DatetimeIndex(
+                pd.to_datetime(
+                    list(benchmark_values.keys()),
+                    utc=True,
+                )
+            )
+            missing_benchmark = expected_timestamps.difference(
+                actual_timestamps
+            )
+            unexpected_benchmark = actual_timestamps.difference(
+                expected_timestamps
+            )
+            if len(missing_benchmark) or len(unexpected_benchmark):
+                raise ValueError(
+                    "timestamp coverage is incomplete: "
+                    f"missing benchmark={len(missing_benchmark)}, "
+                    "unexpected benchmark="
+                    f"{len(unexpected_benchmark)}"
+                )
+            actual_content_hash = canonical_spy_content_hash(
+                benchmark_values
+            )
+            if actual_content_hash != manifest["content_hash"]:
+                raise ValueError(
+                    "benchmark manifest content_hash does not match the "
+                    "exact timestamp/adjusted-close content"
+                )
             if (
                 trials is None
                 or isinstance(trials, bool)
@@ -402,7 +498,10 @@ def compute_backtest_summary(
                     "trial count is missing; benchmark evidence requires the "
                     "actual experiment-registry count for its search scope"
                 )
-            portfolio_values = _daily_portfolio_value_series(snapshots)
+            portfolio_values = _daily_portfolio_value_series(
+                snapshots,
+                manifest["valuation_timestamps"],
+            )
             aligned = align_return_series(portfolio_values, benchmark_values)
             m = compute_active_metrics(aligned, trials=int(trials))
             numeric = (
