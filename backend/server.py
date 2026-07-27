@@ -20,6 +20,7 @@ import os
 import threading
 import logging
 import hmac
+import hashlib
 from datetime import datetime
 from typing import Dict
 from rethinkdb import RethinkDB
@@ -27,6 +28,7 @@ from rethink_changefeed import run_reconnecting_changefeed
 import socketio
 from waitress import serve
 from os import system
+from live_readiness import LiveReadinessError
 
 # Load .env from backend dir or project root so KEY/SECRET are available to spawned services
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -100,7 +102,7 @@ def get_conn():
     return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
 
 
-def register_socket_client(sio, sid, data, *, control_token=None):
+def register_socket_client(sio, sid, data, *, master_key=None):
     """Register a client ID; a duplicate can replace a worker only with proof."""
     global clientList, priceBrokerUID, brokersList
     if not isinstance(data, dict):
@@ -108,12 +110,16 @@ def register_socket_client(sio, sid, data, *, control_token=None):
     uuid = data.get("UUID")
     if not isinstance(uuid, str) or not uuid:
         return False
-    configured_token = (control_token if control_token is not None
-                        else os.environ.get("CONTROL_SOCKET_TOKEN", ""))
+    configured_token = (master_key if master_key is not None
+                        else os.environ.get("SOCKET_CONTROL_MASTER_KEY", ""))
     provided_token = data.get("control_token")
     authenticated = (isinstance(configured_token, str) and bool(configured_token)
                      and isinstance(provided_token, str)
-                     and hmac.compare_digest(provided_token, configured_token))
+                     and hmac.compare_digest(provided_token, derive_socket_control_token(configured_token, data.get("instance"))))
+    if (not isinstance(data.get("instance"), str) or not data["instance"]
+            or not (uuid == data["instance"] or uuid.startswith(data["instance"] + "_"))
+            or not authenticated):
+        return False
     old_sid = clientList.get(uuid)
     if old_sid is not None and old_sid != sid:
         if not authenticated:
@@ -126,6 +132,26 @@ def register_socket_client(sio, sid, data, *, control_token=None):
     if uuid == "PriceBroker":
         priceBrokerUID = sid
     return True
+
+
+def derive_socket_control_token(master_key, instance_id):
+    if type(master_key) is not str or not master_key or type(instance_id) is not str or not instance_id:
+        return ""
+    return hmac.new(master_key.encode("utf-8"), instance_id.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def is_funded_kalshi_live(instance_doc, brokerage_doc) -> bool:
+    if type(instance_doc) is not dict or instance_doc.get("kind") != "kalshi":
+        return False
+    cfg = instance_doc.get("kalshi_config")
+    if type(cfg) is not dict or type(cfg.get("live_enabled")) is not bool or type(cfg.get("paper_mode")) is not bool:
+        raise LiveReadinessError("Kalshi execution mode is malformed")
+    if cfg["live_enabled"] is not True or cfg["paper_mode"] is not False:
+        return False
+    environment = brokerage_doc.get("kalshi_environment") if type(brokerage_doc) is dict else None
+    if type(environment) is not str or environment.lower() not in {"demo", "live", "prod"}:
+        raise LiveReadinessError("Kalshi brokerage environment is malformed")
+    return environment.lower() in {"live", "prod"}
 
 
 def wait_for_rethinkdb(max_attempts=30, delay=2):
@@ -422,10 +448,14 @@ def start_instance_container(instance_id):
     # the unchanged equities path, so this CRITICAL-blast-radius launch point
     # cannot break the equities instances.
     cmd = ['python', 'instance.py', str(instance_id)]
+    _idoc = None
+    _bdoc = None
     try:
         _kc = get_conn()
         try:
             _idoc = r.db(DB_NAME).table('Instances').get(str(instance_id)).run(_kc) or {}
+            if isinstance(_idoc, dict) and _idoc.get("brokerage_id"):
+                _bdoc = r.db(DB_NAME).table('BrokerageAccounts').get(_idoc["brokerage_id"]).run(_kc) or {}
         finally:
             try:
                 _kc.close()
@@ -442,6 +472,12 @@ def start_instance_container(instance_id):
             f"kind lookup for {instance_id} failed ({_kind_e}); using default instance.py",
             "yellow", service="SERVER",
         )
+    master_key = os.environ.get("SOCKET_CONTROL_MASTER_KEY", "")
+    token = derive_socket_control_token(master_key, str(instance_id))
+    if not token:
+        intellistock_logger.log("Instance launch blocked: socket ownership secret is unavailable", "red", service="SERVER")
+        return None
+    env["INSTANCE_SOCKET_CONTROL_TOKEN"] = token
     try:
         client = _get_docker_client()
         if not client:
@@ -469,6 +505,13 @@ def start_instance_container(instance_id):
         volumes = [
             f'{LIVE_TRADING_LOG_VOLUME_NAME}:{LIVE_TRADING_LOG_DIR_IN_CONTAINER}',
         ]
+        if is_funded_kalshi_live(_idoc, _bdoc):
+            from live_readiness import assert_live_start_allowed, report_from_mapping
+            report = report_from_mapping(_idoc.get("live_readiness_report"), instance_id=str(instance_id))
+            assert_live_start_allowed(
+                report,
+                deployed_artifact_hash=os.environ.get("INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256"),
+            )
         container = client.containers.run(
             image,
             command=cmd,

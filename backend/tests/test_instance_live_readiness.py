@@ -28,3 +28,18 @@ def test_live_broker_gate_runs_immediately_before_spawn(monkeypatch):
     monkeypatch.setattr(inst.subprocess, "Popen", must_not_spawn)
     with pytest.raises(LiveReadinessError):
         inst.start_broker(["AAPL"])
+
+
+def test_live_broker_gate_allows_matching_deployed_artifact(monkeypatch):
+    import instance as inst
+    from live_readiness import (ReadinessCheck, ReadinessReport, ReadinessState,
+                                report_fingerprint, required_live_checks)
+    digest = "d" * 64
+    report = ReadinessReport("test-instance", ReadinessState.LIVE_ELIGIBLE,
+                             tuple(ReadinessCheck(name, True, "verified", digest)
+                                   for name in required_live_checks()), digest)
+    payload = {"instance_id": report.instance_id, "state": report.state.value,
+               "artifact_hash": digest, "checks": [c.__dict__ for c in report.checks],
+               "fingerprint": report_fingerprint(report)}
+    monkeypatch.setenv("INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256", digest)
+    assert inst._assert_live_broker_start_allowed("test-instance", {"live_readiness_report": payload}) is None

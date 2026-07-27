@@ -3100,8 +3100,8 @@ def api_alpha_performance(instance_id: str, origin: str = None, run_id: str = No
 @app.get("/instances/{instance_id}/alpha/readiness", response_class=JSONResponse)
 def api_alpha_readiness(instance_id: str,
                         current_user: dict = Depends(get_current_user)):
-    from live_readiness import (ReadinessCheck, ReadinessReport, ReadinessState,
-                                report_fingerprint, report_from_mapping)
+    from live_readiness import (LiveReadinessError, ReadinessCheck, ReadinessReport,
+                                ReadinessState, assert_live_start_allowed, report_from_mapping)
     from benchmark_alpha.rethink_store import AlphaUnavailableError
     store = _alpha_store()
     health = store.health()
@@ -3120,19 +3120,25 @@ def api_alpha_readiness(instance_id: str,
     raw_report = containment.get("readiness_report") if isinstance(containment, dict) else None
     if raw_report:
         try:
-            report = report_from_mapping(raw_report, instance_id=instance_id,
-                                         verify_fingerprint=False)
-            if raw_report.get("fingerprint") != report_fingerprint(report):
-                report = ReadinessReport(
-                    instance_id=report.instance_id,
-                    state=report.state,
-                    checks=report.checks + (ReadinessCheck(
-                        "report fingerprint", False, "invalid fingerprint", ""),),
-                    artifact_hash=report.artifact_hash,
-                )
+            report = report_from_mapping(raw_report, instance_id=instance_id)
+        except LiveReadinessError as exc:
+            reasons.append(str(exc))
+            raw_report = None
+            readiness_ok = False
         except Exception:
             reasons.append("readiness report is unavailable or malformed")
             raw_report = None
+            readiness_ok = False
+        else:
+            try:
+                assert_live_start_allowed(
+                    report,
+                    deployed_artifact_hash=os.environ.get("INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256"),
+                )
+                readiness_ok = True
+            except LiveReadinessError as exc:
+                reasons.append(str(exc))
+                readiness_ok = False
     if not raw_report:
         report = ReadinessReport(
             instance_id=instance_id,
@@ -3149,9 +3155,8 @@ def api_alpha_readiness(instance_id: str,
         )
     failures = [check.reason for check in report.checks if not check.passed]
     reasons.extend(failures)
-    readiness_ok = (report.state in {ReadinessState.LIVE_ELIGIBLE,
-                                     ReadinessState.LIVE_RUNNING}
-                    and not failures)
+    if not raw_report:
+        readiness_ok = False
     return {
         "audit_store_health": {"available": health.available,
                                "error": health.error},

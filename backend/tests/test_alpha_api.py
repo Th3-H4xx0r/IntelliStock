@@ -170,8 +170,8 @@ def test_readiness_endpoint_reports_checks_and_never_promotes_paper_state(monkey
     monkeypatch.setattr(api_main, "_alpha_store", lambda: Store())
     payload = api_main.api_alpha_readiness("test-instance", current_user={})
 
-    assert payload["state"] == "PAPER_ELIGIBLE"
-    assert payload["checks"][0]["evidence_hash"] == "abc"
+    assert payload["state"] == "RESEARCH"
+    assert payload["checks"][0]["name"] == "audit store"
     assert payload["readiness_ok"] is False
 
 

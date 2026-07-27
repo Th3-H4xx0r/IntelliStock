@@ -352,7 +352,10 @@ def _assert_live_broker_start_allowed(instance_id, instance_doc):
         (instance_doc or {}).get("live_readiness_report"),
         instance_id=str(instance_id),
     )
-    assert_live_start_allowed(report)
+    assert_live_start_allowed(
+        report,
+        deployed_artifact_hash=os.environ.get("INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256"),
+    )
 
 
 def start_broker(symbols):
@@ -608,7 +611,7 @@ def run():
         def connect():
             intellistock_logger.log("Connection established to socket server", "green", service="SOCKET")
             sio.emit('clientType', {"UUID": args_list[1], "instance": args_list[1], "symbol": None,
-                                    "control_token": os.environ.get("CONTROL_SOCKET_TOKEN", "")})
+                                    "control_token": os.environ.get("INSTANCE_SOCKET_CONTROL_TOKEN", "")})
 
         @sio.event
         def terminate(data):

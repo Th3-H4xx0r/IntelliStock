@@ -5924,7 +5924,8 @@ def run_socket_loop():
                 uuid_val = f"{instance_id}_{symbol}"
             else:
                 uuid_val = f"{instance_id}_broker"
-            sio.emit('clientType', {'UUID': uuid_val, 'instance': instance_id, 'symbol': symbol})
+            sio.emit('clientType', {'UUID': uuid_val, 'instance': instance_id, 'symbol': symbol,
+                                    'control_token': os.environ.get('INSTANCE_SOCKET_CONTROL_TOKEN', '')})
             _log("Connected to server (instance " + str(instance_id) + ")", "green")
             sio.wait()  # blocks until disconnected
         except Exception as e:
