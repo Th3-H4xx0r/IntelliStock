@@ -23,7 +23,6 @@ from datetime import datetime
 from os import system
 
 from rethinkdb import RethinkDB
-import socketio
 from dotenv import load_dotenv
 
 from intellistock_logger import intellistock_logger
@@ -358,6 +357,31 @@ def _assert_live_broker_start_allowed(instance_id, instance_doc):
     )
 
 
+def _load_instance_and_brokerage(instance_id):
+    """Read the exact linked stock brokerage immediately before broker spawn."""
+    connection = get_conn()
+    try:
+        instance = (
+            r.db(DB_NAME).table("Instances").get(str(instance_id))
+            .run(connection)
+        )
+        if type(instance) is not dict or instance.get("id") != str(instance_id):
+            raise RuntimeError("instance configuration is unavailable")
+        brokerage_id = instance.get("brokerage_id")
+        if type(brokerage_id) is not str or not brokerage_id:
+            raise RuntimeError("linked brokerage is unavailable")
+        brokerage = (
+            r.db(DB_NAME).table("BrokerageAccounts").get(brokerage_id)
+            .run(connection)
+        )
+        if (type(brokerage) is not dict
+                or brokerage.get("id") != brokerage_id):
+            raise RuntimeError("linked brokerage is unavailable")
+        return instance, brokerage
+    finally:
+        safe_close(connection)
+
+
 def start_broker(symbols):
     """Start a single broker process with all tickers.
 
@@ -427,15 +451,11 @@ def start_broker(symbols):
     # 'kind') take the unchanged broker.py path below.
     _kind = None
     _instance_doc = None
+    _brokerage_doc = None
     try:
-        _kc = get_conn()
-        try:
-            _instance_doc = r.db(DB_NAME).table('Instances').get(instance_id).run(_kc)
-            if not isinstance(_instance_doc, dict):
-                raise RuntimeError("instance configuration is unavailable")
-            _kind = _instance_doc.get('kind')
-        finally:
-            safe_close(_kc)
+        _instance_doc, _brokerage_doc = _load_instance_and_brokerage(
+            instance_id)
+        _kind = _instance_doc.get('kind')
     except Exception as exc:
         intellistock_logger.log(
             f"Broker start blocked: instance configuration unavailable ({type(exc).__name__})",
@@ -457,7 +477,11 @@ def start_broker(symbols):
             'python', 'broker.py', instance_id, 'live',
             'NULL', 'NULL', time_increment,
         ] + list(symbols)
-    _assert_live_broker_start_allowed(instance_id, _instance_doc)
+    from live_readiness import brokerage_requires_live_gate
+    if (_kind == "kalshi"
+            or brokerage_requires_live_gate(
+                _instance_doc, _brokerage_doc, environ=os.environ)):
+        _assert_live_broker_start_allowed(instance_id, _instance_doc)
     broker_env = os.environ.copy()
     broker_env.pop("INSTANCE_SOCKET_SUPERVISOR_TOKEN", None)
     broker_process = subprocess.Popen(
@@ -606,44 +630,6 @@ def run():
         os._exit(1)
     finally:
         safe_close(conn)
-
-    sio = socketio.Client()
-
-    def socketIO():
-        @sio.event
-        def connect():
-            intellistock_logger.log("Connection established to socket server", "green", service="SOCKET")
-            sio.emit('clientType', {"UUID": args_list[1], "instance": args_list[1], "symbol": None,
-                                    "control_token": os.environ.get("INSTANCE_SOCKET_SUPERVISOR_TOKEN", "")})
-
-        @sio.event
-        def terminate(data):
-            if data.get('terminate') is True:
-                intellistock_logger.log("Terminate received from server", "yellow", service="SOCKET")
-                os._exit(0)
-
-        @sio.event
-        def disconnect():
-            intellistock_logger.log("Disconnected from server", "yellow", service="SOCKET")
-
-        server_url = os.environ.get('SERVER_URL', 'http://localhost:5000')
-        time.sleep(2)
-        max_attempts = 8
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if attempt > 1:
-                    time.sleep(2)
-                sio.connect(server_url, transports=['polling'])
-                break
-            except Exception as e:
-                if attempt == max_attempts:
-                    intellistock_logger.log(f"Socket connection failed after {max_attempts} attempts: {e}", "red", service="SOCKET")
-                    raise
-                intellistock_logger.log(f"Socket connect attempt {attempt}/{max_attempts} failed, retrying: {e}", "yellow", service="SOCKET")
-        sio.wait()
-
-    socket_thread = threading.Thread(target=socketIO, daemon=True)
-    socket_thread.start()
 
     intellistock_logger.log("Service starting", "yellow", service="SERVER")
     service_status = 0

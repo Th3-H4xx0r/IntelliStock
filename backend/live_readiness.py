@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -101,8 +102,7 @@ def report_from_mapping(payload: Mapping, *, instance_id: str,
     return report
 
 
-def assert_live_start_allowed(report: ReadinessReport, *, deployed_artifact_hash: str | None = None) -> None:
-    """Permit a real-money spawn only with a complete eligible report."""
+def _assert_report_well_formed(report: ReadinessReport) -> None:
     if (type(report) is not ReadinessReport or type(report.instance_id) is not str or not report.instance_id
             or type(report.state) is not ReadinessState or type(report.checks) is not tuple
             or len(report.checks) != len(_REQUIRED_LIVE_CHECKS)
@@ -112,6 +112,32 @@ def assert_live_start_allowed(report: ReadinessReport, *, deployed_artifact_hash
                    for check in report.checks)
             or {check.name for check in report.checks} != set(_REQUIRED_LIVE_CHECKS)):
         raise LiveReadinessError("live readiness checks are incomplete or malformed")
+
+
+def assert_artifact_bound(
+        report: ReadinessReport,
+        *,
+        deployed_artifact_hash: str | None = None,
+) -> None:
+    """Validate report structure and exact deployed artifact identity.
+
+    This deliberately does not grant funded-trading permission.  It exists for
+    stopped-image verification before paper observation is complete.
+    """
+    _assert_report_well_formed(report)
+    if (type(report.artifact_hash) is not str
+            or not _SHA256_RE.fullmatch(report.artifact_hash)
+            or type(deployed_artifact_hash) is not str
+            or not _SHA256_RE.fullmatch(deployed_artifact_hash)
+            or report.artifact_hash != deployed_artifact_hash):
+        raise LiveReadinessError(
+            "deployed artifact identity does not match readiness report")
+
+
+def assert_live_start_allowed(report: ReadinessReport, *, deployed_artifact_hash: str | None = None) -> None:
+    """Permit a real-money spawn only with a complete eligible report."""
+    assert_artifact_bound(
+        report, deployed_artifact_hash=deployed_artifact_hash)
     failures = [check.name for check in report.checks if not check.passed]
     if failures:
         raise LiveReadinessError(
@@ -122,8 +148,48 @@ def assert_live_start_allowed(report: ReadinessReport, *, deployed_artifact_hash
         raise LiveReadinessError(
             f"live readiness state is {report.state.value}, not LIVE_ELIGIBLE"
         )
-    if (type(report.artifact_hash) is not str or not _SHA256_RE.fullmatch(report.artifact_hash)
-            or type(deployed_artifact_hash) is not str
-            or not _SHA256_RE.fullmatch(deployed_artifact_hash)
-            or report.artifact_hash != deployed_artifact_hash):
-        raise LiveReadinessError("deployed artifact identity does not match readiness report")
+
+
+def brokerage_requires_live_gate(
+        instance: Mapping,
+        brokerage: Mapping,
+        *,
+        environ: Mapping | None = None,
+) -> bool:
+    """Classify a stock broker start as paper or funded, fail-closed.
+
+    Alpaca uses its persisted paper flag.  Robinhood has no paper endpoint, so
+    its explicit dry-run process mode is authoritative and defaults to dry-run.
+    """
+    if type(instance) is not dict:
+        raise LiveReadinessError("instance configuration is unavailable")
+    kind = instance.get("kind")
+    if kind not in (None, "", "equities"):
+        raise LiveReadinessError("instance is not an equities configuration")
+    brokerage_id = instance.get("brokerage_id")
+    if type(brokerage_id) is not str or not brokerage_id:
+        raise LiveReadinessError("linked brokerage is unavailable")
+    if (type(brokerage) is not dict
+            or brokerage.get("id") != brokerage_id):
+        raise LiveReadinessError("linked brokerage does not match instance")
+
+    brokerage_type = brokerage.get("brokerage_type")
+    if brokerage_type == "alpaca":
+        paper = brokerage.get("alpaca_paper")
+        if type(paper) is not bool:
+            raise LiveReadinessError("Alpaca execution mode is malformed")
+        return paper is False
+    if brokerage_type == "robinhood":
+        environment = os.environ if environ is None else environ
+        if not isinstance(environment, Mapping):
+            raise LiveReadinessError("Robinhood execution mode is malformed")
+        raw_mode = environment.get("RH_DRY_RUN", "true")
+        if type(raw_mode) is not str:
+            raise LiveReadinessError("Robinhood execution mode is malformed")
+        mode = raw_mode.strip().lower()
+        if mode in {"1", "true", "yes", "on"}:
+            return False
+        if mode in {"0", "false", "no", "off"}:
+            return True
+        raise LiveReadinessError("Robinhood execution mode is malformed")
+    raise LiveReadinessError("stock brokerage type is unsupported")

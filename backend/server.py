@@ -115,8 +115,9 @@ def register_socket_client(sio, sid, data, *, master_key=None):
     configured_token = (master_key if master_key is not None
                         else os.environ.get("SOCKET_CONTROL_MASTER_KEY", ""))
     provided_token = data.get("control_token")
-    role = "supervisor" if uuid == data.get("instance") else "broker" if uuid == str(data.get("instance")) + "_broker" else ""
-    expected_token = derive_socket_control_token(configured_token, data.get("instance"), role)
+    role = "broker" if uuid == str(data.get("instance")) + "_broker" else ""
+    expected_token = derive_socket_control_token(
+        configured_token, data.get("instance"), role)
     authenticated = (isinstance(configured_token, str) and bool(configured_token)
                      and isinstance(provided_token, str)
                      and bool(expected_token)
@@ -151,10 +152,10 @@ def unregister_socket_client(sid):
             clientOwners.pop(uuid, None)
 
 
-def derive_socket_control_token(master_key, instance_id, role="supervisor"):
+def derive_socket_control_token(master_key, instance_id, role="broker"):
     if (type(master_key) is not str or not re.fullmatch(r"[0-9a-f]{64}", master_key)
             or len(set(master_key)) < 8 or type(instance_id) is not str or not instance_id
-            or role not in {"supervisor", "broker"}):
+            or role != "broker"):
         return ""
     return hmac.new(master_key.encode("utf-8"), (instance_id + ":" + role).encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -183,7 +184,9 @@ def image_identity(image_obj):
 @dataclass(frozen=True)
 class InstanceLaunchPreflight:
     client: object
+    image_id: str
     image_digest: str
+    instance_id: str
     instance: dict
     brokerage: dict
 
@@ -193,12 +196,23 @@ def _preflight_instance_launch(instance_id, *, client=None):
     if client is None:
         raise LiveReadinessError("Docker client is unavailable")
     image = os.environ.get('DOCKER_INSTANCE_IMAGE', 'intellistock-backend')
-    digest = image_identity(client.images.get(image))
+    image_obj = client.images.get(image)
+    digest = image_identity(image_obj)
+    image_id = "sha256:" + digest
     instance, brokerage = _fresh_instance_docs(instance_id)
+    if instance.get("id") != str(instance_id):
+        raise LiveReadinessError("instance identity does not match launch")
     if is_funded_kalshi_live(instance, brokerage):
         from live_readiness import assert_live_start_allowed, report_from_mapping
         assert_live_start_allowed(report_from_mapping(instance.get("live_readiness_report"), instance_id=str(instance_id)), deployed_artifact_hash=digest)
-    return InstanceLaunchPreflight(client, digest, instance, brokerage)
+    return InstanceLaunchPreflight(
+        client=client,
+        image_id=image_id,
+        image_digest=digest,
+        instance_id=str(instance_id),
+        instance=instance,
+        brokerage=brokerage,
+    )
 
 
 def _fresh_instance_docs(instance_id):
@@ -437,6 +451,32 @@ def _get_instance_network(client):
     return _detect_container_network(client)
 
 
+def _docker_object_not_found(exc) -> bool:
+    return type(exc).__name__.lower().endswith("notfound")
+
+
+def _remove_existing_instance_container(client, name) -> None:
+    """Remove a prior named worker or fail without launching a duplicate."""
+    try:
+        old = client.containers.get(name)
+    except Exception as exc:
+        if _docker_object_not_found(exc):
+            return
+        raise
+    try:
+        old.stop(timeout=5)
+    except Exception as exc:
+        if _docker_object_not_found(exc):
+            return
+        raise
+    try:
+        old.remove()
+    except Exception as exc:
+        if _docker_object_not_found(exc):
+            return
+        raise
+
+
 def start_instance_container(instance_id, *, preflight=None):
     """
     Create and start a Docker container running instance.py.
@@ -445,7 +485,6 @@ def start_instance_container(instance_id, *, preflight=None):
     """
     global running_threads_objs
     name = _instance_container_name(instance_id)
-    image = os.environ.get('DOCKER_INSTANCE_IMAGE', 'intellistock-backend')
     # Env for the container: RethinkDB and server URL (so instance can connect)
     rethink_host = os.environ.get('INSTANCE_RETHINKDB_HOST', RETHINKDB_HOST)
     server_url = os.environ.get('INSTANCE_SERVER_URL', os.environ.get('SERVER_URL', 'http://localhost:5000'))
@@ -507,17 +546,21 @@ def start_instance_container(instance_id, *, preflight=None):
     # the unchanged equities path, so this CRITICAL-blast-radius launch point
     # cannot break the equities instances.
     master_key = os.environ.get("SOCKET_CONTROL_MASTER_KEY", "")
-    token = derive_socket_control_token(master_key, str(instance_id), "supervisor")
     broker_token = derive_socket_control_token(master_key, str(instance_id), "broker")
-    if not token or not broker_token:
+    if not broker_token:
         intellistock_logger.log("Instance launch blocked: socket ownership secret is unavailable", "red", service="SERVER")
         return None
-    env["INSTANCE_SOCKET_SUPERVISOR_TOKEN"] = token
     env["INSTANCE_SOCKET_BROKER_TOKEN"] = broker_token
     try:
-        preflight = preflight or _preflight_instance_launch(instance_id)
-        client = preflight.client
-        kind = preflight.instance.get("kind")
+        # This call must remain internal and immediately precede launch.  A
+        # caller cannot supply a stale authorization snapshot.
+        # A legacy caller may still pass ``preflight``; never trust or reuse it.
+        # The authoritative snapshot is always rebuilt here.
+        authoritative_preflight = _preflight_instance_launch(instance_id)
+        if authoritative_preflight.instance_id != str(instance_id):
+            raise LiveReadinessError("launch preflight instance does not match")
+        client = authoritative_preflight.client
+        kind = authoritative_preflight.instance.get("kind")
         if kind == "kalshi":
             cmd = ['python', '-m', 'kalshi.runner', str(instance_id)]
         elif kind in (None, "", "equities"):
@@ -526,31 +569,21 @@ def start_instance_container(instance_id, *, preflight=None):
             raise LiveReadinessError("instance kind is malformed")
         network = _get_instance_network(client)
         # Use only local image (do not pull); otherwise Docker tries Docker Hub and fails
-        try:
-            actual_image_digest = preflight.image_digest
-        except Exception:
-            intellistock_logger.log(
-                f"Image '{image}' not found locally. Build it first: docker build -t {image} ./backend (or docker-compose build backend)",
-                "red",
-                service="SERVER",
-            )
-            return None
+        actual_image_digest = authoritative_preflight.image_digest
+        immutable_image_id = authoritative_preflight.image_id
+        if immutable_image_id != "sha256:" + actual_image_digest:
+            raise LiveReadinessError("launch image identity is inconsistent")
         env["INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256"] = actual_image_digest
         # Fresh validation is deliberately before any old container mutation.
         # If a container with this name already exists (e.g. from a previous run), remove it
-        try:
-            old = client.containers.get(name)
-            old.stop(timeout=5)
-            old.remove()
-        except Exception:
-            pass
+        _remove_existing_instance_container(client, name)
         # Mount the live_trading_logs volume so the broker's log file is
         # readable from the api container via the same shared volume.
         volumes = [
             f'{LIVE_TRADING_LOG_VOLUME_NAME}:{LIVE_TRADING_LOG_DIR_IN_CONTAINER}',
         ]
         container = client.containers.run(
-            image,
+            immutable_image_id,
             command=cmd,
             name=name,
             environment=env,
@@ -562,36 +595,55 @@ def start_instance_container(instance_id, *, preflight=None):
         running_threads_objs[instance_id] = container
         intellistock_logger.log(f"Started instance container: {instance_id} ({name})", "green", service="SERVER")
         return container
-    except Exception as e:
-        intellistock_logger.log(f"Failed to start instance container {instance_id}: {e}", "red", service="SERVER")
+    except Exception as exc:
+        intellistock_logger.log(
+            f"Failed to start instance container {instance_id} "
+            f"({type(exc).__name__})",
+            "red",
+            service="SERVER",
+        )
         return None
 
 
 def stop_instance_container(instance_id):
-    """Stop and remove the Docker container for this instance."""
-    global running_threads_objs
+    """Stop/remove a worker and forget it only after authoritative success."""
+    global running_threads_objs, thread_count
     container = running_threads_objs.get(instance_id)
     if not container:
-        return
+        return True
     try:
-        try:
-            container.stop(timeout=5)
-        except Exception:
-            pass
+        container.stop(timeout=5)
+    except Exception as exc:
+        if not _docker_object_not_found(exc):
+            intellistock_logger.log(
+                f"Instance stop not confirmed for {instance_id} "
+                f"({type(exc).__name__})",
+                "red",
+                service="SERVER",
+            )
+            return False
+    else:
         try:
             container.remove()
-        except Exception:
-            pass
-    except Exception as e:
-        intellistock_logger.log(f"Error stopping instance container {instance_id}: {e}", "yellow", service="SERVER")
-    finally:
-        if instance_id in running_threads_objs:
-            del running_threads_objs[instance_id]
-        if instance_id in running_threads:
-            running_threads.remove(instance_id)
-        global thread_count
-        thread_count = max(0, thread_count - 1)
-    intellistock_logger.log(f"Stopped and removed instance container: {instance_id}", "green", service="SERVER")
+        except Exception as exc:
+            if not _docker_object_not_found(exc):
+                intellistock_logger.log(
+                    f"Instance removal not confirmed for {instance_id} "
+                    f"({type(exc).__name__})",
+                    "red",
+                    service="SERVER",
+                )
+                return False
+    running_threads_objs.pop(instance_id, None)
+    if instance_id in running_threads:
+        running_threads.remove(instance_id)
+    thread_count = max(0, thread_count - 1)
+    intellistock_logger.log(
+        f"Stopped and removed instance container: {instance_id}",
+        "green",
+        service="SERVER",
+    )
+    return True
 
 
 def _agent_container_env():

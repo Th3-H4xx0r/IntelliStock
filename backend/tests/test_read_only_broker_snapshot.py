@@ -27,6 +27,29 @@ def test_read_only_snapshot_uses_exact_get_endpoints_and_validates_shapes(monkey
         monkeypatch.setattr(mod, "_get_json", lambda *a: {"account_number": "acct"}) or mod.read_authoritative_snapshot({}, row)
 
 
+@pytest.mark.parametrize("full_index", [2, 3, 4])
+def test_snapshot_fails_closed_when_broker_history_may_be_truncated(
+        monkeypatch, full_index):
+    import read_only_broker_snapshot as mod
+
+    monkeypatch.setattr(mod, "decrypt_required", lambda value, **kw: "value")
+    values = [{"account_number": "acct"}, [], [], [], []]
+    limits = {2: 500, 3: 500, 4: 100}
+    values[full_index] = [{"id": str(index)}
+                          for index in range(limits[full_index])]
+    monkeypatch.setattr(mod, "_get_json", lambda *args: values.pop(0))
+    row = {
+        "brokerage_type": "alpaca",
+        "alpaca_paper": False,
+        "alpaca_base_url": "https://api.alpaca.markets",
+        "alpaca_key": "x",
+        "alpaca_secret": "y",
+        "alpaca_account_number": "acct",
+    }
+    with pytest.raises(RuntimeError, match="truncated"):
+        mod.read_authoritative_snapshot({}, row)
+
+
 @pytest.mark.parametrize("bad", [{"account_number": "other"}, [], None])
 def test_account_mismatch_or_malformed_fails_closed(monkeypatch, bad):
     import read_only_broker_snapshot as mod

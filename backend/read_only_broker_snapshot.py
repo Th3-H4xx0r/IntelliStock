@@ -48,4 +48,9 @@ def read_authoritative_snapshot(instance, brokerage):
     }
     if not all(isinstance(result[key], list) for key in ("positions", "open_orders", "recent_orders", "recent_trades")):
         raise RuntimeError("Alpaca response is malformed")
+    if (len(result["open_orders"]) >= 500
+            or len(result["recent_orders"]) >= 500
+            or len(result["recent_trades"]) >= 100):
+        raise RuntimeError(
+            "Alpaca history may be truncated at the requested page limit")
     return result

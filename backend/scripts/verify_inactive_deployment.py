@@ -89,6 +89,41 @@ def _document_hashes(documents: Iterable[Mapping]) -> tuple[str, ...]:
     return tuple(sorted(encoded))
 
 
+def _account_identity_hash(
+        instance_id: str,
+        brokerage_id: str,
+        brokerage: Mapping,
+        authoritative_account_id: str,
+) -> str:
+    """Bind the snapshot to the exact stock account link and environment."""
+    if (type(instance_id) is not str or not instance_id
+            or type(brokerage_id) is not str or not brokerage_id
+            or type(brokerage) is not dict
+            or brokerage.get("id") != brokerage_id
+            or brokerage.get("brokerage_type") != "alpaca"
+            or brokerage.get("alpaca_paper") is not False
+            or brokerage.get("alpaca_base_url")
+            not in {"https://api.alpaca.markets",
+                    "https://api.alpaca.markets/"}
+            or type(authoritative_account_id) is not str
+            or not authoritative_account_id
+            or brokerage.get("alpaca_account_number")
+            != authoritative_account_id):
+        raise RuntimeError("linked stock account identity is malformed")
+    identity = {
+        "instance_id": instance_id,
+        "brokerage_id": brokerage_id,
+        "brokerage_type": brokerage["brokerage_type"],
+        "paper": brokerage["alpaca_paper"],
+        "endpoint": brokerage["alpaca_base_url"],
+        "linked_account": brokerage["alpaca_account_number"],
+        "authoritative_account": authoritative_account_id,
+    }
+    canonical = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def compare_account_invariants(before: AccountInvariant,
                                after: AccountInvariant) -> InvariantComparison:
     reasons = []
@@ -135,9 +170,10 @@ def _snapshot_reader(conn, instance_id: str, broker_snapshot_reader, worker_stat
         raise RuntimeError("instance state is unavailable")
     if type(instance.get("runCommand")) is not bool:
         raise RuntimeError("runCommand is not a boolean")
-    from live_readiness import assert_live_start_allowed, report_from_mapping
+    from live_readiness import assert_artifact_bound, report_from_mapping
     report = report_from_mapping(instance.get("live_readiness_report"), instance_id=instance_id)
-    assert_live_start_allowed(report, deployed_artifact_hash=expected_artifact_hash)
+    assert_artifact_bound(
+        report, deployed_artifact_hash=expected_artifact_hash)
     brokerage_id = instance.get("brokerage_id")
     if not isinstance(brokerage_id, str) or not brokerage_id:
         raise RuntimeError("linked brokerage is unavailable")
@@ -163,7 +199,8 @@ def _snapshot_reader(conn, instance_id: str, broker_snapshot_reader, worker_stat
             positions=positions,
             orders=[*open_orders, *recent_orders, *recent_trades],
         ),
-        account_hash=hashlib.sha256(account_id.encode("utf-8")).hexdigest(),
+        account_hash=_account_identity_hash(
+            instance_id, brokerage_id, brokerage, account_id),
         worker_state=worker_state_reader(instance_id),
     )
 
