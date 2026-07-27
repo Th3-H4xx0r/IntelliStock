@@ -36,3 +36,4 @@ Task 8: committed at cf8e0b0.
 Task 9: complete locally; broker-first startup plus continuous reconciliation, deferred ownership, manual/external quarantine, and fail-closed snapshot consistency implemented. 96 focused tests passed.
 Task 9: committed at 99127c3.
 Task 10: complete locally; authoritative typed marks, dependency evidence timestamps, skew/age gates, read-only Alpaca mark stream, and fail-closed calendar behavior implemented. 129 focused tests passed.
+Task 11: complete locally; durable account/sleeve risk state, account-wide kill, watchdog health persistence, fail-closed kill polling, command leases/reconciliation quarantine, and stream shutdown implemented. 173 focused tests passed plus 64 risk follow-up tests.

@@ -19,7 +19,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -45,7 +45,9 @@ MAX_RECENT_TRADES = int(os.environ.get("LIVE_STATE_MAX_RECENT_TRADES", "100"))
 MAX_PORTFOLIO_HISTORY = int(os.environ.get("LIVE_STATE_MAX_PORTFOLIO_HISTORY", "500"))
 
 VALID_COMMAND_TYPES = frozenset({"halt", "close_position", "submit_order"})
-TERMINAL_COMMAND_STATUSES = frozenset({"completed", "failed"})
+TERMINAL_COMMAND_STATUSES = frozenset(
+    {"completed", "failed", "reconciliation_required"}
+)
 
 
 def append_current_equity_point(portfolio_history, equity, now_iso, max_ph=MAX_PORTFOLIO_HISTORY):
@@ -197,6 +199,10 @@ def submit_command(
         "error": None,
         "result": None,
         "submitted_by": submitted_by,
+        "lease_owner": None,
+        "lease_expires_at": None,
+        "lease_expires_at_iso": None,
+        "attempt_count": 0,
     }
     # Narrow the duplicate-id fallback to ReqlOpFailedError so a transport or
     # auth error doesn't get silently "recovered" via conflict=replace (which
@@ -223,44 +229,143 @@ def get_command(r, conn, command_id: str) -> Optional[dict]:
         return None
 
 
-def claim_next_pending(r, conn, instance_id: str) -> Optional[dict]:
-    """Broker side: atomically find the oldest pending command for this
-    instance and mark it running. Returns the command doc (with the new
-    status) or None if no pending work.
+def _command_claim_transition(
+    command: dict,
+    *,
+    now: datetime,
+    worker_id: str,
+    lease_seconds: float,
+) -> tuple[Optional[dict], bool]:
+    """Pure lease transition used by the RethinkDB command claimant.
 
-    Race-safe: we select by `(status=='pending', instance_id)`, sort by
-    `created_at`, pick the first, and run a conditional update that only
-    succeeds if the row is still pending. If the update touched 0 rows we
-    lost the race and try the next one.
+    An expired ``halt`` can be retried because it is idempotent and cannot add
+    exposure.  Every expired order-affecting command is quarantined for broker
+    reconciliation instead of being blindly re-submitted.
+    """
+
+    observed = now
+    if observed.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    observed = observed.astimezone(timezone.utc)
+    owner = str(worker_id or "").strip()
+    if not owner:
+        raise ValueError("worker_id is required")
+    lease = float(lease_seconds)
+    if lease <= 0:
+        raise ValueError("lease_seconds must be > 0")
+    cmd = dict(command or {})
+    status = str(cmd.get("status") or "").strip().lower()
+    if status == "running":
+        raw_expiry = cmd.get("lease_expires_at_iso")
+        try:
+            expiry = datetime.fromisoformat(str(raw_expiry))
+            if expiry.tzinfo is None:
+                raise ValueError
+            expiry = expiry.astimezone(timezone.utc)
+        except Exception:
+            expiry = datetime.fromtimestamp(0, timezone.utc)
+        if expiry > observed:
+            return None, False
+        if str(cmd.get("type") or "").strip().lower() != "halt":
+            cmd.update(
+                {
+                    "status": "reconciliation_required",
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "lease_expires_at_iso": None,
+                    "error": (
+                        "worker lease expired after possible broker side "
+                        "effect; reconcile lifecycle and broker history "
+                        "before issuing a replacement command"
+                    ),
+                    "completed_at": observed,
+                    "completed_at_iso": observed.isoformat(),
+                }
+            )
+            return cmd, False
+    elif status != "pending":
+        return None, False
+
+    expiry = observed + timedelta(seconds=lease)
+    cmd.update(
+        {
+            "status": "running",
+            "started_at": observed,
+            "started_at_iso": observed.isoformat(),
+            "lease_owner": owner,
+            "lease_expires_at": expiry,
+            "lease_expires_at_iso": expiry.isoformat(),
+            "attempt_count": int(cmd.get("attempt_count") or 0) + 1,
+            "error": None,
+        }
+    )
+    return cmd, True
+
+
+def claim_next_pending(
+    r,
+    conn,
+    instance_id: str,
+    *,
+    worker_id: Optional[str] = None,
+    lease_seconds: float = 30.0,
+) -> Optional[dict]:
+    """Atomically lease the oldest command eligible for execution.
+
+    Expired non-halt commands are atomically moved to
+    ``reconciliation_required`` and never returned for execution.  This
+    prevents a crash-after-submit from becoming a duplicate live order.
     """
     ensure_tables(r, conn)
     tbl = r.db(DB_NAME).table(LIVE_COMMANDS_TABLE)
+    owner = str(worker_id or f"broker-{os.getpid()}").strip()
+    now = datetime.now(timezone.utc)
     try:
-        pending = list(
+        candidates = list(
             tbl
             .get_all(str(instance_id), index="instance_id")
-            .filter({"status": "pending"})
+            .filter(
+                lambda row: row["status"].eq("pending")
+                | row["status"].eq("running")
+            )
             .order_by("created_at")
-            .limit(5)
+            .limit(20)
             .run(conn)
         )
     except Exception:
         return None
-    for cmd in pending:
+    for cmd in candidates:
         cmd_id = cmd.get("id")
         if not cmd_id:
             continue
+        updated, executable = _command_claim_transition(
+            cmd,
+            now=now,
+            worker_id=owner,
+            lease_seconds=lease_seconds,
+        )
+        if updated is None:
+            continue
+        patch = {
+            key: value
+            for key, value in updated.items()
+            if key not in {"id", "instance_id", "type", "payload", "created_at"}
+            and value != cmd.get(key)
+        }
+        prior_status = str(cmd.get("status") or "")
+        prior_owner = str(cmd.get("lease_owner") or "")
         try:
             res = tbl.get(cmd_id).update(
                 lambda row: r.branch(
-                    row["status"].eq("pending"),
-                    {"status": "running", "started_at": r.now(), "started_at_iso": _now_iso()},
+                    row["status"].eq(prior_status)
+                    & row["lease_owner"].default("").eq(prior_owner),
+                    patch,
                     {},
                 )
             ).run(conn)
             if int(res.get("replaced", 0) or 0) > 0:
-                fresh = tbl.get(cmd_id).run(conn)
-                return fresh
+                if executable:
+                    return tbl.get(cmd_id).run(conn)
         except Exception:
             continue
     return None
@@ -273,6 +378,9 @@ def complete_command(r, conn, command_id: str, *, result: Optional[dict] = None)
             "completed_at": r.now(),
             "completed_at_iso": _now_iso(),
             "result": result or {},
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "lease_expires_at_iso": None,
         }).run(conn)
     except Exception:
         pass
@@ -285,6 +393,9 @@ def fail_command(r, conn, command_id: str, *, error: str) -> None:
             "completed_at": r.now(),
             "completed_at_iso": _now_iso(),
             "error": str(error)[:2000],
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "lease_expires_at_iso": None,
         }).run(conn)
     except Exception:
         pass

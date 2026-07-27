@@ -80,7 +80,7 @@ def _maybe_start_alpha_watchdog(instance_id_val):
     (Task 6 Step 9). Restart-safe: any prior watchdog is stopped first."""
     global alpha_watchdog_process
     if os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") != "1":
-        return
+        return False
     _stop_alpha_watchdog()
     try:
         from benchmark_alpha.watchdog import build_watchdog_command
@@ -91,10 +91,33 @@ def _maybe_start_alpha_watchdog(instance_id_val):
         atexit.register(_stop_alpha_watchdog)
         intellistock_logger.log(
             "Started alpha mark watchdog subprocess", "green", service="INSTANCE")
+        return True
     except Exception as _wd_exc:
         intellistock_logger.log(
-            f"Alpha watchdog failed to start (non-fatal): {_wd_exc}",
-            "yellow", service="INSTANCE")
+            f"Alpha watchdog failed to start: {_wd_exc}",
+            "red", service="INSTANCE")
+        return False
+
+
+def _assert_watchdog_preflight() -> None:
+    """Reject funded Alpaca startup before Popen if watchdog wiring is absent."""
+
+    if os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") != "1":
+        raise RuntimeError("funded Alpaca requires ALPHA_MARK_WATCHDOG_ENABLED=1")
+    missing = [
+        name
+        for name in (
+            "ALPACA_WATCHDOG_KEY",
+            "ALPACA_WATCHDOG_SECRET",
+            "RETHINKDB_HOST",
+        )
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "funded Alpaca watchdog prerequisites are incomplete: "
+            + ",".join(missing)
+        )
 current_symbols = []   # list of symbols the broker was started with
 current_granularity_time_increment = '60'  # from Instances[instance_id].granularity_time_increment
 instance_key = ''      # from Instances[instance_id].key (loaded from DB)
@@ -478,10 +501,22 @@ def start_broker(symbols):
             'NULL', 'NULL', time_increment,
         ] + list(symbols)
     from live_readiness import brokerage_requires_live_gate
-    if (_kind == "kalshi"
-            or brokerage_requires_live_gate(
-                _instance_doc, _brokerage_doc, environ=os.environ)):
+    _requires_live_gate = (
+        _kind == "kalshi"
+        or brokerage_requires_live_gate(
+            _instance_doc, _brokerage_doc, environ=os.environ
+        )
+    )
+    _funded_alpaca = (
+        _kind != "kalshi"
+        and str(_brokerage_doc.get("brokerage_type") or "").lower()
+        == "alpaca"
+        and _brokerage_doc.get("alpaca_paper") is False
+    )
+    if _requires_live_gate:
         _assert_live_broker_start_allowed(instance_id, _instance_doc)
+    if _funded_alpaca:
+        _assert_watchdog_preflight()
     broker_env = os.environ.copy()
     broker_env.pop("INSTANCE_SOCKET_SUPERVISOR_TOKEN", None)
     broker_process = subprocess.Popen(
@@ -490,7 +525,20 @@ def start_broker(symbols):
         creationflags=0,  # same terminal (no CREATE_NEW_CONSOLE)
         env=broker_env,
     )
-    _maybe_start_alpha_watchdog(instance_id)
+    _watchdog_started = False
+    if (
+        _kind != "kalshi"
+        and str(_brokerage_doc.get("brokerage_type") or "").lower()
+        == "alpaca"
+    ):
+        _watchdog_started = _maybe_start_alpha_watchdog(instance_id)
+    if _funded_alpaca and not _watchdog_started:
+        try:
+            broker_process.terminate()
+            broker_process.wait(timeout=10)
+        finally:
+            broker_process = None
+        raise RuntimeError("funded Alpaca broker stopped: watchdog failed")
     if symbols:
         intellistock_logger.log(
             f"Started broker with {len(symbols)} ticker(s): {', '.join(symbols)} (secrets read from DB)",

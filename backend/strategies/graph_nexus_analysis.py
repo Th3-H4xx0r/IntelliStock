@@ -21603,13 +21603,10 @@ def _apply_portfolio_drawdown_halt(
                 _held_syms = list((portfolio_emulator.get_positions() or {}).keys())
         except Exception:
             _held_syms = []
-        # 2026-07-19 adversarial review CRITICAL: the kill tier must NOT
-        # liquidate the sleeve legs — in a crash the inverse leg is the
-        # position generating gains, and selling it triggered an infinite
-        # kill<->deploy churn loop (sleeve re-parks at cycle end, dd stays
-        # >= kill, repeat every bar).
-        _kill_sleeve_syms = _sleeve_symbols(config)
-        _held_syms = [s for s in _held_syms if s not in _kill_sleeve_syms]
+        # Account loss containment is portfolio-wide.  Sleeve deployment is
+        # already disabled during hard/kill tiers, so exempting a leveraged
+        # inverse leg here can only retain risk; it cannot prevent redeploy
+        # churn.  Liquidate every broker-owned holding, including SQQQ.
         _killed = []
         for sym in _held_syms:
             sc = scores.get(sym) if isinstance(scores.get(sym), dict) else {}

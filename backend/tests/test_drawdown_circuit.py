@@ -123,13 +123,12 @@ def test_override_cleared_when_recovered():
     assert "_dd_cut_floor_override" not in cache2
 
 
-def test_kill_spares_sleeve_legs():
-    # Adversarial review CRITICAL: kill must not liquidate the hedge.
+def test_account_kill_includes_sleeve_legs():
     cfg = {"residual_sleeve_enabled": True, "residual_sleeve_symbol": "SPY",
            "residual_sleeve_bear_symbol": "SQQQ"}
     out, cache = _run(5200.0, spy_ret20=-4.0,
                       positions={"AAA": 1.0, "SQQQ": 70.0, "SPY": 2.0}, cfg=cfg)
     assert cache["_portfolio_drawdown_state"]["circuit_tier"] == "kill"
     assert out["AAA"]["score"] == -1
-    assert out.get("SQQQ", {}).get("score") != -1, "kill must spare the bear leg"
-    assert out.get("SPY", {}).get("score") != -1, "kill must spare the SPY leg"
+    assert out["SQQQ"]["score"] == -1
+    assert out["SPY"]["score"] == -1

@@ -200,6 +200,7 @@ class AlpacaAdapter(BrokerAdapter):
         self._api_key = api_key
         self._api_secret = api_secret
         self._paper = paper
+        self._account_equity = None
 
         self._instance_id = instance_id
         self._wal = wal
@@ -1506,12 +1507,14 @@ class AlpacaAdapter(BrokerAdapter):
         """
         acct = self._client.get_account()
         cash = float(acct.cash or 0.0)
+        equity = float(acct.equity or 0.0)
         # Keep the cached _cash in sync so sizing code that reads it
         # (PortfolioEmulator-style) doesn't drift from Alpaca.
         with self._lock:
             self._cash = cash
+            self._account_equity = equity
         return AccountDTO(
-            equity=float(acct.equity or 0.0),
+            equity=equity,
             pattern_day_trader=bool(getattr(acct, "pattern_day_trader", False)),
             daytrade_count=int(getattr(acct, "daytrade_count", 0) or 0),
             account_blocked=bool(getattr(acct, "account_blocked", False)),
@@ -1628,6 +1631,31 @@ class AlpacaAdapter(BrokerAdapter):
             "subscribed": tuple(sorted(self._mark_stream.subscribed_symbols())),
             "overflow": tuple(sorted(self._mark_stream.overflow_symbols())),
         }
+
+    def stop_live_streams(self) -> None:
+        """Stop market/order streams and drain the ordered event worker."""
+
+        self._stop_stream = True
+        mark_stream = self._mark_stream
+        if mark_stream is not None:
+            mark_stream.stop()
+        stream = self._stream
+        if stream is not None:
+            for name in ("stop", "stop_ws"):
+                stopper = getattr(stream, name, None)
+                if callable(stopper):
+                    try:
+                        stopper()
+                    except Exception:
+                        pass
+                    break
+        thread = self._stream_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        executor = self._order_event_executor
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
+            self._order_event_executor = None
 
     def bind_order_event_sink(self, sink, *, account_id: str) -> None:
         """Bind the durable lifecycle sink used by the promoted Alpaca path.

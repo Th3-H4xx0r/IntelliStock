@@ -85,6 +85,8 @@ _live_trading_started_at = None
 # Task 7: Alpaca-stock orders cross exactly one immutable gate/service seam.
 # All values begin UNKNOWN and are promoted only by successful live checks.
 _live_stock_order_service = None
+_live_risk_store = None
+_live_risk_state = None
 _live_order_dependency_lock = threading.RLock()
 _live_order_dependency_state = {
     "kill_switch": "unknown",
@@ -6332,6 +6334,95 @@ def _reconcile_alpaca_ownership(adapter, order_service):
         raise
 
 
+def _initialize_live_risk_authority(
+    adapter, *, account_id: str, paper: bool
+):
+    """Load account-scoped risk state; only paper may bootstrap it."""
+
+    global _live_risk_store, _live_risk_state
+    from live_risk_state import (
+        RethinkRiskBackend,
+        RiskStateStore,
+        RiskStateUnavailable,
+        initialize_risk_state,
+    )
+
+    store = RiskStateStore(RethinkRiskBackend())
+    try:
+        state = store.load_required(str(instance_id), str(account_id))
+    except RiskStateUnavailable:
+        if not paper:
+            _live_risk_store = store
+            _live_risk_state = None
+            with _live_order_dependency_lock:
+                _live_order_dependency_state.update(
+                    {"risk_state": "unknown", "risk_state_at": None}
+                )
+            return None
+        equity = (
+            getattr(adapter, "_account_equity", None)
+            or getattr(adapter, "_initial_value", None)
+        )
+        state = store.save(
+            initialize_risk_state(
+                str(instance_id),
+                str(account_id),
+                equity,
+                datetime.datetime.now(datetime.timezone.utc),
+            )
+        )
+    _live_risk_store = store
+    _live_risk_state = state
+    return state
+
+
+def _refresh_live_account_risk_state(adapter, observed_at):
+    """Persist one fresh broker-equity drawdown observation."""
+
+    global _live_risk_state
+    from live_risk_state import evaluate_drawdown
+
+    if _live_risk_store is None or _live_risk_state is None:
+        raise RuntimeError("durable risk state is unavailable")
+    equity = getattr(adapter, "_account_equity", None)
+    if equity is None:
+        raise RuntimeError("fresh broker equity is unavailable")
+    evaluated = evaluate_drawdown(
+        _live_risk_state, equity, observed_at
+    )
+    _live_risk_state = _live_risk_store.save(evaluated)
+    snapshot_id = (
+        f"risk-state:{_live_risk_state.version}:"
+        f"{_live_risk_state.observed_at.isoformat()}"
+    )
+    with _live_order_dependency_lock:
+        _live_order_dependency_state.update(
+            {
+                "risk_state": (
+                    "healthy"
+                    if _live_risk_state.new_exposure_allowed
+                    else "unhealthy"
+                ),
+                "risk_state_at": _live_risk_state.observed_at,
+                "risk_snapshot_id": snapshot_id,
+            }
+        )
+    return _live_risk_state
+
+
+def _apply_live_confirmed_fill_risk(fill):
+    """Update sleeve protection only after a durable confirmed fill."""
+
+    global _live_risk_state
+    from live_risk_state import apply_confirmed_fill
+
+    if _live_risk_store is None or _live_risk_state is None:
+        raise RuntimeError("confirmed fill cannot update missing risk state")
+    updated = apply_confirmed_fill(_live_risk_state, fill)
+    if updated != _live_risk_state:
+        _live_risk_state = _live_risk_store.save(updated)
+
+
 def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
     from decimal import Decimal
@@ -6378,6 +6469,20 @@ def _live_order_dependency_snapshot(adapter, intent):
         value = state.get(name)
         return value if isinstance(value, datetime.datetime) else None
 
+    max_order_notional = None
+    max_position_quantity = None
+    if _live_risk_state is not None:
+        max_order_notional = _live_risk_state.max_order_notional
+        position_limit = (
+            _live_risk_state.max_leveraged_notional
+            if symbol in {
+                "SQQQ", "TQQQ", "SPXU", "UPRO", "SOXL", "SOXS"
+            }
+            else _live_risk_state.max_symbol_notional
+        )
+        if position_limit is not None and quote_price > 0:
+            max_position_quantity = position_limit / quote_price
+
     return DependencySnapshot(
         account_id=account_id,
         instance_id=instance_identity,
@@ -6410,6 +6515,8 @@ def _live_order_dependency_snapshot(adapter, intent):
         persistence_at=_state_time("persistence_at"),
         risk_state_at=_state_time("risk_state_at"),
         watchdog_at=_state_time("watchdog_at"),
+        max_order_notional=max_order_notional,
+        max_position_quantity=max_position_quantity,
         max_quote_age=datetime.timedelta(
             seconds=600 if intent.reduce_only else 30
         ),
@@ -6739,6 +6846,15 @@ def _live_state_command_worker(instance_id_val: str, adapter, order_service=None
     to reason about than a long-lived changefeed that can die silently under
     network blips."""
     interval = float(os.environ.get("LIVE_STATE_COMMAND_POLL_INTERVAL_SEC", "1"))
+    worker_id = (
+        f"{str(instance_id_val)}:{os.getpid()}:{threading.get_ident()}"
+    )
+    lease_seconds = max(
+        30.0,
+        float(
+            os.environ.get("LIVE_COMMAND_LEASE_SECONDS", "30") or 30
+        ),
+    )
     conn_local = None
     try:
         import live_state as _ls_mod
@@ -6751,7 +6867,13 @@ def _live_state_command_worker(instance_id_val: str, adapter, order_service=None
             if conn_local is None:
                 _live_trading_stop_event.wait(interval)
                 continue
-            cmd = _ls_mod.claim_next_pending(r, conn_local, instance_id_val)
+            cmd = _ls_mod.claim_next_pending(
+                r,
+                conn_local,
+                instance_id_val,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+            )
             if cmd is None:
                 _live_trading_stop_event.wait(interval)
                 continue
@@ -6828,6 +6950,17 @@ def _shutdown_live_trading_state(reason: str = "shutdown") -> None:
         _live_trading_stop_event.set()
     except Exception:
         pass
+    try:
+        if live_adapter is not None:
+            stop_streams = getattr(live_adapter, "stop_live_streams", None)
+            if callable(stop_streams):
+                stop_streams()
+    except Exception as _stream_stop_error:
+        _log(
+            "Live stream shutdown warning: "
+            f"{type(_stream_stop_error).__name__}",
+            "yellow",
+        )
     # Wait for the snapshot + command threads to exit so a mid-tick upsert
     # can't resurrect the row we're about to delete.
     _snap_interval = float(os.environ.get("LIVE_STATE_SNAPSHOT_INTERVAL_SEC", "3"))
@@ -7605,6 +7738,18 @@ elif mode == MODE_LIVE:
                     or getattr(live_adapter, "_account_id", None)
                     or getattr(live_adapter, "_instance_id", instance_id)
                 )
+                _risk_authority = _initialize_live_risk_authority(
+                    live_adapter,
+                    account_id=_gate_account_id,
+                    paper=bool(live_broker_paper),
+                )
+                if _risk_authority is None:
+                    _log(
+                        "Durable account risk state is missing; funded "
+                        "exposure remains blocked until paper promotion "
+                        "provides account-scoped state.",
+                        "red",
+                    )
                 _live_stock_order_service = LiveOrderService(
                     account_id=_gate_account_id,
                     instance_id=str(instance_id),
@@ -7618,6 +7763,7 @@ elif mode == MODE_LIVE:
                         _RethinkLifecycleBackend()
                     ),
                     lookup_by_client_id=live_adapter.get_order_by_client_id,
+                    confirmed_fill_handler=_apply_live_confirmed_fill_risk,
                     event_handler=live_adapter.apply_lifecycle_event,
                 )
                 live_adapter.bind_order_event_sink(
@@ -10370,10 +10516,8 @@ while not shutdown_requested:
                     with _live_order_dependency_lock:
                         _live_order_dependency_state.update({
                             "risk_state": "unknown",
-                            "watchdog": "unknown",
                             "risk_snapshot_id": "",
                             "risk_state_at": None,
-                            "watchdog_at": None,
                         })
                 # 2026-05-07 scheduler refactor: skip pre-cycle RH refresh on
                 # IDLE ticks. Strategy returns {} immediately on IDLE so
@@ -10492,7 +10636,35 @@ while not shutdown_requested:
                             )
                         except Exception:
                             _pos_ok = False
-                    if _acct_ok and _pos_ok:
+                    _risk_ok = True
+                    if (
+                        _acct_ok
+                        and _pos_ok
+                        and str(live_broker_type or "").strip().lower()
+                        == "alpaca"
+                    ):
+                        try:
+                            _refresh_live_account_risk_state(
+                                live_adapter,
+                                datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ),
+                            )
+                        except Exception as _risk_exc:
+                            _risk_ok = False
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state.update(
+                                    {
+                                        "risk_state": "unknown",
+                                        "risk_state_at": None,
+                                    }
+                                )
+                            _log(
+                                "Durable account risk refresh failed; "
+                                f"blocking exposure ({type(_risk_exc).__name__})",
+                                "red",
+                            )
+                    if _acct_ok and _pos_ok and _risk_ok:
                         if str(live_broker_type or "").strip().lower() == "alpaca":
                             _fresh_dependency_at = datetime.datetime.now(
                                 datetime.timezone.utc
@@ -10522,7 +10694,8 @@ while not shutdown_requested:
                         _precycle_ok = False
                         _log(
                             f"Pre-cycle RH refresh FAILED "
-                            f"(account_ok={_acct_ok}, positions_ok={_pos_ok}) "
+                            f"(account_ok={_acct_ok}, positions_ok={_pos_ok}, "
+                            f"risk_ok={_risk_ok}) "
                             f"— SKIPPING this hourly cycle to avoid trading "
                             f"on stale data. Will retry on next loop tick.",
                             "red",
@@ -10828,23 +11001,17 @@ while not shutdown_requested:
                         and _precycle_ok
                         and _run_once_gate_ok
                     ):
-                        _risk_snapshot_id = (
-                            f"risk:{str(instance_id)}:"
-                            f"{current_time.isoformat()}:"
-                            f"{int(_strategy_tick_n)}"
-                        )
-                        _risk_evidence_at = datetime.datetime.now(
-                            datetime.timezone.utc
-                        )
                         with _live_order_dependency_lock:
-                            _live_order_dependency_state.update({
-                                "risk_state": "healthy",
-                                "watchdog": "healthy",
-                                "risk_snapshot_id": _risk_snapshot_id,
-                                "risk_state_at": _risk_evidence_at,
-                                "watchdog_at": _risk_evidence_at,
-                            })
-                        if _live_stock_order_service is not None:
+                            _risk_snapshot_id = str(
+                                _live_order_dependency_state.get(
+                                    "risk_snapshot_id"
+                                )
+                                or ""
+                            )
+                        if (
+                            _live_stock_order_service is not None
+                            and _risk_snapshot_id
+                        ):
                             _live_stock_order_service.risk_snapshot_id = (
                                 _risk_snapshot_id
                             )
@@ -11623,7 +11790,19 @@ while not shutdown_requested:
                         timeout=5,
                     )
                     try:
-                        return _ks_r.db("IntelliStock").table("Instances").get(str(instance_id)).run(_ks_conn)
+                        _instance_row = (
+                            _ks_r.db("IntelliStock")
+                            .table("Instances")
+                            .get(str(instance_id))
+                            .run(_ks_conn)
+                        )
+                        _watchdog_row = (
+                            _ks_r.db("IntelliStock")
+                            .table("AlphaState")
+                            .get(f"control_health:{str(instance_id)}")
+                            .run(_ks_conn)
+                        )
+                        return _instance_row, _watchdog_row
                     finally:
                         try:
                             _ks_conn.close(noreply_wait=False)
@@ -11632,7 +11811,51 @@ while not shutdown_requested:
                 try:
                     _ks_fut = _PRICE_FETCH_EXECUTOR.submit(_ks_poll_blocking)
                     try:
-                        _inst = _ks_fut.result(timeout=10.0)
+                        _inst, _watchdog_row = _ks_fut.result(timeout=10.0)
+                        try:
+                            from benchmark_alpha.watchdog import ControlHealth
+
+                            _wd_payload = dict(
+                                (_watchdog_row or {}).get("payload") or {}
+                            )
+                            _wd_evidence = ControlHealth(
+                                instance_id=_wd_payload.get("instance_id"),
+                                status=_wd_payload.get("status"),
+                                observed_at=datetime.datetime.fromisoformat(
+                                    str(_wd_payload.get("observed_at"))
+                                ),
+                                result_status=_wd_payload.get(
+                                    "result_status"
+                                ),
+                                degraded_audit=_wd_payload.get(
+                                    "degraded_audit"
+                                ),
+                                evidence_hash=_wd_payload.get(
+                                    "evidence_hash"
+                                ),
+                            )
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state.update(
+                                    {
+                                        "watchdog": (
+                                            "healthy"
+                                            if _wd_evidence.status == "healthy"
+                                            and not _wd_evidence.degraded_audit
+                                            else "unhealthy"
+                                        ),
+                                        "watchdog_at": (
+                                            _wd_evidence.observed_at
+                                        ),
+                                    }
+                                )
+                        except Exception:
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state.update(
+                                    {
+                                        "watchdog": "unknown",
+                                        "watchdog_at": None,
+                                    }
+                                )
                         if _inst and _inst.get("runCommand") is False:
                             with _live_order_dependency_lock:
                                 _live_order_dependency_state["kill_switch"] = (
@@ -11653,18 +11876,34 @@ while not shutdown_requested:
                                 )
                     except _live_cf.TimeoutError:
                         with _live_order_dependency_lock:
-                            _live_order_dependency_state["kill_switch"] = (
-                                "unknown"
+                            _live_order_dependency_state.update(
+                                {
+                                    "kill_switch": "unknown",
+                                    "watchdog": "unknown",
+                                    "watchdog_at": None,
+                                }
                             )
                         _log(
                             "Kill-switch poll hard-timeout (>10s) — "
-                            "fail-open, continuing trading",
+                            "failing closed for this tick",
                             "yellow",
                         )
+                        _exec_order = []
                 except Exception as _ks_e:
                     with _live_order_dependency_lock:
-                        _live_order_dependency_state["kill_switch"] = "unknown"
-                    _log(f"Kill-switch poll failed: {type(_ks_e).__name__}: {_ks_e} (failing open — continuing)", "yellow")
+                        _live_order_dependency_state.update(
+                            {
+                                "kill_switch": "unknown",
+                                "watchdog": "unknown",
+                                "watchdog_at": None,
+                            }
+                        )
+                    _exec_order = []
+                    _log(
+                        "Kill-switch/watchdog poll failed: "
+                        f"{type(_ks_e).__name__} (failing closed)",
+                        "yellow",
+                    )
                 finally:
                     with _live_order_dependency_lock:
                         _live_order_dependency_state["kill_switch_at"] = (
