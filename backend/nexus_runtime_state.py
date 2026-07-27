@@ -6,6 +6,7 @@ as a runtime guard; the bug-checking agents verify the source grep too.
 
 Tables introduced:
 - LiveOrderWAL       - write-ahead log for every live order (broker_adapters/_wal.py)
+- LiveOrderLifecycle - append-only normalized order-event histories
 - NexusRuntimeState  - per-instance+scope runtime cache (blacklist, cooldowns, peaks)
 - LiveDecisionAudit  - append-only audit of every live decision
 """
@@ -27,6 +28,7 @@ except ImportError:
 
 DB_NAME = "IntelliStock"
 WAL_TABLE = "LiveOrderWAL"
+LIFECYCLE_TABLE = "LiveOrderLifecycle"
 STATE_TABLE = "NexusRuntimeState"
 AUDIT_TABLE = "LiveDecisionAudit"
 
@@ -65,11 +67,11 @@ def _conn() -> Iterator:
 
 def ensure_tables() -> None:
     """Create WAL/state/audit tables if missing. Raises if a forbidden table is requested."""
-    for t in (WAL_TABLE, STATE_TABLE, AUDIT_TABLE):
+    for t in (WAL_TABLE, LIFECYCLE_TABLE, STATE_TABLE, AUDIT_TABLE):
         _assert_table_allowed(t)
     with _conn() as c:
         existing = set(_r.db(DB_NAME).table_list().run(c))
-        for t in (WAL_TABLE, STATE_TABLE, AUDIT_TABLE):
+        for t in (WAL_TABLE, LIFECYCLE_TABLE, STATE_TABLE, AUDIT_TABLE):
             if t not in existing:
                 _r.db(DB_NAME).table_create(t).run(c)
 
@@ -171,6 +173,83 @@ class WALStore:
             row.pop("id", None)
             out.append(row)
         return out
+
+
+class RethinkLifecycleBackend:
+    """Atomic backend for ``live_orders.OrderLifecycleStore``.
+
+    Each row owns one immutable client-order identity. ``events`` only grows;
+    ``version`` is updated by an atomic compare-and-set expression.
+    """
+
+    def __init__(self) -> None:
+        _assert_table_allowed(LIFECYCLE_TABLE)
+
+    def create(self, row) -> bool:
+        _assert_table_allowed(LIFECYCLE_TABLE)
+        payload = dict(row)
+        payload["id"] = payload["client_order_id"]
+        try:
+            with _conn() as c:
+                _r.db(DB_NAME).table(LIFECYCLE_TABLE).insert(
+                    payload, conflict="error"
+                ).run(c)
+            return True
+        except Exception:
+            # A duplicate deterministic identity is idempotent. Any storage
+            # outage still propagates because the confirming read also fails.
+            if self.get(payload["client_order_id"]) is not None:
+                return False
+            raise
+
+    def get(self, client_order_id: str) -> Optional[dict]:
+        _assert_table_allowed(LIFECYCLE_TABLE)
+        with _conn() as c:
+            row = (
+                _r.db(DB_NAME)
+                .table(LIFECYCLE_TABLE)
+                .get(str(client_order_id))
+                .run(c)
+            )
+        if row is None:
+            return None
+        row.pop("id", None)
+        return row
+
+    def compare_and_swap(
+        self, client_order_id: str, expected_version: int, row
+    ) -> bool:
+        _assert_table_allowed(LIFECYCLE_TABLE)
+        patch = dict(row)
+        patch.pop("id", None)
+        with _conn() as c:
+            result = (
+                _r.db(DB_NAME)
+                .table(LIFECYCLE_TABLE)
+                .get(str(client_order_id))
+                .update(
+                    lambda current: _r.branch(
+                        current["version"].default(-1).eq(int(expected_version)),
+                        patch,
+                        {},
+                    )
+                )
+                .run(c)
+            )
+        return int(result.get("replaced", 0) or 0) == 1
+
+    def list_for_instance(self, instance_id: str) -> list[dict]:
+        _assert_table_allowed(LIFECYCLE_TABLE)
+        with _conn() as c:
+            rows = list(
+                _r.db(DB_NAME)
+                .table(LIFECYCLE_TABLE)
+                .filter({"instance_id": str(instance_id)})
+                .run(c)
+            )
+        for row in rows:
+            row.pop("id", None)
+        return rows
 
 
 # ---- NexusRuntimeState accessors ----

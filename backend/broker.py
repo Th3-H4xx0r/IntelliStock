@@ -7199,7 +7199,11 @@ if mode == MODE_BACKTEST:
          % (initial_cash, _bt_taker_fee, " [emulated]" if emulated_taker_fee is not None else "", _bt_execution_kind), "green")
 elif mode == MODE_LIVE:
     try:
-        from nexus_runtime_state import ensure_tables as _ensure_live_tables, WALStore as _WALStore
+        from nexus_runtime_state import (
+            ensure_tables as _ensure_live_tables,
+            WALStore as _WALStore,
+            RethinkLifecycleBackend as _RethinkLifecycleBackend,
+        )
         from broker_adapters.factory import build_adapter as _build_adapter
         from broker_adapters._preflight import alpaca_quota_budget as _quota_budget
         from broker_adapters.errors import BrokerError as _BrokerError
@@ -7473,7 +7477,6 @@ elif mode == MODE_LIVE:
                 clean_room_retention_days=_clean_room_retention_days,
                 seed_trades_from_broker=(not _clean_room_mode),
             )
-            live_adapter.start_trade_updates()
             # Task 6 containment: block every legacy live submission when
             # this instance's RethinkDB containment state disables legacy
             # order authority (fail closed if the state is unreadable).
@@ -7482,6 +7485,7 @@ elif mode == MODE_LIVE:
             # Task 7 is intentionally stock/Alpaca-only. Robinhood, crypto,
             # and prediction-market adapters retain their existing paths.
             if str(live_broker_type or "").strip().lower() == "alpaca":
+                from live_orders import OrderLifecycleStore
                 from live_state import LiveOrderService
                 _gate_account_id = str(
                     live_brokerage_id
@@ -7497,6 +7501,15 @@ elif mode == MODE_LIVE:
                     # Bound method injection only; every CALL occurs inside
                     # LiveOrderService after UnifiedOrderGate approval.
                     transport=live_adapter.submit_order,
+                    lifecycle_store=OrderLifecycleStore(
+                        _RethinkLifecycleBackend()
+                    ),
+                    lookup_by_client_id=live_adapter.get_order_by_client_id,
+                    event_handler=live_adapter.apply_lifecycle_event,
+                )
+                live_adapter.bind_order_event_sink(
+                    _live_stock_order_service.apply_broker_event,
+                    account_id=_gate_account_id,
                 )
                 _gate_now = datetime.datetime.now(datetime.timezone.utc)
                 with _live_order_dependency_lock:
@@ -7513,6 +7526,9 @@ elif mode == MODE_LIVE:
                     })
             else:
                 _live_stock_order_service = None
+            # Start the Alpaca stream only after the durable event sink is
+            # bound; no fill can race the lifecycle authority at boot.
+            live_adapter.start_trade_updates()
         except _BrokerError as _be:
             _log(f"Failed to build live broker adapter: {_be}", "red")
             # Phase C (2026-04-29): Discord alert on adapter build failure.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -30,6 +30,30 @@ class OrderSource(str, Enum):
     MANUAL = "manual"
     RISK_EXIT = "risk_exit"
     RESIDUAL_SLEEVE = "residual_sleeve"
+
+
+class LifecycleState(str, Enum):
+    """Durable states for one immutable client-order identity."""
+
+    INTENT = "intent"
+    SUBMITTING = "submitting"
+    UNKNOWN = "unknown"
+    ACKNOWLEDGED = "acknowledged"
+    PARTIAL = "partial"
+    FILLED = "filled"
+    CANCELED = "canceled"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+TERMINAL_LIFECYCLE_STATES = frozenset(
+    {
+        LifecycleState.FILLED,
+        LifecycleState.CANCELED,
+        LifecycleState.REJECTED,
+        LifecycleState.EXPIRED,
+    }
+)
 
 
 def _aware_utc(value: datetime, field_name: str) -> datetime:
@@ -335,3 +359,133 @@ class GateDecision:
         """Compatibility/readability alias for callers displaying denials."""
 
         return self.reason_codes
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerOrderEvent:
+    """Immutable normalized broker event.
+
+    Broker feeds supply cumulative quantities and average prices. The order
+    service fills the incremental fields before persistence/accounting.
+    """
+
+    event_id: str
+    account_id: str
+    instance_id: str
+    client_order_id: str
+    broker_order_id: Optional[str]
+    symbol: str
+    side: OrderSide
+    state: LifecycleState
+    cumulative_quantity: Decimal
+    cumulative_average_price: Optional[Decimal]
+    cumulative_fees: Decimal
+    occurred_at: datetime
+    sequence: int = -1
+    incremental_quantity: Decimal = Decimal("0")
+    incremental_price: Optional[Decimal] = None
+    incremental_fees: Decimal = Decimal("0")
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        strings = {
+            "event_id": self.event_id,
+            "account_id": self.account_id,
+            "instance_id": self.instance_id,
+            "client_order_id": self.client_order_id,
+            "symbol": self.symbol,
+        }
+        for name, raw in strings.items():
+            value = str(raw or "").strip()
+            if not value:
+                raise ValueError(f"{name} is required")
+            if name == "symbol":
+                value = value.upper()
+            object.__setattr__(self, name, value)
+        broker_order_id = str(self.broker_order_id or "").strip() or None
+        object.__setattr__(self, "broker_order_id", broker_order_id)
+        try:
+            side = self.side if isinstance(self.side, OrderSide) else OrderSide(
+                str(self.side).lower()
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"unsupported order side: {self.side!r}") from exc
+        try:
+            state = (
+                self.state
+                if isinstance(self.state, LifecycleState)
+                else LifecycleState(str(self.state).lower())
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"unsupported lifecycle state: {self.state!r}") from exc
+        cumulative = _decimal(self.cumulative_quantity, "cumulative_quantity")
+        incremental = _decimal(
+            self.incremental_quantity, "incremental_quantity"
+        )
+        cumulative_fees = _decimal(self.cumulative_fees, "cumulative_fees")
+        incremental_fees = _decimal(self.incremental_fees, "incremental_fees")
+        average = _optional_decimal(
+            self.cumulative_average_price, "cumulative_average_price"
+        )
+        incremental_price = _optional_decimal(
+            self.incremental_price, "incremental_price"
+        )
+        if min(cumulative, incremental, cumulative_fees, incremental_fees) < 0:
+            raise ValueError("event quantities and fees must be non-negative")
+        if average is not None and average <= 0:
+            raise ValueError("cumulative_average_price must be > 0")
+        if incremental_price is not None and incremental_price <= 0:
+            raise ValueError("incremental_price must be > 0")
+        if state in (LifecycleState.PARTIAL, LifecycleState.FILLED):
+            if cumulative <= 0 or average is None:
+                raise ValueError("fill events require cumulative quantity and price")
+        try:
+            sequence = int(self.sequence)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("sequence must be an integer") from exc
+        if sequence < -1 or sequence != self.sequence:
+            raise ValueError("sequence must be -1 or a non-negative integer")
+        object.__setattr__(self, "side", side)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "cumulative_quantity", cumulative)
+        object.__setattr__(self, "cumulative_average_price", average)
+        object.__setattr__(self, "cumulative_fees", cumulative_fees)
+        object.__setattr__(self, "incremental_quantity", incremental)
+        object.__setattr__(self, "incremental_price", incremental_price)
+        object.__setattr__(self, "incremental_fees", incremental_fees)
+        object.__setattr__(self, "occurred_at", _aware_utc(self.occurred_at, "occurred_at"))
+        object.__setattr__(self, "sequence", sequence)
+        object.__setattr__(self, "reason", str(self.reason or "").strip())
+
+    def with_identity(self, **changes) -> "BrokerOrderEvent":
+        """Return an immutable variant; useful to test identity drift."""
+
+        return replace(self, **changes)
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmedFill:
+    """Exactly-once incremental accounting instruction."""
+
+    event: BrokerOrderEvent
+    incremental_quantity: Decimal
+    incremental_price: Decimal
+    incremental_fees: Decimal
+    position_delta: Decimal
+    cash_delta: Decimal
+
+    def __post_init__(self) -> None:
+        quantity = _decimal(
+            self.incremental_quantity, "incremental_quantity", positive=True
+        )
+        price = _decimal(self.incremental_price, "incremental_price", positive=True)
+        fees = _decimal(self.incremental_fees, "incremental_fees")
+        position_delta = _decimal(self.position_delta, "position_delta")
+        cash_delta = _decimal(self.cash_delta, "cash_delta")
+        if fees < 0:
+            raise ValueError("incremental_fees must be non-negative")
+        object.__setattr__(self, "incremental_quantity", quantity)
+        object.__setattr__(self, "incremental_price", price)
+        object.__setattr__(self, "incremental_fees", fees)
+        object.__setattr__(self, "position_delta", position_delta)
+        object.__setattr__(self, "cash_delta", cash_delta)

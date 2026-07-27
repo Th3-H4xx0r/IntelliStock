@@ -22,10 +22,13 @@ Crash safety:
 from __future__ import annotations
 
 import copy
+import concurrent.futures
+import hashlib
 import os
 import threading
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from broker_adapters.base import (
@@ -243,6 +246,11 @@ class AlpacaAdapter(BrokerAdapter):
         self._stream_thread: Optional[threading.Thread] = None
         self._last_heartbeat_utc: Optional[datetime] = None
         self._trade_updates_connected = False
+        self._order_event_sink = None
+        self._order_event_account_id = ""
+        self._order_event_executor: Optional[
+            concurrent.futures.ThreadPoolExecutor
+        ] = None
 
         # PortfolioEmulator-compatible mirror
         self._positions: dict[str, float] = {}
@@ -689,14 +697,16 @@ class AlpacaAdapter(BrokerAdapter):
         from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
 
-        # Idempotency: if we've already attempted this cid, query by client id first.
-        # On transient failure we swallow and proceed (intent path will re-reconcile).
+        # Idempotency: query by deterministic client id before every POST.
+        # An unavailable lookup is ambiguity, never permission to submit.
         try:
             existing_ref = self.get_order_by_client_id(client_order_id)
             if existing_ref is not None:
                 return existing_ref
-        except BrokerError:
-            pass  # transient; fall through to submit. WAL+reconcile handles dup safety.
+        except BrokerError as lookup_error:
+            raise BrokerError(
+                f"pre-submit reconciliation unavailable for {client_order_id}"
+            ) from lookup_error
 
         self._wal.record_intent(client_order_id, symbol, side, qty, notional)
 
@@ -1354,6 +1364,277 @@ class AlpacaAdapter(BrokerAdapter):
             )
             self._stream_thread.start()
 
+    def bind_order_event_sink(self, sink, *, account_id: str) -> None:
+        """Bind the durable lifecycle sink used by the promoted Alpaca path.
+
+        A single worker preserves stream order and keeps synchronous
+        persistence/network I/O off alpaca-py's asyncio callback.
+        """
+
+        if not callable(sink):
+            raise TypeError("order event sink must be callable")
+        account_id = str(account_id or "").strip()
+        if not account_id:
+            raise ValueError("account_id is required for order event identity")
+        self._order_event_sink = sink
+        self._order_event_account_id = account_id
+        if self._order_event_executor is None:
+            self._order_event_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"alpaca-events-{self._instance_id[:12]}",
+            )
+
+    def _normalized_trade_update(self, data: Any):
+        """Convert one Alpaca payload to the shared immutable event shape."""
+
+        from live_orders import BrokerOrderEvent, LifecycleState, OrderSide
+
+        order = getattr(data, "order", None)
+        if order is None:
+            return None
+        raw_event = str(getattr(data, "event", "") or "").lower()
+        state = {
+            "new": LifecycleState.ACKNOWLEDGED,
+            "accepted": LifecycleState.ACKNOWLEDGED,
+            "pending_new": LifecycleState.ACKNOWLEDGED,
+            "partial_fill": LifecycleState.PARTIAL,
+            "fill": LifecycleState.FILLED,
+            "rejected": LifecycleState.REJECTED,
+            "canceled": LifecycleState.CANCELED,
+            "cancelled": LifecycleState.CANCELED,
+            "expired": LifecycleState.EXPIRED,
+            "done_for_day": LifecycleState.EXPIRED,
+        }.get(raw_event)
+        if state is None:
+            return None
+        cid = str(getattr(order, "client_order_id", "") or "").strip()
+        broker_order_id = str(getattr(order, "id", "") or "").strip() or None
+        symbol = str(getattr(order, "symbol", "") or "").strip().upper()
+        side = OrderSide(str(getattr(order, "side", "") or "").lower())
+        cumulative = Decimal(str(getattr(order, "filled_qty", 0) or 0))
+        raw_average = getattr(order, "filled_avg_price", None)
+        average = (
+            Decimal(str(raw_average))
+            if raw_average not in (None, "", 0, "0")
+            else None
+        )
+        raw_fees = (
+            getattr(order, "filled_fees", None)
+            or getattr(order, "commission", None)
+            or 0
+        )
+        fees = Decimal(str(raw_fees))
+        occurred_at = (
+            getattr(data, "timestamp", None)
+            or getattr(order, "updated_at", None)
+            or datetime.now(timezone.utc)
+        )
+        if not isinstance(occurred_at, datetime):
+            occurred_at = datetime.now(timezone.utc)
+        elif occurred_at.tzinfo is None:
+            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+        identity = "|".join(
+            (
+                cid,
+                str(broker_order_id or ""),
+                state.value,
+                str(cumulative.normalize()),
+                str(fees.normalize()),
+            )
+        )
+        return BrokerOrderEvent(
+            event_id=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+            account_id=self._order_event_account_id,
+            instance_id=self._instance_id,
+            client_order_id=cid,
+            broker_order_id=broker_order_id,
+            symbol=symbol,
+            side=side,
+            state=state,
+            cumulative_quantity=cumulative,
+            cumulative_average_price=average,
+            cumulative_fees=fees,
+            occurred_at=occurred_at,
+            reason=str(getattr(data, "message", "") or ""),
+        )
+
+    def apply_lifecycle_event(self, event, fill=None) -> None:
+        """Update compatibility mirrors only after durable event application."""
+
+        from live_orders import LifecycleState
+
+        with self._lock:
+            if event.state is LifecycleState.ACKNOWLEDGED:
+                if event.broker_order_id:
+                    self._wal.mark_submitted(
+                        event.client_order_id, event.broker_order_id
+                    )
+            elif event.state is LifecycleState.PARTIAL:
+                self._wal.mark_partial(
+                    event.client_order_id,
+                    float(event.cumulative_quantity),
+                    (
+                        float(event.cumulative_average_price)
+                        if event.cumulative_average_price is not None
+                        else None
+                    ),
+                )
+            elif event.state is LifecycleState.FILLED:
+                self._wal.mark_filled(
+                    event.client_order_id,
+                    float(event.cumulative_quantity),
+                    (
+                        float(event.cumulative_average_price)
+                        if event.cumulative_average_price is not None
+                        else None
+                    ),
+                )
+            elif event.state is LifecycleState.REJECTED:
+                self._wal.mark_rejected(
+                    event.client_order_id, event.reason or "broker rejected"
+                )
+            elif event.state is LifecycleState.CANCELED:
+                self._wal.mark_canceled(event.client_order_id)
+            elif event.state is LifecycleState.EXPIRED:
+                self._wal.mark_expired(event.client_order_id)
+
+            if fill is not None:
+                symbol = event.symbol
+                new_position = (
+                    Decimal(str(self._positions.get(symbol, 0) or 0))
+                    + fill.position_delta
+                )
+                if abs(new_position) < Decimal("0.000000001"):
+                    self._positions.pop(symbol, None)
+                else:
+                    self._positions[symbol] = float(new_position)
+                self._cash += float(fill.cash_delta)
+                price = float(fill.incremental_price)
+                if price > 0:
+                    try:
+                        self._market_marks.update(
+                            MarketMark(
+                                symbol=symbol,
+                                price=price,
+                                bid=None,
+                                ask=None,
+                                bid_size=None,
+                                ask_size=None,
+                                observed_at=event.occurred_at,
+                                received_at=datetime.now(timezone.utc),
+                                source=MarkSource.FILL,
+                                feed="execution",
+                                quality=MarkQuality.EXECUTION_ONLY,
+                                session=classify_session(event.occurred_at),
+                            )
+                        )
+                    except ValueError:
+                        pass
+                    newest = self._market_marks.get(symbol)
+                    self._last_prices[symbol] = (
+                        newest.price if newest is not None else price
+                    )
+                self._trades.append(
+                    {
+                        "timestamp": event.occurred_at,
+                        "action": event.side.value,
+                        "ticker": symbol,
+                        "shares": float(fill.incremental_quantity),
+                        "price": price,
+                        "total": float(
+                            fill.incremental_quantity * fill.incremental_price
+                        ),
+                        "fees": float(fill.incremental_fees),
+                        "cash_after": self._cash,
+                        "order_id": event.broker_order_id or "",
+                        "client_order_id": event.client_order_id,
+                    }
+                )
+            if event.state in (
+                LifecycleState.CANCELED,
+                LifecycleState.REJECTED,
+                LifecycleState.EXPIRED,
+            ):
+                self._discard_orders_today(event.symbol, event.side.value)
+
+    def _apply_legacy_trade_update(
+        self,
+        *,
+        ev: str,
+        cid: str,
+        sym: str,
+        filled_qty: float,
+        filled_avg: Optional[float],
+        side: str,
+        order: Any,
+        data: Any,
+        now_utc: datetime,
+    ) -> None:
+        """Compatibility facade for tests/non-promotable legacy callers."""
+
+        with self._lock:
+            if ev == "fill":
+                self._wal.mark_filled(cid, filled_qty, filled_avg)
+                delta = filled_qty
+                current = self._positions.get(sym, 0.0)
+                new_pos = current + delta if "buy" in side else current - delta
+                if abs(new_pos) < 1e-9:
+                    self._positions.pop(sym, None)
+                else:
+                    self._positions[sym] = new_pos
+                price = filled_avg or 0.0
+                cash_delta = price * filled_qty
+                if "buy" in side:
+                    self._cash -= cash_delta
+                else:
+                    self._cash += cash_delta
+                if price > 0:
+                    try:
+                        self._market_marks.update(
+                            MarketMark(
+                                symbol=sym,
+                                price=price,
+                                bid=None,
+                                ask=None,
+                                bid_size=None,
+                                ask_size=None,
+                                observed_at=now_utc,
+                                received_at=now_utc,
+                                source=MarkSource.FILL,
+                                feed="execution",
+                                quality=MarkQuality.EXECUTION_ONLY,
+                                session=classify_session(now_utc),
+                            )
+                        )
+                    except ValueError:
+                        pass
+                    newest = self._market_marks.get(sym)
+                    self._last_prices[sym] = (
+                        newest.price if newest is not None else price
+                    )
+                self._trades.append(
+                    {
+                        "timestamp": now_utc,
+                        "action": "buy" if "buy" in side else "sell",
+                        "ticker": sym,
+                        "shares": filled_qty,
+                        "price": price,
+                        "total": cash_delta,
+                        "cash_after": self._cash,
+                        "order_id": str(getattr(order, "id", "") or ""),
+                    }
+                )
+            elif ev == "partial_fill":
+                self._wal.mark_partial(cid, filled_qty, filled_avg)
+            elif ev == "rejected":
+                self._wal.mark_rejected(
+                    cid, str(getattr(data, "message", "rejected"))
+                )
+            elif ev == "canceled":
+                self._wal.mark_canceled(cid)
+            elif ev == "expired":
+                self._wal.mark_expired(cid)
+
     async def _on_trade_update(self, data: Any) -> None:
         """Trade-updates callback.
 
@@ -1415,75 +1696,38 @@ class AlpacaAdapter(BrokerAdapter):
         except Exception:
             pass
 
-        with self._lock:
-            if ev == "fill":
-                self._wal.mark_filled(cid, filled_qty, filled_avg)
-                # Update mirror FROM EVENT payload (no REST call in hot path).
-                # Alpaca's filled_qty is absolute for the order; for position
-                # tracking we use the order side delta directly.
-                delta = filled_qty
-                current = self._positions.get(sym, 0.0)
-                new_pos = current + delta if "buy" in side else current - delta
-                if abs(new_pos) < 1e-9:
-                    self._positions.pop(sym, None)
-                else:
-                    self._positions[sym] = new_pos
-                price = filled_avg or 0.0
-                # Best-effort cash delta (adapter.refresh_cash() is authoritative).
-                cash_delta = price * filled_qty
-                if "buy" in side:
-                    self._cash -= cash_delta
-                else:
-                    self._cash += cash_delta
-                # 2026-04-22 populate _last_prices on every fill so downstream
-                # price-readers (outcome tracking, snapshot UI, strategy
-                # sizing) always have a recent Alpaca-authoritative quote for
-                # any symbol we've traded today. Task 4: the fill goes into
-                # the mark book as an EXECUTION_ONLY mark — it can seed a cold
-                # cache but never outranks a quote/trade/broker mark and can
-                # never authorize an exposure increase.
-                if price > 0:
-                    try:
-                        self._market_marks.update(MarketMark(
-                            symbol=sym, price=price, bid=None, ask=None,
-                            bid_size=None, ask_size=None,
-                            observed_at=now_utc, received_at=now_utc,
-                            source=MarkSource.FILL, feed="execution",
-                            quality=MarkQuality.EXECUTION_ONLY,
-                            session=classify_session(now_utc),
-                        ))
-                    except ValueError:
-                        pass
-                    _newest = self._market_marks.get(sym)
-                    self._last_prices[sym] = _newest.price if _newest is not None else price
-                self._trades.append({
-                    "timestamp": now_utc,
-                    "action": "buy" if "buy" in side else "sell",
-                    "ticker": sym,
-                    "shares": filled_qty,
-                    "price": price,
-                    "total": cash_delta,
-                    "cash_after": self._cash,
-                    # 2026-04-22 Fix 7: thread Alpaca's broker order_id so the
-                    # UI's Recent Executions rows can correlate with SUBMIT
-                    # logs. Consumer at broker.py:2903 already reads this.
-                    "order_id": str(getattr(order, "id", "") or ""),
-                })
-            elif ev == "partial_fill":
-                self._wal.mark_partial(cid, filled_qty, filled_avg)
-                # Partial-fill mirror update: Alpaca sends cumulative filled_qty;
-                # we defer position mirror update until `fill` or cancel for
-                # simplicity (strategies rarely act on partial).
-            elif ev == "rejected":
-                self._wal.mark_rejected(cid, str(getattr(data, "message", "rejected")))
-            elif ev == "canceled":
-                self._wal.mark_canceled(cid)
-            elif ev == "expired":
-                self._wal.mark_expired(cid)
+        delegated = False
+        if self._order_event_sink is not None:
+            try:
+                normalized = self._normalized_trade_update(data)
+                if normalized is not None and self._order_event_executor is not None:
+                    self._order_event_executor.submit(
+                        self._order_event_sink, normalized
+                    )
+                    delegated = True
+            except Exception as dispatch_error:
+                _alog(
+                    "BROKER",
+                    f"Alpaca lifecycle dispatch failed closed: "
+                    f"{type(dispatch_error).__name__}: {dispatch_error}",
+                    "red",
+                )
+        else:
+            self._apply_legacy_trade_update(
+                ev=ev,
+                cid=cid,
+                sym=sym,
+                filled_qty=filled_qty,
+                filled_avg=filled_avg,
+                side=side,
+                order=order,
+                data=data,
+                now_utc=now_utc,
+            )
 
         # Offload authoritative REST refresh to a thread so we don't block the
         # stream event loop. Best-effort; failures swallowed.
-        if ev in ("fill", "partial_fill"):
+        if not delegated and ev in ("fill", "partial_fill"):
             try:
                 loop = asyncio.get_running_loop()
                 loop.run_in_executor(None, self._refresh_account_state)
