@@ -55,6 +55,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Seed non-secret Compose environment
+        run: cp .env.example .env
       - name: Render inactive Compose release
         env:
           NEO4J_PASSWORD: ci-not-a-production-secret
