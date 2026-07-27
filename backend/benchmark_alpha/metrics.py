@@ -1,9 +1,9 @@
 """Active-return and risk statistics vs adjusted SPY (Task 9).
 
-Timestamps are inner-aligned before comparison; drawdown is always the
+Valuation dates must match exactly before comparison; drawdown is always the
 positive magnitude; the bootstrap uses contiguous 5-day blocks with a fixed
 seed; the Deflated Sharpe probability (Bailey & Lopez de Prado) counts the
-COMPLETE registered trial count including failures.
+complete registered trial count, including failures.
 """
 import math
 from dataclasses import dataclass
@@ -32,22 +32,62 @@ class ActiveMetrics:
     bootstrap_active_low: float
     bootstrap_active_high: float
     observations: int
+    trials: int
+
+
+class IncompleteBenchmarkError(ValueError):
+    """Portfolio and adjusted-SPY valuations cannot form promotion evidence."""
+
+
+def _normalized_value_series(values, name):
+    series = pd.Series(values, copy=True)
+    try:
+        series.index = pd.to_datetime(series.index, utc=True).normalize()
+        series = series.astype(float)
+    except (TypeError, ValueError) as exc:
+        raise IncompleteBenchmarkError(
+            f"{name} timestamps and values must be parseable"
+        ) from exc
+    if series.index.has_duplicates:
+        duplicates = sorted(
+            {stamp.isoformat() for stamp in series.index[series.index.duplicated(False)]}
+        )
+        raise IncompleteBenchmarkError(
+            f"{name} has duplicate normalized valuation dates: {duplicates}"
+        )
+    array = series.to_numpy(dtype=float)
+    if not np.isfinite(array).all() or (array <= 0).any():
+        raise IncompleteBenchmarkError(
+            f"{name} valuations must all be finite positive values"
+        )
+    return series.sort_index()
 
 
 def align_return_series(portfolio_values, spy_adjusted_values):
-    """Timestamp-normalized inner alignment of two value series."""
-    port = pd.Series(portfolio_values).astype(float)
-    spy = pd.Series(spy_adjusted_values).astype(float)
-    port.index = pd.to_datetime(port.index, utc=True).normalize()
-    spy.index = pd.to_datetime(spy.index, utc=True).normalize()
-    aligned = pd.concat(
+    """Strict timestamp-keyed alignment of daily portfolio and adjusted SPY.
+
+    Promotion evidence requires identical valuation-date coverage. Missing
+    observations are surfaced as an incomplete benchmark instead of being
+    silently dropped by an inner join.
+    """
+    port = _normalized_value_series(portfolio_values, "portfolio")
+    spy = _normalized_value_series(spy_adjusted_values, "benchmark")
+    missing_benchmark = port.index.difference(spy.index)
+    missing_portfolio = spy.index.difference(port.index)
+    if len(missing_benchmark) or len(missing_portfolio):
+        raise IncompleteBenchmarkError(
+            "timestamp coverage is incomplete: "
+            f"missing benchmark={len(missing_benchmark)}, "
+            f"missing portfolio={len(missing_portfolio)}"
+        )
+    if len(port) < 2:
+        raise IncompleteBenchmarkError(
+            f"need at least 2 matching observations, got {len(port)}"
+        )
+    return pd.concat(
         [port.rename("portfolio"), spy.rename("benchmark")],
-        axis=1, join="inner").dropna()
-    if len(aligned) < 2:
-        raise ValueError(
-            f"need at least 2 matching observations, got {len(aligned)} — "
-            "an empty alignment is an error, not zero active return")
-    return aligned
+        axis=1,
+    )
 
 
 def _drawdown_magnitude(values):
@@ -55,8 +95,22 @@ def _drawdown_magnitude(values):
     return float((1.0 - values / peaks).max())
 
 
-def compute_active_metrics(aligned, annualization=252, bootstrap_seed=179):
-    values = aligned[["portfolio", "benchmark"]].astype(float)
+def compute_active_metrics(
+    aligned, *, trials: int, annualization=252, bootstrap_seed=179
+):
+    if isinstance(trials, bool) or int(trials) != trials or int(trials) < 1:
+        raise ValueError("trials must be an explicit positive integer")
+    trials = int(trials)
+    if not isinstance(aligned, pd.DataFrame):
+        raise TypeError("aligned must be a pandas DataFrame")
+    try:
+        values = align_return_series(
+            aligned["portfolio"], aligned["benchmark"]
+        )
+    except KeyError as exc:
+        raise ValueError(
+            "aligned must contain portfolio and benchmark columns"
+        ) from exc
     port_ret = values["portfolio"].pct_change().dropna()
     bench_ret = values["benchmark"].pct_change().dropna()
     active = (port_ret - bench_ret).to_numpy()
@@ -89,7 +143,12 @@ def compute_active_metrics(aligned, annualization=252, bootstrap_seed=179):
     skew = float(pd.Series(port_ret).skew()) if n > 2 else 0.0
     kurt = float(pd.Series(port_ret).kurt()) + 3.0 if n > 3 else 3.0
     dsp = deflated_sharpe_probability(
-        daily_sharpe, sample_count=max(n, 2), skew=skew, kurtosis=kurt, trials=1)
+        daily_sharpe,
+        sample_count=max(n, 2),
+        skew=skew,
+        kurtosis=kurt,
+        trials=trials,
+    )
 
     low, high = _block_bootstrap_interval(active, bootstrap_seed)
 
@@ -108,6 +167,7 @@ def compute_active_metrics(aligned, annualization=252, bootstrap_seed=179):
         bootstrap_active_low=low,
         bootstrap_active_high=high,
         observations=n,
+        trials=trials,
     )
 
 

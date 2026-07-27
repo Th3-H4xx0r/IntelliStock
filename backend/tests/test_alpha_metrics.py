@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from benchmark_alpha.metrics import (
+    IncompleteBenchmarkError,
     align_return_series,
     compute_active_metrics,
     deflated_sharpe_probability,
@@ -18,23 +19,59 @@ def test_active_metrics_use_matching_timestamps_and_known_active_return():
     idx = pd.to_datetime(["2026-07-08", "2026-07-09", "2026-07-10"], utc=True)
     aligned = pd.DataFrame({"portfolio": [100.0, 102.0, 101.0],
                             "benchmark": [100.0, 101.0, 101.0]}, index=idx)
-    m = compute_active_metrics(aligned, bootstrap_seed=179)
+    m = compute_active_metrics(aligned, trials=7, bootstrap_seed=179)
     assert round(m.portfolio_return, 6) == 0.01
     assert round(m.benchmark_return, 6) == 0.01
     assert round(m.active_return, 6) == 0.0
+    assert m.trials == 7
 
 
-def test_align_is_inner_join_and_rejects_tiny_series():
+def test_align_requires_complete_matching_timestamp_coverage():
     port = pd.Series([100.0, 101.0, 102.0],
                      index=pd.to_datetime(
                          ["2026-07-08", "2026-07-09", "2026-07-10"], utc=True))
     spy = pd.Series([500.0, 505.0],
                     index=pd.to_datetime(["2026-07-09", "2026-07-10"], utc=True))
-    aligned = align_return_series(port, spy)
-    assert len(aligned) == 2
+    with pytest.raises(IncompleteBenchmarkError, match="missing benchmark"):
+        align_return_series(port, spy)
+
+    aligned = align_return_series(port.iloc[1:], spy)
+    assert list(aligned.index) == list(port.index[1:])
     assert list(aligned.columns) == ["portfolio", "benchmark"]
-    with pytest.raises(ValueError):
+    with pytest.raises(IncompleteBenchmarkError):
         align_return_series(port.iloc[:1], spy.iloc[:1])
+
+
+def test_align_rejects_duplicate_normalized_dates_and_non_finite_values():
+    duplicate_day = pd.Series(
+        [100.0, 101.0],
+        index=pd.to_datetime(
+            ["2026-07-08T14:00:00Z", "2026-07-08T20:00:00Z"]
+        ),
+    )
+    spy = pd.Series(
+        [500.0],
+        index=pd.to_datetime(["2026-07-08T04:00:00Z"]),
+    )
+    with pytest.raises(IncompleteBenchmarkError, match="duplicate"):
+        align_return_series(duplicate_day, spy)
+    with pytest.raises(IncompleteBenchmarkError, match="finite positive"):
+        align_return_series(
+            pd.Series([float("nan"), 101.0], index=pd.date_range("2026-07-08", periods=2)),
+            pd.Series([500.0, 501.0], index=pd.date_range("2026-07-08", periods=2)),
+        )
+
+
+def test_metrics_refuse_implicit_or_nonpositive_trial_count():
+    idx = pd.to_datetime(["2026-07-08", "2026-07-09"], utc=True)
+    aligned = pd.DataFrame(
+        {"portfolio": [100.0, 101.0], "benchmark": [100.0, 100.5]},
+        index=idx,
+    )
+    with pytest.raises(TypeError):
+        compute_active_metrics(aligned)
+    with pytest.raises(ValueError, match="positive"):
+        compute_active_metrics(aligned, trials=0)
 
 
 def test_max_drawdown_is_positive_magnitude_and_beta_reasonable():
@@ -44,7 +81,7 @@ def test_max_drawdown_is_positive_magnitude_and_beta_reasonable():
                       110, 108, 112, 116, 114, 118, 120, 118, 122, 124],
                      index=idx, dtype=float)
     m = compute_active_metrics(align_return_series(port, bench),
-                               bootstrap_seed=179)
+                               trials=3, bootstrap_seed=179)
     assert m.max_drawdown_magnitude > 0
     assert m.max_drawdown_magnitude == pytest.approx(1 - 92.0 / 108.0)
     assert m.tracking_error > 0
@@ -56,8 +93,8 @@ def test_bootstrap_is_deterministic_for_a_seed():
     aligned = pd.DataFrame(
         {"portfolio": [100 + i + (i % 3) for i in range(15)],
          "benchmark": [100 + i for i in range(15)]}, index=idx, dtype=float)
-    a = compute_active_metrics(aligned, bootstrap_seed=179)
-    b = compute_active_metrics(aligned, bootstrap_seed=179)
+    a = compute_active_metrics(aligned, trials=3, bootstrap_seed=179)
+    b = compute_active_metrics(aligned, trials=3, bootstrap_seed=179)
     assert (a.bootstrap_active_low, a.bootstrap_active_high) == \
         (b.bootstrap_active_low, b.bootstrap_active_high)
 
@@ -80,5 +117,5 @@ def test_tiny_sample_bootstrap_interval_is_not_a_zero_width_certainty():
     aligned = pd.DataFrame({"portfolio": [100.0, 103.0, 99.0, 104.0],
                             "benchmark": [100.0, 100.5, 101.0, 101.5]},
                            index=idx)
-    m = compute_active_metrics(aligned, bootstrap_seed=179)
+    m = compute_active_metrics(aligned, trials=3, bootstrap_seed=179)
     assert m.bootstrap_active_high > m.bootstrap_active_low

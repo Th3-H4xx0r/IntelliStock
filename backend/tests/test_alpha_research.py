@@ -13,7 +13,12 @@ from benchmark_alpha.research import (
     SealedHoldout,
     StageBGoReport,
     evaluate_stage_b_go,
+    run_registered_experiment,
     walk_forward_splits,
+)
+from experiment_registry import (
+    ExperimentRegistry as ImmutableExperimentRegistry,
+    ExperimentSpec as ImmutableExperimentSpec,
 )
 
 DATES = [f"2024-{m:02d}-15" for m in range(1, 13)] + \
@@ -63,6 +68,102 @@ def test_failed_experiments_remain_queryable_and_count_as_trials():
     rows = registry.all_experiments()
     assert rows[0]["status"] == "failed"
     assert registry.trial_count() == 1
+
+
+def test_registered_runner_persists_attempt_before_invoking_model():
+    events = []
+
+    class RecordingStore:
+        def __init__(self):
+            from experiment_registry import InMemoryExperimentStore
+
+            self.inner = InMemoryExperimentStore()
+
+        def insert_experiment_registration(self, registration):
+            events.append(("registered", registration.experiment_id))
+            return self.inner.insert_experiment_registration(registration)
+
+        def insert_experiment_outcome(self, outcome):
+            events.append((outcome.status, outcome.experiment_id))
+            return self.inner.insert_experiment_outcome(outcome)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    spec = ImmutableExperimentSpec(
+        experiment_id="attempt-before-model",
+        parent_experiment_id=None,
+        search_scope="fresh-direct/live-40",
+        commit_sha="b25e2f1",
+        source_tree_hash="sha256:source",
+        effective_config={"active_ceiling": 0.40},
+        model_provider="openai",
+        model_name="research-model",
+        prompt_hashes={"decision": "sha256:prompt"},
+        model_settings={"temperature": 0.0},
+        seed=179,
+        predeclared_repeats=1,
+        dataset_manifest={"id": "dataset", "hash": "sha256:data"},
+        graph_manifest={"id": "graph", "hash": "sha256:graph"},
+        universe_manifest={"id": "universe", "hash": "sha256:universe"},
+        benchmark_manifest={"id": "spy", "hash": "sha256:spy"},
+        execution_cost_model={"version": "cost-v1"},
+        start_date="2024-01-02",
+        end_date="2026-06-30",
+        fold="fold-1",
+        actor="test",
+    )
+    registry = ImmutableExperimentRegistry(store=RecordingStore())
+
+    def model_call():
+        events.append(("model", spec.experiment_id))
+        return {"active_return": 0.12}
+
+    result = run_registered_experiment(registry, spec, model_call)
+
+    assert result == {"active_return": 0.12}
+    assert events == [
+        ("registered", "attempt-before-model"),
+        ("model", "attempt-before-model"),
+        ("completed", "attempt-before-model"),
+    ]
+
+
+def test_registered_runner_records_failure_without_exception_payload():
+    spec = ImmutableExperimentSpec(
+        experiment_id="failed-model-attempt",
+        parent_experiment_id=None,
+        search_scope="fresh-direct/live-40",
+        commit_sha="b25e2f1",
+        source_tree_hash="sha256:source",
+        effective_config={"active_ceiling": 0.40},
+        model_provider="openai",
+        model_name="research-model",
+        prompt_hashes={"decision": "sha256:prompt"},
+        model_settings={"temperature": 0.0},
+        seed=179,
+        predeclared_repeats=1,
+        dataset_manifest={"id": "dataset", "hash": "sha256:data"},
+        graph_manifest={"id": "graph", "hash": "sha256:graph"},
+        universe_manifest={"id": "universe", "hash": "sha256:universe"},
+        benchmark_manifest={"id": "spy", "hash": "sha256:spy"},
+        execution_cost_model={"version": "cost-v1"},
+        start_date="2024-01-02",
+        end_date="2026-06-30",
+        fold="fold-1",
+        actor="test",
+    )
+    registry = ImmutableExperimentRegistry()
+
+    def failing_model_call():
+        raise RuntimeError("SENSITIVE-PROVIDER-PAYLOAD")
+
+    with pytest.raises(RuntimeError, match="SENSITIVE-PROVIDER"):
+        run_registered_experiment(registry, spec, failing_model_call)
+
+    outcome = registry.outcome(spec.experiment_id)
+    assert outcome.status == "failed"
+    assert outcome.failure_reason == "RuntimeError"
 
 
 def test_manifest_refuses_unprovable_features_and_hashes_content():

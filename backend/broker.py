@@ -407,6 +407,7 @@ _backtest_alpaca_timeframe = None  # Set during backtest setup (e.g., "1Day", "1
 _backtest_fetch_start_dt = None
 _backtest_fetch_end_dt = None
 _backtest_no_history_symbols = set()
+_backtest_spy_benchmark = None
 
 dotenv.load_dotenv()
 
@@ -1128,6 +1129,33 @@ def _alpaca_chunk_days_for_timeframe(timeframe):
     return chunk_days
 
 
+def _historical_bars_request_params(
+    *,
+    is_crypto,
+    symbol,
+    start_iso,
+    end_iso,
+    timeframe,
+    feed,
+    adjustment,
+):
+    """Build stock/crypto params without leaking stock adjustments to crypto."""
+    params = {
+        "start": start_iso,
+        "end": end_iso,
+        "timeframe": timeframe,
+        "limit": 10000,
+        "sort": "asc",
+    }
+    if is_crypto:
+        params["symbols"] = symbol
+        return params
+    params["feed"] = feed
+    if adjustment:
+        params["adjustment"] = str(adjustment)
+    return params
+
+
 def fetch_alpaca_historical_bars(
     symbols,
     start_date,
@@ -1138,6 +1166,7 @@ def fetch_alpaca_historical_bars(
     db_conn=None,
     feed=None,  # 2026-04-23: user-selectable via BrokerageAccounts.alpaca_data_feed
     allow_backtest_rh_fallback=False,  # R13.1 (2026-04-24): strategy-config opt-in, see below
+    adjustment=None,  # None preserves Alpaca's raw default; SPY benchmark uses "all"
 ):
     """
     Fetch historical OHLCV bars from Alpaca Data API v2 by requesting smaller date-range
@@ -1416,24 +1445,17 @@ def fetch_alpaca_historical_bars(
             return []
         if _is_crypto:
             url = "https://data.alpaca.markets/v1beta3/crypto/us/bars"
-            params = {
-                "symbols": sym,
-                "start": start_iso,
-                "end": end_iso,
-                "timeframe": timeframe,
-                "limit": 10000,
-                "sort": "asc",
-            }
         else:
             url = f"{ALPACA_DATA_BASE}/stocks/{sym}/bars"
-            params = {
-                "start": start_iso,
-                "end": end_iso,
-                "timeframe": timeframe,
-                "limit": 10000,
-                "feed": feed,
-                "sort": "asc",
-            }
+        params = _historical_bars_request_params(
+            is_crypto=_is_crypto,
+            symbol=sym,
+            start_iso=start_iso,
+            end_iso=end_iso,
+            timeframe=timeframe,
+            feed=feed,
+            adjustment=adjustment,
+        )
         collected = []
         # Live-readiness P0 #4: 429 retry/backoff on Alpaca data API. Under live
         # load (every 5 min × hundreds of tickers via discovery) IEX free tier
@@ -1536,7 +1558,7 @@ def fetch_alpaca_historical_bars(
 
     def fetch_one_chunk(sym, chunk_start, chunk_end, log_empty_once=None, retry_smaller=False):
         """Fetch bars for one symbol in [chunk_start, chunk_end); from cache if available, else Alpaca."""
-        if db_conn and get_bars_chunk_cached:
+        if db_conn and get_bars_chunk_cached and adjustment in (None, "", "raw"):
             bars, from_cache = get_bars_chunk_cached(
                 db_conn, sym, chunk_start, chunk_end, timeframe, feed,
                 lambda: _do_fetch_one_chunk(sym, chunk_start, chunk_end, log_empty_once, retry_smaller),
@@ -1717,6 +1739,121 @@ def fetch_alpaca_historical_bars(
         except NameError:
             pass
         return out
+
+
+def _fetch_adjusted_spy_benchmark(
+    fetch_bars,
+    *,
+    start_date,
+    end_date,
+    key,
+    secret,
+    feed,
+):
+    """Fetch the promoted benchmark independently of strategy/warm-up bars."""
+    from backtest_summary import build_adjusted_spy_close_series
+
+    rows = fetch_bars(
+        ["SPY"],
+        start_date,
+        end_date,
+        key=key,
+        secret=secret,
+        timeframe="1Day",
+        db_conn=None,
+        feed=feed,
+        allow_backtest_rh_fallback=False,
+        adjustment="all",
+    )
+    values = build_adjusted_spy_close_series(
+        (rows or {}).get("SPY") or (),
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return {
+        "values": values,
+        "manifest": {
+            "symbol": "SPY",
+            "timeframe": "1Day",
+            "adjustment": "all",
+            "price_field": "c",
+            "total_return": True,
+            "feed": str(feed or "").lower(),
+            "start_date": str(start_date)[:10],
+            "end_date": str(end_date)[:10],
+        },
+    }
+
+
+def _compute_backtest_summary_with_benchmark(
+    compute_summary,
+    *,
+    emulator,
+    snapshots,
+    initial_cash,
+    benchmark_bundle,
+    trials,
+):
+    """Broker result-writer seam; crypto/legacy callers keep base P&L only."""
+    if benchmark_bundle is None:
+        return compute_summary(emulator, snapshots, initial_cash)
+    return compute_summary(
+        emulator,
+        snapshots,
+        initial_cash,
+        benchmark_values=benchmark_bundle.get("values"),
+        benchmark_manifest=benchmark_bundle.get("manifest"),
+        trials=trials,
+    )
+
+
+def _backtest_uses_equity_benchmark(
+    strategy_schema, *, is_crypto_runtime
+):
+    """Return False for crypto even if the runtime kind lookup is transient."""
+    if is_crypto_runtime:
+        return False
+    if isinstance(strategy_schema, dict):
+        name = str(strategy_schema.get("name") or "").strip().lower()
+        if name.startswith("crypto:"):
+            return False
+    return True
+
+
+def _declared_experiment_search_scope(strategy_schema):
+    """Return one explicitly declared immutable-registry scope, or ``None``."""
+    if not isinstance(strategy_schema, dict):
+        return None
+    scopes = set()
+    direct = strategy_schema.get("experiment_search_scope")
+    if direct:
+        scopes.add(str(direct))
+    for strategy in strategy_schema.get("strategies") or ():
+        if not isinstance(strategy, dict):
+            continue
+        value = strategy.get("experiment_search_scope")
+        config = strategy.get("config") or {}
+        if not value and isinstance(config, dict):
+            value = config.get("experiment_search_scope")
+        if value:
+            scopes.add(str(value))
+    return next(iter(scopes)) if len(scopes) == 1 else None
+
+
+def _registered_trial_count(r_module, conn, db_name, search_scope):
+    """Read the complete append-only trial ledger for a declared scope."""
+    if not search_scope:
+        return None
+    from benchmark_alpha.rethink_store import EXPERIMENTS_TABLE
+
+    count = int(
+        r_module.db(db_name)
+        .table(EXPERIMENTS_TABLE)
+        .filter({"search_scope": str(search_scope)})
+        .count()
+        .run(conn)
+    )
+    return count if count > 0 else None
 
 
 def _resolve_data_brokerage_creds_now():
@@ -6719,6 +6856,7 @@ if mode == MODE_BACKTEST:
     _backtest_fetch_start_dt = None
     _backtest_fetch_end_dt = None
     _backtest_no_history_symbols = set()
+    _backtest_spy_benchmark = None
     _backtest_start_dt_input = start_dt
     _backtest_end_dt_input = end_dt_input
     # Treat end date as inclusive for backtests: run through the full calendar day.
@@ -6814,6 +6952,42 @@ if mode == MODE_BACKTEST:
         symbols_for_fetch, extended_start, end_date, key, secret, alpaca_timeframe,
         db_conn=_bars_db_conn, feed=data_feed,
     )
+    # Promotion evidence uses an independently requested adjusted-SPY daily
+    # close series over the exact user window. It never reuses raw strategy
+    # bars or the warm-up window. Crypto backtests remain byte-for-byte on the
+    # legacy summary path and do not request an equity benchmark.
+    if _backtest_uses_equity_benchmark(
+        _backtest_strategy_schema,
+        is_crypto_runtime=_is_crypto_instance_runtime(),
+    ):
+        try:
+            _backtest_spy_benchmark = _fetch_adjusted_spy_benchmark(
+                fetch_alpaca_historical_bars,
+                start_date=start_dt,
+                end_date=end_date,
+                key=key,
+                secret=secret,
+                feed=data_feed,
+            )
+        except Exception as _spy_exc:
+            _log(
+                "Adjusted SPY benchmark unavailable "
+                f"({type(_spy_exc).__name__}); metrics marked incomplete",
+                "yellow",
+            )
+            _backtest_spy_benchmark = {
+                "values": {},
+                "manifest": {
+                    "symbol": "SPY",
+                    "timeframe": "1Day",
+                    "adjustment": "all",
+                    "price_field": "c",
+                    "total_return": True,
+                    "feed": str(data_feed or "").lower(),
+                    "start_date": str(start_dt)[:10],
+                    "end_date": str(end_date)[:10],
+                },
+            }
     # Approximate expected bars for requested range (trading hours ~6.5/day, ~252 trading days/year)
     req_days = (end_date - extended_start).days if (end_date and extended_start) else 0
     try:
@@ -9211,8 +9385,39 @@ while not shutdown_requested:
                             # construction — never from a separately-resolved
                             # end-date bar that can disagree (the +$437 vs
                             # -$2,318 half of incident 586767).
-                            _bt_summary = compute_backtest_summary(
-                                portfolio_emulator, snapshots, initial_cash,
+                            _bt_search_scope = (
+                                _declared_experiment_search_scope(
+                                    _backtest_strategy_schema
+                                )
+                            )
+                            _bt_trials = None
+                            if _bt_search_scope:
+                                try:
+                                    _bt_trials = _registered_trial_count(
+                                        r,
+                                        conn,
+                                        DB_NAME,
+                                        _bt_search_scope,
+                                    )
+                                except Exception as _trial_exc:
+                                    _log(
+                                        "Immutable experiment trial count "
+                                        "unavailable "
+                                        f"({type(_trial_exc).__name__}); "
+                                        "benchmark metrics marked incomplete",
+                                        "yellow",
+                                    )
+                            _bt_summary = (
+                                _compute_backtest_summary_with_benchmark(
+                                    compute_backtest_summary,
+                                    emulator=portfolio_emulator,
+                                    snapshots=snapshots,
+                                    initial_cash=initial_cash,
+                                    benchmark_bundle=(
+                                        _backtest_spy_benchmark
+                                    ),
+                                    trials=_bt_trials,
+                                )
                             )
                             final_value = _bt_summary["final_value"]
                             final_pnl = _bt_summary["pnl"]
@@ -9262,6 +9467,26 @@ while not shutdown_requested:
                                 'cadence_mode': "dual_cadence_backtest_sim" if _dc_bt_sim else "full_every_tick",
                                 'dual_cadence_backtest_simulation': bool(_dc_bt_sim),
                             }
+                            for _benchmark_field in (
+                                "benchmark_complete",
+                                "benchmark_incomplete_reason",
+                                "benchmark_observations",
+                                "benchmark_manifest",
+                                "trial_count",
+                                "benchmark_return",
+                                "active_return",
+                                "beta",
+                                "tracking_error",
+                                "information_ratio",
+                                "deflated_sharpe_probability",
+                                "max_drawdown_magnitude",
+                                "bootstrap_active_low",
+                                "bootstrap_active_high",
+                            ):
+                                if _benchmark_field in _bt_summary:
+                                    backtest_result[_benchmark_field] = (
+                                        _bt_summary[_benchmark_field]
+                                    )
                             
                             # Update existing row if we have id, else insert.
                             # Fail the write closed if any secret material slipped

@@ -165,9 +165,126 @@ def assert_execution_provenance_promotable(summary) -> None:
             raise ExecutionProvenanceError(
                 f"fill_provenance[{index}] executes before its quote"
             )
+from collections.abc import Mapping
+from datetime import date, timezone
 
 
-def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values=None) -> dict:
+def _date_only(value) -> date:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc)
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("date is required")
+    return date.fromisoformat(text[:10])
+
+
+def build_adjusted_spy_close_series(
+    bars, *, start_date, end_date
+) -> dict:
+    """Return timestamp-keyed adjusted SPY daily closes for the user window.
+
+    The caller is responsible for requesting Alpaca ``adjustment=all``. This
+    helper deliberately consumes the returned ``c`` field (not VWAP or an
+    intraday strategy price), filters out warm-up/out-of-window bars, and
+    rejects duplicate or invalid daily observations.
+    """
+    import pandas as pd
+
+    start = _date_only(start_date)
+    end = _date_only(end_date)
+    if end < start:
+        raise ValueError("SPY benchmark end_date precedes start_date")
+    values = {}
+    for bar in bars or ():
+        try:
+            timestamp = pd.to_datetime((bar or {}).get("t"), utc=True)
+            close = float((bar or {}).get("c"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SPY benchmark bar requires timestamp t and close c") from exc
+        day = timestamp.date()
+        if day < start or day > end:
+            continue
+        if not math.isfinite(close) or close <= 0:
+            raise ValueError(f"SPY adjusted close must be finite and positive on {day}")
+        normalized = timestamp.normalize()
+        if normalized in values:
+            raise ValueError(f"duplicate SPY daily benchmark bar on {day}")
+        values[normalized] = close
+    return dict(sorted(values.items(), key=lambda pair: pair[0]))
+
+
+def _validate_spy_benchmark_manifest(manifest) -> dict:
+    if not isinstance(manifest, Mapping):
+        raise ValueError("benchmark manifest is required")
+    manifest = dict(manifest)
+    expected = {
+        "symbol": "SPY",
+        "timeframe": "1Day",
+        "adjustment": "all",
+        "price_field": "c",
+        "total_return": True,
+    }
+    for field, required in expected.items():
+        if manifest.get(field) != required:
+            raise ValueError(
+                f"benchmark manifest {field} must be {required!r}, "
+                f"got {manifest.get(field)!r}"
+            )
+    if str(manifest.get("feed") or "").lower() not in {"iex", "sip"}:
+        raise ValueError("benchmark manifest feed must be 'iex' or 'sip'")
+    start = _date_only(manifest.get("start_date"))
+    end = _date_only(manifest.get("end_date"))
+    if end < start:
+        raise ValueError("benchmark manifest end_date precedes start_date")
+    return manifest
+
+
+def _daily_portfolio_value_series(snapshots):
+    """Select the final recorded portfolio valuation on each UTC day."""
+    import pandas as pd
+
+    daily = {}
+    seen_timestamps = set()
+    for snapshot in snapshots or ():
+        try:
+            timestamp = pd.to_datetime(
+                (snapshot or {}).get("timestamp"),
+                utc=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "portfolio snapshot timestamp must be parseable"
+            ) from exc
+        if pd.isna(timestamp):
+            raise ValueError("portfolio snapshot timestamp must be parseable")
+        if timestamp in seen_timestamps:
+            raise ValueError(
+                f"duplicate portfolio snapshot timestamp {timestamp.isoformat()}"
+            )
+        seen_timestamps.add(timestamp)
+        day = timestamp.normalize()
+        prior = daily.get(day)
+        if prior is None or timestamp > prior[0]:
+            daily[day] = (timestamp, (snapshot or {}).get("value"))
+    return pd.Series(
+        {day: pair[1] for day, pair in daily.items()},
+        dtype=object,
+    )
+
+
+def compute_backtest_summary(
+    emulator,
+    snapshots,
+    initial_cash,
+    benchmark_values=None,
+    *,
+    benchmark_manifest=None,
+    trials=None,
+) -> dict:
     """Final P&L derived from the equity curve's own end mark.
 
     ``final_value`` is the last portfolio snapshot's stored ``value`` (the
@@ -245,54 +362,85 @@ def compute_backtest_summary(emulator, snapshots, initial_cash, benchmark_values
         summary["execution_promotion_eligible"] = False
         summary["execution_promotion_error"] = str(exc)
 
-    # Task 9 (benchmark-alpha): MERGE benchmark-relative fields when a
-    # benchmark value series is supplied. Existing P&L fields are never
-    # replaced, and legacy callers without benchmark_values are byte-identical.
-    if benchmark_values is not None and snapshots:
+    # Benchmark-relative enrichment is additive. The promoted path accepts
+    # only timestamp-keyed adjusted SPY daily closes plus the exact request
+    # convention and a positive registry trial count. Any gap remains visible
+    # as an incomplete result instead of being zipped/dropped or defaulted.
+    if benchmark_values is not None:
+        summary.update(
+            {
+                "benchmark_complete": False,
+                "benchmark_incomplete_reason": None,
+                "benchmark_observations": 0,
+                "benchmark_manifest": (
+                    dict(benchmark_manifest)
+                    if isinstance(benchmark_manifest, Mapping)
+                    else benchmark_manifest
+                ),
+                "trial_count": trials,
+            }
+        )
         try:
-            import math as _math
+            from benchmark_alpha.metrics import (
+                align_return_series,
+                compute_active_metrics,
+            )
 
-            import pandas as _pd
-
-            from benchmark_alpha.metrics import compute_active_metrics
-            # Audit 2026-07-18: a None snapshot value coerced to 0.0 poisoned
-            # the metrics with NaN and a false 100% drawdown. Only jointly
-            # valid (snapshot, benchmark) pairs participate.
-            pairs = []
-            for snap, bench_v in zip(snapshots, benchmark_values):
-                value = (snap or {}).get("value")
-                try:
-                    value = float(value)
-                    bench_f = float(bench_v)
-                except (TypeError, ValueError):
-                    continue
-                if value > 0 and bench_f > 0:
-                    pairs.append((value, bench_f))
-            if len(pairs) >= 2:
-                aligned = _pd.DataFrame(
-                    {"portfolio": [p for p, _ in pairs],
-                     "benchmark": [b for _, b in pairs]},
-                    index=_pd.RangeIndex(len(pairs)))
-                m = compute_active_metrics(aligned)
-                if not all(_math.isfinite(x) for x in (
-                        m.benchmark_return, m.active_return, m.beta,
-                        m.tracking_error, m.information_ratio,
-                        m.max_drawdown_magnitude, m.bootstrap_active_low,
-                        m.bootstrap_active_high)):
-                    raise ValueError("non-finite benchmark metrics")
-                summary.update({
+            manifest = _validate_spy_benchmark_manifest(benchmark_manifest)
+            if not isinstance(benchmark_values, Mapping):
+                raise ValueError(
+                    "benchmark_values must be timestamp-keyed; positional "
+                    "benchmark sequences are forbidden"
+                )
+            if (
+                trials is None
+                or isinstance(trials, bool)
+                or int(trials) != trials
+                or int(trials) < 1
+            ):
+                raise ValueError(
+                    "trial count is missing; benchmark evidence requires the "
+                    "actual experiment-registry count for its search scope"
+                )
+            portfolio_values = _daily_portfolio_value_series(snapshots)
+            aligned = align_return_series(portfolio_values, benchmark_values)
+            m = compute_active_metrics(aligned, trials=int(trials))
+            numeric = (
+                m.benchmark_return,
+                m.active_return,
+                m.beta,
+                m.tracking_error,
+                m.information_ratio,
+                m.deflated_sharpe_probability,
+                m.max_drawdown_magnitude,
+                m.bootstrap_active_low,
+                m.bootstrap_active_high,
+            )
+            if not all(math.isfinite(value) for value in numeric):
+                raise ValueError("non-finite benchmark metrics")
+            summary.update(
+                {
+                    "benchmark_complete": True,
+                    "benchmark_incomplete_reason": None,
+                    "benchmark_manifest": manifest,
+                    "benchmark_observations": m.observations,
+                    "trial_count": m.trials,
                     "benchmark_return": m.benchmark_return,
                     "active_return": m.active_return,
                     "beta": m.beta,
                     "tracking_error": m.tracking_error,
                     "information_ratio": m.information_ratio,
+                    "deflated_sharpe_probability": (
+                        m.deflated_sharpe_probability
+                    ),
                     "max_drawdown_magnitude": m.max_drawdown_magnitude,
                     "bootstrap_active_low": m.bootstrap_active_low,
                     "bootstrap_active_high": m.bootstrap_active_high,
-                })
-        except Exception:
-            # Benchmark enrichment is additive; failure never blocks base P&L.
-            pass
+                }
+            )
+        except Exception as exc:
+            # Base P&L remains usable, but this row cannot be promoted.
+            summary["benchmark_incomplete_reason"] = str(exc)
     return summary
 
 
