@@ -35,18 +35,60 @@ def _fake_r_with_brokerages(brokerages: list[dict]) -> tuple[MagicMock, MagicMoc
     return r, MagicMock()  # (r, conn)
 
 
-def test_refreshed_kill_switch_token_is_not_persisted_without_encryption(monkeypatch):
-    """The emergency writer must fail closed rather than storing live tokens."""
+def test_refreshed_kill_switch_token_encryption_failure_is_reported(monkeypatch):
+    """A refreshed credential that cannot be persisted must be visible in halt output."""
     import live_kill_switch as lks
 
-    monkeypatch.delenv("INTELLISTOCK_CRED_KEY", raising=False)
-    fake_r, fake_conn = _fake_r_with_brokerages([])
-    client = MagicMock(state=SimpleNamespace(
-        access_token="new-access", refresh_token="new-refresh",
-        obtained_at_epoch=1, expires_in=3600,
-    ))
+    rh_brokerage = {
+        "id": "rh-1", "brokerage_type": "robinhood",
+        "robinhood_access_token": "stale", "robinhood_refresh_token": "refresh",
+        "robinhood_device_token": "device", "robinhood_account_number": "123",
+    }
+    fake_r, fake_conn = _fake_r_with_brokerages([rh_brokerage])
+    monkeypatch.setattr(lks, "_get_conn", lambda: (fake_r, fake_conn))
 
-    assert lks._persist_rh_refreshed_token(fake_r, fake_conn, {"id": "rh-1"}, client) is False
+    fake_secret_store = type(sys)("secret_store")
+    fake_secret_store.decrypt = lambda value: value
+    fake_secret_store.encrypt = lambda _value: (_ for _ in ()).throw(RuntimeError("credential key unavailable"))
+    monkeypatch.setitem(sys.modules, "secret_store", fake_secret_store)
+
+    fake_engine = type(sys)("robinhood_engine")
+
+    class _State:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _Unauthorized(Exception):
+        status_code = 401
+
+    class _Client:
+        def __init__(self, *, state, **_kwargs):
+            self.state = state
+            self.refreshed = False
+
+        def list_orders(self, **_kwargs):
+            if not self.refreshed:
+                raise _Unauthorized("expired")
+            return [{"id": "order-1", "cancel": "https://example.invalid/cancel"}]
+
+        def refresh(self):
+            self.refreshed = True
+            return self.state
+
+        def cancel_order(self, **_kwargs):
+            return True
+
+    fake_engine.RobinhoodSessionState = _State
+    fake_engine.RobinhoodClient = _Client
+    monkeypatch.setitem(sys.modules, "robinhood_engine", fake_engine)
+    fake_alerts = type(sys)("live_alerts")
+    fake_alerts.alert_halt = lambda **_kwargs: None
+    monkeypatch.setitem(sys.modules, "live_alerts", fake_alerts)
+
+    summary = lks.halt_live_trading(reason="test")
+
+    assert summary["orders_canceled"] == 1
+    assert any("credential refresh persistence" in error for error in summary["errors"])
     fake_r.db.return_value.table.return_value.get.return_value.update.assert_not_called()
 
 
@@ -138,6 +180,7 @@ def test_robinhood_cancel_refreshes_on_stale_token_401(monkeypatch):
     monkeypatch.setattr(lks, "_get_conn", lambda: (fake_r, fake_conn))
     monkeypatch.setitem(sys.modules, "secret_store", type(sys)("secret_store"))
     sys.modules["secret_store"].decrypt = lambda v: v
+    sys.modules["secret_store"].encrypt = lambda v: f"fernet:{v}"
 
     fake_engine = type(sys)("robinhood_engine")
 
@@ -200,6 +243,7 @@ def test_robinhood_cancel_refreshes_on_stale_token_401_during_cancel(monkeypatch
     monkeypatch.setattr(lks, "_get_conn", lambda: (fake_r, fake_conn))
     monkeypatch.setitem(sys.modules, "secret_store", type(sys)("secret_store"))
     sys.modules["secret_store"].decrypt = lambda v: v
+    sys.modules["secret_store"].encrypt = lambda v: f"fernet:{v}"
 
     fake_engine = type(sys)("robinhood_engine")
 

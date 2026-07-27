@@ -36,31 +36,28 @@ def _persist_rh_refreshed_token(r, conn, brokerage_row: dict, client) -> bool:
     """Write a kill-switch-refreshed Robinhood token back to the BrokerageAccounts
     row (Scope D B2) so the DB token doesn't desync after the emergency refresh.
 
-    Best-effort: a write failure never blocks the cancel (the in-memory client
-    is already refreshed; worst case the next daemon boot refreshes again).
+    Raises on encryption or persistence failures.  The caller records a
+    non-secret summary error while continuing the emergency cancel retry.
     """
     bid = (brokerage_row or {}).get("id")
     if not bid:
         return False
-    try:
-        from secret_store import encrypt as _encrypt
-        st = getattr(client, "state", None)
-        access = getattr(st, "access_token", "") or ""
-        refresh_tok = getattr(st, "refresh_token", "") or ""
-        enc_access = _encrypt(access)
-        enc_refresh = _encrypt(refresh_tok)
-        import time as _t
-        import datetime as _dt
-        r.db(DB_NAME).table("BrokerageAccounts").get(bid).update({
-            "robinhood_access_token": enc_access,
-            "robinhood_refresh_token": enc_refresh,
-            "robinhood_obtained_at_epoch": int(getattr(st, "obtained_at_epoch", 0) or int(_t.time())),
-            "robinhood_expires_in": int(getattr(st, "expires_in", 0) or 86400),
-            "last_refresh_at": _dt.datetime.utcnow().isoformat(),
-        }).run(conn)
-        return True
-    except Exception:
-        return False
+    from secret_store import encrypt as _encrypt
+    st = getattr(client, "state", None)
+    access = getattr(st, "access_token", "") or ""
+    refresh_tok = getattr(st, "refresh_token", "") or ""
+    enc_access = _encrypt(access)
+    enc_refresh = _encrypt(refresh_tok)
+    import time as _t
+    import datetime as _dt
+    r.db(DB_NAME).table("BrokerageAccounts").get(bid).update({
+        "robinhood_access_token": enc_access,
+        "robinhood_refresh_token": enc_refresh,
+        "robinhood_obtained_at_epoch": int(getattr(st, "obtained_at_epoch", 0) or int(_t.time())),
+        "robinhood_expires_in": int(getattr(st, "expires_in", 0) or 86400),
+        "last_refresh_at": _dt.datetime.utcnow().isoformat(),
+    }).run(conn)
+    return True
 
 
 def halt_live_trading(
@@ -200,7 +197,13 @@ def halt_live_trading(
                                 ):
                                     _rh_refreshed["done"] = True
                                     client.refresh()
-                                    _persist_rh_refreshed_token(r, conn, b, client)
+                                    try:
+                                        _persist_rh_refreshed_token(r, conn, b, client)
+                                    except Exception as _persist_error:
+                                        summary["errors"].append(
+                                            f"brokerage {b.get('id')}: credential refresh persistence "
+                                            f"failed ({type(_persist_error).__name__})"
+                                        )
                                     return fn()
                                 raise
 
