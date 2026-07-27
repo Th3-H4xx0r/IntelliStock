@@ -91,6 +91,9 @@ services:
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
       - SOCKET_CONTROL_MASTER_KEY=${SOCKET_CONTROL_MASTER_KEY:?Set SOCKET_CONTROL_MASTER_KEY in .env (run install.sh/install.ps1 to auto-generate)}
       - DOCKER_INSTANCE_IMAGE=intellistock-backend
+      # Inactive-by-default release posture. An operator must separately set
+      # this true before an equities runCommand can create a worker.
+      - EQUITIES_INSTANCE_AUTOSTART_ALLOWED=${EQUITIES_INSTANCE_AUTOSTART_ALLOWED:-false}
       - INSTANCE_RETHINKDB_HOST=rethinkdb
       - INSTANCE_SERVER_URL=http://intellistock-backend:5000
       - INSTANCE_DOCKER_NETWORK=intellistockv4_default

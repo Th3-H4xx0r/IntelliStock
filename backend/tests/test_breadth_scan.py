@@ -12,19 +12,14 @@ its module deps and a fake ticker_universe, and hand it synthetic closes.
 import ast
 import os
 import sys
-import types
 
 _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
-# Fake ticker_universe so the function's `from ticker_universe import ...` resolves.
-_fake_tu = types.ModuleType("ticker_universe")
-_fake_tu.get_breadth_universe = lambda **k: list(_UNIVERSE)
-sys.modules["ticker_universe"] = _fake_tu
-
 _ns = {
     "_log": lambda *a, **k: None,
+    "get_breadth_universe": lambda **k: list(_UNIVERSE),
     # bars are pre-seeded into strategy_cache["_overlay_bars_raw"] as close-lists;
     # the loader is a no-op and _point_in_time_closes just returns them.
     "_ensure_overlay_bars_cached": lambda *a, **k: None,
@@ -33,6 +28,19 @@ _ns = {
 _src = open(os.path.join(_backend, "strategies", "graph_nexus_analysis.py")).read()
 for _node in ast.parse(_src).body:
     if isinstance(_node, ast.FunctionDef) and _node.name == "_breadth_scan_movers":
+        # The extracted function imports this dependency inside its try block.
+        # Remove only that import and inject the test-local callable above;
+        # mutating sys.modules at collection time contaminates unrelated tests.
+        for _inner in ast.walk(_node):
+            if isinstance(_inner, ast.Try):
+                _inner.body = [
+                    _statement
+                    for _statement in _inner.body
+                    if not (
+                        isinstance(_statement, ast.ImportFrom)
+                        and _statement.module == "ticker_universe"
+                    )
+                ]
         exec(compile(ast.Module(body=[_node], type_ignores=[]), "gna.py", "exec"), _ns)
 breadth = _ns["_breadth_scan_movers"]
 

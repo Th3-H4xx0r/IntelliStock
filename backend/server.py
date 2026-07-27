@@ -561,6 +561,20 @@ def start_instance_container(instance_id, *, preflight=None):
             raise LiveReadinessError("launch preflight instance does not match")
         client = authoritative_preflight.client
         kind = authoritative_preflight.instance.get("kind")
+        if (
+            kind in (None, "", "equities")
+            and os.environ.get(
+                "EQUITIES_INSTANCE_AUTOSTART_ALLOWED", "false"
+            ).strip().lower()
+            not in {"1", "true", "yes", "on"}
+        ):
+            intellistock_logger.log(
+                f"Equities instance {instance_id} remains stopped: "
+                "EQUITIES_INSTANCE_AUTOSTART_ALLOWED is not explicitly enabled",
+                "yellow",
+                service="SERVER",
+            )
+            return None
         if kind == "kalshi":
             cmd = ['python', '-m', 'kalshi.runner', str(instance_id)]
         elif kind in (None, "", "equities"):

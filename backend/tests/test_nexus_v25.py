@@ -256,6 +256,7 @@ def test_profit_take_only_fires_once_per_open_position():
     portfolio.seed_position("WIN", 10.0, 100.0, buy_time=buy_time)
     cache = {}
     config = {
+        "profit_take_enabled": True,
         "profit_take_gain_pct": 40.0,
         "profit_take_sell_fraction": 0.50,
         "trailing_stop_activation_pct": 10.0,

@@ -132,6 +132,7 @@ def test_master_key_rejects_predictable_values():
 def test_start_ignores_caller_preflight_and_runs_immutable_image_id(monkeypatch):
     import server
     monkeypatch.setenv("SOCKET_CONTROL_MASTER_KEY", "0123456789abcdef" * 4)
+    monkeypatch.setenv("EQUITIES_INSTANCE_AUTOSTART_ALLOWED", "true")
     monkeypatch.setattr(server, "_get_instance_network", lambda c: "net")
     monkeypatch.setattr(server, "_augment_volumes_with_claude", lambda v: v)
     captured = []

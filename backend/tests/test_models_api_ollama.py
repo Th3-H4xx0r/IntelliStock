@@ -156,6 +156,7 @@ def test_llm_test_endpoint_accepts_local_ollama_without_api_key(monkeypatch):
     app.dependency_overrides[api_main.get_current_user] = lambda: {
         "id": "test-user", "username": "test", "role": "user"
     }
+    app.dependency_overrides[api_main.conn_dependency] = lambda: object()
     client = TestClient(app)
 
     # Mock the two LLM call sites the test endpoint uses.

@@ -46,6 +46,19 @@ from chatbot.claude_cli_provider import (  # noqa: E402
 from chatbot.claude_cli_provider import test_claude_cli as _test_claude_cli  # noqa: E402  # avoid pytest collection
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cli_path_resolution(monkeypatch):
+    """Keep mocked subprocess tests independent of the host's CLI installer."""
+    real_resolver = provider._resolve_cli_path
+
+    def _resolve(requested):
+        if os.path.isabs(requested):
+            return real_resolver(requested)
+        return requested
+
+    monkeypatch.setattr(provider, "_resolve_cli_path", _resolve)
+
+
 # ── validate_extra_args ────────────────────────────────────────────────────
 
 
@@ -903,7 +916,7 @@ class TestTestClaudeCliHelper:
         out = _test_claude_cli(cli_path="claude")
         assert out["ok"] is False
         assert out["logged_in"] is False
-        assert "log in" in out["error"].lower()
+        assert "not logged in" in out["error"].lower()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

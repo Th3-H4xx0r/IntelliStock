@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
@@ -52,6 +53,131 @@ class InactiveVerification:
     passed: bool
     reasons: tuple[str, ...]
     evidence_hash: str
+
+
+@dataclass(frozen=True)
+class ReadinessEvidenceBundle:
+    """Versioned, secret-free hashes for one inactive release candidate."""
+
+    schema_version: int
+    artifact_hash: str
+    inactive_evidence_hash: str
+    readiness_fingerprint: str
+    inactive_verified: bool
+    activation_allowed: bool
+    unmet_check_hashes: tuple[str, ...]
+    verification_reason_hashes: tuple[str, ...]
+    bundle_hash: str
+
+    def to_mapping(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "artifact_hash": self.artifact_hash,
+            "inactive_evidence_hash": self.inactive_evidence_hash,
+            "readiness_fingerprint": self.readiness_fingerprint,
+            "inactive_verified": self.inactive_verified,
+            "activation_allowed": self.activation_allowed,
+            "unmet_check_hashes": list(self.unmet_check_hashes),
+            "verification_reason_hashes": list(
+                self.verification_reason_hashes
+            ),
+            "bundle_hash": self.bundle_hash,
+        }
+
+
+def build_readiness_evidence_bundle(
+    *,
+    artifact_hash: str,
+    inactive_verification: InactiveVerification,
+    readiness_report,
+) -> ReadinessEvidenceBundle:
+    """Bind inactive verification and readiness without exposing identifiers."""
+    from live_readiness import (
+        LiveReadinessError,
+        ReadinessReport,
+        assert_artifact_bound,
+        assert_live_start_allowed,
+        report_fingerprint,
+    )
+
+    if (
+        type(artifact_hash) is not str
+        or not re.fullmatch(r"[0-9a-f]{64}", artifact_hash)
+    ):
+        raise ValueError("artifact_hash must be a lowercase SHA-256 digest")
+    if type(inactive_verification) is not InactiveVerification:
+        raise TypeError("inactive_verification is malformed")
+    if (
+        type(inactive_verification.evidence_hash) is not str
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", inactive_verification.evidence_hash
+        )
+    ):
+        raise ValueError(
+            "inactive verification evidence must be a SHA-256 digest"
+        )
+    if type(readiness_report) is not ReadinessReport:
+        raise TypeError("readiness_report is malformed")
+    try:
+        assert_artifact_bound(
+            readiness_report,
+            deployed_artifact_hash=artifact_hash,
+        )
+    except LiveReadinessError as exc:
+        raise ValueError(
+            "artifact_hash does not match the readiness report"
+        ) from exc
+
+    inactive_verified = bool(
+        inactive_verification.passed
+        and not inactive_verification.reasons
+    )
+    activation_allowed = False
+    if inactive_verified:
+        try:
+            assert_live_start_allowed(
+                readiness_report,
+                deployed_artifact_hash=artifact_hash,
+            )
+        except LiveReadinessError:
+            pass
+        else:
+            activation_allowed = True
+
+    unmet = tuple(
+        sorted(
+            hashlib.sha256(check.name.encode("utf-8")).hexdigest()
+            for check in readiness_report.checks
+            if not check.passed
+        )
+    )
+    reason_hashes = tuple(
+        sorted(
+            hashlib.sha256(reason.encode("utf-8")).hexdigest()
+            for reason in inactive_verification.reasons
+        )
+    )
+    payload = {
+        "schema_version": 1,
+        "artifact_hash": artifact_hash,
+        "inactive_evidence_hash": inactive_verification.evidence_hash,
+        "readiness_fingerprint": report_fingerprint(readiness_report),
+        "inactive_verified": inactive_verified,
+        "activation_allowed": activation_allowed,
+        "unmet_check_hashes": unmet,
+        "verification_reason_hashes": reason_hashes,
+    }
+    bundle_hash = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return ReadinessEvidenceBundle(
+        **payload,
+        bundle_hash=bundle_hash,
+    )
 
 
 def _number(value):
@@ -206,7 +332,6 @@ def _snapshot_reader(conn, instance_id: str, broker_snapshot_reader, worker_stat
 
 
 def _validate_deployed_image(image_ref: str, expected_hash: str, *, client=None) -> None:
-    import re
     if type(image_ref) is not str or not image_ref or type(expected_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
         raise RuntimeError("deployed image identity is unavailable")
     if client is None:
