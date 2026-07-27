@@ -55,3 +55,19 @@ def test_is_encrypted_detects_tag(with_key):
     assert is_encrypted(ct)
     assert not is_encrypted("plain")
     assert not is_encrypted(None)
+
+
+def test_decrypt_required_rejects_plaintext(with_key):
+    """A credential reader must not silently accept a legacy plaintext row."""
+    from secret_store import decrypt_required
+
+    with pytest.raises(RuntimeError, match="alpaca_secret: plaintext secret is forbidden"):
+        decrypt_required("live-secret", field="alpaca_secret")
+
+
+def test_decrypt_required_rejects_empty_decrypted_secret(with_key):
+    """An encrypted-but-empty secret is not a usable credential."""
+    from secret_store import decrypt_required, encrypt
+
+    with pytest.raises(RuntimeError, match="api_key: decrypted secret is empty"):
+        decrypt_required(encrypt(""), field="api_key")

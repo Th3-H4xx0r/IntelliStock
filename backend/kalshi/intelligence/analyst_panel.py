@@ -117,7 +117,11 @@ def make_llm_call(model_doc: dict | None, log=None, instance_id: str | None = No
             _log(f"Analyst LLM: missing provider/model (provider={provider_raw!r}, "
                  f"model={model!r}) — analyst disabled.", "yellow")
             return None
-        api_key = (model_doc.get("api_key") or "").strip() or resolve_api_key_for_provider(provider)
+        stored_api_key = (model_doc.get("api_key") or "").strip()
+        if stored_api_key:
+            from secret_store import decrypt
+            stored_api_key = decrypt(stored_api_key) or ""
+        api_key = stored_api_key or resolve_api_key_for_provider(provider)
         provider_config = _provider_config_from_doc(provider, model_doc)
         # Output budget sized to the model's reasoning effort. The analyst's own
         # output (adjustments + shortlist + rationales) is small, but reasoning

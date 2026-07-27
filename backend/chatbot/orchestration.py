@@ -118,6 +118,9 @@ def _resolve_model(conn, model_id: Optional[str]) -> Dict[str, Any]:
             "reasoning_effort": doc.get("reasoning_effort"),
         }
     api_key = doc.get("api_key") or ""
+    if api_key:
+        from secret_store import decrypt
+        api_key = decrypt(api_key) or ""
     if not api_key:
         # Fallback to env vars via resolver pattern; we keep this simple here
         # because the chatbot can't accept env-based keys silently.

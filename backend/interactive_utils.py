@@ -7470,15 +7470,11 @@ def action_link_alpaca(conn, account_name, key, secret, paper=True, alpaca_data_
     _ensure_brokerage_accounts_table(conn)
     import datetime
     now = datetime.datetime.utcnow().isoformat()
-    # Encrypt secrets at rest. If Fernet key is missing we fall back to plaintext
-    # rather than block account linking - the credential_service logs a warning.
-    try:
-        from secret_store import encrypt as _encrypt
-        _enc_key = _encrypt(key)
-        _enc_secret = _encrypt(secret)
-    except RuntimeError:
-        _enc_key = key
-        _enc_secret = secret
+    # A missing credential key is a failed link; plaintext persistence is not
+    # an acceptable fallback for broker credentials.
+    from secret_store import encrypt as _encrypt
+    _enc_key = _encrypt(key)
+    _enc_secret = _encrypt(secret)
     doc = {
         "account_name": account_name,
         "brokerage_type": "alpaca",
@@ -7639,16 +7635,11 @@ def action_link_robinhood_tokens(conn, account_name, access_token, refresh_token
     _ensure_brokerage_accounts_table(conn)
     import datetime
     now = datetime.datetime.utcnow().isoformat()
-    # Encrypt bearer tokens at rest.
-    try:
-        from secret_store import encrypt as _encrypt
-        _enc_access = _encrypt(access_token)
-        _enc_refresh = _encrypt(refresh_token)
-        _enc_device = _encrypt(device_token)
-    except RuntimeError:
-        _enc_access = access_token
-        _enc_refresh = refresh_token
-        _enc_device = device_token
+    # A missing credential key is a failed link; never substitute plaintext.
+    from secret_store import encrypt as _encrypt
+    _enc_access = _encrypt(access_token)
+    _enc_refresh = _encrypt(refresh_token)
+    _enc_device = _encrypt(device_token)
     doc = {
         "account_name": account_name,
         "brokerage_type": "robinhood",
@@ -7708,13 +7699,9 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
     update = {"updated_at": now}
     data_access_result = None  # populated if we run the feed validation
 
-    # Helper for encrypting secrets on update. If Fernet key missing, store plaintext
-    # (caller may not have configured it yet; credential_service logs a warning).
-    try:
-        from secret_store import encrypt as _encrypt, decrypt as _decrypt
-    except Exception:
-        _encrypt = lambda v: v
-        _decrypt = lambda v: v
+    # Updates require encrypted existing values and an available Fernet key.
+    # A plaintext legacy row must be migrated before it can be used.
+    from secret_store import decrypt_required as _decrypt_required, encrypt as _encrypt
 
     if btype == "alpaca":
         account_name = (account_name or "").strip()
@@ -7742,8 +7729,8 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
         _effective_feed = _incoming_feed or (doc.get("alpaca_data_feed") or "iex")
 
         if key or secret:
-            use_key = key or _decrypt(doc.get("alpaca_key", "")) or ""
-            use_secret = secret or _decrypt(doc.get("alpaca_secret", "")) or ""
+            use_key = key or _decrypt_required(doc.get("alpaca_key", ""), field="alpaca_key")
+            use_secret = secret or _decrypt_required(doc.get("alpaca_secret", ""), field="alpaca_secret")
             use_paper = paper if paper is not None else doc.get("alpaca_paper", True)
             base_url = "https://paper-api.alpaca.markets" if use_paper else "https://api.alpaca.markets"
 
@@ -7774,15 +7761,9 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
             )
 
             if key:
-                try:
-                    update["alpaca_key"] = _encrypt(key)
-                except RuntimeError:
-                    update["alpaca_key"] = key
+                update["alpaca_key"] = _encrypt(key)
             if secret:
-                try:
-                    update["alpaca_secret"] = _encrypt(secret)
-                except RuntimeError:
-                    update["alpaca_secret"] = secret
+                update["alpaca_secret"] = _encrypt(secret)
             if paper is not None:
                 update["alpaca_paper"] = bool(paper)
                 update["alpaca_base_url"] = base_url
@@ -7807,8 +7788,8 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
             _stored_feed = str(doc.get("alpaca_data_feed") or "").strip().lower()
             if _incoming_feed != _stored_feed:
                 try:
-                    _use_key = _decrypt(doc.get("alpaca_key", "")) or ""
-                    _use_secret = _decrypt(doc.get("alpaca_secret", "")) or ""
+                    _use_key = _decrypt_required(doc.get("alpaca_key", ""), field="alpaca_key")
+                    _use_secret = _decrypt_required(doc.get("alpaca_secret", ""), field="alpaca_secret")
                 except Exception as _dec_e:
                     raise ValueError(
                         f"Cannot validate feed change: stored credentials could "
@@ -7851,11 +7832,15 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
         if access_token:
             import time as _time, uuid as _uuid
             from robinhood_engine import RobinhoodClient, RobinhoodSessionState, RobinhoodAPIError as _RHErr
-            dtoken = device_token or _decrypt(doc.get("robinhood_device_token")) or str(_uuid.uuid4())
+            dtoken = device_token or _decrypt_required(
+                doc.get("robinhood_device_token"), field="robinhood_device_token"
+            )
             _real_expires_in = _rh_expires_in_from_jwt(access_token, fallback=86400)
             state = RobinhoodSessionState(
                 access_token=access_token,
-                refresh_token=refresh_token or _decrypt(doc.get("robinhood_refresh_token", "")) or "",
+                refresh_token=refresh_token or _decrypt_required(
+                    doc.get("robinhood_refresh_token", ""), field="robinhood_refresh_token"
+                ),
                 token_type="Bearer",
                 expires_in=_real_expires_in,
                 obtained_at_epoch=int(_time.time()),
@@ -7872,15 +7857,12 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
                 raise ValueError(f"Could not connect to Robinhood to validate: {e}")
 
             acct_num = client.state.account_number or acct.get("account_number", "")
-            # Encrypt tokens on write.
-            try:
-                _enc_access = _encrypt(access_token)
-                _enc_refresh = _encrypt(refresh_token or _decrypt(doc.get("robinhood_refresh_token", "")) or "")
-                _enc_device = _encrypt(dtoken)
-            except RuntimeError:
-                _enc_access = access_token
-                _enc_refresh = refresh_token or doc.get("robinhood_refresh_token", "")
-                _enc_device = dtoken
+            # Encrypt tokens on write; encryption failure aborts the update.
+            _enc_access = _encrypt(access_token)
+            _enc_refresh = _encrypt(refresh_token or _decrypt_required(
+                doc.get("robinhood_refresh_token", ""), field="robinhood_refresh_token"
+            ))
+            _enc_device = _encrypt(dtoken)
             update.update({
                 "robinhood_access_token": _enc_access,
                 "robinhood_refresh_token": _enc_refresh,
@@ -8335,19 +8317,15 @@ def action_refresh_robinhood(conn, brokerage_id):
 
     from robinhood_engine import RobinhoodClient, RobinhoodSessionState, RobinhoodAPIError as _RHErr
     import datetime
-    # Decrypt stored tokens before giving to client; encrypt new ones on write.
-    try:
-        from secret_store import decrypt as _decrypt, encrypt as _encrypt
-    except Exception:
-        _decrypt = lambda v: v
-        _encrypt = lambda v: v
+    # Both read and write boundaries require encrypted secrets.
+    from secret_store import decrypt_required as _decrypt_required, encrypt as _encrypt
     state = RobinhoodSessionState(
-        access_token=_decrypt(doc.get("robinhood_access_token")),
-        refresh_token=_decrypt(doc.get("robinhood_refresh_token")),
+        access_token=_decrypt_required(doc.get("robinhood_access_token"), field="robinhood_access_token"),
+        refresh_token=_decrypt_required(doc.get("robinhood_refresh_token"), field="robinhood_refresh_token"),
         token_type=doc.get("robinhood_token_type", "Bearer"),
         expires_in=doc.get("robinhood_expires_in"),
         obtained_at_epoch=doc.get("robinhood_obtained_at_epoch"),
-        device_token=_decrypt(doc.get("robinhood_device_token")),
+        device_token=_decrypt_required(doc.get("robinhood_device_token"), field="robinhood_device_token"),
         account_number=doc.get("robinhood_account_number"),
         account_url=doc.get("robinhood_account_url"),
     )
@@ -8364,12 +8342,8 @@ def action_refresh_robinhood(conn, brokerage_id):
         raise ValueError(f"Refresh failed: {e.detail or str(e)}")
 
     now = datetime.datetime.utcnow().isoformat()
-    try:
-        _enc_access = _encrypt(new_state.access_token)
-        _enc_refresh = _encrypt(new_state.refresh_token)
-    except RuntimeError:
-        _enc_access = new_state.access_token
-        _enc_refresh = new_state.refresh_token
+    _enc_access = _encrypt(new_state.access_token)
+    _enc_refresh = _encrypt(new_state.refresh_token)
     r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).update({
         "robinhood_access_token": _enc_access,
         "robinhood_refresh_token": _enc_refresh,
@@ -8558,6 +8532,10 @@ def action_get_model_raw(conn, model_id):
     doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
+    if doc.get("api_key"):
+        from secret_store import decrypt
+        doc = dict(doc)
+        doc["api_key"] = decrypt(doc["api_key"])
     return doc
 
 
@@ -8672,6 +8650,8 @@ def action_create_model(conn, name, provider, model, api_key=None,
                         input_cost_per_1m=None, output_cost_per_1m=None,
                         cache_creation_cost_per_1m=None,
                         cache_read_cost_per_1m=None):
+    from secret_store import encrypt as _encrypt
+
     _ensure_models_table(conn)
     provider_n = (provider or "").strip().lower()
     _validate_provider_model_compat(provider_n, model)
@@ -8685,7 +8665,7 @@ def action_create_model(conn, name, provider, model, api_key=None,
         "name": (name or "").strip(),
         "provider": provider_n,
         "model": (model or "").strip(),
-        "api_key": (api_key or "").strip(),
+        "api_key": _encrypt((api_key or "").strip()) if (api_key or "").strip() else "",
         "openai_base_url": (openai_base_url or "").strip(),
         "nvidia_base_url": (nvidia_base_url or "").strip(),
         "azure_openai_endpoint": (azure_openai_endpoint or "").strip(),
@@ -8727,6 +8707,8 @@ def action_create_model(conn, name, provider, model, api_key=None,
 
 
 def action_edit_model(conn, model_id, **kwargs):
+    from secret_store import encrypt as _encrypt
+
     _ensure_models_table(conn)
     doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     if doc is None:
@@ -8807,7 +8789,7 @@ def action_edit_model(conn, model_id, **kwargs):
         # of overwriting it — otherwise editing any other field would wipe the key.
         if field == "api_key" and (val == "" or _looks_masked(val)):
             continue
-        update[field] = val
+        update[field] = _encrypt(val) if field == "api_key" else val
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).update(update).run(conn)
     updated = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     # If the conversation is using a claude-cli session with this model,
@@ -8858,6 +8840,10 @@ def _find_strategies_referencing_model(conn, model_id):
 
 def _restore_inline_from_model(conn, model_id, model_doc):
     """Before force-deleting a model, restore inline credentials into referencing strategies."""
+    if model_doc.get("api_key"):
+        from secret_store import decrypt
+        model_doc = dict(model_doc)
+        model_doc["api_key"] = decrypt(model_doc["api_key"])
     strategies = list(r.db(DB_NAME).table("Strategies").run(conn))
     for strat in strategies:
         changed = False

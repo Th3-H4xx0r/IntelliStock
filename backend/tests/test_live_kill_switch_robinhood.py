@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 _backend = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,6 +33,21 @@ def _fake_r_with_brokerages(brokerages: list[dict]) -> tuple[MagicMock, MagicMoc
     }
     bro_tbl.run.return_value = iter(brokerages)
     return r, MagicMock()  # (r, conn)
+
+
+def test_refreshed_kill_switch_token_is_not_persisted_without_encryption(monkeypatch):
+    """The emergency writer must fail closed rather than storing live tokens."""
+    import live_kill_switch as lks
+
+    monkeypatch.delenv("INTELLISTOCK_CRED_KEY", raising=False)
+    fake_r, fake_conn = _fake_r_with_brokerages([])
+    client = MagicMock(state=SimpleNamespace(
+        access_token="new-access", refresh_token="new-refresh",
+        obtained_at_epoch=1, expires_in=3600,
+    ))
+
+    assert lks._persist_rh_refreshed_token(fake_r, fake_conn, {"id": "rh-1"}, client) is False
+    fake_r.db.return_value.table.return_value.get.return_value.update.assert_not_called()
 
 
 def test_robinhood_cancel_path_invokes_cancel_for_each_open_order(monkeypatch):

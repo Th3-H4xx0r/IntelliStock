@@ -43,18 +43,12 @@ def _persist_rh_refreshed_token(r, conn, brokerage_row: dict, client) -> bool:
     if not bid:
         return False
     try:
-        try:
-            from secret_store import encrypt as _encrypt
-        except Exception:
-            _encrypt = lambda v: v  # noqa: E731 — plaintext fallback (no Fernet key)
+        from secret_store import encrypt as _encrypt
         st = getattr(client, "state", None)
         access = getattr(st, "access_token", "") or ""
         refresh_tok = getattr(st, "refresh_token", "") or ""
-        try:
-            enc_access = _encrypt(access)
-            enc_refresh = _encrypt(refresh_tok)
-        except RuntimeError:
-            enc_access, enc_refresh = access, refresh_tok
+        enc_access = _encrypt(access)
+        enc_refresh = _encrypt(refresh_tok)
         import time as _t
         import datetime as _dt
         r.db(DB_NAME).table("BrokerageAccounts").get(bid).update({
