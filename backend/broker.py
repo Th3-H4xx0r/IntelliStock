@@ -96,6 +96,11 @@ _live_order_dependency_state = {
     "watchdog": "unknown",
     "cash_at": None,
     "positions_at": None,
+    "kill_switch_at": None,
+    "calendar_at": None,
+    "persistence_at": None,
+    "risk_state_at": None,
+    "watchdog_at": None,
     "market_open": False,
     "risk_snapshot_id": "",
 }
@@ -3159,6 +3164,14 @@ def _residual_sleeve_release(
                 decision_at = _dt.now(_tz.utc)
             elif decision_at.tzinfo is None:
                 decision_at = decision_at.replace(tzinfo=_tz.utc)
+            quote_at = _dt.fromtimestamp(0, _tz.utc)
+            try:
+                mark = portfolio_emulator._market_marks.get(symbol)
+                if mark is not None:
+                    price = float(mark.price)
+                    quote_at = mark.observed_at
+            except Exception:
+                pass
             style = (
                 portfolio_emulator._order_style_for_now(
                     price, "sell", decision_at
@@ -3180,7 +3193,7 @@ def _residual_sleeve_release(
                 quantity=Decimal(str(quantity)),
                 reduce_only=True,
                 decision_at=decision_at,
-                quote_at=decision_at,
+                quote_at=quote_at,
                 risk_snapshot_id=(
                     getattr(order_service, "risk_snapshot_id", "")
                     or f"sleeve:{decision_at.isoformat()}"
@@ -3456,6 +3469,14 @@ def _residual_sleeve_deploy(
                 decision_at = _dt.now(_tz.utc)
             elif decision_at.tzinfo is None:
                 decision_at = decision_at.replace(tzinfo=_tz.utc)
+            quote_at = _dt.fromtimestamp(0, _tz.utc)
+            try:
+                mark = portfolio_emulator._market_marks.get(symbol)
+                if mark is not None:
+                    price = float(mark.price)
+                    quote_at = mark.observed_at
+            except Exception:
+                pass
             style = (
                 portfolio_emulator._order_style_for_now(
                     price, "buy", decision_at
@@ -3479,7 +3500,7 @@ def _residual_sleeve_deploy(
                 ).quantize(Decimal("0.00000001")),
                 reduce_only=False,
                 decision_at=decision_at,
-                quote_at=decision_at,
+                quote_at=quote_at,
                 risk_snapshot_id=(
                     getattr(order_service, "risk_snapshot_id", "")
                     or f"sleeve:{decision_at.isoformat()}"
@@ -6287,6 +6308,8 @@ def _reconcile_alpaca_ownership(adapter, order_service):
                         "healthy" if result.healthy else "unhealthy"
                     ),
                     "positions_at": now_utc,
+                    "persistence": "healthy",
+                    "persistence_at": now_utc,
                     "reconciliation_evidence_hash": result.evidence_hash,
                 }
             )
@@ -6301,6 +6324,8 @@ def _reconcile_alpaca_ownership(adapter, order_service):
                 {
                     "positions": "unhealthy",
                     "positions_at": now_utc,
+                    "persistence": "unknown",
+                    "persistence_at": None,
                     "reconciliation_evidence_hash": "",
                 }
             )
@@ -6311,6 +6336,7 @@ def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
     from decimal import Decimal
     from live_orders import DependencySnapshot, Health, OrderSource
+    from market_marks import MarkPurpose, evaluate_mark
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     with _live_order_dependency_lock:
@@ -6318,10 +6344,22 @@ def _live_order_dependency_snapshot(adapter, intent):
     position_map = dict(getattr(adapter, "_positions", {}) or {})
     symbol = str(intent.symbol).strip().upper()
     position_quantity = Decimal(str(position_map.get(symbol, 0) or 0))
-    quote_price = intent.reference_price
-    if quote_price is None:
-        quote_price = Decimal(
-            str((getattr(adapter, "_last_prices", {}) or {}).get(symbol, 0) or 0)
+    mark_book = getattr(adapter, "_market_marks", None)
+    mark = mark_book.get(symbol) if mark_book is not None else None
+    quote_price = Decimal("0")
+    quote_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+    quote_health = Health.UNKNOWN
+    if mark is not None:
+        purpose = (
+            MarkPurpose.RISK_REDUCTION
+            if intent.reduce_only
+            else MarkPurpose.SUBMISSION
+        )
+        mark_check = evaluate_mark(mark, purpose, now_utc)
+        quote_price = Decimal(str(mark.price))
+        quote_at = mark.observed_at
+        quote_health = (
+            Health.HEALTHY if mark_check.allowed else Health.UNHEALTHY
         )
     positions_health = state.get("positions", "unknown")
     if getattr(adapter, "_positions_stale_since", None) is not None:
@@ -6336,9 +6374,10 @@ def _live_order_dependency_snapshot(adapter, intent):
         or getattr(adapter, "_instance_id", "")
     )
     instance_identity = str(getattr(adapter, "_instance_id", "") or instance_id)
-    quote_health = (
-        Health.HEALTHY if quote_price > 0 else Health.UNKNOWN
-    )
+    def _state_time(name):
+        value = state.get(name)
+        return value if isinstance(value, datetime.datetime) else None
+
     return DependencySnapshot(
         account_id=account_id,
         instance_id=instance_identity,
@@ -6358,13 +6397,22 @@ def _live_order_dependency_snapshot(adapter, intent):
         watchdog=Health(state.get("watchdog", "unknown")),
         quote_symbol=symbol,
         quote_price=quote_price,
-        quote_at=intent.quote_at,
+        quote_at=quote_at,
         position_symbol=symbol,
         position_quantity=position_quantity,
         positions_at=positions_at,
         available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
         market_open=bool(state.get("market_open", False)),
         risk_snapshot_id=risk_snapshot_id,
+        kill_switch_at=_state_time("kill_switch_at"),
+        cash_at=_state_time("cash_at"),
+        calendar_at=_state_time("calendar_at"),
+        persistence_at=_state_time("persistence_at"),
+        risk_state_at=_state_time("risk_state_at"),
+        watchdog_at=_state_time("watchdog_at"),
+        max_quote_age=datetime.timedelta(
+            seconds=600 if intent.reduce_only else 30
+        ),
         open_order_idempotency_keys=frozenset(),
         authorized_sources=frozenset(OrderSource),
     )
@@ -7595,11 +7643,24 @@ elif mode == MODE_LIVE:
                             else "unknown"
                         ),
                         "cash_at": _gate_now,
+                        "persistence_at": (
+                            _gate_now
+                            if getattr(live_adapter, "_wal", None) is not None
+                            else None
+                        ),
                     })
             else:
                 _live_stock_order_service = None
             # Start the Alpaca stream only after the durable event sink is
             # bound; no fill can race the lifecycle authority at boot.
+            if _is_alpaca_runtime:
+                _mark_status = live_adapter.start_market_marks(symbols or ())
+                if _mark_status.get("overflow"):
+                    _log(
+                        "Alpaca mark-stream subscription overflow; affected "
+                        f"symbols fail closed: {_mark_status['overflow']}",
+                        "red",
+                    )
             live_adapter.start_trade_updates()
         except _BrokerError as _be:
             _log(f"Failed to build live broker adapter: {_be}", "red")
@@ -10311,6 +10372,8 @@ while not shutdown_requested:
                             "risk_state": "unknown",
                             "watchdog": "unknown",
                             "risk_snapshot_id": "",
+                            "risk_state_at": None,
+                            "watchdog_at": None,
                         })
                 # 2026-05-07 scheduler refactor: skip pre-cycle RH refresh on
                 # IDLE ticks. Strategy returns {} immediately on IDLE so
@@ -10414,6 +10477,21 @@ while not shutdown_requested:
                     _pos_ok = _retry_refresh(
                         "refresh_positions", live_adapter.refresh_positions, 5
                     )
+                    if (
+                        _pos_ok
+                        and str(live_broker_type or "").strip().lower()
+                        == "alpaca"
+                        and _live_stock_order_service is not None
+                    ):
+                        try:
+                            _pos_ok = bool(
+                                _reconcile_alpaca_ownership(
+                                    live_adapter,
+                                    _live_stock_order_service,
+                                ).healthy
+                            )
+                        except Exception:
+                            _pos_ok = False
                     if _acct_ok and _pos_ok:
                         if str(live_broker_type or "").strip().lower() == "alpaca":
                             _fresh_dependency_at = datetime.datetime.now(
@@ -10422,9 +10500,7 @@ while not shutdown_requested:
                             with _live_order_dependency_lock:
                                 _live_order_dependency_state.update({
                                     "cash": "healthy",
-                                    "positions": "healthy",
                                     "cash_at": _fresh_dependency_at,
-                                    "positions_at": _fresh_dependency_at,
                                 })
                         _log(
                             "Pre-cycle RH refresh COMPLETE — proceeding to "
@@ -10438,10 +10514,11 @@ while not shutdown_requested:
                                     "cash": (
                                         "healthy" if _acct_ok else "unknown"
                                     ),
-                                    "positions": (
-                                        "healthy" if _pos_ok else "unknown"
-                                    ),
                                 })
+                                if not _pos_ok:
+                                    _live_order_dependency_state[
+                                        "positions"
+                                    ] = "unknown"
                         _precycle_ok = False
                         _log(
                             f"Pre-cycle RH refresh FAILED "
@@ -10756,11 +10833,16 @@ while not shutdown_requested:
                             f"{current_time.isoformat()}:"
                             f"{int(_strategy_tick_n)}"
                         )
+                        _risk_evidence_at = datetime.datetime.now(
+                            datetime.timezone.utc
+                        )
                         with _live_order_dependency_lock:
                             _live_order_dependency_state.update({
                                 "risk_state": "healthy",
                                 "watchdog": "healthy",
                                 "risk_snapshot_id": _risk_snapshot_id,
+                                "risk_state_at": _risk_evidence_at,
+                                "watchdog_at": _risk_evidence_at,
                             })
                         if _live_stock_order_service is not None:
                             _live_stock_order_service.risk_snapshot_id = (
@@ -11583,6 +11665,11 @@ while not shutdown_requested:
                     with _live_order_dependency_lock:
                         _live_order_dependency_state["kill_switch"] = "unknown"
                     _log(f"Kill-switch poll failed: {type(_ks_e).__name__}: {_ks_e} (failing open — continuing)", "yellow")
+                finally:
+                    with _live_order_dependency_lock:
+                        _live_order_dependency_state["kill_switch_at"] = (
+                            datetime.datetime.now(datetime.timezone.utc)
+                        )
 
             # 2026-04-22 Fix 3b: sync emulator cash from Alpaca's authoritative
             # get_account().cash BEFORE the per-symbol buy-gate math runs.
@@ -11637,16 +11724,15 @@ while not shutdown_requested:
                 ):
                     try:
                         _pos_fut = _PRICE_FETCH_EXECUTOR.submit(
-                            portfolio_emulator.refresh_positions
+                            _reconcile_alpaca_ownership,
+                            portfolio_emulator,
+                            _live_stock_order_service,
                         )
-                        _pos_fut.result(timeout=15.0)
-                        with _live_order_dependency_lock:
-                            _live_order_dependency_state.update({
-                                "positions": "healthy",
-                                "positions_at": datetime.datetime.now(
-                                    datetime.timezone.utc
-                                ),
-                            })
+                        _pos_reconciliation = _pos_fut.result(timeout=15.0)
+                        if not _pos_reconciliation.healthy:
+                            raise RuntimeError(
+                                "ownership reconciliation unresolved"
+                            )
                     except Exception as _pos_sync_e:
                         with _live_order_dependency_lock:
                             _live_order_dependency_state["positions"] = (
@@ -11672,6 +11758,7 @@ while not shutdown_requested:
                     _live_order_dependency_state.update({
                         "calendar": "unknown",
                         "market_open": False,
+                        "calendar_at": None,
                     })
             if (not _is_crypto_instance_runtime()) and mode == MODE_LIVE and portfolio_emulator is not None and _exec_order:
                 try:
@@ -11688,6 +11775,9 @@ while not shutdown_requested:
                                 _live_order_dependency_state.update({
                                     "calendar": "healthy",
                                     "market_open": _live_market_open_this_tick,
+                                    "calendar_at": datetime.datetime.now(
+                                        datetime.timezone.utc
+                                    ),
                                 })
                     except _live_cf.TimeoutError:
                         if str(live_broker_type or "").strip().lower() == "alpaca":
@@ -11695,21 +11785,27 @@ while not shutdown_requested:
                                 _live_order_dependency_state.update({
                                     "calendar": "unknown",
                                     "market_open": False,
+                                    "calendar_at": datetime.datetime.now(
+                                        datetime.timezone.utc
+                                    ),
                                 })
                         _log(
                             "Market-open check hard-timeout (>10s) — "
-                            "fail-open, treating market as open this tick",
+                            "failing closed for this tick",
                             "yellow",
                         )
-                        _live_market_open_this_tick = True
+                        _live_market_open_this_tick = False
                 except Exception:
                     if str(live_broker_type or "").strip().lower() == "alpaca":
                         with _live_order_dependency_lock:
                             _live_order_dependency_state.update({
                                 "calendar": "unknown",
                                 "market_open": False,
+                                "calendar_at": datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ),
                             })
-                    _live_market_open_this_tick = True  # fail-open on adapter issues
+                    _live_market_open_this_tick = False
                 _last_mkt = _loop_log_last_market_closed
                 if not _live_market_open_this_tick:
                     if _last_mkt is not True or (time.time() - _loop_log_last_heartbeat_at) >= LOOP_LOG_HEARTBEAT_SEC:
@@ -12549,21 +12645,34 @@ while not shutdown_requested:
                                                 )
                                                 or "risk:unavailable"
                                             )
+                                        _intent_price = price
                                         _authoritative_quote_at = (
-                                            _live_order_quote_times.get(
-                                                str(symbol).strip().upper()
-                                            )
-                                            or datetime.datetime.fromtimestamp(
+                                            datetime.datetime.fromtimestamp(
                                                 0, datetime.timezone.utc
                                             )
                                         )
+                                        try:
+                                            _intent_mark = (
+                                                live_adapter._market_marks.get(
+                                                    str(symbol).strip().upper()
+                                                )
+                                            )
+                                            if _intent_mark is not None:
+                                                _authoritative_quote_at = (
+                                                    _intent_mark.observed_at
+                                                )
+                                                _intent_price = float(
+                                                    _intent_mark.price
+                                                )
+                                        except Exception:
+                                            pass
                                         _stock_intent = (
                                             _build_strategy_stock_intent(
                                                 _live_stock_order_service,
                                                 portfolio_emulator,
                                                 symbol=symbol,
                                                 decision=decision,
-                                                price=price,
+                                                price=_intent_price,
                                                 current_time=current_time,
                                                 cash_to_use=cash_to_use,
                                                 sell_fraction=sell_fraction,

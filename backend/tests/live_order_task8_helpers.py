@@ -62,6 +62,12 @@ def snapshot(order: OrderIntent | None = None, **changes) -> DependencySnapshot:
         "available_cash": Decimal("1000"),
         "market_open": True,
         "risk_snapshot_id": order.risk_snapshot_id,
+        "kill_switch_at": NOW,
+        "cash_at": NOW,
+        "calendar_at": NOW,
+        "persistence_at": NOW,
+        "risk_state_at": NOW,
+        "watchdog_at": NOW,
         "max_order_notional": Decimal("1000"),
         "max_position_quantity": Decimal("100"),
     }

@@ -52,7 +52,7 @@ class UnifiedOrderGate:
         required = (
             self._DEPENDENCIES
             if not intent.reduce_only
-            else ("quote", "positions")
+            else ("quote", "positions", "persistence")
         )
         for name in required:
             health = getattr(snapshot, name)
@@ -60,6 +60,39 @@ class UnifiedOrderGate:
                 blockers.append(f"dependency.{name}.unknown")
             elif health is Health.UNHEALTHY:
                 blockers.append(f"dependency.{name}.unhealthy")
+
+        # A green status without recent evidence is not healthy. Control
+        # timestamps are evaluated against the same immutable observation.
+        freshness = {
+            "kill_switch": (
+                snapshot.kill_switch_at,
+                snapshot.max_control_age,
+            ),
+            "cash": (snapshot.cash_at, snapshot.max_cash_age),
+            "calendar": (snapshot.calendar_at, snapshot.max_calendar_age),
+            "persistence": (
+                snapshot.persistence_at,
+                snapshot.max_control_age,
+            ),
+            "risk_state": (
+                snapshot.risk_state_at,
+                snapshot.max_control_age,
+            ),
+            "watchdog": (
+                snapshot.watchdog_at,
+                snapshot.max_control_age,
+            ),
+        }
+        for name in required:
+            if name in ("quote", "positions"):
+                continue
+            timestamp, max_age = freshness[name]
+            if timestamp is None:
+                blockers.append(f"dependency.{name}.stale")
+            elif timestamp - snapshot.observed_at > snapshot.max_clock_skew:
+                blockers.append(f"dependency.{name}.clock_skew")
+            elif snapshot.observed_at - timestamp > max_age:
+                blockers.append(f"dependency.{name}.stale")
 
         # 3. Reduce-only containment.
         if intent.reduce_only:
@@ -82,13 +115,22 @@ class UnifiedOrderGate:
             blockers.append("quote.symbol_mismatch")
         if snapshot.quote_at != intent.quote_at:
             blockers.append("quote.timestamp_mismatch")
-        if (
-            snapshot.observed_at < snapshot.quote_at
-            or snapshot.observed_at - snapshot.quote_at > snapshot.max_quote_age
-        ):
+        if snapshot.quote_at - snapshot.observed_at > snapshot.max_clock_skew:
+            blockers.append("quote.clock_skew")
+        elif snapshot.observed_at - snapshot.quote_at > snapshot.max_quote_age:
             blockers.append("quote.stale")
         if snapshot.quote_price <= 0:
             blockers.append("quote.invalid_price")
+        if (
+            intent.reference_price is not None
+            and snapshot.quote_price > 0
+            and (
+                abs(intent.reference_price - snapshot.quote_price)
+                / snapshot.quote_price
+            )
+            > snapshot.max_reference_price_deviation
+        ):
+            blockers.append("quote.reference_price_mismatch")
         if not snapshot.market_open:
             blockers.append("market.closed")
 
@@ -96,9 +138,10 @@ class UnifiedOrderGate:
         # calculate the projected exposure of an add.
         if snapshot.position_symbol != intent.symbol:
             blockers.append("positions.symbol_mismatch")
-        if (
-            snapshot.observed_at < snapshot.positions_at
-            or snapshot.observed_at - snapshot.positions_at
+        if snapshot.positions_at - snapshot.observed_at > snapshot.max_clock_skew:
+            blockers.append("positions.clock_skew")
+        elif (
+            snapshot.observed_at - snapshot.positions_at
             > snapshot.max_positions_age
         ):
             blockers.append("positions.stale")

@@ -34,3 +34,5 @@ Tasks 3-7: integrated and verified together; 477 compatibility tests passed, inc
 Task 8: complete locally; durable Alpaca lifecycle, ordered normalized event dispatch, confirmed-fill-only accounting, and persistent CAS backend implemented. 90 focused tests passed.
 Task 8: committed at cf8e0b0.
 Task 9: complete locally; broker-first startup plus continuous reconciliation, deferred ownership, manual/external quarantine, and fail-closed snapshot consistency implemented. 96 focused tests passed.
+Task 9: committed at 99127c3.
+Task 10: complete locally; authoritative typed marks, dependency evidence timestamps, skew/age gates, read-only Alpaca mark stream, and fail-closed calendar behavior implemented. 129 focused tests passed.

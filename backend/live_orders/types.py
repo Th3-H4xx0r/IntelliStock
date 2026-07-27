@@ -248,6 +248,12 @@ class DependencySnapshot:
     available_cash: Decimal
     market_open: bool
     risk_snapshot_id: str
+    kill_switch_at: Optional[datetime] = None
+    cash_at: Optional[datetime] = None
+    calendar_at: Optional[datetime] = None
+    persistence_at: Optional[datetime] = None
+    risk_state_at: Optional[datetime] = None
+    watchdog_at: Optional[datetime] = None
     max_order_notional: Optional[Decimal] = None
     max_position_quantity: Optional[Decimal] = None
     open_order_idempotency_keys: frozenset[str] = field(default_factory=frozenset)
@@ -256,6 +262,11 @@ class DependencySnapshot:
     )
     max_quote_age: timedelta = timedelta(seconds=30)
     max_positions_age: timedelta = timedelta(seconds=60)
+    max_cash_age: timedelta = timedelta(seconds=60)
+    max_calendar_age: timedelta = timedelta(seconds=60)
+    max_control_age: timedelta = timedelta(seconds=60)
+    max_clock_skew: timedelta = timedelta(seconds=5)
+    max_reference_price_deviation: Decimal = Decimal("0.001")
 
     def __post_init__(self) -> None:
         health_fields = (
@@ -279,6 +290,19 @@ class DependencySnapshot:
         observed_at = _aware_utc(self.observed_at, "observed_at")
         quote_at = _aware_utc(self.quote_at, "quote_at")
         positions_at = _aware_utc(self.positions_at, "positions_at")
+        dependency_times = {}
+        for name in (
+            "kill_switch_at",
+            "cash_at",
+            "calendar_at",
+            "persistence_at",
+            "risk_state_at",
+            "watchdog_at",
+        ):
+            value = getattr(self, name)
+            dependency_times[name] = (
+                _aware_utc(value, name) if value is not None else None
+            )
         quote_price = _decimal(self.quote_price, "quote_price")
         position_quantity = _decimal(self.position_quantity, "position_quantity")
         available_cash = _decimal(self.available_cash, "available_cash")
@@ -288,6 +312,10 @@ class DependencySnapshot:
         max_position_quantity = _optional_decimal(
             self.max_position_quantity, "max_position_quantity"
         )
+        max_reference_price_deviation = _decimal(
+            self.max_reference_price_deviation,
+            "max_reference_price_deviation",
+        )
         if position_quantity < 0:
             raise ValueError("position_quantity must be >= 0")
         if available_cash < 0:
@@ -296,10 +324,21 @@ class DependencySnapshot:
             raise ValueError("max_order_notional must be > 0")
         if max_position_quantity is not None and max_position_quantity < 0:
             raise ValueError("max_position_quantity must be >= 0")
+        if max_reference_price_deviation < 0:
+            raise ValueError("max_reference_price_deviation must be >= 0")
         if not isinstance(self.max_quote_age, timedelta) or self.max_quote_age.total_seconds() < 0:
             raise ValueError("max_quote_age must be a non-negative timedelta")
         if not isinstance(self.max_positions_age, timedelta) or self.max_positions_age.total_seconds() < 0:
             raise ValueError("max_positions_age must be a non-negative timedelta")
+        for name in (
+            "max_cash_age",
+            "max_calendar_age",
+            "max_control_age",
+            "max_clock_skew",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, timedelta) or value.total_seconds() < 0:
+                raise ValueError(f"{name} must be a non-negative timedelta")
 
         try:
             sources = frozenset(
@@ -320,11 +359,16 @@ class DependencySnapshot:
             ("position_symbol", str(self.position_symbol or "").strip().upper()),
             ("position_quantity", position_quantity),
             ("positions_at", positions_at),
+            *dependency_times.items(),
             ("available_cash", available_cash),
             ("market_open", bool(self.market_open)),
             ("risk_snapshot_id", str(self.risk_snapshot_id or "").strip()),
             ("max_order_notional", max_order_notional),
             ("max_position_quantity", max_position_quantity),
+            (
+                "max_reference_price_deviation",
+                max_reference_price_deviation,
+            ),
             (
                 "open_order_idempotency_keys",
                 frozenset(str(value) for value in self.open_order_idempotency_keys),

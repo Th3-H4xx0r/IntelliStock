@@ -254,6 +254,7 @@ class AlpacaAdapter(BrokerAdapter):
         self._stream_thread: Optional[threading.Thread] = None
         self._last_heartbeat_utc: Optional[datetime] = None
         self._trade_updates_connected = False
+        self._mark_stream = None
         self._order_event_sink = None
         self._order_event_account_id = ""
         self._order_event_executor: Optional[
@@ -1608,6 +1609,25 @@ class AlpacaAdapter(BrokerAdapter):
                 target=_run, daemon=True, name="alpaca-trade-updates"
             )
             self._stream_thread.start()
+
+    def start_market_marks(self, symbols) -> dict:
+        """Start the read-only quote/trade stream feeding typed marks."""
+
+        from alpaca_mark_stream import AlpacaMarkStream
+
+        if self._mark_stream is None:
+            self._mark_stream = AlpacaMarkStream(
+                self._market_marks,
+                api_key=self._api_key,
+                api_secret=self._api_secret,
+                feed=os.environ.get("ALPACA_DATA_FEED", "iex"),
+            )
+        self._mark_stream.set_symbols(symbols)
+        self._mark_stream.start()
+        return {
+            "subscribed": tuple(sorted(self._mark_stream.subscribed_symbols())),
+            "overflow": tuple(sorted(self._mark_stream.overflow_symbols())),
+        }
 
     def bind_order_event_sink(self, sink, *, account_id: str) -> None:
         """Bind the durable lifecycle sink used by the promoted Alpaca path.
