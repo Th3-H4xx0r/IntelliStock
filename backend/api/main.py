@@ -3107,6 +3107,7 @@ def api_alpha_readiness(instance_id: str,
     health = store.health()
     reasons = []
     containment = None
+    latest_promotion = None
     if not health.available:
         reasons.append(f"audit store unavailable: {health.error}")
     else:
@@ -3115,6 +3116,20 @@ def api_alpha_readiness(instance_id: str,
             containment = record.payload if record else None
         except AlphaUnavailableError as exc:
             reasons.append(f"containment state unreadable: {exc}")
+        try:
+            backend = getattr(store, "_backend", None)
+            if backend is not None:
+                promotion_rows = backend.list_records(
+                    "AlphaPromotions",
+                    {"instance_id": str(instance_id)},
+                    "approved_at",
+                )
+                if promotion_rows:
+                    latest_promotion = dict(promotion_rows[-1])
+        except Exception:
+            # A missing/unreadable promotion ledger never grants readiness;
+            # the strict containment report below remains authoritative.
+            latest_promotion = None
     if not containment:
         reasons.append("containment state not persisted (Task 0 pending)")
     raw_report = containment.get("readiness_report") if isinstance(containment, dict) else None
@@ -3161,6 +3176,7 @@ def api_alpha_readiness(instance_id: str,
         "audit_store_health": {"available": health.available,
                                "error": health.error},
         "containment": containment,
+        "latest_promotion": latest_promotion,
         "state": report.state.value,
         "checks": [
             {"name": check.name, "passed": check.passed, "reason": check.reason,

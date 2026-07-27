@@ -50,6 +50,52 @@ class ReadinessReport:
     artifact_hash: str
 
 
+_STATE_ORDER = (
+    ReadinessState.RESEARCH,
+    ReadinessState.PAPER_ELIGIBLE,
+    ReadinessState.CANARY_ELIGIBLE,
+    ReadinessState.LIVE_ELIGIBLE,
+    ReadinessState.LIVE_RUNNING,
+)
+
+
+def assert_readiness_transition_allowed(
+    current: ReadinessState,
+    target: ReadinessState,
+    *,
+    evidence_state: ReadinessState,
+    explicit_activation: bool = False,
+) -> None:
+    """Enforce adjacent, evidence-bounded promotion and explicit activation.
+
+    Demotion is always allowed.  Promotion can advance by one state only and
+    can never exceed the state proven by immutable evidence. ``LIVE_RUNNING``
+    additionally requires a distinct explicit activation action.
+    """
+
+    if not all(
+        isinstance(value, ReadinessState)
+        for value in (current, target, evidence_state)
+    ):
+        raise LiveReadinessError("readiness transition values are malformed")
+    current_rank = _STATE_ORDER.index(current)
+    target_rank = _STATE_ORDER.index(target)
+    evidence_rank = _STATE_ORDER.index(evidence_state)
+    if target_rank <= current_rank:
+        return
+    if target_rank != current_rank + 1:
+        raise LiveReadinessError("readiness promotion cannot skip states")
+    if target_rank > evidence_rank:
+        raise LiveReadinessError("readiness evidence does not authorize target")
+    if (
+        target is ReadinessState.LIVE_RUNNING
+        and explicit_activation is not True
+    ):
+        raise LiveReadinessError(
+            "LIVE_RUNNING requires a separate explicit activation"
+        )
+
+
 def _canonical_payload(report: ReadinessReport) -> str:
     return json.dumps(asdict(report), sort_keys=True, separators=(",", ":"))
 

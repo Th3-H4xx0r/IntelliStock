@@ -213,6 +213,33 @@ def test_live_gate_rejects_directly_constructed_incomplete_checks():
         assert_live_start_allowed(report, deployed_artifact_hash="b" * 64)
 
 
+def test_readiness_promotions_are_adjacent_and_live_running_is_explicit():
+    from live_readiness import (
+        LiveReadinessError,
+        ReadinessState,
+        assert_readiness_transition_allowed,
+    )
+
+    with pytest.raises(LiveReadinessError, match="skip"):
+        assert_readiness_transition_allowed(
+            ReadinessState.RESEARCH,
+            ReadinessState.LIVE_ELIGIBLE,
+            evidence_state=ReadinessState.LIVE_ELIGIBLE,
+        )
+    with pytest.raises(LiveReadinessError, match="explicit activation"):
+        assert_readiness_transition_allowed(
+            ReadinessState.LIVE_ELIGIBLE,
+            ReadinessState.LIVE_RUNNING,
+            evidence_state=ReadinessState.LIVE_RUNNING,
+        )
+    assert_readiness_transition_allowed(
+        ReadinessState.LIVE_ELIGIBLE,
+        ReadinessState.LIVE_RUNNING,
+        evidence_state=ReadinessState.LIVE_RUNNING,
+        explicit_activation=True,
+    )
+
+
 def test_position_invariants_ignore_marks_but_detect_stable_changes():
     from scripts.verify_inactive_deployment import AccountInvariant, compare_account_invariants
     base = {"asset_id": "a", "symbol": "A", "side": "long", "qty": "1", "avg_entry_price": "2", "current_price": "3"}
