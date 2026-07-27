@@ -12,7 +12,7 @@ def test_ensemble_blends_and_renormalizes():
     assert abs(sum(b.values()) - 1.0) < 1e-9
     assert 0.3 < b["home"] < 0.7            # between the two
     # w=0 -> pure physical; w=1 -> pure learned
-    assert me.ensemble(phys, learned, w=0.0)["home"] == 0.7
+    assert abs(me.ensemble(phys, learned, w=0.0)["home"] - 0.7) < 1e-9
     assert abs(me.ensemble(phys, learned, w=1.0)["away"] - 0.4) < 1e-9
 
 
