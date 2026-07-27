@@ -86,10 +86,7 @@ from interactive_utils import (
     action_nexus_config_set,
     action_list_brokerages,
     action_link_alpaca,
-    action_link_robinhood_tokens,
-    action_fetch_robinhood_accounts,
     action_delete_brokerage,
-    action_refresh_robinhood,
     _normalize_nexus_phase_value,
     _nexus_phase_selector_from_value,
 )
@@ -156,7 +153,7 @@ def cmd_help():
     intellistock_logger.log("  agent status         Show agent status (running, paused, count_today, resume_at)", "white", service="CLI")
     intellistock_logger.log("  agent best           Show best strategy (tag Best) with details and settings", "white", service="CLI")
     intellistock_logger.log("  brokerages, bk       List linked brokerage accounts", "white", service="CLI")
-    intellistock_logger.log("  link-brokerage       Interactive: link a new brokerage account (Alpaca or Robinhood)", "white", service="CLI")
+    intellistock_logger.log("  link-brokerage       Interactive: link a new Alpaca account", "white", service="CLI")
     intellistock_logger.log("  unlink-brokerage ID  Remove a linked brokerage account by ID", "white", service="CLI")
     intellistock_logger.log("  exit, quit, q        Exit CLI", "white", service="CLI")
     intellistock_logger.log("------------------------\n", "cyan", service="CLI")
@@ -2396,8 +2393,6 @@ def cmd_brokerages(conn):
             intellistock_logger.log(f"  [{btype}] {name}  status={status}  id={aid}", status_color, service="CLI")
             if btype == "ALPACA":
                 intellistock_logger.log(f"    key={acct.get('alpaca_key', '?')}  paper={acct.get('alpaca_paper', '?')}  acct={acct.get('alpaca_account_number', '?')}", "white", service="CLI")
-            elif btype == "ROBINHOOD":
-                intellistock_logger.log(f"    acct={acct.get('robinhood_account_number', '?')}  last_refresh={acct.get('last_refresh_at', '?')}", "white", service="CLI")
             if acct.get("last_error"):
                 intellistock_logger.log(f"    error: {acct['last_error']}", "red", service="CLI")
         intellistock_logger.log("", service="CLI")
@@ -2409,9 +2404,9 @@ def cmd_link_brokerage(conn):
     """Interactive: link a new brokerage account."""
     intellistock_logger.log("\n--- Link Brokerage Account ---", "cyan", service="CLI")
     try:
-        btype = input("Brokerage type (alpaca/robinhood): ").strip().lower()
-        if btype not in ("alpaca", "robinhood"):
-            intellistock_logger.log("Invalid type. Must be 'alpaca' or 'robinhood'.", "yellow", service="CLI")
+        btype = input("Brokerage type (alpaca): ").strip().lower()
+        if btype != "alpaca":
+            intellistock_logger.log("Invalid type. Stock trading supports Alpaca.", "yellow", service="CLI")
             return
 
         account_name = input("Account name (e.g. 'My Paper Trading'): ").strip()
@@ -2419,186 +2414,26 @@ def cmd_link_brokerage(conn):
             intellistock_logger.log("Account name is required.", "yellow", service="CLI")
             return
 
-        if btype == "alpaca":
-            key = input("Alpaca API Key ID: ").strip()
-            secret = input("Alpaca Secret Key: ").strip()
-            paper_input = input("Paper trading? (y/n, default y): ").strip().lower()
-            paper = paper_input not in ("n", "no")
-            if not key or not secret:
-                intellistock_logger.log("Key and secret are required.", "yellow", service="CLI")
-                return
-            intellistock_logger.log("Validating Alpaca credentials...", "white", service="CLI")
-            try:
-                out = action_link_alpaca(conn, account_name, key, secret, paper)
-                acct = out.get("account", {})
-                intellistock_logger.log(f"  Alpaca account linked: {acct.get('account_name')}  (id={acct.get('id')})", "green", service="CLI")
-                intellistock_logger.log(f"  Alpaca account number: {acct.get('alpaca_account_number', 'N/A')}", "white", service="CLI")
-                intellistock_logger.log(f"  Mode: {'Paper' if paper else 'Live'}", "white", service="CLI")
-            except ValueError as e:
-                intellistock_logger.log(f"Failed to link: {e}", "red", service="CLI")
-
-        elif btype == "robinhood":
-            intellistock_logger.log("Robinhood linking method:", "cyan", service="CLI")
-            intellistock_logger.log("  1) Paste access token + refresh token (recommended)", "white", service="CLI")
-            intellistock_logger.log("  2) Login with email and password (interactive, handles MFA)", "white", service="CLI")
-            method = input("Choose method (1/2): ").strip()
-
-            if method == "1":
-                access_token = input("Access token (paste, 'Bearer ' prefix will be stripped): ").strip()
-                refresh_token = input("Refresh token: ").strip()
-                device_token = input("Device token (optional, press Enter to generate): ").strip() or None
-                if not access_token or not refresh_token:
-                    intellistock_logger.log("access_token and refresh_token are required.", "yellow", service="CLI")
-                    return
-                intellistock_logger.log("Validating tokens and fetching accounts...", "white", service="CLI")
-                try:
-                    chosen = _cli_pick_robinhood_account(access_token, refresh_token, device_token)
-                    if chosen is None:
-                        return
-                    out = action_link_robinhood_tokens(conn, account_name, access_token, refresh_token, device_token,
-                                                      account_number=chosen)
-                    acct = out.get("account", {})
-                    intellistock_logger.log(f"  Robinhood account linked: {acct.get('account_name')}  (id={acct.get('id')})", "green", service="CLI")
-                    intellistock_logger.log(f"  Robinhood account number: {acct.get('robinhood_account_number', 'N/A')}", "white", service="CLI")
-                except ValueError as e:
-                    intellistock_logger.log(f"Failed to link: {e}", "red", service="CLI")
-
-            elif method == "2":
-                _cmd_link_robinhood_password(conn, account_name)
-            else:
-                intellistock_logger.log("Invalid choice.", "yellow", service="CLI")
+        key = input("Alpaca API Key ID: ").strip()
+        secret = input("Alpaca Secret Key: ").strip()
+        paper_input = input("Paper trading? (y/n, default y): ").strip().lower()
+        paper = paper_input not in ("n", "no")
+        if not key or not secret:
+            intellistock_logger.log("Key and secret are required.", "yellow", service="CLI")
+            return
+        intellistock_logger.log("Validating Alpaca credentials...", "white", service="CLI")
+        try:
+            out = action_link_alpaca(conn, account_name, key, secret, paper)
+            acct = out.get("account", {})
+            intellistock_logger.log(f"  Alpaca account linked: {acct.get('account_name')}  (id={acct.get('id')})", "green", service="CLI")
+            intellistock_logger.log(f"  Alpaca account number: {acct.get('alpaca_account_number', 'N/A')}", "white", service="CLI")
+            intellistock_logger.log(f"  Mode: {'Paper' if paper else 'Live'}", "white", service="CLI")
+        except ValueError as e:
+            intellistock_logger.log(f"Failed to link: {e}", "red", service="CLI")
     except (EOFError, KeyboardInterrupt):
         intellistock_logger.log("\nCancelled.", "yellow", service="CLI")
     except Exception as e:
         intellistock_logger.log(f"Error: {e}", "red", service="CLI")
-
-
-def _cli_pick_robinhood_account(access_token, refresh_token=None, device_token=None):
-    """Fetch Robinhood accounts, display them, and interactively return the chosen account_number.
-    Returns the selected account_number string, or None if the user cancelled."""
-    try:
-        result = action_fetch_robinhood_accounts(access_token, refresh_token, device_token)
-        accounts = result.get("accounts") or []
-    except ValueError as e:
-        intellistock_logger.log(f"Failed to fetch accounts: {e}", "red", service="CLI")
-        return None
-
-    if not accounts:
-        intellistock_logger.log("No accounts found with these credentials.", "yellow", service="CLI")
-        return None
-
-    # If only one account, auto-select
-    if len(accounts) == 1:
-        a = accounts[0]
-        intellistock_logger.log(f"  Auto-selected account: {a['account_number']} ({a.get('account_type', '').capitalize()}  ${a.get('equity') or 0:,.2f})", "green", service="CLI")
-        return a["account_number"]
-
-    intellistock_logger.log("\nDetected Robinhood accounts:", "cyan", service="CLI")
-    for i, a in enumerate(accounts, 1):
-        equity = a.get("equity") or 0.0
-        bp     = a.get("buying_power") or 0.0
-        atype  = (a.get("account_type") or "").capitalize()
-        intellistock_logger.log(
-            f"  [{i}] {a['account_number']}   Type: {atype}   Equity: ${equity:,.2f}   Buying Power: ${bp:,.2f}",
-            "white", service="CLI"
-        )
-
-    try:
-        choice = input(f"Select account [1-{len(accounts)}]: ").strip()
-        idx = int(choice) - 1
-        if not (0 <= idx < len(accounts)):
-            raise ValueError()
-    except (ValueError, EOFError):
-        intellistock_logger.log("Invalid selection, cancelled.", "yellow", service="CLI")
-        return None
-
-    chosen = accounts[idx]["account_number"]
-    intellistock_logger.log(f"  Selected: {chosen}", "green", service="CLI")
-    return chosen
-
-
-def _cmd_link_robinhood_password(conn, account_name):
-    """Interactive Robinhood login via email/password with MFA/challenge support."""
-    import getpass
-    from robinhood_engine import RobinhoodClient, RobinhoodSessionState, RobinhoodMFARequired, RobinhoodChallengeRequired, RobinhoodAPIError
-
-    email = input("Robinhood email: ").strip()
-    try:
-        password = getpass.getpass("Password: ")
-    except Exception:
-        password = input("Password (visible): ").strip()
-
-    if not email or not password:
-        intellistock_logger.log("Email and password are required.", "yellow", service="CLI")
-        return
-
-    client = RobinhoodClient()
-    challenge_response_id = None
-    mfa_code = None
-
-    for attempt in range(5):
-        try:
-            intellistock_logger.log("Logging in to Robinhood...", "white", service="CLI")
-            client.login_password(
-                username=email,
-                password=password,
-                mfa_code=mfa_code,
-                challenge_response_id=challenge_response_id,
-            )
-            break  # success
-        except RobinhoodMFARequired as e:
-            intellistock_logger.log(f"MFA required (type: {e.mfa_type or 'app'}). Check your authenticator app.", "yellow", service="CLI")
-            mfa_code = input("Enter MFA code: ").strip()
-            challenge_response_id = None
-        except RobinhoodChallengeRequired as e:
-            cid = e.challenge_id
-            intellistock_logger.log(f"SMS/email challenge required (id={cid}). Check your phone/email.", "yellow", service="CLI")
-            code = input("Enter challenge code: ").strip()
-            try:
-                challenge_response_id = client.respond_to_challenge(cid, code)
-            except Exception as ce:
-                intellistock_logger.log(f"Challenge response failed: {ce}", "red", service="CLI")
-                return
-            mfa_code = None
-        except RobinhoodAPIError as e:
-            intellistock_logger.log(f"Login failed: {e.detail or str(e)}", "red", service="CLI")
-            return
-        except Exception as e:
-            intellistock_logger.log(f"Login error: {e}", "red", service="CLI")
-            return
-    else:
-        intellistock_logger.log("Too many login attempts.", "red", service="CLI")
-        return
-
-    if not client.state.access_token:
-        intellistock_logger.log("Login did not return an access token.", "red", service="CLI")
-        return
-
-    intellistock_logger.log("Login successful. Fetching available accounts...", "green", service="CLI")
-    chosen = _cli_pick_robinhood_account(
-        client.state.access_token,
-        client.state.refresh_token or "",
-        client.state.device_token,
-    )
-    if chosen is None:
-        return
-
-    try:
-        out = action_link_robinhood_tokens(
-            conn,
-            account_name,
-            client.state.access_token,
-            client.state.refresh_token or "",
-            client.state.device_token,
-            client.state.expires_in,
-            client.state.obtained_at_epoch,
-            account_number=chosen,
-        )
-        acct = out.get("account", {})
-        intellistock_logger.log(f"  Robinhood account linked: {acct.get('account_name')}  (id={acct.get('id')})", "green", service="CLI")
-        intellistock_logger.log(f"  Robinhood account number: {acct.get('robinhood_account_number', 'N/A')}", "white", service="CLI")
-    except ValueError as e:
-        intellistock_logger.log(f"Failed to save: {e}", "red", service="CLI")
 
 
 def cmd_unlink_brokerage(conn, brokerage_id):

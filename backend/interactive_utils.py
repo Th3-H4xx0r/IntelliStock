@@ -19,6 +19,7 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 from rethinkdb import RethinkDB
+from strategy_secret_boundary import scrub_inline_strategy_secrets
 
 r = RethinkDB()
 DB_NAME = "IntelliStock"
@@ -235,6 +236,10 @@ def _normalize_strategy_payload_item(strategy_doc, strict=True):
         strategy_doc.get("conditions") if isinstance(strategy_doc.get("conditions"), dict) else {},
     )
     merged_config = _apply_strategy_config_aliases(canonical_strategy, merged_config)
+    merged_config = scrub_inline_strategy_secrets(
+        merged_config,
+        reject_material=bool(strict),
+    )
 
     return {
         "strategy": canonical_strategy,
@@ -1146,22 +1151,31 @@ def action_create_instance(
         if granularity_time_increment is not None
         else 60
     )
-    # Default Alpaca key/secret from env so backtests and live runs can fetch bars (e.g. AI-created instances)
+    kind_normalized = str(kind or "").strip().lower()
+    non_equity_compatibility = kind_normalized in {"crypto", "kalshi"}
     key_val = (key or "").strip()
     secret_val = (secret or "").strip()
-    if not key_val:
-        key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
-    if not secret_val:
-        secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
+    if not non_equity_compatibility and (key_val or secret_val):
+        raise ValueError(
+            "Stock credentials cannot be stored on an instance; use a linked Alpaca brokerage"
+        )
+    # Preserve the existing non-equity compatibility path. Equity instances
+    # never copy credentials from arguments or process environment.
+    if non_equity_compatibility:
+        if not key_val:
+            key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
+        if not secret_val:
+            secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
     doc = {
         "id": instance_id,
-        "key": key_val,
-        "secret": secret_val,
         "runCommand": bool(run_command),
         "stocks": [],
         "granularity_time_increment": granularity_sec,
         "created_by": created_by if created_by in ("ai", "user") else "user",
     }
+    if non_equity_compatibility:
+        doc["key"] = key_val
+        doc["secret"] = secret_val
     if name:
         doc["name"] = name
     if brokerage_id:
@@ -5538,8 +5552,16 @@ def action_create_backtest(
         raise ValueError("start_date, end_date required")  # V7.3: stocks can be empty for pure discovery
     ensure_backtest_instances_table(conn)
     instance_doc = _resolve_instance_doc(conn, instance_id) if instance_id else None
-    default_key = (instance_doc.get("key") or "") if instance_doc else ""
-    default_secret = (instance_doc.get("secret") or "") if instance_doc else ""
+    kind_normalized = str((instance_doc or {}).get("kind") or "").strip().lower()
+    non_equity_compatibility = kind_normalized in {"crypto", "kalshi"}
+    direct_key = (key or "").strip()
+    direct_secret = (secret or "").strip()
+    if not non_equity_compatibility and (direct_key or direct_secret):
+        raise ValueError(
+            "Stock credentials cannot be queued with a backtest; use a linked Alpaca brokerage"
+        )
+    default_key = (instance_doc.get("key") or "") if instance_doc and non_equity_compatibility else ""
+    default_secret = (instance_doc.get("secret") or "") if instance_doc and non_equity_compatibility else ""
     stocks_list = [s.strip().upper() for s in (stocks if isinstance(stocks, list) else [stocks]) if s and str(s).strip()]
     # V7.3: stocks_list can be empty for pure discovery mode (Nexus discovers its own tickers)
     gran_sec = int(granularity_sec) if granularity_sec is not None else 60
@@ -5547,10 +5569,11 @@ def action_create_backtest(
         initial_cash = 100000.0
     key_val = (key if key is not None else default_key) or ""
     secret_val = (secret if secret is not None else default_secret) or ""
-    if not key_val:
-        key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
-    if not secret_val:
-        secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
+    if non_equity_compatibility:
+        if not key_val:
+            key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
+        if not secret_val:
+            secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
     # Crypto fee emulation: resolve the taker rate to apply in this backtest. A
     # chosen venue emulates that venue's fee; "default"/None uses the instance's
     # own linked brokerage. Persist the resolved rate + venue so the broker fills
@@ -5584,8 +5607,6 @@ def action_create_backtest(
         "status": "pending",
         "run": True,
         "paused": False,
-        "key": key_val,
-        "secret": secret_val,
         "initial_cash": float(initial_cash),
         # Crypto fee emulation (see above). emulate_fee_venue = the user's choice
         # ("default" or a venue id); emulate_taker_rate = the resolved fee applied;
@@ -5595,6 +5616,9 @@ def action_create_backtest(
         "emulate_taker_rate": float(_taker_rate),
         "fee_venue_resolved": _resolved_venue,
     }
+    if non_equity_compatibility:
+        doc["key"] = key_val
+        doc["secret"] = secret_val
     if instance_id:
         doc["instance"] = str(instance_id).strip()
     backtest_id = insert_backtest_with_unique_id(conn, doc)
@@ -6342,7 +6366,7 @@ def action_get_live_state(conn, instance_id):
     """Return live state for this instance — broker-direct + LiveState merge.
 
     Pulls cash/equity/positions/recent_trades/portfolio_history live from the
-    broker (Alpaca / Robinhood). The container-written LiveState row is now
+    broker (Alpaca for equities). The container-written LiveState row is now
     informational only — used for ``status`` / ``trading_active`` / ``lookback``
     / ``log_file_path`` / ``uptime_sec`` and as a fallback when the broker
     fetch fails.
@@ -7222,12 +7246,6 @@ def _mask_brokerage_doc(doc):
         d["binanceus_key"] = _mask_key(d["binanceus_key"])
     if d.get("binanceus_secret"):
         d["binanceus_secret"] = "****"
-    if d.get("robinhood_access_token"):
-        d["robinhood_access_token"] = "****"
-    if d.get("robinhood_refresh_token"):
-        d["robinhood_refresh_token"] = "****"
-    if d.get("robinhood_device_token"):
-        d["robinhood_device_token"] = "****"
     return d
 
 
@@ -7470,15 +7488,11 @@ def action_link_alpaca(conn, account_name, key, secret, paper=True, alpaca_data_
     _ensure_brokerage_accounts_table(conn)
     import datetime
     now = datetime.datetime.utcnow().isoformat()
-    # Encrypt secrets at rest. If Fernet key is missing we fall back to plaintext
-    # rather than block account linking - the credential_service logs a warning.
-    try:
-        from secret_store import encrypt as _encrypt
-        _enc_key = _encrypt(key)
-        _enc_secret = _encrypt(secret)
-    except RuntimeError:
-        _enc_key = key
-        _enc_secret = secret
+    # A missing credential key is a failed link; plaintext persistence is not
+    # an acceptable fallback for broker credentials.
+    from secret_store import encrypt as _encrypt
+    _enc_key = _encrypt(key)
+    _enc_secret = _encrypt(secret)
     doc = {
         "account_name": account_name,
         "brokerage_type": "alpaca",
@@ -7500,178 +7514,6 @@ def action_link_alpaca(conn, account_name, key, secret, paper=True, alpaca_data_
     return {"linked": True, "account": _mask_brokerage_doc(doc), "data_access": data_access}
 
 
-def _rh_safe_float(v):
-    """Parse a Robinhood string number to float, or None."""
-    try:
-        return round(float(v), 2) if v is not None else None
-    except Exception:
-        return None
-
-
-def action_fetch_robinhood_accounts(access_token, refresh_token=None, device_token=None):
-    """Validate Robinhood tokens and return available accounts with display info for account selection."""
-    import time as _time
-    import uuid as _uuid
-    access_token = (access_token or "").strip()
-    if access_token.lower().startswith("bearer "):
-        access_token = access_token[7:].strip()
-    if not access_token:
-        raise ValueError("access_token is required")
-
-    from robinhood_engine import RobinhoodClient, RobinhoodSessionState, RobinhoodAPIError as _RHErr
-    state = RobinhoodSessionState(
-        access_token=access_token,
-        refresh_token=(refresh_token or "").strip(),
-        token_type="Bearer",
-        expires_in=86400,
-        obtained_at_epoch=int(_time.time()),
-        device_token=(device_token or "").strip() or str(_uuid.uuid4()),
-    )
-    client = RobinhoodClient(state=state)
-    try:
-        raw_accounts = client.get_accounts()
-    except _RHErr as e:
-        raise ValueError(f"Robinhood validation failed: {e.detail or str(e)}")
-    except Exception as e:
-        raise ValueError(f"Could not connect to Robinhood: {e}")
-
-    if not raw_accounts:
-        raise ValueError("No Robinhood accounts found with these credentials")
-
-    result = []
-    for a in raw_accounts:
-        equity = _rh_safe_float(a.get("equity") or a.get("extended_hours_equity"))
-        result.append({
-            "account_number":  a.get("account_number", ""),
-            "account_type":    a.get("type", ""),
-            "display_name":    a.get("display_name", ""),
-            "management_type": a.get("management_type", "self_directed"),
-            "equity":          equity,
-            "buying_power":    _rh_safe_float(a.get("buying_power")),
-            "cash":            _rh_safe_float(a.get("cash")),
-        })
-    return {"accounts": result}
-
-
-def _rh_expires_in_from_jwt(access_token, fallback=86400):
-    """Decode the JWT's `exp` claim to derive a real expires_in (seconds from now).
-
-    Robinhood now issues access_tokens with multi-week TTLs (e.g. 31 days = 2_713_454s),
-    not the 24h default. Hardcoding 86400 makes _maybe_refresh_token attempt a refresh
-    at the 12h mark of a 31-day token — way too early, and prone to hitting RH's
-    session-rotation logic which surfaces as RobinhoodMFARequired.
-
-    This decodes the JWT body (no signature check; we trust the token we just received
-    from RH) and returns max(0, exp - now). Falls back to `fallback` on any parse error.
-    """
-    import base64
-    import json
-    import time as _time
-    if not access_token or not isinstance(access_token, str):
-        return fallback
-    try:
-        parts = access_token.split(".")
-        if len(parts) < 2:
-            return fallback
-        payload_b64 = parts[1]
-        # JWT base64url uses no padding; add it back.
-        padding = "=" * (-len(payload_b64) % 4)
-        decoded = base64.urlsafe_b64decode(payload_b64 + padding)
-        claims = json.loads(decoded.decode("utf-8"))
-        exp = claims.get("exp")
-        if not exp:
-            return fallback
-        derived = int(exp) - int(_time.time())
-        return derived if derived > 0 else fallback
-    except Exception:
-        return fallback
-
-
-def action_link_robinhood_tokens(conn, account_name, access_token, refresh_token,
-                                  device_token=None, expires_in=None, obtained_at_epoch=None,
-                                  account_number=None):
-    """Link a Robinhood account via tokens. Validates by calling /accounts/.
-    If account_number is provided, selects that specific account; otherwise uses the first."""
-    import time as _time
-    import uuid as _uuid
-    account_name = (account_name or "").strip()
-    access_token = (access_token or "").strip()
-    if access_token.lower().startswith("bearer "):
-        access_token = access_token[7:].strip()
-    refresh_token = (refresh_token or "").strip()
-    if not account_name:
-        raise ValueError("account_name is required")
-    if not access_token:
-        raise ValueError("access_token is required")
-    if not refresh_token:
-        raise ValueError("refresh_token is required")
-
-    device_token = (device_token or "").strip() or str(_uuid.uuid4())
-    if obtained_at_epoch is None:
-        obtained_at_epoch = int(_time.time())
-    # Derive real expires_in from the JWT exp claim; the 86400 hardcoded
-    # default is wrong for tokens RH now issues with longer TTLs (~31 days).
-    if expires_in is None or expires_in == 86400:
-        expires_in = _rh_expires_in_from_jwt(access_token, fallback=expires_in or 86400)
-
-    from robinhood_engine import RobinhoodClient, RobinhoodSessionState, RobinhoodAPIError as _RHErr
-    state = RobinhoodSessionState(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_type="Bearer",
-        expires_in=expires_in,
-        obtained_at_epoch=obtained_at_epoch,
-        device_token=device_token,
-    )
-    client = RobinhoodClient(state=state)
-    try:
-        acct = client.select_default_account(
-            preferred_account_number=(account_number or "").strip() or None
-        )
-    except _RHErr as e:
-        raise ValueError(f"Robinhood validation failed: {e.detail or str(e)}")
-    except Exception as e:
-        raise ValueError(f"Could not connect to Robinhood to validate: {e}")
-
-    acct_number = client.state.account_number or acct.get("account_number", "")
-    acct_url = client.state.account_url or acct.get("url", "")
-
-    _ensure_brokerage_accounts_table(conn)
-    import datetime
-    now = datetime.datetime.utcnow().isoformat()
-    # Encrypt bearer tokens at rest.
-    try:
-        from secret_store import encrypt as _encrypt
-        _enc_access = _encrypt(access_token)
-        _enc_refresh = _encrypt(refresh_token)
-        _enc_device = _encrypt(device_token)
-    except RuntimeError:
-        _enc_access = access_token
-        _enc_refresh = refresh_token
-        _enc_device = device_token
-    doc = {
-        "account_name": account_name,
-        "brokerage_type": "robinhood",
-        "robinhood_access_token": _enc_access,
-        "robinhood_refresh_token": _enc_refresh,
-        "robinhood_device_token": _enc_device,
-        "robinhood_expires_in": int(expires_in),
-        "robinhood_obtained_at_epoch": int(obtained_at_epoch),
-        "robinhood_account_number": acct_number,
-        "robinhood_account_url": acct_url,
-        "robinhood_token_type": "Bearer",
-        "status": "active",
-        "last_error": None,
-        "created_at": now,
-        "updated_at": now,
-        "last_refresh_at": now,
-    }
-    result = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).insert(doc).run(conn)
-    inserted_id = (result.get("generated_keys") or [None])[0]
-    doc["id"] = inserted_id
-    return {"linked": True, "account": _mask_brokerage_doc(doc)}
-
-
 def action_delete_brokerage(conn, brokerage_id):
     """Delete a linked brokerage account."""
     brokerage_id = (brokerage_id or "").strip()
@@ -7685,9 +7527,15 @@ def action_delete_brokerage(conn, brokerage_id):
     return {"deleted": True, "id": brokerage_id}
 
 
-def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, secret=None,
-                             paper=None, access_token=None, refresh_token=None,
-                             device_token=None, account_number=None, alpaca_data_feed=None):
+def action_update_brokerage(
+    conn,
+    brokerage_id,
+    account_name=None,
+    key=None,
+    secret=None,
+    paper=None,
+    alpaca_data_feed=None,
+):
     """Update a linked brokerage account's name and/or credentials.
 
     2026-04-23: accepts ``alpaca_data_feed`` (iex|sip). When the feed OR the
@@ -7708,13 +7556,9 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
     update = {"updated_at": now}
     data_access_result = None  # populated if we run the feed validation
 
-    # Helper for encrypting secrets on update. If Fernet key missing, store plaintext
-    # (caller may not have configured it yet; credential_service logs a warning).
-    try:
-        from secret_store import encrypt as _encrypt, decrypt as _decrypt
-    except Exception:
-        _encrypt = lambda v: v
-        _decrypt = lambda v: v
+    # Updates require encrypted existing values and an available Fernet key.
+    # A plaintext legacy row must be migrated before it can be used.
+    from secret_store import decrypt_required as _decrypt_required, encrypt as _encrypt
 
     if btype == "alpaca":
         account_name = (account_name or "").strip()
@@ -7742,8 +7586,8 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
         _effective_feed = _incoming_feed or (doc.get("alpaca_data_feed") or "iex")
 
         if key or secret:
-            use_key = key or _decrypt(doc.get("alpaca_key", "")) or ""
-            use_secret = secret or _decrypt(doc.get("alpaca_secret", "")) or ""
+            use_key = key or _decrypt_required(doc.get("alpaca_key", ""), field="alpaca_key")
+            use_secret = secret or _decrypt_required(doc.get("alpaca_secret", ""), field="alpaca_secret")
             use_paper = paper if paper is not None else doc.get("alpaca_paper", True)
             base_url = "https://paper-api.alpaca.markets" if use_paper else "https://api.alpaca.markets"
 
@@ -7774,15 +7618,9 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
             )
 
             if key:
-                try:
-                    update["alpaca_key"] = _encrypt(key)
-                except RuntimeError:
-                    update["alpaca_key"] = key
+                update["alpaca_key"] = _encrypt(key)
             if secret:
-                try:
-                    update["alpaca_secret"] = _encrypt(secret)
-                except RuntimeError:
-                    update["alpaca_secret"] = secret
+                update["alpaca_secret"] = _encrypt(secret)
             if paper is not None:
                 update["alpaca_paper"] = bool(paper)
                 update["alpaca_base_url"] = base_url
@@ -7807,8 +7645,8 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
             _stored_feed = str(doc.get("alpaca_data_feed") or "").strip().lower()
             if _incoming_feed != _stored_feed:
                 try:
-                    _use_key = _decrypt(doc.get("alpaca_key", "")) or ""
-                    _use_secret = _decrypt(doc.get("alpaca_secret", "")) or ""
+                    _use_key = _decrypt_required(doc.get("alpaca_key", ""), field="alpaca_key")
+                    _use_secret = _decrypt_required(doc.get("alpaca_secret", ""), field="alpaca_secret")
                 except Exception as _dec_e:
                     raise ValueError(
                         f"Cannot validate feed change: stored credentials could "
@@ -7827,72 +7665,8 @@ def action_update_brokerage(conn, brokerage_id, account_name=None, key=None, sec
         if _incoming_feed:
             update["alpaca_data_feed"] = _incoming_feed
 
-    elif btype == "robinhood":
-        account_name = (account_name or "").strip()
-        access_token = (access_token or "").strip()
-        if access_token.lower().startswith("bearer "):
-            access_token = access_token[7:].strip()
-        refresh_token = (refresh_token or "").strip()
-        device_token = (device_token or "").strip()
-        account_number = (account_number or "").strip()
-
-        # Same mask-echo guard as alpaca: UI-displayed "****" must not be
-        # re-submitted as a new token value.
-        if _looks_masked(access_token):
-            access_token = ""
-        if _looks_masked(refresh_token):
-            refresh_token = ""
-        if _looks_masked(device_token):
-            device_token = ""
-
-        if account_name:
-            update["account_name"] = account_name
-
-        if access_token:
-            import time as _time, uuid as _uuid
-            from robinhood_engine import RobinhoodClient, RobinhoodSessionState, RobinhoodAPIError as _RHErr
-            dtoken = device_token or _decrypt(doc.get("robinhood_device_token")) or str(_uuid.uuid4())
-            _real_expires_in = _rh_expires_in_from_jwt(access_token, fallback=86400)
-            state = RobinhoodSessionState(
-                access_token=access_token,
-                refresh_token=refresh_token or _decrypt(doc.get("robinhood_refresh_token", "")) or "",
-                token_type="Bearer",
-                expires_in=_real_expires_in,
-                obtained_at_epoch=int(_time.time()),
-                device_token=dtoken,
-            )
-            client = RobinhoodClient(state=state)
-            try:
-                acct = client.select_default_account(
-                    preferred_account_number=account_number or doc.get("robinhood_account_number") or None
-                )
-            except _RHErr as e:
-                raise ValueError(f"Robinhood validation failed: {e.detail or str(e)}")
-            except Exception as e:
-                raise ValueError(f"Could not connect to Robinhood to validate: {e}")
-
-            acct_num = client.state.account_number or acct.get("account_number", "")
-            # Encrypt tokens on write.
-            try:
-                _enc_access = _encrypt(access_token)
-                _enc_refresh = _encrypt(refresh_token or _decrypt(doc.get("robinhood_refresh_token", "")) or "")
-                _enc_device = _encrypt(dtoken)
-            except RuntimeError:
-                _enc_access = access_token
-                _enc_refresh = refresh_token or doc.get("robinhood_refresh_token", "")
-                _enc_device = dtoken
-            update.update({
-                "robinhood_access_token": _enc_access,
-                "robinhood_refresh_token": _enc_refresh,
-                "robinhood_device_token": _enc_device,
-                "robinhood_obtained_at_epoch": int(_time.time()),
-                "robinhood_expires_in": int(_real_expires_in),
-                "robinhood_account_number": acct_num,
-                "robinhood_account_url": client.state.account_url or acct.get("url", ""),
-                "status": "active",
-                "last_error": None,
-                "last_refresh_at": now,
-            })
+    else:
+        raise ValueError(f"Unsupported brokerage type: {btype}")
 
     r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).update(update).run(conn)
     updated_doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).run(conn)
@@ -7918,27 +7692,19 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
     if doc is None:
         raise ValueError(f"Brokerage account not found: {brokerage_id}")
 
-    btype = doc.get("brokerage_type", "")
+    btype = str(doc.get("brokerage_type") or "").strip().lower()
     account_name = doc.get("account_name", "Account")
 
-    # Decrypt Fernet-stored credentials before passing to broker APIs.
-    try:
-        from secret_store import decrypt as _decrypt
-    except Exception:
-        _decrypt = lambda v: v
-
     if btype == "alpaca":
-        data = _fetch_alpaca_portfolio_history(
-            key=_decrypt(doc.get("alpaca_key", "")) or "",
-            secret=_decrypt(doc.get("alpaca_secret", "")) or "",
-            base_url=doc.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
-            range_str=range_str,
+        from stock_credential_boundary import resolve_alpaca_brokerage_credentials
+        alpaca_creds = resolve_alpaca_brokerage_credentials(
+            doc,
+            expected_brokerage_id=brokerage_id,
         )
-    elif btype == "robinhood":
-        data = _fetch_robinhood_portfolio_history(
-            access_token=_decrypt(doc.get("robinhood_access_token", "")) or "",
-            token_type=doc.get("robinhood_token_type", "Bearer"),
-            account_number=doc.get("robinhood_account_number", ""),
+        data = _fetch_alpaca_portfolio_history(
+            key=alpaca_creds.key,
+            secret=alpaca_creds.secret,
+            base_url=doc.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
             range_str=range_str,
         )
     else:
@@ -7946,8 +7712,7 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
 
     # Self-heal: a successful history fetch proves the stored creds are valid,
     # so clear any stale "expired" status left over from a prior transient
-    # failure (e.g. a credential_service refresh that ran before decryption
-    # was wired in). Only touch the row if status actually needs changing.
+    # failure. Only touch the row if status actually needs changing.
     if doc.get("status") != "active" or doc.get("last_error"):
         try:
             import datetime as _dt
@@ -7970,8 +7735,8 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
     if range_str == "1D" and btype == "alpaca":
         try:
             live_eq = _fetch_alpaca_current_equity(
-                key=_decrypt(doc.get("alpaca_key", "")) or "",
-                secret=_decrypt(doc.get("alpaca_secret", "")) or "",
+                key=alpaca_creds.key,
+                secret=alpaca_creds.secret,
                 base_url=doc.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
             )
         except Exception:
@@ -8074,318 +7839,6 @@ def _fetch_alpaca_portfolio_history(key, secret, base_url, range_str):
         pairs = [(t, v) for t, v in pairs if t >= ytd_start_ms]
 
     return {"timestamps": [p[0] for p in pairs], "values": [p[1] for p in pairs]}
-
-
-def _fetch_robinhood_intraday_historicals(access_token, token_type, account_number):
-    """
-    1D fast-path: hit the legacy /portfolios/historicals/{account}/ endpoint
-    that powers Robinhood's own web app intraday chart. Returns dense ~5-min
-    equity bars across the trading day instead of Bonfire's sparse Bonfire
-    cursor-points (which dedupe morning quiet periods into a single anchor).
-
-    Returns {"timestamps": [ms], "values": [float]} or empty dict if RH
-    returns no data.
-    """
-    import requests as _req
-    from datetime import datetime, timezone
-
-    if not account_number:
-        return {}
-    token = f"{(token_type or 'Bearer').strip()} {access_token}".strip()
-    headers = {
-        "Authorization": token,
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    }
-    url = f"https://api.robinhood.com/portfolios/historicals/{account_number}/"
-    # 5-minute bars across the full trading day with extended hours.
-    params = {"interval": "5minute", "span": "day", "bounds": "regular"}
-    try:
-        resp = _req.get(url, headers=headers, params=params, timeout=15)
-        if not resp.ok:
-            return {}
-        data = resp.json() or {}
-    except Exception:
-        return {}
-    pairs = []
-    for h in (data.get("equity_historicals") or []):
-        ts_str = h.get("begins_at")
-        # Prefer adjusted_close_equity for a rolled-forward equity number;
-        # close_equity is the raw bar close.
-        amount_str = h.get("adjusted_close_equity") or h.get("close_equity")
-        if not ts_str or amount_str is None:
-            continue
-        try:
-            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            pairs.append((int(dt.timestamp() * 1000), float(amount_str)))
-        except (TypeError, ValueError):
-            continue
-    return {"timestamps": [p[0] for p in pairs], "values": [p[1] for p in pairs]}
-
-
-def _fetch_robinhood_portfolio_history(access_token, token_type, account_number, range_str):
-    """
-    Call the Robinhood Bonfire portfolio performance API and return normalized timestamps+values.
-    URL: https://bonfire.robinhood.com/portfolio/performance/{account_number}
-    Params: chart_style=PERFORMANCE&chart_type=historical_portfolio&display_span={span}&include_all_hours=true
-    Response: lines[0].segments[0].points[] where each point has:
-      cursor_data.label.value          -> date string "Mar 5, 2025"
-      cursor_data.price_chart_data.dollar_value.amount -> portfolio value in USD
-
-    For 1D specifically we first try /portfolios/historicals/ (the legacy
-    intraday endpoint that powers RH's own live chart) — Bonfire's cursor-
-    point format dedupes morning quiet periods so the 1D chart visually
-    starts at the moment positions opened, not at market open.
-    """
-    import requests as _req
-    from datetime import datetime, timezone
-
-    # 1D fast path: try the dense intraday endpoint first.
-    if range_str == "1D":
-        intra = _fetch_robinhood_intraday_historicals(access_token, token_type, account_number)
-        if intra.get("timestamps"):
-            return intra
-        # Fall through to Bonfire if /portfolios/historicals/ returned empty
-        # (some new accounts get gated out of the legacy endpoint).
-
-    # Spans to try in order. ALL tries multiple candidates since the exact
-    # value for the max-history span is unknown ("all", "5year", etc.)
-    span_candidates = {
-        "1D":  ["day"],
-        "1W":  ["week"],
-        "1M":  ["month"],
-        "3M":  ["3month"],
-        "YTD": ["year"],
-        "1Y":  ["year"],
-        "ALL": ["all"],
-    }
-    spans_to_try = span_candidates.get(range_str, ["month"])
-
-    if not account_number:
-        raise ValueError("Robinhood account number is required for portfolio history")
-
-    token = f"{(token_type or 'Bearer').strip()} {access_token}".strip()
-    headers = {
-        "Authorization": token,
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    }
-
-    url = f"https://bonfire.robinhood.com/portfolio/performance/{account_number}"
-    raw = None
-    last_err = None
-    for span in spans_to_try:
-        params = {
-            "chart_style": "PERFORMANCE",
-            "chart_type": "historical_portfolio",
-            "display_span": span,
-            "include_all_hours": "true",
-        }
-        try:
-            resp = _req.get(url, headers=headers, params=params, timeout=15)
-            if not resp.ok:
-                last_err = f"Robinhood Bonfire API error (HTTP {resp.status_code}): {resp.text[:300]}"
-                continue
-            candidate = resp.json()
-            # Accept if it has actual point data (check across all segments)
-            lines_c = candidate.get("lines") or []
-            segs_c = (lines_c[0].get("segments") or []) if lines_c else []
-            pts_c = [pt for seg in segs_c for pt in (seg.get("points") or [])]
-            if pts_c:
-                raw = candidate
-                break
-            last_err = f"No data returned for display_span={span}"
-        except Exception as e:
-            last_err = f"Robinhood request failed: {e}"
-
-    if raw is None:
-        raise ValueError(last_err or "Robinhood Bonfire API returned no data")
-
-    # Navigate: lines[0].segments[0].points[]
-    lines = raw.get("lines") or []
-    segments = (lines[0].get("segments") or []) if lines else []
-    # Collect points from ALL segments (week/month spans split by day into multiple segments)
-    points = []
-    for seg in segments:
-        points.extend(seg.get("points") or [])
-
-    # Bonfire labels use Eastern Time (US market timezone). We anchor "today"
-    # in ET so a user on the West Coast late at night doesn't get UTC's next
-    # calendar day stamped onto morning-of-today labels.
-    try:
-        from zoneinfo import ZoneInfo
-        _ET = ZoneInfo("America/New_York")
-    except Exception:
-        _ET = timezone.utc  # fallback if zoneinfo missing — closer to old behavior
-    today_et = datetime.now(tz=_ET)
-    # Date/time label formats returned by Bonfire for different spans:
-    #   1D:       "9:30 AM", "10:15 AM"         — time only, pin to today (ET)
-    #   1W / 1M:  "11:00 PM, Feb 25"            — time + comma + short date (NO year)
-    #   3M / 1Y:  "Mar 5, 2025"                 — full date with year
-    #   ALL:      "Mar 2025" or "2025"           — month+year or year only
-    _DATE_FMTS = [
-        ("%b %d, %Y",       False, False),  # "Mar 5, 2025"         — full date
-        ("%I:%M %p, %b %d", False, True),   # "11:00 PM, Feb 25"   — time+date, no year (1W/1M)
-        ("%b %d, %I:%M %p", False, True),   # "Mar 5, 9:30 AM"     — date+time, no year
-        ("%b %d",           False, True),   # "Mar 4"               — short date, use current year
-        ("%b %Y",           False, False),  # "Mar 2025"            — month + year
-        ("%Y",              False, False),  # "2025"                — year only
-        ("%I:%M %p",        True,  False),  # "9:30 AM"             — time only, pin to today (ET)
-        ("%H:%M",           True,  False),  # "09:30"               — 24-h time only
-    ]
-
-    def _parse_label(label):
-        for fmt, time_only, no_year in _DATE_FMTS:
-            try:
-                dt = datetime.strptime(label, fmt)
-                if time_only:
-                    # Time-only labels are ET market time. Stamp ET date+tz, convert to UTC.
-                    dt = dt.replace(
-                        year=today_et.year, month=today_et.month, day=today_et.day,
-                        tzinfo=_ET,
-                    )
-                elif no_year or dt.year == 1900:
-                    dt = dt.replace(year=today_et.year, tzinfo=_ET)
-                else:
-                    dt = dt.replace(tzinfo=_ET)
-                return dt.astimezone(timezone.utc)
-            except ValueError:
-                continue
-        return None
-
-    import re as _re
-    _DOLLAR_RE = _re.compile(r"[\$]?([\d,]+\.?\d*)")
-
-    def _parse_amount(cursor):
-        # Prefer precise amount from price_chart_data.dollar_value.amount
-        price_chart = cursor.get("price_chart_data") or {}
-        dollar_value = price_chart.get("dollar_value") or {}
-        amount_str = dollar_value.get("amount")
-        if amount_str is not None:
-            try:
-                return float(amount_str)
-            except Exception:
-                pass
-        # Fallback: parse primary_value.value e.g. "$6,958.00"
-        pv = (cursor.get("primary_value") or {}).get("value", "")
-        m = _DOLLAR_RE.search(pv)
-        if m:
-            try:
-                return float(m.group(1).replace(",", ""))
-            except Exception:
-                pass
-        return None
-
-    pairs = []
-    for pt in points:
-        cursor = pt.get("cursor_data") or {}
-        label = (cursor.get("label") or {}).get("value", "")
-        if not label:
-            continue
-        dt = _parse_label(label)
-        amount = _parse_amount(cursor)
-        if dt is None or amount is None:
-            continue
-        pairs.append((int(dt.timestamp() * 1000), amount))
-
-    if range_str == "YTD":
-        now = datetime.now(tz=timezone.utc)
-        ytd_start_ms = int(datetime(now.year, 1, 1, tzinfo=timezone.utc).timestamp()) * 1000
-        pairs = [(t, v) for t, v in pairs if t >= ytd_start_ms]
-
-    # Collapse consecutive flat-value runs caused by market-closed hours
-    # (overnight, weekends, or idle pre-trading periods). Keep BOTH endpoints
-    # of each flat run so the chart can draw the horizontal segment instead
-    # of compressing it to a single point — otherwise an account that was
-    # cash-only all morning shows a 1D chart that visually starts when the
-    # first position was opened.
-    # For 1D specifically we skip dedup entirely; intraday data density is
-    # already low and every minute of the trading day matters visually.
-    if len(pairs) > 1 and range_str != "1D":
-        deduped = []
-        n = len(pairs)
-        for i, (t, v) in enumerate(pairs):
-            is_first = (i == 0)
-            is_last = (i == n - 1)
-            prev_differs = is_first or abs(pairs[i - 1][1] - v) > 0.001
-            next_differs = is_last or abs(pairs[i + 1][1] - v) > 0.001
-            # Keep first, last, and any point where a neighbor's value differs.
-            # In a flat run [a a a a b]: first a (kept, prev_diff), middle a's
-            # dropped, last a (kept, next_diff), b (kept, prev_diff).
-            if is_first or is_last or prev_differs or next_differs:
-                deduped.append((t, v))
-        pairs = deduped
-
-    return {"timestamps": [p[0] for p in pairs], "values": [p[1] for p in pairs]}
-
-
-def action_refresh_robinhood(conn, brokerage_id):
-    """Manually refresh a Robinhood account's tokens."""
-    brokerage_id = (brokerage_id or "").strip()
-    if not brokerage_id:
-        raise ValueError("brokerage_id is required")
-    _ensure_brokerage_accounts_table(conn)
-    doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).run(conn)
-    if doc is None:
-        raise ValueError(f"Brokerage account not found: {brokerage_id}")
-    if doc.get("brokerage_type") != "robinhood":
-        raise ValueError("This account is not a Robinhood account")
-
-    from robinhood_engine import RobinhoodClient, RobinhoodSessionState, RobinhoodAPIError as _RHErr
-    import datetime
-    # Decrypt stored tokens before giving to client; encrypt new ones on write.
-    try:
-        from secret_store import decrypt as _decrypt, encrypt as _encrypt
-    except Exception:
-        _decrypt = lambda v: v
-        _encrypt = lambda v: v
-    state = RobinhoodSessionState(
-        access_token=_decrypt(doc.get("robinhood_access_token")),
-        refresh_token=_decrypt(doc.get("robinhood_refresh_token")),
-        token_type=doc.get("robinhood_token_type", "Bearer"),
-        expires_in=doc.get("robinhood_expires_in"),
-        obtained_at_epoch=doc.get("robinhood_obtained_at_epoch"),
-        device_token=_decrypt(doc.get("robinhood_device_token")),
-        account_number=doc.get("robinhood_account_number"),
-        account_url=doc.get("robinhood_account_url"),
-    )
-    client = RobinhoodClient(state=state)
-    try:
-        new_state = client.refresh()
-    except _RHErr as e:
-        now = datetime.datetime.utcnow().isoformat()
-        r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).update({
-            "status": "expired",
-            "last_error": str(e.detail or e),
-            "updated_at": now,
-        }).run(conn)
-        raise ValueError(f"Refresh failed: {e.detail or str(e)}")
-
-    now = datetime.datetime.utcnow().isoformat()
-    try:
-        _enc_access = _encrypt(new_state.access_token)
-        _enc_refresh = _encrypt(new_state.refresh_token)
-    except RuntimeError:
-        _enc_access = new_state.access_token
-        _enc_refresh = new_state.refresh_token
-    r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).update({
-        "robinhood_access_token": _enc_access,
-        "robinhood_refresh_token": _enc_refresh,
-        "robinhood_obtained_at_epoch": new_state.obtained_at_epoch,
-        "robinhood_expires_in": new_state.expires_in,
-        "status": "active",
-        "last_error": None,
-        "last_refresh_at": now,
-        "updated_at": now,
-    }).run(conn)
-    return {"refreshed": True, "id": brokerage_id}
-
-
-# --- Agent Cycle Log ---
-
-AGENT_CYCLE_LOG_TABLE = "AgentCycleLog"
 
 
 def ensure_agent_cycle_log_table(conn):
@@ -8558,6 +8011,13 @@ def action_get_model_raw(conn, model_id):
     doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
+    if doc.get("api_key"):
+        from secret_store import decrypt_required
+        doc = dict(doc)
+        doc["api_key"] = decrypt_required(
+            doc["api_key"],
+            field="Models.api_key",
+        )
     return doc
 
 
@@ -8672,6 +8132,8 @@ def action_create_model(conn, name, provider, model, api_key=None,
                         input_cost_per_1m=None, output_cost_per_1m=None,
                         cache_creation_cost_per_1m=None,
                         cache_read_cost_per_1m=None):
+    from secret_store import encrypt as _encrypt
+
     _ensure_models_table(conn)
     provider_n = (provider or "").strip().lower()
     _validate_provider_model_compat(provider_n, model)
@@ -8685,7 +8147,7 @@ def action_create_model(conn, name, provider, model, api_key=None,
         "name": (name or "").strip(),
         "provider": provider_n,
         "model": (model or "").strip(),
-        "api_key": (api_key or "").strip(),
+        "api_key": _encrypt((api_key or "").strip()) if (api_key or "").strip() else "",
         "openai_base_url": (openai_base_url or "").strip(),
         "nvidia_base_url": (nvidia_base_url or "").strip(),
         "azure_openai_endpoint": (azure_openai_endpoint or "").strip(),
@@ -8727,6 +8189,8 @@ def action_create_model(conn, name, provider, model, api_key=None,
 
 
 def action_edit_model(conn, model_id, **kwargs):
+    from secret_store import encrypt as _encrypt
+
     _ensure_models_table(conn)
     doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     if doc is None:
@@ -8807,7 +8271,7 @@ def action_edit_model(conn, model_id, **kwargs):
         # of overwriting it — otherwise editing any other field would wipe the key.
         if field == "api_key" and (val == "" or _looks_masked(val)):
             continue
-        update[field] = val
+        update[field] = _encrypt(val) if field == "api_key" else val
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).update(update).run(conn)
     updated = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
     # If the conversation is using a claude-cli session with this model,
@@ -8857,44 +8321,11 @@ def _find_strategies_referencing_model(conn, model_id):
 
 
 def _restore_inline_from_model(conn, model_id, model_doc):
-    """Before force-deleting a model, restore inline credentials into referencing strategies."""
-    strategies = list(r.db(DB_NAME).table("Strategies").run(conn))
-    for strat in strategies:
-        changed = False
-        for sub in (strat.get("strategies") or []):
-            cfg = sub.get("config") or {}
-            for key in list(cfg.keys()):
-                if not key.endswith("llm_model_id") or cfg[key] != model_id:
-                    continue
-                prefix = key[: -len("llm_model_id")]
-                cfg[f"{prefix}llm_provider"] = model_doc.get("provider", "")
-                if prefix:
-                    cfg[f"{prefix}llm_model"] = model_doc.get("model", "")
-                else:
-                    cfg["model_name"] = model_doc.get("model", "")
-                cfg[f"{prefix}llm_api_key"] = model_doc.get("api_key", "")
-                if (model_doc.get("provider") or "").lower() == "azure":
-                    cfg[f"{prefix}azure_openai_api_key"] = model_doc.get("api_key", "")
-                    cfg[f"{prefix}azure_openai_endpoint"] = model_doc.get("azure_openai_endpoint", "")
-                    cfg[f"{prefix}azure_openai_api_version"] = model_doc.get("azure_openai_api_version", "2024-10-21")
-                if (model_doc.get("provider") or "").lower() in ("claude-cli", "codex-cli"):
-                    if model_doc.get("cli_path"):
-                        cfg[f"{prefix}cli_path"] = model_doc["cli_path"]
-                    if model_doc.get("extra_args"):
-                        cfg[f"{prefix}extra_args"] = model_doc["extra_args"]
-                if model_doc.get("openai_base_url"):
-                    cfg[f"{prefix}openai_base_url"] = model_doc["openai_base_url"]
-                if model_doc.get("nvidia_base_url"):
-                    cfg[f"{prefix}nvidia_base_url"] = model_doc["nvidia_base_url"]
-                if model_doc.get("reasoning_effort"):
-                    cfg[f"{prefix}llm_reasoning_effort"] = model_doc["reasoning_effort"]
-                del cfg[key]
-                changed = True
-            sub["config"] = cfg
-        if changed:
-            r.db(DB_NAME).table("Strategies").get(strat["id"]).update(
-                {"strategies": strat["strategies"]}
-            ).run(conn)
+    """Refuse the former plaintext credential restoration path."""
+    raise ValueError(
+        "Referenced models cannot be converted to inline credentials; reassign "
+        "or remove every strategy model reference before deletion"
+    )
 
 
 def action_delete_model(conn, model_id, force=False):
@@ -8903,14 +8334,12 @@ def action_delete_model(conn, model_id, force=False):
     if doc is None:
         return {"deleted": False, "id": model_id}
     referencing = _find_strategies_referencing_model(conn, model_id)
-    if referencing and not force:
+    if referencing:
         names = [s["name"] for s in referencing]
         raise ValueError(
             f"Model is used by strategy(ies): {', '.join(names)}. "
-            "Pass force=true to delete anyway (inline credentials will be restored)."
+            "Please reassign or remove those model references before deleting it."
         )
-    if referencing and force:
-        _restore_inline_from_model(conn, model_id, doc)
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).delete().run(conn)
     try:
         from model_resolver import invalidate_model_cache

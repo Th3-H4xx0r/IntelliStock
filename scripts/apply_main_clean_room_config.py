@@ -13,9 +13,9 @@ ALL the rest automatically (broker.py:~5285+):
      and auto-runs the per-instance cleanup (preserves backtest snapshots)
      so the operator no longer has to run clear_main_instance_lookback_state.py
      separately. Idempotent: subsequent boots skip the cleanup.
-  3. Passes clean_room_mode=True + initial_value to the adapter factory;
-     RobinhoodAdapter.__init__ runs the WAL classifier instead of adopting
-     whatever positions sit in the Robinhood account.
+  3. Passes clean_room_mode=True + initial_value to the Alpaca adapter factory;
+     the adapter runs the WAL classifier instead of adopting arbitrary account
+     positions.
   4. The migration detector at broker.py:5685+ auto-resets stale snapshot
      keys (_portfolio_drawdown_state, _sold_cooldown, _v32_*,
      _deployment_bar_index, etc.) when it detects the cached backtest peak
@@ -27,7 +27,7 @@ ALL the rest automatically (broker.py:~5285+):
 
 So the FULL launch sequence after this script applies is just:
 
-  INTELLISTOCK_CRED_KEY=<key> RH_DRY_RUN=true RETHINKDB_HOST=... \\
+  INTELLISTOCK_CRED_KEY=<key> RETHINKDB_HOST=... \\
       python3 backend/broker.py --instance main
 
 Read-only by default. Pass ``--apply`` to write. ``--initial-value N`` is

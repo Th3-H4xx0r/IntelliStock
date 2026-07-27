@@ -107,7 +107,7 @@ def handle(*, instance_id: str, failure) -> None:
     # 1. Halt (existing infra: flip runCommand + cancel orders + alert_halt).
     # 1-B (bug-sweep 2026-05-28): scope the AUTOMATIC abort to the FAILING
     # instance only — a paper instance's LLM failure must not halt the
-    # real-money 'main' instance or cancel its Robinhood orders. The global
+    # real-money 'main' instance or cancel its orders. The global
     # blast radius is reserved for the manual `python -m backend.live_kill_switch`.
     halt_summary: dict[str, Any] = {}
     try:

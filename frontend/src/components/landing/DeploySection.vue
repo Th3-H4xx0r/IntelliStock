@@ -85,15 +85,6 @@ onMounted(() => {
                   style="filter: grayscale(100%);"
                 />
               </div>
-              <div class="w-px h-5 bg-border-subtle"></div>
-              <div class="opacity-40 hover:opacity-80 transition-opacity cursor-default">
-                <img
-                  src="https://upload.wikimedia.org/wikipedia/commons/thumb/d/da/Robinhood_%28company%29_logo.svg/1280px-Robinhood_%28company%29_logo.svg.png"
-                  alt="Robinhood"
-                  class="h-7 w-auto"
-                  style="filter: brightness(0) invert(1);"
-                />
-              </div>
             </div>
           </div>
         </div>

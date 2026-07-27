@@ -18,7 +18,6 @@ pandas
 soccerdata
 requests
 tqdm
-pyrh
 alpaca_trade_api
 # tensorflow-cpu has no linux_aarch64 / macOS arm64 wheels on PyPI, so
 # Docker builds on Apple Silicon fail to resolve it. Fall back to the

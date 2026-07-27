@@ -306,9 +306,9 @@ ML News, Volatility, Earnings, the risk guards) runs without ever
 touching Neo4j. Run `docker compose stop neo4j` if you want to skip
 the 4 GB heap entirely.
 
-**Does it support brokers other than Alpaca and Robinhood?** Not yet —
-broker support lives behind a small adapter interface in
-`backend/broker_adapters/`. Adding one is the size of a weekend.
+**Which broker handles stocks?** Alpaca is the sole equities broker, with live
+and paper accounts. Kalshi prediction markets and Binance.US crypto use their
+own isolated trading paths.
 
 ## Highlights
 
@@ -325,10 +325,9 @@ broker support lives behind a small adapter interface in
   in an ephemeral container, gates concurrency by host CPU, and
   replays trades step-by-step in the UI at 0.5×–10× speed
   (`backend/engines/backtest_engine.py`).
-- **Live trading** — container-isolated instances per strategy,
-  brokerage-agnostic (Alpaca live + paper, Robinhood); credential
-  service auto-refreshes Robinhood tokens 30 minutes before expiry
-  (`backend/credential_service.py`).
+- **Live trading** — container-isolated instances per strategy, with Alpaca
+  live and paper accounts for equities. Kalshi and crypto instances remain
+  isolated from the equities execution path.
 - **AI agent** — autonomous strategy generator: LLM proposes
   strategies, the harness backtests them, an LLM verdict layer filters
   for profitability, and survivors are persisted with provenance
@@ -361,7 +360,7 @@ flowchart LR
     Pre --> Agg[Weighted vote aggregation<br/>threshold = 0.1]
     Agg --> Decision{BUY / HOLD / SELL}
     Decision --> Post[post-decision<br/>position_sizing,<br/>trade_allocator]
-    Post --> Order[Broker adapter<br/>Alpaca / Robinhood / paper]
+    Post --> Order[Broker adapter<br/>Alpaca live / Alpaca paper]
 ```
 
 Two scopes:
@@ -674,9 +673,8 @@ How a single tick decision is reached:
 - The Discord bot accepts commands from any account in the server. If
   you wire it up, restrict it to your own account or set
   `DISCORD_BOT_API_KEY` and only allow trusted callers.
-- Robinhood's pyrh integration is unofficial and can have your account
-  flagged or banned. Use it knowingly; the onboarding flow surfaces the
-  warning before linking.
+- Use Alpaca paper trading until the exact deployed build has completed your
+  operational validation period. Live mode places real orders with real funds.
 - Backtests run in their own short-lived containers with the host
   Docker socket mounted (so the engine can spawn them). The socket is
   not exposed to chatbot tools.
@@ -885,7 +883,6 @@ credits roll, not a manifest.
 | **[toon-format](https://pypi.org/project/toon-format/)**                                                                                                                                                                                                                                                                     | Compact token-efficient encoding for LLM prompts (~40% fewer tokens vs JSON).            |
 | **[alpaca-py](https://github.com/alpacahq/alpaca-py)**                                                                                                                                                                                                                                                                       | Live trading client (TradingClient + TradingStream).                                     |
 | **[alpaca-trade-api](https://github.com/alpacahq/alpaca-trade-api-python)**                                                                                                                                                                                                                                                  | Legacy Alpaca client kept for historical-data paths during migration.                    |
-| **[pyrh](https://github.com/jmfernandes/robin_stocks)**                                                                                                                                                                                                                                                                      | Robinhood (unofficial) — auth and order routing.                                         |
 | **[yfinance](https://github.com/ranaroussi/yfinance)**                                                                                                                                                                                                                                                                       | Free historical equity bars and price polling.                                           |
 | **[exchange_calendars](https://github.com/gerrymanoim/exchange_calendars)**                                                                                                                                                                                                                                                  | NYSE market calendar including holidays and early closes.                                |
 | **[NumPy](https://github.com/numpy/numpy)** + **[pandas](https://github.com/pandas-dev/pandas)**                                                                                                                                                                                                                             | Numerical core and time-series dataframes.                                               |

@@ -418,7 +418,7 @@ def test_classifier_handles_tz_naive_wal_timestamp():
 
 
 def test_classifier_excludes_dry_run_synthetic_fills():
-    """0-A (bug-sweep 2026-05-28): RH_DRY_RUN synthetic fills are written to the
+    """Historical dry-run synthetic fills are written to the
     WAL as terminal 'filled' rows with broker_order_id 'dry-*' but were NEVER
     submitted to the broker. They must NOT feed classification or the _trades
     rebuild, else a clean-room boot after a dry-run cycle fabricates bogus

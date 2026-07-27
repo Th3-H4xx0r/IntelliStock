@@ -1,14 +1,25 @@
 import model_resolver
+import pytest
 
 
 class _FakeConn:
     pass
 
 
-def test_openrouter_fields_injected(monkeypatch):
+@pytest.fixture
+def encrypt_model_key(monkeypatch):
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+    from secret_store import encrypt
+
+    monkeypatch.setenv("INTELLISTOCK_CRED_KEY", Fernet.generate_key().decode())
+    return encrypt
+
+
+def test_openrouter_fields_injected(monkeypatch, encrypt_model_key):
     doc = {
         "id": "m1", "provider": "openrouter", "model": "anthropic/claude-3.5-sonnet",
-        "api_key": "sk-or-x", "openrouter_base_url": "https://openrouter.ai/api/v1",
+        "api_key": encrypt_model_key("sk-or-x"), "openrouter_base_url": "https://openrouter.ai/api/v1",
         "openrouter_referer": "https://intellistock.app", "openrouter_title": "IntelliStock",
     }
     monkeypatch.setattr(model_resolver, "_get_model_from_cache_or_db", lambda c, mid: doc)
@@ -21,10 +32,10 @@ def test_openrouter_fields_injected(monkeypatch):
     assert out["openrouter_title"] == "IntelliStock"
 
 
-def test_openrouter_optional_fields_absent(monkeypatch):
+def test_openrouter_optional_fields_absent(monkeypatch, encrypt_model_key):
     doc = {
         "id": "m2", "provider": "openrouter", "model": "openai/gpt-4o-mini",
-        "api_key": "sk-or-y",
+        "api_key": encrypt_model_key("sk-or-y"),
     }
     monkeypatch.setattr(model_resolver, "_get_model_from_cache_or_db", lambda c, mid: doc)
     out = model_resolver.resolve_model_refs_in_config(_FakeConn(), {"llm_model_id": "m2"})

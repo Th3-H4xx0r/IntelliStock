@@ -130,7 +130,9 @@ const brokerageIcon = computed(() =>
 )
 
 const brokerageLabel = computed(() => {
-  const t = props.account.brokerage_type === 'alpaca' ? 'Alpaca' : 'Robinhood'
+  const t = props.account.brokerage_type === 'alpaca'
+    ? 'Alpaca'
+    : String(props.account.brokerage_type || 'Brokerage')
   const paper = props.account.brokerage_type === 'alpaca' && props.account.alpaca_paper
   return paper ? `${t} · Paper` : t
 })

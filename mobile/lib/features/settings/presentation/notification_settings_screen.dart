@@ -15,7 +15,7 @@ import '../data/models/notification_prefs.dart';
 
 /// Per-category notification routing — pushed via `/settings/notifications`.
 ///
-/// Each of the 9 categories has an independent Discord and iOS-push toggle.
+/// Each category has an independent Discord and iOS-push toggle.
 /// A "Send test" button per channel lets the operator confirm delivery.
 class NotificationSettingsScreen extends ConsumerWidget {
   const NotificationSettingsScreen({super.key});
@@ -23,18 +23,20 @@ class NotificationSettingsScreen extends ConsumerWidget {
   void _snack(BuildContext context, String msg, {bool ok = true}) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(
-          msg,
-          style: AppTextStyles.body.copyWith(
-            color: Colors.white,
-            fontWeight: FontWeight.w600,
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            msg,
+            style: AppTextStyles.body.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
           ),
+          backgroundColor: ok ? AppColors.success : AppColors.danger,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
         ),
-        backgroundColor: ok ? AppColors.success : AppColors.danger,
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 3),
-      ));
+      );
   }
 
   Future<void> _enableOnThisDevice(BuildContext context, WidgetRef ref) async {
@@ -46,7 +48,11 @@ class NotificationSettingsScreen extends ConsumerWidget {
     await ref.read(pushDevicesProvider.notifier).refresh();
   }
 
-  Future<void> _removeDevice(BuildContext context, WidgetRef ref, PushDevice d) async {
+  Future<void> _removeDevice(
+    BuildContext context,
+    WidgetRef ref,
+    PushDevice d,
+  ) async {
     try {
       await ref.read(pushRepositoryProvider).unregister(d.deviceToken);
       await ref.read(pushDevicesProvider.notifier).refresh();
@@ -56,8 +62,13 @@ class NotificationSettingsScreen extends ConsumerWidget {
     }
   }
 
-  Future<void> _onToggle(BuildContext context, WidgetRef ref, String category,
-      NotifChannel channel, bool value) async {
+  Future<void> _onToggle(
+    BuildContext context,
+    WidgetRef ref,
+    String category,
+    NotifChannel channel,
+    bool value,
+  ) async {
     final err = await ref
         .read(notificationPrefsControllerProvider.notifier)
         .toggle(category, channel, value);
@@ -66,7 +77,11 @@ class NotificationSettingsScreen extends ConsumerWidget {
     }
   }
 
-  Future<void> _sendTest(BuildContext context, WidgetRef ref, NotifChannel channel) async {
+  Future<void> _sendTest(
+    BuildContext context,
+    WidgetRef ref,
+    NotifChannel channel,
+  ) async {
     final label = channel == NotifChannel.discord ? 'Discord' : 'iOS push';
     try {
       final res = await ref
@@ -78,7 +93,8 @@ class NotificationSettingsScreen extends ConsumerWidget {
         final devices = res['devices'] ?? 0;
         String msg;
         if (devices == 0) {
-          msg = 'No iOS device registered yet — tap "Enable push on this device".';
+          msg =
+              'No iOS device registered yet — tap "Enable push on this device".';
         } else {
           final errors = res['errors'] as List?;
           final reason = (errors != null && errors.isNotEmpty)
@@ -90,7 +106,11 @@ class NotificationSettingsScreen extends ConsumerWidget {
         }
         _snack(context, msg, ok: false);
       } else {
-        _snack(context, ok ? '$label test sent ✓' : '$label test could not be sent', ok: ok);
+        _snack(
+          context,
+          ok ? '$label test sent ✓' : '$label test could not be sent',
+          ok: ok,
+        );
       }
       // The send may have auto-corrected a device's env; refresh the list.
       if (channel == NotifChannel.push) {
@@ -104,13 +124,23 @@ class NotificationSettingsScreen extends ConsumerWidget {
   /// Grouped per-type routing: a header per group, then a card of rows with
   /// independent Discord + iOS-push switches. Uses the API taxonomy; falls back
   /// to the built-in categories if the server didn't send `types`.
-  List<Widget> _buildGroupedRouting(BuildContext context, WidgetRef ref, NotificationPrefs prefs) {
+  List<Widget> _buildGroupedRouting(
+    BuildContext context,
+    WidgetRef ref,
+    NotificationPrefs prefs,
+  ) {
     final types = prefs.types.isNotEmpty
         ? prefs.types
         : kNotificationCategories
-            .map((m) => NotificationType(
-                key: m.key, group: 'Notifications', label: m.label, desc: m.description))
-            .toList();
+              .map(
+                (m) => NotificationType(
+                  key: m.key,
+                  group: 'Notifications',
+                  label: m.label,
+                  desc: m.description,
+                ),
+              )
+              .toList();
     final groups = <String>[];
     for (final t in types) {
       if (!groups.contains(t.group)) groups.add(t.group);
@@ -120,25 +150,37 @@ class NotificationSettingsScreen extends ConsumerWidget {
       final groupTypes = types.where((t) => t.group == group).toList();
       widgets.add(_SectionLabel(label: group));
       widgets.add(const SizedBox(height: 8));
-      widgets.add(GlassCard(
-        padding: EdgeInsets.zero,
-        child: Column(
-          children: [
-            for (var i = 0; i < groupTypes.length; i++) ...[
-              if (i > 0) const _Divider(),
-              _CategoryRow(
-                label: groupTypes[i].label,
-                description: groupTypes[i].desc,
-                route: prefs.routeFor(groupTypes[i].key),
-                onDiscord: (v) =>
-                    _onToggle(context, ref, groupTypes[i].key, NotifChannel.discord, v),
-                onPush: (v) =>
-                    _onToggle(context, ref, groupTypes[i].key, NotifChannel.push, v),
-              ),
+      widgets.add(
+        GlassCard(
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              for (var i = 0; i < groupTypes.length; i++) ...[
+                if (i > 0) const _Divider(),
+                _CategoryRow(
+                  label: groupTypes[i].label,
+                  description: groupTypes[i].desc,
+                  route: prefs.routeFor(groupTypes[i].key),
+                  onDiscord: (v) => _onToggle(
+                    context,
+                    ref,
+                    groupTypes[i].key,
+                    NotifChannel.discord,
+                    v,
+                  ),
+                  onPush: (v) => _onToggle(
+                    context,
+                    ref,
+                    groupTypes[i].key,
+                    NotifChannel.push,
+                    v,
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
-      ));
+      );
       widgets.add(const SizedBox(height: 24));
     }
     return widgets;
@@ -158,7 +200,11 @@ class NotificationSettingsScreen extends ConsumerWidget {
                 backgroundColor: Colors.transparent,
                 elevation: 0,
                 leading: IconButton(
-                  icon: Icon(symbol('arrow_back'), color: AppColors.textMuted, size: 22),
+                  icon: Icon(
+                    symbol('arrow_back'),
+                    color: AppColors.textMuted,
+                    size: 22,
+                  ),
                   onPressed: () => Navigator.of(context).pop(),
                 ),
                 title: Text('Notifications', style: AppTextStyles.h3),
@@ -177,9 +223,13 @@ class NotificationSettingsScreen extends ConsumerWidget {
                     child: Padding(
                       padding: const EdgeInsets.only(top: 60),
                       child: Center(
-                        child: Text('Failed to load preferences\n$e',
-                            textAlign: TextAlign.center,
-                            style: AppTextStyles.body.copyWith(color: AppColors.danger)),
+                        child: Text(
+                          'Failed to load preferences\n$e',
+                          textAlign: TextAlign.center,
+                          style: AppTextStyles.body.copyWith(
+                            color: AppColors.danger,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -191,8 +241,12 @@ class NotificationSettingsScreen extends ConsumerWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Send a sample notification to confirm a channel works.',
-                                style: AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+                            Text(
+                              'Send a sample notification to confirm a channel works.',
+                              style: AppTextStyles.micro.copyWith(
+                                color: AppColors.textDim,
+                              ),
+                            ),
                             const SizedBox(height: 12),
                             Row(
                               children: [
@@ -200,7 +254,11 @@ class NotificationSettingsScreen extends ConsumerWidget {
                                   child: _TestButton(
                                     icon: symbol('discord'),
                                     label: 'Test Discord',
-                                    onTap: () => _sendTest(context, ref, NotifChannel.discord),
+                                    onTap: () => _sendTest(
+                                      context,
+                                      ref,
+                                      NotifChannel.discord,
+                                    ),
                                   ),
                                 ),
                                 const SizedBox(width: 10),
@@ -208,7 +266,11 @@ class NotificationSettingsScreen extends ConsumerWidget {
                                   child: _TestButton(
                                     icon: symbol('notifications'),
                                     label: 'Test iOS push',
-                                    onTap: () => _sendTest(context, ref, NotifChannel.push),
+                                    onTap: () => _sendTest(
+                                      context,
+                                      ref,
+                                      NotifChannel.push,
+                                    ),
                                   ),
                                 ),
                               ],
@@ -223,26 +285,42 @@ class NotificationSettingsScreen extends ConsumerWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            ref.watch(pushDevicesProvider).when(
-                                  loading: () => Row(children: [
-                                    const SizedBox(
+                            ref
+                                .watch(pushDevicesProvider)
+                                .when(
+                                  loading: () => Row(
+                                    children: [
+                                      const SizedBox(
                                         width: 16,
                                         height: 16,
-                                        child: CircularProgressIndicator(strokeWidth: 2)),
-                                    const SizedBox(width: 10),
-                                    Text('Checking registered devices…',
-                                        style: AppTextStyles.micro
-                                            .copyWith(color: AppColors.textDim)),
-                                  ]),
-                                  error: (e, _) => Text('Could not load devices: $e',
-                                      style: AppTextStyles.micro
-                                          .copyWith(color: AppColors.danger)),
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Text(
+                                        'Checking registered devices…',
+                                        style: AppTextStyles.micro.copyWith(
+                                          color: AppColors.textDim,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  error: (e, _) => Text(
+                                    'Could not load devices: $e',
+                                    style: AppTextStyles.micro.copyWith(
+                                      color: AppColors.danger,
+                                    ),
+                                  ),
                                   data: (devices) => devices.isEmpty
                                       ? Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
                                           children: [
-                                            Text('No devices registered yet.',
-                                                style: AppTextStyles.bodyHi),
+                                            Text(
+                                              'No devices registered yet.',
+                                              style: AppTextStyles.bodyHi,
+                                            ),
                                             const SizedBox(height: 4),
                                             Text(
                                               'Tap "Enable push on this device" and allow '
@@ -250,7 +328,9 @@ class NotificationSettingsScreen extends ConsumerWidget {
                                               'the app installed (push doesn\'t work in the '
                                               'simulator).',
                                               style: AppTextStyles.micro
-                                                  .copyWith(color: AppColors.textDim),
+                                                  .copyWith(
+                                                    color: AppColors.textDim,
+                                                  ),
                                             ),
                                           ],
                                         )
@@ -259,8 +339,11 @@ class NotificationSettingsScreen extends ConsumerWidget {
                                             for (final d in devices)
                                               _DeviceTile(
                                                 device: d,
-                                                onRemove: () =>
-                                                    _removeDevice(context, ref, d),
+                                                onRemove: () => _removeDevice(
+                                                  context,
+                                                  ref,
+                                                  d,
+                                                ),
                                               ),
                                           ],
                                         ),
@@ -312,14 +395,24 @@ class _CategoryRow extends StatelessWidget {
         children: [
           Text(label, style: AppTextStyles.bodyHi),
           const SizedBox(height: 2),
-          Text(description,
-              style: AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+          Text(
+            description,
+            style: AppTextStyles.micro.copyWith(color: AppColors.textDim),
+          ),
           const SizedBox(height: 10),
           Row(
             children: [
-              _ChannelToggle(label: 'Discord', value: route.discord, onChanged: onDiscord),
+              _ChannelToggle(
+                label: 'Discord',
+                value: route.discord,
+                onChanged: onDiscord,
+              ),
               const SizedBox(width: 20),
-              _ChannelToggle(label: 'iOS push', value: route.push, onChanged: onPush),
+              _ChannelToggle(
+                label: 'iOS push',
+                value: route.push,
+                onChanged: onPush,
+              ),
             ],
           ),
         ],
@@ -329,7 +422,11 @@ class _CategoryRow extends StatelessWidget {
 }
 
 class _ChannelToggle extends StatelessWidget {
-  const _ChannelToggle({required this.label, required this.value, required this.onChanged});
+  const _ChannelToggle({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
   final String label;
   final bool value;
   final ValueChanged<bool> onChanged;
@@ -339,10 +436,12 @@ class _ChannelToggle extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(label,
-            style: AppTextStyles.micro.copyWith(
-              color: value ? AppColors.textHi : AppColors.textDim,
-            )),
+        Text(
+          label,
+          style: AppTextStyles.micro.copyWith(
+            color: value ? AppColors.textHi : AppColors.textDim,
+          ),
+        ),
         const SizedBox(width: 8),
         AppToggle(value: value, onChanged: onChanged),
       ],
@@ -351,7 +450,11 @@ class _ChannelToggle extends StatelessWidget {
 }
 
 class _TestButton extends StatelessWidget {
-  const _TestButton({required this.icon, required this.label, required this.onTap});
+  const _TestButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
   final IconData icon;
   final String label;
   final VoidCallback onTap;
@@ -374,9 +477,11 @@ class _TestButton extends StatelessWidget {
             Icon(icon, size: 16, color: AppColors.primary),
             const SizedBox(width: 8),
             Flexible(
-              child: Text(label,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppTextStyles.meta.copyWith(color: AppColors.primary)),
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.meta.copyWith(color: AppColors.primary),
+              ),
             ),
           ],
         ),
@@ -407,8 +512,10 @@ class _DeviceTile extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(device.tokenSuffix, style: AppTextStyles.body),
-                Text(parts.join(' · '),
-                    style: AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+                Text(
+                  parts.join(' · '),
+                  style: AppTextStyles.micro.copyWith(color: AppColors.textDim),
+                ),
               ],
             ),
           ),
@@ -439,6 +546,10 @@ class _Divider extends StatelessWidget {
   const _Divider();
   @override
   Widget build(BuildContext context) {
-    return Container(height: 1, margin: const EdgeInsets.symmetric(horizontal: 16), color: AppColors.border);
+    return Container(
+      height: 1,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      color: AppColors.border,
+    );
   }
 }

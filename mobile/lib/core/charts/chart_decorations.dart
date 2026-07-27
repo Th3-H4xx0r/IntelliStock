@@ -120,8 +120,18 @@ String hourAmPm(int hour24) {
 /// otherwise). Shared by the dashboard and live-trading charts.
 String formatChartDate(DateTime ts, String range) {
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   switch (range) {
     case '1D':
@@ -143,8 +153,18 @@ String formatChartDate(DateTime ts, String range) {
 String formatChartDateBySpan(DateTime ts, Duration span) {
   String two(int n) => n.toString().padLeft(2, '0');
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   if (span.inDays <= 2) return '${two(ts.hour)}:${two(ts.minute)}';
   if (span.inDays <= 120) return '${months[ts.month - 1]} ${ts.day}';
@@ -157,9 +177,7 @@ List<int> evenlySpacedLabelIndices(int count, int slots) {
   if (count <= 0) return const [];
   if (count == 1) return const [0];
   final n = slots.clamp(2, count);
-  return [
-    for (var s = 0; s < n; s++) ((s / (n - 1)) * (count - 1)).round(),
-  ];
+  return [for (var s = 0; s < n; s++) ((s / (n - 1)) * (count - 1)).round()];
 }
 
 /// A Y value-axis configured to be invisible and inset-free, with explicit
@@ -198,7 +216,7 @@ NumericAxis edgeToEdgeIndexAxis(int count) {
 /// Like [edgeToEdgeIndexAxis] but with an explicit value range — used by the
 /// 1D portfolio chart whose x is "minutes since local midnight" over a fixed
 /// `[0, 1440]` full-day span, so the line fills only the elapsed part of the
-/// day (a short line early in the morning, like Robinhood's overnight view).
+/// day (a short line early in the morning).
 NumericAxis edgeToEdgeRangeAxis(double minimum, double maximum) {
   return NumericAxis(
     isVisible: false,

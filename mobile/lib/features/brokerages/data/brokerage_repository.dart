@@ -29,7 +29,9 @@ class BrokerageRepository {
 
   /// PUT /brokerages/{id} — edit an existing account.
   Future<Map<String, dynamic>> edit(
-      String id, Map<String, dynamic> body) async {
+    String id,
+    Map<String, dynamic> body,
+  ) async {
     return _client.put<Map<String, dynamic>>('/brokerages/$id', body: body);
   }
 
@@ -38,23 +40,12 @@ class BrokerageRepository {
     await _client.delete<dynamic>('/brokerages/$id');
   }
 
-  /// POST /brokerages/{id}/refresh — refresh Robinhood tokens.
-  Future<Map<String, dynamic>> refresh(String id) async {
-    return _client.post<Map<String, dynamic>>('/brokerages/$id/refresh');
-  }
-
   /// POST /brokerages/test-alpaca — diagnostic probe, does NOT save.
   Future<Map<String, dynamic>> testAlpaca(Map<String, dynamic> body) async {
-    return _client.post<Map<String, dynamic>>('/brokerages/test-alpaca',
-        body: body);
-  }
-
-  /// POST /brokerages/robinhood/accounts — step-1 Robinhood account picker.
-  Future<Map<String, dynamic>> robinhoodAccounts(
-      Map<String, dynamic> body) async {
     return _client.post<Map<String, dynamic>>(
-        '/brokerages/robinhood/accounts',
-        body: body);
+      '/brokerages/test-alpaca',
+      body: body,
+    );
   }
 }
 

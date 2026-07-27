@@ -1,10 +1,10 @@
 """Direct broker fetch for the Live Trading API endpoint.
 
-Bypasses the LiveState row by querying Alpaca / Robinhood directly so the UI
+Bypasses the LiveState row by querying Alpaca directly so the UI
 keeps showing fresh equity / positions / portfolio_history when the instance
 container is stalled. Public API: ``fetch_broker_live_state(conn, instance_id)``.
-TradingClient/RobinhoodClient cached per-instance and recycled on cred-hash
-change; portfolio_history cached for ``_PORTFOLIO_HISTORY_TTL_SEC`` seconds.
+TradingClient is cached per-instance and recycled on credential-hash changes;
+portfolio_history is cached for ``_PORTFOLIO_HISTORY_TTL_SEC`` seconds.
 """
 
 from __future__ import annotations
@@ -20,6 +20,12 @@ import requests
 
 from rethinkdb import RethinkDB
 from secret_store import decrypt
+from stock_credential_boundary import (
+    StockCredentialError,
+    is_equity_stock_instance,
+    linked_alpaca_brokerage_id,
+    resolve_linked_alpaca_credentials,
+)
 
 
 _DB_NAME = "IntelliStock"
@@ -86,15 +92,49 @@ def _load_credentials(instance_id: str) -> dict:
         if not inst:
             out["error"] = "instance_not_found"
             return out
+        if is_equity_stock_instance(inst):
+            out["broker_type"] = "alpaca"
+            try:
+                brokerage_id = linked_alpaca_brokerage_id(inst, data=False)
+            except StockCredentialError:
+                out["error"] = "stock_exact_alpaca_link_required"
+                return out
+            out["brokerage_id"] = brokerage_id
+            try:
+                brokerage = (
+                    rdb.db(_DB_NAME)
+                    .table("BrokerageAccounts")
+                    .get(brokerage_id)
+                    .run(conn)
+                )
+            except Exception as exc:
+                out["error"] = (
+                    "brokerage_lookup_failed: "
+                    f"{type(exc).__name__}"
+                )
+                return out
+            try:
+                creds = resolve_linked_alpaca_credentials(
+                    inst,
+                    brokerage,
+                    data=False,
+                )
+            except StockCredentialError:
+                out["error"] = "stock_alpaca_credentials_invalid"
+                return out
+            out["paper"] = creds.paper
+            out["key"] = creds.key
+            out["secret"] = creds.secret
+            return out
+
+        # Compatibility path below is intentionally limited to non-equity
+        # instances.  Stock instances never use instance-level credentials.
         brokerage_id = inst.get("brokerage_id") or None
         broker_type = (inst.get("broker_type") or "alpaca").strip().lower()
         paper_field = inst.get("alpaca_paper")
         out["brokerage_id"] = brokerage_id
         out["broker_type"] = broker_type
-        if broker_type == "robinhood":
-            out["paper"] = False
-        else:
-            out["paper"] = True if paper_field is None else bool(paper_field)
+        out["paper"] = True if paper_field is None else bool(paper_field)
         if not brokerage_id:
             # Legacy instance-level credentials fallback (mirrors broker.py:348-356).
             try:
@@ -119,12 +159,9 @@ def _load_credentials(instance_id: str) -> dict:
             return out
         broker_type = (b.get("brokerage_type") or broker_type or "alpaca").strip().lower()
         out["broker_type"] = broker_type
-        if broker_type == "robinhood":
-            out["paper"] = False
-        else:
-            b_paper = b.get("alpaca_paper")
-            if b_paper is not None:
-                out["paper"] = bool(b_paper)
+        b_paper = b.get("alpaca_paper")
+        if b_paper is not None:
+            out["paper"] = bool(b_paper)
         if broker_type == "alpaca":
             try:
                 k = decrypt(b.get("alpaca_key")) or None
@@ -137,38 +174,6 @@ def _load_credentials(instance_id: str) -> dict:
                 return out
             out["key"] = k
             out["secret"] = s
-            return out
-        if broker_type == "robinhood":
-            try:
-                acc_tok = decrypt(b.get("robinhood_access_token")) or None
-                ref_tok = decrypt(b.get("robinhood_refresh_token")) or None
-            except Exception as e:
-                out["error"] = f"creds_decrypt_failed: {type(e).__name__}: {e}"
-                return out
-            try:
-                dev_tok = decrypt(b.get("robinhood_device_token")) or None
-            except Exception:
-                dev_tok = b.get("robinhood_device_token") or None
-            try:
-                obtained_at = int(b.get("robinhood_obtained_at_epoch")) if b.get("robinhood_obtained_at_epoch") is not None else None
-            except Exception:
-                obtained_at = None
-            try:
-                expires_in = int(b.get("robinhood_expires_in")) if b.get("robinhood_expires_in") is not None else None
-            except Exception:
-                expires_in = None
-            if not acc_tok:
-                out["error"] = "robinhood_access_token_missing"
-                return out
-            out["access_token"] = acc_tok
-            out["refresh_token"] = ref_tok
-            out["device_token"] = dev_tok
-            out["account_number"] = (b.get("robinhood_account_number") or "").strip() or None
-            out["account_url"] = (b.get("robinhood_account_url") or "").strip() or None
-            out["obtained_at_epoch"] = obtained_at
-            out["expires_in"] = expires_in
-            # Required by the Bonfire portfolio-history helper (see Bug B).
-            out["token_type"] = b.get("robinhood_token_type") or "Bearer"
             return out
         out["error"] = f"unsupported_broker_type: {broker_type}"
         return out
@@ -324,224 +329,6 @@ def _fetch_alpaca(instance_id: str, creds: dict) -> dict:
     }
 
 
-# ── Robinhood ───────────────────────────────────────────────────────────────
-
-def _get_robinhood_client(instance_id: str, creds: dict):
-    """Return cached RobinhoodClient, rebuilding on credential rotation."""
-    from robinhood_engine import RobinhoodClient, RobinhoodSessionState
-    cache_key = (instance_id, "robinhood")
-    cred_hash = _hash_creds(
-        creds.get("access_token"), creds.get("refresh_token"),
-        creds.get("account_number"), creds.get("device_token"),
-    )
-    entry = _client_cache.get(cache_key)
-    if entry and entry.get("cred_hash") == cred_hash:
-        return entry["client"]
-    state = RobinhoodSessionState(
-        access_token=creds.get("access_token"), refresh_token=creds.get("refresh_token"),
-        device_token=creds.get("device_token"), account_number=creds.get("account_number"),
-        account_url=creds.get("account_url"), obtained_at_epoch=creds.get("obtained_at_epoch"),
-        expires_in=creds.get("expires_in"),
-    )
-    client = RobinhoodClient(state=state)
-    _client_cache[cache_key] = {"client": client, "cred_hash": cred_hash}
-    return client
-
-
-def _robinhood_portfolio_history(creds: dict) -> list[dict]:
-    """Bonfire endpoint — legacy /portfolios/historicals/ returns empty for new accounts."""
-    acc_num = (creds.get("account_number") or "").strip()
-    if not acc_num:
-        return []
-    try:
-        from interactive_utils import _fetch_robinhood_portfolio_history
-        raw = _fetch_robinhood_portfolio_history(
-            access_token=creds.get("access_token") or "",
-            token_type=creds.get("token_type") or "Bearer",
-            account_number=acc_num,
-            range_str="1M",
-        )
-    except Exception:
-        return []
-    timestamps = raw.get("timestamps") or []
-    values = raw.get("values") or []
-    out: list[dict] = []
-    for t_ms, v in zip(timestamps, values):
-        try:
-            dt = datetime.fromtimestamp(int(t_ms) / 1000, tz=timezone.utc)
-            out.append({"ts": dt.isoformat(), "value": float(v)})
-        except Exception:
-            continue
-    return out[-_MAX_PORTFOLIO_HISTORY:]
-
-
-def _robinhood_recent_trades(client, limit: int = 50) -> list[dict]:
-    """Pull recent filled RH orders; map to LiveState shape."""
-    try:
-        orders = client.list_orders(limit=int(limit), state="filled") or []
-    except Exception:
-        return []
-    out: list[dict] = []
-    instr_to_sym: dict[str, str] = {}
-    for o in orders:
-        try:
-            if (o.get("state") or "").strip().lower() != "filled":
-                continue
-            instr = (o.get("instrument") or "").strip()
-            sym = instr_to_sym.get(instr)
-            if not sym and instr:
-                try:
-                    inst_doc = client.get_instrument(instr) or {}
-                    sym = (inst_doc.get("symbol") or "").upper() or None
-                    if sym:
-                        instr_to_sym[instr] = sym
-                except Exception:
-                    sym = None
-            side = (o.get("side") or "").strip().lower()
-            out.append({
-                "ts": o.get("last_transaction_at") or o.get("updated_at") or o.get("created_at"),
-                "symbol": sym,
-                "side": "buy" if side == "buy" else "sell",
-                "qty": float(o.get("cumulative_quantity") or o.get("quantity") or 0.0),
-                "price": float(o.get("average_price") or o.get("price") or 0.0),
-                "order_id": o.get("id"),
-            })
-        except Exception:
-            continue
-    return out[:_MAX_RECENT_TRADES]
-
-
-def _fetch_robinhood(instance_id: str, creds: dict) -> dict:
-    """Build broker-state dict from Robinhood."""
-    client = _get_robinhood_client(instance_id, creds)
-    summary = client.get_account_summary(account_number=creds.get("account_number"))
-    cash = float(summary.get("cash") or 0.0)
-    equity = float(summary.get("equity") or 0.0)
-    buying_power = float(summary.get("buying_power") or 0.0)
-    account_id = (summary.get("account_number") or creds.get("account_number") or "") or None
-
-    raw_positions: list[dict] = []
-    try:
-        positions = client.get_positions(account_number=creds.get("account_number"), nonzero=True) or []
-    except Exception:
-        positions = []
-    for p in positions:
-        try:
-            qty_f = float(p.get("quantity") or 0.0)
-            if qty_f <= 0:
-                continue
-            avg_entry = float(p.get("average_buy_price") or 0.0)
-            instr = (p.get("instrument") or "").strip()
-            sym = ""
-            if instr:
-                try:
-                    inst_doc = client.get_instrument(instr) or {}
-                    sym = (inst_doc.get("symbol") or "").upper()
-                except Exception:
-                    sym = ""
-            raw_positions.append({"symbol": sym or None, "qty": qty_f, "avg_entry": avg_entry})
-        except Exception:
-            continue
-
-    # Batch one quote call — single broken quote must not poison the snapshot.
-    symbols_for_quote = [r["symbol"] for r in raw_positions if r.get("symbol")]
-    live_prices: dict[str, float] = {}
-    if symbols_for_quote:
-        try:
-            from robinhood_engine import get_live_prices
-            live_prices = get_live_prices(symbols_for_quote) or {}
-        except Exception:
-            live_prices = {}
-
-    positions_payload: list[dict] = []
-    for r in raw_positions:
-        sym = r["symbol"]
-        qty_f = r["qty"]
-        avg_entry = r["avg_entry"]
-        last_price_raw = live_prices.get(sym) if sym else None
-        try:
-            last_price = float(last_price_raw) if last_price_raw is not None else None
-        except Exception:
-            last_price = None
-        if last_price is not None and last_price > 0:
-            market_value = qty_f * last_price
-            unrealized = (last_price - avg_entry) * qty_f if avg_entry > 0 else 0.0
-            unrealized_pct = ((last_price / avg_entry) - 1.0) * 100.0 if avg_entry > 0 else 0.0
-        else:
-            last_price = None
-            market_value = None
-            unrealized = None
-            unrealized_pct = None
-        positions_payload.append({
-            "symbol": sym,
-            "qty": qty_f,
-            "avg_entry_price": avg_entry if avg_entry else None,
-            "last_price": last_price,
-            "market_value": market_value,
-            "unrealized_pnl": unrealized,
-            "unrealized_pnl_pct": unrealized_pct,
-        })
-
-    recent_trades = _robinhood_recent_trades(client)
-    ph = _portfolio_history_cached(instance_id, lambda: _robinhood_portfolio_history(creds))
-
-    # initial_value: 1-month-ago equity from Bonfire history. None when unavailable
-    # so the UI shows "—" rather than a misleading 0% Total P&L.
-    initial_value: Optional[float]
-    if ph:
-        try:
-            initial_value = float(ph[0]["value"])
-        except Exception:
-            initial_value = None
-    else:
-        initial_value = None
-
-    # last_equity: prefer RH-reported previous close; fall back to today's first
-    # portfolio_history sample. Field name varies across RH responses.
-    last_equity_val: Optional[float] = None
-    try:
-        portfolio = client.get_portfolio(account_number=creds.get("account_number")) or {}
-        epc = portfolio.get("equity_previous_close") or portfolio.get("adjusted_equity_previous_close")
-        if epc is not None:
-            last_equity_val = float(epc)
-    except Exception:
-        last_equity_val = None
-    if not last_equity_val and ph:
-        today_iso = datetime.now(timezone.utc).date().isoformat()
-        for sample in ph:
-            ts = str(sample.get("ts") or "")
-            if ts.startswith(today_iso):
-                try:
-                    last_equity_val = float(sample.get("value") or 0.0) or None
-                except Exception:
-                    last_equity_val = None
-                break
-
-    if initial_value and initial_value > 0:
-        total_pnl = equity - initial_value
-        total_pnl_pct = ((equity / initial_value) - 1.0) * 100.0
-    else:
-        total_pnl = None
-        total_pnl_pct = None
-
-    if last_equity_val and last_equity_val > 0 and equity > 0:
-        day_pnl = equity - last_equity_val
-        day_pnl_pct = ((equity / last_equity_val) - 1.0) * 100.0
-    else:
-        day_pnl = None
-        day_pnl_pct = None
-
-    return {
-        "cash": cash, "equity": equity, "buying_power": buying_power,
-        "last_equity": last_equity_val if last_equity_val is not None else 0.0,
-        "initial_value": initial_value, "day_pnl": day_pnl, "day_pnl_pct": day_pnl_pct,
-        "total_pnl": total_pnl, "total_pnl_pct": total_pnl_pct,
-        "positions": positions_payload, "recent_trades": recent_trades, "portfolio_history": ph,
-        "broker": {"name": "RobinhoodAdapter", "account_id": account_id, "paper": False,
-                   "health": {"auth_fresh": True, "errors": []}},
-    }
-
-
 def _portfolio_history_cached(instance_id: str, fetch_fn) -> list[dict]:
     """Return cached portfolio_history if within TTL, else refetch.
 
@@ -583,13 +370,10 @@ def fetch_broker_live_state(conn, instance_id: str) -> dict:
             return base_meta
         broker_type = creds.get("broker_type") or "alpaca"
         try:
-            if broker_type == "alpaca":
-                state = _fetch_alpaca(instance_id, creds)
-            elif broker_type == "robinhood":
-                state = _fetch_robinhood(instance_id, creds)
-            else:
+            if broker_type != "alpaca":
                 base_meta["broker_fetch_error"] = f"unsupported_broker_type: {broker_type}"
                 return base_meta
+            state = _fetch_alpaca(instance_id, creds)
         except Exception as e:
             base_meta["broker_fetch_error"] = f"broker_api_error: {type(e).__name__}: {e}"
             return base_meta

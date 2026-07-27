@@ -7,8 +7,8 @@
   1. Verifies prerequisites (docker, docker compose). Auto-installs
      Docker Desktop via winget if missing, and starts the daemon if
      it's not already running.
-  2. Creates .env with safe defaults + a freshly-generated Fernet
-     INTELLISTOCK_CRED_KEY (only if .env doesn't already exist).
+  2. Creates .env with safe defaults + freshly-generated stable secrets,
+     and securely provisions missing control-plane keys during upgrades.
   3. Builds the backend image.
   4. Brings up the full stack (rethinkdb, neo4j, backend, api,
      frontend, price-service, backtest-engine, credential-service).
@@ -140,10 +140,50 @@ if ($LASTEXITCODE -ne 0) {
 }
 Ok 'docker + docker compose present and daemon is up'
 
+function New-SocketControlMasterKey {
+  $bytes = New-Object byte[] 32
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $rng.GetBytes($bytes)
+  } finally {
+    $rng.Dispose()
+  }
+  return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+function Ensure-SocketControlMasterKey([string]$Path) {
+  $keyLines = @(
+    Get-Content -LiteralPath $Path |
+      Where-Object { $_ -match '^SOCKET_CONTROL_MASTER_KEY=' }
+  )
+
+  if ($keyLines.Count -eq 0) {
+    $socketControlMasterKey = New-SocketControlMasterKey
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::AppendAllText(
+      $Path,
+      "`n# Stable 32-byte socket-control HMAC master key (64 lowercase hex)`nSOCKET_CONTROL_MASTER_KEY=$socketControlMasterKey`n",
+      $utf8NoBom
+    )
+    $socketControlMasterKey = $null
+    Ok 'Provisioned the required socket-control master key in .env'
+    return
+  }
+
+  if ($keyLines.Count -ne 1) {
+    Fail '.env must contain exactly one SOCKET_CONTROL_MASTER_KEY assignment'
+  }
+
+  $currentValue = ($keyLines[0] -split '=', 2)[1]
+  if ($currentValue -cnotmatch '^[0-9a-f]{64}$') {
+    Fail 'SOCKET_CONTROL_MASTER_KEY must be exactly 64 lowercase hexadecimal characters'
+  }
+}
+
 # ── .env scaffold ─────────────────────────────────────────────────
 $EnvFile = Join-Path $RepoRoot '.env'
 if (Test-Path $EnvFile) {
-  Ok '.env already exists — leaving it alone'
+  Ok '.env already exists — preserving its configured values'
 } else {
   Info 'Generating .env with safe defaults'
 
@@ -253,6 +293,8 @@ POLYGON_API_KEY=
   [System.IO.File]::WriteAllText($EnvFile, $envContent, (New-Object System.Text.UTF8Encoding $false))
   Ok "Wrote $EnvFile  (review and add any optional API keys you have)"
 }
+
+Ensure-SocketControlMasterKey -Path $EnvFile
 
 # ── Helper: read a value from .env without sourcing it ────────────
 function Get-EnvValue($key, $default) {

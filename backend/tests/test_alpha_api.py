@@ -148,6 +148,33 @@ def test_alpha_endpoints_require_authentication():
         assert "Depends" in repr(params["current_user"].default)
 
 
+def test_readiness_endpoint_reports_checks_and_never_promotes_paper_state(monkeypatch):
+    import api.main as api_main
+
+    class Store:
+        def health(self):
+            return types.SimpleNamespace(available=True, error="")
+
+        def get_state(self, key):
+            return types.SimpleNamespace(payload={
+                "readiness_report": {
+                    "instance_id": "test-instance",
+                    "state": "PAPER_ELIGIBLE",
+                    "artifact_hash": "artifact-hash",
+                    "checks": [{"name": "paper evidence", "passed": True,
+                                "reason": "complete", "evidence_hash": "abc"}],
+                    "fingerprint": "not-verified-in-this-route",
+                },
+            })
+
+    monkeypatch.setattr(api_main, "_alpha_store", lambda: Store())
+    payload = api_main.api_alpha_readiness("test-instance", current_user={})
+
+    assert payload["state"] == "RESEARCH"
+    assert payload["checks"][0]["name"] == "audit store"
+    assert payload["readiness_ok"] is False
+
+
 # --- ownership reconciliation (Step 9) --------------------------------------
 
 def test_reconciliation_flags_lineage_gaps_and_passes_july18_baseline():

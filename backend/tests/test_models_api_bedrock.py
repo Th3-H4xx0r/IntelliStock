@@ -51,6 +51,8 @@ def test_create_edit_model_body_accept_cache_family():
 def test_action_create_model_persists_cache_family(monkeypatch):
     import interactive_utils as iu
     from unittest.mock import MagicMock
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("INTELLISTOCK_CRED_KEY", Fernet.generate_key().decode())
     fake_r = MagicMock()
     fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
     monkeypatch.setattr(iu, "r", fake_r)
@@ -167,6 +169,8 @@ def test_bedrock_list_models_passes_args(app_client):
 def test_action_create_model_persists_bedrock_fields(monkeypatch):
     import interactive_utils as iu
     from unittest.mock import MagicMock
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("INTELLISTOCK_CRED_KEY", Fernet.generate_key().decode())
     fake_r = MagicMock()
     fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
     monkeypatch.setattr(iu, "r", fake_r)

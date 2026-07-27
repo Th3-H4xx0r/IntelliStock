@@ -2034,11 +2034,38 @@ def _prompt_ref_for_index(index: int) -> str:
 
 # ── Benzinga data fetching + context formatting ──────────────────────────────
 
+def _benzinga_available_at(record: dict):
+    """Return an explicit publication/availability timestamp, never event date."""
+
+    if not isinstance(record, dict):
+        return None
+    containers = [record]
+    metadata = record.get("metadata")
+    if isinstance(metadata, dict):
+        containers.append(metadata)
+    for container in containers:
+        for key in (
+            "available_at",
+            "published_at",
+            "published_date",
+            "publication_time",
+            "created_at",
+            "updated_at",
+            "last_updated",
+        ):
+            value = container.get(key)
+            if value is not None and str(value).strip():
+                return value
+    return None
+
+
 def _fetch_all_benzinga(
     config: dict,
     date_key: str,
     tickers: list[str],
     strategy_cache: dict | None = None,
+    *,
+    context=None,
 ) -> dict[str, list]:
     """
     Fetch all enabled Benzinga data sources for the given date and tickers.
@@ -2214,6 +2241,17 @@ def _fetch_all_benzinga(
 
         # Apply data-leakage prevention per day (strips future actuals)
         sliced = _bz_strip(data_type, sliced, date_key)
+
+        if context is not None and not context.is_live:
+            from point_in_time_data import filter_available
+
+            sliced = list(
+                filter_available(
+                    sliced,
+                    context=context,
+                    available_at=_benzinga_available_at,
+                )
+            )
 
         if sliced:
             results[data_type] = sliced
@@ -4942,15 +4980,99 @@ def _v32_price_vs_recent_high(
     return (float(buy_price) - high) / high
 
 
+def _market_cap_point_in_time_inputs(
+    strategy_cache: dict | None,
+    *,
+    context=None,
+    fundamentals=None,
+):
+    """Resolve explicitly supplied PIT inputs or the active run-scoped pair."""
+
+    if isinstance(strategy_cache, dict):
+        if context is None:
+            context = strategy_cache.get("_point_in_time_context")
+        if fundamentals is None:
+            fundamentals = strategy_cache.get("_point_in_time_fundamentals")
+    return context, fundamentals
+
+
+def _dated_market_cap(
+    symbol: str,
+    *,
+    context=None,
+    fundamentals=None,
+) -> float | None:
+    """Resolve strict historical market cap or return None for current/live."""
+
+    if context is None:
+        return None
+    from collections.abc import Mapping
+    from point_in_time_data import PointInTimeContext, PointInTimeDataError
+
+    if not isinstance(context, PointInTimeContext):
+        raise PointInTimeDataError(
+            "market-cap context must be a PointInTimeContext"
+        )
+    if context.is_live:
+        return None
+    if not context.strict:
+        raise PointInTimeDataError(
+            "historical market-cap context must be strict"
+        )
+    if not isinstance(fundamentals, Mapping):
+        raise PointInTimeDataError(
+            "dated fundamentals payload is required for market-cap consumers"
+        )
+
+    symbol_u = str(symbol or "").strip().upper()
+    row = fundamentals.get(symbol_u)
+    if row is None:
+        for raw_symbol, candidate in fundamentals.items():
+            if str(raw_symbol or "").strip().upper() == symbol_u:
+                row = candidate
+                break
+    if isinstance(row, Mapping):
+        raw_market_cap = row.get(
+            "market_cap",
+            row.get("marketCap", row.get("mcap")),
+        )
+    else:
+        raw_market_cap = row
+    try:
+        market_cap = float(raw_market_cap or 0.0)
+    except (TypeError, ValueError):
+        market_cap = 0.0
+    if market_cap <= 0:
+        raise PointInTimeDataError(
+            f"dated fundamentals market_cap is missing for {symbol_u or '<empty>'}"
+        )
+    return market_cap
+
+
 def _v32_get_market_cap(
     symbol: str,
     strategy_cache: dict | None,
     config: dict | None,
+    *,
+    context=None,
+    fundamentals=None,
 ) -> float | None:
     """V32 T2-a helper: resolve market_cap from strategy_cache metadata.
 
     Returns None when unknown. Callers choose fail-open vs fail-closed.
     """
+    context, fundamentals = _market_cap_point_in_time_inputs(
+        strategy_cache,
+        context=context,
+        fundamentals=fundamentals,
+    )
+    dated_market_cap = _dated_market_cap(
+        symbol,
+        context=context,
+        fundamentals=fundamentals,
+    )
+    if dated_market_cap is not None:
+        return dated_market_cap
     if not strategy_cache:
         return None
     for key in ("_ticker_metadata", "_stock_metadata", "_discovered_stocks_cache"):
@@ -5251,10 +5373,25 @@ def _extract_quality_metadata(
     *,
     portfolio_emulator=None,
     strategy_cache: dict | None = None,
+    context=None,
+    fundamentals=None,
 ) -> dict[str, Any]:
     payload = score_doc if isinstance(score_doc, dict) else {}
     merged: dict[str, float] = {}
     sources: list[str] = []
+    context, fundamentals = _market_cap_point_in_time_inputs(
+        strategy_cache,
+        context=context,
+        fundamentals=fundamentals,
+    )
+    dated_market_cap = _dated_market_cap(
+        symbol,
+        context=context,
+        fundamentals=fundamentals,
+    )
+    if dated_market_cap is not None:
+        merged["market_cap"] = dated_market_cap
+        sources.append("point-in-time fundamentals")
 
     def _maybe_store(meta: dict | None, source: str) -> None:
         if not isinstance(meta, dict):
@@ -6099,12 +6236,77 @@ def _enforce_sector_portfolio_cap(
 # else QQQ as a tech-heavy proxy, else returns "bull" (safe default).
 # Result is stored in strategy_cache["_market_regime"] for downstream consumers
 # (notably the grace period escape hatch C in _in_initial_grace_period).
-def _point_in_time_closes(bars, date_str: str) -> list[float]:
-    """Valid closes from a bar list, filtered to bars dated <= date_str."""
+def load_graph_snapshot(*, context, store):
+    """Load the dated graph input required by a historical Nexus decision."""
+    from point_in_time_data import load_snapshot_payload
+
+    return load_snapshot_payload(store, dataset="graph", context=context)
+
+
+def load_fundamentals_snapshot(*, context, store):
+    """Load dated fundamentals without substituting present-day metadata."""
+    from point_in_time_data import load_snapshot_payload
+
+    return load_snapshot_payload(store, dataset="fundamentals", context=context)
+
+
+def _point_in_time_closes(
+    bars,
+    date_str: str,
+    *,
+    context=None,
+    session_close_resolver=None,
+) -> list[float]:
+    """Valid daily closes visible at the requested point in time.
+
+    ``date_str`` remains the legacy coarse date boundary.  A supplied
+    ``PointInTimeContext`` additionally requires the exchange session-close
+    timestamp for each row, preventing a prefetched same-session final close
+    from being exposed before the session has actually closed.
+    """
+    from point_in_time_data import (
+        PointInTimeContext,
+        PointInTimeDataError,
+        filter_available,
+    )
+
     closes: list[float] = []
     if not isinstance(bars, list):
         return closes
-    for b in bars:
+    eligible_bars = list(bars)
+    if context is not None:
+        if not isinstance(context, PointInTimeContext):
+            raise PointInTimeDataError(
+                "daily overlay context must be a PointInTimeContext"
+            )
+        if not callable(session_close_resolver):
+            raise PointInTimeDataError(
+                "daily overlay session close resolver is required"
+            )
+
+        def _daily_close_available_at(bar):
+            raw_date = bar.get("session_date", bar.get("t", bar.get("date", "")))
+            if isinstance(raw_date, datetime):
+                session_date = raw_date.date()
+            else:
+                try:
+                    session_date = datetime.fromisoformat(
+                        str(raw_date or "")[:10]
+                    ).date()
+                except (TypeError, ValueError) as exc:
+                    raise PointInTimeDataError(
+                        "daily overlay session date is missing"
+                    ) from exc
+            return session_close_resolver(session_date)
+
+        eligible_bars = list(
+            filter_available(
+                eligible_bars,
+                context=context,
+                available_at=_daily_close_available_at,
+            )
+        )
+    for b in eligible_bars:
         if not isinstance(b, dict):
             continue
         try:
@@ -6122,25 +6324,97 @@ def _point_in_time_closes(bars, date_str: str) -> list[float]:
     return closes
 
 
-def _daily_closes_from_intraday(bars, date_str: str) -> list[float]:
+def _daily_closes_from_intraday(
+    bars,
+    date_str: str,
+    *,
+    context=None,
+    session_close_resolver=None,
+) -> list[float]:
     """Resample intraday bars (e.g. the engine's 1h backtest universe) to
-    one close per day, point-in-time filtered. Bars are assumed
-    chronological (the engine loads them that way)."""
-    daily: dict[str, float] = {}
+    one final close per completed exchange session.
+
+    Bars may be prefetched beyond the decision timestamp, but a supplied
+    point-in-time context exposes a session's aggregate only once the session
+    close resolver says that final value is available.
+    """
+    from datetime import time as _time, timezone as _timezone
+    from zoneinfo import ZoneInfo
+
+    from point_in_time_data import (
+        PointInTimeContext,
+        PointInTimeDataError,
+        require_aware_utc,
+    )
+
+    daily: dict[str, tuple[datetime, dict]] = {}
     if not isinstance(bars, list):
         return []
+    if context is not None:
+        if not isinstance(context, PointInTimeContext):
+            raise PointInTimeDataError(
+                "intraday overlay context must be a PointInTimeContext"
+            )
+        if not callable(session_close_resolver):
+            raise PointInTimeDataError(
+                "intraday overlay session close resolver is required"
+            )
+    new_york = ZoneInfo("America/New_York")
     for b in bars:
         if not isinstance(b, dict):
             continue
         try:
-            ts_str = str(b.get("t", b.get("date", "")) or "")[:10]
+            raw_timestamp = b.get("t", b.get("date"))
+            if context is not None:
+                timestamp = require_aware_utc(
+                    raw_timestamp,
+                    field="intraday bar timestamp",
+                )
+            else:
+                timestamp = datetime.fromisoformat(
+                    str(raw_timestamp or "").replace("Z", "+00:00")
+                )
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=_timezone.utc)
+                timestamp = timestamp.astimezone(_timezone.utc)
             c_val = float(b.get("c", 0) or 0)
+        except PointInTimeDataError:
+            if context is not None and context.strict:
+                raise
+            continue
         except (TypeError, ValueError):
             continue
-        if not ts_str or ts_str > date_str or c_val <= 0:
+        local_timestamp = timestamp.astimezone(new_york)
+        session_date = local_timestamp.date()
+        session_key = session_date.isoformat()
+        if session_key > date_str or c_val <= 0:
             continue
-        daily[ts_str] = c_val  # last bar of the day wins
-    return [daily[d] for d in sorted(daily)]
+        if context is not None:
+            session_close = require_aware_utc(
+                session_close_resolver(session_date),
+                field="intraday session close",
+            )
+            session_open = datetime.combine(
+                session_date,
+                _time(9, 30),
+                tzinfo=new_york,
+            ).astimezone(_timezone.utc)
+            if timestamp < session_open or timestamp > session_close:
+                continue
+        candidate = {
+            "session_date": session_key,
+            "t": raw_timestamp,
+            "c": c_val,
+        }
+        previous = daily.get(session_key)
+        if previous is None or timestamp > previous[0]:
+            daily[session_key] = (timestamp, candidate)
+    return _point_in_time_closes(
+        [daily[d][1] for d in sorted(daily)],
+        date_str,
+        context=context,
+        session_close_resolver=session_close_resolver,
+    )
 
 
 def _recovery_override_regime(closes, current, ret5, config, diag):
@@ -6181,6 +6455,9 @@ def _detect_market_regime(
     config: dict,
     date_key: str,
     data=None,
+    *,
+    context=None,
+    session_close_resolver=None,
 ) -> str:
     """V31 Section 4.5 bull/bear/chop detector.
 
@@ -6211,9 +6488,19 @@ def _detect_market_regime(
             bars_cache = {}
 
         closes: list[float] = []
+        pit_close_kwargs = {}
+        if context is not None and not context.is_live:
+            pit_close_kwargs = {
+                "context": context,
+                "session_close_resolver": session_close_resolver,
+            }
         # 1) Overlay cache proxies, by usable point-in-time closes.
         for candidate in ("SPY", "QQQ", "VOO"):
-            cand = _point_in_time_closes(bars_cache.get(candidate), date_str)
+            cand = _point_in_time_closes(
+                bars_cache.get(candidate),
+                date_str,
+                **pit_close_kwargs,
+            )
             if len(cand) >= 21:
                 closes = cand
                 diag["proxy"] = candidate
@@ -6224,7 +6511,11 @@ def _detect_market_regime(
             for candidate in ("SPY", "QQQ", "VOO"):
                 entry = data.get(candidate)
                 cand_bars = entry.get("bars") if isinstance(entry, dict) else entry
-                cand = _daily_closes_from_intraday(cand_bars, date_str)
+                cand = _daily_closes_from_intraday(
+                    cand_bars,
+                    date_str,
+                    **pit_close_kwargs,
+                )
                 if len(cand) >= 21:
                     closes = cand
                     diag["proxy"] = f"{candidate}(data)"
@@ -6332,6 +6623,10 @@ def _detect_market_regime(
         diag["raw"] = "chop"
         return "chop"
     except Exception as e:
+        from point_in_time_data import PointInTimeDataError
+
+        if isinstance(e, PointInTimeDataError):
+            raise
         try:
             _log(f"V31 regime detector tolerated unexpected error: {e}", "yellow")
         except Exception:
@@ -6884,6 +7179,9 @@ def _recent_closes_for_symbol(
 def _resolve_position_market_cap(
     sym: str,
     strategy_cache: dict | None,
+    *,
+    context=None,
+    fundamentals=None,
 ) -> float | None:
     """Return cached market cap in USD for ``sym`` or None if unknown.
 
@@ -6891,6 +7189,18 @@ def _resolve_position_market_cap(
     `_get_quality_metadata_for_ticker` and Benzinga). Returns None if the
     cache miss makes the conviction tier undecidable (caller treats as MID).
     """
+    context, fundamentals = _market_cap_point_in_time_inputs(
+        strategy_cache,
+        context=context,
+        fundamentals=fundamentals,
+    )
+    dated_market_cap = _dated_market_cap(
+        sym,
+        context=context,
+        fundamentals=fundamentals,
+    )
+    if dated_market_cap is not None:
+        return dated_market_cap
     if not isinstance(strategy_cache, dict):
         return None
     cache = strategy_cache.get("_yf_market_cap_cache") or {}
@@ -6909,6 +7219,9 @@ def _preseed_mcap_cache_from_universe(
     config: dict,
     *,
     portfolio_emulator=None,
+    context=None,
+    fundamentals_store=None,
+    fundamentals=None,
 ) -> int:
     """Pre-populate ``_yf_market_cap_cache`` for a backtest universe.
 
@@ -6964,6 +7277,27 @@ def _preseed_mcap_cache_from_universe(
     if not isinstance(strategy_cache, dict):
         _log("mcap pre-seed: skipped — strategy_cache not a dict", "yellow")
         return 0
+
+    # A point-in-time market-cap result is derived data.  Never let the
+    # per-run idempotency set turn it into a cross-manifest/as-of cache hit.
+    # Reset the legacy consumer-facing cache whenever that immutable scope
+    # changes; switching back to a current-state path also drops historical
+    # values before Neo4j/yfinance can repopulate them.
+    pit_scope_key = "_yf_market_cap_cache_pit_scope"
+    active_pit_scope = strategy_cache.get(pit_scope_key)
+    requested_pit_scope = None
+    if context is not None and not context.is_live:
+        requested_pit_scope = context.cache_key("nexus-fundamentals")
+    if requested_pit_scope != active_pit_scope and (
+        requested_pit_scope is not None or active_pit_scope is not None
+    ):
+        strategy_cache["_yf_market_cap_cache"] = {}
+        strategy_cache["_yf_market_cap_cache_preseeded_tickers"] = set()
+        strategy_cache.pop("_yf_market_cap_cache_preseeded", None)
+        if requested_pit_scope is None:
+            strategy_cache.pop(pit_scope_key, None)
+        else:
+            strategy_cache[pit_scope_key] = requested_pit_scope
 
     # γ.1 (Phase γ, 2026-05-18): one-shot migration of the legacy bool flag
     # to the new set[str] semantics. If the persisted live state (or an
@@ -7088,6 +7422,47 @@ def _preseed_mcap_cache_from_universe(
     yf_zeros = 0
     yf_failures = 0
     yf_attempted = 0
+
+    if context is not None and not context.is_live:
+        from point_in_time_data import PointInTimeDataError
+
+        from collections.abc import Mapping
+
+        snapshot = fundamentals
+        if snapshot is None:
+            snapshot = load_fundamentals_snapshot(
+                context=context,
+                store=fundamentals_store,
+            )
+        if not isinstance(snapshot, Mapping):
+            raise PointInTimeDataError(
+                "fundamentals snapshot payload must be a ticker mapping"
+            )
+        normalized_snapshot = {
+            str(ticker or "").strip().upper(): value
+            for ticker, value in snapshot.items()
+            if str(ticker or "").strip()
+        }
+        populated_symbols: set[str] = set()
+        for sym_u in new_to_seed:
+            raw = normalized_snapshot.get(sym_u)
+            if isinstance(raw, dict):
+                raw = raw.get("market_cap", raw.get("marketCap", raw.get("mcap")))
+            try:
+                market_cap = float(raw or 0.0)
+            except (TypeError, ValueError):
+                market_cap = 0.0
+            if market_cap <= 0:
+                if context.strict:
+                    raise PointInTimeDataError(
+                        f"fundamentals snapshot is missing market_cap for {sym_u}"
+                    )
+                continue
+            cache[sym_u] = market_cap
+            populated_symbols.add(sym_u)
+        already_seeded |= populated_symbols
+        strategy_cache["_yf_market_cap_cache_preseeded_tickers"] = already_seeded
+        return len(populated_symbols)
 
     # Phase 1: neo4j cache (cheap, no network)
     for sym_u in new_to_seed:
@@ -7961,8 +8336,8 @@ def _bfq_winner_lock_bypass_allowed(
 
     V28.6 release valve: aged, high-conviction queue items can break the BFQ
     drainage deadlock by displacing one of the armored winners that calcify
-    the portfolio after V28.3 full-exit cascades. Feature-flagged off by
-    default; the biggest winners (PnL > max_held_pnl_pct) are still protected.
+    the portfolio after V28.3 full-exit cascades. Enabled by default with an
+    explicit opt-out; the biggest winners remain protected.
     """
     # 2026-05-08 default flipped to True. The bypass guards (queue_bars,
     # queue_score, delta, held_pnl band, min_hold_days) are conservative
@@ -10265,8 +10640,8 @@ def _emu_last_price(portfolio_emulator, sym):
     """Last known price for `sym` from the portfolio emulator / broker adapter.
 
     The real price surface (Step 1) is the `_last_prices` dict attribute exposed
-    by PortfolioEmulator (backend/portfolio_emulator.py:22) and the Alpaca /
-    Robinhood adapters — there is no get_last_price() method."""
+    by PortfolioEmulator (backend/portfolio_emulator.py:22) and the Alpaca
+    adapter — there is no get_last_price() method."""
     try:
         return (getattr(portfolio_emulator, "_last_prices", {}) or {}).get(sym)
     except Exception:
@@ -13620,6 +13995,50 @@ _neo4j_stock_sector_cache: dict[str, list[str]] | None = None
 _momentum_neighbor_cache: dict = {}  # Cached Neo4j neighbor results for momentum scan
 _GN_LIVE_MODE_FLAG: bool = False  # Module-level live-mode flag set by run_once; gates wall-clock budgets in utility fns
 _neo4j_market_cap_cache: dict[str, float] = {}
+_active_point_in_time_graph_scope = None
+
+
+def _activate_point_in_time_graph_scope(
+    context,
+    *,
+    strategy_cache: dict | None,
+    config: dict | None,
+) -> None:
+    """Namespace graph-derived caches by immutable manifest and decision time."""
+    global _active_point_in_time_graph_scope
+    global _momentum_neighbor_cache
+    global _neo4j_etf_cache
+    global _neo4j_stock_sector_cache
+    global _neo4j_market_cap_cache
+
+    requested_scope = None
+    if context is not None and not context.is_live:
+        requested_scope = context.cache_key("nexus-graph")
+
+    global_scope_changed = requested_scope != _active_point_in_time_graph_scope
+    if global_scope_changed:
+        _momentum_neighbor_cache = {}
+        _PRIVATE_ENTITY_ALIAS_QUERY_CACHE.clear()
+        _PRIVATE_ENTITY_ALIAS_QUERY_CACHE_ORDER.clear()
+        _neo4j_etf_cache = None
+        _neo4j_stock_sector_cache = None
+        _neo4j_market_cap_cache = {}
+        _active_point_in_time_graph_scope = requested_scope
+
+    local_scope_changed = False
+    if isinstance(strategy_cache, dict):
+        scope_key = "_nexus_graph_pit_scope"
+        local_scope_changed = strategy_cache.get(scope_key) != requested_scope
+        if local_scope_changed:
+            strategy_cache.pop("_neo4j_snapshot", None)
+            strategy_cache.pop("_neo4j_snapshot_stats", None)
+            strategy_cache.pop("_inst_co_holdings_cache", None)
+            if requested_scope is None:
+                strategy_cache.pop(scope_key, None)
+            else:
+                strategy_cache[scope_key] = requested_scope
+    if (global_scope_changed or local_scope_changed) and isinstance(config, dict):
+        config.pop("_inst_co_holdings_cache", None)
 
 
 def _load_neo4j_market_cap_cache(driver) -> None:
@@ -14095,7 +14514,51 @@ def _article_set_fingerprint(articles: list) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
-def _get_cached_articles(conn, date_key: str, *, sentiment_cache_scope_id: str = ""):
+def _article_available_at(article: dict):
+    if not isinstance(article, dict):
+        return None
+    return (
+        article.get("published_at")
+        or article.get("created_at")
+        or article.get("published_date")
+    )
+
+
+def _filter_articles_for_context(articles: list, context=None) -> list[dict]:
+    if context is None:
+        return list(articles or [])
+    from point_in_time_data import filter_available
+
+    return list(
+        filter_available(
+            articles or [],
+            context=context,
+            available_at=_article_available_at,
+        )
+    )
+
+
+def _point_in_time_sentiment_scope_id(
+    sentiment_cache_scope_id: str,
+    context=None,
+) -> str:
+    base_scope = str(sentiment_cache_scope_id or "").strip()
+    if context is None:
+        return base_scope
+    key = context.cache_key("nexus-news-sentiment", base_scope)
+    return (
+        f"{key[0]}|manifest={key[1]}|as_of={key[2]}|"
+        f"scope={key[3]}"
+    )
+
+
+def _get_cached_articles(
+    conn,
+    date_key: str,
+    *,
+    sentiment_cache_scope_id: str = "",
+    context=None,
+):
     """
     Return (articles, cached_sentiment) for date_key (YYYY-MM-DD).
     Sentiment is keyed by article-set fingerprint: only returned if the cached
@@ -14121,11 +14584,15 @@ def _get_cached_articles(conn, date_key: str, *, sentiment_cache_scope_id: str =
                     }).run(conn)
                 except Exception:
                     pass
+            articles = _filter_articles_for_context(articles, context)
             n = len(articles)
             _log(f"Article cache HIT for {date_key} ({n} articles)", "green")
             fp = _article_set_fingerprint(articles)
             sent = None
-            scope_id = str(sentiment_cache_scope_id or "").strip()
+            scope_id = _point_in_time_sentiment_scope_id(
+                sentiment_cache_scope_id,
+                context,
+            )
             by_scope = doc.get("sentiment_by_scope")
             if scope_id and isinstance(by_scope, dict) and fp:
                 scope_bucket = by_scope.get(scope_id)
@@ -14160,6 +14627,10 @@ def _get_cached_articles(conn, date_key: str, *, sentiment_cache_scope_id: str =
                 sent = None
             return articles, sent
     except Exception as e:
+        from point_in_time_data import PointInTimeDataError
+
+        if isinstance(e, PointInTimeDataError):
+            raise
         _log(f"Article cache lookup error: {e}", "yellow")
     return None, None
 
@@ -14172,12 +14643,16 @@ def _save_cached_sentiment(
     *,
     sentiment_cache_scope_id: str = "",
     sentiment_cache_scope_doc: dict[str, Any] | None = None,
+    context=None,
 ):
     """Save LLM sentiment_data keyed by article-set fingerprint so reuse is only for the same articles."""
     if conn is None or not isinstance(sentiment_data, dict) or len(sentiment_data) == 0:
         return
     fp = _article_set_fingerprint(articles or []) if articles else ""
-    scope_id = str(sentiment_cache_scope_id or "").strip()
+    scope_id = _point_in_time_sentiment_scope_id(
+        sentiment_cache_scope_id,
+        context,
+    )
     scope_doc = dict(sentiment_cache_scope_doc or {})
     try:
         doc = _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).run(conn)
@@ -14369,6 +14844,7 @@ def _fetch_articles_cached(
     *,
     sentiment_cache_scope_id: str = "",
     force_fresh: bool = False,
+    context=None,
 ) -> tuple[list, bool, dict | None]:
     """
     Return (articles, from_cache, cached_sentiment) for the given date range.
@@ -14384,27 +14860,60 @@ def _fetch_articles_cached(
     conn = _get_nexus_db_conn()
     if conn:
         _ensure_nexus_cache_table(conn)
+        cache_kwargs = {
+            "sentiment_cache_scope_id": sentiment_cache_scope_id,
+        }
+        if context is not None:
+            cache_kwargs["context"] = context
         cached_articles, cached_sentiment = _get_cached_articles(
-            conn,
-            date_key,
-            sentiment_cache_scope_id=sentiment_cache_scope_id,
+            conn, date_key, **cache_kwargs
         )
+        cached_count = len(cached_articles or [])
+        cached_articles = _filter_articles_for_context(
+            cached_articles or [],
+            context,
+        )
+        if len(cached_articles) != cached_count:
+            cached_sentiment = None
         if (not force_fresh) and cached_articles is not None and len(cached_articles) >= min_articles:
             return cached_articles, True, cached_sentiment
     _log(f"Article cache MISS for {date_key}; fetching from Alpaca (limit={limit})", "cyan")
-    articles = _fetch_alpaca_news_all(start_dt, end_dt, alpaca_key, alpaca_secret, limit=limit)
-    articles = _filter_low_signal_alpaca_articles(articles or [], date_key=date_key, log_prefix="Alpaca fetched article sanitize")
-    if conn and articles:
+    fetch_end_dt = end_dt
+    if context is not None and isinstance(end_dt, datetime):
+        context_end = context.as_of
+        if end_dt.tzinfo is None:
+            context_end = context_end.replace(tzinfo=None)
+        if fetch_end_dt > context_end:
+            fetch_end_dt = context_end
+    fetched_articles = _fetch_alpaca_news_all(
+        start_dt,
+        fetch_end_dt,
+        alpaca_key,
+        alpaca_secret,
+        limit=limit,
+    )
+    fetched_articles = _filter_low_signal_alpaca_articles(
+        fetched_articles or [],
+        date_key=date_key,
+        log_prefix="Alpaca fetched article sanitize",
+    )
+    if conn and fetched_articles:
         start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        _save_cached_articles(conn, date_key, articles, start_iso, end_iso)
+        end_iso = fetch_end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        _save_cached_articles(
+            conn,
+            date_key,
+            fetched_articles,
+            start_iso,
+            end_iso,
+        )
     elif conn and force_fresh:
         # Scope D C1: a live first-touch force_fresh fetch came back EMPTY. The
         # existing cached doc may be a stale backtest entry; leaving it lets the
         # next same-day cycle (force_fresh=False) serve it. Invalidate so the next
         # cycle re-fetches fresh instead of adopting backtest articles+sentiment.
         _invalidate_cached_articles(conn, date_key, sentiment_cache_scope_id=sentiment_cache_scope_id)
-    return articles or [], False, None
+    return _filter_articles_for_context(fetched_articles, context), False, None
 
 
 def _mentioned_tickers_from_articles(articles: list) -> set:
@@ -16256,6 +16765,7 @@ def _fetch_google_news_cached(
     conn=None,
     *,
     log_context: str = "foreground",
+    context=None,
 ) -> list[dict]:
     """
     Fetch Google News articles with RethinkDB caching (same pattern as Alpaca cache).
@@ -16303,6 +16813,10 @@ def _fetch_google_news_cached(
                 cache_articles(conn, date_key, sanitized_cached, kw_hash)
             except Exception:
                 pass
+        sanitized_cached = _filter_articles_for_context(
+            sanitized_cached,
+            context,
+        )
         if _is_background_log:
             _log(f"Google News background: {len(sanitized_cached)} articles from cache for {date_key}", "cyan")
         else:
@@ -16349,6 +16863,7 @@ def _fetch_google_news_cached(
     )
     if articles and conn:
         cache_articles(conn, date_key, articles, kw_hash)
+    articles = _filter_articles_for_context(articles, context)
 
     if _is_background_log:
         _log(f"Google News background: {len(articles)} articles fetched for {date_key}", "green")
@@ -16994,6 +17509,47 @@ def _cap_propagation_fanout_per_seed(edges: list[dict], config: dict) -> list[di
             )[:max_per_seed]
             keep.update(id(e) for e in ranked)
     return [e for e in edges if id(e) in keep]
+
+
+def _institutional_cache_binding(
+    context,
+    base_instance_id: str,
+    date_key: str,
+) -> tuple[str, dict[str, str]]:
+    """Return persistent cache identity bound to strict graph decision time."""
+
+    base = str(base_instance_id or "default")[:24]
+    if context is not None and not context.is_live:
+        from point_in_time_data import PointInTimeContext, PointInTimeDataError
+
+        if not isinstance(context, PointInTimeContext) or not context.strict:
+            raise PointInTimeDataError(
+                "historical institutional cache context must be strict"
+            )
+        manifest_id = context.manifest.manifest_id
+        as_of = context.as_of.isoformat().replace("+00:00", "Z")
+        return (
+            f"inst_co_holdings|{base}|{manifest_id}|{as_of}",
+            {"manifest_id": manifest_id, "as_of": as_of},
+        )
+    return f"inst_co_holdings|{base}|{date_key[:7]}", {}
+
+
+def _institutional_cache_row_matches(row: dict, context) -> bool:
+    """True when a persistent co-holdings row belongs to the exact PIT scope."""
+
+    if not isinstance(row, dict):
+        return False
+    if context is None or context.is_live:
+        return True
+    if not context.strict:
+        return False
+    expected_manifest = context.manifest.manifest_id
+    expected_as_of = context.as_of.isoformat().replace("+00:00", "Z")
+    return (
+        str(row.get("manifest_id") or "") == expected_manifest
+        and str(row.get("as_of") or "") == expected_as_of
+    )
 
 
 def _compute_propagated_scores(
@@ -18695,7 +19251,17 @@ def _overlay_bars_compute_range(config: dict, date_key: str) -> tuple[str, str]:
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
 
-def _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_secret):
+def _breadth_scan_movers(
+    config,
+    strategy_cache,
+    date_key,
+    alpaca_key,
+    alpaca_secret,
+    *,
+    context=None,
+    snapshot_store=None,
+    session_close_resolver=None,
+):
     """2026-07-24 market-wide BREADTH momentum scanner (default OFF).
 
     The stock finder only ever looked at ~100-250 symbols (trend ETFs + graph
@@ -18748,11 +19314,18 @@ def _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_se
                 _rollback()
             return list(_admitted.keys())   # off-regime: don't grow the pool
         from ticker_universe import get_breadth_universe
+        _universe_kwargs = {}
+        if context is not None:
+            _universe_kwargs = {
+                "context": context,
+                "snapshot_store": snapshot_store,
+            }
         _uni = get_breadth_universe(
             min_mcap=float(config.get("breadth_scan_min_mcap", 2e9) or 2e9),
             min_dollar_volume=float(config.get("breadth_scan_min_dollar_volume", 5e6) or 5e6),
             price_floor=float(config.get("buy_price_floor", 5.0) or 5.0),
             top_n=int(config.get("breadth_scan_universe_size", 500) or 500),
+            **_universe_kwargs,
         )
         if not _uni:
             return list(_admitted.keys())
@@ -18772,10 +19345,20 @@ def _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_se
         _admit_per_bar = max(1, int(config.get("breadth_scan_admit_per_bar", 3) or 3))
         _admit_max = int(config.get("breadth_scan_admit_max", 150) or 150)
         _cands = []
+        _pit_close_kwargs = {}
+        if context is not None and not context.is_live:
+            _pit_close_kwargs = {
+                "context": context,
+                "session_close_resolver": session_close_resolver,
+            }
         for _sym in _batch:
             if _sym in _admitted:
                 continue
-            _c = _point_in_time_closes(_bars_all.get(_sym), _ds)
+            _c = _point_in_time_closes(
+                _bars_all.get(_sym),
+                _ds,
+                **_pit_close_kwargs,
+            )
             if len(_c) < 21 or _c[-1] <= 0:
                 continue
             # Scan the FULL r60 window (not just r20) for split-signature jumps:
@@ -18802,6 +19385,10 @@ def _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_se
                 break
             _admitted[_sym] = _ds
     except Exception as _e:
+        from point_in_time_data import PointInTimeDataError
+
+        if isinstance(_e, PointInTimeDataError):
+            raise
         try:
             _log(f"breadth scan tolerated error: {_e}", "yellow")
         except Exception:
@@ -21023,13 +21610,10 @@ def _apply_portfolio_drawdown_halt(
                 _held_syms = list((portfolio_emulator.get_positions() or {}).keys())
         except Exception:
             _held_syms = []
-        # 2026-07-19 adversarial review CRITICAL: the kill tier must NOT
-        # liquidate the sleeve legs — in a crash the inverse leg is the
-        # position generating gains, and selling it triggered an infinite
-        # kill<->deploy churn loop (sleeve re-parks at cycle end, dd stays
-        # >= kill, repeat every bar).
-        _kill_sleeve_syms = _sleeve_symbols(config)
-        _held_syms = [s for s in _held_syms if s not in _kill_sleeve_syms]
+        # Account loss containment is portfolio-wide.  Sleeve deployment is
+        # already disabled during hard/kill tiers, so exempting a leveraged
+        # inverse leg here can only retain risk; it cannot prevent redeploy
+        # churn.  Liquidate every broker-owned holding, including SQQQ.
         _killed = []
         for sym in _held_syms:
             sc = scores.get(sym) if isinstance(scores.get(sym), dict) else {}
@@ -21247,12 +21831,36 @@ class GraphNexusAnalysis:
         portfolio_emulator=None,
         strategy_cache=None,
         time_increment=None,
+        *,
+        point_in_time_context=None,
+        point_in_time_store=None,
+        point_in_time_fundamentals=None,
+        session_close_resolver=None,
     ):
         """
         Per-symbol entry point. Delegates to run_once([symbol], ...) and returns
         score (and optional reason) for this symbol. Use execution_scope "run_once"
         in the strategy spec so the broker calls run_once once per loop instead.
         """
+        if point_in_time_context is None and data is None:
+            from datetime import timezone as _timezone
+            from point_in_time_data import DatasetManifest, PointInTimeContext
+
+            live_as_of = current_time
+            if not isinstance(live_as_of, datetime):
+                live_as_of = datetime.now(_timezone.utc)
+            elif live_as_of.tzinfo is None:
+                live_as_of = live_as_of.replace(tzinfo=_timezone.utc)
+            else:
+                live_as_of = live_as_of.astimezone(_timezone.utc)
+            point_in_time_context = PointInTimeContext.for_live(
+                as_of=live_as_of,
+                manifest=DatasetManifest(
+                    manifest_id="graph-nexus-live-current",
+                    source_hashes={"live": "current-state"},
+                    created_at=live_as_of,
+                ),
+            )
         prices = {symbol: price} if price is not None else {}
         raw = self.run_once(
             [symbol],
@@ -21264,6 +21872,10 @@ class GraphNexusAnalysis:
             portfolio_emulator=portfolio_emulator,
             strategy_cache=strategy_cache,
             time_increment=time_increment,
+            point_in_time_context=point_in_time_context,
+            point_in_time_store=point_in_time_store,
+            point_in_time_fundamentals=point_in_time_fundamentals,
+            session_close_resolver=session_close_resolver,
         )
         if not raw or symbol not in raw:
             return (0, None, None, "No clear signal")
@@ -21668,6 +22280,78 @@ class GraphNexusAnalysis:
         )
         return out
 
+    def run_historical(
+        self,
+        symbols: list,
+        prices: dict,
+        current_time,
+        config: dict,
+        conditions: dict,
+        data=None,
+        portfolio_emulator=None,
+        strategy_cache=None,
+        time_increment=None,
+        *,
+        context=None,
+        point_in_time_store=None,
+        session_close_resolver=None,
+        mode=None,
+    ) -> dict:
+        """Run Graph Nexus against immutable, dated research inputs.
+
+        Historical execution deliberately has a separate entry point so a
+        caller cannot accidentally enter the legacy current-state path.  All
+        required snapshots are resolved before any strategy work begins.
+        """
+        from point_in_time_data import (
+            ImmutableSnapshotStore,
+            PointInTimeContext,
+            PointInTimeDataError,
+        )
+        from ticker_universe import load_universe_snapshot
+
+        if not isinstance(context, PointInTimeContext) or context.is_live:
+            raise PointInTimeDataError(
+                "historical Graph Nexus requires a non-live PointInTimeContext"
+            )
+        if not context.strict:
+            raise PointInTimeDataError(
+                "historical Graph Nexus requires a strict PointInTimeContext"
+            )
+        if not callable(session_close_resolver):
+            raise PointInTimeDataError(
+                "historical Graph Nexus requires a session close resolver"
+            )
+        point_in_time_store = ImmutableSnapshotStore.coerce(
+            point_in_time_store
+        )
+
+        # Fail closed before the large strategy pipeline can mutate caches or
+        # contact a present-day source.
+        load_graph_snapshot(context=context, store=point_in_time_store)
+        fundamentals = load_fundamentals_snapshot(
+            context=context,
+            store=point_in_time_store,
+        )
+        load_universe_snapshot(context=context, store=point_in_time_store)
+
+        return self.run_once(
+            symbols,
+            prices,
+            current_time,
+            config,
+            conditions,
+            data=data,
+            portfolio_emulator=portfolio_emulator,
+            strategy_cache=strategy_cache,
+            time_increment=time_increment,
+            mode=mode,
+            point_in_time_context=context,
+            point_in_time_store=point_in_time_store,
+            point_in_time_fundamentals=fundamentals,
+            session_close_resolver=session_close_resolver,
+        )
+
     def run_once(
         self,
         symbols: list,
@@ -21686,11 +22370,59 @@ class GraphNexusAnalysis:
                     # backtests + the per-symbol shim — the dual-cadence gate
                     # below decides FULL/MONITOR/IDLE itself when mode is None.
                     # See docs/superpowers/specs/2026-05-07-live-broker-scheduler-design.md.
+        point_in_time_context=None,
+        point_in_time_store=None,
+        point_in_time_fundamentals=None,
+        session_close_resolver=None,
     ) -> dict:
         """
         Run once per trading loop. Fetch news, classify via LLM, propagate through
         Neo4j graph with relationship-aware contagion, return dict[symbol -> score_data].
         """
+        if point_in_time_context is None and data is not None:
+            from point_in_time_data import PointInTimeDataError
+
+            raise PointInTimeDataError(
+                "historical Graph Nexus requires a point-in-time context"
+            )
+        if point_in_time_context is not None:
+            from point_in_time_data import (
+                PointInTimeContext,
+                PointInTimeDataError,
+            )
+
+            if not isinstance(point_in_time_context, PointInTimeContext):
+                raise PointInTimeDataError(
+                    "point_in_time_context must be a PointInTimeContext"
+                )
+            if (
+                not point_in_time_context.is_live
+                and not point_in_time_context.strict
+            ):
+                raise PointInTimeDataError(
+                    "historical Graph Nexus requires a strict "
+                    "PointInTimeContext"
+                )
+            if (
+                not point_in_time_context.is_live
+                and not callable(session_close_resolver)
+            ):
+                raise PointInTimeDataError(
+                    "historical Graph Nexus requires a session close resolver"
+                )
+        if isinstance(strategy_cache, dict):
+            strategy_cache["_point_in_time_context"] = point_in_time_context
+            if point_in_time_fundamentals is not None:
+                strategy_cache["_point_in_time_fundamentals"] = (
+                    point_in_time_fundamentals
+                )
+            else:
+                strategy_cache.pop("_point_in_time_fundamentals", None)
+        _activate_point_in_time_graph_scope(
+            point_in_time_context,
+            strategy_cache=strategy_cache,
+            config=config,
+        )
         symbols_list = list(symbols or [])
         # Discovery can populate the initial symbol universe even when no symbols
         # are passed into the strategy.
@@ -21849,13 +22581,24 @@ class GraphNexusAnalysis:
         # newly-BFQ'd tickers in subsequent bars get seeded too.
         if isinstance(strategy_cache, dict) and not historical_lookback_mode:
             try:
+                _pit_preseed_kwargs = {}
+                if point_in_time_context is not None:
+                    _pit_preseed_kwargs = {
+                        "context": point_in_time_context,
+                        "fundamentals_store": point_in_time_store,
+                    }
                 _preseed_mcap_cache_from_universe(
                     symbols_list,
                     strategy_cache,
                     config,
                     portfolio_emulator=portfolio_emulator,
+                    **_pit_preseed_kwargs,
                 )
             except Exception as _ps_exc:
+                from point_in_time_data import PointInTimeDataError
+
+                if isinstance(_ps_exc, PointInTimeDataError):
+                    raise
                 _log(f"mcap pre-seed error (non-fatal): {_ps_exc}", "yellow")
         # Position sizing: fraction of portfolio assigned to nexus stock buys / ETF buys
         nexus_portfolio_pct = float(config.get("nexus_portfolio_pct", 0.90))
@@ -22724,13 +23467,24 @@ class GraphNexusAnalysis:
         except Exception:
             _live_first_touch = False
         try:
+            _pit_news_kwargs = {}
+            if (
+                point_in_time_context is not None
+                and not point_in_time_context.is_live
+            ):
+                _pit_news_kwargs["context"] = point_in_time_context
             articles, from_cache, cached_sentiment = _fetch_articles_cached(
                 date_key, start_dt, end_dt, alpaca_key, alpaca_secret,
                 limit=num_articles, min_articles=min_articles,
                 sentiment_cache_scope_id=sentiment_cache_scope_id,
                 force_fresh=_live_first_touch,
+                **_pit_news_kwargs,
             )
         except Exception as e:
+            from point_in_time_data import PointInTimeDataError
+
+            if isinstance(e, PointInTimeDataError):
+                raise
             _log(f"News fetch error: {e}", "red")
             return {s: 0 for s in symbols_list}
         # Backtest safety: filter out articles published after current_time (catches stale cached full-day fetches).
@@ -22961,22 +23715,39 @@ class GraphNexusAnalysis:
         global _shared_neo4j_driver
         _shared_neo4j_driver = None
         try:
-            from neo4j import GraphDatabase as _GraphDatabase
-            _shared_neo4j_driver = _GraphDatabase.driver(
-                neo4j_uri,
-                auth=(neo4j_user, neo4j_password),
-                connection_timeout=30,               # 30s to establish connection
-                max_connection_lifetime=300,          # Recycle stale connections after 5 min
-                connection_acquisition_timeout=60,    # Wait up to 60s for pooled connection
-                max_connection_pool_size=10,
-            )
-            _log(f"Neo4j: shared driver connected to {_uri_for_log(neo4j_uri)}", "cyan")
+            if point_in_time_context is not None:
+                _shared_neo4j_driver = load_graph_snapshot(
+                    context=point_in_time_context,
+                    store=point_in_time_store,
+                )
+                _log(
+                    "Neo4j: using point-in-time graph snapshot "
+                    f"(manifest={point_in_time_context.manifest.manifest_id}, "
+                    f"as_of={point_in_time_context.as_of.isoformat()})",
+                    "cyan",
+                )
+            else:
+                from neo4j import GraphDatabase as _GraphDatabase
+
+                _shared_neo4j_driver = _GraphDatabase.driver(
+                    neo4j_uri,
+                    auth=(neo4j_user, neo4j_password),
+                    connection_timeout=30,               # 30s to establish connection
+                    max_connection_lifetime=300,          # Recycle stale connections after 5 min
+                    connection_acquisition_timeout=60,    # Wait up to 60s for pooled connection
+                    max_connection_pool_size=10,
+                )
+                _log(f"Neo4j: shared driver connected to {_uri_for_log(neo4j_uri)}", "cyan")
             # Pre-load dynamic ETF-sector/theme mappings from Neo4j (refreshed per session)
             if config.get("etf_allocation_enabled", True):
                 _load_neo4j_etf_mappings(_shared_neo4j_driver, force_refresh=True)
                 _load_neo4j_stock_sector_mappings(_shared_neo4j_driver, force_refresh=True)
                 _load_neo4j_market_cap_cache(_shared_neo4j_driver)
         except Exception as _drv_exc:
+            from point_in_time_data import PointInTimeDataError
+
+            if isinstance(_drv_exc, PointInTimeDataError):
+                raise
             _log(f"Neo4j: failed to create shared driver: {_drv_exc}", "yellow")
 
         # ── 2) LLM sentiment + event classification (or use cached sentiment) ──────────────────────
@@ -23051,6 +23822,9 @@ class GraphNexusAnalysis:
                     _bg_conn = None
                 _bg_result = {"google_articles": [], "normalized": []}
                 try:
+                    _pit_google_kwargs = {}
+                    if point_in_time_context is not None:
+                        _pit_google_kwargs["context"] = point_in_time_context
                     _bg_articles = _fetch_google_news_cached(
                         date_key,
                         start_dt,
@@ -23058,6 +23832,7 @@ class GraphNexusAnalysis:
                         config,
                         conn=_bg_conn,
                         log_context="background",
+                        **_pit_google_kwargs,
                     )
                     if not _bg_articles:
                         _log("Google News background: no articles fetched (disabled or no results)", "cyan")
@@ -23069,6 +23844,10 @@ class GraphNexusAnalysis:
                     _bg_result["google_articles"] = _bg_articles
                     _bg_result["normalized"] = _bg_normalized
                 except Exception as _bg_exc:
+                    from point_in_time_data import PointInTimeDataError
+
+                    if isinstance(_bg_exc, PointInTimeDataError):
+                        raise
                     _log(f"Google News fetch error: {_bg_exc}", "yellow")
                 return _bg_result
 
@@ -23098,6 +23877,10 @@ class GraphNexusAnalysis:
                     _log(f"Macro pipeline: Google News fetch timed out after {_gn_to}s — skipping", "yellow")
                     return [], [], [], []
                 except Exception as _bg_gn_exc:
+                    from point_in_time_data import PointInTimeDataError
+
+                    if isinstance(_bg_gn_exc, PointInTimeDataError):
+                        raise
                     _log(f"Macro pipeline: Google News fetch failed: {_bg_gn_exc}", "yellow")
                     return [], [], [], []
                 _bg_google_articles = _bg_gn_result.get("google_articles", []) if isinstance(_bg_gn_result, dict) else []
@@ -23302,6 +24085,9 @@ class GraphNexusAnalysis:
                 mentioned |= set(sentiment_data.keys())
                 # Only cache on successful LLM return (non-empty parsed result)
                 if conn:
+                    _pit_sentiment_kwargs = {}
+                    if point_in_time_context is not None:
+                        _pit_sentiment_kwargs["context"] = point_in_time_context
                     _save_cached_sentiment(
                         conn,
                         date_key,
@@ -23309,6 +24095,7 @@ class GraphNexusAnalysis:
                         articles,
                         sentiment_cache_scope_id=sentiment_cache_scope_id,
                         sentiment_cache_scope_doc=sentiment_cache_scope_doc,
+                        **_pit_sentiment_kwargs,
                     )
                 # Save event snapshots for outcome tracking (measure actual moves next run)
                 if outcome_tracking:
@@ -23482,8 +24269,19 @@ class GraphNexusAnalysis:
         # by the grace-period escape hatch C (in _in_initial_grace_period).
         # Falls back to "bull" if no proxy bars are available.
         if strategy_cache is not None and bool(config.get("regime_detector_enabled", True)):
-            _v31_raw = _detect_market_regime(strategy_cache, config, date_key,
-                                             data=data)
+            _pit_regime_kwargs = {}
+            if point_in_time_context is not None:
+                _pit_regime_kwargs = {
+                    "context": point_in_time_context,
+                    "session_close_resolver": session_close_resolver,
+                }
+            _v31_raw = _detect_market_regime(
+                strategy_cache,
+                config,
+                date_key,
+                data=data,
+                **_pit_regime_kwargs,
+            )
             _v31_regime = _apply_regime_hysteresis(strategy_cache, _v31_raw, config)
             strategy_cache["_market_regime"] = _v31_regime
             # 2026-07-24 recovery-regime flag (v2) — see _next_recovery_flag.
@@ -23865,6 +24663,10 @@ class GraphNexusAnalysis:
                 google_articles = []
                 _gn_normalized = []
             except Exception as _macro_join_exc:
+                from point_in_time_data import PointInTimeDataError
+
+                if isinstance(_macro_join_exc, PointInTimeDataError):
+                    raise
                 _log(f"Macro pipeline error (non-fatal): {_macro_join_exc}", "yellow")
                 macro_rows = []
                 _gn_macro_traces = []
@@ -24045,16 +24847,44 @@ class GraphNexusAnalysis:
         # (propagated already initialized above, before trend sell enforcement)
         # Pass cached institutional co-holdings through config for lookback reuse.
         # Check in-memory cache first, then fall back to RethinkDB persistent cache.
-        if historical_lookback_mode and strategy_cache is not None:
+        _inst_rdb_key, _inst_scope_metadata = _institutional_cache_binding(
+            point_in_time_context,
+            base_instance_id or instance_id,
+            date_key,
+        )
+        _strict_inst_scope = bool(
+            point_in_time_context is not None
+            and not point_in_time_context.is_live
+            and point_in_time_context.strict
+        )
+        if (
+            (historical_lookback_mode or _strict_inst_scope)
+            and strategy_cache is not None
+        ):
             _cached_inst = strategy_cache.get("_inst_co_holdings_cache")
-            if _cached_inst is not None:
+            _cached_inst_scope = strategy_cache.get(
+                "_inst_co_holdings_cache_scope"
+            )
+            if (
+                _cached_inst is not None
+                and (
+                    not _strict_inst_scope
+                    or _cached_inst_scope == _inst_scope_metadata
+                )
+            ):
                 config["_inst_co_holdings_cache"] = _cached_inst
         if config.get("_inst_co_holdings_cache") is None and conn is not None and _nexus_db_available:
             try:
-                _inst_rdb_key = f"inst_co_holdings|{(base_instance_id or instance_id)[:24]}|{date_key[:7]}"
                 _ensure_learning_cache_table(conn)
                 _inst_rdb_cached = _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).get(_inst_rdb_key).run(conn)
-                if _inst_rdb_cached and isinstance(_inst_rdb_cached.get("edges"), list):
+                if (
+                    _inst_rdb_cached
+                    and isinstance(_inst_rdb_cached.get("edges"), list)
+                    and _institutional_cache_row_matches(
+                        _inst_rdb_cached,
+                        point_in_time_context,
+                    )
+                ):
                     config["_inst_co_holdings_cache"] = _inst_rdb_cached["edges"]
                     _log(f"  Institutional co-holdings: loaded from RethinkDB cache ({len(_inst_rdb_cached['edges'])} edges)", "cyan")
             except Exception as _inst_cache_exc:
@@ -24068,6 +24898,15 @@ class GraphNexusAnalysis:
                 try:
                     _shared_neo4j_driver.verify_connectivity()
                 except Exception as _conn_check_exc:
+                    if (
+                        point_in_time_context is not None
+                        and not point_in_time_context.is_live
+                    ):
+                        from point_in_time_data import PointInTimeDataError
+
+                        raise PointInTimeDataError(
+                            "historical graph snapshot connectivity failed"
+                        ) from _conn_check_exc
                     _log(f"Neo4j WARN: stale connection detected ({_conn_check_exc}), recreating driver", "yellow")
                     try:
                         _shared_neo4j_driver.close()
@@ -24092,17 +24931,32 @@ class GraphNexusAnalysis:
                     strategy_cache=strategy_cache,
                 )
         except Exception as e:
+            from point_in_time_data import PointInTimeDataError
+
+            if isinstance(e, PointInTimeDataError):
+                raise
             _log(f"Neo4j error: {e}", "yellow")
         # Persist institutional cache to in-memory strategy_cache and RethinkDB for cross-session reuse
         _new_inst = config.get("_inst_co_holdings_cache")
         if _new_inst is not None:
-            if historical_lookback_mode and strategy_cache is not None:
+            if (
+                (historical_lookback_mode or _strict_inst_scope)
+                and strategy_cache is not None
+            ):
                 strategy_cache["_inst_co_holdings_cache"] = _new_inst
+                strategy_cache["_inst_co_holdings_cache_scope"] = dict(
+                    _inst_scope_metadata
+                )
             if conn is not None and _nexus_db_available:
                 try:
-                    _inst_rdb_key = f"inst_co_holdings|{(base_instance_id or instance_id)[:24]}|{date_key[:7]}"
+                    _inst_cache_row = {
+                        "id": _inst_rdb_key,
+                        "edges": _new_inst,
+                        "cached_at": date_key,
+                        **_inst_scope_metadata,
+                    }
                     _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).insert(
-                        {"id": _inst_rdb_key, "edges": _new_inst, "cached_at": date_key},
+                        _inst_cache_row,
                         conflict="replace",
                     ).run(conn)
                 except Exception as _inst_cache_write_exc:
@@ -24310,11 +25164,28 @@ class GraphNexusAnalysis:
                     # filtered inside _breadth_scan_movers; every buy stays gated. The
                     # bear reserved-buy lane is separately blocked from these names.
                     try:
-                        _bsm = _breadth_scan_movers(config, strategy_cache, date_key, alpaca_key, alpaca_secret)
+                        _pit_breadth_kwargs = {}
+                        if point_in_time_context is not None:
+                            _pit_breadth_kwargs = {
+                                "context": point_in_time_context,
+                                "snapshot_store": point_in_time_store,
+                                "session_close_resolver": session_close_resolver,
+                            }
+                        _bsm = _breadth_scan_movers(
+                            config,
+                            strategy_cache,
+                            date_key,
+                            alpaca_key,
+                            alpaca_secret,
+                            **_pit_breadth_kwargs,
+                        )
                         if _bsm:
                             _mw_extra_sources["breadth_scan"] = _bsm
-                    except Exception:
-                        pass
+                    except Exception as _bsm_exc:
+                        from point_in_time_data import PointInTimeDataError
+
+                        if isinstance(_bsm_exc, PointInTimeDataError):
+                            raise
 
                 _mw = _build_momentum_watchlist(
                     strategy_cache, all_discovered,
@@ -24327,6 +25198,10 @@ class GraphNexusAnalysis:
                         alpaca_key, alpaca_secret, config, date_key,
                     )
             except Exception as _mw_exc:
+                from point_in_time_data import PointInTimeDataError
+
+                if isinstance(_mw_exc, PointInTimeDataError):
+                    raise
                 _log(f"Momentum watchlist build/load error: {_mw_exc}", "yellow")
 
         # ── 3c-bis) Momentum rediscovery for previously sold stocks ──────

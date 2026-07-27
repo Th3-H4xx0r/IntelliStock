@@ -22,7 +22,7 @@ class StockScreenArgs {
   final double? portfolioTotal;
 }
 
-/// Full-screen stock view, modeled on modern brokerage apps (Robinhood-style):
+/// Full-screen stock view, modeled on modern brokerage apps:
 /// a violet gradient crown, name + odometer price header, a live (10 s) gapless
 /// chart with range pills, a clean stats list, the user's position with a
 /// diversity gauge, an About section, and recent orders.
@@ -60,8 +60,9 @@ class _StockScreenState extends ConsumerState<StockScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final histAsync =
-        ref.watch(stockHistoryProvider((symbol: widget.symbol, range: _range)));
+    final histAsync = ref.watch(
+      stockHistoryProvider((symbol: widget.symbol, range: _range)),
+    );
     final infoAsync = ref.watch(stockInfoProvider(widget.symbol));
     final info = infoAsync.valueOrNull ?? const <String, dynamic>{};
     // True only while the very first fetch is in flight (no data yet) — drives
@@ -90,9 +91,11 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 const SizedBox(height: 14),
                 _header(series, info, loading: histLoading),
                 const SizedBox(height: 18),
-                _chartArea(series,
-                    error: histAsync.hasError && series == null,
-                    loading: histLoading),
+                _chartArea(
+                  series,
+                  error: histAsync.hasError && series == null,
+                  loading: histLoading,
+                ),
                 const SizedBox(height: 10),
                 _rangeTabs(),
                 if (widget.position != null) ...[
@@ -102,10 +105,7 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 const SizedBox(height: 28),
                 _botCard(),
                 const SizedBox(height: 28),
-                if (infoLoading)
-                  _statsSkeleton()
-                else
-                  _statsCard(series, info),
+                if (infoLoading) _statsSkeleton() else _statsCard(series, info),
                 if (infoLoading) ...[
                   const SizedBox(height: 30),
                   _aboutSkeleton(),
@@ -137,8 +137,11 @@ class _StockScreenState extends ConsumerState<StockScreen> {
               shape: BoxShape.circle,
               border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
             ),
-            child: const Icon(Icons.arrow_back_ios_new,
-                size: 15, color: AppColors.textHi),
+            child: const Icon(
+              Icons.arrow_back_ios_new,
+              size: 15,
+              color: AppColors.textHi,
+            ),
           ),
         ),
       ],
@@ -146,8 +149,11 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   }
 
   // ── Header: name + odometer price on one row, ticker + change below ──
-  Widget _header(StockSeries? series, Map<String, dynamic> info,
-      {required bool loading}) {
+  Widget _header(
+    StockSeries? series,
+    Map<String, dynamic> info, {
+    required bool loading,
+  }) {
     final name = ((info['name'] as String?) ?? '').trim();
     final vals = series?.vals;
     final ready = vals != null && vals.length >= 2;
@@ -171,19 +177,25 @@ class _StockScreenState extends ConsumerState<StockScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(name.isNotEmpty ? name : widget.symbol,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTextStyles.h2.copyWith(
-                          fontWeight: FontWeight.w700,
-                          height: 1.18,
-                          letterSpacing: -0.2)),
+                  Text(
+                    name.isNotEmpty ? name : widget.symbol,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.h2.copyWith(
+                      fontWeight: FontWeight.w700,
+                      height: 1.18,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
                   const SizedBox(height: 4),
-                  Text(widget.symbol,
-                      style: AppTextStyles.micro.copyWith(
-                          color: AppColors.textMd,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: 0.5)),
+                  Text(
+                    widget.symbol,
+                    style: AppTextStyles.micro.copyWith(
+                      color: AppColors.textMd,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -197,29 +209,41 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                     tween: Tween<double>(begin: 0, end: shown),
                     duration: const Duration(milliseconds: 450),
                     curve: Curves.easeOutCubic,
-                    builder: (_, v, _) => Text(fmtMoney(v),
-                        style: AppTextStyles.valueXl
-                            .copyWith(fontWeight: FontWeight.w800)),
+                    builder: (_, v, _) => Text(
+                      fmtMoney(v),
+                      style: AppTextStyles.valueXl.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   )
                 else if (loading)
                   Skeleton(width: 120, height: 28, radius: 8)
                 else
-                  Text('—',
-                      style: AppTextStyles.valueXl
-                          .copyWith(fontWeight: FontWeight.w800)),
+                  Text(
+                    '—',
+                    style: AppTextStyles.valueXl.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
                 const SizedBox(height: 4),
                 if (ready)
                   Text(
                     '${dAbs >= 0 ? '▲' : '▼'} ${fmtPnl(dAbs)}  ${fmtPct(dPct)}',
                     style: AppTextStyles.meta.copyWith(
-                        fontSize: 15, color: c, fontWeight: FontWeight.w700),
+                      fontSize: 15,
+                      color: c,
+                      fontWeight: FontWeight.w700,
+                    ),
                   )
                 else if (loading)
                   Skeleton(width: 100, height: 16, radius: 5)
                 else
-                  Text('No price data',
-                      style: AppTextStyles.micro
-                          .copyWith(color: AppColors.textDim)),
+                  Text(
+                    'No price data',
+                    style: AppTextStyles.micro.copyWith(
+                      color: AppColors.textDim,
+                    ),
+                  ),
               ],
             ),
           ],
@@ -229,8 +253,11 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   }
 
   // ── Live, gapless chart (skeleton while loading; graceful no-data state) ──
-  Widget _chartArea(StockSeries? series,
-      {required bool error, required bool loading}) {
+  Widget _chartArea(
+    StockSeries? series, {
+    required bool error,
+    required bool loading,
+  }) {
     if (series != null && series.vals.length >= 2) {
       final up = series.vals.last >= series.vals.first;
       // Animate only the first time this range's data appears; subsequent 10 s
@@ -269,7 +296,8 @@ class _StockScreenState extends ConsumerState<StockScreen> {
               : 'No chart data available for ${widget.symbol}',
           textAlign: TextAlign.center,
           style: AppTextStyles.micro.copyWith(
-              color: error ? AppColors.danger : AppColors.textDim),
+            color: error ? AppColors.danger : AppColors.textDim,
+          ),
         ),
       ),
     );
@@ -297,12 +325,14 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                     : Colors.transparent,
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Text(r,
-                  textAlign: TextAlign.center,
-                  style: AppTextStyles.micro.copyWith(
-                    color: isActive ? AppColors.textHi : AppColors.textDim,
-                    fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
-                  )),
+              child: Text(
+                r,
+                textAlign: TextAlign.center,
+                style: AppTextStyles.micro.copyWith(
+                  color: isActive ? AppColors.textHi : AppColors.textDim,
+                  fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
             ),
           ),
         );
@@ -353,14 +383,16 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                   Expanded(child: _statCell(cells[i])),
                   const SizedBox(width: 14),
                   Expanded(
-                      child: i + 1 < cells.length
-                          ? _statCell(cells[i + 1])
-                          : const SizedBox.shrink()),
+                    child: i + 1 < cells.length
+                        ? _statCell(cells[i + 1])
+                        : const SizedBox.shrink(),
+                  ),
                   const SizedBox(width: 14),
                   Expanded(
-                      child: i + 2 < cells.length
-                          ? _statCell(cells[i + 2])
-                          : const SizedBox.shrink()),
+                    child: i + 2 < cells.length
+                        ? _statCell(cells[i + 2])
+                        : const SizedBox.shrink(),
+                  ),
                 ],
               ),
             ),
@@ -370,115 +402,123 @@ class _StockScreenState extends ConsumerState<StockScreen> {
   }
 
   Widget _statCell((String, String) s) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(s.$1.toUpperCase(),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.nano
-                  .copyWith(color: AppColors.textFaint, letterSpacing: 0.2)),
-          const SizedBox(height: 4),
-          Text(s.$2,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.value
-                  .copyWith(fontWeight: FontWeight.w700, fontSize: 16)),
-        ],
-      );
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        s.$1.toUpperCase(),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AppTextStyles.nano.copyWith(
+          color: AppColors.textFaint,
+          letterSpacing: 0.2,
+        ),
+      ),
+      const SizedBox(height: 4),
+      Text(
+        s.$2,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AppTextStyles.value.copyWith(
+          fontWeight: FontWeight.w700,
+          fontSize: 16,
+        ),
+      ),
+    ],
+  );
 
   Widget _sectionTitle(String s) => Text(
-        s.toUpperCase(),
-        style: AppTextStyles.meta.copyWith(
-          color: AppColors.textMuted,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.0,
-        ),
-      );
+    s.toUpperCase(),
+    style: AppTextStyles.meta.copyWith(
+      color: AppColors.textMuted,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 1.0,
+    ),
+  );
 
   // ── Skeleton placeholders (shown while a section's data loads) ──
   Widget _statsSkeleton() => Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _sectionTitle('Key statistics'),
-            const SizedBox(height: 18),
-            for (var r = 0; r < 3; r++)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 18),
-                child: Row(
-                  children: [
-                    for (var c = 0; c < 3; c++) ...[
-                      if (c > 0) const SizedBox(width: 14),
-                      const Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Skeleton(width: 46, height: 9, radius: 4),
-                            SizedBox(height: 7),
-                            Skeleton(width: 62, height: 15, radius: 5),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-          ],
-        ),
-      );
+    padding: const EdgeInsets.only(top: 4),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle('Key statistics'),
+        const SizedBox(height: 18),
+        for (var r = 0; r < 3; r++)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 18),
+            child: Row(
+              children: [
+                for (var c = 0; c < 3; c++) ...[
+                  if (c > 0) const SizedBox(width: 14),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Skeleton(width: 46, height: 9, radius: 4),
+                        SizedBox(height: 7),
+                        Skeleton(width: 62, height: 15, radius: 5),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+      ],
+    ),
+  );
 
   Widget _aboutSkeleton() => Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _sectionTitle('About'),
-            const SizedBox(height: 14),
-            const Skeleton(height: 12, radius: 5),
-            const SizedBox(height: 9),
-            const Skeleton(height: 12, radius: 5),
-            const SizedBox(height: 9),
-            const Skeleton(width: 220, height: 12, radius: 5),
-          ],
-        ),
-      );
+    padding: const EdgeInsets.only(top: 4),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle('About'),
+        const SizedBox(height: 14),
+        const Skeleton(height: 12, radius: 5),
+        const SizedBox(height: 9),
+        const Skeleton(height: 12, radius: 5),
+        const SizedBox(height: 9),
+        const Skeleton(width: 220, height: 12, radius: 5),
+      ],
+    ),
+  );
 
   Widget _botRowSkeleton() => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: const [
-            Skeleton(width: 150, height: 13, radius: 5),
-            SizedBox(height: 6),
-            Skeleton(width: 90, height: 10, radius: 4),
-            SizedBox(height: 7),
-            Skeleton(height: 10, radius: 4),
-          ],
-        ),
-      );
+    padding: const EdgeInsets.symmetric(vertical: 10),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: const [
+        Skeleton(width: 150, height: 13, radius: 5),
+        SizedBox(height: 6),
+        Skeleton(width: 90, height: 10, radius: 4),
+        SizedBox(height: 7),
+        Skeleton(height: 10, radius: 4),
+      ],
+    ),
+  );
 
   Widget _orderRowSkeleton() => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Row(
-          children: [
-            const Skeleton(width: 40, height: 18, radius: 5),
-            const SizedBox(width: 10),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Skeleton(width: 110, height: 13, radius: 5),
-                  SizedBox(height: 5),
-                  Skeleton(width: 78, height: 10, radius: 4),
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Skeleton(width: 54, height: 13, radius: 5),
-          ],
+    padding: const EdgeInsets.symmetric(vertical: 8),
+    child: Row(
+      children: [
+        const Skeleton(width: 40, height: 18, radius: 5),
+        const SizedBox(width: 10),
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton(width: 110, height: 13, radius: 5),
+              SizedBox(height: 5),
+              Skeleton(width: 78, height: 10, radius: 4),
+            ],
+          ),
         ),
-      );
+        const SizedBox(width: 10),
+        const Skeleton(width: 54, height: 13, radius: 5),
+      ],
+    ),
+  );
 
   // ── Position card with diversity gauge + total P&L ──
   Widget _positionCard(AccountPosition p) {
@@ -509,21 +549,29 @@ class _StockScreenState extends ConsumerState<StockScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('TOTAL P&L',
-                        style: AppTextStyles.nano
-                            .copyWith(color: AppColors.textFaint)),
+                    Text(
+                      'TOTAL P&L',
+                      style: AppTextStyles.nano.copyWith(
+                        color: AppColors.textFaint,
+                      ),
+                    ),
                     const SizedBox(height: 3),
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.baseline,
                       textBaseline: TextBaseline.alphabetic,
                       children: [
-                        Text(fmtPnl(p.unrealizedPnl),
-                            style:
-                                AppTextStyles.valueLg.copyWith(color: color)),
+                        Text(
+                          fmtPnl(p.unrealizedPnl),
+                          style: AppTextStyles.valueLg.copyWith(color: color),
+                        ),
                         const SizedBox(width: 6),
-                        Text(fmtPct(p.unrealizedPnlPct),
-                            style: AppTextStyles.micro.copyWith(
-                                color: color, fontWeight: FontWeight.w700)),
+                        Text(
+                          fmtPct(p.unrealizedPnlPct),
+                          style: AppTextStyles.micro.copyWith(
+                            color: color,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                       ],
                     ),
                   ],
@@ -532,20 +580,28 @@ class _StockScreenState extends ConsumerState<StockScreen> {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text('VALUE',
-                      style: AppTextStyles.nano
-                          .copyWith(color: AppColors.textFaint)),
+                  Text(
+                    'VALUE',
+                    style: AppTextStyles.nano.copyWith(
+                      color: AppColors.textFaint,
+                    ),
+                  ),
                   const SizedBox(height: 3),
-                  Text(fmtMoney(p.marketValue),
-                      style: AppTextStyles.value
-                          .copyWith(fontWeight: FontWeight.w700)),
+                  Text(
+                    fmtMoney(p.marketValue),
+                    style: AppTextStyles.value.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
                 ],
               ),
             ],
           ),
           const SizedBox(height: 10),
-          Text('$qtyStr shares · avg ${fmtMoney(p.avgEntryPrice)}',
-              style: AppTextStyles.micro.copyWith(color: AppColors.textMuted)),
+          Text(
+            '$qtyStr shares · avg ${fmtMoney(p.avgEntryPrice)}',
+            style: AppTextStyles.micro.copyWith(color: AppColors.textMuted),
+          ),
         ],
       ),
     );
@@ -565,31 +621,41 @@ class _StockScreenState extends ConsumerState<StockScreen> {
           _sectionTitle('About'),
           if (tags.isNotEmpty) ...[
             const SizedBox(height: 12),
-            Wrap(spacing: 8, runSpacing: 8, children: [
-              for (final t in tags) _tag(t),
-            ]),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [for (final t in tags) _tag(t)],
+            ),
           ],
           const SizedBox(height: 14),
-          Text(summary,
-              style: AppTextStyles.body
-                  .copyWith(height: 1.5, color: AppColors.textMd),
-              maxLines: 10,
-              overflow: TextOverflow.ellipsis),
+          Text(
+            summary,
+            style: AppTextStyles.body.copyWith(
+              height: 1.5,
+              color: AppColors.textMd,
+            ),
+            maxLines: 10,
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
       ),
     );
   }
 
   Widget _tag(String label) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: AppColors.fill(AppColors.primary),
-          borderRadius: BorderRadius.circular(7),
-        ),
-        child: Text(label,
-            style: AppTextStyles.micro.copyWith(
-                color: AppColors.primary, fontWeight: FontWeight.w600)),
-      );
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+    decoration: BoxDecoration(
+      color: AppColors.fill(AppColors.primary),
+      borderRadius: BorderRadius.circular(7),
+    ),
+    child: Text(
+      label,
+      style: AppTextStyles.micro.copyWith(
+        color: AppColors.primary,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
 
   // ── Bot activity: the bot's own buy/sell decisions for this symbol + why ──
   Widget _botCard() {
@@ -604,24 +670,31 @@ class _StockScreenState extends ConsumerState<StockScreen> {
           if (bid == null)
             _ordersEmpty('No linked brokerage')
           else
-            Consumer(builder: (context, ref, _) {
-              final async = ref.watch(
-                stockBotActivityProvider(
-                    (brokerageId: bid, symbol: widget.symbol)),
-              );
-              return async.when(
-                loading: () => Column(
-                  children: [for (var i = 0; i < 2; i++) _botRowSkeleton()],
-                ),
-                error: (_, _) => _ordersEmpty("Couldn't load bot activity"),
-                data: (events) => events.isEmpty
-                    ? _ordersEmpty(
-                        'No bot trades logged yet for ${widget.symbol}')
-                    : Column(children: [
-                        for (final e in events) _BotEventRow(event: e),
-                      ]),
-              );
-            }),
+            Consumer(
+              builder: (context, ref, _) {
+                final async = ref.watch(
+                  stockBotActivityProvider((
+                    brokerageId: bid,
+                    symbol: widget.symbol,
+                  )),
+                );
+                return async.when(
+                  loading: () => Column(
+                    children: [for (var i = 0; i < 2; i++) _botRowSkeleton()],
+                  ),
+                  error: (_, _) => _ordersEmpty("Couldn't load bot activity"),
+                  data: (events) => events.isEmpty
+                      ? _ordersEmpty(
+                          'No bot trades logged yet for ${widget.symbol}',
+                        )
+                      : Column(
+                          children: [
+                            for (final e in events) _BotEventRow(event: e),
+                          ],
+                        ),
+                );
+              },
+            ),
         ],
       ),
     );
@@ -640,32 +713,41 @@ class _StockScreenState extends ConsumerState<StockScreen> {
           if (bid == null)
             _ordersEmpty('No linked brokerage')
           else
-            Consumer(builder: (context, ref, _) {
-              final ordersAsync = ref.watch(
-                stockOrdersProvider((brokerageId: bid, symbol: widget.symbol)),
-              );
-              return ordersAsync.when(
-                loading: () => Column(
-                  children: [for (var i = 0; i < 3; i++) _orderRowSkeleton()],
-                ),
-                error: (_, _) => _ordersEmpty("Couldn't load orders"),
-                data: (orders) => orders.isEmpty
-                    ? _ordersEmpty('No recent orders for ${widget.symbol}')
-                    : Column(
-                        children: [for (final t in orders) _OrderRow(trade: t)],
-                      ),
-              );
-            }),
+            Consumer(
+              builder: (context, ref, _) {
+                final ordersAsync = ref.watch(
+                  stockOrdersProvider((
+                    brokerageId: bid,
+                    symbol: widget.symbol,
+                  )),
+                );
+                return ordersAsync.when(
+                  loading: () => Column(
+                    children: [for (var i = 0; i < 3; i++) _orderRowSkeleton()],
+                  ),
+                  error: (_, _) => _ordersEmpty("Couldn't load orders"),
+                  data: (orders) => orders.isEmpty
+                      ? _ordersEmpty('No recent orders for ${widget.symbol}')
+                      : Column(
+                          children: [
+                            for (final t in orders) _OrderRow(trade: t),
+                          ],
+                        ),
+                );
+              },
+            ),
         ],
       ),
     );
   }
 
   Widget _ordersEmpty(String msg) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Text(msg,
-            style: AppTextStyles.micro.copyWith(color: AppColors.textDim)),
-      );
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    child: Text(
+      msg,
+      style: AppTextStyles.micro.copyWith(color: AppColors.textDim),
+    ),
+  );
 }
 
 /// Violet crown matching the dashboard: a deep violet top that falls off to
@@ -754,8 +836,11 @@ String _compact(num v) {
 /// Circular allocation gauge: arc = this position's share of the portfolio,
 /// with the percentage in the centre — the diversity indicator.
 class _DiversityGauge extends StatelessWidget {
-  const _DiversityGauge(
-      {required this.fraction, required this.color, this.size = 60});
+  const _DiversityGauge({
+    required this.fraction,
+    required this.color,
+    this.size = 60,
+  });
   final double fraction;
   final Color color;
   final double size;
@@ -777,12 +862,18 @@ class _DiversityGauge extends StatelessWidget {
         children: [
           CustomPaint(
             size: Size(size, size),
-            painter:
-                _GaugePainter(fraction: fraction.clamp(0.0, 1.0), color: color),
+            painter: _GaugePainter(
+              fraction: fraction.clamp(0.0, 1.0),
+              color: color,
+            ),
           ),
-          Text(_label,
-              style: AppTextStyles.micro.copyWith(
-                  color: AppColors.textHi, fontWeight: FontWeight.w800)),
+          Text(
+            _label,
+            style: AppTextStyles.micro.copyWith(
+              color: AppColors.textHi,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
         ],
       ),
     );
@@ -856,63 +947,87 @@ class _BotEventRow extends StatelessWidget {
                   color: AppColors.fill(color),
                   borderRadius: BorderRadius.circular(5),
                 ),
-                child: Text(event.side.toUpperCase(),
-                    style: AppTextStyles.nano
-                        .copyWith(color: color, fontWeight: FontWeight.w800)),
+                child: Text(
+                  event.side.toUpperCase(),
+                  style: AppTextStyles.nano.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppTextStyles.bodyHi
-                        .copyWith(fontWeight: FontWeight.w600)),
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.bodyHi.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
               if (event.ts != null)
-                Text(fmtRelative(event.ts),
-                    style:
-                        AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+                Text(
+                  fmtRelative(event.ts),
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textDim),
+                ),
             ],
           ),
           if (reason.isNotEmpty) ...[
             const SizedBox(height: 5),
-            Text(reason,
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-                style: AppTextStyles.body
-                    .copyWith(color: AppColors.textMd, height: 1.4)),
+            Text(
+              reason,
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.body.copyWith(
+                color: AppColors.textMd,
+                height: 1.4,
+              ),
+            ),
           ],
           if (backers.isNotEmpty) ...[
             const SizedBox(height: 5),
-            Text('Backed by ${backers.join(', ')}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AppTextStyles.micro.copyWith(
-                    color: AppColors.primary, fontWeight: FontWeight.w600)),
+            Text(
+              'Backed by ${backers.join(', ')}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.micro.copyWith(
+                color: AppColors.primary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ],
           if (event.price != null || event.overrideApplied) ...[
             const SizedBox(height: 6),
             Row(
               children: [
                 if (event.price != null)
-                  Text('@ ${fmtMoney(event.price!)}',
-                      style: AppTextStyles.micro
-                          .copyWith(color: AppColors.textMuted)),
+                  Text(
+                    '@ ${fmtMoney(event.price!)}',
+                    style: AppTextStyles.micro.copyWith(
+                      color: AppColors.textMuted,
+                    ),
+                  ),
                 if (event.price != null && event.overrideApplied)
                   const SizedBox(width: 10),
                 if (event.overrideApplied)
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
                     decoration: BoxDecoration(
                       color: AppColors.fill(AppColors.primary),
                       borderRadius: BorderRadius.circular(4),
                     ),
-                    child: Text('OVERRIDDEN',
-                        style: AppTextStyles.nano.copyWith(
-                            color: AppColors.primary,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 0.4)),
+                    child: Text(
+                      'OVERRIDDEN',
+                      style: AppTextStyles.nano.copyWith(
+                        color: AppColors.primary,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.4,
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -945,22 +1060,30 @@ class _OrderRow extends StatelessWidget {
               color: AppColors.fill(color),
               borderRadius: BorderRadius.circular(5),
             ),
-            child: Text(trade.side.toUpperCase(),
-                style: AppTextStyles.nano
-                    .copyWith(color: color, fontWeight: FontWeight.w800)),
+            child: Text(
+              trade.side.toUpperCase(),
+              style: AppTextStyles.nano.copyWith(
+                color: color,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('$qtyStr @ ${fmtMoney(trade.price)}',
-                    style: AppTextStyles.bodyHi
-                        .copyWith(fontWeight: FontWeight.w600)),
+                Text(
+                  '$qtyStr @ ${fmtMoney(trade.price)}',
+                  style: AppTextStyles.bodyHi.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
                 const SizedBox(height: 2),
-                Text(fmtDateTime(trade.ts),
-                    style:
-                        AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+                Text(
+                  fmtDateTime(trade.ts),
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textDim),
+                ),
               ],
             ),
           ),

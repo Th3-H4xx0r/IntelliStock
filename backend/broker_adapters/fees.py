@@ -12,7 +12,6 @@ _BINANCE = ("binanceus", "binance", "binance_us", "binance.us")
 # but can EMULATE fees for in a backtest (coinbase, kraken).
 CRYPTO_TAKER_FEE_BY_BROKER = {
     "alpaca": 0.0025,
-    "robinhood": 0.0025,
     "binanceus": 0.0002,
     "coinbase": 0.006,
     "kraken": 0.0026,

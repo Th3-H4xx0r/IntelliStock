@@ -39,7 +39,7 @@ const letters = computed(() => Array.from(headline))
       <div
         v-for="(item, idx) in [
           { icon: 'memory',           label: 'LLM models',  desc: 'OpenAI · Gemini · Azure · NVIDIA · DeepSeek' },
-          { icon: 'account_balance',  label: 'Brokerages',  desc: 'Alpaca · Robinhood' },
+          { icon: 'account_balance',  label: 'Stock brokerage',  desc: 'Alpaca' },
           { icon: 'rocket_launch',    label: 'Instances',   desc: 'Live or paper, fully autonomous' },
         ]"
         :key="item.label"

@@ -89,7 +89,11 @@ services:
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
+      - SOCKET_CONTROL_MASTER_KEY=${SOCKET_CONTROL_MASTER_KEY:?Set SOCKET_CONTROL_MASTER_KEY in .env (run install.sh/install.ps1 to auto-generate)}
       - DOCKER_INSTANCE_IMAGE=intellistock-backend
+      # Inactive-by-default release posture. An operator must separately set
+      # this true before an equities runCommand can create a worker.
+      - EQUITIES_INSTANCE_AUTOSTART_ALLOWED=${EQUITIES_INSTANCE_AUTOSTART_ALLOWED:-false}
       - INSTANCE_RETHINKDB_HOST=rethinkdb
       - INSTANCE_SERVER_URL=http://intellistock-backend:5000
       - INSTANCE_DOCKER_NETWORK=intellistockv4_default
@@ -246,29 +250,6 @@ services:
   # Discover engine is NOT started here. The backend (server.py) starts and stops it via the Docker API
   # when EngineControl.discover_engine.running is set to true/false (e.g. via dashboard or API).
 
-  credential-service:
-    image: intellistock-backend
-    container_name: intellistock-credential-service
-    command: ["python", "credential_service.py"]
-    restart: unless-stopped
-    depends_on:
-      - rethinkdb
-    # 2026-04-26: credential_service.py decrypts Fernet-encrypted Robinhood
-    # tokens via secret_store before refresh and re-encrypts on write. Without
-    # INTELLISTOCK_CRED_KEY in env, every refresh raises and marks the account
-    # status="expired" (codex review caught this gap on the keys-on-baseline
-    # branch — same R19-style hole as backtest-engine had).
-    env_file:
-      - .env
-    environment:
-      - RETHINKDB_HOST=rethinkdb
-      - RETHINKDB_PORT=28015
-      # How often to check for expiring tokens (seconds, default 300 = 5 min)
-      - CREDENTIAL_CHECK_INTERVAL=300
-      # Refresh tokens this many seconds before expiry (default 1800 = 30 min)
-      - CREDENTIAL_REFRESH_BEFORE_EXPIRY=1800
-      - INTELLISTOCK_CRED_KEY=${INTELLISTOCK_CRED_KEY:-}
-
   discord-bot:
     image: intellistock-backend
     container_name: intellistock-discord-bot
@@ -326,8 +307,8 @@ services:
     # --cache-size: MB for query cache (default is half of available); more = better throughput
     command: rethinkdb --bind all -d /data --cache-size 2048
     ports:
-      - "28015:28015"   # Driver port
-      - "${RETHINKDB_WEB_PORT:-8080}:8080"   # Web admin UI (host port from env; set RETHINKDB_WEB_PORT if 8080 is in use)
+      - "127.0.0.1:28015:28015"   # Driver port, local host access only
+      - "127.0.0.1:${RETHINKDB_WEB_PORT:-8080}:8080"   # Admin UI, local host access only
     volumes:
       - rethinkdb_data:/data
     restart: unless-stopped

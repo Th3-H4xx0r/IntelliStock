@@ -50,20 +50,15 @@ def is_within_live_session(current_time: datetime.datetime) -> bool:
     """Live tick gate: NYSE pre-market + RTH + after-hours, holiday-aware.
     Wraps live_calendar.is_nyse_open_extended.
 
-    2026-05-01: ``RH_RTH_ONLY=true`` (or ``LIVE_RTH_ONLY=true``) narrows the
-    gate to regular hours only (9:30 AM - 4:00 PM ET). Eliminates pre-market
-    quote disagreements between Alpaca IEX and RH (wide spreads on low-volume
-    microcaps caused buy sizing to use the ask side at submit time and over-
-    pay relative to the strategy's evaluation price). Default behavior is
-    unchanged — extended hours still allowed unless the flag is set.
+    ``LIVE_RTH_ONLY=true`` narrows the gate to regular hours only
+    (9:30 AM - 4:00 PM ET). Default behavior is unchanged: extended hours
+    remain allowed unless the flag is set.
     """
     if current_time is None:
         return False
     import os
-    _rth_only = (
-        os.environ.get("RH_RTH_ONLY", "")
-        or os.environ.get("LIVE_RTH_ONLY", "")
-        or ""
+    _rth_only = os.environ.get(
+        "LIVE_RTH_ONLY", ""
     ).strip().lower() in ("1", "true", "yes")
     try:
         from live_calendar import is_nyse_open_extended, is_nyse_open

@@ -38,7 +38,7 @@ In scope:
 
 Out of scope (explicitly):
 - Broker outages, market crashes, exchange-side anomalies.
-- Bugs in upstream providers (OpenAI, Alpaca, Robinhood, Polygon).
+- Bugs in upstream providers (OpenAI, Alpaca, Kalshi, Binance.US, Polygon).
 - Side-channel attacks against the host kernel.
 - Operator-side OPSEC (an operator who pastes their `.env` into
   Discord is on their own).

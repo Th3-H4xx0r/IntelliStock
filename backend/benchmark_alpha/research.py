@@ -11,6 +11,10 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from collections.abc import Callable, Mapping
+
+from experiment_registry import ExperimentRegistry as ImmutableExperimentRegistry
+from experiment_registry import ExperimentSpec as ImmutableExperimentSpec
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,39 @@ class ExperimentRegistry:
 
     def trial_count(self):
         return len(self._rows)
+
+
+def run_registered_experiment(
+    registry: ImmutableExperimentRegistry,
+    spec: ImmutableExperimentSpec,
+    run: Callable[[], Mapping],
+):
+    """Register immutable provenance before invoking the experiment callback.
+
+    A callback exception is recorded as a failed trial and then re-raised; a
+    successful callback must return a mapping and is stored as a separate
+    immutable terminal outcome.
+    """
+    if not isinstance(registry, ImmutableExperimentRegistry):
+        raise TypeError("registry must be an immutable ExperimentRegistry")
+    if not isinstance(spec, ImmutableExperimentSpec):
+        raise TypeError("spec must be an immutable ExperimentSpec")
+    registry.register_before_run(spec)
+    try:
+        result = run()
+    except Exception as exc:
+        # The exception payload may contain provider responses, credentials,
+        # prompts, or account identifiers. Persist only the error class as
+        # immutable failure provenance; callers still receive the original
+        # exception for their own redacted observability boundary.
+        registry.fail(spec.experiment_id, type(exc).__name__)
+        raise
+    if not isinstance(result, Mapping):
+        error = TypeError("registered experiment result must be a mapping")
+        registry.fail(spec.experiment_id, str(error))
+        raise error
+    registry.complete_experiment(spec.experiment_id, result)
+    return result
 
 
 class DataManifest:

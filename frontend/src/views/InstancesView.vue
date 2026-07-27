@@ -66,16 +66,6 @@ const deleting      = ref(false)
 // Brokerages for create form
 const brokerages = ref([])
 
-// Phase C (2026-04-29): expose the selected brokerage's type so the template
-// can show a Robinhood-specific warning banner without re-running the lookup
-// inside the v-if expression on each render.
-const selectedBrokerageType = computed(() => {
-  const id = createForm.value.brokerage_id
-  if (!id) return ''
-  const b = brokerages.value.find(x => String(x.id) === String(id))
-  return ((b && b.brokerage_type) || '').toString().trim().toLowerCase()
-})
-
 // Create modal
 const showCreate   = ref(false)
 const creating     = ref(false)
@@ -1486,22 +1476,6 @@ onMounted(async () => {
                   {{ b.account_name }} ({{ b.brokerage_type }})
                 </option>
               </select>
-              <!-- Phase C (2026-04-29): warn when user picks a Robinhood brokerage.
-                   RH uses unofficial reverse-engineered API; ToS / account-ban risk
-                   is real. Adapter defaults to RH_DRY_RUN=true so first orders
-                   never hit the live endpoint until the operator flips the env. -->
-              <p
-                v-if="selectedBrokerageType === 'robinhood'"
-                class="text-[11px] text-amber-400 mt-1.5 flex items-start gap-1"
-              >
-                <span class="material-symbols-outlined text-[12px] leading-[14px] mt-0.5">warning</span>
-                <span>
-                  <strong>Robinhood is unofficial.</strong>
-                  Automated trading violates Robinhood's ToS — account-ban risk is real.
-                  Adapter starts in <code>RH_DRY_RUN=true</code> mode by default; set the env to
-                  <code>false</code> only when ready to trade real money.
-                </span>
-              </p>
             </div>
 
             <!-- Max usage -->

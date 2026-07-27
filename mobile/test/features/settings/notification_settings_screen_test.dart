@@ -14,7 +14,11 @@ class _FakePushRepo implements PushRepository {
   @override
   Future<List<PushDevice>> listDevices() async => _devices;
   @override
-  Future<void> registerToken(String token, {required String env, String? appVersion}) async {}
+  Future<void> registerToken(
+    String token, {
+    required String env,
+    String? appVersion,
+  }) async {}
   @override
   Future<void> unregister(String token) async {}
 }
@@ -33,6 +37,7 @@ class _FakeRepo implements NotificationPrefsRepository {
     _prefs = prefs;
     return prefs;
   }
+
   @override
   Future<Map<String, dynamic>> sendTest(NotifChannel channel) async {
     testCount++;
@@ -40,11 +45,12 @@ class _FakeRepo implements NotificationPrefsRepository {
   }
 }
 
-NotificationPrefs _seed() => const NotificationPrefs(categories: {
-      'order_fill': CategoryRoute(discord: true, push: false),
-    });
+NotificationPrefs _seed() => const NotificationPrefs(
+  categories: {'order_fill': CategoryRoute(discord: true, push: false)},
+);
 
-Widget _app(_FakeRepo repo, {List<PushDevice> devices = const []}) => ProviderScope(
+Widget _app(_FakeRepo repo, {List<PushDevice> devices = const []}) =>
+    ProviderScope(
       overrides: [
         notificationPrefsRepositoryProvider.overrideWithValue(repo),
         pushRepositoryProvider.overrideWithValue(_FakePushRepo(devices)),
@@ -53,17 +59,19 @@ Widget _app(_FakeRepo repo, {List<PushDevice> devices = const []}) => ProviderSc
     );
 
 void main() {
-  testWidgets('renders 9 categories, two toggles each, and test buttons',
-      (tester) async {
-    await tester.pumpWidget(_app(_FakeRepo(_seed())));
-    await tester.pumpAndSettle();
+  testWidgets(
+    'renders 10 fallback categories, two toggles each, and test buttons',
+    (tester) async {
+      await tester.pumpWidget(_app(_FakeRepo(_seed())));
+      await tester.pumpAndSettle();
 
-    expect(find.text('Order filled'), findsOneWidget);
-    expect(find.text('Crash loop'), findsOneWidget);
-    expect(find.byType(AppToggle), findsNWidgets(18)); // 9 categories x 2
-    expect(find.text('Test Discord'), findsOneWidget);
-    expect(find.text('Test iOS push'), findsOneWidget);
-  });
+      expect(find.text('Order filled'), findsOneWidget);
+      expect(find.text('Crash loop'), findsOneWidget);
+      expect(find.byType(AppToggle), findsNWidgets(20)); // 10 categories x 2
+      expect(find.text('Test Discord'), findsOneWidget);
+      expect(find.text('Test iOS push'), findsOneWidget);
+    },
+  );
 
   testWidgets('tapping a toggle persists via the controller', (tester) async {
     final repo = _FakeRepo(_seed());
@@ -77,7 +85,9 @@ void main() {
     expect(repo.saveCount, greaterThanOrEqualTo(1));
   });
 
-  testWidgets('renders grouped sections with headers from API types', (tester) async {
+  testWidgets('renders grouped sections with headers from API types', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(1200, 4000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -85,8 +95,18 @@ void main() {
     const prefs = NotificationPrefs(
       categories: {'order_fill': CategoryRoute(discord: true, push: false)},
       types: [
-        NotificationType(key: 'order_fill', group: 'Trading', label: 'Order filled', desc: 'An order filled'),
-        NotificationType(key: 'halt', group: 'Risk & Halts', label: 'Halt', desc: 'Trading halted'),
+        NotificationType(
+          key: 'order_fill',
+          group: 'Trading',
+          label: 'Order filled',
+          desc: 'An order filled',
+        ),
+        NotificationType(
+          key: 'halt',
+          group: 'Risk & Halts',
+          label: 'Halt',
+          desc: 'Trading halted',
+        ),
       ],
     );
     await tester.pumpWidget(_app(_FakeRepo(prefs)));
@@ -97,7 +117,9 @@ void main() {
     expect(find.text('Halt'), findsOneWidget);
   });
 
-  testWidgets('empty devices shows instructions + enable button', (tester) async {
+  testWidgets('empty devices shows instructions + enable button', (
+    tester,
+  ) async {
     await tester.pumpWidget(_app(_FakeRepo(_seed())));
     await tester.pumpAndSettle();
     expect(find.text('No devices registered yet.'), findsOneWidget);
@@ -105,9 +127,19 @@ void main() {
   });
 
   testWidgets('lists a registered device', (tester) async {
-    await tester.pumpWidget(_app(_FakeRepo(_seed()), devices: const [
-      PushDevice(deviceToken: '0123456789abcdef', platform: 'ios', env: 'sandbox', lastSeen: '2026-06-11T00:00:00Z'),
-    ]));
+    await tester.pumpWidget(
+      _app(
+        _FakeRepo(_seed()),
+        devices: const [
+          PushDevice(
+            deviceToken: '0123456789abcdef',
+            platform: 'ios',
+            env: 'sandbox',
+            lastSeen: '2026-06-11T00:00:00Z',
+          ),
+        ],
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('…89abcdef'), findsOneWidget);
     expect(find.textContaining('IOS · sandbox'), findsOneWidget);

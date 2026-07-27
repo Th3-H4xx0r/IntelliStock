@@ -21,6 +21,11 @@ from benchmark_alpha.types import EventKind, RunPhase
 DB_NAME = "IntelliStock"
 EVENTS_TABLE = "AlphaEvents"
 STATE_TABLE = "AlphaState"
+EXPERIMENTS_TABLE = "AlphaExperiments"
+# Registrations and terminal outcomes are separate append-only rows in the
+# existing migrated table. Keep the alias for callers that name the logical
+# outcome stream; no second, undeclared production table is required.
+EXPERIMENT_OUTCOMES_TABLE = EXPERIMENTS_TABLE
 
 _CONNECT_TIMEOUT_SECONDS = 10
 
@@ -187,6 +192,32 @@ class _RethinkBackend:
         with self._conn_factory() as conn:
             return self._r.db(self._db).table(STATE_TABLE).get(key).run(conn)
 
+    def get_record(self, table, record_id):
+        with self._conn_factory() as conn:
+            return (
+                self._r.db(self._db).table(table).get(str(record_id)).run(conn)
+            )
+
+    def list_records(self, table, filters=None, order_field=None):
+        with self._conn_factory() as conn:
+            query = self._r.db(self._db).table(table)
+            if filters:
+                query = query.filter(
+                    {str(field): value for field, value in filters.items()}
+                )
+            if order_field:
+                query = query.order_by(str(order_field))
+            return list(query.run(conn))
+
+    def count_records(self, table, filters=None):
+        with self._conn_factory() as conn:
+            query = self._r.db(self._db).table(table)
+            if filters:
+                query = query.filter(
+                    {str(field): value for field, value in filters.items()}
+                )
+            return int(query.count().run(conn))
+
     def read_by_index(self, table, index, key, *, limit, cursor):
         """One bounded page over a compound index whose last component is
         ``as_of``. The cursor is an opaque boundary position (as_of + ids
@@ -207,7 +238,7 @@ class _RethinkBackend:
         try:
             with self._conn_factory() as conn:
                 tables = set(self._r.db(self._db).table_list().run(conn))
-            missing = {EVENTS_TABLE, STATE_TABLE} - tables
+            missing = {EVENTS_TABLE, STATE_TABLE, EXPERIMENTS_TABLE} - tables
             if missing:
                 return f"missing tables: {sorted(missing)}"
             return None
@@ -289,6 +320,110 @@ class AlphaRethinkStore:
         raise AlphaIntegrityError(
             f"record {doc.get('id')!r} in {table} already exists with "
             "divergent content")
+
+    # -- immutable experiment attempts ---------------------------------------
+
+    def _insert_immutable_doc(self, table, doc, operation):
+        try:
+            prior = self._backend.insert_record(
+                table, doc, durability="hard"
+            )
+        except (AlphaIntegrityError, AlphaUnavailableError):
+            raise
+        except Exception as exc:
+            raise AlphaUnavailableError(
+                f"{operation} failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        if prior is None:
+            return True
+        if canonical_json(prior) == canonical_json(doc):
+            return False
+        raise AlphaIntegrityError(
+            f"immutable record {doc.get('id')!r} in {table} already exists "
+            "with divergent content"
+        )
+
+    def insert_experiment_registration(self, registration):
+        from experiment_registry import RegisteredExperiment
+
+        if not isinstance(registration, RegisteredExperiment):
+            raise TypeError("registration must be a RegisteredExperiment")
+        return self._insert_immutable_doc(
+            EXPERIMENTS_TABLE,
+            registration.to_doc(),
+            "insert_experiment_registration",
+        )
+
+    def insert_experiment_outcome(self, outcome):
+        from experiment_registry import ExperimentOutcome
+
+        if not isinstance(outcome, ExperimentOutcome):
+            raise TypeError("outcome must be an ExperimentOutcome")
+        return self._insert_immutable_doc(
+            EXPERIMENT_OUTCOMES_TABLE,
+            outcome.to_doc(),
+            "insert_experiment_outcome",
+        )
+
+    def get_experiment_registration(self, experiment_id):
+        from experiment_registry import RegisteredExperiment
+
+        try:
+            row = self._backend.get_record(
+                EXPERIMENTS_TABLE, str(experiment_id)
+            )
+        except Exception as exc:
+            raise AlphaUnavailableError(
+                "get_experiment_registration failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        return RegisteredExperiment.from_doc(row) if row is not None else None
+
+    def get_experiment_outcome(self, experiment_id):
+        from experiment_registry import ExperimentOutcome
+
+        try:
+            row = self._backend.get_record(
+                EXPERIMENT_OUTCOMES_TABLE, f"{experiment_id}:terminal"
+            )
+        except Exception as exc:
+            raise AlphaUnavailableError(
+                f"get_experiment_outcome failed: {type(exc).__name__}: {exc}"
+            ) from exc
+        return ExperimentOutcome.from_doc(row) if row is not None else None
+
+    def list_experiment_registrations(self, scope=None):
+        from experiment_registry import RegisteredExperiment
+
+        filters = {"record_kind": "registration"}
+        if scope is not None:
+            filters["search_scope"] = str(scope)
+        try:
+            rows = self._backend.list_records(
+                EXPERIMENTS_TABLE,
+                filters,
+                "registered_at",
+            )
+        except Exception as exc:
+            raise AlphaUnavailableError(
+                "list_experiment_registrations failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        return tuple(RegisteredExperiment.from_doc(row) for row in rows)
+
+    def experiment_trial_count(self, scope=None):
+        filters = {"record_kind": "registration"}
+        if scope is not None:
+            filters["search_scope"] = str(scope)
+        try:
+            return self._backend.count_records(
+                EXPERIMENTS_TABLE,
+                filters,
+            )
+        except Exception as exc:
+            raise AlphaUnavailableError(
+                f"experiment_trial_count failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     # -- versioned state ------------------------------------------------------
 

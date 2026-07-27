@@ -9,16 +9,14 @@ class CategoryRoute {
   final bool push;
 
   factory CategoryRoute.fromJson(Map j) => CategoryRoute(
-        discord: j['discord'] as bool? ?? true,
-        push: j['push'] as bool? ?? false,
-      );
+    discord: j['discord'] as bool? ?? true,
+    push: j['push'] as bool? ?? false,
+  );
 
   Map<String, dynamic> toJson() => {'discord': discord, 'push': push};
 
-  CategoryRoute copyWith({bool? discord, bool? push}) => CategoryRoute(
-        discord: discord ?? this.discord,
-        push: push ?? this.push,
-      );
+  CategoryRoute copyWith({bool? discord, bool? push}) =>
+      CategoryRoute(discord: discord ?? this.discord, push: push ?? this.push);
 }
 
 /// Taxonomy metadata for one notification type (from the API `types` array).
@@ -35,11 +33,11 @@ class NotificationType {
   final String desc;
 
   factory NotificationType.fromJson(Map j) => NotificationType(
-        key: (j['key'] ?? '').toString(),
-        group: (j['group'] ?? 'Other').toString(),
-        label: (j['label'] ?? j['key'] ?? '').toString(),
-        desc: (j['desc'] ?? '').toString(),
-      );
+    key: (j['key'] ?? '').toString(),
+    group: (j['group'] ?? 'Other').toString(),
+    label: (j['label'] ?? j['key'] ?? '').toString(),
+    desc: (j['desc'] ?? '').toString(),
+  );
 }
 
 class NotificationPrefs {
@@ -69,10 +67,8 @@ class NotificationPrefs {
   }
 
   Map<String, dynamic> toJson() => {
-        'categories': {
-          for (final e in categories.entries) e.key: e.value.toJson(),
-        },
-      };
+    'categories': {for (final e in categories.entries) e.key: e.value.toJson()},
+  };
 
   /// Group names in first-appearance (display) order.
   List<String> get groupsInOrder {
@@ -101,7 +97,7 @@ class NotificationPrefs {
 /// Channel selector used by toggles + the send-test buttons.
 enum NotifChannel { discord, push }
 
-/// Display metadata for the 9 categories (ordered for the settings list).
+/// Fallback display metadata used when the API taxonomy is unavailable.
 class NotificationCategoryMeta {
   const NotificationCategoryMeta(this.key, this.label, this.description);
   final String key;
@@ -110,14 +106,46 @@ class NotificationCategoryMeta {
 }
 
 const kNotificationCategories = <NotificationCategoryMeta>[
-  NotificationCategoryMeta('order_submit', 'Order submitted', 'An order was sent to the broker'),
+  NotificationCategoryMeta(
+    'order_submit',
+    'Order submitted',
+    'An order was sent to the broker',
+  ),
   NotificationCategoryMeta('order_fill', 'Order filled', 'An order was filled'),
-  NotificationCategoryMeta('order_reject', 'Order rejected', 'The broker rejected an order'),
-  NotificationCategoryMeta('order_retry', 'Order retried', 'An order is being retried after a recoverable reject'),
-  NotificationCategoryMeta('strategy_start', 'Strategy start', 'A strategy fired its first run of the session'),
-  NotificationCategoryMeta('strategy_error', 'Strategy error', 'An unrecoverable strategy error occurred'),
+  NotificationCategoryMeta(
+    'order_reject',
+    'Order rejected',
+    'The broker rejected an order',
+  ),
+  NotificationCategoryMeta(
+    'order_retry',
+    'Order retried',
+    'An order is being retried after a recoverable reject',
+  ),
+  NotificationCategoryMeta(
+    'strategy_start',
+    'Strategy start',
+    'A strategy fired its first run of the session',
+  ),
+  NotificationCategoryMeta(
+    'strategy_error',
+    'Strategy error',
+    'An unrecoverable strategy error occurred',
+  ),
   NotificationCategoryMeta('halt', 'Halt', 'Live trading was halted'),
-  NotificationCategoryMeta('drawdown_halt', 'Drawdown halt', 'A drawdown risk-off guard tripped'),
-  NotificationCategoryMeta('crash_loop', 'Crash loop', 'The broker subprocess entered a crash loop'),
-  NotificationCategoryMeta('instance_crash', 'Instance crashed', 'An instance process died (not a Stop) and was held open for log capture'),
+  NotificationCategoryMeta(
+    'drawdown_halt',
+    'Drawdown halt',
+    'A drawdown risk-off guard tripped',
+  ),
+  NotificationCategoryMeta(
+    'crash_loop',
+    'Crash loop',
+    'The broker subprocess entered a crash loop',
+  ),
+  NotificationCategoryMeta(
+    'instance_crash',
+    'Instance crashed',
+    'An instance process died (not a Stop) and was held open for log capture',
+  ),
 ];

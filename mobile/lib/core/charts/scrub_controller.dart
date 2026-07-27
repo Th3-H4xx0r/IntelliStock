@@ -13,13 +13,15 @@ class ScrubSample {
 
   @override
   bool operator ==(Object other) =>
-      other is ScrubSample && other.index == index && other.fraction == fraction;
+      other is ScrubSample &&
+      other.index == index &&
+      other.fraction == fraction;
 
   @override
   int get hashCode => Object.hash(index, fraction);
 }
 
-/// Default haptic: the soft iOS "selection" tick, matching Robinhood's
+/// Default haptic: the soft iOS "selection" tick used by brokerage charts.
 /// per-data-point feel while scrubbing. Wrapped in a block body so the returned
 /// Future is intentionally discarded.
 void defaultScrubTick() {
@@ -34,8 +36,8 @@ void defaultScrubTick() {
 /// value while the finger moves — which is what removes the scrubbing jank.
 class ScrubController extends ValueNotifier<ScrubSample?> {
   ScrubController({VoidCallback? onTick})
-      : _onTick = onTick ?? defaultScrubTick,
-        super(null);
+    : _onTick = onTick ?? defaultScrubTick,
+      super(null);
 
   final VoidCallback _onTick;
 

@@ -66,7 +66,7 @@ def _build_alpaca(*, positions, wal, initial_value=10000.0, cash=10000.0, equity
 def test_scenario_1_first_boot_with_contaminated_broker():
     """Bad-test orders exist in the broker; WAL is empty.
 
-    The operator just relinked Robinhood; the account already has TSLA, NVDA,
+    The operator just linked an account that already has TSLA, NVDA,
     AAPL from prior testing. WAL has no rows because this is the strategy's
     first live boot. ALL 3 broker positions must be quarantined; _positions
     must be empty; _initial_value must be the operator-supplied baseline.

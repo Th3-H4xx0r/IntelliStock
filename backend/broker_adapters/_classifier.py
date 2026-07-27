@@ -118,9 +118,9 @@ def classify_broker_positions(
     # Defensive re-filter on prefix + retention so the classifier is safe
     # even if the caller didn't filter.
     #
-    # 0-A (bug-sweep 2026-05-28): EXCLUDE RH_DRY_RUN synthetic fills. _dry_run_submit
-    # writes a terminal 'filled' WAL row with broker_order_id 'dry-<uuid>' that was
-    # NEVER sent to the broker. Feeding it into classification or the _trades rebuild
+    # Exclude synthetic dry-run fills. A dry-run submit writes a terminal
+    # 'filled' WAL row with broker_order_id 'dry-<uuid>' that was never sent to
+    # the broker. Feeding it into classification or the _trades rebuild
     # would fabricate phantom positions, bogus recent_sell_block entries, and bad V32
     # entry anchors on a clean-room boot taken AFTER a dry-run cycle. Real fills carry
     # a genuine broker_order_id and are kept.
@@ -166,10 +166,7 @@ def classify_broker_positions(
             continue
         if qty <= 0:
             continue
-        # 2-D / Scope D C3: normalize dot->dash so a WAL symbol written in dot
-        # form (BRK.B) matches the dash-form key RH's instruments endpoint
-        # returns for the broker position (BRK-B). Read + write paths must agree
-        # or a share-class position stays quarantined as external (unsellable).
+        # Normalize dot->dash so WAL and broker share-class symbols match.
         symbol = normalize_broker_symbol(row.get("symbol"))
         if not symbol:
             continue
@@ -184,7 +181,7 @@ def classify_broker_positions(
         trades.append({
             "ticker": symbol,
             # Lowercase to match the convention every other _trades writer
-            # uses (alpaca.py:1396, robinhood.py:1640/2407, _seed_trades_from_broker).
+            # uses throughout the strategy runtime.
             # Strategy consumers do bare-equality `action == "buy"`
             # (graph_nexus_analysis.py:16365 and others); uppercase would
             # silently disable V32 risk pipeline for WAL-seeded positions.

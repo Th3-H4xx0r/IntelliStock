@@ -80,7 +80,8 @@ class _TodaysMoversStrip extends ConsumerWidget {
           scrollDirection: Axis.horizontal,
           itemCount: movers.length,
           separatorBuilder: (_, _) => const SizedBox(width: 8),
-          itemBuilder: (_, i) => _MoverChip(mover: movers[i], brokerageId: brokerageId),
+          itemBuilder: (_, i) =>
+              _MoverChip(mover: movers[i], brokerageId: brokerageId),
         ),
       ),
     );
@@ -98,8 +99,10 @@ class _MoverChip extends StatelessWidget {
     final c = up ? AppColors.success : AppColors.danger;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => context.push('/stock/${mover.symbol}',
-          extra: StockScreenArgs(brokerageId: brokerageId)),
+      onTap: () => context.push(
+        '/stock/${mover.symbol}',
+        extra: StockScreenArgs(brokerageId: brokerageId),
+      ),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
         decoration: BoxDecoration(
@@ -110,13 +113,21 @@ class _MoverChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(mover.symbol,
-                style: AppTextStyles.micro
-                    .copyWith(color: AppColors.textHi, fontWeight: FontWeight.w700)),
+            Text(
+              mover.symbol,
+              style: AppTextStyles.micro.copyWith(
+                color: AppColors.textHi,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
             const SizedBox(width: 6),
-            Text('${up ? '▲' : '▼'} ${fmtPct(mover.pct)}',
-                style: AppTextStyles.micro
-                    .copyWith(color: c, fontWeight: FontWeight.w700)),
+            Text(
+              '${up ? '▲' : '▼'} ${fmtPct(mover.pct)}',
+              style: AppTextStyles.micro.copyWith(
+                color: c,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ],
         ),
       ),
@@ -176,12 +187,19 @@ class _DayPnlValue extends StatelessWidget {
         const SizedBox(height: 2),
         Row(
           children: [
-            Icon(up ? symbol('trending_up') : symbol('trending_down'),
-                size: 13, color: c),
+            Icon(
+              up ? symbol('trending_up') : symbol('trending_down'),
+              size: 13,
+              color: c,
+            ),
             const SizedBox(width: 3),
-            Text(fmtPct(d.pct),
-                style: AppTextStyles.micro
-                    .copyWith(color: c, fontWeight: FontWeight.w700)),
+            Text(
+              fmtPct(d.pct),
+              style: AppTextStyles.micro.copyWith(
+                color: c,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ],
         ),
       ],
@@ -234,17 +252,20 @@ class _DiversificationValue extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.baseline,
           textBaseline: TextBaseline.alphabetic,
           children: [
-            Text('${s.score}',
-                style: AppTextStyles.valueLg.copyWith(color: c)),
-            Text(' /100',
-                style: AppTextStyles.micro.copyWith(color: AppColors.textFaint)),
+            Text('${s.score}', style: AppTextStyles.valueLg.copyWith(color: c)),
+            Text(
+              ' /100',
+              style: AppTextStyles.micro.copyWith(color: AppColors.textFaint),
+            ),
           ],
         ),
         const SizedBox(height: 2),
-        Text('Top ${s.topWeight.round()}% · ${s.count} holdings',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: AppTextStyles.micro.copyWith(color: AppColors.textMuted)),
+        Text(
+          'Top ${s.topWeight.round()}% · ${s.count} holdings',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AppTextStyles.micro.copyWith(color: AppColors.textMuted),
+        ),
       ],
     );
   }
@@ -277,14 +298,23 @@ class _RiskCard extends ConsumerWidget {
               Row(
                 children: [
                   Expanded(
-                      child: _riskMetric(
-                          'Volatility', '${r.volatility.round()}%')),
+                    child: _riskMetric(
+                      'Volatility',
+                      '${r.volatility.round()}%',
+                    ),
+                  ),
                   Expanded(
-                      child: _riskMetric(
-                          'Max drawdown', '${r.maxDrawdown.round()}%')),
+                    child: _riskMetric(
+                      'Max drawdown',
+                      '${r.maxDrawdown.round()}%',
+                    ),
+                  ),
                   Expanded(
-                      child: _riskMetric('Sharpe',
-                          r.sharpe == null ? '—' : r.sharpe!.toStringAsFixed(2))),
+                    child: _riskMetric(
+                      'Sharpe',
+                      r.sharpe == null ? '—' : r.sharpe!.toStringAsFixed(2),
+                    ),
+                  ),
                 ],
               ),
           ],
@@ -294,22 +324,26 @@ class _RiskCard extends ConsumerWidget {
   }
 
   Widget _riskMetric(String label, String value) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.value.copyWith(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 3),
-          Text(label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
-        ],
-      );
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        value,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AppTextStyles.value.copyWith(fontWeight: FontWeight.w700),
+      ),
+      const SizedBox(height: 3),
+      Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+      ),
+    ],
+  );
 }
 
-// ── Sector allocation — metallic gradient donut (Robinhood-style) ────────────
+// ── Sector allocation — metallic gradient donut ──────────────────────────────
 
 class _SectorAllocationCard extends ConsumerWidget {
   const _SectorAllocationCard({required this.brokerageId});
@@ -334,7 +368,9 @@ class _SectorAllocationCard extends ConsumerWidget {
             if (slices == null)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 20),
-                child: Center(child: Skeleton(width: 180, height: 180, radius: 90)),
+                child: Center(
+                  child: Skeleton(width: 180, height: 180, radius: 90),
+                ),
               )
             else
               // Sorted desc by aggregateBySector, so index 0 is the largest.
@@ -345,7 +381,6 @@ class _SectorAllocationCard extends ConsumerWidget {
     );
   }
 }
-
 
 // ── Market indices — horizontal sparkline cards (S&P / Nasdaq / Dow / RUT) ───
 
@@ -387,16 +422,19 @@ class _IndexCard extends StatelessWidget {
       child: GlassCard(
         frosted: true,
         padding: const EdgeInsets.all(14),
-        onTap: () => context.push('/stock/${quote.symbol}',
-            extra: const StockScreenArgs()),
+        onTap: () => context.push(
+          '/stock/${quote.symbol}',
+          extra: const StockScreenArgs(),
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(quote.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style:
-                    AppTextStyles.bodyHi.copyWith(fontWeight: FontWeight.w700)),
+            Text(
+              quote.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.bodyHi.copyWith(fontWeight: FontWeight.w700),
+            ),
             const SizedBox(height: 10),
             SizedBox(
               height: 40,
@@ -406,17 +444,22 @@ class _IndexCard extends StatelessWidget {
               ),
             ),
             const Spacer(),
-            Text(level != null ? _fmtLevel(level) : '—',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style:
-                    AppTextStyles.value.copyWith(fontWeight: FontWeight.w800)),
+            Text(
+              level != null ? _fmtLevel(level) : '—',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.value.copyWith(fontWeight: FontWeight.w800),
+            ),
             const SizedBox(height: 2),
-            Text('${up ? '▲' : '▼'} ${fmtPct(quote.pct)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AppTextStyles.micro
-                    .copyWith(color: c, fontWeight: FontWeight.w700)),
+            Text(
+              '${up ? '▲' : '▼'} ${fmtPct(quote.pct)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.micro.copyWith(
+                color: c,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ],
         ),
       ),
@@ -534,10 +577,12 @@ class _SectorPerfRow extends StatelessWidget {
         children: [
           SizedBox(
             width: 108,
-            child: Text(quote.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AppTextStyles.micro.copyWith(color: AppColors.textMd)),
+            child: Text(
+              quote.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTextStyles.micro.copyWith(color: AppColors.textMd),
+            ),
           ),
           Expanded(
             child: ClipRRect(
@@ -553,10 +598,14 @@ class _SectorPerfRow extends StatelessWidget {
           const SizedBox(width: 10),
           SizedBox(
             width: 58,
-            child: Text(fmtPct(quote.pct),
-                textAlign: TextAlign.right,
-                style: AppTextStyles.micro
-                    .copyWith(color: c, fontWeight: FontWeight.w700)),
+            child: Text(
+              fmtPct(quote.pct),
+              textAlign: TextAlign.right,
+              style: AppTextStyles.micro.copyWith(
+                color: c,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ),
         ],
       ),
@@ -594,16 +643,20 @@ class _MarketMoversCard extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
-                      child: _MoverColumn(
-                          title: 'Gainers',
-                          movers: data.gainers,
-                          brokerageId: brokerageId)),
+                    child: _MoverColumn(
+                      title: 'Gainers',
+                      movers: data.gainers,
+                      brokerageId: brokerageId,
+                    ),
+                  ),
                   const SizedBox(width: 12),
                   Expanded(
-                      child: _MoverColumn(
-                          title: 'Losers',
-                          movers: data.losers,
-                          brokerageId: brokerageId)),
+                    child: _MoverColumn(
+                      title: 'Losers',
+                      movers: data.losers,
+                      brokerageId: brokerageId,
+                    ),
+                  ),
                 ],
               ),
           ],
@@ -614,8 +667,11 @@ class _MarketMoversCard extends ConsumerWidget {
 }
 
 class _MoverColumn extends StatelessWidget {
-  const _MoverColumn(
-      {required this.title, required this.movers, required this.brokerageId});
+  const _MoverColumn({
+    required this.title,
+    required this.movers,
+    required this.brokerageId,
+  });
   final String title;
   final List<MarketMover> movers;
   final String brokerageId;
@@ -625,32 +681,42 @@ class _MoverColumn extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title.toUpperCase(),
-            style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+        Text(
+          title.toUpperCase(),
+          style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+        ),
         const SizedBox(height: 6),
         for (final m in movers.take(5))
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => context.push('/stock/${m.symbol}',
-                extra: const StockScreenArgs()),
+            onTap: () => context.push(
+              '/stock/${m.symbol}',
+              extra: const StockScreenArgs(),
+            ),
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 4),
               child: Row(
                 children: [
                   Expanded(
-                    child: Text(m.symbol,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: AppTextStyles.micro.copyWith(
-                            color: AppColors.textHi,
-                            fontWeight: FontWeight.w700)),
-                  ),
-                  Text(fmtPct(m.pct),
+                    child: Text(
+                      m.symbol,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: AppTextStyles.micro.copyWith(
-                          color: (m.pct ?? 0) >= 0
-                              ? AppColors.success
-                              : AppColors.danger,
-                          fontWeight: FontWeight.w700)),
+                        color: AppColors.textHi,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    fmtPct(m.pct),
+                    style: AppTextStyles.micro.copyWith(
+                      color: (m.pct ?? 0) >= 0
+                          ? AppColors.success
+                          : AppColors.danger,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -694,20 +760,25 @@ class _NexusMomentumCard extends ConsumerWidget {
             for (final p in picks.take(10))
               GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => context.push('/stock/${p.symbol}',
-                    extra: StockScreenArgs(brokerageId: brokerageId)),
+                onTap: () => context.push(
+                  '/stock/${p.symbol}',
+                  extra: StockScreenArgs(brokerageId: brokerageId),
+                ),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 5),
                   child: Row(
                     children: [
                       SizedBox(
                         width: 64,
-                        child: Text(p.symbol,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: AppTextStyles.micro.copyWith(
-                                color: AppColors.textHi,
-                                fontWeight: FontWeight.w700)),
+                        child: Text(
+                          p.symbol,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTextStyles.micro.copyWith(
+                            color: AppColors.textHi,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                       ),
                       Expanded(
                         child: ClipRRect(
@@ -717,10 +788,12 @@ class _NexusMomentumCard extends ConsumerWidget {
                                 ? (p.score.abs() / maxScore).clamp(0.0, 1.0)
                                 : 0.0,
                             minHeight: 5,
-                            backgroundColor:
-                                Colors.white.withValues(alpha: 0.06),
+                            backgroundColor: Colors.white.withValues(
+                              alpha: 0.06,
+                            ),
                             valueColor: const AlwaysStoppedAnimation<Color>(
-                                AppColors.primary),
+                              AppColors.primary,
+                            ),
                           ),
                         ),
                       ),
@@ -771,11 +844,15 @@ class _MarketNewsCard extends ConsumerWidget {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(a.title,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: AppTextStyles.bodyHi.copyWith(
-                                      fontWeight: FontWeight.w600, height: 1.3)),
+                              Text(
+                                a.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: AppTextStyles.bodyHi.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.3,
+                                ),
+                              ),
                               const SizedBox(height: 3),
                               Text(
                                 [
@@ -783,8 +860,9 @@ class _MarketNewsCard extends ConsumerWidget {
                                   if (a.publishedAt != null)
                                     fmtRelative(a.publishedAt),
                                 ].join('  ·  '),
-                                style: AppTextStyles.nano
-                                    .copyWith(color: AppColors.textDim),
+                                style: AppTextStyles.nano.copyWith(
+                                  color: AppColors.textDim,
+                                ),
                               ),
                             ],
                           ),
@@ -792,8 +870,11 @@ class _MarketNewsCard extends ConsumerWidget {
                         const SizedBox(width: 8),
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
-                          child: Icon(symbol('arrow_forward'),
-                              size: 13, color: AppColors.textFaint),
+                          child: Icon(
+                            symbol('arrow_forward'),
+                            size: 13,
+                            color: AppColors.textFaint,
+                          ),
                         ),
                       ],
                     ),
@@ -820,15 +901,17 @@ Future<void> _openInAppBrowser(String url) async {
   } catch (_) {
     try {
       await launchUrl(uri);
-    } catch (_) {/* give up silently */}
+    } catch (_) {
+      /* give up silently */
+    }
   }
 }
 
 Widget _tileLabel(String s) => Text(
-      s,
-      style: AppTextStyles.nano.copyWith(
-        color: AppColors.textFaint,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0.8,
-      ),
-    );
+  s,
+  style: AppTextStyles.nano.copyWith(
+    color: AppColors.textFaint,
+    fontWeight: FontWeight.w700,
+    letterSpacing: 0.8,
+  ),
+);

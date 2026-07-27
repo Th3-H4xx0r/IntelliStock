@@ -1,6 +1,6 @@
 """Fernet-based credential store.
 
-Secrets (Alpaca API key/secret, Robinhood tokens) are Fernet-encrypted before
+Secrets (including Alpaca API keys) are Fernet-encrypted before
 write to the BrokerageAccounts RethinkDB rows. The key is loaded from the
 INTELLISTOCK_CRED_KEY env var; the repo never contains it.
 
@@ -73,6 +73,21 @@ def decrypt(stored: Optional[str]) -> Optional[str]:
         return _fernet().decrypt(stored[len(_TAG):].encode("utf-8")).decode("utf-8")
     except InvalidToken:
         raise
+
+
+def decrypt_required(stored: str | None, *, field: str) -> str:
+    """Decrypt a required credential without accepting legacy plaintext.
+
+    ``decrypt`` remains deliberately backward-compatible for callers that
+    participate in the staged data migration.  Credential-consuming paths use
+    this stricter boundary once their table has been migrated.
+    """
+    if not is_encrypted(stored):
+        raise RuntimeError(f"{field}: plaintext secret is forbidden")
+    value = decrypt(stored)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"{field}: decrypted secret is empty")
+    return value
 
 
 def is_encrypted(stored: Optional[str]) -> bool:

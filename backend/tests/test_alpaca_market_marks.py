@@ -186,6 +186,41 @@ def test_base_adapter_without_book_returns_empty_marks():
         BrokerAdapter.get_market_marks, "__isabstractmethod__") else True
 
 
+def test_adapter_market_stream_shares_authoritative_mark_book(
+    alpaca_adapter, monkeypatch
+):
+    import alpaca_mark_stream
+
+    created = []
+
+    class StubMarkStream:
+        def __init__(self, book, **_kwargs):
+            self.book = book
+            self.symbols = set()
+            self.started = False
+            created.append(self)
+
+        def set_symbols(self, symbols):
+            self.symbols = {str(symbol).upper() for symbol in symbols}
+
+        def start(self):
+            self.started = True
+
+        def subscribed_symbols(self):
+            return set(self.symbols)
+
+        def overflow_symbols(self):
+            return set()
+
+    monkeypatch.setattr(alpaca_mark_stream, "AlpacaMarkStream", StubMarkStream)
+
+    status = alpaca_adapter.start_market_marks(["AAPL", "MSFT"])
+
+    assert created[0].book is alpaca_adapter._market_marks
+    assert created[0].started is True
+    assert status["subscribed"] == ("AAPL", "MSFT")
+
+
 # --- AlpacaMarkStream -------------------------------------------------------
 
 class FakeStream:

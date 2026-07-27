@@ -112,6 +112,8 @@ def test_openrouter_list_models_passes_base_url(app_client):
 def test_action_create_model_persists_openrouter_fields(monkeypatch):
     import interactive_utils as iu
     from unittest.mock import MagicMock
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("INTELLISTOCK_CRED_KEY", Fernet.generate_key().decode())
     fake_r = MagicMock()
     fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
     monkeypatch.setattr(iu, "r", fake_r)

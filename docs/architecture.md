@@ -1,7 +1,7 @@
 # Architecture
 
 IntelliStock is a multi-container application orchestrated by Docker
-Compose. Eight services run by default; a ninth (Discord bot) is
+Compose. Seven services run by default; an eighth (Discord bot) is
 optional. This page maps out which service does what, where the data
 lives, and how a single trade flows from the dashboard to the broker.
 
@@ -21,9 +21,7 @@ flowchart LR
     PE[Price service<br/>price_engine.py] --> RDB
     BE_E[Backtest engine<br/>backtest_engine.py] --> RDB
     BE_E -->|spawn| BT
-    CR[Credential refresher<br/>credential_service.py] --> RDB
-
-    INST --> BRK{{Brokerage APIs<br/>Alpaca / Robinhood}}
+    INST --> BRK{{Brokerage APIs<br/>Alpaca / Kalshi / Binance.US}}
     INST --> RDB
     BT -->|fills + P&L| RDB
 
@@ -43,12 +41,10 @@ flowchart LR
 | `neo4j`              | `neo4j:5.15.0`       | Graph database for the Graph Nexus.                                        |
 | `price-service`      | `intellistock-backend` | Polls live quotes; writes ticks to RethinkDB.                            |
 | `backtest-engine`    | `intellistock-backend` | Concurrency-gated harness. Spawns ephemeral backtest containers.         |
-| `credential-service` | `intellistock-backend` | Auto-refreshes Robinhood tokens 30 min before expiry.                    |
 | `discord-bot` *(optional)* | `intellistock-backend` | CLI parity over Discord. Disabled if `DISCORD_BOT_TOKEN` is empty. |
 
-The five `intellistock-backend`-image services share one image build; only
-the entrypoint differs. The image is built once by the `backend` service
-in `docker-compose.yml`.
+The backend-image services share one image build; only the entrypoint differs.
+The image is built once by the `backend` service in `docker-compose.yml`.
 
 ## Data stores
 
@@ -151,7 +147,7 @@ same code in both modes.
 | `backend/api/main.py` REST surface    | broker logic (API just reads/writes RethinkDB)        |
 | Strategy modules in `backend/strategies/` | broker code (strategies are pure decision logic)  |
 | Graph Nexus phases in `backend/engines/nexus_graph_engine.py` | strategies (strategies *consume* the graph; the engine *builds* it) |
-| Brokerage adapters in `backend/broker_adapters/` | broker.py (broker.py speaks the adapter interface, not Alpaca/Robinhood APIs directly) |
+| Brokerage adapters in `backend/broker_adapters/` | broker.py (broker.py speaks the adapter interface, not provider APIs directly) |
 
 ## See also
 

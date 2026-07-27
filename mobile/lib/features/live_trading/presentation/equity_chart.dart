@@ -104,8 +104,10 @@ class _EquityChartState extends State<EquityChart> {
 
     final color = _lineColor;
     final n = pts.length;
-    final plotHeight =
-        (widget.height - _labelRowHeight).clamp(40.0, widget.height);
+    final plotHeight = (widget.height - _labelRowHeight).clamp(
+      40.0,
+      widget.height,
+    );
     final bounds = paddedBounds([for (final p in pts) p.value]);
 
     final chart = _chartFor(pts, color, bounds);
@@ -114,7 +116,9 @@ class _EquityChartState extends State<EquityChart> {
     final useTimeAxis =
         widget.range == '1D' && widget.style != ChartStyle.candle;
     final labels = useTimeAxis
-        ? [for (final h in [0, 6, 12, 18, 24]) hourAmPm(h)]
+        ? [
+            for (final h in [0, 6, 12, 18, 24]) hourAmPm(h),
+          ]
         : [
             for (final i in evenlySpacedLabelIndices(n, 4))
               formatChartDate(pts[i].ts, widget.range),
@@ -236,7 +240,7 @@ class _EquityChartState extends State<EquityChart> {
     final isLine = widget.style == ChartStyle.line;
     // Reached only for area/line (candle returns above). 1D plots against a
     // fixed full-day [0,1440]-minute axis so the line fills only the elapsed
-    // part of the day (Robinhood overnight style).
+    // part of the day.
     final useTimeAxis = widget.range == '1D';
     num xOf(_ChartPoint d) => useTimeAxis ? _minuteOfDay(d.ts) : d.x;
     return SfCartesianChart(
@@ -343,7 +347,13 @@ class RangeStats {
 
   static RangeStats from(PortfolioHistory? h) {
     if (h == null || h.values.length < 2) {
-      return const RangeStats(high: null, low: null, dollars: 0, pct: 0, isUp: true);
+      return const RangeStats(
+        high: null,
+        low: null,
+        dollars: 0,
+        pct: 0,
+        isUp: true,
+      );
     }
     final vs = h.values;
     final start = vs.first;
@@ -375,7 +385,14 @@ class _ChartPoint {
 }
 
 class _CandlePoint {
-  const _CandlePoint(this.x, this.open, this.high, this.low, this.close, this.ts);
+  const _CandlePoint(
+    this.x,
+    this.open,
+    this.high,
+    this.low,
+    this.close,
+    this.ts,
+  );
   final int x;
   final double open, high, low, close;
   final DateTime ts;

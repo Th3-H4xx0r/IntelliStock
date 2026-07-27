@@ -21,11 +21,6 @@ watch(() => props.brokerages, (next) => {
   if (next.length === 1 && !selectedBrokerage.value) selectedBrokerage.value = next[0].id
 }, { immediate: true })
 
-const selectedBrokerageType = computed(() => {
-  const b = props.brokerages.find(x => x.id === selectedBrokerage.value)
-  return b ? b.brokerage_type : ''
-})
-
 function _normalizeError(data, status) {
   const d = data?.detail
   if (Array.isArray(d)) return d.map(x => (x && (x.msg || x.message)) || JSON.stringify(x)).join('; ')
@@ -137,17 +132,6 @@ const canLink = computed(() => props.instances.length > 0 && props.brokerages.le
           </select>
         </div>
       </div>
-
-      <p
-        v-if="canLink && selectedBrokerageType === 'robinhood'"
-        class="text-[11px] text-amber-400 flex items-start gap-1.5 leading-snug"
-      >
-        <span class="material-symbols-outlined text-[14px] mt-0.5">warning</span>
-        <span>
-          <strong>Heads up:</strong> Robinhood automation is unofficial and can result in account suspension or banning.
-          The adapter starts with <code class="font-mono">RH_DRY_RUN=true</code> until you flip it.
-        </span>
-      </p>
 
       <Transition name="step">
         <div v-if="submitMsg" class="rounded-lg px-3 py-2.5 text-sm font-medium"

@@ -11,7 +11,7 @@ def test_build_audit_row_shape():
     boot_at = datetime(2026, 5, 28, 14, 0, tzinfo=timezone.utc)
     row = build_audit_row(
         instance_id="main",
-        broker_type="robinhood",
+        broker_type="alpaca",
         mode="clean_room",
         broker_cash_at_boot=9876.54,
         broker_positions_total=3,
@@ -30,7 +30,7 @@ def test_build_audit_row_shape():
     assert row["id"] == f"main|{boot_at.isoformat()}"
     assert row["instance_id"] == "main"
     assert row["mode"] == "clean_room"
-    assert row["broker_type"] == "robinhood"
+    assert row["broker_type"] == "alpaca"
     assert row["strategy_owned_count"] == 1
     assert row["strategy_owned_tickers"] == ["TSLA"]
     assert row["external_count"] == 1

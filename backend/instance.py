@@ -23,7 +23,6 @@ from datetime import datetime
 from os import system
 
 from rethinkdb import RethinkDB
-import socketio
 from dotenv import load_dotenv
 
 from intellistock_logger import intellistock_logger
@@ -81,7 +80,7 @@ def _maybe_start_alpha_watchdog(instance_id_val):
     (Task 6 Step 9). Restart-safe: any prior watchdog is stopped first."""
     global alpha_watchdog_process
     if os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") != "1":
-        return
+        return False
     _stop_alpha_watchdog()
     try:
         from benchmark_alpha.watchdog import build_watchdog_command
@@ -92,10 +91,33 @@ def _maybe_start_alpha_watchdog(instance_id_val):
         atexit.register(_stop_alpha_watchdog)
         intellistock_logger.log(
             "Started alpha mark watchdog subprocess", "green", service="INSTANCE")
+        return True
     except Exception as _wd_exc:
         intellistock_logger.log(
-            f"Alpha watchdog failed to start (non-fatal): {_wd_exc}",
-            "yellow", service="INSTANCE")
+            f"Alpha watchdog failed to start: {_wd_exc}",
+            "red", service="INSTANCE")
+        return False
+
+
+def _assert_watchdog_preflight() -> None:
+    """Reject funded Alpaca startup before Popen if watchdog wiring is absent."""
+
+    if os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") != "1":
+        raise RuntimeError("funded Alpaca requires ALPHA_MARK_WATCHDOG_ENABLED=1")
+    missing = [
+        name
+        for name in (
+            "ALPACA_WATCHDOG_KEY",
+            "ALPACA_WATCHDOG_SECRET",
+            "RETHINKDB_HOST",
+        )
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "funded Alpaca watchdog prerequisites are incomplete: "
+            + ",".join(missing)
+        )
 current_symbols = []   # list of symbols the broker was started with
 current_granularity_time_increment = '60'  # from Instances[instance_id].granularity_time_increment
 instance_key = ''      # from Instances[instance_id].key (loaded from DB)
@@ -344,6 +366,45 @@ def get_symbols_for_instance(conn, instance_id):
         return []
 
 
+def _assert_live_broker_start_allowed(instance_id, instance_doc):
+    """Validate the persisted, fingerprinted report immediately before spawn."""
+    from live_readiness import assert_live_start_allowed, report_from_mapping
+
+    report = report_from_mapping(
+        (instance_doc or {}).get("live_readiness_report"),
+        instance_id=str(instance_id),
+    )
+    assert_live_start_allowed(
+        report,
+        deployed_artifact_hash=os.environ.get("INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256"),
+    )
+
+
+def _load_instance_and_brokerage(instance_id):
+    """Read the exact linked stock brokerage immediately before broker spawn."""
+    connection = get_conn()
+    try:
+        instance = (
+            r.db(DB_NAME).table("Instances").get(str(instance_id))
+            .run(connection)
+        )
+        if type(instance) is not dict or instance.get("id") != str(instance_id):
+            raise RuntimeError("instance configuration is unavailable")
+        brokerage_id = instance.get("brokerage_id")
+        if type(brokerage_id) is not str or not brokerage_id:
+            raise RuntimeError("linked brokerage is unavailable")
+        brokerage = (
+            r.db(DB_NAME).table("BrokerageAccounts").get(brokerage_id)
+            .run(connection)
+        )
+        if (type(brokerage) is not dict
+                or brokerage.get("id") != brokerage_id):
+            raise RuntimeError("linked brokerage is unavailable")
+        return instance, brokerage
+    finally:
+        safe_close(connection)
+
+
 def start_broker(symbols):
     """Start a single broker process with all tickers.
 
@@ -412,15 +473,18 @@ def start_broker(symbols):
     # broker. Dispatch on the Instances row's 'kind'. Equities instances (no
     # 'kind') take the unchanged broker.py path below.
     _kind = None
+    _instance_doc = None
+    _brokerage_doc = None
     try:
-        _kc = get_conn()
-        try:
-            _kdoc = r.db(DB_NAME).table('Instances').get(instance_id).run(_kc) or {}
-            _kind = _kdoc.get('kind')
-        finally:
-            safe_close(_kc)
-    except Exception:
-        _kind = None
+        _instance_doc, _brokerage_doc = _load_instance_and_brokerage(
+            instance_id)
+        _kind = _instance_doc.get('kind')
+    except Exception as exc:
+        intellistock_logger.log(
+            f"Broker start blocked: instance configuration unavailable ({type(exc).__name__})",
+            "red", service="INSTANCE",
+        )
+        return
 
     if _kind == 'kalshi':
         # kalshi/runner.py reads kalshi_config + linked brokerage from the DB.
@@ -436,12 +500,45 @@ def start_broker(symbols):
             'python', 'broker.py', instance_id, 'live',
             'NULL', 'NULL', time_increment,
         ] + list(symbols)
+    from live_readiness import brokerage_requires_live_gate
+    _requires_live_gate = (
+        _kind == "kalshi"
+        or brokerage_requires_live_gate(
+            _instance_doc, _brokerage_doc, environ=os.environ
+        )
+    )
+    _funded_alpaca = (
+        _kind != "kalshi"
+        and str(_brokerage_doc.get("brokerage_type") or "").lower()
+        == "alpaca"
+        and _brokerage_doc.get("alpaca_paper") is False
+    )
+    if _requires_live_gate:
+        _assert_live_broker_start_allowed(instance_id, _instance_doc)
+    if _funded_alpaca:
+        _assert_watchdog_preflight()
+    broker_env = os.environ.copy()
+    broker_env.pop("INSTANCE_SOCKET_SUPERVISOR_TOKEN", None)
     broker_process = subprocess.Popen(
         cmd,
         cwd=BACKEND_DIR,
         creationflags=0,  # same terminal (no CREATE_NEW_CONSOLE)
+        env=broker_env,
     )
-    _maybe_start_alpha_watchdog(instance_id)
+    _watchdog_started = False
+    if (
+        _kind != "kalshi"
+        and str(_brokerage_doc.get("brokerage_type") or "").lower()
+        == "alpaca"
+    ):
+        _watchdog_started = _maybe_start_alpha_watchdog(instance_id)
+    if _funded_alpaca and not _watchdog_started:
+        try:
+            broker_process.terminate()
+            broker_process.wait(timeout=10)
+        finally:
+            broker_process = None
+        raise RuntimeError("funded Alpaca broker stopped: watchdog failed")
     if symbols:
         intellistock_logger.log(
             f"Started broker with {len(symbols)} ticker(s): {', '.join(symbols)} (secrets read from DB)",
@@ -581,43 +678,6 @@ def run():
         os._exit(1)
     finally:
         safe_close(conn)
-
-    sio = socketio.Client()
-
-    def socketIO():
-        @sio.event
-        def connect():
-            intellistock_logger.log("Connection established to socket server", "green", service="SOCKET")
-            sio.emit('clientType', {"UUID": args_list[1], "instance": args_list[1], "symbol": None})
-
-        @sio.event
-        def terminate(data):
-            if data.get('terminate') is True:
-                intellistock_logger.log("Terminate received from server", "yellow", service="SOCKET")
-                os._exit(0)
-
-        @sio.event
-        def disconnect():
-            intellistock_logger.log("Disconnected from server", "yellow", service="SOCKET")
-
-        server_url = os.environ.get('SERVER_URL', 'http://localhost:5000')
-        time.sleep(2)
-        max_attempts = 8
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if attempt > 1:
-                    time.sleep(2)
-                sio.connect(server_url, transports=['polling'])
-                break
-            except Exception as e:
-                if attempt == max_attempts:
-                    intellistock_logger.log(f"Socket connection failed after {max_attempts} attempts: {e}", "red", service="SOCKET")
-                    raise
-                intellistock_logger.log(f"Socket connect attempt {attempt}/{max_attempts} failed, retrying: {e}", "yellow", service="SOCKET")
-        sio.wait()
-
-    socket_thread = threading.Thread(target=socketIO, daemon=True)
-    socket_thread.start()
 
     intellistock_logger.log("Service starting", "yellow", service="SERVER")
     service_status = 0

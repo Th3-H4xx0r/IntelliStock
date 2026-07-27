@@ -28,7 +28,7 @@ from typing import Any, Callable
 CACHE: dict[str, Any] = {
     "cursors": {},            # symbol -> int (bars consumed: bars[:idx] all <= current)
     "last_current_utc": None,  # for rewind detection
-    "filtered": {},           # symbol -> {"bars": [well-formed bars], "src_len": int}
+    "filtered": {},           # symbol -> {"entries": [(bar, available_at)], "src_len": int}
 }
 
 
@@ -42,17 +42,22 @@ def invalidate() -> None:
 def latest_price_at(
     data: dict,
     symbols,
-    current_utc,
+    available_through,
     *,
     bar_time_to_datetime: Callable,
+    bar_available_at: Callable,
 ) -> dict:
-    """Return ``{symbol: float(close)}`` for the latest bar with ``t <=
-    current_utc`` (non-daily). Symbols with no eligible bar are omitted.
+    """Return the latest close whose availability is at/before the clock.
 
-    ``current_utc`` must be a naive-UTC datetime (as produced by broker's
-    ``_current_time_to_utc``). ``bar_time_to_datetime`` converts a bar's ``t``
-    to naive UTC or None for malformed bars.
+    ``available_through`` and every result from ``bar_available_at`` must be
+    timezone-aware.  A bar label alone never establishes eligibility.
     """
+    from event_time import aware_utc
+
+    current_utc = aware_utc(
+        available_through,
+        field="available_through",
+    )
     out: dict = {}
     last = CACHE.get("last_current_utc")
     if last is not None and current_utc < last:
@@ -66,30 +71,50 @@ def latest_price_at(
         n = len(bars)
         f = filtered.get(sym)
         if f is None:
-            f = {"bars": [], "src_len": 0}
+            f = {"entries": [], "src_len": 0}
             filtered[sym] = f
         if f["src_len"] < n:
             # Extend the malformed-stripped view with newly-appended bars.
             for j in range(f["src_len"], n):
-                if bar_time_to_datetime(bars[j].get("t")) is not None:
-                    f["bars"].append(bars[j])
+                bar = bars[j]
+                if bar_time_to_datetime(bar.get("t")) is None:
+                    continue
+                try:
+                    available = aware_utc(
+                        bar_available_at(bar),
+                        field="bar_available_at",
+                    )
+                except (TypeError, ValueError):
+                    continue
+                f["entries"].append((bar, available))
             f["src_len"] = n
         elif f["src_len"] > n:
             # Source shrank/replaced-shorter: rebuild and reset this cursor.
-            f["bars"] = [b for b in bars if bar_time_to_datetime(b.get("t")) is not None]
+            f["entries"] = []
+            for bar in bars:
+                if bar_time_to_datetime(bar.get("t")) is None:
+                    continue
+                try:
+                    available = aware_utc(
+                        bar_available_at(bar),
+                        field="bar_available_at",
+                    )
+                except (TypeError, ValueError):
+                    continue
+                f["entries"].append((bar, available))
             f["src_len"] = n
             cursors[sym] = 0
 
-        clean = f["bars"]
+        clean = f["entries"]
         nf = len(clean)
         idx = cursors.get(sym, 0)
         if idx > nf:
             idx = 0
-        while idx < nf and bar_time_to_datetime(clean[idx].get("t")) <= current_utc:
+        while idx < nf and clean[idx][1] <= current_utc:
             idx += 1
         cursors[sym] = idx
         if idx > 0:
-            bar = clean[idx - 1]
+            bar = clean[idx - 1][0]
             if "c" in bar:
                 try:
                     out[sym] = float(bar["c"])

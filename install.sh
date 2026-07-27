@@ -6,8 +6,8 @@
 #      Auto-installs any that are missing using the host's package
 #      manager (apt / dnf / yum / pacman / zypper / apk / brew) and
 #      the official get.docker.com convenience script for Linux Docker.
-#   2. Creates .env with safe defaults + a freshly-generated Fernet
-#      INTELLISTOCK_CRED_KEY (only if .env doesn't already exist)
+#   2. Creates .env with safe defaults + freshly-generated stable secrets,
+#      and securely provisions missing control-plane keys during upgrades
 #   3. Builds the backend image
 #   4. Brings up the full stack (rethinkdb, neo4j, backend, api,
 #      frontend, price-service, backtest-engine, credential-service)
@@ -229,10 +229,38 @@ ensure_openssl
 ensure_docker_running
 ok "docker, docker compose, openssl present and daemon is up"
 
+# Add the mandatory socket-control master key to new and upgraded installs.
+# Existing valid values are preserved because rotating this key invalidates
+# in-flight supervisor/broker authentication tokens.
+ensure_socket_control_master_key() {
+  local key_line_count current_value socket_control_master_key
+  key_line_count="$(grep -Ec '^SOCKET_CONTROL_MASTER_KEY=' "$ENV_FILE" || true)"
+
+  if [[ "$key_line_count" -eq 0 ]]; then
+    socket_control_master_key="$(openssl rand -hex 32)"
+    printf '\n# Stable 32-byte socket-control HMAC master key (64 lowercase hex)\nSOCKET_CONTROL_MASTER_KEY=%s\n' \
+      "$socket_control_master_key" >> "$ENV_FILE"
+    unset socket_control_master_key
+    ok "Provisioned the required socket-control master key in .env"
+    return
+  fi
+
+  if [[ "$key_line_count" -ne 1 ]]; then
+    err ".env must contain exactly one SOCKET_CONTROL_MASTER_KEY assignment"
+    exit 1
+  fi
+
+  current_value="$(grep -E '^SOCKET_CONTROL_MASTER_KEY=' "$ENV_FILE" | cut -d= -f2-)"
+  if ! [[ "$current_value" =~ ^[0-9a-f]{64}$ ]]; then
+    err "SOCKET_CONTROL_MASTER_KEY must be exactly 64 lowercase hexadecimal characters"
+    exit 1
+  fi
+}
+
 # ── .env scaffold ──────────────────────────────────────────────────
 ENV_FILE="$REPO_ROOT/.env"
 if [[ -f "$ENV_FILE" ]]; then
-  ok ".env already exists — leaving it alone"
+  ok ".env already exists — preserving its configured values"
 else
   info "Generating .env with safe defaults"
   # Fernet key = 32 random bytes, URL-safe base64 (44 chars incl. padding).
@@ -335,6 +363,8 @@ POLYGON_API_KEY=
 EOF
   ok "Wrote $ENV_FILE  (review and add any optional API keys you have)"
 fi
+
+ensure_socket_control_master_key
 
 # ── Build & launch ─────────────────────────────────────────────────
 info "Building backend image (this takes a few minutes the first time)…"

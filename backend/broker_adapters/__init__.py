@@ -1,9 +1,4 @@
-"""Broker adapters: unified interface over Alpaca and Robinhood.
-
-Alpaca is the production path. Robinhood uses an unofficial reverse-engineered
-API; the UI surfaces an explicit account-ban warning when the user picks it,
-and the adapter defaults to RH_DRY_RUN=true at first boot so accidental live
-orders are blocked until an operator flips the env.
+"""Broker adapters: unified interfaces for supported broker integrations.
 
 This package mirrors the PortfolioEmulator interface (including private attrs
 _positions / _trades / _initial_value / _cash / _last_prices) so strategies that

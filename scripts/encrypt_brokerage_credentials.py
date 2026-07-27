@@ -27,8 +27,8 @@ _BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-# Load .env files the same way backend/broker.py and backend/credential_service.py
-# do so INTELLISTOCK_CRED_KEY can live in either root .env or backend/.env.
+# Load .env files the same way the backend does so INTELLISTOCK_CRED_KEY can
+# live in either root .env or backend/.env.
 try:
     from dotenv import load_dotenv
     _PROJECT_ROOT = os.path.dirname(_BACKEND)
@@ -41,9 +41,6 @@ except ImportError:
 ENCRYPTED_FIELDS = (
     "alpaca_key",
     "alpaca_secret",
-    "robinhood_access_token",
-    "robinhood_refresh_token",
-    "robinhood_device_token",
 )
 
 

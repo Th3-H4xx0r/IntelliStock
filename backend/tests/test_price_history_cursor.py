@@ -68,11 +68,23 @@ def _build_data(start_iso: str, count: int, sym: str = "AAPL") -> dict:
 
 
 def _call(data, symbols, current_time, daily_mode=False):
+    def _available(bar):
+        timestamp = _bar_time_to_datetime(bar.get("t"))
+        if timestamp is None:
+            return None
+        if daily_mode:
+            return datetime.combine(
+                timestamp.date() + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+        return timestamp
+
     return bph.get_price_history_up_to_current(
         data, symbols, current_time,
-        daily_mode=daily_mode,
         bar_time_to_datetime=_bar_time_to_datetime,
         current_time_to_utc=_current_time_to_utc,
+        bar_available_at=_available,
     )
 
 
@@ -245,3 +257,61 @@ def test_invalidate_clears_cursor():
     bph.invalidate_cursor()
     assert bph.CACHE["cursors"] == {}
     assert bph.CACHE["last_current_utc"] is None
+
+
+def test_intraday_history_waits_for_bar_close():
+    data = {
+        "SPY": [_make_bar("2026-03-02T14:00:00+00:00", 123.0)],
+    }
+
+    def _hour_available(bar):
+        return _bar_time_to_datetime(bar["t"]) + timedelta(hours=1)
+
+    before_close = bph.get_price_history_up_to_current(
+        data,
+        ["SPY"],
+        "2026-03-02T14:59:59+00:00",
+        bar_time_to_datetime=_bar_time_to_datetime,
+        current_time_to_utc=_current_time_to_utc,
+        bar_available_at=_hour_available,
+    )
+    at_close = bph.get_price_history_up_to_current(
+        data,
+        ["SPY"],
+        "2026-03-02T15:00:00+00:00",
+        bar_time_to_datetime=_bar_time_to_datetime,
+        current_time_to_utc=_current_time_to_utc,
+        bar_available_at=_hour_available,
+    )
+
+    assert before_close == {"SPY": []}
+    assert at_close == {"SPY": data["SPY"]}
+
+
+def test_daily_history_becomes_visible_at_session_close():
+    data = {
+        "SPY": [_make_bar("2026-03-02T00:00:00+00:00", 123.0)],
+    }
+
+    def _session_close(_bar):
+        return datetime(2026, 3, 2, 21, 0, tzinfo=timezone.utc)
+
+    before_close = bph.get_price_history_up_to_current(
+        data,
+        ["SPY"],
+        "2026-03-02T20:59:59+00:00",
+        bar_time_to_datetime=_bar_time_to_datetime,
+        current_time_to_utc=_current_time_to_utc,
+        bar_available_at=_session_close,
+    )
+    at_close = bph.get_price_history_up_to_current(
+        data,
+        ["SPY"],
+        "2026-03-02T21:00:00+00:00",
+        bar_time_to_datetime=_bar_time_to_datetime,
+        current_time_to_utc=_current_time_to_utc,
+        bar_available_at=_session_close,
+    )
+
+    assert before_close == {"SPY": []}
+    assert at_close == {"SPY": data["SPY"]}

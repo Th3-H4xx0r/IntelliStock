@@ -10,7 +10,7 @@
 ############################
 
 #from webull import paper_webull
-import re
+from dataclasses import dataclass
 from dotenv import load_dotenv
 from intellistock_logger import intellistock_logger
 import time as time
@@ -19,6 +19,9 @@ import sys
 import os
 import threading
 import logging
+import hmac
+import hashlib
+import re
 from datetime import datetime
 from typing import Dict
 from rethinkdb import RethinkDB
@@ -26,6 +29,7 @@ from rethink_changefeed import run_reconnecting_changefeed
 import socketio
 from waitress import serve
 from os import system
+from live_readiness import LiveReadinessError
 
 # Load .env from backend dir or project root so KEY/SECRET are available to spawned services
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -90,6 +94,7 @@ conn = None
 clientList = {}
 brokersList = {}
 priceBrokerUID = ''
+clientOwners = {}
 
 # Price service runs separately. Discover and Nexus are server-managed engine containers.
 
@@ -97,6 +102,129 @@ priceBrokerUID = ''
 def get_conn():
     """Create a new RethinkDB connection (connections are not thread-safe)."""
     return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+
+
+def register_socket_client(sio, sid, data, *, master_key=None):
+    """Register a client ID; a duplicate can replace a worker only with proof."""
+    global clientList, priceBrokerUID, brokersList, clientOwners
+    if not isinstance(data, dict):
+        return False
+    uuid = data.get("UUID")
+    if not isinstance(uuid, str) or not uuid or uuid == "PriceBroker" or data.get("instance") == "PriceBroker":
+        return False
+    configured_token = (master_key if master_key is not None
+                        else os.environ.get("SOCKET_CONTROL_MASTER_KEY", ""))
+    provided_token = data.get("control_token")
+    role = "broker" if uuid == str(data.get("instance")) + "_broker" else ""
+    expected_token = derive_socket_control_token(
+        configured_token, data.get("instance"), role)
+    authenticated = (isinstance(configured_token, str) and bool(configured_token)
+                     and isinstance(provided_token, str)
+                     and bool(expected_token)
+                     and hmac.compare_digest(provided_token, expected_token))
+    if (not isinstance(data.get("instance"), str) or not data["instance"]
+            or not role
+            or not authenticated):
+        return False
+    old_sid = clientList.get(uuid)
+    if old_sid is not None and old_sid != sid:
+        if clientOwners.get(uuid) != (data["instance"], role):
+            return False
+        if not authenticated:
+            return False
+        sio.emit('terminate', {'terminate': True}, room=old_sid)
+        brokersList.pop(old_sid, None)
+    if data.get('instance') is not None and data.get('symbol') is not None:
+        brokersList[sid] = {'instance': data['instance'], 'symbol': data['symbol']}
+    clientList[uuid] = sid
+    clientOwners[uuid] = (data["instance"], role)
+    if uuid == "PriceBroker":
+        priceBrokerUID = sid
+    return True
+
+
+def unregister_socket_client(sid):
+    global clientList, clientOwners, brokersList
+    brokersList.pop(sid, None)
+    for uuid, current_sid in list(clientList.items()):
+        if current_sid == sid:
+            clientList.pop(uuid, None)
+            clientOwners.pop(uuid, None)
+
+
+def derive_socket_control_token(master_key, instance_id, role="broker"):
+    if (type(master_key) is not str or not re.fullmatch(r"[0-9a-f]{64}", master_key)
+            or len(set(master_key)) < 8 or type(instance_id) is not str or not instance_id
+            or role != "broker"):
+        return ""
+    return hmac.new(master_key.encode("utf-8"), (instance_id + ":" + role).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def is_funded_kalshi_live(instance_doc, brokerage_doc) -> bool:
+    if type(instance_doc) is not dict or instance_doc.get("kind") != "kalshi":
+        return False
+    cfg = instance_doc.get("kalshi_config")
+    if type(cfg) is not dict or type(cfg.get("live_enabled")) is not bool or type(cfg.get("paper_mode")) is not bool:
+        raise LiveReadinessError("Kalshi execution mode is malformed")
+    if cfg["live_enabled"] is not True or cfg["paper_mode"] is not False:
+        return False
+    environment = brokerage_doc.get("kalshi_environment") if type(brokerage_doc) is dict else None
+    if type(environment) is not str or environment.lower() not in {"demo", "live", "prod"}:
+        raise LiveReadinessError("Kalshi brokerage environment is malformed")
+    return environment.lower() in {"live", "prod"}
+
+
+def image_identity(image_obj):
+    value = getattr(image_obj, "id", "")
+    if type(value) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise LiveReadinessError("Docker image identity is malformed")
+    return value.split(":", 1)[1]
+
+
+@dataclass(frozen=True)
+class InstanceLaunchPreflight:
+    client: object
+    image_id: str
+    image_digest: str
+    instance_id: str
+    instance: dict
+    brokerage: dict
+
+
+def _preflight_instance_launch(instance_id, *, client=None):
+    client = client or _get_docker_client()
+    if client is None:
+        raise LiveReadinessError("Docker client is unavailable")
+    image = os.environ.get('DOCKER_INSTANCE_IMAGE', 'intellistock-backend')
+    image_obj = client.images.get(image)
+    digest = image_identity(image_obj)
+    image_id = "sha256:" + digest
+    instance, brokerage = _fresh_instance_docs(instance_id)
+    if instance.get("id") != str(instance_id):
+        raise LiveReadinessError("instance identity does not match launch")
+    if is_funded_kalshi_live(instance, brokerage):
+        from live_readiness import assert_live_start_allowed, report_from_mapping
+        assert_live_start_allowed(report_from_mapping(instance.get("live_readiness_report"), instance_id=str(instance_id)), deployed_artifact_hash=digest)
+    return InstanceLaunchPreflight(
+        client=client,
+        image_id=image_id,
+        image_digest=digest,
+        instance_id=str(instance_id),
+        instance=instance,
+        brokerage=brokerage,
+    )
+
+
+def _fresh_instance_docs(instance_id):
+    connection = get_conn()
+    try:
+        instance = r.db(DB_NAME).table("Instances").get(str(instance_id)).run(connection)
+        if type(instance) is not dict:
+            raise LiveReadinessError("instance configuration is unavailable")
+        brokerage = r.db(DB_NAME).table("BrokerageAccounts").get(instance.get("brokerage_id")).run(connection) if instance.get("brokerage_id") else {}
+        return instance, brokerage if type(brokerage) is dict else {}
+    finally:
+        connection.close()
 
 
 def wait_for_rethinkdb(max_attempts=30, delay=2):
@@ -323,7 +451,33 @@ def _get_instance_network(client):
     return _detect_container_network(client)
 
 
-def start_instance_container(instance_id):
+def _docker_object_not_found(exc) -> bool:
+    return type(exc).__name__.lower().endswith("notfound")
+
+
+def _remove_existing_instance_container(client, name) -> None:
+    """Remove a prior named worker or fail without launching a duplicate."""
+    try:
+        old = client.containers.get(name)
+    except Exception as exc:
+        if _docker_object_not_found(exc):
+            return
+        raise
+    try:
+        old.stop(timeout=5)
+    except Exception as exc:
+        if _docker_object_not_found(exc):
+            return
+        raise
+    try:
+        old.remove()
+    except Exception as exc:
+        if _docker_object_not_found(exc):
+            return
+        raise
+
+
+def start_instance_container(instance_id, *, preflight=None):
     """
     Create and start a Docker container running instance.py.
     Instance reads key/secret from the Instances table in the DB; only instance_id is passed.
@@ -331,7 +485,6 @@ def start_instance_container(instance_id):
     """
     global running_threads_objs
     name = _instance_container_name(instance_id)
-    image = os.environ.get('DOCKER_INSTANCE_IMAGE', 'intellistock-backend')
     # Env for the container: RethinkDB and server URL (so instance can connect)
     rethink_host = os.environ.get('INSTANCE_RETHINKDB_HOST', RETHINKDB_HOST)
     server_url = os.environ.get('INSTANCE_SERVER_URL', os.environ.get('SERVER_URL', 'http://localhost:5000'))
@@ -349,27 +502,9 @@ def start_instance_container(instance_id):
                'GRAPH_NEXUS_LLM_PROVIDER', 'GRAPH_NEXUS_LLM_API_KEY', 'GRAPH_NEXUS_LLM_MODEL',
                'INTELLISTOCK_CRED_KEY',
                'ALLOW_LEGACY_ENV_CREDS',
-               # Phase C (2026-04-29) — Robinhood live-trading env passthrough.
-               # Without RH_DRY_RUN on the per-instance container, the adapter
-               # always sees the dry-run default and silently swallows live
-               # orders regardless of host-side override.
-               'RH_DRY_RUN',
-               'RH_POLL_INTERVAL_SEC', 'RH_POSITIONS_STALE_MAX_SEC',
-               # 2026-04-30 — RH inter-order pacing. Without these passed
-               # through, RobinhoodAdapter inside the per-instance container
-               # always uses the 25/45-s defaults regardless of host-side
-               # tuning (HIGH agent finding #7).
-               'RH_INTER_ORDER_DELAY_MIN_SEC', 'RH_INTER_ORDER_DELAY_MAX_SEC',
-               # Burst-poll window after a submit (enhancement 2026-04-30):
-               # while not strictly required (defaults inside adapter), this
-               # lets operators tune burst window length on the fly.
-               'RH_BURST_POLL_INTERVAL_SEC', 'RH_BURST_POLL_WINDOW_SEC',
-               # 2026-05-01 — RTH-only gate. When set, broker_session
-               # narrows the live tick gate from extended hours
-               # (4 AM-8 PM ET) to RTH (9:30 AM-4 PM ET) so pre-market
-               # wide-spread fills can't bite. RH_FAIL_CLOSED_PDT also
-               # added here for completeness (preflight fail-closed).
-               'RH_RTH_ONLY', 'LIVE_RTH_ONLY', 'RH_FAIL_CLOSED_PDT',
+               # When set, broker_session narrows the live tick gate from
+               # extended hours to regular trading hours.
+               'LIVE_RTH_ONLY',
                # 2026-05-01 — auto-reset on detected account migration
                # (peak >> current equity + 0 broker positions). Without
                # this set the boot sequence logs RED + warns but does not
@@ -392,56 +527,59 @@ def start_instance_container(instance_id):
     # branch only on kind='kalshi'. DEFENSIVE: any lookup failure falls back to
     # the unchanged equities path, so this CRITICAL-blast-radius launch point
     # cannot break the equities instances.
-    cmd = ['python', 'instance.py', str(instance_id)]
+    master_key = os.environ.get("SOCKET_CONTROL_MASTER_KEY", "")
+    broker_token = derive_socket_control_token(master_key, str(instance_id), "broker")
+    if not broker_token:
+        intellistock_logger.log("Instance launch blocked: socket ownership secret is unavailable", "red", service="SERVER")
+        return None
+    env["INSTANCE_SOCKET_BROKER_TOKEN"] = broker_token
     try:
-        _kc = get_conn()
-        try:
-            _idoc = r.db(DB_NAME).table('Instances').get(str(instance_id)).run(_kc) or {}
-        finally:
-            try:
-                _kc.close()
-            except Exception:
-                pass
-        if (_idoc or {}).get('kind') == 'kalshi':
-            cmd = ['python', '-m', 'kalshi.runner', str(instance_id)]
+        # This call must remain internal and immediately precede launch.  A
+        # caller cannot supply a stale authorization snapshot.
+        # A legacy caller may still pass ``preflight``; never trust or reuse it.
+        # The authoritative snapshot is always rebuilt here.
+        authoritative_preflight = _preflight_instance_launch(instance_id)
+        if authoritative_preflight.instance_id != str(instance_id):
+            raise LiveReadinessError("launch preflight instance does not match")
+        client = authoritative_preflight.client
+        kind = authoritative_preflight.instance.get("kind")
+        if (
+            kind in (None, "", "equities")
+            and os.environ.get(
+                "EQUITIES_INSTANCE_AUTOSTART_ALLOWED", "false"
+            ).strip().lower()
+            not in {"1", "true", "yes", "on"}
+        ):
             intellistock_logger.log(
-                f"Launching Kalshi instance {instance_id} via dedicated engine (kalshi.runner)",
-                "green", service="SERVER",
-            )
-    except Exception as _kind_e:
-        intellistock_logger.log(
-            f"kind lookup for {instance_id} failed ({_kind_e}); using default instance.py",
-            "yellow", service="SERVER",
-        )
-    try:
-        client = _get_docker_client()
-        if not client:
-            return None
-        network = _get_instance_network(client)
-        # Use only local image (do not pull); otherwise Docker tries Docker Hub and fails
-        try:
-            client.images.get(image)
-        except Exception:
-            intellistock_logger.log(
-                f"Image '{image}' not found locally. Build it first: docker build -t {image} ./backend (or docker-compose build backend)",
-                "red",
+                f"Equities instance {instance_id} remains stopped: "
+                "EQUITIES_INSTANCE_AUTOSTART_ALLOWED is not explicitly enabled",
+                "yellow",
                 service="SERVER",
             )
             return None
+        if kind == "kalshi":
+            cmd = ['python', '-m', 'kalshi.runner', str(instance_id)]
+        elif kind in (None, "", "equities"):
+            cmd = ['python', 'instance.py', str(instance_id)]
+        else:
+            raise LiveReadinessError("instance kind is malformed")
+        network = _get_instance_network(client)
+        # Use only local image (do not pull); otherwise Docker tries Docker Hub and fails
+        actual_image_digest = authoritative_preflight.image_digest
+        immutable_image_id = authoritative_preflight.image_id
+        if immutable_image_id != "sha256:" + actual_image_digest:
+            raise LiveReadinessError("launch image identity is inconsistent")
+        env["INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256"] = actual_image_digest
+        # Fresh validation is deliberately before any old container mutation.
         # If a container with this name already exists (e.g. from a previous run), remove it
-        try:
-            old = client.containers.get(name)
-            old.stop(timeout=5)
-            old.remove()
-        except Exception:
-            pass
+        _remove_existing_instance_container(client, name)
         # Mount the live_trading_logs volume so the broker's log file is
         # readable from the api container via the same shared volume.
         volumes = [
             f'{LIVE_TRADING_LOG_VOLUME_NAME}:{LIVE_TRADING_LOG_DIR_IN_CONTAINER}',
         ]
         container = client.containers.run(
-            image,
+            immutable_image_id,
             command=cmd,
             name=name,
             environment=env,
@@ -453,36 +591,55 @@ def start_instance_container(instance_id):
         running_threads_objs[instance_id] = container
         intellistock_logger.log(f"Started instance container: {instance_id} ({name})", "green", service="SERVER")
         return container
-    except Exception as e:
-        intellistock_logger.log(f"Failed to start instance container {instance_id}: {e}", "red", service="SERVER")
+    except Exception as exc:
+        intellistock_logger.log(
+            f"Failed to start instance container {instance_id} "
+            f"({type(exc).__name__})",
+            "red",
+            service="SERVER",
+        )
         return None
 
 
 def stop_instance_container(instance_id):
-    """Stop and remove the Docker container for this instance."""
-    global running_threads_objs
+    """Stop/remove a worker and forget it only after authoritative success."""
+    global running_threads_objs, thread_count
     container = running_threads_objs.get(instance_id)
     if not container:
-        return
+        return True
     try:
-        try:
-            container.stop(timeout=5)
-        except Exception:
-            pass
+        container.stop(timeout=5)
+    except Exception as exc:
+        if not _docker_object_not_found(exc):
+            intellistock_logger.log(
+                f"Instance stop not confirmed for {instance_id} "
+                f"({type(exc).__name__})",
+                "red",
+                service="SERVER",
+            )
+            return False
+    else:
         try:
             container.remove()
-        except Exception:
-            pass
-    except Exception as e:
-        intellistock_logger.log(f"Error stopping instance container {instance_id}: {e}", "yellow", service="SERVER")
-    finally:
-        if instance_id in running_threads_objs:
-            del running_threads_objs[instance_id]
-        if instance_id in running_threads:
-            running_threads.remove(instance_id)
-        global thread_count
-        thread_count = max(0, thread_count - 1)
-    intellistock_logger.log(f"Stopped and removed instance container: {instance_id}", "green", service="SERVER")
+        except Exception as exc:
+            if not _docker_object_not_found(exc):
+                intellistock_logger.log(
+                    f"Instance removal not confirmed for {instance_id} "
+                    f"({type(exc).__name__})",
+                    "red",
+                    service="SERVER",
+                )
+                return False
+    running_threads_objs.pop(instance_id, None)
+    if instance_id in running_threads:
+        running_threads.remove(instance_id)
+    thread_count = max(0, thread_count - 1)
+    intellistock_logger.log(
+        f"Stopped and removed instance container: {instance_id}",
+        "green",
+        service="SERVER",
+    )
+    return True
 
 
 def _agent_container_env():
@@ -1223,13 +1380,18 @@ def run_thread_service_change(change, c):
             # a real-money engine minimal.
             from kalshi.mode import kalshi_mode_changed
             if kalshi_mode_changed(old_val, new_val):
+                try:
+                    preflight = _preflight_instance_launch(instance_id)
+                except Exception as exc:
+                    intellistock_logger.log(f"Kalshi mode change blocked before restart: {type(exc).__name__}", "red", service="SERVER")
+                    return
                 intellistock_logger.log(
                     f"Kalshi instance {instance_id}: paper/live mode changed — restarting engine.",
                     "yellow", service="SERVER")
                 stop_instance_container(instance_id)
                 running_threads.append(instance_id)
                 thread_count += 1
-                if start_instance_container(instance_id) is None:
+                if start_instance_container(instance_id, preflight=preflight) is None:
                     thread_count -= 1
                     if instance_id in running_threads:
                         running_threads.remove(instance_id)
@@ -1462,28 +1624,7 @@ def run():
 
             @sio.event
             def clientType(sid, data):
-                global clientList
-                global priceBrokerUID
-                global brokersList
-                uuid = data.get('UUID')
-                if uuid in clientList.keys():
-                    # Reconnection: same UUID (e.g. instance or broker reconnected). Terminate old connection and replace with new.
-                    old_sid = clientList[uuid]
-                    if old_sid != sid:
-                        try:
-                            sio.emit('terminate', {'terminate': True}, room=old_sid)
-                        except Exception:
-                            pass
-                        if old_sid in brokersList:
-                            del brokersList[old_sid]
-                        del clientList[uuid]
-                if uuid not in clientList.keys():
-                    if data.get('instance') is not None and data.get('symbol') is not None:
-                        brokersList[sid] = {'instance': data['instance'], 'symbol': data['symbol']}
-                    print(brokersList)
-                    clientList[uuid] = sid
-                    if data.get("UUID") == "PriceBroker":
-                        priceBrokerUID = sid
+                register_socket_client(sio, sid, data)
 
             @sio.event
             def disconnect(sid):
@@ -1491,9 +1632,7 @@ def run():
                 global priceBrokerUID
                 global brokersList
 
-                if sid in brokersList.keys():
-                    del brokersList[sid]
-                print(brokersList)
+                unregister_socket_client(sid)
 
                 if priceBrokerUID == sid:
                     r.db(DB_NAME).table('Config').get('Config').update({'runPriceService': True}).run(thread_conn)

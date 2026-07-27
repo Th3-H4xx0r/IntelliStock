@@ -18,12 +18,14 @@ from datetime import datetime, timezone
 
 def _build_runtime(instance_id):
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
-    from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import QueryOrderStatus
     from rethinkdb import RethinkDB
 
-    from benchmark_alpha.emergency import ReduceOnlyEmergencyExecutor
-    from benchmark_alpha.rethink_store import AlphaRethinkStore
+    from benchmark_alpha.rethink_store import (
+        AlphaRethinkStore,
+        AlphaStateConflictError,
+    )
     from benchmark_alpha.watchdog import AlphaWatchdog
 
     key = os.environ["ALPACA_WATCHDOG_KEY"]
@@ -76,19 +78,25 @@ def _build_runtime(instance_id):
                 r.db("IntelliStock").table("Instances").get(instance_id).update(
                     {"runCommand": False}).run(conn)
 
-    executor = ReduceOnlyEmergencyExecutor(
-        read_positions=Probe().broker_positions,
-        submit_reduce=lambda symbol, qty, client_order_id: str(
-            client.submit_order(MarketOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.DAY,
-                client_order_id=client_order_id)).id),
-        instance_id=instance_id,
-    )
+    def write_health(evidence):
+        key = f"control_health:{instance_id}"
+        for _attempt in range(3):
+            current = store.get_state(key)
+            expected = current.version if current is not None else 0
+            try:
+                store.put_state(key, evidence.to_doc(), expected)
+                return
+            except AlphaStateConflictError:
+                continue
+        raise AlphaStateConflictError(
+            "watchdog control-health CAS retries exhausted"
+        )
+
     watchdog = AlphaWatchdog(
         probe=Probe(), rethink_store=store, thresholds={},
         instance_id=instance_id,
-        reduce_executor=executor.reduce_to_targets,
+        reduce_executor=None,
+        health_writer=write_health,
     )
     return watchdog
 
@@ -118,6 +126,10 @@ def main(argv=None):
                 print(f"[watchdog] {result.status} mismatches="
                       f"{len(result.mismatches)} degraded_audit={result.degraded_audit}")
         except Exception as exc:
+            try:
+                watchdog.record_failure(datetime.now(timezone.utc), exc)
+            except Exception:
+                pass
             print(f"[watchdog] poll error: {type(exc).__name__}: {exc}",
                   file=sys.stderr)
         time.sleep(args.poll_seconds)

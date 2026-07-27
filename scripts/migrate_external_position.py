@@ -72,12 +72,8 @@ def main():
     cid_prefix = _derive_cid_prefix(args.instance)
     cid = f"{cid_prefix}MIGRATED-{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc)
-    # 2-D (bug-sweep 2026-05-28): normalize dot->dash so the synthetic symbol
-    # matches the dash-form RobinhoodAdapter.refresh_positions keys positions by
-    # (RH's instruments endpoint returns "BRK-B", never "BRK.B"). Scope D C3: use
-    # the SHARED helper (not an inline copy) so the write path and the classifier
-    # read path can't diverge. Without this a share-class adoption writes a
-    # dot-form WAL symbol the classifier can never match (stays external).
+    # Normalize dot->dash with the shared broker-symbol helper so the write path
+    # and classifier read path cannot diverge for share-class tickers.
     from broker_adapters._symbols import normalize_broker_symbol
     norm_symbol = normalize_broker_symbol(args.ticker)
     row = {

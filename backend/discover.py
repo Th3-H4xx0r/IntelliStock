@@ -1,5 +1,5 @@
 try:
-    # Imports: yfinance for Yahoo fallback; ticker list from Nasdaq API (paginated)
+    # Imports: yfinance for market history; ticker list from Nasdaq API.
     import requests
     import yfinance as yf
     import pandas as pd
@@ -10,8 +10,6 @@ try:
 
     from dotenv import load_dotenv
     from rethinkdb import RethinkDB
-    from robinhood_engine import get_price_history
-    from robinhood_data_policy import robinhood_data_fallback_allowed
     from intellistock_logger import intellistock_logger
     from tqdm import tqdm
     from stock_metrics import add_all_metrics, StockMetrics
@@ -54,7 +52,7 @@ try:
         return symbols
 
     def _yahoo_fallback(symbol, start_date, end_date):
-        """Fetch historical OHLC from Yahoo via yfinance (fallback when Robinhood has no data)."""
+        """Fetch historical OHLC from Yahoo via yfinance."""
         df = yf.download(symbol, start=start_date, end=end_date, progress=False, auto_adjust=False)
         if df.empty:
             return df
@@ -128,7 +126,7 @@ try:
         """
         Return OHLCV DataFrame for ticker: use cache + incremental fetch.
         Loads cache; if cache has data, fetches only from (lastDate+1) to end_date via yfinance and merges.
-        If no cache, fetches full year (Robinhood then Yahoo) and saves to cache.
+        If no cache, fetches the full requested window and saves it to cache.
         """
         cached_df, last_date_str = _get_cached_price_data(conn, ticker)
         end_d = end_date.date() if hasattr(end_date, 'date') else end_date
@@ -157,12 +155,7 @@ try:
             except Exception:
                 pass
 
-        if robinhood_data_fallback_allowed("robinhood"):
-            df = get_price_history(ticker, interval="day", span="year")
-        else:
-            df = pd.DataFrame()
-        if df.empty:
-            df = _yahoo_fallback(ticker, start_date, end_date)
+        df = _yahoo_fallback(ticker, start_date, end_date)
         if not df.empty:
             _save_price_cache(conn, ticker, df)
         return df
@@ -300,17 +293,12 @@ try:
         intellistock_logger.log(f"Total tickers to analyze: {len(tickers)}", "cyan", service="Discover")
         intellistock_logger.log("=" * 60, "cyan", service="Discover")
 
-        # Index Returns (Robinhood may not have index symbols; fall back to Yahoo)
-        if robinhood_data_fallback_allowed("robinhood"):
-            intellistock_logger.log(f"Fetching {readable_index_name} historical data from Robinhood", "cyan", service="Discover")
-            index_df = get_price_history(index_name, interval="day", span="year")
-        else:
-            index_df = pd.DataFrame()
-        if index_df.empty:
-            intellistock_logger.log(f"Robinhood data unavailable for {index_name}, using Yahoo Finance fallback", "yellow", service="Discover")
-            index_df = _yahoo_fallback(index_name, start_date, end_date)
-        else:
-            intellistock_logger.log(f"Successfully fetched {len(index_df)} days of data from Robinhood", "green", service="Discover")
+        intellistock_logger.log(
+            f"Fetching {readable_index_name} historical data",
+            "cyan",
+            service="Discover",
+        )
+        index_df = _yahoo_fallback(index_name, start_date, end_date)
         
         if index_df.empty or len(index_df) < 2:
             intellistock_logger.log(f"Skipping {readable_index_name}: insufficient index data", "yellow", service="Discover")

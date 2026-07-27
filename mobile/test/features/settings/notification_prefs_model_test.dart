@@ -22,29 +22,43 @@ void main() {
     });
 
     test('round-trips through toJson', () {
-      const p = NotificationPrefs(categories: {
-        'order_fill': CategoryRoute(discord: false, push: true),
-      });
+      const p = NotificationPrefs(
+        categories: {'order_fill': CategoryRoute(discord: false, push: true)},
+      );
       final back = NotificationPrefs.fromJson(p.toJson());
       expect(back.routeFor('order_fill').push, true);
       expect(back.routeFor('order_fill').discord, false);
     });
 
     test('withRoute returns an immutable copy', () {
-      const p = NotificationPrefs(categories: {
-        'order_fill': CategoryRoute(discord: true, push: false),
-      });
-      final next = p.withRoute('order_fill', const CategoryRoute(discord: true, push: true));
+      const p = NotificationPrefs(
+        categories: {'order_fill': CategoryRoute(discord: true, push: false)},
+      );
+      final next = p.withRoute(
+        'order_fill',
+        const CategoryRoute(discord: true, push: true),
+      );
       expect(p.routeFor('order_fill').push, false); // original unchanged
       expect(next.routeFor('order_fill').push, true);
     });
   });
 
-  test('there are 9 categories with stable keys', () {
-    expect(kNotificationCategories.length, 9);
-    expect(kNotificationCategories.map((c) => c.key), containsAll(<String>[
-      'order_submit', 'order_fill', 'order_reject', 'order_retry',
-      'strategy_start', 'strategy_error', 'halt', 'drawdown_halt', 'crash_loop',
-    ]));
+  test('there are 10 fallback categories with stable keys', () {
+    expect(kNotificationCategories.length, 10);
+    expect(
+      kNotificationCategories.map((c) => c.key),
+      containsAll(<String>[
+        'order_submit',
+        'order_fill',
+        'order_reject',
+        'order_retry',
+        'strategy_start',
+        'strategy_error',
+        'halt',
+        'drawdown_halt',
+        'crash_loop',
+        'instance_crash',
+      ]),
+    );
   });
 }
