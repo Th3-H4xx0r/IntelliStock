@@ -19,6 +19,7 @@ import sys
 import os
 import threading
 import logging
+import hmac
 from datetime import datetime
 from typing import Dict
 from rethinkdb import RethinkDB
@@ -97,6 +98,34 @@ priceBrokerUID = ''
 def get_conn():
     """Create a new RethinkDB connection (connections are not thread-safe)."""
     return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+
+
+def register_socket_client(sio, sid, data, *, control_token=None):
+    """Register a client ID; a duplicate can replace a worker only with proof."""
+    global clientList, priceBrokerUID, brokersList
+    if not isinstance(data, dict):
+        return False
+    uuid = data.get("UUID")
+    if not isinstance(uuid, str) or not uuid:
+        return False
+    configured_token = (control_token if control_token is not None
+                        else os.environ.get("CONTROL_SOCKET_TOKEN", ""))
+    provided_token = data.get("control_token")
+    authenticated = (isinstance(configured_token, str) and bool(configured_token)
+                     and isinstance(provided_token, str)
+                     and hmac.compare_digest(provided_token, configured_token))
+    old_sid = clientList.get(uuid)
+    if old_sid is not None and old_sid != sid:
+        if not authenticated:
+            return False
+        sio.emit('terminate', {'terminate': True}, room=old_sid)
+        brokersList.pop(old_sid, None)
+    if data.get('instance') is not None and data.get('symbol') is not None:
+        brokersList[sid] = {'instance': data['instance'], 'symbol': data['symbol']}
+    clientList[uuid] = sid
+    if uuid == "PriceBroker":
+        priceBrokerUID = sid
+    return True
 
 
 def wait_for_rethinkdb(max_attempts=30, delay=2):
@@ -1462,28 +1491,7 @@ def run():
 
             @sio.event
             def clientType(sid, data):
-                global clientList
-                global priceBrokerUID
-                global brokersList
-                uuid = data.get('UUID')
-                if uuid in clientList.keys():
-                    # Reconnection: same UUID (e.g. instance or broker reconnected). Terminate old connection and replace with new.
-                    old_sid = clientList[uuid]
-                    if old_sid != sid:
-                        try:
-                            sio.emit('terminate', {'terminate': True}, room=old_sid)
-                        except Exception:
-                            pass
-                        if old_sid in brokersList:
-                            del brokersList[old_sid]
-                        del clientList[uuid]
-                if uuid not in clientList.keys():
-                    if data.get('instance') is not None and data.get('symbol') is not None:
-                        brokersList[sid] = {'instance': data['instance'], 'symbol': data['symbol']}
-                    print(brokersList)
-                    clientList[uuid] = sid
-                    if data.get("UUID") == "PriceBroker":
-                        priceBrokerUID = sid
+                register_socket_client(sio, sid, data)
 
             @sio.event
             def disconnect(sid):
@@ -1493,7 +1501,6 @@ def run():
 
                 if sid in brokersList.keys():
                     del brokersList[sid]
-                print(brokersList)
 
                 if priceBrokerUID == sid:
                     r.db(DB_NAME).table('Config').get('Config').update({'runPriceService': True}).run(thread_conn)

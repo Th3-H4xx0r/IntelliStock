@@ -326,8 +326,8 @@ services:
     # --cache-size: MB for query cache (default is half of available); more = better throughput
     command: rethinkdb --bind all -d /data --cache-size 2048
     ports:
-      - "28015:28015"   # Driver port
-      - "${RETHINKDB_WEB_PORT:-8080}:8080"   # Web admin UI (host port from env; set RETHINKDB_WEB_PORT if 8080 is in use)
+      - "127.0.0.1:28015:28015"   # Driver port, local host access only
+      - "127.0.0.1:${RETHINKDB_WEB_PORT:-8080}:8080"   # Admin UI, local host access only
     volumes:
       - rethinkdb_data:/data
     restart: unless-stopped

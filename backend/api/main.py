@@ -3100,6 +3100,8 @@ def api_alpha_performance(instance_id: str, origin: str = None, run_id: str = No
 @app.get("/instances/{instance_id}/alpha/readiness", response_class=JSONResponse)
 def api_alpha_readiness(instance_id: str,
                         current_user: dict = Depends(get_current_user)):
+    from live_readiness import (ReadinessCheck, ReadinessReport, ReadinessState,
+                                report_fingerprint, report_from_mapping)
     from benchmark_alpha.rethink_store import AlphaUnavailableError
     store = _alpha_store()
     health = store.health()
@@ -3115,12 +3117,53 @@ def api_alpha_readiness(instance_id: str,
             reasons.append(f"containment state unreadable: {exc}")
     if not containment:
         reasons.append("containment state not persisted (Task 0 pending)")
-    reasons.append("promotion gates not evaluated (Tasks 16-18 pending)")
+    raw_report = containment.get("readiness_report") if isinstance(containment, dict) else None
+    if raw_report:
+        try:
+            report = report_from_mapping(raw_report, instance_id=instance_id,
+                                         verify_fingerprint=False)
+            if raw_report.get("fingerprint") != report_fingerprint(report):
+                report = ReadinessReport(
+                    instance_id=report.instance_id,
+                    state=report.state,
+                    checks=report.checks + (ReadinessCheck(
+                        "report fingerprint", False, "invalid fingerprint", ""),),
+                    artifact_hash=report.artifact_hash,
+                )
+        except Exception:
+            reasons.append("readiness report is unavailable or malformed")
+            raw_report = None
+    if not raw_report:
+        report = ReadinessReport(
+            instance_id=instance_id,
+            state=ReadinessState.RESEARCH,
+            checks=(
+                ReadinessCheck("audit store", health.available,
+                               "available" if health.available else "unavailable", ""),
+                ReadinessCheck("containment", False,
+                               "not persisted" if not containment else "unreadable", ""),
+                ReadinessCheck("promotion gates", False,
+                               "not evaluated", ""),
+            ),
+            artifact_hash="",
+        )
+    failures = [check.reason for check in report.checks if not check.passed]
+    reasons.extend(failures)
+    readiness_ok = (report.state in {ReadinessState.LIVE_ELIGIBLE,
+                                     ReadinessState.LIVE_RUNNING}
+                    and not failures)
     return {
         "audit_store_health": {"available": health.available,
                                "error": health.error},
         "containment": containment,
-        "readiness_ok": False,  # honest default until Task 17 gates exist
+        "state": report.state.value,
+        "checks": [
+            {"name": check.name, "passed": check.passed, "reason": check.reason,
+             "evidence_hash": check.evidence_hash}
+            for check in report.checks
+        ],
+        "artifact_hash": report.artifact_hash,
+        "readiness_ok": readiness_ok,
         "reasons": reasons,
     }
 

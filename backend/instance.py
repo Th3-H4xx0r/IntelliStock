@@ -344,6 +344,17 @@ def get_symbols_for_instance(conn, instance_id):
         return []
 
 
+def _assert_live_broker_start_allowed(instance_id, instance_doc):
+    """Validate the persisted, fingerprinted report immediately before spawn."""
+    from live_readiness import assert_live_start_allowed, report_from_mapping
+
+    report = report_from_mapping(
+        (instance_doc or {}).get("live_readiness_report"),
+        instance_id=str(instance_id),
+    )
+    assert_live_start_allowed(report)
+
+
 def start_broker(symbols):
     """Start a single broker process with all tickers.
 
@@ -412,15 +423,22 @@ def start_broker(symbols):
     # broker. Dispatch on the Instances row's 'kind'. Equities instances (no
     # 'kind') take the unchanged broker.py path below.
     _kind = None
+    _instance_doc = None
     try:
         _kc = get_conn()
         try:
-            _kdoc = r.db(DB_NAME).table('Instances').get(instance_id).run(_kc) or {}
-            _kind = _kdoc.get('kind')
+            _instance_doc = r.db(DB_NAME).table('Instances').get(instance_id).run(_kc)
+            if not isinstance(_instance_doc, dict):
+                raise RuntimeError("instance configuration is unavailable")
+            _kind = _instance_doc.get('kind')
         finally:
             safe_close(_kc)
-    except Exception:
-        _kind = None
+    except Exception as exc:
+        intellistock_logger.log(
+            f"Broker start blocked: instance configuration unavailable ({type(exc).__name__})",
+            "red", service="INSTANCE",
+        )
+        return
 
     if _kind == 'kalshi':
         # kalshi/runner.py reads kalshi_config + linked brokerage from the DB.
@@ -436,6 +454,7 @@ def start_broker(symbols):
             'python', 'broker.py', instance_id, 'live',
             'NULL', 'NULL', time_increment,
         ] + list(symbols)
+    _assert_live_broker_start_allowed(instance_id, _instance_doc)
     broker_process = subprocess.Popen(
         cmd,
         cwd=BACKEND_DIR,
@@ -588,7 +607,8 @@ def run():
         @sio.event
         def connect():
             intellistock_logger.log("Connection established to socket server", "green", service="SOCKET")
-            sio.emit('clientType', {"UUID": args_list[1], "instance": args_list[1], "symbol": None})
+            sio.emit('clientType', {"UUID": args_list[1], "instance": args_list[1], "symbol": None,
+                                    "control_token": os.environ.get("CONTROL_SOCKET_TOKEN", "")})
 
         @sio.event
         def terminate(data):
