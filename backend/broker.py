@@ -6574,6 +6574,60 @@ elif mode == MODE_LIVE:
         except Exception as _e:
             _log(f"refresh_orders_today warning: {_e}", "yellow")
 
+        # ----- LIVE ACCOUNT IDENTITY ASSERTION (2026-07-27) ----------------
+        # `BrokerageAccounts.alpaca_account_number` was recorded at link time
+        # and never read at runtime. Alpaca's paper/live endpoint split makes a
+        # wrong ENDPOINT fail closed (401), but a valid key pair for a DIFFERENT
+        # LIVE ACCOUNT boots cleanly and trades that account's real money — the
+        # only prior control was a logged "operator confirmed via launch
+        # checklist (no programmatic check)". Fails OPEN when either side is
+        # unknown (an absent field must not cause an outage) and CLOSED only on
+        # a definite mismatch. Pure comparison lives in live_account_identity.py.
+        try:
+            from live_account_identity import check_account_identity as _chk_ident
+            _stored_account_number = ""
+            if live_brokerage_id:
+                try:
+                    import rethinkdb as _rdb_i
+                    _ri = _rdb_i.RethinkDB()
+                    _ci = _ri.connect(host=os.environ.get("RETHINKDB_HOST", "localhost"),
+                                      port=int(os.environ.get("RETHINKDB_PORT", "28015")),
+                                      timeout=10)
+                    try:
+                        _bi = _ri.db("IntelliStock").table("BrokerageAccounts").get(
+                            live_brokerage_id).run(_ci)
+                        _stored_account_number = str(
+                            (_bi or {}).get("alpaca_account_number") or "").strip()
+                    finally:
+                        try:
+                            _ci.close()
+                        except Exception:
+                            pass
+                except Exception as _sa_err:
+                    _log(f"[account-identity] stored account lookup failed: {_sa_err}",
+                         "yellow")
+            _live_acct_no = ""
+            if hasattr(live_adapter, "get_account_number"):
+                _live_acct_no = live_adapter.get_account_number()
+            _ident = _chk_ident(_stored_account_number, _live_acct_no,
+                                instance_id=str(instance_id))
+            _log(f"[account-identity] {_ident.message}",
+                 "red" if not _ident.ok else ("yellow" if _ident.status != "match" else "green"))
+            if not _ident.ok:
+                try:
+                    from live_alerts import alert_strategy_error as _alert_ident
+                    _alert_ident(instance_id=str(instance_id),
+                                 tag="live_account_mismatch", message=_ident.message)
+                except Exception:
+                    pass
+                sys.exit(5)   # same exit path as the adapter 401 assertion
+        except SystemExit:
+            raise
+        except Exception as _ident_err:
+            # NEVER let the check itself halt trading — that would be a new
+            # outage mode. A failure here degrades to unverified, like before.
+            _log(f"[account-identity] check skipped (non-fatal): {_ident_err}", "yellow")
+
         # ----- LiveBootAudit row (2026-05-28) ------------------------------
         # One row per broker boot: forensic record of what the adapter
         # adopted as strategy-owned vs quarantined as external. Non-fatal

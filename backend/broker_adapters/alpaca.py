@@ -1265,6 +1265,21 @@ class AlpacaAdapter(BrokerAdapter):
             cash=cash,
         )
 
+    def get_account_number(self) -> str:
+        """The account number Alpaca reports for THESE credentials.
+
+        2026-07-27 live-safety: nothing in the boot path ever compared the
+        account we actually connect to against the `alpaca_account_number`
+        captured when the brokerage was linked, so a wrong-but-valid live key
+        pair boots cleanly and trades the wrong real account. Callers use this
+        to assert identity before the first order. Returns "" when Alpaca does
+        not supply it, so callers can distinguish "mismatch" from "unknown".
+        """
+        try:
+            return str(getattr(self._client.get_account(), "account_number", "") or "").strip()
+        except Exception:
+            return ""
+
     def is_market_open(self, now_utc: datetime) -> bool:
         """True during NYSE regular OR extended trading hours.
 
