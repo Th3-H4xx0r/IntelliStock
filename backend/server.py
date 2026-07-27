@@ -502,27 +502,9 @@ def start_instance_container(instance_id, *, preflight=None):
                'GRAPH_NEXUS_LLM_PROVIDER', 'GRAPH_NEXUS_LLM_API_KEY', 'GRAPH_NEXUS_LLM_MODEL',
                'INTELLISTOCK_CRED_KEY',
                'ALLOW_LEGACY_ENV_CREDS',
-               # Phase C (2026-04-29) — Robinhood live-trading env passthrough.
-               # Without RH_DRY_RUN on the per-instance container, the adapter
-               # always sees the dry-run default and silently swallows live
-               # orders regardless of host-side override.
-               'RH_DRY_RUN',
-               'RH_POLL_INTERVAL_SEC', 'RH_POSITIONS_STALE_MAX_SEC',
-               # 2026-04-30 — RH inter-order pacing. Without these passed
-               # through, RobinhoodAdapter inside the per-instance container
-               # always uses the 25/45-s defaults regardless of host-side
-               # tuning (HIGH agent finding #7).
-               'RH_INTER_ORDER_DELAY_MIN_SEC', 'RH_INTER_ORDER_DELAY_MAX_SEC',
-               # Burst-poll window after a submit (enhancement 2026-04-30):
-               # while not strictly required (defaults inside adapter), this
-               # lets operators tune burst window length on the fly.
-               'RH_BURST_POLL_INTERVAL_SEC', 'RH_BURST_POLL_WINDOW_SEC',
-               # 2026-05-01 — RTH-only gate. When set, broker_session
-               # narrows the live tick gate from extended hours
-               # (4 AM-8 PM ET) to RTH (9:30 AM-4 PM ET) so pre-market
-               # wide-spread fills can't bite. RH_FAIL_CLOSED_PDT also
-               # added here for completeness (preflight fail-closed).
-               'RH_RTH_ONLY', 'LIVE_RTH_ONLY', 'RH_FAIL_CLOSED_PDT',
+               # When set, broker_session narrows the live tick gate from
+               # extended hours to regular trading hours.
+               'LIVE_RTH_ONLY',
                # 2026-05-01 — auto-reset on detected account migration
                # (peak >> current equity + 0 broker positions). Without
                # this set the boot sequence logs RED + warns but does not

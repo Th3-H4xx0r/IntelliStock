@@ -17,9 +17,6 @@ SECRET_FIELDS_BY_TABLE: Mapping[str, tuple[str, ...]] = {
     "BrokerageAccounts": (
         "alpaca_key",
         "alpaca_secret",
-        "robinhood_access_token",
-        "robinhood_refresh_token",
-        "robinhood_device_token",
     ),
     "Models": ("api_key",),
     "Instances": ("key", "secret"),

@@ -54,7 +54,9 @@ class _StepWelcomeState extends ConsumerState<StepWelcome>
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: AppColors.primary.withValues(alpha: 0.20 - _pulse.value * 0.10),
+                      color: AppColors.primary.withValues(
+                        alpha: 0.20 - _pulse.value * 0.10,
+                      ),
                       width: 1,
                     ),
                   ),
@@ -85,17 +87,14 @@ class _StepWelcomeState extends ConsumerState<StepWelcome>
             _FeatureItem(
               icon: 'account_balance',
               label: 'Brokerages',
-              desc: 'Alpaca · Robinhood',
+              desc: 'Alpaca',
             ),
             _FeatureItem(
               icon: 'rocket_launch',
               label: 'Instances',
               desc: 'Live or paper, fully autonomous',
             ),
-          ]) ...[
-            _FeatureTile(item: item),
-            const SizedBox(height: 8),
-          ],
+          ]) ...[_FeatureTile(item: item), const SizedBox(height: 8)],
           const SizedBox(height: 8),
         ],
       ),
@@ -127,23 +126,23 @@ class _FeatureTile extends StatelessWidget {
       borderColor: AppColors.border,
       child: Row(
         children: [
-          IconTile(
-            icon: symbol(item.icon),
-            color: AppColors.primary,
-            size: 40,
-          ),
+          IconTile(icon: symbol(item.icon), color: AppColors.primary, size: 40),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(item.label,
-                    style: AppTextStyles.cardTitle
-                        .copyWith(color: AppColors.textHi)),
+                Text(
+                  item.label,
+                  style: AppTextStyles.cardTitle.copyWith(
+                    color: AppColors.textHi,
+                  ),
+                ),
                 const SizedBox(height: 2),
-                Text(item.desc,
-                    style:
-                        AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+                Text(
+                  item.desc,
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textDim),
+                ),
               ],
             ),
           ),

@@ -25,7 +25,6 @@ from portfolio_emulator import PortfolioEmulator, create_backtest_emulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
-from robinhood_data_policy import robinhood_data_fallback_allowed
 from persistence_safety import SecretMaterialError, assert_secret_free, sanitize_snapshot
 from secret_store import decrypt_required
 from stock_credential_boundary import (
@@ -128,9 +127,7 @@ _SCP_PERSIST_EXECUTOR = _live_cf.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="scp-persist-watchdog"
 )
 # 2026-05-05 live-hang investigation: snapshot worker hung 71s after full
-# cycle completion (LiveState frozen 5+h). Robinhood adapter calls in
-# _compute_live_state_snapshot share a requests.Session that 11cec87 did
-# not patch, and r.connect() had no timeout — both wedge silently. Wrap
+# cycle completion (LiveState frozen 5+h). Wrap
 # the whole tick (compute + upsert) in a watchdog with bounded zombie
 # leak (max_workers=2).
 _SNAPSHOT_EXECUTOR = _live_cf.ThreadPoolExecutor(
@@ -240,121 +237,8 @@ def _send_monitor_discord_notification(_inst_id: str, _date_key: str, _now_pt_st
             _log(f"Discord monitor-ping thread spawn FAILED: {type(_th_exc).__name__}: {_th_exc}", "yellow")
         except Exception:
             pass
-# 2026-05-05 live-hang continuation: even with snapshot-level watchdog AND
-# RH client timeout=20s, urllib3's SSL recv() doesn't reliably propagate
-# socket.timeout when TLS is stuck or a NAT path drops mid-stream. The
-# 20s requests timeout and 20s watchdog then race at the same threshold;
-# when watchdog wins, the call wedges 60-180s waiting for OS TCP to fire.
-# Fix: hard-bound each RH adapter call (refresh_account, refresh_positions)
-# with a 12s executor timeout — well inside the watchdog — and on timeout
-# rebuild the RH requests.Session so the wedged urllib3 conn pool is
-# flushed before the next snapshot tick.
-_snap_session_reset_pending: bool = False
-# 2026-05-05 third pass: snapshot is now strictly cache-only —
+# Snapshot reads are strictly cache-only —
 # refresh_account/refresh_positions(force=False) return cache without HTTP.
-# So the snapshot's _bounded_adapter_call should never wedge anymore.
-# The "consecutive timeout backoff" + "session reset on snapshot timeout"
-# logic is dead code in the new design (only the hourly pre-cycle hook
-# can hit RH HTTP, and IT has its own 5-retry + give-up path).
-# We keep the network diagnostic runner — it's still useful when the
-# pre-cycle hook fires it on its own retry path. Diagnostic is rate-limited
-# to one run per 60s.
-_snap_last_diagnostic_epoch: float = 0.0
-_RH_DIAGNOSTIC_INTERVAL_SEC: float = 60.0
-
-
-def _diagnose_rh_network() -> None:
-    """One-shot network probe to localize a wedge in RH calls. Each step is
-    submitted to _PRICE_FETCH_EXECUTOR and bounded so the diagnostic itself
-    can't wedge the snapshot. Logs:
-
-      - DNS time + IP   (or "DNS HANG/FAIL" → resolver issue)
-      - TCP+TLS time    (or "TCP+TLS HANG/FAIL" → network/firewall issue)
-
-    If both probes succeed but the actual API call still wedges, the issue is
-    in the HTTP layer (rate-limit, RH backend, TLS fingerprint reset).
-    """
-    global _snap_last_diagnostic_epoch
-    _snap_last_diagnostic_epoch = time.time()
-    import socket as _sock
-    import ssl as _ssl
-    host = "api.robinhood.com"
-    port = 443
-
-    def _do_dns():
-        return _sock.gethostbyname(host)
-
-    fut = _PRICE_FETCH_EXECUTOR.submit(_do_dns)
-    ip = None
-    try:
-        _t0 = time.time()
-        ip = fut.result(timeout=5.0)
-        _ms = (time.time() - _t0) * 1000
-        try:
-            _log(f"rh-diag: DNS {host}={ip} in {_ms:.0f}ms", "yellow")
-        except Exception:
-            pass
-    except _live_cf.TimeoutError:
-        try:
-            _log("rh-diag: DNS HANG (>5s) — resolver issue. "
-                 "Container DNS may be misconfigured; check /etc/resolv.conf "
-                 "or move to a static resolver (1.1.1.1).", "red")
-        except Exception:
-            pass
-        return
-    except Exception as e:
-        try:
-            _log(f"rh-diag: DNS FAIL: {type(e).__name__}: {e}", "red")
-        except Exception:
-            pass
-        return
-
-    def _do_tcp_tls():
-        s = _sock.create_connection((ip, port), timeout=5.0)
-        try:
-            ctx = _ssl.create_default_context()
-            ss = ctx.wrap_socket(s, server_hostname=host, do_handshake_on_connect=False)
-            ss.settimeout(5.0)
-            ss.do_handshake()
-            ss.close()
-            return True
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-
-    fut = _PRICE_FETCH_EXECUTOR.submit(_do_tcp_tls)
-    try:
-        _t0 = time.time()
-        fut.result(timeout=10.0)
-        _ms = (time.time() - _t0) * 1000
-        try:
-            _log(
-                f"rh-diag: TCP+TLS to {ip}:{port} in {_ms:.0f}ms — "
-                f"network OK; wedge is in HTTP layer (likely RH rate-limit / "
-                f"fingerprint reset / backend slowness).",
-                "yellow",
-            )
-        except Exception:
-            pass
-    except _live_cf.TimeoutError:
-        try:
-            _log(
-                f"rh-diag: TCP+TLS HANG (>10s) to {ip}:{port} — "
-                f"network/firewall issue. Container egress may be blocked or "
-                f"the path is dropping packets.",
-                "red",
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        try:
-            _log(f"rh-diag: TCP+TLS FAIL to {ip}:{port}: {type(e).__name__}: {e}", "red")
-        except Exception:
-            pass
-
-
 def _bounded_adapter_call(name: str, fn, timeout: float = 12.0):
     """Run an adapter call with a hard timeout. After 2026-05-05 third pass,
     snapshot's refresh_account/refresh_positions are cache-only — they
@@ -376,14 +260,6 @@ def _bounded_adapter_call(name: str, fn, timeout: float = 12.0):
             )
         except Exception:
             pass
-        global _snap_last_diagnostic_epoch
-        _now = time.time()
-        if (_now - _snap_last_diagnostic_epoch > _RH_DIAGNOSTIC_INTERVAL_SEC
-                and robinhood_data_fallback_allowed(live_broker_type)):
-            try:
-                _diagnose_rh_network()
-            except Exception:
-                pass
         raise
 # Detach all watchdog executors at process exit so zombie threads on wedged
 # TCP reads can't block clean shutdown for the OS-level FIN_WAIT timeout
@@ -536,70 +412,6 @@ Examples:
     )
 
 
-def _load_robinhood_extras_from_db(brokerage_id):
-    """Phase C (2026-04-29) — fetch RH-specific fields the factory needs to
-    build a working RobinhoodAdapter.
-
-    2026-04-30 — extended to also return ``obtained_at_epoch``, ``expires_in``
-    and ``account_url`` so the in-process token-refresh helper can compute
-    a real TTL gate. Without these the adapter's _maybe_refresh_token was a
-    no-op for the entire session (CRITICAL agent finding #1).
-
-    Returns a dict with keys:
-      ``account_number``  (str | None)  — RH sub-account to trade from
-      ``device_token``    (str | None)  — RH per-device fingerprint
-      ``obtained_at_epoch`` (int | None) — when current access_token was minted
-      ``expires_in``      (int | None)  — TTL of access_token in seconds
-      ``account_url``     (str | None)  — RH /accounts/<num>/ resource URL
-    All keys present even on failure (values may be None).
-    Called only when broker_type == 'robinhood'.
-    """
-    out = {
-        "account_number": None,
-        "device_token": None,
-        "obtained_at_epoch": None,
-        "expires_in": None,
-        "account_url": None,
-    }
-    if not brokerage_id:
-        return out
-    try:
-        from rethinkdb import RethinkDB
-        from secret_store import decrypt
-        _r = RethinkDB()
-        host = os.environ.get("RETHINKDB_HOST", "localhost")
-        port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-        conn = _r.connect(host=host, port=port, timeout=10)
-        try:
-            b = _r.db("IntelliStock").table("BrokerageAccounts").get(brokerage_id).run(conn)
-            if not b:
-                return out
-            out["account_number"] = (b.get("robinhood_account_number") or "").strip() or None
-            try:
-                out["device_token"] = decrypt(b.get("robinhood_device_token")) or None
-            except Exception:
-                out["device_token"] = b.get("robinhood_device_token") or None
-            try:
-                _oa = b.get("robinhood_obtained_at_epoch")
-                out["obtained_at_epoch"] = int(_oa) if _oa is not None else None
-            except Exception:
-                out["obtained_at_epoch"] = None
-            try:
-                _ei = b.get("robinhood_expires_in")
-                out["expires_in"] = int(_ei) if _ei is not None else None
-            except Exception:
-                out["expires_in"] = None
-            out["account_url"] = (b.get("robinhood_account_url") or "").strip() or None
-            return out
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-    except Exception:
-        return out
-
-
 def _load_live_credentials_from_db(instance_id):
     """Resolve live credentials from the instance's exact brokerage link.
 
@@ -669,15 +481,11 @@ def _load_live_credentials_from_db(instance_id):
             # decision (treat as paper for safety, but operator sees the warning).
             _paper_field = inst_doc.get("alpaca_paper")
             if _paper_field is None:
-                # Phase C (2026-04-29): only fire the RED log for Alpaca where
-                # the paper/live distinction is meaningful. Robinhood has no
-                # paper account; RH_DRY_RUN env flag handles dry-run instead.
-                if broker_type != "robinhood":
-                    _early_log(
-                        f"Instance {instance_id} has NO `alpaca_paper` field. Defaulting to "
-                        f"PAPER for safety. Set alpaca_paper=true/false explicitly on the row.",
-                        "red",
-                    )
+                _early_log(
+                    f"Instance {instance_id} has NO `alpaca_paper` field. Defaulting to "
+                    f"PAPER for safety. Set alpaca_paper=true/false explicitly on the row.",
+                    "red",
+                )
                 paper = True
             else:
                 paper = bool(_paper_field)
@@ -691,14 +499,11 @@ def _load_live_credentials_from_db(instance_id):
                     broker_type = (b_doc.get("brokerage_type") or broker_type or "alpaca").strip().lower()
                     _b_paper_field = b_doc.get("alpaca_paper")
                     if _b_paper_field is None:
-                        # Phase C (2026-04-29): only RED-log for Alpaca. RH
-                        # has no paper-account concept; RH_DRY_RUN handles dry-run.
-                        if broker_type != "robinhood":
-                            _early_log(
-                                f"BrokerageAccount {brokerage_id} has NO `alpaca_paper` field. "
-                                f"Defaulting to PAPER for safety. Set the field explicitly.",
-                                "red",
-                            )
+                        _early_log(
+                            f"BrokerageAccount {brokerage_id} has NO `alpaca_paper` field. "
+                            f"Defaulting to PAPER for safety. Set the field explicitly.",
+                            "red",
+                        )
                         paper = True
                     else:
                         paper = bool(_b_paper_field)
@@ -714,18 +519,6 @@ def _load_live_credentials_from_db(instance_id):
                                 "red",
                             )
                             # Fail closed.
-                            return None, None, broker_type, paper, brokerage_id
-                        return k, s, broker_type, paper, brokerage_id
-                    if broker_type == "robinhood":
-                        try:
-                            k = decrypt(b_doc.get("robinhood_access_token")) or None
-                            s = decrypt(b_doc.get("robinhood_refresh_token")) or None
-                        except Exception as _e:
-                            _early_log(
-                                f"Decrypt failed for BrokerageAccount {brokerage_id} "
-                                f"(is INTELLISTOCK_CRED_KEY set?): {type(_e).__name__}: {_e}",
-                                "red",
-                            )
                             return None, None, broker_type, paper, brokerage_id
                         return k, s, broker_type, paper, brokerage_id
                     if broker_type in ("binanceus", "binance", "binance_us", "binance.us"):
@@ -1175,7 +968,6 @@ def fetch_alpaca_historical_bars(
     timeframe="1Min",  # Default, will be overridden by caller
     db_conn=None,
     feed=None,  # 2026-04-23: user-selectable via BrokerageAccounts.alpaca_data_feed
-    allow_backtest_rh_fallback=False,  # R13.1 (2026-04-24): strategy-config opt-in, see below
     adjustment=None,  # None preserves Alpaca's raw default; SPY benchmark uses "all"
 ):
     """
@@ -1281,167 +1073,6 @@ def fetch_alpaca_historical_bars(
         from price_utils import get_bars_chunk_cached
     except ImportError:
         get_bars_chunk_cached = None
-
-    def _robinhood_bars_fallback(sym, chunk_start, chunk_end, tf):
-        """Fallback to Robinhood's public historicals endpoint when Alpaca
-        rejects a symbol (401 on IEX free-tier without SIP subscription, or
-        unavailable ticker). Returns bars in Alpaca's wire format
-        ({t, o, h, l, c, v}) so the caller can merge into `out[sym]`
-        without caring which provider served them.
-
-        Robinhood's /quotes/historicals/ is public (no auth required) and
-        covers most US-listed tickers that Alpaca IEX skips.
-
-        Logs every step so operators can see when/why fallback fires or
-        why it returns empty (import failure, empty DF, window filter).
-        """
-        try:
-            from robinhood_engine import get_price_history
-        except Exception as _imp_e:
-            try:
-                _log(
-                    f"Robinhood fallback: CANNOT IMPORT robinhood_engine for {sym} "
-                    f"({type(_imp_e).__name__}: {_imp_e}) — install robin-stocks + its deps",
-                    "red",
-                )
-            except NameError:
-                pass
-            return []
-        _tf = (tf or "").strip()
-        # Map Alpaca timeframe to Robinhood interval + span + bounds.
-        # CRITICAL: Robinhood's API rejects combinations of span and bounds:
-        #   - `bounds=trading` only works with intraday spans (day, week).
-        #   - `bounds=regular` is required for span=year / 5year.
-        # Previously left at the default `bounds=trading`, so every call
-        # with span=year 400'd with:
-        #   "span 'year' is not valid with bounds 'trading'."
-        # and returned an empty DataFrame silently → fallback appeared
-        # to do nothing. Fixed 2026-04-21.
-        if _tf.startswith("1Min") or _tf.startswith("5Min"):
-            interval, span, bounds = "5minute", "week", "trading"
-        elif _tf.startswith("1Hour") or _tf.startswith("4Hour"):
-            interval, span, bounds = "hour", "week", "trading"
-        else:
-            interval = "day"
-            try:
-                _days = (chunk_end - chunk_start).days
-            except Exception:
-                _days = 365
-            if _days <= 7:
-                span, bounds = "week", "trading"
-            elif _days <= 365:
-                span, bounds = "year", "regular"
-            else:
-                span, bounds = "5year", "regular"
-        try:
-            _log(
-                f"Robinhood fallback: CALLING get_price_history "
-                f"sym={sym} tf={_tf} interval={interval} span={span} bounds={bounds} "
-                f"window={chunk_start.strftime('%Y-%m-%d')}..{chunk_end.strftime('%Y-%m-%d')}",
-                "cyan",
-            )
-        except Exception:
-            pass
-        try:
-            df = get_price_history(sym, interval=interval, span=span, bounds=bounds)
-        except Exception as _rh_e:
-            try:
-                _log(
-                    f"Robinhood fallback: get_price_history RAISED for {sym}: "
-                    f"{type(_rh_e).__name__}: {_rh_e}",
-                    "yellow",
-                )
-            except NameError:
-                pass
-            return []
-        if df is None or getattr(df, "empty", True):
-            try:
-                _log(
-                    f"Robinhood fallback: EMPTY DataFrame for {sym} "
-                    f"(interval={interval}, span={span}) — symbol may not exist on RH "
-                    f"or endpoint returned no rows",
-                    "yellow",
-                )
-            except NameError:
-                pass
-            return []
-        try:
-            _log(
-                f"Robinhood fallback: raw DF has {len(df)} row(s) for {sym} "
-                f"before window filter",
-                "cyan",
-            )
-        except Exception:
-            pass
-
-        # Bug-swept 2026-04-21:
-        # C1 - NaN contamination: `row.get("Open") or 0` returns NaN because
-        #      NaN is truthy. `float(nan)` poisons downstream indicator math.
-        #      Use pd.notna + explicit NaN check.
-        # M2 - NaT handling: `pd.to_datetime` can yield NaT for malformed
-        #      begins_at; skip those.
-        def _safe_float(v):
-            try:
-                if v is None:
-                    return 0.0
-                f = float(v)
-                return 0.0 if f != f else f
-            except (TypeError, ValueError):
-                return 0.0
-
-        def _safe_int(v):
-            try:
-                if v is None:
-                    return 0
-                f = float(v)
-                return 0 if f != f else int(f)
-            except (TypeError, ValueError):
-                return 0
-
-        # Filter to the requested window + convert each row to Alpaca-shape.
-        bars = []
-        try:
-            _cs = chunk_start.replace(tzinfo=None) if getattr(chunk_start, "tzinfo", None) else chunk_start
-            _ce = chunk_end.replace(tzinfo=None) if getattr(chunk_end, "tzinfo", None) else chunk_end
-        except Exception:
-            _cs, _ce = chunk_start, chunk_end
-        for dt, row in df.iterrows():
-            try:
-                _dt_naive = dt.to_pydatetime() if hasattr(dt, "to_pydatetime") else dt
-                # Skip NaT (Not-a-Time from pandas on malformed RH timestamps).
-                try:
-                    import pandas as _pd_check
-                    if _pd_check.isna(_dt_naive):
-                        continue
-                except Exception:
-                    pass
-                if getattr(_dt_naive, "tzinfo", None) is not None:
-                    _dt_naive = _dt_naive.replace(tzinfo=None)
-                if _dt_naive < _cs or _dt_naive >= _ce:
-                    continue
-                _c = _safe_float(row.get("Close"))
-                if _c <= 0:
-                    # Skip bars with invalid/zero close — they break price logic.
-                    continue
-                bars.append({
-                    "t": _dt_naive.isoformat() + "Z",
-                    "o": _safe_float(row.get("Open")),
-                    "h": _safe_float(row.get("High")),
-                    "l": _safe_float(row.get("Low")),
-                    "c": _c,
-                    "v": _safe_int(row.get("Volume")),
-                })
-            except Exception:
-                continue
-        try:
-            _log(
-                f"Robinhood fallback: window-filtered {len(bars)}/{len(df)} row(s) "
-                f"for {sym} ({chunk_start.strftime('%Y-%m-%d')}..{chunk_end.strftime('%Y-%m-%d')})",
-                "cyan",
-            )
-        except Exception:
-            pass
-        return bars
 
     def _do_fetch_one_chunk(sym, chunk_start, chunk_end, log_empty_once=None, retry_smaller=False):
         """Perform the actual Alpaca HTTP request for one chunk. Returns list of bars."""
@@ -1601,137 +1232,11 @@ def fetch_alpaca_historical_bars(
                         except NameError:
                             pass
                 except Exception as e:
-                    _err_str = str(e)
                     try:
                         _log(f"Alpaca bars chunk error for {sym} ({chunk_start.date()}–{chunk_end.date()}): {e}", "yellow")
                     except NameError:
                         pass
-                    # Bug-swept 2026-04-21:
-                    # Agent-3 C1: RH fallback writing to AlpacaBarsCache during
-                    #   backtests would silently swap data providers mid-run
-                    #   and break V32 Phase 3 reproducibility. Skip RH entirely
-                    #   when mode==MODE_BACKTEST so backtests stay Alpaca-pure.
-                    # Agent-1 H1: Only fall back on 401/403/404 (permanent
-                    #   auth/access failures). For 429/5xx, let the outer
-                    #   loop keep the symbol's partial bars and move on —
-                    #   don't spam RH on transient Alpaca issues.
-                    # R13.1: strategy-config opt-in for backtest RH fallback
-                    # via allow_backtest_rh_fallback kwarg. When the strategy
-                    # doesn't pass it (default False), backtest stays pure.
-                    _should_fallback = (mode != MODE_BACKTEST and robinhood_data_fallback_allowed(live_broker_type)) or bool(locals().get("allow_backtest_rh_fallback", False))
-                    if _should_fallback:
-                        _status_code = None
-                        try:
-                            _resp = getattr(e, "response", None)
-                            if _resp is not None:
-                                _status_code = getattr(_resp, "status_code", None)
-                        except Exception:
-                            _status_code = None
-                        if _status_code is not None and _status_code not in (401, 403, 404, 422):
-                            _should_fallback = False
-                            try:
-                                _log(
-                                    f"Skipping Robinhood fallback for {sym}: transient Alpaca "
-                                    f"HTTP {_status_code} (will retry next cycle).",
-                                    "yellow",
-                                )
-                            except NameError:
-                                pass
-                    # Robinhood public-historicals fallback — covers symbols
-                    # that Alpaca IEX rejects with 401 Unauthorized (MRK,
-                    # TSLA, NVO, GOOGL, EA, CSCO etc. on the free data feed).
-                    # No auth required; public /quotes/historicals/ endpoint.
-                    # Successful RH bars are written into the same
-                    # AlpacaBarsCache table under the same chunk key so the
-                    # NEXT run hits cache and skips both Alpaca 401 AND the
-                    # Robinhood call — matching the user's "reduce calls" ask.
-                    # Cache writes are LIVE-ONLY so backtests can't read RH
-                    # bars that were originally fetched for live mode (they
-                    # will cache-miss, hit Alpaca, and either succeed or fail
-                    # fast with no silent provider swap).
-                    try:
-                        _rh_bars = _robinhood_bars_fallback(sym, chunk_start, chunk_end, timeframe) if _should_fallback else []
-                        if _rh_bars:
-                            out[sym].extend(_rh_bars)
-                            try:
-                                _log(
-                                    f"Robinhood fallback: fetched {len(_rh_bars)} bars for {sym} "
-                                    f"({chunk_start.date()}–{chunk_end.date()})",
-                                    "green",
-                                )
-                            except NameError:
-                                pass
-                            # Persist to the same cache so future runs reuse.
-                            # Bug-swept 2026-04-21: previously referenced
-                            # undefined `r` (shadowed by local requests.Response)
-                            # and `DB_NAME` (defined only in other functions) and
-                            # `datetime.datetime.utcnow()` (here `datetime` IS
-                            # the class via `from datetime import datetime`).
-                            # Fix: use `_rethink` already initialized at
-                            # price_utils module-import time, hardcode db name,
-                            # call `datetime.utcnow()`.
-                            if db_conn is not None:
-                                try:
-                                    import base64 as _b64
-                                    import gzip as _gz
-                                    import json as _json
-                                    from price_utils import (
-                                        alpaca_bars_cache_key as _key_fn,
-                                        ALPACA_BARS_CACHE_TABLE as _bars_tbl,
-                                        _BARS_COMPRESS_THRESHOLD as _bars_thresh,
-                                        _ensure_bars_cache_table as _ensure_bars_tbl,
-                                        _rethink as _rdb,
-                                    )
-                                    if _rdb is not None:
-                                        _cache_db = "IntelliStock"
-                                        _ensure_bars_tbl(db_conn, _cache_db, _bars_tbl)
-                                        _cache_id = _key_fn(sym, chunk_start, chunk_end, timeframe, feed)
-                                        _bars_json = _json.dumps(_rh_bars)
-                                        _payload = _bars_json
-                                        _compressed = False
-                                        if len(_bars_json) > _bars_thresh:
-                                            _payload = _b64.b64encode(_gz.compress(_bars_json.encode("utf-8"))).decode("ascii")
-                                            _compressed = True
-                                        _rdb.db(_cache_db).table(_bars_tbl).insert({
-                                            "id": _cache_id,
-                                            "symbol": sym.upper(),
-                                            "start_date": chunk_start.strftime("%Y-%m-%d"),
-                                            "end_date": chunk_end.strftime("%Y-%m-%d"),
-                                            "timeframe": timeframe,
-                                            "feed": feed,
-                                            "bars": _payload,
-                                            "compressed": _compressed,
-                                            "cached_at": datetime.utcnow().isoformat() + "Z",
-                                            "source": "robinhood_fallback",
-                                        }, conflict="replace").run(db_conn)
-                                        try:
-                                            _log(
-                                                f"Robinhood fallback: CACHED {len(_rh_bars)} bars "
-                                                f"for {sym} to AlpacaBarsCache "
-                                                f"(id={_cache_id[:12]}..., compressed={_compressed})",
-                                                "green",
-                                            )
-                                        except NameError:
-                                            pass
-                                except Exception as _cache_e:
-                                    # Agent-3 M1: surface cache write failures
-                                    # so operators can see when "reduce calls"
-                                    # path is broken (RethinkDB down, schema
-                                    # drift, etc.) instead of silently
-                                    # re-fetching from RH every run.
-                                    try:
-                                        _log(
-                                            f"RH fallback cache write failed for {sym}: "
-                                            f"{type(_cache_e).__name__}: {_cache_e}",
-                                            "yellow",
-                                        )
-                                    except NameError:
-                                        pass
-                    except Exception as _rh_e:
-                        try:
-                            _log(f"Robinhood fallback failed for {sym}: {_rh_e}", "yellow")
-                        except NameError:
-                            pass
+
                 chunk_start = chunk_end
             # Sort by time and dedupe by 't'
             seen_t = set()
@@ -1781,7 +1286,6 @@ def _fetch_adjusted_spy_benchmark(
         timeframe="1Day",
         db_conn=None,
         feed=feed,
-        allow_backtest_rh_fallback=False,
         adjustment="all",
     )
     values = build_adjusted_spy_close_series(
@@ -2394,8 +1898,8 @@ def _fetch_price_for_symbol(symbol: str, current_time, key=None, secret=None, fe
 
     2026-04-23: ``allow_non_alpaca_fallback`` — when True and all 5 Alpaca
     tiers return no price (401 on restricted symbols, empty response, or
-    network failure), try yfinance then Robinhood public API before
-    returning None. LIVE callers pass True so 401'd symbols don't get
+    network failure), try yfinance before returning None. LIVE callers pass
+    True so unavailable symbols don't get
     silently discarded. BACKTEST callers leave False (default) so
     historical price reproducibility stays Alpaca-pure.
     """
@@ -2650,16 +2154,10 @@ def _fetch_price_for_symbol(symbol: str, current_time, key=None, secret=None, fe
                         return p
                 except (TypeError, ValueError):
                     pass
-        # 2026-04-23: explicit non-Alpaca fallback for live callers. Alpaca
-        # 401s on restricted symbols (e.g. SIP-only, delisted-IEX, free-tier
-        # edge cases) were silently discarding tickers from Nexus expansion
-        # buys / discovery / sell-enforcement. Callers that pass
-        # ``allow_non_alpaca_fallback=True`` get yfinance → Robinhood fallback
-        # so no ticker is silently dropped.
+        # Explicit public-data fallback for live callers when Alpaca cannot
+        # serve a symbol through the configured feed.
         if allow_non_alpaca_fallback:
-            # 2026-05-03 live-hang investigation: yfinance (curl_cffi gzip
-            # hangs on rate-limit) and Robinhood public get_price_history
-            # have no enforceable client-side timeout. Submit to a long-lived
+            # yfinance can hang on rate-limit. Submit to a long-lived
             # module-level executor (_PRICE_FETCH_EXECUTOR) and wait at most
             # 15s for the result. A wedged HTTP read leaks one thread (bounded
             # by the executor's max_workers=4) but never blocks the live tick.
@@ -2677,42 +2175,6 @@ def _fetch_price_for_symbol(symbol: str, current_time, key=None, secret=None, fe
                     _yp = None
                 if _yp and _yp > 0:
                     return _yp
-            except Exception:
-                pass
-            # Robinhood data fallback is gated: only when Robinhood is the trading
-            # broker (a non-RH instance, e.g. Alpaca, must NEVER call Robinhood from
-            # the server IP). yfinance above still runs for every caller.
-            if not robinhood_data_fallback_allowed(live_broker_type):
-                return None
-            try:
-                from robinhood_engine import get_price_history as _rh_ph
-                import datetime as _dt2
-                import math as _math2
-                ct_utc2 = _current_time_to_utc(current_time)
-                if ct_utc2 is not None:
-                    _target_date = ct_utc2.date()
-                    _rh_fut = _PRICE_FETCH_EXECUTOR.submit(_rh_ph, symbol, "day", "year")
-                    try:
-                        df = _rh_fut.result(timeout=15)
-                    except _live_cf.TimeoutError:
-                        try:
-                            _log(f"robinhood get_price_history({symbol}) watchdog timeout (>15s); leaving worker to finish in background", "yellow")
-                        except Exception:
-                            pass
-                        df = None
-                    if df is not None and not df.empty:
-                        for _i in reversed(range(len(df))):
-                            _row_date = df.index[_i]
-                            if hasattr(_row_date, "date"):
-                                _row_date = _row_date.date()
-                            if _row_date <= _target_date:
-                                try:
-                                    _c = float(df["close_price"].iloc[_i]) if "close_price" in df.columns else float(df["close"].iloc[_i])
-                                    if _c > 0 and not _math2.isnan(_c):
-                                        return _c
-                                except (TypeError, ValueError, KeyError):
-                                    pass
-                                break
             except Exception:
                 pass
         return None
@@ -2771,32 +2233,6 @@ def _fetch_price_with_fallback(symbol: str, current_time, key: str = "", secret:
         if log_fn:
             log_fn("[Pending] Fetched price %s=%.2f via yfinance fallback" % (symbol, price), "cyan")
         return price
-    # yfinance also failed — try Robinhood public API (no auth needed) — but only
-    # when Robinhood is the trading broker (a non-RH instance must not call
-    # Robinhood from the server IP).
-    if not robinhood_data_fallback_allowed(live_broker_type):
-        return None
-    try:
-        import datetime as _dt
-        import math as _math
-        from robinhood_engine import get_price_history as _rh_price_history
-        ct_utc = _current_time_to_utc(current_time)
-        if ct_utc is not None:
-            target_date = ct_utc.date()
-            df = _rh_price_history(symbol, interval="day", span="week")
-            if df is not None and not df.empty:
-                for i in reversed(range(len(df))):
-                    row_date = df.index[i]
-                    if hasattr(row_date, "date"):
-                        row_date = row_date.date()
-                    if row_date < target_date:  # strict < to avoid same-day close (forward-looking in intraday backtests)
-                        close = float(df["Close"].iloc[i])
-                        if close > 0 and not _math.isnan(close):
-                            if log_fn:
-                                log_fn("[Pending] Fetched price %s=%.2f via Robinhood fallback" % (symbol, close), "cyan")
-                            return close
-    except Exception:
-        pass
     return None
 
 
@@ -4844,15 +4280,12 @@ def _fetch_daily_close_prices(symbols, start_date, end_date, alpaca_key, alpaca_
     prices_by_date = {}
     for sym in symbols:
         collected = []
-        _alpaca_auth_failed = False
         try:
             params = {"start": start_iso, "end": end_iso, "timeframe": "1Day", "limit": 10000, "feed": feed, "sort": "asc"}
             url = f"{ALPACA_DATA_BASE}/stocks/{sym}/bars"
             while True:
                 resp = requests.get(url, headers=headers, params=params, timeout=30)
                 if resp.status_code in (401, 403, 404, 422):
-                    # 2026-04-23: mark Alpaca-auth failure so we try RH fallback below
-                    _alpaca_auth_failed = True
                     break
                 if resp.status_code != 200:
                     break
@@ -4865,33 +4298,6 @@ def _fetch_daily_close_prices(symbols, start_date, end_date, alpaca_key, alpaca_
                 params = {"page_token": npt, "timeframe": "1Day", "limit": 10000, "feed": feed, "sort": "asc"}
         except Exception as e:
             _log(f"  Lookback price fetch failed for {sym}: {e}", "yellow")
-        # 2026-04-23: RH fallback on Alpaca 401/403/404/422 — no silent discards.
-        # Mirrors the fetch_alpaca_historical_bars RH fallback policy so live
-        # lookback's daily-close prefetch covers SIP-only / delisted / IEX-
-        # restricted tickers without operator intervention.
-        if _alpaca_auth_failed and not collected and robinhood_data_fallback_allowed(live_broker_type):
-            try:
-                from robinhood_engine import get_price_history as _rh_ph
-                df = _rh_ph(sym, interval="day", span="year")
-                if df is not None and not df.empty:
-                    _start_d = start_date
-                    _end_d = end_date
-                    for _i in range(len(df)):
-                        _row_date = df.index[_i]
-                        if hasattr(_row_date, "date"):
-                            _row_date = _row_date.date()
-                        if _row_date < _start_d or _row_date > _end_d:
-                            continue
-                        try:
-                            _c = float(df["close_price"].iloc[_i]) if "close_price" in df.columns else float(df["close"].iloc[_i])
-                            if _c > 0:
-                                prices_by_date.setdefault(_row_date.strftime("%Y-%m-%d"), {})[sym] = _c
-                        except (TypeError, ValueError, KeyError):
-                            continue
-                    _log(f"  Lookback price fetch: RH fallback succeeded for {sym}", "cyan")
-                    continue  # RH filled in; skip the Alpaca collected loop below
-            except Exception as _rh_e:
-                _log(f"  Lookback price fetch: RH fallback failed for {sym}: {_rh_e}", "yellow")
         for b in collected:
             t = b.get("t")
             c = b.get("c")
@@ -5994,7 +5400,7 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     _lb_snap = globals().get("_live_lookback_progress")
     # 2026-05-07 strategy-tick diagnostic state. Snapshot daemon copies the
     # strategy worker thread's last phase/wake info into the live-state
-    # payload so the UI / API can show "tick #4 wedged at phase=rh_refresh
+    # payload so the UI / API can show "tick #4 wedged at phase=broker_refresh
     # since 22:00:01" instead of just falling silent.
     try:
         _strat_tick = dict(_strategy_tick_state)
@@ -6091,18 +5497,10 @@ def _live_state_snapshot_worker(
     trader wonders why the live page hasn't moved in 15 seconds.
     """
     interval = float(os.environ.get("LIVE_STATE_SNAPSHOT_INTERVAL_SEC", "3"))
-    # 2026-05-05 live-hang investigation: bound the entire tick (compute +
-    # RethinkDB upsert) under a watchdog. Either Robinhood session reads or
-    # rdb writes can wedge silently; on TimeoutError, walk away and let the
+    # Bound the entire tick (compute + RethinkDB upsert) under a watchdog.
+    # Either broker reads or rdb writes can wedge silently; on TimeoutError,
+    # walk away and let the
     # zombie thread finish whenever the OS unblocks it.
-    # 2026-05-05 third pass: live_broker_fetch (which serves the working
-    # live trading UI) uses RobinhoodClient with default timeout_sec=20.
-    # Our prior 20s watchdog + 12s adapter bound were both TIGHTER than
-    # RH's typical response window, causing premature aborts. Raise to
-    # 35s watchdog + 25s adapter bound — RH's 20s requests-level timeout
-    # then has room to fire FIRST and surface a real exception, while
-    # adapter calls slow enough to complete within their natural window
-    # actually return data instead of being prematurely abandoned.
     snapshot_watchdog_sec = float(
         os.environ.get("LIVE_STATE_SNAPSHOT_WATCHDOG_SEC", "35")
     )
@@ -7186,12 +6584,9 @@ if mode == MODE_BACKTEST:
     _backtest_fetch_start_dt = extended_start
     _log("Warmup: fetching from %s (%s cycles / ~%s days before start) to end." % (extended_start, WARMUP_CYCLES, warmup_td.days), "green")
 
-from robinhood_engine import get_live_prices, get_price_history
-
 # Symbols list for price_history: same as symbols unless Breakout strategy needs SPY for market filter
 symbols_for_data = list(symbols or [])
 
-# print(get_live_prices(symbols))
 if mode == MODE_BACKTEST:
     # Load strategies early so we can add SPY to the fetch when Breakout strategy is used
     _cached_strategies, _strategy_row_id, _backtest_strategy_schema = load_strategies_from_db()
@@ -7485,36 +6880,6 @@ elif mode == MODE_LIVE:
             _open_live_trading_log(instance_id)
         except Exception as _log_e_pre:
             _log(f"Could not open live-trading log file (pre-adapter): {_log_e_pre}", "yellow")
-        # Phase C (2026-04-29) — resolve RH-only extras (account_number +
-        # device_token) so RobinhoodAdapter trades from the sub-account the
-        # user picked at link time. No-op for Alpaca.
-        _rh_account_number = None
-        _rh_device_token = None
-        _rh_obtained_at = None
-        _rh_expires_in = None
-        _rh_account_url = None
-        if (live_broker_type or "").strip().lower() == "robinhood":
-            _rh_extras = _load_robinhood_extras_from_db(live_brokerage_id)
-            _rh_account_number = _rh_extras.get("account_number")
-            _rh_device_token = _rh_extras.get("device_token")
-            _rh_obtained_at = _rh_extras.get("obtained_at_epoch")
-            _rh_expires_in = _rh_extras.get("expires_in")
-            _rh_account_url = _rh_extras.get("account_url")
-            if not _rh_account_number:
-                _log(
-                    f"Robinhood brokerage {live_brokerage_id} has NO `robinhood_account_number`. "
-                    f"Re-link the account from the UI so the adapter trades from the right sub-account.",
-                    "yellow",
-                )
-            # Surface dry-run state on boot so operators can't miss it.
-            _rh_dry = (os.environ.get("RH_DRY_RUN", "true") or "true").strip().lower() not in ("0", "false", "no", "off")
-            if _rh_dry:
-                _log(
-                    "RH_DRY_RUN=true (default) — Robinhood orders will NOT be submitted. "
-                    "Set RH_DRY_RUN=false to enable real-money trading.",
-                    "yellow",
-                )
-
         # ----- Clean-room mode resolution (2026-05-28) ---------------------
         # Sources of truth, in precedence order:
         #   1. env LIVE_CLEAN_ROOM_MODE (per-host force)
@@ -7703,16 +7068,6 @@ elif mode == MODE_LIVE:
                 paper=live_broker_paper,
                 instance_id=str(instance_id),
                 wal_store=live_wal,
-                account_number=_rh_account_number,
-                device_token=_rh_device_token,
-                # 2026-04-30 — auth chain CRITICAL #1/#2: thread session-state
-                # extras into the adapter so the in-process refresh path is
-                # actually live. brokerage_id is also threaded so the adapter
-                # can persist refreshed tokens back to the same DB row.
-                rh_obtained_at_epoch=_rh_obtained_at,
-                rh_expires_in=_rh_expires_in,
-                rh_account_url=_rh_account_url,
-                rh_brokerage_id=live_brokerage_id,
                 # 2026-05-28 — clean-room mode threading. Backward-compatible:
                 # clean_room_mode defaults False; when False the adapter
                 # uses the legacy "adopt broker state at boot" behavior.
@@ -7728,8 +7083,8 @@ elif mode == MODE_LIVE:
             # order authority (fail closed if the state is unreadable).
             live_adapter = _install_legacy_containment_gate(
                 live_adapter, str(instance_id))
-            # Task 7 is intentionally stock/Alpaca-only. Robinhood, crypto,
-            # and prediction-market adapters retain their existing paths.
+            # Task 7 is intentionally stock/Alpaca-only. Crypto and
+            # prediction-market adapters retain their existing paths.
             if str(live_broker_type or "").strip().lower() == "alpaca":
                 from live_orders import OrderLifecycleStore
                 from live_state import LiveOrderService
@@ -8077,12 +7432,9 @@ elif mode == MODE_LIVE:
                 _bar_now = int(_nexus_cache.get("_deployment_bar_index", 0) or 0)
             except Exception:
                 _bar_now = 0
-            # Phase C (2026-04-29) — adapter-agnostic warm-boot positions
-            # probe. Was: `live_adapter._client.get_all_positions()` which
-            # only worked for Alpaca's TradingClient; for RobinhoodAdapter
-            # the underlying client is `RobinhoodClient` and the method is
-            # named differently. Use the BrokerAdapter ABC method so any
-            # adapter implementation works. refresh_positions() returns a
+            # Adapter-agnostic warm-boot positions probe. Use the BrokerAdapter
+            # ABC method so any adapter implementation works.
+            # refresh_positions() returns a
             # list[PositionDTO] with PositionDTO.qty as float.
             _warm_position_count = 0
             try:
@@ -8163,7 +7515,7 @@ elif mode == MODE_LIVE:
             # positions probe, compare the cached drawdown peak against the
             # broker's CURRENT equity. A peak materially above current equity
             # (>40% gap) AND empty broker positions strongly suggests the
-            # operator switched brokerages (e.g. Alpaca → Robinhood) leaving
+            # operator switched accounts leaving
             # state from the prior account. Without resetting, the persisted
             # peak immediately trips drawdown_halt and demotes every buy.
             #
@@ -9335,9 +8687,8 @@ if mode == MODE_LIVE:
                 symbols,
                 # Scope E (2026-05-29): the LIVE historic lookback must fetch
                 # bars/news with the DATA-source brokerage creds (data_key/
-                # data_secret), NOT the trading creds (key/secret) — which for a
-                # Robinhood-trading instance are not valid Alpaca data creds AND
-                # are wiped to "" after the adapter build (~line 6007). Passing
+                # data_secret), NOT unrelated trading creds (key/secret), which
+                # may not be valid Alpaca data creds. Passing
                 # empty/trading creds let the stale doc-179 alpaca_key win and
                 # 401'd every data.alpaca.markets bars call (then fell back to RH).
                 # Mirrors the per-tick path's _strat_data_key (data_key or key).
@@ -10128,12 +9479,9 @@ while not shutdown_requested:
                 prices = _get_prices_at_time(data, symbols, current_time, use_cursor=True)
                 price_history = get_price_history_up_to_current(data, symbols_for_data, current_time)
         else:
-            # get_live_prices() hits Robinhood's batch-quotes endpoint. Only call it
-            # when Robinhood is the trading broker — a non-RH (e.g. Alpaca) instance
-            # must NOT call Robinhood from the server IP. Held-position prices are
-            # backfilled by _ensure_prices_include_positions (Alpaca/yfinance) and the
-            # per-symbol fetchers + pre-submit quote refresh cover the rest.
-            prices = get_live_prices(symbols) if robinhood_data_fallback_allowed(live_broker_type) else {}
+            # Held-position prices are backfilled by the adapter mark stream
+            # and the bounded Alpaca/yfinance price fetchers.
+            prices = {}
             price_history = None
 
         # Promotable equity backtests apply pending orders from the previous
@@ -10357,11 +9705,11 @@ while not shutdown_requested:
         # 2026-04-30 v2 Task A: live mode uses NYSE-aware gate
         # (holiday + early-close aware via exchange_calendars). Backtest
         # keeps the legacy PT-window gate to preserve determinism.
-        # 2026-05-05: when any strategy has dual-cadence enabled, force
-        # extended-hours mode (1AM-5PM PT) regardless of RH_RTH_ONLY env.
+        # When any strategy has dual-cadence enabled, force extended-hours
+        # mode (1AM-5PM PT) regardless of LIVE_RTH_ONLY.
         # The dual-cadence gate inside the strategy enforces its own
         # tighter 5AM-5PM PT window; the broker just needs to tick during
-        # that window. Without this override, RH_RTH_ONLY=true would clip
+        # that window. Without this override, LIVE_RTH_ONLY=true would clip
         # the broker to 6:30AM-1PM PT and dual-cadence's 1PM-5PM PT
         # monitor cycles would never run.
         _dc_enabled_any = False
@@ -10380,7 +9728,7 @@ while not shutdown_requested:
         elif mode == MODE_LIVE:
             if _dc_enabled_any:
                 # Force extended-hours gate (NYSE pre-market + RTH + after-hours)
-                # regardless of RH_RTH_ONLY. The dual-cadence gate in the
+                # regardless of LIVE_RTH_ONLY. The dual-cadence gate in the
                 # strategy enforces its own tighter 5AM-5PM PT window.
                 try:
                     from live_calendar import is_nyse_open_extended as _live_isoe
@@ -10403,10 +9751,8 @@ while not shutdown_requested:
             # "Outside session" on the same cadence would double every heartbeat.
             try:
                 if _loop_log_last_outside is not True:
-                    _rth_only_active = (
-                        os.environ.get("RH_RTH_ONLY", "")
-                        or os.environ.get("LIVE_RTH_ONLY", "")
-                        or ""
+                    _rth_only_active = os.environ.get(
+                        "LIVE_RTH_ONLY", ""
                     ).strip().lower() in ("1", "true", "yes")
                     if _rth_only_active:
                         _log(
@@ -10607,12 +9953,12 @@ while not shutdown_requested:
                         return False
 
                     _log(
-                        "Pre-cycle RH refresh starting (hourly run depends "
+                        "Pre-cycle broker refresh starting (hourly run depends "
                         "on this; will retry up to 5x)...",
                         "cyan",
                     )
                     try:
-                        _set_strategy_tick_phase("rh_refresh")
+                        _set_strategy_tick_phase("broker_refresh")
                     except Exception:
                         pass
                     _acct_ok = _retry_refresh(
@@ -12103,19 +11449,6 @@ while not shutdown_requested:
                             _c = _last.get("c") if isinstance(_last, dict) else None
                             if _c and float(_c) > 0:
                                 _fresh[str(_s).strip().upper()] = float(_c)
-                    elif _bt == "robinhood":
-                        # 2026-05-06: 10s executor bound for the same reason.
-                        from robinhood_engine import get_live_prices as _rh_gl
-                        _rh_fut = _PRICE_FETCH_EXECUTOR.submit(_rh_gl, _exec_syms)
-                        try:
-                            _fresh = _rh_fut.result(timeout=10.0) or {}
-                        except _live_cf.TimeoutError:
-                            _log(
-                                "Pre-submit RH live prices hard-timeout (>10s) — "
-                                "using tick-start prices",
-                                "yellow",
-                            )
-                            _fresh = {}
                     _refreshed = 0
                     for _s, _p in _fresh.items():
                         if datetime.datetime.now(datetime.timezone.utc) > _refresh_deadline:
@@ -12950,8 +12283,8 @@ while not shutdown_requested:
                                                 "red",
                                             )
                                     else:
-                                        # Robinhood and crypto compatibility
-                                        # paths are intentionally unchanged.
+                                        # Non-equity compatibility paths are
+                                        # intentionally unchanged.
                                         _es_fut = _PRICE_FETCH_EXECUTOR.submit(
                                             portfolio_emulator.execute_signal,
                                             symbol,

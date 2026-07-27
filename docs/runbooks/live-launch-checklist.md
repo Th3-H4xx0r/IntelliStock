@@ -13,7 +13,7 @@
 
 ## T-1h to T-30min (morning of launch)
 
-- [ ] **Liquidate all Robinhood positions.** Sell everything currently held in the broker account. Wait for fills to confirm.
+- [ ] **Reconcile the Alpaca account.** Confirm every open position and order is expected for this instance. Quarantine or manually close unrelated holdings before launch.
 - [ ] **Wait for settlement.** Best-effort: try to launch when cash_available approximately equals cash_total. Live mode now logs `[live_boot] BLOCKER #1 settlement: operator confirmed via launch checklist (no programmatic check)` — the burden is on you to verify settlement manually.
 - [ ] **Run cleanup script (dry-run first):**
   ```bash
@@ -60,7 +60,7 @@
 ## What this checklist protects against
 
 - Old (deprecated) nexus version's persisted state (cooldowns, blacklists, peak HWM, discovered-stock "sold" flags) leaking into the new strategy's decision-making.
-- Stale Robinhood positions distorting the new strategy's deployment ramp.
+- Stale or unrelated Alpaca positions distorting the new strategy's deployment ramp.
 
 > Note: `LiveOrderWAL` is globally-scoped (one broker process per host -> one WAL). It is NOT touched by the per-instance cleanup script; the broker's startup reconciliation handles non-terminal WAL entries on boot. See the optional "Check LiveOrderWAL state manually" step above.
 

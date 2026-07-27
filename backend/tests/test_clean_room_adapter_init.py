@@ -52,15 +52,6 @@ def test_alpaca_clean_room_mode_param_accepted():
         "clean_room_mode must default to False for backward compatibility"
 
 
-def test_robinhood_clean_room_mode_param_accepted():
-    from broker_adapters.robinhood import RobinhoodAdapter
-
-    sig = inspect.signature(RobinhoodAdapter.__init__)
-    for name in ("clean_room_mode", "cid_prefix", "clean_room_retention_days"):
-        assert name in sig.parameters, f"RobinhoodAdapter.__init__ missing {name}"
-    assert sig.parameters["clean_room_mode"].default is False
-
-
 def test_factory_threads_clean_room_params():
     """build_adapter accepts the new params and threads them through."""
     from broker_adapters import factory
@@ -125,8 +116,7 @@ def test_alpaca_clean_room_classifies_strategy_owned_and_external():
 
 def test_alpaca_clean_room_refresh_does_not_readopt_external():
     """2-A (bug-sweep 2026-05-28): a forced refresh_positions must NOT re-merge
-    a quarantined external position back into strategy-owned. Mirrors the
-    RobinhoodAdapter fix."""
+    a quarantined external position back into strategy-owned."""
     from broker_adapters._wal import LiveOrderWAL, InMemoryStore
 
     now = datetime(2026, 5, 28, tzinfo=timezone.utc)

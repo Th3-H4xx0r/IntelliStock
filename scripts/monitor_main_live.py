@@ -11,8 +11,8 @@ Behaviour:
 - Logs into /auth/login, persists JWT to .monitor_state/token.txt.
 - Tails /instances/main/live-logs since last cursor (stored in
   .monitor_state/cursor.txt). Prints ALL new lines verbatim.
-- Categorises new lines into: ERRORS, WARNINGS, LOOKBACK_PROGRESS,
-  LOOKBACK_DONE, CYCLE_COMPLETE_TODAY, RH_FALLBACK_OK, RH_FALLBACK_FAIL.
+- Categorises new lines into errors, warnings, lookback progress, and completed
+  strategy cycles.
 - Exits with special code 42 once TODAY's first "Run once complete |
   date=<YYYY-MM-DD>" appears AFTER the "Live lookback warmup check"
   marker, meaning the full cycle is done. Outer /loop uses exit-code
@@ -168,13 +168,9 @@ def _write_cursor(n: int) -> None:
 # NOTE: order matters — WARN_PATTERNS are tested BEFORE ERR_PATTERNS below,
 # so expected-but-noisy 401s are demoted rather than miscategorised as errors.
 WARN_PATTERNS = [
-    # Alpaca IEX free-tier 401s are EXPECTED for restricted symbols and are
-    # handled by the RH fallback. Only noteworthy if no RH_OK follows them.
+    # Alpaca IEX free-tier 401s are noteworthy data-availability warnings.
     re.compile(r"Alpaca bars chunk error.*401 Client Error", re.I),
-    re.compile(r"Robinhood fallback: EMPTY DataFrame"),
-    re.compile(r"Robinhood fallback: get_price_history RAISED"),
     re.compile(r"No Alpaca prices for .* Nexus will use JIT"),
-    re.compile(r"Skipping Robinhood fallback"),
     re.compile(r"Live lookback .* FAILED:"),   # per-day failures, loop continues
     re.compile(r"PDT.*rule|day trade"),
     # 2026-04-22 Round 4 Fix 9: surface new broker / strategy guard rails
@@ -205,8 +201,6 @@ ERR_PATTERNS = [
     re.compile(r"\bTraceback\b"),
     re.compile(r"UnboundLocalError|AttributeError|TypeError|KeyError|NameError|ValueError|ImportError"),
     re.compile(r"RuntimeError(?!\s+from)"),
-    re.compile(r"CANNOT IMPORT robinhood_engine"),
-    re.compile(r"RH fallback cache write failed"),
     # Hard-fail broker markers.
     re.compile(r"Broker .* crashed|Broker shutdown due to|broker loop exited"),
     # 2026-04-22 Round 4 Fix 9: Discord outage + strategy-loop crash are
@@ -220,10 +214,6 @@ ERR_PATTERNS = [
 LOOKBACK_PROG = re.compile(r"Live lookback progress (\d+)/(\d+)")
 LOOKBACK_DONE = re.compile(r"Live lookback warmup check: (\d+) outcomes")
 RUN_ONCE_COMPLETE = re.compile(r"Run once complete \| date=(\d{4}-\d{2}-\d{2})")
-RH_OK = re.compile(r"Robinhood fallback: fetched (\d+) bars for (\S+)")
-RH_CACHED = re.compile(r"Robinhood fallback: CACHED (\d+) bars for (\S+)")
-
-
 def _classify(line: str) -> str:
     # Check WARN before ERROR so expected 401/PDT/lookback-day-fail lines
     # aren't miscategorised as hard errors.
@@ -237,8 +227,6 @@ def _classify(line: str) -> str:
         return "LOOKBACK_PROGRESS"
     if RUN_ONCE_COMPLETE.search(line):
         return "RUN_ONCE_COMPLETE"
-    if RH_OK.search(line) or RH_CACHED.search(line):
-        return "RH_OK"
     return "INFO"
 
 
@@ -294,7 +282,6 @@ def main(argv=None) -> int:
     lookback_progress: Optional[tuple[int, int]] = None
     lookback_done = False
     run_once_dates: list[str] = []
-    rh_ok_lines: list[str] = []
 
     # Also fetch live-state for status / lookback dict.
     _s2, resp2 = _http("GET", f"{cfg['api_url']}/instances/{INSTANCE_ID}/live-state", token=tok)
@@ -338,8 +325,6 @@ def main(argv=None) -> int:
             m = RUN_ONCE_COMPLETE.search(text)
             if m:
                 run_once_dates.append(m.group(1))
-        elif cat == "RH_OK":
-            rh_ok_lines.append(text.rstrip())
         if printed < args.max_print and (cat != "INFO" or not args.quiet_info):
             print(text.rstrip())
             printed += 1
@@ -349,8 +334,6 @@ def main(argv=None) -> int:
         print(f"last lookback progress in batch: {lookback_progress[0]}/{lookback_progress[1]}")
     if lookback_done:
         print("LOOKBACK_DONE observed in this batch.")
-    if rh_ok_lines:
-        print(f"RH fallback succeeded {len(rh_ok_lines)} time(s) in this batch.")
     if errors:
         print(f"ERRORS ({len(errors)}):")
         for e in errors[:10]:
@@ -381,7 +364,6 @@ def main(argv=None) -> int:
         "errors_head": errors[:3],
         "warns_head": warns[:3],
         "run_once_dates_new": run_once_dates,
-        "rh_fallback_hits": len(rh_ok_lines),
         "today": today_str,
         "cycle_done_today": cycle_done_today,
     }

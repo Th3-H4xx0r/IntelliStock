@@ -109,12 +109,12 @@
   <text x="310" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Feb 22</text>
   <text x="498" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Mar 03</text>
 
-  <!-- ── Card 2: Robinhood Individual ── -->
+  <!-- ── Card 2: Alpaca Paper ── -->
   <rect x="541" y="162" width="308" height="192" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
   <circle cx="822" cy="182" r="4" fill="#ef4444"/>
   <text x="815" y="185" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#ef4444" text-anchor="end">expired</text>
-  <text x="559" y="183" font-family="'Courier New',monospace" font-size="8" font-weight="700" fill="#64748b" letter-spacing="1">ROBINHOOD</text>
-  <text x="559" y="198" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">Robinhood Individual Account</text>
+  <text x="559" y="183" font-family="'Courier New',monospace" font-size="8" font-weight="700" fill="#64748b" letter-spacing="1">ALPACA PAPER</text>
+  <text x="559" y="198" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">Alpaca Paper Account</text>
   <text x="559" y="226" font-family="'Courier New',monospace" font-size="20" font-weight="700" fill="#f1f5f9">$6,475.80</text>
   <text x="559" y="244" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#ef4444">▼ -$171.73 (-2.58%)</text>
   <!-- Time pills -->
@@ -140,12 +140,12 @@
   <text x="650" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Feb 22</text>
   <text x="820" y="358" font-family="system-ui,-apple-system,sans-serif" font-size="7" fill="#334155">Mar 03</text>
 
-  <!-- ── Card 3: Robinhood IntelliStock ── -->
+  <!-- ── Card 3: Alpaca Live ── -->
   <rect x="862" y="162" width="308" height="192" rx="13" fill="#0f1420" stroke="#ffffff0c" stroke-width="1"/>
   <circle cx="1143" cy="182" r="4" fill="#10b981"/>
   <text x="1136" y="185" font-family="system-ui,-apple-system,sans-serif" font-size="8" fill="#10b981" text-anchor="end">active</text>
-  <text x="880" y="183" font-family="'Courier New',monospace" font-size="8" font-weight="700" fill="#64748b" letter-spacing="1">ROBINHOOD</text>
-  <text x="880" y="198" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">Robinhood Intellistock Account</text>
+  <text x="880" y="183" font-family="'Courier New',monospace" font-size="8" font-weight="700" fill="#64748b" letter-spacing="1">ALPACA LIVE</text>
+  <text x="880" y="198" font-family="system-ui,-apple-system,sans-serif" font-size="10" fill="#94a3b8">Alpaca Live Account</text>
   <text x="880" y="226" font-family="'Courier New',monospace" font-size="20" font-weight="700" fill="#10b981">$6.13</text>
   <text x="880" y="244" font-family="system-ui,-apple-system,sans-serif" font-size="9" fill="#10b981">▲ +$0.22 (+3.67%)</text>
   <!-- Time pills -->

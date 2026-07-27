@@ -38,10 +38,12 @@ class _HistoryArgs {
 }
 
 /// AutoDispose family provider for portfolio history (one per account + range).
-final _historyProvider = AutoDisposeAsyncNotifierProviderFamily<
-    _HistoryNotifier, PortfolioHistory, _HistoryArgs>(
-  _HistoryNotifier.new,
-);
+final _historyProvider =
+    AutoDisposeAsyncNotifierProviderFamily<
+      _HistoryNotifier,
+      PortfolioHistory,
+      _HistoryArgs
+    >(_HistoryNotifier.new);
 
 class _HistoryNotifier
     extends AutoDisposeFamilyAsyncNotifier<PortfolioHistory, _HistoryArgs> {
@@ -101,7 +103,9 @@ class _HistoryNotifier
     // Guarded: the autoDispose notifier may already be gone on a late tick.
     try {
       ref.read(portfolioUpdatedAtProvider.notifier).state = DateTime.now();
-    } catch (_) {/* provider disposed — ignore */}
+    } catch (_) {
+      /* provider disposed — ignore */
+    }
   }
 }
 
@@ -109,10 +113,7 @@ class _HistoryNotifier
 
 /// Compute absolute and percent change vs baseline (open_value or first point).
 /// Returns (changeAbs, changePct) or (null, null) if not enough data.
-(double?, double?) computeChange(
-  PortfolioHistory history, {
-  int? scrubIndex,
-}) {
+(double?, double?) computeChange(PortfolioHistory history, {int? scrubIndex}) {
   if (history.isEmpty) return (null, null);
 
   final baseline = history.openValue ?? history.values.first;
@@ -135,7 +136,8 @@ class _HistoryNotifier
 int nearestIndex(List<DateTime> timestamps, double fraction) {
   if (timestamps.isEmpty) return 0;
   if (timestamps.length == 1) return 0;
-  final target = timestamps.first.millisecondsSinceEpoch +
+  final target =
+      timestamps.first.millisecondsSinceEpoch +
       fraction *
           (timestamps.last.millisecondsSinceEpoch -
               timestamps.first.millisecondsSinceEpoch);
@@ -306,11 +308,10 @@ class _CardHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final type = account.brokerageType as String? ?? '';
-    final isPaper =
-        type == 'alpaca' && (account.alpacaPaper as bool? ?? false);
+    final isPaper = type == 'alpaca' && (account.alpacaPaper as bool? ?? false);
     final label = type == 'alpaca'
         ? (isPaper ? 'Alpaca · Paper' : 'Alpaca')
-        : 'Robinhood';
+        : type;
     final icon = type == 'alpaca' ? symbol('show_chart') : symbol('savings');
     final isActive = (account.status as String? ?? '') == 'active';
     final statusColor = isActive ? AppColors.success : AppColors.danger;
@@ -339,8 +340,10 @@ class _CardHeader extends StatelessWidget {
             Container(
               width: 6,
               height: 6,
-              decoration:
-                  BoxDecoration(shape: BoxShape.circle, color: statusColor),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: statusColor,
+              ),
             ),
             const SizedBox(width: 4),
             Text(
@@ -362,14 +365,18 @@ class _ValueRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final activeValue = (scrubIndex != null &&
+    final activeValue =
+        (scrubIndex != null &&
             scrubIndex! >= 0 &&
             scrubIndex! < history.values.length)
         ? history.values[scrubIndex!]
-        : (history.currentValue ?? (history.values.isNotEmpty ? history.values.last : 0.0));
+        : (history.currentValue ??
+              (history.values.isNotEmpty ? history.values.last : 0.0));
 
-    final (changeAbs, changePct) =
-        computeChange(history, scrubIndex: scrubIndex);
+    final (changeAbs, changePct) = computeChange(
+      history,
+      scrubIndex: scrubIndex,
+    );
     final positive = (changeAbs ?? 0) >= 0;
     final changeColor = positive ? AppColors.success : AppColors.danger;
 
@@ -457,8 +464,9 @@ class _RangeTabs extends StatelessWidget {
                 curve: Curves.easeOut,
                 padding: const EdgeInsets.symmetric(vertical: 7),
                 decoration: BoxDecoration(
-                  color:
-                      isActive ? const Color(0x24FFFFFF) : Colors.transparent,
+                  color: isActive
+                      ? const Color(0x24FFFFFF)
+                      : Colors.transparent,
                   borderRadius: BorderRadius.circular(7),
                 ),
                 child: Text(
@@ -502,12 +510,16 @@ class _ChartEmpty extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(symbol('bar_chart_4_bars'),
-                size: 32, color: AppColors.textFaint),
+            Icon(
+              symbol('bar_chart_4_bars'),
+              size: 32,
+              color: AppColors.textFaint,
+            ),
             const SizedBox(height: 8),
-            Text(message,
-                style:
-                    AppTextStyles.micro.copyWith(color: AppColors.textFaint)),
+            Text(
+              message,
+              style: AppTextStyles.micro.copyWith(color: AppColors.textFaint),
+            ),
           ],
         ),
       ),
@@ -553,8 +565,8 @@ class _ChartArea extends StatelessWidget {
     final bounds = paddedBounds(history.values);
 
     // 1D plots against a fixed full-day [0, 1440]-minute axis so the line fills
-    // only the elapsed part of the day (a short morning line, like Robinhood's
-    // overnight view). Other ranges plot edge-to-edge by index (gapless across
+    // only the elapsed part of the day. Other ranges plot edge-to-edge by index
+    // (gapless across
     // weekends/closed sessions). history.values stays the single source of
     // truth for both the curve and the scrubber, so the header value matches.
     final xs = _isDay
@@ -566,7 +578,9 @@ class _ChartArea extends StatelessWidget {
     ];
 
     final labels = _isDay
-        ? [for (final h in [0, 6, 12, 18, 24]) hourAmPm(h)]
+        ? [
+            for (final h in [0, 6, 12, 18, 24]) hourAmPm(h),
+          ]
         : [
             for (final i in evenlySpacedLabelIndices(n, 4))
               formatChartDate(history.timestamps[i], range),
@@ -597,8 +611,9 @@ class _ChartArea extends StatelessWidget {
     final chart = SfCartesianChart(
       plotAreaBorderWidth: 0,
       margin: EdgeInsets.zero,
-      primaryXAxis:
-          _isDay ? edgeToEdgeRangeAxis(0, _dayMinutes) : edgeToEdgeIndexAxis(n),
+      primaryXAxis: _isDay
+          ? edgeToEdgeRangeAxis(0, _dayMinutes)
+          : edgeToEdgeIndexAxis(n),
       primaryYAxis: hiddenValueAxis(minimum: bounds.min, maximum: bounds.max),
       tooltipBehavior: TooltipBehavior(enable: false),
       series: <CartesianSeries<_ChartPoint, double>>[
@@ -651,14 +666,19 @@ class _ChartArea extends StatelessWidget {
                                 sample.index < 0 ||
                                 sample.index >= n) {
                               if (n == 0) return const SizedBox.shrink();
-                              final endFrac =
-                                  _isDay ? (xs.last / _dayMinutes) : 1.0;
+                              final endFrac = _isDay
+                                  ? (xs.last / _dayMinutes)
+                                  : 1.0;
                               // Persistent "current value" marker — pulses to
                               // signal the chart is live-updating.
                               return _PulsingEndDot(
                                 fraction: endFrac.clamp(0.0, 1.0),
-                                dotY: valueToY(history.values[n - 1],
-                                    bounds.min, bounds.max, _plotHeight),
+                                dotY: valueToY(
+                                  history.values[n - 1],
+                                  bounds.min,
+                                  bounds.max,
+                                  _plotHeight,
+                                ),
                                 color: lineColor,
                               );
                             }
@@ -744,13 +764,18 @@ class _LiveStatusChipState extends State<_LiveStatusChip> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: c)),
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(shape: BoxShape.circle, color: c),
+        ),
         const SizedBox(width: 5),
-        Text(open ? 'Markets Open' : 'Markets Closed',
-            style: AppTextStyles.nano
-                .copyWith(color: c, fontWeight: FontWeight.w700)),
+        Text(
+          open ? 'Markets Open' : 'Markets Closed',
+          style: AppTextStyles.nano.copyWith(
+            color: c,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
       ],
     );
   }
@@ -838,7 +863,10 @@ class _PulsingDotPainter extends CustomPainter {
 
     // Static soft glow + solid core + white ring — matches the old end dot.
     canvas.drawCircle(
-        center, 7, Paint()..color = color.withValues(alpha: 0.18));
+      center,
+      7,
+      Paint()..color = color.withValues(alpha: 0.18),
+    );
     canvas.drawCircle(center, 4, Paint()..color = color);
     canvas.drawCircle(
       center,

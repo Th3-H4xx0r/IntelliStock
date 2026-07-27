@@ -54,7 +54,7 @@ def set_phase(
     exception is swallowed to keep the strategy hot path safe.
 
     Phases used by the broker outer loop: ``wake``, ``warm_boot_eppi``,
-    ``scheduling_check``, ``rh_refresh``, ``strategy_run``,
+    ``scheduling_check``, ``broker_refresh``, ``strategy_run``,
     ``post_tick_snapshot``, ``sleep``. Plus free-form values for ad-hoc
     instrumentation.
 

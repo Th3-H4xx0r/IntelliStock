@@ -46,8 +46,7 @@ class InstancesScreen extends ConsumerWidget {
         padding: const EdgeInsets.all(24),
         child: ErrorBanner(
           message: e.toString(),
-          onRetry: () =>
-              ref.invalidate(instancesControllerProvider),
+          onRetry: () => ref.invalidate(instancesControllerProvider),
         ),
       ),
       data: (state) => _InstancesBody(state: state),
@@ -233,9 +232,7 @@ class _InstancesBody extends ConsumerWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: const _CreateInstanceSheet(),
-      ),
+      builder: (_) => ProviderScope(child: const _CreateInstanceSheet()),
     );
   }
 }
@@ -388,7 +385,11 @@ class _Pill extends StatelessWidget {
 // ── Instance card ─────────────────────────────────────────────────────────────
 
 class _InstanceCard extends ConsumerWidget {
-  const _InstanceCard({required this.inst, required this.busy, this.pinned = false});
+  const _InstanceCard({
+    required this.inst,
+    required this.busy,
+    this.pinned = false,
+  });
 
   final Instance inst;
   final bool busy;
@@ -399,9 +400,11 @@ class _InstanceCard extends ConsumerWidget {
     final ctrl = ref.read(instancesControllerProvider.notifier);
 
     // Resolve strategy/brokerage names from instance data or nested maps.
-    final strategyName = (inst.strategy?['name'] ?? inst.strategyId ?? '').toString();
+    final strategyName = (inst.strategy?['name'] ?? inst.strategyId ?? '')
+        .toString();
     final brokerageName = inst.brokerage != null
-        ? '${inst.brokerage!['account_name'] ?? ''} (${inst.brokerage!['brokerage_type'] ?? ''})'.trim()
+        ? '${inst.brokerage!['account_name'] ?? ''} (${inst.brokerage!['brokerage_type'] ?? ''})'
+              .trim()
         : (inst.brokerageId ?? '');
 
     final isAi = inst.createdBy == 'ai';
@@ -467,8 +470,7 @@ class _InstanceCard extends ConsumerWidget {
           else
             Text(
               'No strategy linked',
-              style: AppTextStyles.meta
-                  .copyWith(fontStyle: FontStyle.italic),
+              style: AppTextStyles.meta.copyWith(fontStyle: FontStyle.italic),
             ),
           if (inst.brokerageId != null) ...[
             const SizedBox(height: 4),
@@ -515,7 +517,9 @@ class _InstanceCard extends ConsumerWidget {
                 )
               else
                 _ActionBtn(
-                  icon: busy ? symbol('progress_activity') : symbol('play_arrow'),
+                  icon: busy
+                      ? symbol('progress_activity')
+                      : symbol('play_arrow'),
                   label: 'Start',
                   color: AppColors.success,
                   onTap: busy ? null : () => ctrl.start(inst.id),
@@ -524,9 +528,7 @@ class _InstanceCard extends ConsumerWidget {
                 icon: symbol('delete'),
                 label: 'Delete',
                 color: AppColors.danger,
-                onTap: busy
-                    ? null
-                    : () => _confirmDelete(context, ref, inst),
+                onTap: busy ? null : () => _confirmDelete(context, ref, inst),
               ),
             ],
           ),
@@ -536,12 +538,16 @@ class _InstanceCard extends ConsumerWidget {
   }
 
   Future<void> _confirmDelete(
-      BuildContext context, WidgetRef ref, Instance inst) async {
+    BuildContext context,
+    WidgetRef ref,
+    Instance inst,
+  ) async {
     final ctrl = ref.read(instancesControllerProvider.notifier);
     await showConfirmDialog(
       context,
       title: 'Delete Instance',
-      body: 'Delete "${inst.name.isNotEmpty ? inst.name : inst.id}"? This cannot be undone.',
+      body:
+          'Delete "${inst.name.isNotEmpty ? inst.name : inst.id}"? This cannot be undone.',
       confirmLabel: 'Delete',
       confirmColor: AppColors.danger,
       icon: symbol('delete'),
@@ -561,8 +567,10 @@ class _MetaRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Text('$label: ',
-            style: AppTextStyles.meta.copyWith(color: AppColors.textDim)),
+        Text(
+          '$label: ',
+          style: AppTextStyles.meta.copyWith(color: AppColors.textDim),
+        ),
         Expanded(
           child: Text(
             value,
@@ -608,9 +616,12 @@ class _StocksChips extends ConsumerWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(symbol('add'), size: 13, color: AppColors.textFaint),
-                  Text('Add',
-                      style: AppTextStyles.nano
-                          .copyWith(color: AppColors.textFaint)),
+                  Text(
+                    'Add',
+                    style: AppTextStyles.nano.copyWith(
+                      color: AppColors.textFaint,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -630,9 +641,7 @@ class _StocksChips extends ConsumerWidget {
               for (final sym in inst.stocks)
                 _StockChip(
                   sym: sym,
-                  onRemove: busy
-                      ? null
-                      : () => ctrl.removeStock(inst.id, sym),
+                  onRemove: busy ? null : () => ctrl.removeStock(inst.id, sym),
                 ),
             ],
           ),
@@ -641,14 +650,16 @@ class _StocksChips extends ConsumerWidget {
   }
 
   Future<void> _showAddStockSheet(
-      BuildContext context, WidgetRef ref, String instanceId) async {
+    BuildContext context,
+    WidgetRef ref,
+    String instanceId,
+  ) async {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => ProviderScope(
-        child: _AddStockSheet(instanceId: instanceId),
-      ),
+      builder: (_) =>
+          ProviderScope(child: _AddStockSheet(instanceId: instanceId)),
     );
   }
 }
@@ -675,8 +686,11 @@ class _StockChip extends StatelessWidget {
             const SizedBox(width: 4),
             GestureDetector(
               onTap: onRemove,
-              child: Icon(symbol('close'), size: 11,
-                  color: AppColors.textFaint),
+              child: Icon(
+                symbol('close'),
+                size: 11,
+                color: AppColors.textFaint,
+              ),
             ),
           ],
         ],
@@ -744,8 +758,7 @@ class _CreateInstanceSheet extends ConsumerStatefulWidget {
       _CreateInstanceSheetState();
 }
 
-class _CreateInstanceSheetState
-    extends ConsumerState<_CreateInstanceSheet> {
+class _CreateInstanceSheetState extends ConsumerState<_CreateInstanceSheet> {
   final _idCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
   final _maxUsageCtrl = TextEditingController();
@@ -777,7 +790,9 @@ class _CreateInstanceSheetState
       _error = null;
     });
     try {
-      await ref.read(instancesControllerProvider.notifier).createInstance(
+      await ref
+          .read(instancesControllerProvider.notifier)
+          .createInstance(
             id: id,
             name: _nameCtrl.text.trim(),
             granularity: _granularity,
@@ -827,8 +842,7 @@ class _CreateInstanceSheetState
           Row(
             children: [
               Expanded(
-                child: Text('Start after creation',
-                    style: AppTextStyles.body),
+                child: Text('Start after creation', style: AppTextStyles.body),
               ),
               AppToggle(
                 value: _runCommand,
@@ -842,78 +856,47 @@ class _CreateInstanceSheetState
           const SizedBox(height: 6),
           brokeragesAsync.when(
             loading: () => const SizedBox(height: 40, child: LoadingState()),
-            error: (e, _) => Text('Failed to load brokerages',
-                style: AppTextStyles.meta.copyWith(color: AppColors.danger)),
+            error: (e, _) => Text(
+              'Failed to load brokerages',
+              style: AppTextStyles.meta.copyWith(color: AppColors.danger),
+            ),
             data: (list) {
-              // Check if selected brokerage is Robinhood
-              final selBrok = list.firstWhere(
-                (b) => b['id'].toString() == _brokerageId,
-                orElse: () => const {},
-              );
-              final isRH =
-                  selBrok['brokerage_type']?.toString().toLowerCase() ==
-                      'robinhood';
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _DropdownField(
-                    value: _brokerageId.isEmpty ? null : _brokerageId,
-                    hint: '— None —',
-                    items: [
-                      const DropdownMenuItem(
-                          value: '', child: Text('— None —')),
-                      for (final b in list)
-                        DropdownMenuItem(
-                          value: b['id'].toString(),
-                          child: Text(
-                            '${b['account_name'] ?? ''} (${b['brokerage_type'] ?? ''})'.trim(),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                    ],
-                    onChanged: (v) =>
-                        setState(() => _brokerageId = v ?? ''),
-                  ),
-                  if (isRH) ...[
-                    const SizedBox(height: 6),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: AppColors.fill(AppColors.warning),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                            color: AppColors.stroke(AppColors.warning)),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(symbol('warning'),
-                              size: 14, color: AppColors.warning),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'Robinhood accounts use real money. Ensure you understand the risks before enabling live trading.',
-                              style: AppTextStyles.nano
-                                  .copyWith(color: AppColors.warning),
-                            ),
-                          ),
-                        ],
+              return _DropdownField(
+                value: _brokerageId.isEmpty ? null : _brokerageId,
+                hint: '— None —',
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('— None —')),
+                  for (final b in list)
+                    DropdownMenuItem(
+                      value: b['id'].toString(),
+                      child: Text(
+                        '${b['account_name'] ?? ''} (${b['brokerage_type'] ?? ''})'
+                            .trim(),
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                  ],
                 ],
+                onChanged: (v) => setState(() => _brokerageId = v ?? ''),
               );
             },
           ),
           const SizedBox(height: 12),
-          _Field(label: 'Max Usage (\$)', ctrl: _maxUsageCtrl, hint: 'e.g. 1000', keyboardType: TextInputType.number),
+          _Field(
+            label: 'Max Usage (\$)',
+            ctrl: _maxUsageCtrl,
+            hint: 'e.g. 1000',
+            keyboardType: TextInputType.number,
+          ),
           const SizedBox(height: 12),
           // Strategy selector
           _SectionLabel('Strategy (optional)'),
           const SizedBox(height: 6),
           strategiesAsync.when(
             loading: () => const SizedBox(height: 40, child: LoadingState()),
-            error: (e, _) => Text('Failed to load strategies',
-                style: AppTextStyles.meta.copyWith(color: AppColors.danger)),
+            error: (e, _) => Text(
+              'Failed to load strategies',
+              style: AppTextStyles.meta.copyWith(color: AppColors.danger),
+            ),
             data: (list) => _DropdownField(
               value: _strategyId.isEmpty ? null : _strategyId,
               hint: '— None —',
@@ -1050,12 +1033,10 @@ class _ModalSheet extends StatelessWidget {
                 children: [
                   IconTile(icon: icon, size: 36),
                   const SizedBox(width: 12),
-                  Expanded(
-                      child: Text(title, style: AppTextStyles.h3)),
+                  Expanded(child: Text(title, style: AppTextStyles.h3)),
                   IconButton(
                     icon: Icon(symbol('close'), color: AppColors.textMuted),
-                    onPressed:
-                        busy ? null : () => Navigator.pop(context),
+                    onPressed: busy ? null : () => Navigator.pop(context),
                   ),
                 ],
               ),
@@ -1075,8 +1056,7 @@ class _ModalSheet extends StatelessWidget {
                   Expanded(
                     child: AppButton.ghost(
                       label: 'Cancel',
-                      onPressed:
-                          busy ? null : () => Navigator.pop(context),
+                      onPressed: busy ? null : () => Navigator.pop(context),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -1100,10 +1080,7 @@ class _ModalSheet extends StatelessWidget {
 // ── Granularity pills ─────────────────────────────────────────────────────────
 
 class _GranularityPills extends StatelessWidget {
-  const _GranularityPills({
-    required this.selected,
-    required this.onSelect,
-  });
+  const _GranularityPills({required this.selected, required this.onSelect});
 
   final String selected;
   final ValueChanged<String> onSelect;
@@ -1216,8 +1193,10 @@ class _DropdownField extends StatelessWidget {
     return DropdownButtonFormField<String>(
       initialValue: value,
       hint: hint != null
-          ? Text(hint!,
-              style: AppTextStyles.body.copyWith(color: AppColors.textFaint))
+          ? Text(
+              hint!,
+              style: AppTextStyles.body.copyWith(color: AppColors.textFaint),
+            )
           : null,
       items: items,
       onChanged: onChanged,

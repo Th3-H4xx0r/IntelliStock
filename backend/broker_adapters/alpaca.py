@@ -243,11 +243,8 @@ class AlpacaAdapter(BrokerAdapter):
                 "red",
             )
 
-        # 2026-05-07 deadlock defense-in-depth: was threading.Lock(). The
-        # RobinhoodAdapter sibling had a self-deadlock in
-        # ``save_portfolio_snapshot`` (calling ``get_positions_value``
-        # while holding ``_lock``); identical pattern is reachable here
-        # via 16 lock sites if a future refactor introduces nesting.
+        # Deadlock defense-in-depth: use an RLock because snapshot helpers can
+        # call other helpers that acquire the same lock.
         # RLock makes same-thread re-entrance survivable. Cross-thread
         # mutual-exclusion semantics unchanged.
         self._lock = threading.RLock()
@@ -353,7 +350,7 @@ class AlpacaAdapter(BrokerAdapter):
                 )
                 _now = datetime.now(timezone.utc)
                 _prefix = self._cid_prefix or derive_cid_prefix(self._instance_id)
-                # Compatibility-only path retained until Robinhood removal.
+                # Legacy reconciliation path for non-deferred callers.
                 _wal_rows = self._wal.list_filled_for_prefix(
                     _prefix, since_utc=None
                 )
@@ -1401,12 +1398,9 @@ class AlpacaAdapter(BrokerAdapter):
         with self._lock:
             # 2-A (bug-sweep 2026-05-28): enforce the clean-room quarantine on
             # every rebind so a forced refresh can't re-adopt external positions.
-            # owned_qty = broker_qty - external_qty. Mirror of RobinhoodAdapter.
-            # 2-A (bug-sweep 2026-05-28): enforce the clean-room quarantine on
-            # every rebind so a forced refresh can't re-adopt external positions.
-            # owned_qty = broker_qty - external_qty. (Scope D: a reconcile that
-            # anchored on self._positions was reverted — see RobinhoodAdapter for
-            # the rationale; kept symmetric.)
+            # owned_qty = broker_qty - external_qty. Enforce clean-room
+            # quarantine on every rebind so a forced refresh cannot re-adopt
+            # external positions.
             if self._clean_room_mode:
                 owned_new: dict[str, float] = {}
                 if (

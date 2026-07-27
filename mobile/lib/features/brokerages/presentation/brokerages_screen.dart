@@ -34,8 +34,10 @@ class BrokeragesScreen extends ConsumerWidget {
             children: [
               // ── App bar row ─────────────────────────────────────────────
               Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 12,
+                ),
                 child: Row(
                   children: [
                     IconButton(
@@ -64,9 +66,7 @@ class BrokeragesScreen extends ConsumerWidget {
                   child: ListView(
                     padding: const EdgeInsets.symmetric(horizontal: 20),
                     children: [
-                      _Header(
-                        onLinkTap: () => showLinkBrokerageSheet(context),
-                      ),
+                      _Header(onLinkTap: () => showLinkBrokerageSheet(context)),
                       const SizedBox(height: 24),
                       state.when(
                         loading: () => const _BrokeragesSkeleton(),
@@ -81,10 +81,9 @@ class BrokeragesScreen extends ConsumerWidget {
                                 icon: symbol('account_balance'),
                                 title: 'No brokerages linked yet',
                                 subtitle:
-                                    'Link an Alpaca or Robinhood account to start trading.',
+                                    'Link an Alpaca account to start stock trading.',
                                 actionLabel: 'Link your first brokerage',
-                                onAction: () =>
-                                    showLinkBrokerageSheet(context),
+                                onAction: () => showLinkBrokerageSheet(context),
                               )
                             : _AccountList(accounts: accounts),
                       ),
@@ -117,8 +116,7 @@ class _Header extends StatelessWidget {
           child: SectionHeader(
             eyebrow: 'Brokerages',
             title: 'Linked Accounts',
-            subtitle:
-                'Manage your Alpaca and Robinhood brokerage connections.',
+            subtitle: 'Manage your brokerage connections.',
           ),
         ),
         const SizedBox(width: 12),
@@ -144,10 +142,12 @@ class _AccountList extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: accounts
-          .map((a) => Padding(
-                padding: const EdgeInsets.only(bottom: 16),
-                child: _AccountCard(account: a),
-              ))
+          .map(
+            (a) => Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: _AccountCard(account: a),
+            ),
+          )
           .toList(),
     );
   }
@@ -168,7 +168,7 @@ class _AccountCard extends ConsumerWidget {
     final statusColor = _statusColor(a.status);
     final badgeLabel = isAlpaca
         ? 'ALPACA · ${a.paper ? 'Paper' : 'Live'}'
-        : 'ROBINHOOD';
+        : a.brokerageType.toUpperCase();
     final badgeColor = isAlpaca
         ? (a.paper ? AppColors.info : AppColors.warning)
         : AppColors.success;
@@ -203,21 +203,24 @@ class _AccountCard extends ConsumerWidget {
               ),
               const SizedBox(width: 8),
               // Status dot + label
-              Row(mainAxisSize: MainAxisSize.min, children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: statusColor,
-                    shape: BoxShape.circle,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: statusColor,
+                      shape: BoxShape.circle,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  a.status ?? 'unknown',
-                  style: AppTextStyles.micro.copyWith(color: statusColor),
-                ),
-              ]),
+                  const SizedBox(width: 6),
+                  Text(
+                    a.status ?? 'unknown',
+                    style: AppTextStyles.micro.copyWith(color: statusColor),
+                  ),
+                ],
+              ),
             ],
           ),
           const SizedBox(height: 12),
@@ -227,10 +230,7 @@ class _AccountCard extends ConsumerWidget {
             const SizedBox(height: 4),
           ],
           if (a.lastRefreshAt != null) ...[
-            _detailRow(
-              'Last refreshed',
-              _fmtDateTime(a.lastRefreshAt!),
-            ),
+            _detailRow('Last refreshed', _fmtDateTime(a.lastRefreshAt!)),
             const SizedBox(height: 4),
           ],
           if (a.lastError != null) ...[
@@ -242,8 +242,9 @@ class _AccountCard extends ConsumerWidget {
                   TextSpan(
                     text: 'Error: ',
                     style: AppTextStyles.meta.copyWith(
-                        color: AppColors.danger,
-                        fontWeight: FontWeight.w600),
+                      color: AppColors.danger,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   TextSpan(text: a.lastError),
                 ],
@@ -255,20 +256,10 @@ class _AccountCard extends ConsumerWidget {
           // ── Actions ─────────────────────────────────────────────────────
           Row(
             children: [
-              if (!isAlpaca)
-                _ActionButton(
-                  label: 'Refresh',
-                  icon: Icons.refresh,
-                  onTap: () => _doRefresh(context, ref, a),
-                ),
-              if (!isAlpaca) const SizedBox(width: 8),
               _ActionButton(
                 label: 'Edit',
                 icon: Icons.edit_outlined,
-                onTap: () => showLinkBrokerageSheet(
-                  context,
-                  editAccount: a,
-                ),
+                onTap: () => showLinkBrokerageSheet(context, editAccount: a),
               ),
               const Spacer(),
               _ActionButton(
@@ -302,25 +293,11 @@ class _AccountCard extends ConsumerWidget {
     );
   }
 
-  Future<void> _doRefresh(
-      BuildContext context, WidgetRef ref, Brokerage a) async {
-    try {
-      await ref.read(brokerageRepositoryProvider).refresh(a.id);
-      await ref.read(brokeragesControllerProvider.notifier).refresh();
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Refresh failed: $e'),
-            backgroundColor: AppColors.danger,
-          ),
-        );
-      }
-    }
-  }
-
   Future<void> _doRemove(
-      BuildContext context, WidgetRef ref, Brokerage a) async {
+    BuildContext context,
+    WidgetRef ref,
+    Brokerage a,
+  ) async {
     await showConfirmDialog(
       context,
       title: 'Remove "${a.accountName}"?',
@@ -364,19 +341,25 @@ class _BrokeragesSkeleton extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Header skeleton
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Skeleton(width: 90, height: 10),
-              const SizedBox(height: 6),
-              Skeleton(width: 180, height: 20),
-              const SizedBox(height: 6),
-              Skeleton(width: double.infinity, height: 11),
-            ]),
-          ),
-          const SizedBox(width: 12),
-          Skeleton(width: 120, height: 36, radius: 10),
-        ]),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Skeleton(width: 90, height: 10),
+                  const SizedBox(height: 6),
+                  Skeleton(width: 180, height: 20),
+                  const SizedBox(height: 6),
+                  Skeleton(width: double.infinity, height: 11),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Skeleton(width: 120, height: 36, radius: 10),
+          ],
+        ),
         const SizedBox(height: 24),
         // 3 account-card skeletons
         for (int i = 0; i < 3; i++) ...[
@@ -393,31 +376,42 @@ class _AccountCardSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return GlassCard(
       padding: const EdgeInsets.all(18),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Skeleton.circle(40),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Skeleton(width: 140, height: 14),
-              const SizedBox(height: 6),
-              Skeleton(width: 80, height: 11),
-            ]),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton.circle(40),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Skeleton(width: 140, height: 14),
+                    const SizedBox(height: 6),
+                    Skeleton(width: 80, height: 11),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Skeleton(width: 60, height: 11),
+            ],
           ),
-          const SizedBox(width: 8),
-          Skeleton(width: 60, height: 11),
-        ]),
-        const SizedBox(height: 12),
-        Skeleton(width: 200, height: 10),
-        const SizedBox(height: 4),
-        Skeleton(width: 160, height: 10),
-        const SizedBox(height: 12),
-        Row(children: [
-          Skeleton(width: 70, height: 28, radius: 8),
-          const SizedBox(width: 8),
-          Skeleton(width: 60, height: 28, radius: 8),
-        ]),
-      ]),
+          const SizedBox(height: 12),
+          Skeleton(width: 200, height: 10),
+          const SizedBox(height: 4),
+          Skeleton(width: 160, height: 10),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Skeleton(width: 70, height: 28, radius: 8),
+              const SizedBox(width: 8),
+              Skeleton(width: 60, height: 28, radius: 8),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -457,7 +451,9 @@ class _ActionButton extends StatelessWidget {
             Text(
               label,
               style: AppTextStyles.micro.copyWith(
-                  color: color, fontWeight: FontWeight.w500),
+                color: color,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ],
         ),

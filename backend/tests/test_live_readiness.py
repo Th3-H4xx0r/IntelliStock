@@ -168,9 +168,6 @@ def test_artifact_binding_accepts_non_live_report_but_still_validates_structure(
     [
         ({"brokerage_type": "alpaca", "alpaca_paper": True}, {}, False),
         ({"brokerage_type": "alpaca", "alpaca_paper": False}, {}, True),
-        ({"brokerage_type": "robinhood"}, {}, False),
-        ({"brokerage_type": "robinhood"}, {"RH_DRY_RUN": "true"}, False),
-        ({"brokerage_type": "robinhood"}, {"RH_DRY_RUN": "0"}, True),
     ],
 )
 def test_equity_brokerage_mode_classifier_is_explicit(
@@ -193,8 +190,6 @@ def test_equity_brokerage_mode_classifier_is_explicit(
          {"id": "b", "brokerage_type": "alpaca"}, {}),
         ({"id": "i", "kind": "equities", "brokerage_id": "b"},
          {"id": "b", "brokerage_type": "unknown"}, {}),
-        ({"id": "i", "kind": "equities", "brokerage_id": "b"},
-         {"id": "b", "brokerage_type": "robinhood"}, {"RH_DRY_RUN": "maybe"}),
     ],
 )
 def test_equity_brokerage_mode_classifier_blocks_ambiguous_state(

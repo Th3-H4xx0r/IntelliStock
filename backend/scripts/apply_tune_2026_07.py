@@ -343,10 +343,8 @@ def main(argv=None):
                 "[tune-179] post-restamp preview_change FAILED (%s)." % type(e).__name__
             ) from None
         _print_preview("POST-RESTAMP", verify)
-        # Verify keys on the RESTAMPED instance specifically. doc-179 also links
-        # the retired `main` (Robinhood) instance, which we deliberately do NOT
-        # restamp (brief scopes restamp to alpaca-main); its would_rebuild stays
-        # True but is operationally irrelevant (that instance must not be started).
+        # Verify keys on the RESTAMPED instance specifically. Other linked
+        # instances are outside this tune's alpaca-main scope.
         verify_instances = {i.get("base_instance_id"): i for i in (verify.get("instances") or [])}
         target = verify_instances.get(INSTANCE_ID)
         others_rebuilding = [

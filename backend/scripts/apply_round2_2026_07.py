@@ -43,10 +43,7 @@ SAFETY
   - ``preview_change`` runs on BOTH the current and the proposed strategies:
     both identities must be unchanged vs baseline AND ``alpaca-main`` must show
     would_rebuild=False, else ``--apply`` ABORTS before writing — that would
-    mean a scope-id ingredient moved and the recon above is stale. (The raw
-    ``needs_prompt`` flag is True even on the UNCHANGED config: the retired
-    Robinhood ``main`` instance was deliberately never restamped by the July
-    tune — a pre-existing condition, not a round-2 identity flip.)
+    mean a scope-id ingredient moved and the recon above is stale.
   - ``--apply`` edits Strategies doc-179, which the changefeed picks up and
     RESTARTS the live broker. The plan output warns about this loudly.
 
@@ -279,9 +276,8 @@ def main(argv=None):
 
         # --- Identity preview (read-only) ---
         # Baseline previews the CURRENT (unchanged) strategies so a
-        # pre-existing stale instance (the retired Robinhood `main` was never
-        # restamped — needs_prompt=True on it long predates round-2) can't
-        # masquerade as an identity flip caused by THESE keys. Clean means:
+        # pre-existing stale instance cannot masquerade as an identity flip
+        # caused by THESE keys. Clean means:
         # both identities unchanged vs baseline AND alpaca-main itself would
         # not rebuild.
         try:

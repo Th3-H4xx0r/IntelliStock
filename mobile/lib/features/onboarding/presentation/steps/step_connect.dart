@@ -52,7 +52,9 @@ class _StepConnectState extends ConsumerState<StepConnect> {
       final brData = results[1];
 
       final insts =
-          (instData['instances'] as List? ?? instData['items'] as List? ?? const [])
+          (instData['instances'] as List? ??
+                  instData['items'] as List? ??
+                  const [])
               .whereType<Map<String, dynamic>>()
               .toList();
       final brs =
@@ -66,8 +68,7 @@ class _StepConnectState extends ConsumerState<StepConnect> {
         _loading = false;
         if (insts.length == 1) {
           _selectedInstance =
-              insts[0]['instance_id']?.toString() ??
-              insts[0]['id']?.toString();
+              insts[0]['instance_id']?.toString() ?? insts[0]['id']?.toString();
         }
         if (brs.length == 1) {
           _selectedBrokerage = brs[0]['id']?.toString();
@@ -123,14 +124,6 @@ class _StepConnectState extends ConsumerState<StepConnect> {
     }
   }
 
-  String? get _selectedBrokerageType {
-    if (_selectedBrokerage == null) return null;
-    final matches = _brokerages
-        .where((b) => b['id']?.toString() == _selectedBrokerage);
-    if (matches.isEmpty) return null;
-    return matches.first['brokerage_type']?.toString();
-  }
-
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
@@ -164,15 +157,19 @@ class _StepConnectState extends ConsumerState<StepConnect> {
                     ('rocket_launch', 'Instance', 'Runs on a cadence'),
                     ('account_balance', 'Brokerage', 'Executes orders'),
                   ]) ...[
-                    _FlowNode(
-                        icon: entry.$1,
-                        label: entry.$2,
-                        desc: entry.$3),
+                    _FlowNode(icon: entry.$1, label: entry.$2, desc: entry.$3),
                     if (entry.$2 != 'Brokerage')
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 16, left: 4, right: 4),
-                        child: Icon(Icons.arrow_forward,
-                            size: 14, color: AppColors.textFaint),
+                        padding: const EdgeInsets.only(
+                          bottom: 16,
+                          left: 4,
+                          right: 4,
+                        ),
+                        child: Icon(
+                          Icons.arrow_forward,
+                          size: 14,
+                          color: AppColors.textFaint,
+                        ),
                       ),
                   ],
                 ],
@@ -203,20 +200,21 @@ class _StepConnectState extends ConsumerState<StepConnect> {
                     children: [
                       Text(
                         'Could not load: $_loadError',
-                        style: AppTextStyles.meta
-                            .copyWith(color: AppColors.textDim),
+                        style: AppTextStyles.meta.copyWith(
+                          color: AppColors.textDim,
+                        ),
                       ),
                       const SizedBox(height: 8),
-                      AppButton.ghost(
-                          label: 'Retry', onPressed: _load),
+                      AppButton.ghost(label: 'Retry', onPressed: _load),
                     ],
                   )
                 else if (_instances.isEmpty || _brokerages.isEmpty)
                   Text(
                     "You'll need at least one instance and one brokerage to link them here. "
                     "Skip for now and do it later from the Instances page.",
-                    style: AppTextStyles.body
-                        .copyWith(color: AppColors.textMuted),
+                    style: AppTextStyles.body.copyWith(
+                      color: AppColors.textMuted,
+                    ),
                   )
                 else
                   Column(
@@ -225,21 +223,22 @@ class _StepConnectState extends ConsumerState<StepConnect> {
                         label: 'Instance',
                         value: _selectedInstance,
                         items: _instances
-                            .map((i) => DropdownMenuItem(
-                                  value: i['instance_id']?.toString() ??
-                                      i['id']?.toString(),
-                                  child: Text(
-                                    (i['name'] ??
-                                            i['instance_id'] ??
-                                            i['id'])
-                                        .toString(),
-                                    style: AppTextStyles.body.copyWith(
-                                        color: AppColors.textHi),
+                            .map(
+                              (i) => DropdownMenuItem(
+                                value:
+                                    i['instance_id']?.toString() ??
+                                    i['id']?.toString(),
+                                child: Text(
+                                  (i['name'] ?? i['instance_id'] ?? i['id'])
+                                      .toString(),
+                                  style: AppTextStyles.body.copyWith(
+                                    color: AppColors.textHi,
                                   ),
-                                ))
+                                ),
+                              ),
+                            )
                             .toList(),
-                        onChanged: (v) =>
-                            setState(() => _selectedInstance = v),
+                        onChanged: (v) => setState(() => _selectedInstance = v),
                         disabled: _busy,
                       ),
                       const SizedBox(height: 12),
@@ -247,51 +246,28 @@ class _StepConnectState extends ConsumerState<StepConnect> {
                         label: 'Brokerage',
                         value: _selectedBrokerage,
                         items: _brokerages
-                            .map((b) => DropdownMenuItem(
-                                  value: b['id']?.toString(),
-                                  child: Text(
-                                    '${b['account_name']} (${b['brokerage_type']})',
-                                    style: AppTextStyles.body.copyWith(
-                                        color: AppColors.textHi),
+                            .map(
+                              (b) => DropdownMenuItem(
+                                value: b['id']?.toString(),
+                                child: Text(
+                                  '${b['account_name']} (${b['brokerage_type']})',
+                                  style: AppTextStyles.body.copyWith(
+                                    color: AppColors.textHi,
                                   ),
-                                ))
+                                ),
+                              ),
+                            )
                             .toList(),
                         onChanged: (v) =>
                             setState(() => _selectedBrokerage = v),
                         disabled: _busy,
                       ),
-                      if (_selectedBrokerageType == 'robinhood') ...[
-                        const SizedBox(height: 10),
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.fill(AppColors.warning),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                                color: AppColors.stroke(AppColors.warning)),
-                          ),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Icon(symbol('warning'),
-                                  size: 14, color: AppColors.warning),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  'Robinhood automation is unofficial and may result in account suspension. '
-                                  'The adapter starts in dry-run mode.',
-                                  style: AppTextStyles.nano.copyWith(
-                                      color: AppColors.warning),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
                       if (_message != null) ...[
                         const SizedBox(height: 10),
                         OnboardingMessageBanner(
-                            message: _message!, ok: _messageOk),
+                          message: _message!,
+                          ok: _messageOk,
+                        ),
                       ],
                       const SizedBox(height: 14),
                       Align(
@@ -304,9 +280,9 @@ class _StepConnectState extends ConsumerState<StepConnect> {
                           busy: _busy,
                           onPressed:
                               (_selectedInstance != null &&
-                                      _selectedBrokerage != null)
-                                  ? _link
-                                  : null,
+                                  _selectedBrokerage != null)
+                              ? _link
+                              : null,
                         ),
                       ),
                     ],
@@ -339,16 +315,20 @@ class _FlowNode extends StatelessWidget {
         children: [
           IconTile(icon: symbol(icon), color: AppColors.primary, size: 40),
           const SizedBox(height: 6),
-          Text(label,
-              textAlign: TextAlign.center,
-              style: AppTextStyles.meta.copyWith(color: AppColors.textHi)),
+          Text(
+            label,
+            textAlign: TextAlign.center,
+            style: AppTextStyles.meta.copyWith(color: AppColors.textHi),
+          ),
           const SizedBox(height: 2),
-          Text(desc,
-              textAlign: TextAlign.center,
-              style: AppTextStyles.nano.copyWith(
-                color: AppColors.textDim,
-                height: 1.3,
-              )),
+          Text(
+            desc,
+            textAlign: TextAlign.center,
+            style: AppTextStyles.nano.copyWith(
+              color: AppColors.textDim,
+              height: 1.3,
+            ),
+          ),
         ],
       ),
     );
@@ -387,13 +367,16 @@ class _DropdownField extends StatelessWidget {
           initialValue: value,
           onChanged: disabled ? null : onChanged,
           dropdownColor: AppColors.surface,
-          hint: Text('Pick one…',
-              style:
-                  AppTextStyles.body.copyWith(color: AppColors.textFaint)),
+          hint: Text(
+            'Pick one…',
+            style: AppTextStyles.body.copyWith(color: AppColors.textFaint),
+          ),
           style: AppTextStyles.body.copyWith(color: AppColors.textHi),
           decoration: InputDecoration(
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
             filled: true,
             fillColor: AppColors.surface,
             border: OutlineInputBorder(
@@ -406,8 +389,10 @@ class _DropdownField extends StatelessWidget {
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
-              borderSide:
-                  const BorderSide(color: AppColors.primary, width: 1.5),
+              borderSide: const BorderSide(
+                color: AppColors.primary,
+                width: 1.5,
+              ),
             ),
           ),
           items: items,

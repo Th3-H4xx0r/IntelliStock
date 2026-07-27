@@ -73,36 +73,15 @@ def _scan_wal_rows_for_instance(r, conn, cid_prefix: str, retention_days: int) -
     return out
 
 
-def _decrypt_or_passthrough(value):
-    """Decrypt a Fernet-encrypted secret_store value, or pass through if it's
-    plaintext (legacy). Mirrors backend/broker.py:_load_live_credentials_from_db
-    + _load_robinhood_extras_from_db which both call secret_store.decrypt
-    transparently. Without this, the inspector would feed encrypted ciphertext
-    to the broker as a bearer token and get a 401 JWT verification failed.
-    """
-    if value is None or value == "":
-        return value
-    # backend/ on sys.path was inserted in main()
-    from secret_store import decrypt
-    try:
-        return decrypt(value)
-    except Exception:
-        # If decrypt fails, fall back to passthrough (legacy plaintext rows).
-        # The broker itself does the same when the field has no fernet: tag.
-        return value
-
-
 def _fetch_broker_positions_and_cash(brokerage_row: dict):
     """Read-only broker call: positions + cash + open orders. Mirrors the
     adapter's REST refresh path without booting the adapter.
 
     IMPORTANT: BrokerageAccounts rows store Fernet-encrypted credentials per
     backend/secret_store.py. broker.py decrypts them at boot via
-    _load_live_credentials_from_db (alpaca_key, alpaca_secret,
-    robinhood_access_token, robinhood_refresh_token) and
-    _load_robinhood_extras_from_db (robinhood_device_token). We replicate
-    that here so the broker API call uses the actual bearer token, not the
-    Fernet ciphertext. Requires INTELLISTOCK_CRED_KEY env to be set.
+    _load_live_credentials_from_db (alpaca_key, alpaca_secret). We replicate
+    that here so the broker API call uses the actual secret, not Fernet
+    ciphertext. Requires INTELLISTOCK_CRED_KEY env to be set.
     """
     btype = (brokerage_row.get("brokerage_type") or "").lower()
     if btype == "alpaca":
@@ -143,79 +122,6 @@ def _fetch_broker_positions_and_cash(brokerage_row: dict):
             cash,
             equity,
         )
-    if btype == "robinhood":
-        # Lazy import via backend/ path. Operator must run with PYTHONPATH=backend.
-        try:
-            from robinhood_engine import RobinhoodClient, RobinhoodSessionState  # type: ignore
-        except ImportError as e:
-            raise SystemExit(
-                f"robinhood_engine import failed ({e}); run from repo root."
-            )
-        # Decrypt RH credentials (see broker.py:644-645 + 530)
-        _access = _decrypt_or_passthrough(brokerage_row.get("robinhood_access_token"))
-        _refresh = _decrypt_or_passthrough(brokerage_row.get("robinhood_refresh_token"))
-        _device = _decrypt_or_passthrough(brokerage_row.get("robinhood_device_token"))
-        if not _access or not _refresh:
-            raise SystemExit(
-                "Robinhood access_token / refresh_token are empty after decrypt. "
-                "Either the brokerage row is missing tokens (re-link via UI), "
-                "or INTELLISTOCK_CRED_KEY is set incorrectly in this shell. "
-                "Export the same INTELLISTOCK_CRED_KEY the broker daemon uses."
-            )
-        # Mirror backend/broker.py:_load_robinhood_extras_from_db
-        state = RobinhoodSessionState(
-            access_token=_access,
-            refresh_token=_refresh,
-            token_type="Bearer",
-            device_token=_device or None,
-            account_number=(brokerage_row.get("robinhood_account_number") or "").strip() or None,
-            account_url=(brokerage_row.get("robinhood_account_url") or "").strip() or None,
-            obtained_at_epoch=int(brokerage_row.get("robinhood_obtained_at_epoch") or 0),
-            expires_in=int(brokerage_row.get("robinhood_expires_in") or 0),
-        )
-        client = RobinhoodClient(state=state, timeout_sec=20)
-        positions = client.get_positions(
-            account_number=brokerage_row.get("robinhood_account_number")
-        ) or []
-        account = client.get_account_summary(
-            account_number=brokerage_row.get("robinhood_account_number")
-        ) or {}
-        cash = float(account.get("cash") or 0.0)
-        equity = float(account.get("equity") or 0.0)
-        # 0-C (bug-sweep 2026-05-28): RH /positions/ dicts have NO 'symbol'
-        # field — only an 'instrument' URL. The old `p.get("symbol")` therefore
-        # produced "" for every position, so the inspector reported 0 owned /
-        # 0 external for EVERY Robinhood instance (a falsely-clean pre-flight).
-        # Resolve the symbol via the instrument URL (cached) and normalize to the
-        # dash-form the clean-room classifier matches against.
-        _inst_sym_cache: dict[str, str] = {}
-
-        def _resolve_symbol(pos: dict) -> str:
-            raw = (pos.get("symbol") or "").strip()
-            if raw:
-                return raw.upper().replace(".", "-")
-            url = (pos.get("instrument") or "").strip()
-            if not url:
-                return ""
-            if url not in _inst_sym_cache:
-                try:
-                    sym = (client.get_instrument(url).get("symbol") or "").strip()
-                except Exception:
-                    sym = ""
-                _inst_sym_cache[url] = sym.upper().replace(".", "-")
-            return _inst_sym_cache[url]
-
-        out_positions = []
-        for p in positions:
-            qty = float(p.get("quantity") or 0.0)
-            if qty == 0.0:
-                continue
-            out_positions.append({
-                "symbol": _resolve_symbol(p),
-                "qty": qty,
-                "market_value": qty * float(p.get("average_buy_price") or 0.0),
-            })
-        return (out_positions, cash, equity)
     raise SystemExit(f"unknown brokerage_type {btype!r} on this instance")
 
 
@@ -225,7 +131,7 @@ def main():
     p.add_argument("--retention-days", type=int, default=180)
     args = p.parse_args()
 
-    # Make backend importable (for secret_store + robinhood_engine + classifier).
+    # Make backend importable (for secret_store + classifier).
     # Must happen BEFORE any decryption call.
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
@@ -262,7 +168,7 @@ def main():
 
         print(f"Instance: {args.instance}  (broker: {bra.get('brokerage_type')})")
         print(
-            f"Account:  {bra.get('alpaca_account_number') or bra.get('robinhood_account_number')}"
+            f"Account:  {bra.get('alpaca_account_number')}"
             f"  ({bra.get('account_name')})"
         )
         if (bra.get("brokerage_type") or "").lower() == "alpaca":

@@ -408,7 +408,6 @@ def test_broker_requests_adjusted_daily_spy_for_exact_user_window():
         "timeframe": "1Day",
         "db_conn": None,
         "feed": "iex",
-        "allow_backtest_rh_fallback": False,
         "adjustment": "all",
     }
     assert bundle["manifest"]["price_field"] == "c"

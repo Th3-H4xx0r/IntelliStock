@@ -52,8 +52,7 @@ class AccountDTO:
     account_blocked: bool
     trading_blocked: bool
     # Added 2026-04-21 so LiveState mirrors the Alpaca UI (Buying Power +
-    # authoritative Daily Change). Optional/default to 0 so older callers
-    # and the Robinhood scaffold stay source-compatible.
+    # authoritative Daily Change). Optional/default to 0 for older callers.
     buying_power: float = 0.0
     last_equity: float = 0.0
     cash: float = 0.0

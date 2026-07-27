@@ -250,29 +250,6 @@ services:
   # Discover engine is NOT started here. The backend (server.py) starts and stops it via the Docker API
   # when EngineControl.discover_engine.running is set to true/false (e.g. via dashboard or API).
 
-  credential-service:
-    image: intellistock-backend
-    container_name: intellistock-credential-service
-    command: ["python", "credential_service.py"]
-    restart: unless-stopped
-    depends_on:
-      - rethinkdb
-    # 2026-04-26: credential_service.py decrypts Fernet-encrypted Robinhood
-    # tokens via secret_store before refresh and re-encrypts on write. Without
-    # INTELLISTOCK_CRED_KEY in env, every refresh raises and marks the account
-    # status="expired" (codex review caught this gap on the keys-on-baseline
-    # branch — same R19-style hole as backtest-engine had).
-    env_file:
-      - .env
-    environment:
-      - RETHINKDB_HOST=rethinkdb
-      - RETHINKDB_PORT=28015
-      # How often to check for expiring tokens (seconds, default 300 = 5 min)
-      - CREDENTIAL_CHECK_INTERVAL=300
-      # Refresh tokens this many seconds before expiry (default 1800 = 30 min)
-      - CREDENTIAL_REFRESH_BEFORE_EXPIRY=1800
-      - INTELLISTOCK_CRED_KEY=${INTELLISTOCK_CRED_KEY:-}
-
   discord-bot:
     image: intellistock-backend
     container_name: intellistock-discord-bot

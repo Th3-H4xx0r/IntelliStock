@@ -8329,8 +8329,8 @@ def _bfq_winner_lock_bypass_allowed(
 
     V28.6 release valve: aged, high-conviction queue items can break the BFQ
     drainage deadlock by displacing one of the armored winners that calcify
-    the portfolio after V28.3 full-exit cascades. Feature-flagged off by
-    default; the biggest winners (PnL > max_held_pnl_pct) are still protected.
+    the portfolio after V28.3 full-exit cascades. Enabled by default with an
+    explicit opt-out; the biggest winners remain protected.
     """
     # 2026-05-08 default flipped to True. The bypass guards (queue_bars,
     # queue_score, delta, held_pnl band, min_hold_days) are conservative
@@ -10633,8 +10633,8 @@ def _emu_last_price(portfolio_emulator, sym):
     """Last known price for `sym` from the portfolio emulator / broker adapter.
 
     The real price surface (Step 1) is the `_last_prices` dict attribute exposed
-    by PortfolioEmulator (backend/portfolio_emulator.py:22) and the Alpaca /
-    Robinhood adapters — there is no get_last_price() method."""
+    by PortfolioEmulator (backend/portfolio_emulator.py:22) and the Alpaca
+    adapter — there is no get_last_price() method."""
     try:
         return (getattr(portfolio_emulator, "_last_prices", {}) or {}).get(sym)
     except Exception:

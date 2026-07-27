@@ -13,7 +13,7 @@ Welcome:
   starting point.
 - **New Graph Nexus phases** for additional public data sources. See
   the [phase authoring guide](../graph-nexus/authoring-guide.md).
-- **Broker adapters** for brokerages other than Alpaca and Robinhood.
+- **Broker adapters** for brokerages other than Alpaca.
   The interface lives in `backend/broker_adapters/`.
 - **Documentation** that fills in gaps the README and `docs/` tree
   don't cover yet.
@@ -110,7 +110,6 @@ Extra care in PRs that touch them:
 - `backend/broker.py` — the per-instance trading loop.
 - `backend/broker_adapters/` — order routing.
 - `backend/strategies/` — decision logic that ends in real orders.
-- `backend/credential_service.py` — Robinhood token refresh.
 - `backend/secret_store.py` — Fernet encryption.
 
 For changes here, include in the PR description:

@@ -17,7 +17,7 @@ from datetime import timezone
 import pytest
 
 
-# Make backend importable (mirrors tests/test_robinhood_adapter_smoke.py).
+# Make backend importable.
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BACKEND = os.path.join(ROOT, "backend")
@@ -78,42 +78,37 @@ def test_next_market_open_returns_future_when_closed():
 
 
 def test_rth_only_flag_rejects_pre_market(monkeypatch):
-    """2026-05-01: RH_RTH_ONLY=true narrows the live gate to RTH so
+    """LIVE_RTH_ONLY=true narrows the live gate to RTH so
     pre-market submits don't run. 5 AM ET (09:00 UTC) is pre-market —
     extended-hours gate accepts, RTH-only gate rejects.
     """
     pre_market = dt.datetime(2026, 5, 1, 9, 0, 0, tzinfo=timezone.utc)  # Fri 5 AM ET
     # Default — pre-market accepted (extended hours).
-    monkeypatch.delenv("RH_RTH_ONLY", raising=False)
     monkeypatch.delenv("LIVE_RTH_ONLY", raising=False)
     assert is_within_live_session(pre_market) is True
     # With flag — pre-market rejected.
-    monkeypatch.setenv("RH_RTH_ONLY", "true")
+    monkeypatch.setenv("LIVE_RTH_ONLY", "true")
     assert is_within_live_session(pre_market) is False
 
 
 def test_rth_only_flag_rejects_after_hours(monkeypatch):
     """6 PM ET (22:00 UTC) is after-hours. RTH-only rejects."""
     after_hours = dt.datetime(2026, 5, 1, 22, 0, 0, tzinfo=timezone.utc)  # Fri 6 PM ET
-    monkeypatch.delenv("RH_RTH_ONLY", raising=False)
     monkeypatch.delenv("LIVE_RTH_ONLY", raising=False)
     assert is_within_live_session(after_hours) is True
-    monkeypatch.setenv("RH_RTH_ONLY", "true")
+    monkeypatch.setenv("LIVE_RTH_ONLY", "true")
     assert is_within_live_session(after_hours) is False
 
 
 def test_rth_only_flag_accepts_rth(monkeypatch):
     """10 AM ET (14:00 UTC) on a NYSE session is RTH; RTH-only accepts."""
     rth = dt.datetime(2026, 5, 1, 14, 0, 0, tzinfo=timezone.utc)
-    monkeypatch.setenv("RH_RTH_ONLY", "true")
+    monkeypatch.setenv("LIVE_RTH_ONLY", "true")
     assert is_within_live_session(rth) is True
 
 
-def test_live_rth_only_alias_works(monkeypatch):
-    """LIVE_RTH_ONLY is a synonym for RH_RTH_ONLY (older deployments may
-    use the more-generic env name).
-    """
+def test_live_rth_only_works(monkeypatch):
+    """The generic session flag restricts pre-market execution."""
     pre_market = dt.datetime(2026, 5, 1, 9, 0, 0, tzinfo=timezone.utc)
-    monkeypatch.delenv("RH_RTH_ONLY", raising=False)
     monkeypatch.setenv("LIVE_RTH_ONLY", "true")
     assert is_within_live_session(pre_market) is False

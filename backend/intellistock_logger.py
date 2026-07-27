@@ -53,7 +53,6 @@ _REDACT_PATTERNS = [
     # the platform-internal secrets (Fernet key, JWT signing key).
     (re.compile(
         r"((?:alpaca[_-]?(?:key|secret|api[_-]?key|api[_-]?secret)"
-        r"|robinhood[_-]?(?:access[_-]?token|refresh[_-]?token|device[_-]?token)"
         r"|openai[_-]?api[_-]?key|gemini[_-]?api[_-]?key|nvidia[_-]?api[_-]?key"
         r"|deepseek[_-]?api[_-]?key|azure[_-]?openai[_-]?api[_-]?key"
         r"|polygon[_-]?api[_-]?key|benzinga[_-]?api[_-]?key"

@@ -14,7 +14,7 @@ const loadError   = ref('')
 
 // Modal state
 const showModal   = ref(false)
-const activeTab   = ref('alpaca')   // 'alpaca' | 'robinhood'
+const activeTab   = ref('alpaca')
 const submitting  = ref(false)
 const submitMsg   = ref('')
 const submitOk    = ref(false)
@@ -50,13 +50,6 @@ function _normalizeErrorDetail(data, fallbackStatus) {
   if (d && typeof d === 'object') return d.msg || d.message || JSON.stringify(d)
   return `HTTP ${fallbackStatus}`
 }
-
-// Robinhood multi-step
-// step 1: enter tokens  step 2: pick account
-const rhStep         = ref(1)
-const rhForm         = ref({ account_name: '', access_token: '', refresh_token: '', device_token: '' })
-const rhAccounts     = ref([])   // fetched accounts from preview endpoint
-const rhSelected     = ref('')   // chosen account_number
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function authHeaders() {
@@ -107,23 +100,6 @@ async function deleteAccount(id, name) {
   }
 }
 
-async function refreshRobinhood(id, name) {
-  if (!confirm(`Refresh tokens for "${name}"?`)) return
-  try {
-    const res = await fetch(`${API_BASE}/brokerages/${id}/refresh`, {
-      method: 'POST',
-      headers: authHeaders(),
-    })
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}))
-      throw new Error(d.detail || `HTTP ${res.status}`)
-    }
-    await fetchAccounts()
-  } catch (e) {
-    alert(`Refresh failed: ${e.message}`)
-  }
-}
-
 // ── Modal ─────────────────────────────────────────────────────────────────────
 function openModal() {
   editMode.value    = false
@@ -133,10 +109,8 @@ function openModal() {
   submitOk.value    = false
   submitting.value  = false
   alpacaForm.value  = { account_name: '', key: '', secret: '', paper: true, data_feed: 'iex' }
-  rhForm.value      = { account_name: '', access_token: '', refresh_token: '', device_token: '' }
-  rhStep.value      = 1
-  rhAccounts.value  = []
-  rhSelected.value  = ''
+  kalshiForm.value  = { account_name: '', key_id: '', private_key: '', environment: 'demo' }
+  binanceusForm.value = { account_name: '', key: '', secret: '', paper: true }
   showModal.value   = true
 }
 
@@ -147,15 +121,13 @@ function openEditModal(acct) {
   submitMsg.value   = ''
   submitOk.value    = false
   submitting.value  = false
-  rhStep.value      = 1
-  rhAccounts.value  = []
-  rhSelected.value  = ''
   if (acct.brokerage_type === 'alpaca') {
     alpacaForm.value = { account_name: acct.account_name, key: acct.alpaca_key || '', secret: '', paper: acct.alpaca_paper ?? true, data_feed: acct.alpaca_data_feed || 'iex' }
   } else if (acct.brokerage_type === 'binanceus') {
     binanceusForm.value = { account_name: acct.account_name, key: acct.binanceus_key || '', secret: '', paper: acct.alpaca_paper ?? true }
   } else {
-    rhForm.value = { account_name: acct.account_name, access_token: '', refresh_token: '', device_token: '' }
+    submitMsg.value = `Unsupported brokerage type: ${acct.brokerage_type}`
+    submitOk.value = false
   }
   showModal.value = true
 }
@@ -174,48 +146,6 @@ function setTab(tab) {
   activeTab.value  = tab
   submitMsg.value  = ''
   submitOk.value   = false
-  rhStep.value     = 1
-  rhAccounts.value = []
-  rhSelected.value = ''
-}
-
-// Step 1 → Step 2: fetch Robinhood accounts for selection
-async function rhFetchAccounts() {
-  const f = rhForm.value
-  if (!f.account_name.trim()) { submitMsg.value = 'Account name is required'; submitOk.value = false; return }
-  // In edit mode with no tokens provided, save name-only without going to step 2
-  if (editMode.value && !f.access_token.trim()) { return submitLink() }
-  if (!f.access_token.trim()) { submitMsg.value = 'Access token is required'; submitOk.value = false; return }
-  if (!f.refresh_token.trim()) { submitMsg.value = 'Refresh token is required'; submitOk.value = false; return }
-
-  submitting.value = true
-  submitMsg.value  = 'Fetching accounts...'
-  submitOk.value   = false
-  try {
-    const res = await fetch(`${API_BASE}/brokerages/robinhood/accounts`, {
-      method:  'POST',
-      headers: authHeaders(),
-      body:    JSON.stringify({
-        access_token:  f.access_token.trim(),
-        refresh_token: f.refresh_token.trim(),
-        device_token:  f.device_token.trim() || undefined,
-      }),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(_normalizeErrorDetail(data, res.status))
-
-    rhAccounts.value = data.accounts || []
-    // Auto-select the first selectable (non-managed) account
-    const selectable = rhAccounts.value.filter(a => a.management_type !== 'managed')
-    rhSelected.value = selectable.length === 1 ? selectable[0].account_number : ''
-    rhStep.value     = 2
-    submitMsg.value  = ''
-  } catch (e) {
-    submitOk.value  = false
-    submitMsg.value = e.message || 'Failed to fetch accounts'
-  } finally {
-    submitting.value = false
-  }
 }
 
 async function submitLink(opts = {}) {
@@ -335,24 +265,7 @@ async function submitLink(opts = {}) {
             paper:          f.paper,
           }
     } else {
-      const f = rhForm.value
-      if (!editMode.value && !rhSelected.value) throw new Error('Please select an account')
-      body = editMode.value
-        ? {
-            account_name:   f.account_name.trim() || undefined,
-            access_token:   f.access_token.trim()  || undefined,
-            refresh_token:  f.refresh_token.trim() || undefined,
-            device_token:   f.device_token.trim()  || undefined,
-            account_number: rhSelected.value || undefined,
-          }
-        : {
-            brokerage_type: 'robinhood',
-            account_name:   f.account_name.trim(),
-            access_token:   f.access_token.trim(),
-            refresh_token:  f.refresh_token.trim(),
-            device_token:   f.device_token.trim() || undefined,
-            account_number: rhSelected.value,
-          }
+      throw new Error(`Unsupported brokerage type: ${activeTab.value}`)
     }
 
     if (editMode.value) {
@@ -505,7 +418,7 @@ onMounted(fetchAccounts)
         <div>
           <p class="text-primary text-xs font-bold uppercase tracking-widest mb-1">Brokerages</p>
           <h1 class="text-2xl sm:text-3xl font-bold leading-tight">Linked Accounts</h1>
-          <p class="text-slate-400 text-sm mt-1 max-w-md">Manage your Alpaca and Robinhood brokerage connections.</p>
+          <p class="text-slate-400 text-sm mt-1 max-w-md">Manage your brokerage connections.</p>
         </div>
         <button
           @click="openModal"
@@ -534,7 +447,7 @@ onMounted(fetchAccounts)
       >
         <span class="material-symbols-outlined text-5xl text-slate-600">account_balance</span>
         <p class="text-slate-300 font-semibold">No brokerages linked yet</p>
-        <p class="text-slate-500 text-sm max-w-xs">Link an Alpaca or Robinhood account to start trading.</p>
+        <p class="text-slate-500 text-sm max-w-xs">Link an Alpaca account to start stock trading.</p>
         <button
           @click="openModal"
           class="mt-2 px-5 py-2 rounded-lg bg-primary text-background-dark font-semibold text-sm hover:brightness-110 transition-all"
@@ -584,9 +497,6 @@ onMounted(fetchAccounts)
             <div v-if="acct.brokerage_type === 'alpaca' && acct.alpaca_account_number">
               <span class="text-slate-400">Account #: </span>{{ acct.alpaca_account_number }}
             </div>
-            <div v-if="acct.brokerage_type === 'robinhood' && acct.robinhood_account_number">
-              <span class="text-slate-400">Account #: </span>{{ acct.robinhood_account_number }}
-            </div>
             <div v-if="acct.last_refresh_at">
               <span class="text-slate-400">Last refreshed: </span>{{ new Date(acct.last_refresh_at).toLocaleString() }}
             </div>
@@ -597,14 +507,6 @@ onMounted(fetchAccounts)
 
           <!-- Actions -->
           <div class="flex flex-wrap items-center gap-2 pt-1 mt-auto">
-            <button
-              v-if="acct.brokerage_type === 'robinhood'"
-              @click="refreshRobinhood(acct.id, acct.account_name)"
-              class="w-full sm:w-auto inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-primary hover:bg-surface border border-border-subtle transition-colors"
-            >
-              <span class="material-symbols-outlined text-[14px]">refresh</span>
-              Refresh
-            </button>
             <button
               @click="openEditModal(acct)"
               class="w-full sm:w-auto inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-primary hover:bg-surface border border-border-subtle transition-colors"
@@ -640,20 +542,14 @@ onMounted(fetchAccounts)
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div>
               <h2 class="text-base font-bold">{{ editMode ? 'Edit Brokerage Account' : 'Link Brokerage Account' }}</h2>
-              <!-- Robinhood breadcrumb (only in link mode) -->
-              <p v-if="!editMode && activeTab === 'robinhood'" class="text-xs text-slate-500 mt-0.5">
-                <span :class="rhStep >= 1 ? 'text-primary' : ''">1. Credentials</span>
-                <span class="mx-1.5">›</span>
-                <span :class="rhStep >= 2 ? 'text-primary' : ''">2. Select Account</span>
-              </p>
             </div>
             <button @click="closeModal" class="text-slate-500 hover:text-slate-300 transition-colors">
               <span class="material-symbols-outlined">close</span>
             </button>
           </div>
 
-          <!-- Tab slider (only show on step 1 and not in edit mode) -->
-          <div v-if="!editMode && rhStep === 1" class="px-6 pt-5">
+          <!-- Brokerage selector -->
+          <div v-if="!editMode" class="px-6 pt-5">
             <div class="flex rounded-lg bg-surface border border-border-subtle p-1 gap-1">
               <button
                 @click="setTab('alpaca')"
@@ -663,15 +559,6 @@ onMounted(fetchAccounts)
                   : 'text-slate-400 hover:text-slate-200'"
               >
                 Alpaca
-              </button>
-              <button
-                @click="setTab('robinhood')"
-                class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
-                :class="activeTab === 'robinhood'
-                  ? 'bg-primary text-background-dark'
-                  : 'text-slate-400 hover:text-slate-200'"
-              >
-                Robinhood
               </button>
               <button
                 @click="setTab('kalshi')"
@@ -815,89 +702,6 @@ onMounted(fetchAccounts)
               </p>
             </template>
 
-            <!-- ── Robinhood Step 1: credentials ── -->
-            <template v-else-if="activeTab === 'robinhood' && rhStep === 1">
-              <div v-if="editMode" class="rounded-lg bg-blue-500/10 border border-blue-500/20 px-4 py-3 text-xs text-blue-300 leading-relaxed">
-                Update account name and/or paste new tokens. Leave tokens blank to only update the name.
-              </div>
-              <div v-else class="rounded-lg bg-amber-500/10 border border-amber-500/20 px-4 py-3 text-xs text-amber-300 leading-relaxed">
-                Paste your Robinhood tokens. Obtain them by running
-                <code class="font-mono bg-black/30 px-1 rounded">python robinhood_cli.py --paste-tokens</code>
-                and copying the tokens shown.
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Account Name</label>
-                <input v-model="rhForm.account_name" type="text" placeholder="e.g. My Robinhood Account"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors" />
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Access Token</label>
-                <textarea v-model="rhForm.access_token" rows="2" placeholder="Paste access token (Bearer prefix will be stripped)"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono resize-none"></textarea>
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Refresh Token</label>
-                <textarea v-model="rhForm.refresh_token" rows="2" placeholder="Paste refresh token"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono resize-none"></textarea>
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Device Token <span class="text-slate-600">(optional)</span></label>
-                <input v-model="rhForm.device_token" type="text" placeholder="Leave blank to auto-generate"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
-              </div>
-            </template>
-
-            <!-- ── Robinhood Step 2: account picker ── -->
-            <template v-else-if="activeTab === 'robinhood' && rhStep === 2">
-              <p class="text-xs text-slate-400">
-                Select the Robinhood account you want to link as
-                <span class="text-slate-200 font-semibold">{{ rhForm.account_name }}</span>.
-              </p>
-
-              <div class="space-y-2">
-                <button
-                  v-for="a in rhAccounts"
-                  :key="a.account_number"
-                  @click="a.management_type !== 'managed' && (rhSelected = a.account_number)"
-                  class="w-full text-left rounded-xl border px-4 py-3.5 transition-all"
-                  :disabled="a.management_type === 'managed'"
-                  :class="a.management_type === 'managed'
-                    ? 'border-border-subtle bg-surface/20 opacity-40 cursor-not-allowed'
-                    : rhSelected === a.account_number
-                      ? 'border-primary bg-primary/8'
-                      : 'border-border-subtle bg-surface/50 hover:border-slate-600'"
-                >
-                  <div class="flex items-center justify-between gap-3">
-                    <!-- Left: radio + account info -->
-                    <div class="flex items-center gap-3">
-                      <div class="size-4 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors"
-                        :class="a.management_type === 'managed'
-                          ? 'border-slate-700'
-                          : rhSelected === a.account_number ? 'border-primary' : 'border-slate-600'">
-                        <div v-if="rhSelected === a.account_number && a.management_type !== 'managed'" class="size-2 rounded-full bg-primary"></div>
-                      </div>
-                      <div>
-                        <div class="flex items-center gap-2">
-                          <p class="text-sm font-semibold text-slate-100">{{ a.display_name || a.account_number }}</p>
-                          <span v-if="a.management_type === 'managed'" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-500 font-medium uppercase tracking-wide">Managed</span>
-                        </div>
-                        <p class="text-xs text-slate-500 mt-0.5 font-mono">{{ a.account_number }}
-                          <span v-if="a.account_type" class="ml-1 capitalize">· {{ fmtType(a.account_type) }}</span>
-                        </p>
-                      </div>
-                    </div>
-                    <!-- Right: equity + buying power -->
-                    <div class="text-right shrink-0">
-                      <p class="text-sm font-bold text-slate-100 tabular-nums">{{ fmtEquity(a.equity) }}</p>
-                      <p class="text-xs text-slate-500 mt-0.5">
-                        <span class="text-slate-400">BP:</span> {{ fmtEquity(a.buying_power) }}
-                      </p>
-                    </div>
-                  </div>
-                </button>
-              </div>
-            </template>
-
             <!-- Status message -->
             <Transition name="slide-up">
               <div
@@ -918,24 +722,12 @@ onMounted(fetchAccounts)
 
           <!-- Modal footer -->
           <div class="px-6 pb-6 flex gap-3">
-            <!-- Alpaca or Robinhood step 1 cancel -->
             <button
-              v-if="activeTab === 'alpaca' || rhStep === 1"
               @click="closeModal"
               :disabled="submitting"
               class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40"
             >
               Cancel
-            </button>
-
-            <!-- Robinhood step 2 back button -->
-            <button
-              v-if="activeTab === 'robinhood' && rhStep === 2"
-              @click="rhStep = 1; submitMsg = ''"
-              :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40"
-            >
-              Back
             </button>
 
             <!-- Alpaca: Test Connection (R16) -->
@@ -962,29 +754,6 @@ onMounted(fetchAccounts)
               {{ submitting ? (editMode ? 'Saving...' : 'Linking...') : (editMode ? 'Save Changes' : 'Link Account') }}
             </button>
 
-            <!-- Robinhood step 1: Fetch Accounts / Save Changes -->
-            <button
-              v-if="activeTab === 'robinhood' && rhStep === 1"
-              @click="rhFetchAccounts"
-              :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-            >
-              <span v-if="submitting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              {{ submitting
-                ? (editMode ? 'Saving...' : 'Fetching...')
-                : (editMode ? (rhForm.access_token.trim() ? 'Next →' : 'Save Changes') : 'Fetch Accounts') }}
-            </button>
-
-            <!-- Robinhood step 2: Link / Save Account -->
-            <button
-              v-if="activeTab === 'robinhood' && rhStep === 2"
-              @click="submitLink"
-              :disabled="submitting || !rhSelected"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-            >
-              <span v-if="submitting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              {{ submitting ? (editMode ? 'Saving...' : 'Linking...') : (editMode ? 'Save Changes' : 'Link Account') }}
-            </button>
           </div>
 
         </div>

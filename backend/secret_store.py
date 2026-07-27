@@ -1,6 +1,6 @@
 """Fernet-based credential store.
 
-Secrets (Alpaca API key/secret, Robinhood tokens) are Fernet-encrypted before
+Secrets (including Alpaca API keys) are Fernet-encrypted before
 write to the BrokerageAccounts RethinkDB rows. The key is loaded from the
 INTELLISTOCK_CRED_KEY env var; the repo never contains it.
 

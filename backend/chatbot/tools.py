@@ -219,8 +219,8 @@ def _exe_render_portfolio_chart(ctx: Dict[str, Any], args: Dict[str, Any]) -> Di
 
 
 def _exe_get_price_history(ctx: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
-    """Fetch OHLC close-price history for one or more tickers from Robinhood's
-    public historicals endpoint. Range chooses the granularity bucket
+    """Fetch close-price history for one or more tickers from the configured
+    market-data provider. Range chooses the granularity bucket
     automatically (1D=5min, 1W=10min, 1M=hourly, 3M/YTD/1Y=daily, ALL=weekly)."""
     symbols = args.get("symbols") or args.get("symbol") or ""
     if isinstance(symbols, list):
@@ -440,7 +440,7 @@ _TOOLS: List[Tool] = [
     ),
     Tool(
         name="list_brokerages",
-        description="List all linked brokerage accounts (Alpaca / Robinhood) with masked credentials.",
+        description="List all linked brokerage accounts with masked credentials.",
         parameters=_obj({}),
         safety="safe",
         executor=lambda ctx, a: {"brokerages": action_list_brokerages(ctx["conn"])},
@@ -703,8 +703,8 @@ _TOOLS: List[Tool] = [
     Tool(
         name="get_price_history",
         description=(
-            "Fetch close-price history for one or more stock tickers from Robinhood's public "
-            "historicals endpoint. The range param picks both span and granularity automatically: "
+            "Fetch close-price history for one or more stock tickers from the configured "
+            "market-data provider. The range param picks both span and granularity automatically: "
             "1D = 5-min bars over a day, 1W = 10-min bars over a week, 1M = hourly bars over a month, "
             "3M = daily over 3 months, YTD = daily year-to-date, 1Y = daily over a year, ALL = weekly over 5 years. "
             "Use this when the user wants the raw numbers — for a chart, prefer render_price_chart "

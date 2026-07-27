@@ -272,7 +272,7 @@ onUnmounted(() => {
                 <span class="animate-ping absolute inset-0 rounded-full bg-primary opacity-75"></span>
                 <span class="relative rounded-full h-2 w-2 bg-primary"></span>
               </span>
-              Now Integrated with Alpaca &amp; Robinhood
+              Integrated with Alpaca
             </div>
           </div>
 

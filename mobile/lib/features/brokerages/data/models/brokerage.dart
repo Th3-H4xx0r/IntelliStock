@@ -20,7 +20,7 @@ class Brokerage {
 
   final String id;
 
-  /// 'alpaca' or 'robinhood'
+  /// Supported brokerage discriminator.
   final String brokerageType;
 
   final String accountName;
@@ -51,9 +51,9 @@ class Brokerage {
     }
 
     // Account number can live under different keys depending on brokerage type.
-    final acctNum = json['account_number'] as String? ??
-        json['alpaca_account_number'] as String? ??
-        json['robinhood_account_number'] as String?;
+    final acctNum =
+        json['account_number'] as String? ??
+        json['alpaca_account_number'] as String?;
 
     return Brokerage(
       id: json['id'] as String? ?? '',
@@ -72,17 +72,17 @@ class Brokerage {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'brokerage_type': brokerageType,
-        'account_name': accountName,
-        if (status != null) 'status': status,
-        'paper': paper,
-        if (accountNumber != null) 'account_number': accountNumber,
-        if (alpacaDataFeed != null) 'alpaca_data_feed': alpacaDataFeed,
-        if (lastRefreshAt != null) 'last_refresh_at': lastRefreshAt,
-        if (lastError != null) 'last_error': lastError,
-        if (equity != null) 'equity': equity,
-        if (buyingPower != null) 'buying_power': buyingPower,
-        if (managementType != null) 'management_type': managementType,
-      };
+    'id': id,
+    'brokerage_type': brokerageType,
+    'account_name': accountName,
+    if (status != null) 'status': status,
+    'paper': paper,
+    if (accountNumber != null) 'account_number': accountNumber,
+    if (alpacaDataFeed != null) 'alpaca_data_feed': alpacaDataFeed,
+    if (lastRefreshAt != null) 'last_refresh_at': lastRefreshAt,
+    if (lastError != null) 'last_error': lastError,
+    if (equity != null) 'equity': equity,
+    if (buyingPower != null) 'buying_power': buyingPower,
+    if (managementType != null) 'management_type': managementType,
+  };
 }

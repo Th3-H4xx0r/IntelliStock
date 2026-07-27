@@ -105,7 +105,7 @@ let commandPollHandle = null
 let pollHandle = null
 let mounted = true
 
-// Robinhood-style ranges. YTD is computed from the start of the current year;
+// Brokerage-style ranges. YTD is computed from the start of the current year;
 // 'ALL' returns every point. The shorter intraday ranges (5m/30m/1h/4h) were
 // removed because portfolio_history is sampled at 60s broker-side, so they
 // rendered as flat lines or empty windows.
@@ -426,7 +426,7 @@ async function fetchEquityHistory() {
   }
 }
 
-// ── Per-position historicals (Robinhood public batch endpoint) ───────────────
+// ── Per-position historicals ─────────────────────────────────────────────────
 // Keyed by symbol → [{ts, value}, ...]. Refetched whenever the position list
 // changes shape OR the global range changes. Backend caches at 60s so rapid
 // re-polls are cheap.
@@ -627,8 +627,7 @@ const chartType = computed(() => {
   return 'area'
 })
 
-// Robinhood-style range stats. The "change over range" anchors on the first
-// point inside the visible window — same convention as RH/Public/Webull.
+// Range stats anchor "change over range" on the first visible point.
 // When the window has <2 points we fall back to liveState's day_pnl so the
 // header isn't blank during early ticks of a fresh session. Note: this is
 // computed from raw equityPoints (not graphSeries) so candle-mode bucketing
@@ -844,7 +843,7 @@ watch(() => route.params.id, (newId, oldId) => {
 //  - the set of held symbols changes (a new buy/sell)
 //  - the user picks a different range tab
 // Backend caches each (range, symbol-csv) pair at 60s so rapid live-state
-// repolls don't trigger redundant Robinhood hits.
+// repolls don't trigger redundant provider calls.
 watch([positionSymbolsKey, currentRange], ([key]) => {
   if (!key) {
     positionHistoricals.value = {}
@@ -1034,7 +1033,7 @@ watch(
 
         <!-- Left: hero equity card + secondary stats -->
         <div class="flex flex-col gap-4 sm:gap-5">
-          <!-- Robinhood-style hero card: equity, change, chart, range tabs, stats -->
+          <!-- Brokerage hero card: equity, change, chart, range tabs, stats -->
           <div class="glass-card rounded-2xl p-4 sm:p-6 flex flex-col">
             <!-- Hero: equity + uptime -->
             <div class="flex items-start justify-between gap-3 mb-2">
@@ -1244,7 +1243,7 @@ watch(
                     <div class="text-lg font-black text-slate-100 tabular-nums leading-tight">{{ fmtMoney(p.market_value) }}</div>
                   </div>
                 </div>
-                <!-- Per-position price chart (Robinhood public historicals) -->
+                <!-- Per-position price chart -->
                 <div class="mb-2 -mx-1">
                   <div
                     v-if="!(positionHistoricals[p.symbol] && positionHistoricals[p.symbol].length)"

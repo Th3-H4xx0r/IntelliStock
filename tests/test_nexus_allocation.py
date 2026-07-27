@@ -2624,9 +2624,9 @@ class TestBfqWinnerLockBypass(unittest.TestCase):
         """Happy path: aged+high-score+high-delta vs mid-PnL winner = bypass allowed."""
         self.assertTrue(self._call(queue_score=1.6, delta=1.6))
 
-    def test_disabled_by_default(self):
-        """Empty config means feature flag off -- bypass never allowed."""
-        self.assertFalse(self._call(config={}))
+    def test_enabled_by_default(self):
+        """Empty config uses the calibrated safe-on release valve."""
+        self.assertTrue(self._call(config={}))
 
     def test_too_young_in_queue_blocked(self):
         """Queue item below min_queue_bars threshold must not bypass."""

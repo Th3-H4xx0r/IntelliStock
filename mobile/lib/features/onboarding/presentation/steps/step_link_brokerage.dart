@@ -11,8 +11,7 @@ import '../../../../core/widgets/material_symbols.dart';
 import '../../application/onboarding_controller.dart';
 import 'onboarding_form_widgets.dart';
 
-/// Minimal inline brokerage-link form.
-/// Tabs: Alpaca | Robinhood.
+/// Minimal inline Alpaca brokerage-link form.
 class StepLinkBrokerage extends ConsumerStatefulWidget {
   const StepLinkBrokerage({super.key});
 
@@ -20,20 +19,11 @@ class StepLinkBrokerage extends ConsumerStatefulWidget {
   ConsumerState<StepLinkBrokerage> createState() => _StepLinkBrokerageState();
 }
 
-class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tab;
-
-  // Alpaca fields.
+class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage> {
   final _alpacaNameCtrl = TextEditingController();
   final _alpacaKeyCtrl = TextEditingController();
   final _alpacaSecretCtrl = TextEditingController();
   bool _alpacaPaper = true;
-
-  // Robinhood fields.
-  final _rhNameCtrl = TextEditingController();
-  final _rhUsernameCtrl = TextEditingController();
-  final _rhPasswordCtrl = TextEditingController();
 
   bool _busy = false;
   String? _message;
@@ -42,46 +32,22 @@ class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage>
   final List<Map<String, dynamic>> _saved = [];
 
   @override
-  void initState() {
-    super.initState();
-    _tab = TabController(length: 2, vsync: this);
-    _tab.addListener(() => setState(() {}));
-  }
-
-  @override
   void dispose() {
-    _tab.dispose();
     _alpacaNameCtrl.dispose();
     _alpacaKeyCtrl.dispose();
     _alpacaSecretCtrl.dispose();
-    _rhNameCtrl.dispose();
-    _rhUsernameCtrl.dispose();
-    _rhPasswordCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
-    final isAlpaca = _tab.index == 0;
-    if (isAlpaca) {
-      if (_alpacaNameCtrl.text.trim().isEmpty ||
-          _alpacaKeyCtrl.text.trim().isEmpty ||
-          _alpacaSecretCtrl.text.trim().isEmpty) {
-        setState(() {
-          _message = 'Name, API key, and secret are required.';
-          _messageOk = false;
-        });
-        return;
-      }
-    } else {
-      if (_rhNameCtrl.text.trim().isEmpty ||
-          _rhUsernameCtrl.text.trim().isEmpty ||
-          _rhPasswordCtrl.text.trim().isEmpty) {
-        setState(() {
-          _message = 'Name, username, and password are required.';
-          _messageOk = false;
-        });
-        return;
-      }
+    if (_alpacaNameCtrl.text.trim().isEmpty ||
+        _alpacaKeyCtrl.text.trim().isEmpty ||
+        _alpacaSecretCtrl.text.trim().isEmpty) {
+      setState(() {
+        _message = 'Name, API key, and secret are required.';
+        _messageOk = false;
+      });
+      return;
     }
 
     setState(() {
@@ -92,32 +58,20 @@ class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage>
 
     try {
       final client = ref.read(apiClientProvider);
-      final Map<String, dynamic> body;
-
-      if (isAlpaca) {
-        body = {
-          'account_name': _alpacaNameCtrl.text.trim(),
-          'brokerage_type': 'alpaca',
-          'api_key': _alpacaKeyCtrl.text.trim(),
-          'api_secret': _alpacaSecretCtrl.text.trim(),
-          'paper': _alpacaPaper,
-        };
-      } else {
-        body = {
-          'account_name': _rhNameCtrl.text.trim(),
-          'brokerage_type': 'robinhood',
-          'username': _rhUsernameCtrl.text.trim(),
-          'password': _rhPasswordCtrl.text.trim(),
-        };
-      }
+      final Map<String, dynamic> body = {
+        'account_name': _alpacaNameCtrl.text.trim(),
+        'brokerage_type': 'alpaca',
+        'api_key': _alpacaKeyCtrl.text.trim(),
+        'api_secret': _alpacaSecretCtrl.text.trim(),
+        'paper': _alpacaPaper,
+      };
 
       final data = await client.post<Map<String, dynamic>>(
         '/brokerages',
         body: body,
       );
 
-      final name =
-          (data['account_name'] ?? body['account_name']).toString();
+      final name = (data['account_name'] ?? body['account_name']).toString();
       setState(() {
         _saved.add(data);
         _message = 'Brokerage "$name" linked.';
@@ -127,12 +81,11 @@ class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage>
         _alpacaKeyCtrl.clear();
         _alpacaSecretCtrl.clear();
         _alpacaPaper = true;
-        _rhNameCtrl.clear();
-        _rhUsernameCtrl.clear();
-        _rhPasswordCtrl.clear();
       });
 
-      ref.read(onboardingControllerProvider.notifier).updateCounts(
+      ref
+          .read(onboardingControllerProvider.notifier)
+          .updateCounts(
             brokerages:
                 ref.read(onboardingControllerProvider).brokerageCount + 1,
           );
@@ -153,8 +106,6 @@ class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage>
 
   @override
   Widget build(BuildContext context) {
-    final isRobinhood = _tab.index == 1;
-
     return SingleChildScrollView(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -167,8 +118,7 @@ class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage>
           ),
           const SizedBox(height: 8),
           Text(
-            'IntelliStock supports Alpaca (recommended) and Robinhood. '
-            'Start with Alpaca paper mode to test without real money.',
+            'Connect Alpaca in paper mode first to test without real money.',
             style: AppTextStyles.body.copyWith(color: AppColors.textMuted),
           ),
           if (_saved.isNotEmpty) ...[
@@ -188,83 +138,20 @@ class _StepLinkBrokerageState extends ConsumerState<StepLinkBrokerage>
             ],
           ],
           const SizedBox(height: 20),
-          // Tab bar.
-          Container(
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: TabBar(
-              controller: _tab,
-              labelStyle: AppTextStyles.cardTitle,
-              unselectedLabelStyle: AppTextStyles.meta,
-              labelColor: AppColors.primary,
-              unselectedLabelColor: AppColors.textMuted,
-              indicator: BoxDecoration(
-                color: AppColors.fill(AppColors.primary),
-                borderRadius: BorderRadius.circular(7),
-                border: Border.all(color: AppColors.stroke(AppColors.primary)),
-              ),
-              indicatorSize: TabBarIndicatorSize.tab,
-              dividerColor: Colors.transparent,
-              tabs: const [
-                Tab(text: 'Alpaca'),
-                Tab(text: 'Robinhood'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
           GlassCard(
             padding: const EdgeInsets.all(16),
             borderColor: AppColors.border,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (!isRobinhood)
-                  _AlpacaForm(
-                    nameCtrl: _alpacaNameCtrl,
-                    keyCtrl: _alpacaKeyCtrl,
-                    secretCtrl: _alpacaSecretCtrl,
-                    paper: _alpacaPaper,
-                    busy: _busy,
-                    onPaperChanged: (v) => setState(() => _alpacaPaper = v),
-                  )
-                else
-                  _RobinhoodForm(
-                    nameCtrl: _rhNameCtrl,
-                    usernameCtrl: _rhUsernameCtrl,
-                    passwordCtrl: _rhPasswordCtrl,
-                    busy: _busy,
-                  ),
-                if (isRobinhood) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: AppColors.fill(AppColors.warning),
-                      borderRadius: BorderRadius.circular(8),
-                      border:
-                          Border.all(color: AppColors.stroke(AppColors.warning)),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(symbol('warning'),
-                            size: 16, color: AppColors.warning),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Robinhood automation is unofficial and may result in account suspension. '
-                            'The adapter starts in dry-run mode.',
-                            style: AppTextStyles.nano
-                                .copyWith(color: AppColors.warning),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+                _AlpacaForm(
+                  nameCtrl: _alpacaNameCtrl,
+                  keyCtrl: _alpacaKeyCtrl,
+                  secretCtrl: _alpacaSecretCtrl,
+                  paper: _alpacaPaper,
+                  busy: _busy,
+                  onPaperChanged: (v) => setState(() => _alpacaPaper = v),
+                ),
                 if (_message != null) ...[
                   const SizedBox(height: 10),
                   OnboardingMessageBanner(message: _message!, ok: _messageOk),
@@ -310,75 +197,37 @@ class _AlpacaForm extends StatelessWidget {
     return Column(
       children: [
         OnboardingField(
-            label: 'Account Name *',
-            hint: 'e.g. alpaca-paper',
-            controller: nameCtrl,
-            enabled: !busy),
+          label: 'Account Name *',
+          hint: 'e.g. alpaca-paper',
+          controller: nameCtrl,
+          enabled: !busy,
+        ),
         const SizedBox(height: 12),
         OnboardingField(
-            label: 'API Key *',
-            hint: 'PK…',
-            controller: keyCtrl,
-            enabled: !busy),
+          label: 'API Key *',
+          hint: 'PK…',
+          controller: keyCtrl,
+          enabled: !busy,
+        ),
         const SizedBox(height: 12),
         OnboardingField(
-            label: 'API Secret *',
-            hint: 'Secret…',
-            controller: secretCtrl,
-            obscure: true,
-            enabled: !busy),
+          label: 'API Secret *',
+          hint: 'Secret…',
+          controller: secretCtrl,
+          obscure: true,
+          enabled: !busy,
+        ),
         const SizedBox(height: 12),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Paper mode',
-                style: AppTextStyles.body.copyWith(color: AppColors.textMd)),
-            AppToggle(
-              value: paper,
-              onChanged: busy ? null : onPaperChanged,
+            Text(
+              'Paper mode',
+              style: AppTextStyles.body.copyWith(color: AppColors.textMd),
             ),
+            AppToggle(value: paper, onChanged: busy ? null : onPaperChanged),
           ],
         ),
-      ],
-    );
-  }
-}
-
-class _RobinhoodForm extends StatelessWidget {
-  const _RobinhoodForm({
-    required this.nameCtrl,
-    required this.usernameCtrl,
-    required this.passwordCtrl,
-    required this.busy,
-  });
-
-  final TextEditingController nameCtrl;
-  final TextEditingController usernameCtrl;
-  final TextEditingController passwordCtrl;
-  final bool busy;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        OnboardingField(
-            label: 'Account Name *',
-            hint: 'e.g. robinhood-main',
-            controller: nameCtrl,
-            enabled: !busy),
-        const SizedBox(height: 12),
-        OnboardingField(
-            label: 'Username *',
-            hint: 'your@email.com',
-            controller: usernameCtrl,
-            enabled: !busy),
-        const SizedBox(height: 12),
-        OnboardingField(
-            label: 'Password *',
-            hint: '••••••••',
-            controller: passwordCtrl,
-            obscure: true,
-            enabled: !busy),
       ],
     );
   }
@@ -408,8 +257,9 @@ class _SavedTile extends StatelessWidget {
               children: [
                 Text(
                   (brokerage['account_name'] ?? '').toString(),
-                  style:
-                      AppTextStyles.cardTitle.copyWith(color: AppColors.textHi),
+                  style: AppTextStyles.cardTitle.copyWith(
+                    color: AppColors.textHi,
+                  ),
                 ),
                 Text(
                   (brokerage['brokerage_type'] ?? '').toString(),

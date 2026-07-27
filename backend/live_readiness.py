@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -204,8 +203,7 @@ def brokerage_requires_live_gate(
 ) -> bool:
     """Classify a stock broker start as paper or funded, fail-closed.
 
-    Alpaca uses its persisted paper flag.  Robinhood has no paper endpoint, so
-    its explicit dry-run process mode is authoritative and defaults to dry-run.
+    Alpaca uses its persisted paper flag. Unsupported stock brokers fail closed.
     """
     if type(instance) is not dict:
         raise LiveReadinessError("instance configuration is unavailable")
@@ -225,17 +223,4 @@ def brokerage_requires_live_gate(
         if type(paper) is not bool:
             raise LiveReadinessError("Alpaca execution mode is malformed")
         return paper is False
-    if brokerage_type == "robinhood":
-        environment = os.environ if environ is None else environ
-        if not isinstance(environment, Mapping):
-            raise LiveReadinessError("Robinhood execution mode is malformed")
-        raw_mode = environment.get("RH_DRY_RUN", "true")
-        if type(raw_mode) is not str:
-            raise LiveReadinessError("Robinhood execution mode is malformed")
-        mode = raw_mode.strip().lower()
-        if mode in {"1", "true", "yes", "on"}:
-            return False
-        if mode in {"0", "false", "no", "off"}:
-            return True
-        raise LiveReadinessError("Robinhood execution mode is malformed")
     raise LiveReadinessError("stock brokerage type is unsupported")

@@ -216,8 +216,11 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
                     ),
                   ),
                   const SizedBox(width: 2),
-                  Icon(symbol('arrow_forward'),
-                      size: 13, color: AppColors.textMuted),
+                  Icon(
+                    symbol('arrow_forward'),
+                    size: 13,
+                    color: AppColors.textMuted,
+                  ),
                 ],
               ),
             ),
@@ -273,22 +276,25 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
                   hero: true,
                 ),
                 // Live freshness line — ticks honestly even between polls.
-                Consumer(builder: (context, ref, _) {
-                  final updatedAt = ref.watch(portfolioUpdatedAtProvider);
-                  if (updatedAt == null) return const SizedBox.shrink();
-                  final faint = AppTextStyles.nano
-                      .copyWith(color: AppColors.textFaint);
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('Updated ', style: faint),
-                        RelativeTimeText(timestamp: updatedAt, style: faint),
-                      ],
-                    ),
-                  );
-                }),
+                Consumer(
+                  builder: (context, ref, _) {
+                    final updatedAt = ref.watch(portfolioUpdatedAtProvider);
+                    if (updatedAt == null) return const SizedBox.shrink();
+                    final faint = AppTextStyles.nano.copyWith(
+                      color: AppColors.textFaint,
+                    );
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('Updated ', style: faint),
+                          RelativeTimeText(timestamp: updatedAt, style: faint),
+                        ],
+                      ),
+                    );
+                  },
+                ),
                 _HoldingsList(brokerageId: selected.id),
               ],
             );
@@ -299,7 +305,9 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
   }
 
   BrokerageAccount _resolveSelected(
-      List<BrokerageAccount> accounts, String? id) {
+    List<BrokerageAccount> accounts,
+    String? id,
+  ) {
     if (id != null) {
       for (final a in accounts) {
         if (a.id == id) return a;
@@ -315,7 +323,6 @@ String _accountLabel(BrokerageAccount a) {
   if (a.brokerageType == 'alpaca') {
     return a.alpacaPaper ? 'Alpaca · Paper' : 'Alpaca';
   }
-  if (a.brokerageType == 'robinhood') return 'Robinhood';
   return a.accountName.isNotEmpty ? a.accountName : a.brokerageType;
 }
 
@@ -379,12 +386,13 @@ class _AccountSelector extends StatelessWidget {
         Container(
           width: 6,
           height: 6,
-          decoration:
-              BoxDecoration(shape: BoxShape.circle, color: statusColor),
+          decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor),
         ),
         const SizedBox(width: 4),
-        Text(account.status,
-            style: AppTextStyles.nano.copyWith(color: statusColor)),
+        Text(
+          account.status,
+          style: AppTextStyles.nano.copyWith(color: statusColor),
+        ),
       ],
     );
   }
@@ -471,8 +479,10 @@ class _AccountRow extends StatelessWidget {
             Container(
               width: 6,
               height: 6,
-              decoration:
-                  BoxDecoration(shape: BoxShape.circle, color: statusColor),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: statusColor,
+              ),
             ),
             const SizedBox(width: 10),
             Icon(
@@ -490,7 +500,7 @@ class _AccountRow extends StatelessWidget {
 // ── Holdings ──────────────────────────────────────────────────────────────────
 
 /// The selected account's uninvested cash + holdings, shown below the hero
-/// chart like a modern brokerage app (Robinhood/Coinbase). Hidden while it has
+/// chart like a modern brokerage app. Hidden while it has
 /// no data, so it never shows a blank box.
 class _HoldingsList extends ConsumerWidget {
   const _HoldingsList({required this.brokerageId});
@@ -498,18 +508,22 @@ class _HoldingsList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final holdings = ref.watch(accountHoldingsProvider(brokerageId)).valueOrNull;
+    final holdings = ref
+        .watch(accountHoldingsProvider(brokerageId))
+        .valueOrNull;
     if (holdings == null || holdings.isEmpty) return const SizedBox.shrink();
     final positions = holdings.positions;
     final pnlMode = ref.watch(holdingsPnlModeProvider);
     // Daily → intraday (since 12 AM); Total → full history. Re-fetches on toggle.
     final sparkRange = pnlMode == HoldingsPnlMode.daily ? '1D' : 'ALL';
     final sparksAsync = ref.watch(
-        holdingsSparklinesProvider((brokerageId: brokerageId, range: sparkRange)));
+      holdingsSparklinesProvider((brokerageId: brokerageId, range: sparkRange)),
+    );
     final sparks = sparksAsync.valueOrNull;
     final sparksLoading = sparksAsync.isLoading;
     // Total account value → each row's ring shows its share of the portfolio.
-    final total = (holdings.cash ?? 0) +
+    final total =
+        (holdings.cash ?? 0) +
         positions.fold<double>(0, (s, p) => s + p.marketValue);
     return Padding(
       padding: const EdgeInsets.only(top: 24),
@@ -559,12 +573,12 @@ class _HoldingDivider extends StatelessWidget {
   const _HoldingDivider();
   @override
   Widget build(BuildContext context) => Divider(
-        height: 1,
-        thickness: 1,
-        color: Colors.white.withValues(alpha: 0.05),
-        indent: 66,
-        endIndent: 14,
-      );
+    height: 1,
+    thickness: 1,
+    color: Colors.white.withValues(alpha: 0.05),
+    indent: 66,
+    endIndent: 14,
+  );
 }
 
 /// A tiny intraday (1D, since 12 AM) line for one holding — green if the day's
@@ -581,8 +595,10 @@ class _MiniSpark extends StatelessWidget {
       height: 28,
       width: double.infinity, // fill the Expanded slot in the row
       child: CustomPaint(
-        painter:
-            _SparkPainter(values, up ? AppColors.success : AppColors.danger),
+        painter: _SparkPainter(
+          values,
+          up ? AppColors.success : AppColors.danger,
+        ),
       ),
     );
   }
@@ -650,7 +666,11 @@ class _PnlModeToggle extends ConsumerWidget {
   }
 
   Widget _seg(
-      WidgetRef ref, String label, HoldingsPnlMode m, HoldingsPnlMode active) {
+    WidgetRef ref,
+    String label,
+    HoldingsPnlMode m,
+    HoldingsPnlMode active,
+  ) {
     final isActive = m == active;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -699,7 +719,10 @@ class _AllocationRing extends StatelessWidget {
         children: [
           CustomPaint(
             size: const Size(44, 44),
-            painter: _RingPainter(fraction: fraction.clamp(0.0, 1.0), color: color),
+            painter: _RingPainter(
+              fraction: fraction.clamp(0.0, 1.0),
+              color: color,
+            ),
           ),
           Text(
             _label(fraction),
@@ -767,18 +790,24 @@ class _CashRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Cash',
-                    style: AppTextStyles.bodyHi
-                        .copyWith(fontWeight: FontWeight.w700)),
+                Text(
+                  'Cash',
+                  style: AppTextStyles.bodyHi.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
                 const SizedBox(height: 2),
-                Text('Available to invest',
-                    style:
-                        AppTextStyles.micro.copyWith(color: AppColors.textDim)),
+                Text(
+                  'Available to invest',
+                  style: AppTextStyles.micro.copyWith(color: AppColors.textDim),
+                ),
               ],
             ),
           ),
-          Text(fmtMoney(cash),
-              style: AppTextStyles.value.copyWith(color: AppColors.textHi)),
+          Text(
+            fmtMoney(cash),
+            style: AppTextStyles.value.copyWith(color: AppColors.textHi),
+          ),
         ],
       ),
     );
@@ -786,13 +815,14 @@ class _CashRow extends StatelessWidget {
 }
 
 class _HoldingRow extends StatelessWidget {
-  const _HoldingRow(
-      {required this.p,
-      required this.total,
-      this.spark,
-      this.sparkLoading = false,
-      required this.mode,
-      required this.brokerageId});
+  const _HoldingRow({
+    required this.p,
+    required this.total,
+    this.spark,
+    this.sparkLoading = false,
+    required this.mode,
+    required this.brokerageId,
+  });
   final AccountPosition p;
   final double total;
   final String brokerageId;
@@ -808,8 +838,9 @@ class _HoldingRow extends StatelessWidget {
 
   String get _qtyLabel {
     final q = p.qty;
-    final s =
-        q == q.roundToDouble() ? q.toInt().toString() : q.toStringAsFixed(2);
+    final s = q == q.roundToDouble()
+        ? q.toInt().toString()
+        : q.toStringAsFixed(2);
     return '$s ${q == 1 ? 'share' : 'shares'}';
   }
 
@@ -819,8 +850,9 @@ class _HoldingRow extends StatelessWidget {
     // sparkline (start-of-day → now); Total is the lifetime unrealized P&L.
     final daily = mode == HoldingsPnlMode.daily;
     final s = spark;
-    final double? ratio =
-        (s != null && s.length >= 2 && s.first != 0) ? s.last / s.first : null;
+    final double? ratio = (s != null && s.length >= 2 && s.first != 0)
+        ? s.last / s.first
+        : null;
     final bool hasPnl = !daily || ratio != null;
     final double pnlAbs = daily
         ? (ratio != null ? p.marketValue * (1 - 1 / ratio) : 0)
@@ -834,63 +866,79 @@ class _HoldingRow extends StatelessWidget {
         : (up ? AppColors.success : AppColors.danger);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => context.push('/stock/${p.symbol}',
-          extra: StockScreenArgs(
-              position: p, brokerageId: brokerageId, portfolioTotal: total)),
+      onTap: () => context.push(
+        '/stock/${p.symbol}',
+        extra: StockScreenArgs(
+          position: p,
+          brokerageId: brokerageId,
+          portfolioTotal: total,
+        ),
+      ),
       child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-      child: Row(
-        children: [
-          _AllocationRing(
-            fraction: total > 0 ? p.marketValue / total : 0,
-            color: color,
-          ),
-          const SizedBox(width: 12),
-          SizedBox(
-            width: 64,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+        child: Row(
+          children: [
+            _AllocationRing(
+              fraction: total > 0 ? p.marketValue / total : 0,
+              color: color,
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 64,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    p.symbol,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.bodyHi.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _qtyLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.micro.copyWith(
+                      color: color.withValues(alpha: 0.7),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            // Sparkline fills the middle (wide); a skeleton shows while it
+            // re-fetches on a Daily/Total toggle.
+            Expanded(
+              child: sparkLoading
+                  ? const Skeleton(height: 28, radius: 6)
+                  : (spark != null
+                        ? _MiniSpark(values: spark!)
+                        : const SizedBox.shrink()),
+            ),
+            const SizedBox(width: 16), // …with margin before the value column.
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(p.symbol,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppTextStyles.bodyHi
-                        .copyWith(color: color, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 2),
-                Text(_qtyLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppTextStyles.micro
-                        .copyWith(color: color.withValues(alpha: 0.7))),
+                Text(
+                  fmtMoney(p.marketValue),
+                  style: AppTextStyles.value.copyWith(color: color),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  hasPnl ? '${fmtPnl(pnlAbs)} · ${fmtPct(pnlPct)}' : '—',
+                  style: AppTextStyles.micro.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
               ],
             ),
-          ),
-          const SizedBox(width: 10),
-          // Sparkline fills the middle (wide); a skeleton shows while it
-          // re-fetches on a Daily/Total toggle.
-          Expanded(
-            child: sparkLoading
-                ? const Skeleton(height: 28, radius: 6)
-                : (spark != null
-                    ? _MiniSpark(values: spark!)
-                    : const SizedBox.shrink()),
-          ),
-          const SizedBox(width: 16), // …with margin before the value column.
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(fmtMoney(p.marketValue),
-                  style: AppTextStyles.value.copyWith(color: color)),
-              const SizedBox(height: 3),
-              Text(
-                hasPnl ? '${fmtPnl(pnlAbs)} · ${fmtPct(pnlPct)}' : '—',
-                style: AppTextStyles.micro
-                    .copyWith(color: color, fontWeight: FontWeight.w700),
-              ),
-            ],
-          ),
-        ],
-      ),
+          ],
+        ),
       ),
     );
   }
@@ -919,18 +967,15 @@ class _ServicesSection extends ConsumerWidget {
                   const SizedBox(height: 2),
                   Text(
                     'Status and controls for all IntelliStock background services.',
-                    style:
-                        AppTextStyles.micro.copyWith(color: AppColors.textDim),
+                    style: AppTextStyles.micro.copyWith(
+                      color: AppColors.textDim,
+                    ),
                   ),
                 ],
               ),
             ),
             IconButton(
-              icon: Icon(
-                symbol('refresh'),
-                size: 18,
-                color: AppColors.textDim,
-              ),
+              icon: Icon(symbol('refresh'), size: 18, color: AppColors.textDim),
               onPressed: () =>
                   ref.read(dashboardServicesProvider.notifier).refreshNow(),
               tooltip: 'Refresh',
@@ -969,8 +1014,11 @@ class _ServicesSection extends ConsumerWidget {
 // ── Price Engine card ─────────────────────────────────────────────────────────
 
 class _PriceEngineCard extends StatelessWidget {
-  const _PriceEngineCard(
-      {required this.svc, required this.busy, required this.ref});
+  const _PriceEngineCard({
+    required this.svc,
+    required this.busy,
+    required this.ref,
+  });
   final ServicesSnapshot svc;
   final Set<String> busy;
   final WidgetRef ref;
@@ -1030,8 +1078,11 @@ class _PriceEngineCard extends StatelessWidget {
 // ── Discover Engine card ──────────────────────────────────────────────────────
 
 class _DiscoverEngineCard extends StatelessWidget {
-  const _DiscoverEngineCard(
-      {required this.svc, required this.busy, required this.ref});
+  const _DiscoverEngineCard({
+    required this.svc,
+    required this.busy,
+    required this.ref,
+  });
   final ServicesSnapshot svc;
   final Set<String> busy;
   final WidgetRef ref;
@@ -1070,9 +1121,9 @@ class _DiscoverEngineCard extends StatelessWidget {
           onPressed: isBusy
               ? null
               : () => busyNotifier.run(
-                    _id,
-                    () => repo.controlDiscover(running: !isRunning),
-                  ),
+                  _id,
+                  () => repo.controlDiscover(running: !isRunning),
+                ),
         ),
       ],
     );
@@ -1082,8 +1133,7 @@ class _DiscoverEngineCard extends StatelessWidget {
 // ── AI Backtest Agent card ────────────────────────────────────────────────────
 
 class _AgentCard extends StatelessWidget {
-  const _AgentCard(
-      {required this.svc, required this.busy, required this.ref});
+  const _AgentCard({required this.svc, required this.busy, required this.ref});
   final ServicesSnapshot svc;
   final Set<String> busy;
   final WidgetRef ref;
@@ -1106,8 +1156,9 @@ class _AgentCard extends StatelessWidget {
 
     final stats = <Widget>[
       ServiceStatCell(
-          label: 'Backtests today',
-          value: countToday?.toString() ?? '—'),
+        label: 'Backtests today',
+        value: countToday?.toString() ?? '—',
+      ),
       ServiceStatCell(label: 'Last run', value: lastRunDate ?? '—'),
       if (resumeAt != null)
         ServiceStatCell(label: 'Resume at', value: resumeAt),
@@ -1124,9 +1175,9 @@ class _AgentCard extends StatelessWidget {
           onPressed: isBusy
               ? null
               : () => busyNotifier.run(
-                    _id,
-                    () => repo.controlAgent(paused: false),
-                  ),
+                  _id,
+                  () => repo.controlAgent(paused: false),
+                ),
         )
       else if (isRunning)
         AppButton.semantic(
@@ -1138,9 +1189,9 @@ class _AgentCard extends StatelessWidget {
           onPressed: isBusy
               ? null
               : () => busyNotifier.run(
-                    _id,
-                    () => repo.controlAgent(paused: true),
-                  ),
+                  _id,
+                  () => repo.controlAgent(paused: true),
+                ),
         ),
       AppButton.semantic(
         label: (isRunning || isPaused) ? 'Stop' : 'Start',
@@ -1155,7 +1206,9 @@ class _AgentCard extends StatelessWidget {
             : () {
                 if (isRunning || isPaused) {
                   busyNotifier.run(
-                      _id, () => repo.controlAgent(running: false));
+                    _id,
+                    () => repo.controlAgent(running: false),
+                  );
                 } else {
                   _showStartAgentSheet(context, ref);
                 }
@@ -1193,37 +1246,46 @@ class _AgentCard extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(children: [
-                IconTile(icon: symbol('smart_toy'), color: AppColors.warning),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Start AI Backtest Agent',
-                          style: AppTextStyles.cardTitle),
-                      Text(
+              Row(
+                children: [
+                  IconTile(icon: symbol('smart_toy'), color: AppColors.warning),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Start AI Backtest Agent',
+                          style: AppTextStyles.cardTitle,
+                        ),
+                        Text(
                           'Optionally provide a special request for this run.',
-                          style: AppTextStyles.micro
-                              .copyWith(color: AppColors.textFaint)),
-                    ],
+                          style: AppTextStyles.micro.copyWith(
+                            color: AppColors.textFaint,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ]),
+                ],
+              ),
               const SizedBox(height: 16),
-              Text('Special Request',
-                  style: AppTextStyles.micro
-                      .copyWith(fontWeight: FontWeight.w600)),
+              Text(
+                'Special Request',
+                style: AppTextStyles.micro.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               const SizedBox(height: 8),
               TextField(
                 controller: controller,
                 maxLines: 3,
                 style: AppTextStyles.body,
                 decoration: InputDecoration(
-                  hintText:
-                      'e.g. Focus on high-volatility stocks…',
-                  hintStyle:
-                      AppTextStyles.body.copyWith(color: AppColors.textFaint),
+                  hintText: 'e.g. Focus on high-volatility stocks…',
+                  hintStyle: AppTextStyles.body.copyWith(
+                    color: AppColors.textFaint,
+                  ),
                   filled: true,
                   fillColor: AppColors.surface,
                   border: OutlineInputBorder(
@@ -1237,40 +1299,47 @@ class _AgentCard extends StatelessWidget {
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
                     borderSide: BorderSide(
-                        color: AppColors.primary.withValues(alpha: 0.4)),
+                      color: AppColors.primary.withValues(alpha: 0.4),
+                    ),
                   ),
                 ),
               ),
               const SizedBox(height: 16),
-              Row(children: [
-                Expanded(
-                  child: AppButton.ghost(
-                    label: 'Cancel',
-                    onPressed: () => Navigator.of(context).pop(),
+              Row(
+                children: [
+                  Expanded(
+                    child: AppButton.ghost(
+                      label: 'Cancel',
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: AppButton.semantic(
-                    label: 'Start Agent',
-                    color: AppColors.success,
-                    icon: symbol('play_circle'),
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      final sr = controller.text.trim().isEmpty
-                          ? null
-                          : controller.text.trim();
-                      ref.read(engineBusyProvider.notifier).run(
-                            _id,
-                            () => ref
-                                .read(dashboardRepositoryProvider)
-                                .controlAgent(
-                                    running: true, specialRequest: sr),
-                          );
-                    },
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: AppButton.semantic(
+                      label: 'Start Agent',
+                      color: AppColors.success,
+                      icon: symbol('play_circle'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        final sr = controller.text.trim().isEmpty
+                            ? null
+                            : controller.text.trim();
+                        ref
+                            .read(engineBusyProvider.notifier)
+                            .run(
+                              _id,
+                              () => ref
+                                  .read(dashboardRepositoryProvider)
+                                  .controlAgent(
+                                    running: true,
+                                    specialRequest: sr,
+                                  ),
+                            );
+                      },
+                    ),
                   ),
-                ),
-              ]),
+                ],
+              ),
               const SizedBox(height: 8),
             ],
           ),
@@ -1283,8 +1352,7 @@ class _AgentCard extends StatelessWidget {
 // ── Daily Digest card ─────────────────────────────────────────────────────────
 
 class _DigestCard extends StatelessWidget {
-  const _DigestCard(
-      {required this.svc, required this.busy, required this.ref});
+  const _DigestCard({required this.svc, required this.busy, required this.ref});
   final ServicesSnapshot svc;
   final Set<String> busy;
   final WidgetRef ref;
@@ -1309,10 +1377,8 @@ class _DigestCard extends StatelessWidget {
       subtitle: 'Discord market summaries',
       status: status,
       stats: [
-        ServiceStatCell(
-            label: 'Last morning', value: fmtDateTime(lastMorning)),
-        ServiceStatCell(
-            label: 'Last evening', value: fmtDateTime(lastEvening)),
+        ServiceStatCell(label: 'Last morning', value: fmtDateTime(lastMorning)),
+        ServiceStatCell(label: 'Last evening', value: fmtDateTime(lastEvening)),
       ],
       buttons: [
         AppButton.semantic(
@@ -1324,9 +1390,9 @@ class _DigestCard extends StatelessWidget {
           onPressed: isBusy
               ? null
               : () => busyNotifier.run(
-                    _id,
-                    () => repo.controlDigest(running: !isRunning),
-                  ),
+                  _id,
+                  () => repo.controlDigest(running: !isRunning),
+                ),
         ),
         AppButton.semantic(
           label: 'Send Now',
@@ -1334,8 +1400,9 @@ class _DigestCard extends StatelessWidget {
           icon: symbol('send'),
           busy: isBusy,
           dense: true,
-          onPressed:
-              isBusy ? null : () => busyNotifier.run(_id, repo.digestSendNow),
+          onPressed: isBusy
+              ? null
+              : () => busyNotifier.run(_id, repo.digestSendNow),
         ),
       ],
     );
@@ -1345,8 +1412,7 @@ class _DigestCard extends StatelessWidget {
 // ── Nexus Graph Engine card ───────────────────────────────────────────────────
 
 class _NexusCard extends StatelessWidget {
-  const _NexusCard(
-      {required this.svc, required this.busy, required this.ref});
+  const _NexusCard({required this.svc, required this.busy, required this.ref});
   final ServicesSnapshot svc;
   final Set<String> busy;
   final WidgetRef ref;
@@ -1399,9 +1465,9 @@ class _NexusCard extends StatelessWidget {
           onPressed: isBusy
               ? null
               : () => busyNotifier.run(
-                    _id,
-                    () => repo.controlNexus(running: !isRunning),
-                  ),
+                  _id,
+                  () => repo.controlNexus(running: !isRunning),
+                ),
         ),
       ],
     );
@@ -1417,7 +1483,10 @@ class _PortfolioSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
-      children: List.generate(2, (i) => _PortfolioCardSkeleton(bottomPad: i < 1 ? 16 : 0)),
+      children: List.generate(
+        2,
+        (i) => _PortfolioCardSkeleton(bottomPad: i < 1 ? 16 : 0),
+      ),
     );
   }
 }
@@ -1481,7 +1550,10 @@ class _ServicesSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
-      children: List.generate(5, (i) => _ServiceCardSkeleton(bottomPad: i < 4 ? 12 : 0)),
+      children: List.generate(
+        5,
+        (i) => _ServiceCardSkeleton(bottomPad: i < 4 ? 12 : 0),
+      ),
     );
   }
 }
@@ -1548,19 +1620,16 @@ class _OnboardingPanel extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Icon(symbol('replay'),
-                        size: 16, color: AppColors.primary),
+                    Icon(symbol('replay'), size: 16, color: AppColors.primary),
                     const SizedBox(width: 8),
-                    Text('Re-run onboarding',
-                        style: AppTextStyles.cardTitle),
+                    Text('Re-run onboarding', style: AppTextStyles.cardTitle),
                   ],
                 ),
                 const SizedBox(height: 6),
                 Text(
                   'Walk through the welcome flow again to add another model, '
                   'link a brokerage, or spin up a new instance.',
-                  style:
-                      AppTextStyles.micro.copyWith(color: AppColors.textDim),
+                  style: AppTextStyles.micro.copyWith(color: AppColors.textDim),
                 ),
               ],
             ),

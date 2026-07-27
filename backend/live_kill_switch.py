@@ -32,34 +32,6 @@ def _get_conn():
     return r, r.connect(host=host, port=port, timeout=10)
 
 
-def _persist_rh_refreshed_token(r, conn, brokerage_row: dict, client) -> bool:
-    """Write a kill-switch-refreshed Robinhood token back to the BrokerageAccounts
-    row (Scope D B2) so the DB token doesn't desync after the emergency refresh.
-
-    Raises on encryption or persistence failures.  The caller records a
-    non-secret summary error while continuing the emergency cancel retry.
-    """
-    bid = (brokerage_row or {}).get("id")
-    if not bid:
-        return False
-    from secret_store import encrypt as _encrypt
-    st = getattr(client, "state", None)
-    access = getattr(st, "access_token", "") or ""
-    refresh_tok = getattr(st, "refresh_token", "") or ""
-    enc_access = _encrypt(access)
-    enc_refresh = _encrypt(refresh_tok)
-    import time as _t
-    import datetime as _dt
-    r.db(DB_NAME).table("BrokerageAccounts").get(bid).update({
-        "robinhood_access_token": enc_access,
-        "robinhood_refresh_token": enc_refresh,
-        "robinhood_obtained_at_epoch": int(getattr(st, "obtained_at_epoch", 0) or int(_t.time())),
-        "robinhood_expires_in": int(getattr(st, "expires_in", 0) or 86400),
-        "last_refresh_at": _dt.datetime.utcnow().isoformat(),
-    }).run(conn)
-    return True
-
-
 def halt_live_trading(
     reason: str = "manual halt",
     cancel_open_orders: bool = True,
@@ -73,9 +45,9 @@ def halt_live_trading(
     ``instance_id`` is provided (the AUTOMATIC LLM-critical abort path), it must
     halt ONLY that instance and cancel orders ONLY on that instance's linked
     brokerage, so e.g. a paper instance's LLM failure can never flip
-    runCommand=False on the real-money 'main' instance or cancel its Robinhood
-    orders. If the instance has no linked brokerage_id we cancel NOTHING (fail
-    safe) rather than falling back to touching every account.
+    runCommand=False on the real-money 'main' instance or cancel its orders.
+    If the instance has no linked brokerage_id we cancel NOTHING (fail safe)
+    rather than falling back to touching every account.
     """
     r, conn = _get_conn()
     summary = {
@@ -144,98 +116,6 @@ def halt_live_trading(
                             "Alpaca order-cancel failed "
                             f"({type(e).__name__})"
                         )
-                    continue
-
-                if bt == "robinhood":
-                    # 2026-05-28: Robinhood support. Mirrors the Alpaca branch:
-                    # decrypt creds, build a minimal RobinhoodClient, list open
-                    # orders for the linked sub-account, cancel each one.
-                    # We do NOT respect RH_DRY_RUN here — the kill switch is
-                    # an emergency stop; if there are real open orders we cancel
-                    # them regardless of the dry-run flag.
-                    try:
-                        from secret_store import decrypt
-                        access = decrypt(b.get("robinhood_access_token")) or None
-                        refresh = decrypt(b.get("robinhood_refresh_token")) or None
-                        device = decrypt(b.get("robinhood_device_token")) or None
-                        account_number = (b.get("robinhood_account_number") or "").strip() or None
-                        account_url = (b.get("robinhood_account_url") or "").strip() or None
-                        obtained_at = b.get("robinhood_obtained_at_epoch")
-                        expires_in = b.get("robinhood_expires_in")
-                        if not access or not refresh:
-                            summary["errors"].append(
-                                f"brokerage {b.get('id')}: robinhood creds missing/blank after decrypt"
-                            )
-                            continue
-                        from robinhood_engine import RobinhoodClient, RobinhoodSessionState
-                        state = RobinhoodSessionState(
-                            access_token=access,
-                            refresh_token=refresh,
-                            token_type="Bearer",
-                            device_token=device,
-                            account_number=account_number,
-                            account_url=account_url,
-                            obtained_at_epoch=int(obtained_at) if obtained_at else None,
-                            expires_in=int(expires_in) if expires_in else None,
-                        )
-                        client = RobinhoodClient(state=state, timeout_sec=20)
-
-                        # Scope D B2: the kill switch is most needed when the
-                        # daemon is DOWN — and if it's been down past the RH
-                        # access-token lifetime, the stored token is expired.
-                        # _request_json does NOT auto-refresh on 401, so list OR
-                        # cancel would silently 401 and leave real orders open.
-                        # Wrap EVERY RH call in a ONE-SHOT refresh+retry (covers
-                        # both list_orders and each cancel_order, since a 401 can
-                        # surface first on either) and persist the rotated token so
-                        # the DB doesn't desync. Single-shot so it cannot loop.
-                        _rh_refreshed = {"done": False}
-
-                        def _with_401_refresh(fn):
-                            try:
-                                return fn()
-                            except Exception as _e_rh:
-                                if (
-                                    int(getattr(_e_rh, "status_code", 0) or 0) == 401
-                                    and not _rh_refreshed["done"]
-                                    and callable(getattr(client, "refresh", None))
-                                ):
-                                    _rh_refreshed["done"] = True
-                                    client.refresh()
-                                    try:
-                                        _persist_rh_refreshed_token(r, conn, b, client)
-                                    except Exception as _persist_error:
-                                        summary["errors"].append(
-                                            "credential refresh persistence failed "
-                                            f"({type(_persist_error).__name__})"
-                                        )
-                                    return fn()
-                                raise
-
-                        open_orders = _with_401_refresh(
-                            lambda: client.list_orders(
-                                state="open", limit=500, account_number=account_number,
-                            ) or []
-                        )
-                        for o in open_orders:
-                            oid = o.get("id")
-                            cancel_url = o.get("cancel")
-                            if not (oid or cancel_url):
-                                continue
-                            try:
-                                ok = _with_401_refresh(
-                                    lambda: client.cancel_order(
-                                        cancel_url=cancel_url, order_id=oid,
-                                    )
-                                )
-                                if ok:
-                                    summary["orders_canceled"] += 1
-                            except Exception as inner:
-                                summary["errors"].append(
-                                    f"brokerage {b.get('id')} order {oid}: {inner}"
-                                )
-                    except Exception as e:
-                        summary["errors"].append(f"brokerage {b.get('id')}: {e}")
                     continue
 
                 if bt == "kalshi":

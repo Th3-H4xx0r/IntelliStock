@@ -4,7 +4,6 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/app_toggle.dart';
-import '../../../core/widgets/common_widgets.dart';
 import '../application/brokerages_controller.dart';
 import '../data/brokerage_repository.dart';
 import '../data/models/brokerage.dart';
@@ -55,15 +54,6 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
   Map<String, dynamic>? _testResult;
   bool _showTestPanel = false;
 
-  // ── Robinhood form state ──────────────────────────────────────────────────
-  final _rhNameCtrl = TextEditingController();
-  final _rhAccessCtrl = TextEditingController();
-  final _rhRefreshCtrl = TextEditingController();
-  final _rhDeviceCtrl = TextEditingController();
-  int _rhStep = 1; // 1 = credentials, 2 = account picker
-  List<Map<String, dynamic>> _rhAccounts = [];
-  String? _rhSelected;
-
   // ── Binance.US form state (spot 0.00% maker / 0.02% taker) ────────────────
   final _busNameCtrl = TextEditingController();
   final _busKeyCtrl = TextEditingController();
@@ -79,18 +69,17 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
   void initState() {
     super.initState();
     _tabCtrl = TabController(
-      length: 3,
+      length: 2,
       vsync: this,
-      initialIndex: _editMode ? _tabIndexFor(widget.editAccount!.brokerageType) : 0,
+      initialIndex: _editMode
+          ? _tabIndexFor(widget.editAccount!.brokerageType)
+          : 0,
     );
     _tabCtrl.addListener(() {
       if (!_tabCtrl.indexIsChanging) {
         setState(() {
           _submitMsg = null;
           _submitOk = false;
-          _rhStep = 1;
-          _rhAccounts = [];
-          _rhSelected = null;
         });
       }
     });
@@ -105,19 +94,15 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
       } else if (a.brokerageType == 'binanceus') {
         _busNameCtrl.text = a.accountName;
         _busPaper = a.paper;
-      } else {
-        _rhNameCtrl.text = a.accountName;
       }
     }
   }
 
-  // Tab order: 0 = Alpaca, 1 = Robinhood, 2 = Binance.US.
+  // Tab order: 0 = Alpaca, 1 = Binance.US.
   int _tabIndexFor(String brokerageType) {
     switch (brokerageType) {
-      case 'robinhood':
-        return 1;
       case 'binanceus':
-        return 2;
+        return 1;
       default:
         return 0;
     }
@@ -129,10 +114,6 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
     _alpacaNameCtrl.dispose();
     _alpacaKeyCtrl.dispose();
     _alpacaSecretCtrl.dispose();
-    _rhNameCtrl.dispose();
-    _rhAccessCtrl.dispose();
-    _rhRefreshCtrl.dispose();
-    _rhDeviceCtrl.dispose();
     _busNameCtrl.dispose();
     _busKeyCtrl.dispose();
     _busSecretCtrl.dispose();
@@ -141,11 +122,12 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  void _setMsg(String? msg, {bool ok = false}) =>
-      setState(() { _submitMsg = msg; _submitOk = ok; });
+  void _setMsg(String? msg, {bool ok = false}) => setState(() {
+    _submitMsg = msg;
+    _submitOk = ok;
+  });
 
   void _setSubmitting(bool v) => setState(() => _submitting = v);
-
 
   // ── Alpaca: run test suite ────────────────────────────────────────────────
 
@@ -187,8 +169,15 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
               'paper': _alpacaPaper,
               'alpaca_data_feed': _alpacaFeed,
             };
-      final result = await ref.read(brokerageRepositoryProvider).testAlpaca(body);
-      if (mounted) setState(() { _testResult = result; _testRunning = false; });
+      final result = await ref
+          .read(brokerageRepositoryProvider)
+          .testAlpaca(body);
+      if (mounted) {
+        setState(() {
+          _testResult = result;
+          _testRunning = false;
+        });
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -211,9 +200,18 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
     final key = _alpacaKeyCtrl.text.trim();
     final secret = _alpacaSecretCtrl.text.trim();
 
-    if (name.isEmpty) { _setMsg('Account name is required'); return; }
-    if (!_editMode && key.isEmpty) { _setMsg('API Key ID is required'); return; }
-    if (!_editMode && secret.isEmpty) { _setMsg('Secret Key is required'); return; }
+    if (name.isEmpty) {
+      _setMsg('Account name is required');
+      return;
+    }
+    if (!_editMode && key.isEmpty) {
+      _setMsg('API Key ID is required');
+      return;
+    }
+    if (!_editMode && secret.isEmpty) {
+      _setMsg('Secret Key is required');
+      return;
+    }
 
     // Run pre-save test when we have form creds and bypass is not requested.
     if (!bypassTest && key.isNotEmpty && secret.isNotEmpty) {
@@ -227,13 +225,16 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
           'alpaca_data_feed': _alpacaFeed,
         });
         if (result['ok'] == true) {
-          setState(() { _testResult = result; });
+          setState(() {
+            _testResult = result;
+          });
           // All passed — fall through to save.
         } else {
           setState(() {
             _testResult = result;
             _showTestPanel = true;
-            _submitMsg = 'Credential test failed — review below. Tap "Save Anyway" to bypass.';
+            _submitMsg =
+                'Credential test failed — review below. Tap "Save Anyway" to bypass.';
             _submitOk = false;
             _submitting = false;
           });
@@ -270,102 +271,6 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
             };
 
       if (_editMode) {
-        await ref.read(brokerageRepositoryProvider).edit(
-            widget.editAccount!.id, body);
-      } else {
-        await ref.read(brokerageRepositoryProvider).link(body);
-      }
-      _setMsg(_editMode ? 'Account updated!' : 'Account linked!', ok: true);
-      _setSubmitting(false);
-      await ref.read(brokeragesControllerProvider.notifier).refresh();
-      if (mounted) {
-        await Future<void>.delayed(const Duration(milliseconds: 1200));
-        if (mounted) Navigator.of(context).pop();
-      }
-    } catch (e) {
-      _setMsg(e.toString());
-      _setSubmitting(false);
-    }
-  }
-
-  // ── Robinhood step 1 → 2 ─────────────────────────────────────────────────
-
-  Future<void> _rhFetchAccounts() async {
-    final name = _rhNameCtrl.text.trim();
-    final access = _rhAccessCtrl.text.trim();
-    final refresh = _rhRefreshCtrl.text.trim();
-
-    if (name.isEmpty) { _setMsg('Account name is required'); return; }
-    // Edit-mode with no new tokens → save name only.
-    if (_editMode && access.isEmpty) { await _submitRobinhood(); return; }
-    if (access.isEmpty) { _setMsg('Access token is required'); return; }
-    if (refresh.isEmpty) { _setMsg('Refresh token is required'); return; }
-
-    _setSubmitting(true);
-    _setMsg('Fetching accounts…');
-    try {
-      final result = await ref.read(brokerageRepositoryProvider).robinhoodAccounts({
-        'access_token': access,
-        'refresh_token': refresh,
-        if (_rhDeviceCtrl.text.trim().isNotEmpty)
-          'device_token': _rhDeviceCtrl.text.trim(),
-      });
-      final accounts = (result['accounts'] as List<dynamic>? ?? [])
-          .whereType<Map<String, dynamic>>()
-          .toList();
-      final selectable =
-          accounts.where((a) => a['management_type'] != 'managed').toList();
-      setState(() {
-        _rhAccounts = accounts;
-        _rhSelected = selectable.length == 1
-            ? selectable[0]['account_number'] as String?
-            : null;
-        _rhStep = 2;
-        _submitMsg = null;
-        _submitting = false;
-      });
-    } catch (e) {
-      _setMsg(e.toString());
-      _setSubmitting(false);
-    }
-  }
-
-  // ── Robinhood final save ──────────────────────────────────────────────────
-
-  Future<void> _submitRobinhood() async {
-    final name = _rhNameCtrl.text.trim();
-    final access = _rhAccessCtrl.text.trim();
-    final rfresh = _rhRefreshCtrl.text.trim();
-
-    if (!_editMode && (_rhSelected == null || _rhSelected!.isEmpty)) {
-      _setMsg('Please select an account');
-      return;
-    }
-
-    _setSubmitting(true);
-    _setMsg('');
-    try {
-      final body = _editMode
-          ? {
-              if (name.isNotEmpty) 'account_name': name,
-              if (access.isNotEmpty) 'access_token': access,
-              if (rfresh.isNotEmpty) 'refresh_token': rfresh,
-              if (_rhDeviceCtrl.text.trim().isNotEmpty)
-                'device_token': _rhDeviceCtrl.text.trim(),
-              if (_rhSelected != null && _rhSelected!.isNotEmpty)
-                'account_number': _rhSelected,
-            }
-          : {
-              'brokerage_type': 'robinhood',
-              'account_name': name,
-              'access_token': access,
-              'refresh_token': rfresh,
-              if (_rhDeviceCtrl.text.trim().isNotEmpty)
-                'device_token': _rhDeviceCtrl.text.trim(),
-              'account_number': _rhSelected,
-            };
-
-      if (_editMode) {
         await ref
             .read(brokerageRepositoryProvider)
             .edit(widget.editAccount!.id, body);
@@ -392,9 +297,18 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
     final key = _busKeyCtrl.text.trim();
     final secret = _busSecretCtrl.text.trim();
 
-    if (name.isEmpty) { _setMsg('Account name is required'); return; }
-    if (!_editMode && key.isEmpty) { _setMsg('API Key is required'); return; }
-    if (!_editMode && secret.isEmpty) { _setMsg('Secret Key is required'); return; }
+    if (name.isEmpty) {
+      _setMsg('Account name is required');
+      return;
+    }
+    if (!_editMode && key.isEmpty) {
+      _setMsg('API Key is required');
+      return;
+    }
+    if (!_editMode && secret.isEmpty) {
+      _setMsg('Secret Key is required');
+      return;
+    }
 
     _setSubmitting(true);
     _setMsg('');
@@ -462,11 +376,7 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                     : TabBarView(
                         controller: _tabCtrl,
                         physics: const NeverScrollableScrollPhysics(),
-                        children: [
-                          _buildAlpacaTab(),
-                          _buildRobinhoodTab(),
-                          _buildBinanceusTab(),
-                        ],
+                        children: [_buildAlpacaTab(), _buildBinanceusTab()],
                       ),
               ),
             ),
@@ -477,16 +387,16 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
   }
 
   Widget _buildDragHandle() => Center(
-        child: Container(
-          margin: const EdgeInsets.only(top: 12, bottom: 4),
-          width: 36,
-          height: 4,
-          decoration: BoxDecoration(
-            color: AppColors.border,
-            borderRadius: BorderRadius.circular(999),
-          ),
-        ),
-      );
+    child: Container(
+      margin: const EdgeInsets.only(top: 12, bottom: 4),
+      width: 36,
+      height: 4,
+      decoration: BoxDecoration(
+        color: AppColors.border,
+        borderRadius: BorderRadius.circular(999),
+      ),
+    ),
+  );
 
   Widget _buildHeader() {
     return Padding(
@@ -503,32 +413,6 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                       : 'Link Brokerage Account',
                   style: AppTextStyles.h3,
                 ),
-                if (!_editMode && _tabCtrl.index == 1 && _rhStep == 2)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: RichText(
-                      text: TextSpan(
-                        style: AppTextStyles.micro,
-                        children: [
-                          TextSpan(
-                            text: '1. Credentials',
-                            style: AppTextStyles.micro
-                                .copyWith(color: AppColors.textDim),
-                          ),
-                          TextSpan(
-                            text: ' › ',
-                            style: AppTextStyles.micro
-                                .copyWith(color: AppColors.textDim),
-                          ),
-                          TextSpan(
-                            text: '2. Select Account',
-                            style: AppTextStyles.micro
-                                .copyWith(color: AppColors.primary),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
               ],
             ),
           ),
@@ -566,7 +450,6 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
           labelPadding: const EdgeInsets.symmetric(horizontal: 4),
           tabs: const [
             Tab(text: 'Alpaca'),
-            Tab(text: 'Robinhood'),
             Tab(text: 'Binance.US'),
           ],
         ),
@@ -582,7 +465,7 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
       case 'binanceus':
         return _buildBinanceusTab();
       default:
-        return _buildRobinhoodTab();
+        return _buildAlpacaTab();
     }
   }
 
@@ -592,11 +475,18 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _field('Account Name', _alpacaNameCtrl,
-            placeholder: 'e.g. My Paper Trading'),
+        _field(
+          'Account Name',
+          _alpacaNameCtrl,
+          placeholder: 'e.g. My Paper Trading',
+        ),
         const SizedBox(height: 14),
-        _field('API Key ID', _alpacaKeyCtrl,
-            placeholder: 'PKXXXXXXXXXXXXXXXXXXXXXXXX', mono: true),
+        _field(
+          'API Key ID',
+          _alpacaKeyCtrl,
+          placeholder: 'PKXXXXXXXXXXXXXXXXXXXXXXXX',
+          mono: true,
+        ),
         const SizedBox(height: 14),
         _field(
           'Secret Key${_editMode ? ' (leave blank to keep existing)' : ''}',
@@ -638,7 +528,10 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
         const SizedBox(height: 6),
         _DropdownField(
           value: _alpacaFeed,
-          items: const {'iex': 'IEX (free — Basic Market Data)', 'sip': 'SIP (paid — Algo Trader Plus)'},
+          items: const {
+            'iex': 'IEX (free — Basic Market Data)',
+            'sip': 'SIP (paid — Algo Trader Plus)',
+          },
           onChanged: (v) => setState(() => _alpacaFeed = v ?? 'iex'),
         ),
         const SizedBox(height: 4),
@@ -648,10 +541,7 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
         ),
         const SizedBox(height: 16),
         // Test suite panel (shown after Test button pressed)
-        if (_showTestPanel) ...[
-          _buildTestPanel(),
-          const SizedBox(height: 12),
-        ],
+        if (_showTestPanel) ...[_buildTestPanel(), const SizedBox(height: 12)],
         _buildStatusMsg(),
         const SizedBox(height: 12),
         Row(
@@ -659,7 +549,9 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
             // Test button
             Expanded(
               child: OutlinedButton.icon(
-                onPressed: (_submitting || _testRunning) ? null : _runAlpacaTest,
+                onPressed: (_submitting || _testRunning)
+                    ? null
+                    : _runAlpacaTest,
                 icon: _testRunning
                     ? const SizedBox(
                         width: 14,
@@ -670,7 +562,9 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                 label: Text(_testRunning ? 'Testing…' : 'Test'),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: AppColors.primary,
-                  side: BorderSide(color: AppColors.primary.withValues(alpha: 0.5)),
+                  side: BorderSide(
+                    color: AppColors.primary.withValues(alpha: 0.5),
+                  ),
                   textStyle: AppTextStyles.cardTitle,
                 ),
               ),
@@ -694,7 +588,9 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
             !_testRunning) ...[
           const SizedBox(height: 8),
           OutlinedButton(
-            onPressed: _submitting ? null : () => _submitAlpaca(bypassTest: true),
+            onPressed: _submitting
+                ? null
+                : () => _submitAlpaca(bypassTest: true),
             style: OutlinedButton.styleFrom(
               foregroundColor: AppColors.warning,
               side: BorderSide(color: AppColors.warning.withValues(alpha: 0.4)),
@@ -712,23 +608,26 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
     if (_testRunning) {
       return _infoBox(
         color: AppColors.info,
-        child: Row(children: [
-          const SizedBox(
-            width: 14,
-            height: 14,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-          const SizedBox(width: 10),
-          Text('Running 5-endpoint probe against Alpaca…',
-              style: AppTextStyles.meta.copyWith(color: AppColors.info)),
-        ]),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              'Running 5-endpoint probe against Alpaca…',
+              style: AppTextStyles.meta.copyWith(color: AppColors.info),
+            ),
+          ],
+        ),
       );
     }
     if (_testResult == null) return const SizedBox.shrink();
 
     final result = _testResult!;
-    final summary =
-        result['summary'] as Map<String, dynamic>? ?? {};
+    final summary = result['summary'] as Map<String, dynamic>? ?? {};
     final total = (summary['total'] as num?)?.toInt() ?? 0;
     final failed = (summary['failed'] as num?)?.toInt() ?? 0;
     final ok = result['ok'] == true;
@@ -751,13 +650,12 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
               color: ok
                   ? AppColors.fill(AppColors.success)
                   : (total == 0
-                      ? AppColors.fill(AppColors.warning)
-                      : AppColors.fill(AppColors.danger)),
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(10)),
-              border: Border(
-                bottom: BorderSide(color: AppColors.border),
+                        ? AppColors.fill(AppColors.warning)
+                        : AppColors.fill(AppColors.danger)),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(10),
               ),
+              border: Border(bottom: BorderSide(color: AppColors.border)),
             ),
             child: Row(
               children: [
@@ -776,8 +674,8 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                     total == 0
                         ? 'Probe could not run — see hints below.'
                         : ok
-                            ? 'All $total tests passed'
-                            : '$failed of $total tests failed',
+                        ? 'All $total tests passed'
+                        : '$failed of $total tests failed',
                     style: AppTextStyles.meta.copyWith(
                       color: total == 0
                           ? AppColors.warning
@@ -788,8 +686,11 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                 ),
                 GestureDetector(
                   onTap: () => setState(() => _showTestPanel = false),
-                  child:
-                      Icon(Icons.close, size: 16, color: AppColors.textMuted),
+                  child: Icon(
+                    Icons.close,
+                    size: 16,
+                    color: AppColors.textMuted,
+                  ),
                 ),
               ],
             ),
@@ -805,22 +706,24 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                   return Container(
                     margin: const EdgeInsets.only(bottom: 6),
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 8),
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: AppColors.fill(tColor),
                       borderRadius: BorderRadius.circular(8),
-                      border:
-                          Border.all(color: AppColors.stroke(tColor)),
+                      border: Border.all(color: AppColors.stroke(tColor)),
                     ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Icon(
-                            tok
-                                ? Icons.check_circle_outline
-                                : Icons.cancel_outlined,
-                            size: 14,
-                            color: tColor),
+                          tok
+                              ? Icons.check_circle_outline
+                              : Icons.cancel_outlined,
+                          size: 14,
+                          color: tColor,
+                        ),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Column(
@@ -832,14 +735,17 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                                 children: [
                                   Text(
                                     t['name'] as String? ?? '',
-                                    style: AppTextStyles.mono(11,
-                                        color: AppColors.textHi),
+                                    style: AppTextStyles.mono(
+                                      11,
+                                      color: AppColors.textHi,
+                                    ),
                                   ),
                                   if (t['status'] != null)
                                     Text(
                                       'HTTP ${t['status']}',
-                                      style: AppTextStyles.nano
-                                          .copyWith(color: tColor),
+                                      style: AppTextStyles.nano.copyWith(
+                                        color: tColor,
+                                      ),
                                     ),
                                 ],
                               ),
@@ -849,9 +755,10 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                                 Text(
                                   t['message'] as String,
                                   style: AppTextStyles.nano.copyWith(
-                                      color: tok
-                                          ? AppColors.textDim
-                                          : AppColors.danger),
+                                    color: tok
+                                        ? AppColors.textDim
+                                        : AppColors.danger,
+                                  ),
                                 ),
                               ],
                             ],
@@ -872,29 +779,41 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                 color: AppColors.fill(AppColors.warning),
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(
-                    color: AppColors.warning.withValues(alpha: 0.3)),
+                  color: AppColors.warning.withValues(alpha: 0.3),
+                ),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(children: [
-                    Icon(Icons.lightbulb_outline,
-                        size: 13, color: AppColors.warning),
-                    const SizedBox(width: 4),
-                    Text('Hints',
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.lightbulb_outline,
+                        size: 13,
+                        color: AppColors.warning,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Hints',
                         style: AppTextStyles.nano.copyWith(
-                            color: AppColors.warning,
-                            fontWeight: FontWeight.w600)),
-                  ]),
-                  const SizedBox(height: 4),
-                  ...hints.map((h) => Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          h.toString(),
-                          style: AppTextStyles.nano
-                              .copyWith(color: AppColors.warning),
+                          color: AppColors.warning,
+                          fontWeight: FontWeight.w600,
                         ),
-                      )),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  ...hints.map(
+                    (h) => Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        h.toString(),
+                        style: AppTextStyles.nano.copyWith(
+                          color: AppColors.warning,
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -919,7 +838,9 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
                 TextSpan(
                   text: '0.00% maker / 0.02% taker',
                   style: AppTextStyles.meta.copyWith(
-                      color: AppColors.primary, fontWeight: FontWeight.w700),
+                    color: AppColors.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
                 const TextSpan(
                   text:
@@ -932,11 +853,18 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
           ),
         ),
         const SizedBox(height: 14),
-        _field('Account Name', _busNameCtrl,
-            placeholder: 'e.g. Binance.US Paper'),
+        _field(
+          'Account Name',
+          _busNameCtrl,
+          placeholder: 'e.g. Binance.US Paper',
+        ),
         const SizedBox(height: 14),
-        _field('API Key', _busKeyCtrl,
-            placeholder: 'Binance.US API key', mono: true),
+        _field(
+          'API Key',
+          _busKeyCtrl,
+          placeholder: 'Binance.US API key',
+          mono: true,
+        ),
         const SizedBox(height: 14),
         _field(
           'Secret Key${_editMode ? ' (leave blank to keep existing)' : ''}',
@@ -987,247 +915,27 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
         const SizedBox(height: 16),
         _buildStatusMsg(),
         const SizedBox(height: 12),
-        Row(children: [
-          Expanded(
-            child: AppButton.ghost(
-              label: 'Cancel',
-              onPressed:
-                  _submitting ? null : () => Navigator.of(context).pop(),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            flex: 2,
-            child: AppButton.primary(
-              label: _editMode ? 'Save Changes' : 'Link Account',
-              busy: _submitting,
-              onPressed: _submitting ? null : _submitBinanceus,
-            ),
-          ),
-        ]),
-        const SizedBox(height: 8),
-      ],
-    );
-  }
-
-  // ── Robinhood tab ──────────────────────────────────────────────────────────
-
-  Widget _buildRobinhoodTab() {
-    return _rhStep == 1 ? _buildRhStep1() : _buildRhStep2();
-  }
-
-  Widget _buildRhStep1() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (_editMode)
-          _infoBox(
-            color: AppColors.info,
-            child: Text(
-              'Update account name and/or paste new tokens. Leave tokens blank to only update the name.',
-              style: AppTextStyles.meta.copyWith(color: AppColors.info),
-            ),
-          )
-        else
-          _infoBox(
-            color: AppColors.warning,
-            child: Text(
-              'Paste your Robinhood tokens obtained from the CLI tool.',
-              style: AppTextStyles.meta.copyWith(color: AppColors.warning),
-            ),
-          ),
-        const SizedBox(height: 14),
-        _field('Account Name', _rhNameCtrl,
-            placeholder: 'e.g. My Robinhood Account'),
-        const SizedBox(height: 14),
-        _field('Access Token', _rhAccessCtrl,
-            placeholder: 'Paste access token', multiline: true),
-        const SizedBox(height: 14),
-        _field('Refresh Token', _rhRefreshCtrl,
-            placeholder: 'Paste refresh token', multiline: true),
-        const SizedBox(height: 14),
-        _field('Device Token (optional)', _rhDeviceCtrl,
-            placeholder: 'Leave blank to auto-generate', mono: true),
-        const SizedBox(height: 16),
-        _buildStatusMsg(),
-        const SizedBox(height: 12),
-        Row(children: [
-          Expanded(
-            child: AppButton.ghost(
-              label: 'Cancel',
-              onPressed:
-                  _submitting ? null : () => Navigator.of(context).pop(),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            flex: 2,
-            child: AppButton.primary(
-              label: _editMode
-                  ? (_rhAccessCtrl.text.trim().isNotEmpty
-                      ? 'Next'
-                      : 'Save Changes')
-                  : 'Fetch Accounts',
-              busy: _submitting,
-              onPressed: _submitting ? null : _rhFetchAccounts,
-            ),
-          ),
-        ]),
-        const SizedBox(height: 8),
-      ],
-    );
-  }
-
-  Widget _buildRhStep2() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        RichText(
-          text: TextSpan(
-            style: AppTextStyles.meta,
-            text: 'Select the account to link as ',
-            children: [
-              TextSpan(
-                text: _rhNameCtrl.text,
-                style: AppTextStyles.meta.copyWith(
-                    color: AppColors.textHi, fontWeight: FontWeight.w600),
+        Row(
+          children: [
+            Expanded(
+              child: AppButton.ghost(
+                label: 'Cancel',
+                onPressed: _submitting
+                    ? null
+                    : () => Navigator.of(context).pop(),
               ),
-              const TextSpan(text: '.'),
-            ],
-          ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              flex: 2,
+              child: AppButton.primary(
+                label: _editMode ? 'Save Changes' : 'Link Account',
+                busy: _submitting,
+                onPressed: _submitting ? null : _submitBinanceus,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(height: 12),
-        ..._rhAccounts.map((a) {
-          final isManaged = a['management_type'] == 'managed';
-          final acctNum = a['account_number'] as String? ?? '';
-          final selected = _rhSelected == acctNum;
-          final equity = _parseDouble(a['equity']);
-          final bp = _parseDouble(a['buying_power']);
-          final acctType = a['account_type'] as String?;
-          final displayName = a['display_name'] as String? ?? acctNum;
-
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: GestureDetector(
-              onTap: isManaged
-                  ? null
-                  : () => setState(() => _rhSelected = acctNum),
-              child: Opacity(
-                opacity: isManaged ? 0.4 : 1,
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: selected
-                        ? AppColors.primary.withValues(alpha: 0.08)
-                        : AppColors.surface.withValues(alpha: 0.5),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: selected
-                          ? AppColors.primary
-                          : AppColors.border,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      // Radio dot
-                      Container(
-                        width: 16,
-                        height: 16,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: selected
-                                ? AppColors.primary
-                                : AppColors.textDim,
-                            width: 2,
-                          ),
-                        ),
-                        child: selected
-                            ? Center(
-                                child: Container(
-                                  width: 8,
-                                  height: 8,
-                                  decoration: const BoxDecoration(
-                                    color: AppColors.primary,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                              )
-                            : null,
-                      ),
-                      const SizedBox(width: 10),
-                      // Account info
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(children: [
-                              Text(displayName,
-                                  style: AppTextStyles.bodyHi),
-                              if (isManaged) ...[
-                                const SizedBox(width: 6),
-                                AppBadge(
-                                    label: 'Managed',
-                                    color: AppColors.textDim),
-                              ],
-                            ]),
-                            Text(
-                              '$acctNum${acctType != null ? ' · ${_capitalize(acctType)}' : ''}',
-                              style: AppTextStyles.mono(11,
-                                  color: AppColors.textDim),
-                            ),
-                          ],
-                        ),
-                      ),
-                      // Equity + buying power
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            equity != null ? '\$${equity.toStringAsFixed(2)}' : '—',
-                            style: AppTextStyles.value,
-                          ),
-                          Text(
-                            'BP: ${bp != null ? '\$${bp.toStringAsFixed(2)}' : '—'}',
-                            style: AppTextStyles.meta,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        }),
-        const SizedBox(height: 12),
-        _buildStatusMsg(),
-        const SizedBox(height: 8),
-        Row(children: [
-          Expanded(
-            child: AppButton.ghost(
-              label: 'Back',
-              onPressed: _submitting
-                  ? null
-                  : () => setState(() {
-                        _rhStep = 1;
-                        _submitMsg = null;
-                      }),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            flex: 2,
-            child: AppButton.primary(
-              label: _editMode ? 'Save Changes' : 'Link Account',
-              busy: _submitting,
-              onPressed:
-                  (_submitting || (_rhSelected == null && !_editMode))
-                      ? null
-                      : _submitRobinhood,
-            ),
-          ),
-        ]),
         const SizedBox(height: 8),
       ],
     );
@@ -1277,8 +985,10 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
             hintStyle: AppTextStyles.body.copyWith(color: AppColors.textFaint),
             filled: true,
             fillColor: AppColors.surface,
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
               borderSide: BorderSide(color: AppColors.border),
@@ -1292,7 +1002,7 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
               borderSide: BorderSide(color: AppColors.primary),
             ),
           ),
-          onChanged: (_) => setState(() {}), // rebuild for Fetch Accounts label
+          onChanged: (_) => setState(() {}),
         ),
       ],
     );
@@ -1309,16 +1019,6 @@ class _LinkBrokerageSheetState extends ConsumerState<_LinkBrokerageSheet>
       child: child,
     );
   }
-
-  double? _parseDouble(dynamic v) {
-    if (v == null) return null;
-    if (v is num) return v.toDouble();
-    if (v is String) return double.tryParse(v);
-    return null;
-  }
-
-  String _capitalize(String s) =>
-      s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 }
 
 // ── Simple dropdown ───────────────────────────────────────────────────────────
@@ -1352,10 +1052,7 @@ class _DropdownField extends StatelessWidget {
           iconEnabledColor: AppColors.textMuted,
           onChanged: onChanged,
           items: items.entries
-              .map((e) => DropdownMenuItem(
-                    value: e.key,
-                    child: Text(e.value),
-                  ))
+              .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
               .toList(),
         ),
       ),

@@ -14,10 +14,7 @@ class StepAbout extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'WHAT IS INTELLISTOCK',
-            style: AppTextStyles.eyebrow,
-          ),
+          Text('WHAT IS INTELLISTOCK', style: AppTextStyles.eyebrow),
           const SizedBox(height: 8),
           Text(
             'AI-powered autonomous trading.',
@@ -43,13 +40,15 @@ class StepAbout extends StatelessWidget {
                 icon: 'memory',
                 color: AppColors.primary,
                 title: 'LLM Models',
-                desc: 'Plug in any provider — Gemini, OpenAI, Azure, NVIDIA, Ollama, Bedrock.',
+                desc:
+                    'Plug in any provider — Gemini, OpenAI, Azure, NVIDIA, Ollama, Bedrock.',
               ),
               _FeatureCard(
                 icon: 'tune',
                 color: AppColors.info,
                 title: 'Strategies',
-                desc: 'Choose from the catalog or write your own Python strategy.',
+                desc:
+                    'Choose from the catalog or write your own Python strategy.',
               ),
               _FeatureCard(
                 icon: 'rocket_launch',
@@ -61,7 +60,7 @@ class StepAbout extends StatelessWidget {
                 icon: 'account_balance',
                 color: AppColors.warning,
                 title: 'Brokerages',
-                desc: 'Alpaca for live & paper; Robinhood for live (unofficial).',
+                desc: 'Alpaca for stock paper and live trading.',
               ),
             ],
           ),
@@ -82,16 +81,18 @@ class StepAbout extends StatelessWidget {
                   Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(symbol(icon),
-                          size: 20, color: AppColors.primary),
+                      Icon(symbol(icon), size: 20, color: AppColors.primary),
                       const SizedBox(height: 4),
                       Text(label, style: AppTextStyles.nano),
                     ],
                   ),
                   if (label != 'Brokerage') ...[
                     const SizedBox(width: 4),
-                    const Icon(Icons.arrow_forward,
-                        size: 14, color: AppColors.textFaint),
+                    const Icon(
+                      Icons.arrow_forward,
+                      size: 14,
+                      color: AppColors.textFaint,
+                    ),
                     const SizedBox(width: 4),
                   ],
                 ],
@@ -127,9 +128,10 @@ class _FeatureCard extends StatelessWidget {
         children: [
           IconTile(icon: symbol(icon), color: color, size: 32),
           const SizedBox(height: 8),
-          Text(title,
-              style:
-                  AppTextStyles.cardTitle.copyWith(color: AppColors.textHi)),
+          Text(
+            title,
+            style: AppTextStyles.cardTitle.copyWith(color: AppColors.textHi),
+          ),
           const SizedBox(height: 4),
           Expanded(
             child: Text(

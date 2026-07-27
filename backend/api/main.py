@@ -139,11 +139,8 @@ from interactive_utils import (
     action_list_brokerages,
     action_link_alpaca,
     alpaca_run_diagnostic_suite,
-    action_link_robinhood_tokens,
-    action_fetch_robinhood_accounts,
     action_delete_brokerage,
     action_update_brokerage,
-    action_refresh_robinhood,
     action_get_portfolio_history,
     action_ensure_ai_alpaca_brokerage,
     action_agent_cycle_log_create,
@@ -822,14 +819,8 @@ class NexusConfigUpdateBody(BaseModel):
     google_news_enabled: Optional[bool] = None
 
 
-class FetchRobinhoodAccountsBody(BaseModel):
-    access_token: str
-    refresh_token: Optional[str] = None
-    device_token: Optional[str] = None
-
-
 class LinkBrokerageBody(BaseModel):
-    brokerage_type: str = Field(..., pattern="^(alpaca|robinhood|kalshi|binanceus)$")
+    brokerage_type: str = Field(..., pattern="^(alpaca|kalshi|binanceus)$")
     account_name: str = Field(..., min_length=1)
     # Kalshi (RSA-PSS v2): API key id + PEM private key + demo/live environment.
     kalshi_key_id: Optional[str] = None
@@ -842,14 +833,6 @@ class LinkBrokerageBody(BaseModel):
     # 2026-04-23: alpaca bars-feed choice (iex=free, sip=paid). Backend
     # validates the live account has the subscription before accepting.
     alpaca_data_feed: Optional[str] = Field(default="iex", pattern="^(iex|sip)$")
-    # Robinhood (token paste)
-    access_token: Optional[str] = None
-    refresh_token: Optional[str] = None
-    device_token: Optional[str] = None
-    expires_in: Optional[int] = None
-    obtained_at_epoch: Optional[int] = None
-    # Robinhood account selection (from preview step)
-    account_number: Optional[str] = None
 
 
 class UpdateBrokerageBody(BaseModel):
@@ -859,11 +842,6 @@ class UpdateBrokerageBody(BaseModel):
     secret: Optional[str] = None
     paper: Optional[bool] = None
     alpaca_data_feed: Optional[str] = Field(default=None, pattern="^(iex|sip)$")
-    # Robinhood
-    access_token: Optional[str] = None
-    refresh_token: Optional[str] = None
-    device_token: Optional[str] = None
-    account_number: Optional[str] = None
 
 
 def _run(f, *args, **kwargs) -> Any:
@@ -3638,15 +3616,9 @@ def api_list_brokerages(conn=Depends(conn_dependency), current_user: dict = Depe
     return _run(action_list_brokerages, conn)
 
 
-@app.post("/brokerages/robinhood/accounts", response_class=JSONResponse)
-def api_fetch_robinhood_accounts(body: FetchRobinhoodAccountsBody, current_user: dict = Depends(get_current_user)):
-    """Validate Robinhood tokens and return available accounts for account selection."""
-    return _run(action_fetch_robinhood_accounts, body.access_token, body.refresh_token, body.device_token)
-
-
 @app.post("/brokerages", response_class=JSONResponse)
 def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    """Link a new brokerage account (Alpaca, Robinhood, or Kalshi). Validates credentials before saving."""
+    """Link a supported brokerage account after validating its credentials."""
     if body.brokerage_type == "alpaca":
         if not body.key or not body.secret:
             raise HTTPException(status_code=400, detail="key and secret are required for Alpaca")
@@ -3702,11 +3674,7 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
         }
         _r_auth.db("IntelliStock").table("BrokerageAccounts").insert(row).run(conn)
         return {"ok": True, "id": bid, "brokerage_type": "binanceus", "paper": row["alpaca_paper"]}
-    else:
-        if not body.access_token or not body.refresh_token:
-            raise HTTPException(status_code=400, detail="access_token and refresh_token are required for Robinhood")
-        return _run(action_link_robinhood_tokens, conn, body.account_name, body.access_token, body.refresh_token,
-                    body.device_token, body.expires_in, body.obtained_at_epoch, body.account_number)
+    raise HTTPException(status_code=400, detail="unsupported brokerage type")
 
 
 @app.put("/brokerages/{brokerage_id}", response_class=JSONResponse)
@@ -3714,8 +3682,6 @@ def api_update_brokerage(brokerage_id: str, body: UpdateBrokerageBody, conn=Depe
     """Update a linked brokerage account's name and/or credentials."""
     return _run(action_update_brokerage, conn, brokerage_id,
                 account_name=body.account_name, key=body.key, secret=body.secret, paper=body.paper,
-                access_token=body.access_token, refresh_token=body.refresh_token,
-                device_token=body.device_token, account_number=body.account_number,
                 alpaca_data_feed=body.alpaca_data_feed)
 
 
@@ -3824,12 +3790,6 @@ def api_test_alpaca_brokerage(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Alpaca test suite error: {type(e).__name__}: {e}")
-
-
-@app.post("/brokerages/{brokerage_id}/refresh", response_class=JSONResponse)
-def api_refresh_brokerage(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
-    """Manually refresh Robinhood tokens for a linked account."""
-    return _run(action_refresh_robinhood, conn, brokerage_id)
 
 
 @app.post("/brokerages/ensure-ai-alpaca", response_class=JSONResponse)
@@ -5308,8 +5268,8 @@ def api_brokerage_nexus_outcomes(brokerage_id: str, conn=Depends(conn_dependency
 #
 # Used by LiveTradingView so the frontend never has to learn the brokerage_id
 # and never reads from the in-container snapshot writer (which samples sparsely
-# at the strategy tick cadence). Always pulls from the broker's authoritative
-# history endpoint — Alpaca /v2/account/portfolio/history or RH Bonfire.
+# at the strategy tick cadence). Always pulls from Alpaca's authoritative
+# /v2/account/portfolio/history endpoint.
 
 @app.get("/instances/{instance_id}/portfolio-history", response_class=JSONResponse)
 def api_instance_portfolio_history(
@@ -5318,8 +5278,7 @@ def api_instance_portfolio_history(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
-    """Look up the linked brokerage_id for the instance, then fetch broker-side
-    portfolio history (Alpaca/RH dispatch handled by action_get_portfolio_history)."""
+    """Look up the linked brokerage, then fetch its portfolio history."""
     try:
         inst = action_get_instance(conn, instance_id)
     except Exception as e:
@@ -5334,105 +5293,92 @@ def api_instance_portfolio_history(
     return _run(action_get_portfolio_history, conn, bid, range)
 
 
-# ── Per-symbol historicals (Robinhood public) ─────────────────────────────────
-#
-# Hits Robinhood's unauthenticated /quotes/historicals/ batch endpoint. Used by
-# the live trading view to render per-position price charts that share the same
-# range toggle as the equity curve. Cached briefly per (range, symbol-csv) so
-# rapid repolls don't hammer Robinhood.
+# ── Per-symbol historicals ────────────────────────────────────────────────────
 
 _SYMBOL_HISTORICALS_CACHE: dict = {}
-_SYMBOL_HISTORICALS_TTL_SEC = 60.0  # cache for 60s — matches RH's data freshness
+_SYMBOL_HISTORICALS_TTL_SEC = 60.0
 
-# Range → (interval, span) per RH's documented values.
-# 1D uses 5-minute bars over a day; ALL falls back to weekly bars over 5 years.
-_RH_RANGE_MAP = {
-    "1D":  ("5minute",  "day"),
-    "1W":  ("10minute", "week"),
-    "1M":  ("hour",     "month"),
-    "3M":  ("day",      "3month"),
-    "YTD": ("day",      "year"),    # caller may filter to year-start
-    "1Y":  ("day",      "year"),
-    "ALL": ("week",     "5year"),
+_MARKET_HISTORY_RANGE_MAP = {
+    "1D": ("1d", "5m"),
+    "1W": ("7d", "15m"),
+    "1M": ("1mo", "1h"),
+    "3M": ("3mo", "1d"),
+    "YTD": ("ytd", "1d"),
+    "1Y": ("1y", "1d"),
+    "ALL": ("5y", "1wk"),
 }
 
 
-def fetch_symbol_historicals(symbols: str, range_str: str = "1D") -> dict:
-    """Fetch close-price history for one or more tickers from Robinhood's
-    public /quotes/historicals/ endpoint. Returned shape:
-    ``{range, results: {SYMBOL: [{ts, value}, ...], ...}, error?: str}``.
+def _yfinance_symbol_history(symbols: list[str], range_name: str) -> dict:
+    """Fetch close-price history through the project's generic data provider."""
+    import yfinance as yf
 
-    Cached for ``_SYMBOL_HISTORICALS_TTL_SEC`` seconds per (range, sorted-symbols)
-    so rapid repolls don't hammer RH. Used by both the HTTP endpoint and the
-    chatbot's get_price_history tool — single source of truth.
-    """
+    period, interval = _MARKET_HISTORY_RANGE_MAP[range_name]
+    out: dict[str, list[dict]] = {symbol: [] for symbol in symbols}
+    for symbol in symbols:
+        history = yf.Ticker(symbol).history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+        )
+        points = []
+        if history is not None and not history.empty and "Close" in history:
+            for timestamp, close in history["Close"].items():
+                try:
+                    if close is None or close != close:
+                        continue
+                    ts = (
+                        timestamp.isoformat()
+                        if hasattr(timestamp, "isoformat")
+                        else str(timestamp)
+                    )
+                    points.append({"ts": ts, "value": float(close)})
+                except (TypeError, ValueError):
+                    continue
+        out[symbol] = points
+    return out
+
+
+def fetch_symbol_historicals(
+    symbols: str,
+    range_str: str = "1D",
+    *,
+    history_provider=None,
+) -> dict:
+    """Return close-price history using an injectable market-data provider."""
     import time as _time
-    import requests as _req
 
     rng = (range_str or "1D").strip().upper()
-    if rng not in _RH_RANGE_MAP:
-        raise ValueError(f"Invalid range: {rng}. Must be one of: {', '.join(_RH_RANGE_MAP.keys())}")
-    interval, span = _RH_RANGE_MAP[rng]
-    # RH rejects bounds=trading for spans > day. Use 'regular' for everything
-    # except 1D where extended-hours truncation is fine.
-    bounds = "trading" if span == "day" else "regular"
+    if rng not in _MARKET_HISTORY_RANGE_MAP:
+        allowed = ", ".join(_MARKET_HISTORY_RANGE_MAP)
+        raise ValueError(f"Invalid range: {rng}. Must be one of: {allowed}")
 
     syms = [s.strip().upper().replace(".", "-") for s in (symbols or "").split(",") if s.strip()]
     if not syms:
         return {"range": rng, "results": {}}
     if len(syms) > 75:
-        syms = syms[:75]  # RH batch cap
+        syms = syms[:75]
 
     cache_key = (rng, ",".join(sorted(set(syms))))
     now = _time.time()
-    cached = _SYMBOL_HISTORICALS_CACHE.get(cache_key)
-    if cached and (now - cached[0]) < _SYMBOL_HISTORICALS_TTL_SEC:
-        return {"range": rng, "results": cached[1]}
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
-    }
-    out: dict = {sym: [] for sym in syms}
+    if history_provider is None:
+        cached = _SYMBOL_HISTORICALS_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _SYMBOL_HISTORICALS_TTL_SEC:
+            return {"range": rng, "results": cached[1]}
+    provider = history_provider or _yfinance_symbol_history
     try:
-        rsp = _req.get(
-            "https://api.robinhood.com/quotes/historicals/",
-            params={
-                "symbols": ",".join(syms),
-                "interval": interval,
-                "span": span,
-                "bounds": bounds,
-            },
-            headers=headers,
-            timeout=15,
-        )
-        if not rsp.ok:
-            return {"range": rng, "results": out, "error": f"RH HTTP {rsp.status_code}"}
-        data = rsp.json() or {}
-        for res in (data.get("results") or []):
-            sym = (res.get("symbol") or "").upper()
-            if not sym:
-                continue
-            points = []
-            for h in (res.get("historicals") or []):
-                ts = h.get("begins_at")
-                close = h.get("close_price")
-                if ts is None or close is None:
-                    continue
-                try:
-                    points.append({"ts": ts, "value": float(close)})
-                except (TypeError, ValueError):
-                    continue
-            # YTD: trim to start of current year (RH 'year' span returns trailing 1y).
-            if rng == "YTD" and points:
-                from datetime import datetime as _dt, timezone as _tz
-                jan1 = _dt(_dt.now(_tz.utc).year, 1, 1, tzinfo=_tz.utc).isoformat()
-                points = [p for p in points if p["ts"] >= jan1]
-            out[sym] = points
+        out = provider(syms, rng)
+        if not isinstance(out, dict):
+            raise TypeError("market-data provider returned an invalid result")
     except Exception as e:
-        return {"range": rng, "results": out, "error": str(e)}
+        return {
+            "range": rng,
+            "results": {symbol: [] for symbol in syms},
+            "error": str(e),
+        }
 
-    _SYMBOL_HISTORICALS_CACHE[cache_key] = (now, out)
+    if history_provider is None:
+        _SYMBOL_HISTORICALS_CACHE[cache_key] = (now, out)
     return {"range": rng, "results": out}
 
 
@@ -5455,8 +5401,8 @@ def api_symbol_historicals(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Fetch OHLC bar history for one or more symbols from Robinhood's public
-    /quotes/historicals/ endpoint. Returns close-price points keyed by symbol.
+    Fetch close-price history for one or more symbols from the configured
+    market-data provider. Returns points keyed by symbol.
 
     Query params:
       symbols: CSV of tickers (max 75 per RH batch limit), e.g. "AAPL,MSFT,GOOG"

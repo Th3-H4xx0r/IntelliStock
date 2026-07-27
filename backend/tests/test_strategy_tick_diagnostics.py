@@ -48,7 +48,7 @@ def _reset_state():
 
 def test_set_phase_updates_dict():
     sts.set_phase(
-        "rh_refresh",
+        "broker_refresh",
         tick_index=42,
         mode="MONITOR",
         next_wake_ts="2026-05-07T22:20:00+00:00",
@@ -56,7 +56,7 @@ def test_set_phase_updates_dict():
         started=True,
     )
     state = sts.STATE
-    assert state["last_tick_phase"] == "rh_refresh"
+    assert state["last_tick_phase"] == "broker_refresh"
     assert state["last_tick_index"] == 42
     assert state["last_tick_mode"] == "MONITOR"
     assert state["next_wake_ts"] == "2026-05-07T22:20:00+00:00"

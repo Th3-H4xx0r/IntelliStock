@@ -130,9 +130,8 @@ def next_close_utc(after_utc: datetime, *, extended: bool = False) -> Optional[d
     ``extended=False``: regular hours close (16:00 ET, or 13:00 ET on early-close days).
     ``extended=True``: after-hours close (20:00 ET).
 
-    Used by RobinhoodAdapter.submit_order to cap the inter-order delay
-    so a 25-45 s sleep doesn't push a ``gfd`` market order past the close
-    cutoff (HIGH agent finding #9). Returns None if the calendar layer
+    Used by live order submission to avoid pushing a ``gfd`` order past the
+    close cutoff. Returns None if the calendar layer
     can't resolve a session — caller should treat as "don't cap".
     """
     after_utc = _ensure_utc(after_utc)

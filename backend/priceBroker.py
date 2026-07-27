@@ -1,10 +1,10 @@
-# Price Broker: fetches stock prices from Robinhood API every minute and writes to RethinkDB.
-# Uses Robinhood public market data (24/5); no API keys required.
+# Price Broker: fetches stock prices every minute and writes to RethinkDB.
 try:
     import time
     import os
     import threading
     import requests
+    import yfinance as yf
     from datetime import datetime, timezone
     from dotenv import load_dotenv
     import sys
@@ -29,7 +29,7 @@ POLL_INTERVAL_SEC = 60
 
 if os.name == 'nt':
     system("title " + "Price Broker")
-intellistock_logger.log("Price Broker starting (Robinhood API, 1-minute poll).", "green", service="PriceBroker")
+intellistock_logger.log("Price Broker starting (1-minute poll).", "green", service="PriceBroker")
 
 
 def get_conn():
@@ -114,72 +114,68 @@ config_pings_feed.start()
 config_doc_feed = threading.Thread(target=run_config_doc_changefeed, daemon=True)
 config_doc_feed.start()
 
-# Robinhood API via robinhood_engine (public market data; no auth required)
-from robinhood_engine import instruments_batch, quotes_batch, price_from_quote, BATCH_SIZE
-from robinhood_data_policy import robinhood_data_fallback_allowed
-
-# Main thread: poll Robinhood every minute (batch) and write to RethinkDB
+# Main thread: poll public market data every minute and write to RethinkDB.
 intellistock_logger.log("Opening RethinkDB connection for LivePrices / PriceHistory.", "white", service="PriceBroker")
 conn = get_conn()
-# Symbols without "T." for Robinhood
 symbols = [t[2:] if t.startswith("T.") else t for t in tickers]
 # symbol -> ticker_id for writes
 symbol_to_ticker = {sym.upper(): tickers[i] for i, sym in enumerate(symbols)}
 
 _first_run = True
-_data_off_logged = False
+
+
+def _latest_prices(symbol_names):
+    """Fetch the latest available one-minute close for each symbol."""
+    if not symbol_names:
+        return {}
+    frame = yf.download(
+        tickers=symbol_names,
+        period="1d",
+        interval="1m",
+        progress=False,
+        auto_adjust=False,
+        threads=True,
+        group_by="column",
+    )
+    if frame is None or frame.empty:
+        return {}
+    closes = frame.get("Close")
+    prices = {}
+    if len(symbol_names) == 1:
+        try:
+            series = closes.dropna()
+            if not series.empty:
+                prices[symbol_names[0].upper()] = float(series.iloc[-1])
+        except Exception:
+            return {}
+        return prices
+    for symbol in symbol_names:
+        try:
+            series = closes[symbol].dropna()
+            if not series.empty:
+                prices[symbol.upper()] = float(series.iloc[-1])
+        except Exception:
+            continue
+    return prices
 
 while True:
-    # Kill switch: this poller ONLY exists to hit Robinhood's public market-data
-    # endpoints. When the Robinhood data fallback is disabled (env
-    # ROBINHOOD_DATA_FALLBACK off), pause polling entirely so the server IP stops
-    # touching Robinhood — independent of any trading instance.
-    if not robinhood_data_fallback_allowed("robinhood"):
-        if not _data_off_logged:
-            intellistock_logger.log(
-                "Robinhood data fallback disabled (ROBINHOOD_DATA_FALLBACK off); pausing Robinhood polling.",
-                "yellow", service="PriceBroker")
-            _data_off_logged = True
-        time.sleep(POLL_INTERVAL_SEC)
-        continue
-    _data_off_logged = False
-
     now = datetime.now(timezone.utc)
     bucket = now.strftime("%Y-%m-%dT%H:%M")
     storage_ts = bucket + ":00.000Z"
     if _first_run:
-        intellistock_logger.log("Fetching quotes from Robinhood (batch) for all tickers...", "green", service="PriceBroker")
+        intellistock_logger.log("Fetching quotes for all tickers...", "green", service="PriceBroker")
         _first_run = False
 
-    # 1) Batch fetch instrument IDs (in chunks of BATCH_SIZE)
-    symbol_id_pairs = []
-    for start in range(0, len(symbols), BATCH_SIZE):
-        chunk = symbols[start : start + BATCH_SIZE]
-        symbol_id_pairs.extend(instruments_batch(chunk))
-    if not symbol_id_pairs:
-        intellistock_logger.log("No instrument IDs from Robinhood; skipping cycle.", "yellow", service="PriceBroker")
+    latest = _latest_prices(symbols)
+    if not latest:
+        intellistock_logger.log("No quotes returned; skipping cycle.", "yellow", service="PriceBroker")
         time.sleep(POLL_INTERVAL_SEC)
         continue
 
-    # 2) Batch fetch quotes (in chunks of BATCH_SIZE)
-    all_quotes = []
-    for start in range(0, len(symbol_id_pairs), BATCH_SIZE):
-        chunk_pairs = symbol_id_pairs[start : start + BATCH_SIZE]
-        ids_chunk = [p[1] for p in chunk_pairs]
-        quotes = quotes_batch(ids_chunk)
-        # Quote results include "symbol"; match order may differ so we key by symbol
-        all_quotes.extend(quotes)
-
-    # 3) Write each quote to LivePrices and PriceHistory
     written = 0
-    for quote in all_quotes:
-        sym = (quote.get("symbol") or "").upper()
+    for sym, price in latest.items():
         ticker_id = symbol_to_ticker.get(sym)
         if not ticker_id:
-            continue
-        price = price_from_quote(quote)
-        if price is None:
-            intellistock_logger.log(f"{ticker_id}: no price (Robinhood)", "yellow", service="PriceBroker")
             continue
         intellistock_logger.log(f"{ticker_id}: {price}", "white", service="PriceBroker")
         r.db(DB_NAME).table('LivePrices').insert({

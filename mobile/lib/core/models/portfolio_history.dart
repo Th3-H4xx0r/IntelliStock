@@ -20,7 +20,7 @@ class PortfolioHistory {
 
   bool get isEmpty => values.isEmpty;
 
-  /// Re-baselines a 1D series to the device's LOCAL midnight (Robinhood's
+  /// Re-baselines a 1D series to the device's LOCAL midnight (the
   /// overnight day view): the open/baseline becomes the equity at 00:00 local
   /// (the last sample at or before midnight, carried forward), the series is
   /// trimmed to samples from midnight onward with a baseline point planted
