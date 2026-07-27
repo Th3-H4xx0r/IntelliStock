@@ -611,7 +611,7 @@ def run():
         def connect():
             intellistock_logger.log("Connection established to socket server", "green", service="SOCKET")
             sio.emit('clientType', {"UUID": args_list[1], "instance": args_list[1], "symbol": None,
-                                    "control_token": os.environ.get("INSTANCE_SOCKET_CONTROL_TOKEN", "")})
+                                    "control_token": os.environ.get("INSTANCE_SOCKET_SUPERVISOR_TOKEN", "")})
 
         @sio.event
         def terminate(data):

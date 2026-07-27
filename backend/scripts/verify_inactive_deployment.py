@@ -57,6 +57,8 @@ class InactiveVerification:
 def _document_hashes(documents: Iterable[Mapping]) -> tuple[str, ...]:
     encoded = []
     for document in documents or ():
+        if not isinstance(document, Mapping):
+            raise RuntimeError("broker snapshot contains malformed records")
         normalized = json.dumps(document, sort_keys=True, separators=(",", ":"),
                                 default=str)
         encoded.append(hashlib.sha256(normalized.encode("utf-8")).hexdigest())
@@ -159,7 +161,12 @@ def _docker_worker_state(instance_id: str) -> str:
         import docker
         name = "intellistock-instance-" + "".join(c if c.isalnum() or c in "_.-" else "_" for c in instance_id)[:50]
         container = docker.from_env().containers.get(name)
-        return "running" if container.status == "running" else "stopped"
+        container.reload()
+        state = getattr(container, "attrs", {}).get("State", {})
+        restart_policy = getattr(container, "attrs", {}).get("HostConfig", {}).get("RestartPolicy", {}).get("Name", "")
+        if state.get("Running") is False and state.get("Paused") is False and state.get("Restarting") is False and not state.get("Restarting") and restart_policy in {"", "no", "none"} and state.get("Status") in {"exited", "dead"}:
+            return "stopped"
+        return "running" if state.get("Running") is True else "unknown"
     except Exception as exc:
         if exc.__class__.__name__.lower().endswith("notfound"):
             return "stopped"

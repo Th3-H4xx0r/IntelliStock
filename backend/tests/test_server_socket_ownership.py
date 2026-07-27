@@ -21,7 +21,7 @@ def test_unauthenticated_duplicate_uuid_cannot_terminate_existing_worker(monkeyp
     accepted = server.register_socket_client(
         sio, "untrusted-sid",
         {"UUID": "test-instance", "instance": "test-instance", "symbol": None},
-        master_key="owner-token",
+        master_key="x" * 32,
     )
 
     assert accepted is False
@@ -39,8 +39,8 @@ def test_authenticated_duplicate_uuid_may_replace_its_own_worker(monkeypatch):
     accepted = server.register_socket_client(
         sio, "new-sid",
         {"UUID": "test-instance", "instance": "test-instance", "symbol": None,
-         "control_token": server.derive_socket_control_token("owner-token", "test-instance")},
-        master_key="owner-token",
+         "control_token": server.derive_socket_control_token("x" * 32, "test-instance")},
+        master_key="x" * 32,
     )
 
     assert accepted is True
@@ -51,12 +51,13 @@ def test_authenticated_duplicate_uuid_may_replace_its_own_worker(monkeypatch):
 def test_initial_and_cross_instance_claims_require_instance_scoped_proof():
     import server
     sio = MagicMock()
-    master = "test-master"
+    master = "m" * 32
     token_a = server.derive_socket_control_token(master, "instance-a")
     assert server.register_socket_client(sio, "a", {"UUID": "instance-a", "instance": "instance-a"}, master_key=master) is False
     assert server.register_socket_client(sio, "b", {"UUID": "instance-b", "instance": "instance-b", "control_token": token_a}, master_key=master) is False
     assert server.register_socket_client(sio, "bad", {"UUID": "wrong", "instance": "instance-a", "control_token": token_a}, master_key=master) is False
-    assert server.register_socket_client(sio, "ok", {"UUID": "instance-a_broker", "instance": "instance-a", "control_token": token_a}, master_key=master) is True
+    token_broker = server.derive_socket_control_token(master, "instance-a", "broker")
+    assert server.register_socket_client(sio, "ok", {"UUID": "instance-a_broker", "instance": "instance-a", "control_token": token_broker}, master_key=master) is True
 
 
 def test_kalshi_funded_mode_is_strict_and_paper_demo_are_not_coerced():

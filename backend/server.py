@@ -108,16 +108,19 @@ def register_socket_client(sio, sid, data, *, master_key=None):
     if not isinstance(data, dict):
         return False
     uuid = data.get("UUID")
-    if not isinstance(uuid, str) or not uuid:
+    if not isinstance(uuid, str) or not uuid or uuid == "PriceBroker" or data.get("instance") == "PriceBroker":
         return False
     configured_token = (master_key if master_key is not None
                         else os.environ.get("SOCKET_CONTROL_MASTER_KEY", ""))
     provided_token = data.get("control_token")
+    role = "supervisor" if uuid == data.get("instance") else "broker" if uuid == str(data.get("instance")) + "_broker" else ""
+    expected_token = derive_socket_control_token(configured_token, data.get("instance"), role)
     authenticated = (isinstance(configured_token, str) and bool(configured_token)
                      and isinstance(provided_token, str)
-                     and hmac.compare_digest(provided_token, derive_socket_control_token(configured_token, data.get("instance"))))
+                     and bool(expected_token)
+                     and hmac.compare_digest(provided_token, expected_token))
     if (not isinstance(data.get("instance"), str) or not data["instance"]
-            or not (uuid == data["instance"] or uuid.startswith(data["instance"] + "_"))
+            or not role
             or not authenticated):
         return False
     old_sid = clientList.get(uuid)
@@ -134,10 +137,10 @@ def register_socket_client(sio, sid, data, *, master_key=None):
     return True
 
 
-def derive_socket_control_token(master_key, instance_id):
-    if type(master_key) is not str or not master_key or type(instance_id) is not str or not instance_id:
+def derive_socket_control_token(master_key, instance_id, role="supervisor"):
+    if type(master_key) is not str or len(master_key.encode("utf-8")) < 32 or type(instance_id) is not str or not instance_id or role not in {"supervisor", "broker"}:
         return ""
-    return hmac.new(master_key.encode("utf-8"), instance_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.new(master_key.encode("utf-8"), (instance_id + ":" + role).encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def is_funded_kalshi_live(instance_doc, brokerage_doc) -> bool:
@@ -473,11 +476,13 @@ def start_instance_container(instance_id):
             "yellow", service="SERVER",
         )
     master_key = os.environ.get("SOCKET_CONTROL_MASTER_KEY", "")
-    token = derive_socket_control_token(master_key, str(instance_id))
-    if not token:
+    token = derive_socket_control_token(master_key, str(instance_id), "supervisor")
+    broker_token = derive_socket_control_token(master_key, str(instance_id), "broker")
+    if not token or not broker_token:
         intellistock_logger.log("Instance launch blocked: socket ownership secret is unavailable", "red", service="SERVER")
         return None
-    env["INSTANCE_SOCKET_CONTROL_TOKEN"] = token
+    env["INSTANCE_SOCKET_SUPERVISOR_TOKEN"] = token
+    env["INSTANCE_SOCKET_BROKER_TOKEN"] = broker_token
     try:
         client = _get_docker_client()
         if not client:

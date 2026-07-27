@@ -5920,12 +5920,9 @@ def run_socket_loop():
             # strategy), we still use a distinct suffix so the server doesn't
             # see broker-connect as instance-reconnect and terminate instance.
             symbol = symbols[0] if symbols else None
-            if symbol:
-                uuid_val = f"{instance_id}_{symbol}"
-            else:
-                uuid_val = f"{instance_id}_broker"
+            uuid_val = f"{instance_id}_broker"
             sio.emit('clientType', {'UUID': uuid_val, 'instance': instance_id, 'symbol': symbol,
-                                    'control_token': os.environ.get('INSTANCE_SOCKET_CONTROL_TOKEN', '')})
+                                    'control_token': os.environ.get('INSTANCE_SOCKET_BROKER_TOKEN', '')})
             _log("Connected to server (instance " + str(instance_id) + ")", "green")
             sio.wait()  # blocks until disconnected
         except Exception as e:
