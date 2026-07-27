@@ -201,8 +201,8 @@ def halt_live_trading(
                                         _persist_rh_refreshed_token(r, conn, b, client)
                                     except Exception as _persist_error:
                                         summary["errors"].append(
-                                            f"brokerage {b.get('id')}: credential refresh persistence "
-                                            f"failed ({type(_persist_error).__name__})"
+                                            "credential refresh persistence failed "
+                                            f"({type(_persist_error).__name__})"
                                         )
                                     return fn()
                                 raise

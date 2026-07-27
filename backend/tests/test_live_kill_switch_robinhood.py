@@ -7,6 +7,7 @@ Alpaca and Robinhood open orders.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from types import SimpleNamespace
@@ -40,7 +41,7 @@ def test_refreshed_kill_switch_token_encryption_failure_is_reported(monkeypatch)
     import live_kill_switch as lks
 
     rh_brokerage = {
-        "id": "rh-1", "brokerage_type": "robinhood",
+        "id": "CANARY-BROKERAGE-ID", "brokerage_type": "robinhood",
         "robinhood_access_token": "stale", "robinhood_refresh_token": "refresh",
         "robinhood_device_token": "device", "robinhood_account_number": "123",
     }
@@ -89,6 +90,8 @@ def test_refreshed_kill_switch_token_encryption_failure_is_reported(monkeypatch)
 
     assert summary["orders_canceled"] == 1
     assert any("credential refresh persistence" in error for error in summary["errors"])
+    assert "CANARY-BROKERAGE-ID" not in repr(summary)
+    assert "CANARY-BROKERAGE-ID" not in json.dumps(summary)
     fake_r.db.return_value.table.return_value.get.return_value.update.assert_not_called()
 
 
