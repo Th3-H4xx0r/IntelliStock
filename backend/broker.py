@@ -7431,41 +7431,93 @@ def _can_use_same_day_daily_bar(current_utc: datetime.datetime) -> bool:
         return False
 
 
-def _get_prices_at_time(data, symbols, current_time, use_cursor=False):
-    """Get close price ('c') for each symbol at the bar that corresponds to current_time (latest bar at or before current_time).
+def _aware_backtest_clock(current_time):
+    """Normalize the legacy broker clock to the aware-UTC event-time boundary."""
+    from event_time import aware_utc
 
-    ``use_cursor=True`` (passed only from the monotonic main backtest loop, which
-    always uses the master ``data``) takes the O(new_bars)/call cursor path for
-    the non-daily case; every other call site keeps the O(n) full scan so the
-    cursor never has to reason about a different ``data`` object or the daily
-    same-day-bar rule."""
-    prices = {}
     current_utc = _current_time_to_utc(current_time)
     if current_utc is None:
+        return None
+    if getattr(current_utc, "tzinfo", None) is None:
+        current_utc = current_utc.replace(tzinfo=datetime.timezone.utc)
+    return aware_utc(current_utc, field="available_through")
+
+
+def _backtest_bar_interval() -> datetime.timedelta:
+    """Return the interval actually fetched, not the requested loop cadence."""
+    from event_time import interval_for_timeframe
+
+    return interval_for_timeframe(_backtest_alpaca_timeframe)
+
+
+def _equity_daily_bar_session_close(bar_start):
+    """Resolve an equity daily bar to its authoritative exchange close."""
+    try:
+        import pandas as pd
+        import live_calendar
+
+        calendar = getattr(live_calendar, "_CAL", None)
+        if not bool(getattr(live_calendar, "_HAS_LIB", False)) or calendar is None:
+            return None
+        session = pd.Timestamp(bar_start.date())
+        if not bool(calendar.is_session(session)):
+            return None
+        return calendar.session_close(session).tz_convert("UTC").to_pydatetime()
+    except Exception:
+        return None
+
+
+def _backtest_bar_availability_resolver():
+    """Bind fetched granularity and the correct equity/continuous calendar."""
+    from event_time import make_bar_availability_resolver
+
+    interval = _backtest_bar_interval()
+    session_close_resolver = None
+    if interval >= datetime.timedelta(days=1) and not _is_crypto_instance_runtime():
+        session_close_resolver = _equity_daily_bar_session_close
+    return make_bar_availability_resolver(
+        interval=interval,
+        session_close_resolver=session_close_resolver,
+    )
+
+
+def _get_prices_at_time(data, symbols, current_time, use_cursor=False):
+    """Return closes whose completed bars are observable by ``current_time``.
+
+    ``use_cursor=True`` (passed only from the monotonic main backtest loop, which
+    always uses the master ``data``) takes the O(new_bars)/call cursor path.
+    Every other call site keeps the O(n) full scan so the cursor never has to
+    reason about a different ``data`` object."""
+    prices = {}
+    current_utc = _aware_backtest_clock(current_time)
+    if current_utc is None:
         return prices
-    daily_mode = _is_daily_backtest_timeframe()
-    allow_same_day_daily = _can_use_same_day_daily_bar(current_utc)
-    if use_cursor and mode == MODE_BACKTEST and not daily_mode:
+    try:
+        availability = _backtest_bar_availability_resolver()
+    except (TypeError, ValueError):
+        return prices
+    if use_cursor and mode == MODE_BACKTEST:
         return _bprices_cursor.latest_price_at(
-            data, symbols, current_utc, bar_time_to_datetime=_bar_time_to_datetime,
+            data,
+            symbols,
+            current_utc,
+            bar_time_to_datetime=_bar_time_to_datetime,
+            bar_available_at=availability,
         )
     for sym in symbols:
         bars = data.get(sym) or []
         bar_at_time = None
         for b in bars:
-            bt = _bar_time_to_datetime(b.get("t"))
-            if bt is None:
+            if _bar_time_to_datetime(b.get("t")) is None:
                 continue
-            if daily_mode:
-                if bt.date() < current_utc.date() or (allow_same_day_daily and bt.date() == current_utc.date()):
-                    bar_at_time = b
-                else:
-                    break
+            try:
+                available_at = availability(b)
+            except (TypeError, ValueError):
+                continue
+            if available_at <= current_utc:
+                bar_at_time = b
             else:
-                if bt <= current_utc:
-                    bar_at_time = b
-                else:
-                    break
+                break
         if bar_at_time is not None and "c" in bar_at_time:
             try:
                 prices[sym] = float(bar_at_time["c"])
@@ -7483,13 +7535,14 @@ def _backtest_symbol_price_lookup_block_reason(data, symbol, current_time):
     bars = data.get(symbol) or []
     if not bars:
         return ""
-    current_utc = _current_time_to_utc(current_time)
-    first_bar_dt = _bar_time_to_datetime((bars[0] or {}).get("t"))
-    if current_utc is None or first_bar_dt is None:
+    current_utc = _aware_backtest_clock(current_time)
+    if current_utc is None:
         return ""
-    if _is_daily_backtest_timeframe():
-        return "prelisting" if first_bar_dt.date() > current_utc.date() else ""
-    return "prelisting" if first_bar_dt > current_utc else ""
+    try:
+        first_available_at = _backtest_bar_availability_resolver()(bars[0])
+    except (TypeError, ValueError):
+        return "bar_unavailable"
+    return "prelisting" if first_available_at > current_utc else ""
 
 
 # 2026-05-08 backtest perf: monotonic cursor cache for
@@ -7510,14 +7563,14 @@ def _invalidate_price_history_cursor() -> None:
 def get_price_history_up_to_current(data, symbols, current_time):
     """
     (Backtesting only.) Return price history from the start of the fetched range (including warmup)
-    up to and including current emulated time. So strategies receive only past bars, no lookahead.
-    Returns: dict symbol -> list of bar dicts (t, o, h, l, c, v) with bar['t'] <= current_time, sorted by t.
+    whose completed values are available to the current emulated time.
+    Returns: dict symbol -> causal list of bar dicts (t, o, h, l, c, v).
     """
     return _bph.get_price_history_up_to_current(
         data, symbols, current_time,
-        daily_mode=_is_daily_backtest_timeframe(),
         bar_time_to_datetime=_bar_time_to_datetime,
-        current_time_to_utc=_current_time_to_utc,
+        current_time_to_utc=_aware_backtest_clock,
+        bar_available_at=_backtest_bar_availability_resolver(),
     )
 
 print("Time Increment:", time_increment)

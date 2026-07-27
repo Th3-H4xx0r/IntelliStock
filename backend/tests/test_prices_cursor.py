@@ -8,6 +8,9 @@ import datetime
 import backtest_prices_cursor as C
 
 
+UTC = datetime.timezone.utc
+
+
 def _btd(t):
     if t is None:
         return None
@@ -17,15 +20,25 @@ def _btd(t):
         return None
 
 
-def _naive(data, syms, cutoff):
+def _available_at_label(bar):
+    parsed = _btd(bar.get("t"))
+    return parsed.replace(tzinfo=UTC) if parsed is not None else None
+
+
+def _hour_available(bar):
+    available = _available_at_label(bar)
+    return available + datetime.timedelta(hours=1) if available is not None else None
+
+
+def _naive(data, syms, cutoff, availability):
     out = {}
     for s in syms:
         best = None
         for b in data.get(s) or []:
-            bt = _btd(b.get("t"))
-            if bt is None:
+            available = availability(b)
+            if available is None:
                 continue
-            if bt <= cutoff:
+            if available <= cutoff:
                 best = b
             else:
                 break
@@ -39,29 +52,78 @@ def test_cursor_matches_naive_across_steps_and_rewind():
     data = {"BTC/USD": bars}
     C.invalidate()
     for h in range(10):
-        cut = datetime.datetime(2026, 4, 13, h, 30, 0)   # between bars
-        got = C.latest_price_at(data, ["BTC/USD"], cut, bar_time_to_datetime=_btd)
-        assert got == _naive(data, ["BTC/USD"], cut), (h, got)
+        cut = datetime.datetime(2026, 4, 13, h, 30, 0, tzinfo=UTC)
+        got = C.latest_price_at(
+            data,
+            ["BTC/USD"],
+            cut,
+            bar_time_to_datetime=_btd,
+            bar_available_at=_available_at_label,
+        )
+        assert got == _naive(data, ["BTC/USD"], cut, _available_at_label), (h, got)
     # rewind to an earlier time -> must self-heal and still match
-    cut = datetime.datetime(2026, 4, 13, 2, 30, 0)
-    assert C.latest_price_at(data, ["BTC/USD"], cut, bar_time_to_datetime=_btd) == \
-        _naive(data, ["BTC/USD"], cut)
+    cut = datetime.datetime(2026, 4, 13, 2, 30, 0, tzinfo=UTC)
+    assert C.latest_price_at(
+        data,
+        ["BTC/USD"],
+        cut,
+        bar_time_to_datetime=_btd,
+        bar_available_at=_available_at_label,
+    ) == _naive(data, ["BTC/USD"], cut, _available_at_label)
 
 
 def test_cursor_handles_growing_bars_and_malformed():
     C.invalidate()
     data = {"X/USD": [{"t": "2026-04-13T00:00:00Z", "c": 1.0}]}
-    cut0 = datetime.datetime(2026, 4, 13, 0, 0, 0)
-    assert C.latest_price_at(data, ["X/USD"], cut0, bar_time_to_datetime=_btd) == {"X/USD": 1.0}
+    cut0 = datetime.datetime(2026, 4, 13, 0, 0, 0, tzinfo=UTC)
+    assert C.latest_price_at(
+        data,
+        ["X/USD"],
+        cut0,
+        bar_time_to_datetime=_btd,
+        bar_available_at=_available_at_label,
+    ) == {"X/USD": 1.0}
     # pagination appends more bars, including a malformed one
     data["X/USD"].append({"t": "bad", "c": 9.0})
     data["X/USD"].append({"t": "2026-04-13T01:00:00Z", "c": 2.0})
-    cut1 = datetime.datetime(2026, 4, 13, 1, 0, 0)
-    assert C.latest_price_at(data, ["X/USD"], cut1, bar_time_to_datetime=_btd) == {"X/USD": 2.0}
+    cut1 = datetime.datetime(2026, 4, 13, 1, 0, 0, tzinfo=UTC)
+    assert C.latest_price_at(
+        data,
+        ["X/USD"],
+        cut1,
+        bar_time_to_datetime=_btd,
+        bar_available_at=_available_at_label,
+    ) == {"X/USD": 2.0}
 
 
 def test_before_first_bar_returns_empty():
     C.invalidate()
     data = {"X/USD": [{"t": "2026-04-13T05:00:00Z", "c": 1.0}]}
-    cut = datetime.datetime(2026, 4, 13, 0, 0, 0)
-    assert C.latest_price_at(data, ["X/USD"], cut, bar_time_to_datetime=_btd) == {}
+    cut = datetime.datetime(2026, 4, 13, 0, 0, 0, tzinfo=UTC)
+    assert C.latest_price_at(
+        data,
+        ["X/USD"],
+        cut,
+        bar_time_to_datetime=_btd,
+        bar_available_at=_available_at_label,
+    ) == {}
+
+
+def test_latest_price_waits_until_bar_close():
+    C.invalidate()
+    data = {"SPY": [{"t": "2026-03-02T14:00:00Z", "c": 123.0}]}
+
+    assert C.latest_price_at(
+        data,
+        ["SPY"],
+        datetime.datetime(2026, 3, 2, 14, 0, tzinfo=UTC),
+        bar_time_to_datetime=_btd,
+        bar_available_at=_hour_available,
+    ) == {}
+    assert C.latest_price_at(
+        data,
+        ["SPY"],
+        datetime.datetime(2026, 3, 2, 15, 0, tzinfo=UTC),
+        bar_time_to_datetime=_btd,
+        bar_available_at=_hour_available,
+    ) == {"SPY": 123.0}

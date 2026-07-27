@@ -50,11 +50,11 @@ def get_price_history_up_to_current(
     symbols,
     current_time,
     *,
-    daily_mode: bool,
     bar_time_to_datetime: Callable,
     current_time_to_utc: Callable,
+    bar_available_at: Callable,
 ) -> dict:
-    """Return ``{symbol: [bars with t <= current_time]}`` for each symbol.
+    """Return bars whose completed values are available to the simulation.
 
     Uses a per-symbol monotonic cursor to avoid re-scanning bars that
     have already been included in a prior call. Cursor resets if
@@ -66,18 +66,21 @@ def get_price_history_up_to_current(
         symbols: iterable of symbols to slice.
         current_time: current backtest time (any value accepted by
             ``current_time_to_utc``).
-        daily_mode: if True, exclude same-day bars (prevents daily
-            close leakage during intraday/daily-step backtests).
         bar_time_to_datetime: caller-supplied function that converts
             a bar's ``t`` field to a tz-aware datetime, or returns
             None for malformed bars.
         current_time_to_utc: caller-supplied function that converts
             ``current_time`` to a tz-aware UTC datetime, or returns
             None for invalid input.
+        bar_available_at: caller-supplied function returning the aware UTC
+            timestamp when each completed bar becomes observable.
     """
+    from event_time import aware_utc
+
     current_utc = current_time_to_utc(current_time)
     if current_utc is None:
         return {sym: [] for sym in (symbols or [])}
+    current_utc = aware_utc(current_utc, field="available_through")
 
     last_utc = CACHE.get("last_current_utc")
     if last_utc is not None and current_utc < last_utc:
@@ -101,44 +104,52 @@ def get_price_history_up_to_current(
         # filtered list extended.
         f = filtered.get(sym)
         if f is None:
-            f = {"bars": [], "src_len": 0}
+            f = {"entries": [], "src_len": 0}
             filtered[sym] = f
         if f["src_len"] < n:
             # Extend the filtered list with newly-appended bars.
             for j in range(f["src_len"], n):
                 bj = bars[j]
                 btj = bar_time_to_datetime(bj.get("t"))
-                if btj is not None:
-                    f["bars"].append(bj)
+                if btj is None:
+                    continue
+                try:
+                    available = aware_utc(
+                        bar_available_at(bj),
+                        field="bar_available_at",
+                    )
+                except (TypeError, ValueError):
+                    continue
+                f["entries"].append((bj, available))
             f["src_len"] = n
         elif f["src_len"] > n:
             # Source shrank; rebuild from scratch.
-            f["bars"] = []
+            f["entries"] = []
             for bj in bars:
                 btj = bar_time_to_datetime(bj.get("t"))
-                if btj is not None:
-                    f["bars"].append(bj)
+                if btj is None:
+                    continue
+                try:
+                    available = aware_utc(
+                        bar_available_at(bj),
+                        field="bar_available_at",
+                    )
+                except (TypeError, ValueError):
+                    continue
+                f["entries"].append((bj, available))
             f["src_len"] = n
             cursors[sym] = 0  # cursor was relative to old length
 
-        clean = f["bars"]
+        clean = f["entries"]
         nf = len(clean)
         idx = cursors.get(sym, 0)
         if idx > nf:
             idx = 0
         while idx < nf:
-            bt = bar_time_to_datetime(clean[idx].get("t"))
-            # bt is guaranteed non-None here (filtered above).
-            if daily_mode:
-                if bt.date() < current_utc.date():
-                    idx += 1
-                else:
-                    break
+            if clean[idx][1] <= current_utc:
+                idx += 1
             else:
-                if bt <= current_utc:
-                    idx += 1
-                else:
-                    break
+                break
         cursors[sym] = idx
-        out[sym] = clean[:idx]
+        out[sym] = [bar for bar, _available in clean[:idx]]
     return out
