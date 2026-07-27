@@ -82,6 +82,24 @@ _live_trading_snapshot_thread = None
 _live_trading_command_thread = None
 _live_trading_stop_event = threading.Event()
 _live_trading_started_at = None
+# Task 7: Alpaca-stock orders cross exactly one immutable gate/service seam.
+# All values begin UNKNOWN and are promoted only by successful live checks.
+_live_stock_order_service = None
+_live_order_dependency_lock = threading.RLock()
+_live_order_dependency_state = {
+    "kill_switch": "unknown",
+    "cash": "unknown",
+    "positions": "unknown",
+    "calendar": "unknown",
+    "persistence": "unknown",
+    "risk_state": "unknown",
+    "watchdog": "unknown",
+    "cash_at": None,
+    "positions_at": None,
+    "market_open": False,
+    "risk_snapshot_id": "",
+}
+_live_order_quote_times = {}
 # 2026-05-03 live-hang investigation: per-call ThreadPoolExecutor with `with`
 # blocks indefinitely on __exit__ (shutdown(wait=True)) when the worker thread
 # is wedged on a TCP read. Use module-level long-lived pools with bounded
@@ -2908,13 +2926,81 @@ def _residual_sleeve_prepare(data, prices, current_time, cached_strategies,
             pass
 
 
-def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_strategies):
+def _residual_sleeve_release(
+        portfolio_emulator, prices, current_time, cached_strategies,
+        order_service=None):
     """Cycle start: free the sleeve for active picks when cash is low, and
     ALWAYS liquidate it when the regime turns bear/crash (BEAR_F guardrail
     failure 2026-07-19: an exit-less sleeve rode SPY down −8%, flipping the
     bear window from +0.87% to −7.77%). The trend-conditioned regime gate —
     not a drawdown gate — is what the measured counterfactuals prescribe."""
     try:
+        def _submit_release(
+                symbol, price, quantity, reason, *, sell_fraction,
+                order_source):
+            if order_service is None:
+                return _submit_portfolio_signal(
+                    portfolio_emulator,
+                    symbol,
+                    -1,
+                    price,
+                    timestamp=current_time,
+                    sell_fraction=sell_fraction,
+                    order_source=order_source,
+                )
+            from datetime import datetime as _dt, timezone as _tz
+            from decimal import Decimal
+            from live_orders import OrderIntent, OrderSide, OrderSource
+            decision_at = current_time
+            if not isinstance(decision_at, _dt):
+                decision_at = _dt.now(_tz.utc)
+            elif decision_at.tzinfo is None:
+                decision_at = decision_at.replace(tzinfo=_tz.utc)
+            style = (
+                portfolio_emulator._order_style_for_now(
+                    price, "sell", decision_at
+                )
+                if hasattr(portfolio_emulator, "_order_style_for_now")
+                else {
+                    "order_type": "market",
+                    "limit_price": None,
+                    "extended_hours": False,
+                }
+            )
+            intent = OrderIntent(
+                account_id=order_service.account_id,
+                instance_id=order_service.instance_id,
+                source=OrderSource.RESIDUAL_SLEEVE,
+                reason=reason,
+                symbol=symbol,
+                side=OrderSide.SELL,
+                quantity=Decimal(str(quantity)),
+                reduce_only=True,
+                decision_at=decision_at,
+                quote_at=decision_at,
+                risk_snapshot_id=(
+                    getattr(order_service, "risk_snapshot_id", "")
+                    or f"sleeve:{decision_at.isoformat()}"
+                ),
+                order_type=style["order_type"],
+                limit_price=(
+                    Decimal(str(style["limit_price"]))
+                    if style.get("limit_price") is not None
+                    else None
+                ),
+                tif="day",
+                extended_hours=bool(style.get("extended_hours")),
+                reference_price=Decimal(str(price)),
+            )
+            submission = order_service.enqueue(intent)
+            if not submission.decision.allowed:
+                _log(
+                    f"[sleeve] gate blocked SELL {symbol}: "
+                    f"{','.join(submission.decision.reason_codes)}",
+                    "yellow",
+                )
+            return submission.accepted
+
         cfg = _residual_sleeve_config(cached_strategies)
         if not cfg["enabled"] or portfolio_emulator is None:
             return
@@ -3018,12 +3104,11 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                         _bsell_qty = min(bqty, _bneeded / bpx)
                         if _bsell_qty > 0:
                             _bfrac = min(1.0, _bsell_qty / bqty)
-                            _bok = _submit_portfolio_signal(
-                                portfolio_emulator,
+                            _bok = _submit_release(
                                 bsym,
-                                -1,
                                 bpx,
-                                timestamp=current_time,
+                                _bsell_qty,
+                                "bear-leg cash refill",
                                 sell_fraction=_bfrac,
                                 order_source=(
                                     "residual_bear_full_exit"
@@ -3053,12 +3138,11 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                         if _bear_stop_episode_exit
                         else "residual_bear_protective_exit"
                     )
-                    bok = _submit_portfolio_signal(
-                        portfolio_emulator,
+                    bok = _submit_release(
                         bsym,
-                        -1,
                         bpx,
-                        timestamp=current_time,
+                        bqty,
+                        _bear_exit_why,
                         sell_fraction=1.0,
                         order_source=_bear_exit_source,
                     )
@@ -3118,12 +3202,14 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
         else:
             sell_qty = qty
             frac = 1.0
-        ok = _submit_portfolio_signal(
-            portfolio_emulator,
+        why = f"regime={regime} protective exit" if protective else (
+            f"cash was {cash / nav * 100.0:.1f}% of NAV, refill "
+            f"{sell_qty:.4f}/{qty:.4f}")
+        ok = _submit_release(
             sym,
-            -1,
             px,
-            timestamp=current_time,
+            sell_qty,
+            why,
             sell_fraction=frac,
             order_source=(
                 "residual_bull_protective_exit"
@@ -3131,9 +3217,6 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
                 else "residual_bull_refill"
             ),
         )
-        why = f"regime={regime} protective exit" if protective else (
-            f"cash was {cash / nav * 100.0:.1f}% of NAV, refill "
-            f"{sell_qty:.4f}/{qty:.4f}")
         _log(f"[sleeve] released {sell_qty:.4f} {sym} @ {px:.2f} ({why}, ok={ok})",
              "cyan")
     except Exception as _sleeve_exc:
@@ -3143,11 +3226,80 @@ def _residual_sleeve_release(portfolio_emulator, prices, current_time, cached_st
             pass
 
 
-def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_strategies):
+def _residual_sleeve_deploy(
+        portfolio_emulator, prices, current_time, cached_strategies,
+        order_service=None):
     """Cycle end: park idle cash above the operational buffer into the sleeve
     symbol. Delta-buy only; deploys only when idle exceeds the hysteresis
     threshold so a post-release remainder does not immediately round-trip."""
     try:
+        def _submit_deploy(
+                symbol, price, cash_amount, reason, *, order_source):
+            if order_service is None:
+                return _submit_portfolio_signal(
+                    portfolio_emulator,
+                    symbol,
+                    1,
+                    price,
+                    timestamp=current_time,
+                    cash_per_trade=cash_amount,
+                    order_source=order_source,
+                )
+            from datetime import datetime as _dt, timezone as _tz
+            from decimal import Decimal
+            from live_orders import OrderIntent, OrderSide, OrderSource
+            decision_at = current_time
+            if not isinstance(decision_at, _dt):
+                decision_at = _dt.now(_tz.utc)
+            elif decision_at.tzinfo is None:
+                decision_at = decision_at.replace(tzinfo=_tz.utc)
+            style = (
+                portfolio_emulator._order_style_for_now(
+                    price, "buy", decision_at
+                )
+                if hasattr(portfolio_emulator, "_order_style_for_now")
+                else {
+                    "order_type": "market",
+                    "limit_price": None,
+                    "extended_hours": False,
+                }
+            )
+            intent = OrderIntent(
+                account_id=order_service.account_id,
+                instance_id=order_service.instance_id,
+                source=OrderSource.RESIDUAL_SLEEVE,
+                reason=reason,
+                symbol=symbol,
+                side=OrderSide.BUY,
+                quantity=(
+                    Decimal(str(cash_amount)) / Decimal(str(price))
+                ).quantize(Decimal("0.00000001")),
+                reduce_only=False,
+                decision_at=decision_at,
+                quote_at=decision_at,
+                risk_snapshot_id=(
+                    getattr(order_service, "risk_snapshot_id", "")
+                    or f"sleeve:{decision_at.isoformat()}"
+                ),
+                order_type=style["order_type"],
+                limit_price=(
+                    Decimal(str(style["limit_price"]))
+                    if style.get("limit_price") is not None
+                    else None
+                ),
+                tif="day",
+                extended_hours=bool(style.get("extended_hours")),
+                reference_price=Decimal(str(price)),
+            )
+            submission = order_service.enqueue(intent)
+            if not submission.decision.allowed:
+                _log(
+                    f"[sleeve] gate blocked BUY {symbol}: "
+                    f"{','.join(submission.decision.reason_codes)}",
+                    "yellow",
+                )
+            return submission.accepted
+
         cfg = _residual_sleeve_config(cached_strategies)
         if not cfg["enabled"] or portfolio_emulator is None:
             return
@@ -3231,13 +3383,11 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
             deploy = min(idle, room)
             if deploy < max(50.0, cfg["min_deploy_pct"] * nav):
                 return
-            bok = _submit_portfolio_signal(
-                portfolio_emulator,
+            bok = _submit_deploy(
                 bsym,
-                1,
                 bpx,
-                timestamp=current_time,
-                cash_per_trade=deploy,
+                deploy,
+                f"bear-leg park regime={regime}",
                 order_source="residual_bear_deploy",
             )
             if _signal_result_is_confirmed(bok):
@@ -3290,13 +3440,11 @@ def _residual_sleeve_deploy(portfolio_emulator, prices, current_time, cached_str
         idle = cash - park_floor_pct * nav
         if idle < max(50.0, cfg["min_deploy_pct"] * nav):
             return
-        ok = _submit_portfolio_signal(
-            portfolio_emulator,
+        ok = _submit_deploy(
             sym,
-            1,
             px,
-            timestamp=current_time,
-            cash_per_trade=idle,
+            idle,
+            "idle-cash park",
             order_source="residual_bull_deploy",
         )
         if _signal_result_is_confirmed(ok):
@@ -5770,7 +5918,142 @@ def _live_state_snapshot_worker(instance_id_val: str, adapter) -> None:
         pass
 
 
-def _execute_live_command(adapter, cmd: dict) -> tuple[bool, str, dict]:
+def _live_order_dependency_snapshot(adapter, intent):
+    """Build a cache-only dependency view for the pure stock order gate."""
+    from decimal import Decimal
+    from live_orders import DependencySnapshot, Health, OrderSource
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    with _live_order_dependency_lock:
+        state = dict(_live_order_dependency_state)
+    position_map = dict(getattr(adapter, "_positions", {}) or {})
+    symbol = str(intent.symbol).strip().upper()
+    position_quantity = Decimal(str(position_map.get(symbol, 0) or 0))
+    quote_price = intent.reference_price
+    if quote_price is None:
+        quote_price = Decimal(
+            str((getattr(adapter, "_last_prices", {}) or {}).get(symbol, 0) or 0)
+        )
+    positions_health = state.get("positions", "unknown")
+    if getattr(adapter, "_positions_stale_since", None) is not None:
+        positions_health = "unhealthy"
+    positions_at = state.get("positions_at")
+    if not isinstance(positions_at, datetime.datetime):
+        positions_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+    risk_snapshot_id = str(state.get("risk_snapshot_id") or intent.risk_snapshot_id)
+    account_id = str(
+        globals().get("live_brokerage_id")
+        or getattr(adapter, "_account_id", None)
+        or getattr(adapter, "_instance_id", "")
+    )
+    instance_identity = str(getattr(adapter, "_instance_id", "") or instance_id)
+    quote_health = (
+        Health.HEALTHY if quote_price > 0 else Health.UNKNOWN
+    )
+    return DependencySnapshot(
+        account_id=account_id,
+        instance_id=instance_identity,
+        observed_at=now_utc,
+        armed=bool(
+            globals().get("mode") == MODE_LIVE
+            and str(globals().get("live_broker_type") or "").lower() == "alpaca"
+            and _live_stock_order_service is not None
+        ),
+        kill_switch=Health(state.get("kill_switch", "unknown")),
+        quote=quote_health,
+        cash=Health(state.get("cash", "unknown")),
+        positions=Health(positions_health),
+        calendar=Health(state.get("calendar", "unknown")),
+        persistence=Health(state.get("persistence", "unknown")),
+        risk_state=Health(state.get("risk_state", "unknown")),
+        watchdog=Health(state.get("watchdog", "unknown")),
+        quote_symbol=symbol,
+        quote_price=quote_price,
+        quote_at=intent.quote_at,
+        position_symbol=symbol,
+        position_quantity=position_quantity,
+        positions_at=positions_at,
+        available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
+        market_open=bool(state.get("market_open", False)),
+        risk_snapshot_id=risk_snapshot_id,
+        open_order_idempotency_keys=frozenset(),
+        authorized_sources=frozenset(OrderSource),
+    )
+
+
+def _build_strategy_stock_intent(
+        order_service, portfolio, *, symbol, decision, price, current_time,
+        cash_to_use, sell_fraction, action_intents, is_risk_exit,
+        risk_snapshot_id, quote_at):
+    """Create the immutable intent for one normal/risk strategy emission."""
+    from decimal import Decimal
+    from live_orders import OrderIntent, OrderSide, OrderSource
+
+    decision_at = current_time
+    if not isinstance(decision_at, datetime.datetime):
+        decision_at = datetime.datetime.now(datetime.timezone.utc)
+    elif decision_at.tzinfo is None:
+        decision_at = decision_at.replace(tzinfo=datetime.timezone.utc)
+    if decision == 1:
+        quantity = (
+            Decimal(str(cash_to_use)) / Decimal(str(price))
+        ).quantize(Decimal("0.00000001"))
+    else:
+        held_quantity = Decimal(str(
+            (getattr(portfolio, "_positions", {}) or {}).get(symbol, 0) or 0
+        ))
+        fraction = max(
+            0.0,
+            min(1.0, float(sell_fraction if sell_fraction is not None else 1.0)),
+        )
+        quantity = (
+            held_quantity * Decimal(str(fraction))
+        ).quantize(Decimal("0.00000001"))
+    if quantity <= 0:
+        raise ValueError("computed order quantity <= 0")
+    side = "buy" if decision == 1 else "sell"
+    style = (
+        portfolio._order_style_for_now(price, side, decision_at)
+        if hasattr(portfolio, "_order_style_for_now")
+        else {
+            "order_type": "market",
+            "limit_price": None,
+            "extended_hours": False,
+        }
+    )
+    source = (
+        OrderSource.RISK_EXIT if is_risk_exit else OrderSource.STRATEGY
+    )
+    reason = (
+        ",".join(sorted(action_intents))
+        if action_intents
+        else ("risk exit" if is_risk_exit else "strategy signal")
+    )
+    return OrderIntent(
+        account_id=order_service.account_id,
+        instance_id=order_service.instance_id,
+        source=source,
+        reason=reason,
+        symbol=symbol,
+        side=OrderSide.BUY if decision == 1 else OrderSide.SELL,
+        quantity=quantity,
+        reduce_only=(decision == -1),
+        decision_at=decision_at,
+        quote_at=quote_at,
+        risk_snapshot_id=risk_snapshot_id,
+        order_type=style["order_type"],
+        limit_price=(
+            Decimal(str(style["limit_price"]))
+            if style.get("limit_price") is not None
+            else None
+        ),
+        tif="day",
+        extended_hours=bool(style.get("extended_hours")),
+        reference_price=Decimal(str(price)),
+    )
+
+
+def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool, str, dict]:
     """Run one command against the live adapter. Returns (success, error, result)."""
     ctype = str(cmd.get("type") or "").lower()
     payload = dict(cmd.get("payload") or {})
@@ -5843,25 +6126,55 @@ def _execute_live_command(adapter, cmd: dict) -> tuple[bool, str, dict]:
                 return (False, "close_position qty must be a number", {})
             if qty <= 0:
                 return (False, f"no open long position for {symbol}", {})
+            if order_service is None:
+                return (False, "unified live order service unavailable", {})
             last_prices = dict(getattr(adapter, "_last_prices", {}) or {})
             price = float(last_prices.get(symbol, 0.0) or 0.0)
-            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            import live_state as _ls_mod
-            # Canonical signature: (instance_id, symbol, bar_iso, side, retry_n)
-            coid = _ls_mod.make_client_order_id(str(instance_id), symbol, now_iso, "sell", 0)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            quote_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
             try:
-                ref = adapter.submit_order(
-                    symbol=symbol, side="sell", qty=qty, notional=None,
-                    order_type="market", limit_price=None, tif="day",
-                    extended_hours=False, client_order_id=coid,
-                )
+                mark = getattr(adapter, "_market_marks", None)
+                mark = mark.get(symbol) if mark is not None else None
+                if mark is not None and getattr(mark, "observed_at", None) is not None:
+                    quote_at = mark.observed_at
+                    price = float(mark.price)
+            except Exception:
+                pass
+            from decimal import Decimal
+            from live_orders import OrderIntent, OrderSide, OrderSource
+            intent = OrderIntent(
+                account_id=order_service.account_id,
+                instance_id=order_service.instance_id,
+                source=OrderSource.MANUAL,
+                reason=str(payload.get("reason") or "operator close position"),
+                symbol=symbol,
+                side=OrderSide.SELL,
+                quantity=Decimal(str(qty)),
+                reduce_only=True,
+                decision_at=now_utc,
+                quote_at=quote_at,
+                risk_snapshot_id=(
+                    getattr(order_service, "risk_snapshot_id", "")
+                    or f"manual:{now_utc.isoformat()}"
+                ),
+                reference_price=Decimal(str(price)) if price > 0 else None,
+            )
+            try:
+                submission = order_service.enqueue(intent)
             except Exception as _se:
-                return (False, f"submit_order failed: {_se}", {})
+                return (False, f"order service failed: {_se}", {})
+            if not submission.decision.allowed:
+                return (
+                    False,
+                    "order gate blocked: " + ",".join(submission.decision.reason_codes),
+                    {"reason_codes": list(submission.decision.reason_codes)},
+                )
+            ref = submission.reference
             return (True, "", {
                 "symbol": symbol,
-                "qty": qty,
+                "qty": float(submission.decision.approved_quantity),
                 "order_id": getattr(ref, "broker_order_id", None),
-                "client_order_id": coid,
+                "client_order_id": intent.idempotency_key,
                 "last_price": price,
             })
 
@@ -5908,24 +6221,73 @@ def _execute_live_command(adapter, cmd: dict) -> tuple[bool, str, dict]:
             # extended_hours is only valid for LIMIT + DAY.
             if extended_hours and (order_type != "limit" or tif != "day"):
                 return (False, "submit_order: extended_hours requires order_type=limit + tif=day", {})
-            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            import live_state as _ls_mod
-            # Canonical signature: (instance_id, symbol, bar_iso, side, retry_n)
-            coid = _ls_mod.make_client_order_id(str(instance_id), symbol, now_iso, side, 0)
+            if order_service is None:
+                return (False, "unified live order service unavailable", {})
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            quote_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+            quote_price = 0.0
             try:
-                ref = adapter.submit_order(
-                    symbol=symbol, side=side, qty=qty, notional=notional,
-                    order_type=order_type, limit_price=limit_price, tif=tif,
-                    extended_hours=extended_hours, client_order_id=coid,
+                mark_book = getattr(adapter, "_market_marks", None)
+                mark = mark_book.get(symbol) if mark_book is not None else None
+                if mark is not None:
+                    quote_at = mark.observed_at
+                    quote_price = float(mark.price)
+            except Exception:
+                pass
+            if quote_price <= 0:
+                quote_price = float(
+                    (getattr(adapter, "_last_prices", {}) or {}).get(symbol, 0) or 0
                 )
+            if qty is None:
+                if quote_price <= 0:
+                    return (False, "submit_order: fresh quote required for notional sizing", {})
+                qty = float(notional) / quote_price
+            from decimal import Decimal
+            from live_orders import OrderIntent, OrderSide, OrderSource
+            intent = OrderIntent(
+                account_id=order_service.account_id,
+                instance_id=order_service.instance_id,
+                source=OrderSource.MANUAL,
+                reason=str(payload.get("reason") or "operator submitted order"),
+                symbol=symbol,
+                side=OrderSide(side),
+                quantity=Decimal(str(qty)),
+                reduce_only=bool(payload.get("reduce_only", side == "sell")),
+                decision_at=now_utc,
+                quote_at=quote_at,
+                risk_snapshot_id=(
+                    getattr(order_service, "risk_snapshot_id", "")
+                    or f"manual:{now_utc.isoformat()}"
+                ),
+                order_type=order_type,
+                limit_price=(
+                    Decimal(str(limit_price)) if limit_price is not None else None
+                ),
+                tif=tif,
+                extended_hours=extended_hours,
+                reference_price=(
+                    Decimal(str(quote_price)) if quote_price > 0 else None
+                ),
+            )
+            try:
+                submission = order_service.enqueue(intent)
             except Exception as _se:
-                return (False, f"submit_order failed: {_se}", {})
+                return (False, f"order service failed: {_se}", {})
+            if not submission.decision.allowed:
+                return (
+                    False,
+                    "order gate blocked: " + ",".join(submission.decision.reason_codes),
+                    {"reason_codes": list(submission.decision.reason_codes)},
+                )
+            ref = submission.reference
             return (True, "", {
-                "symbol": symbol, "side": side, "qty": qty, "notional": notional,
+                "symbol": symbol, "side": side,
+                "qty": float(submission.decision.approved_quantity),
+                "notional": notional,
                 "order_type": order_type, "limit_price": limit_price, "tif": tif,
                 "extended_hours": extended_hours,
                 "order_id": getattr(ref, "broker_order_id", None),
-                "client_order_id": coid,
+                "client_order_id": intent.idempotency_key,
             })
 
         return (False, f"unknown command type: {ctype!r}", {})
@@ -5933,7 +6295,7 @@ def _execute_live_command(adapter, cmd: dict) -> tuple[bool, str, dict]:
         return (False, f"{type(_e).__name__}: {_e}", {})
 
 
-def _live_state_command_worker(instance_id_val: str, adapter) -> None:
+def _live_state_command_worker(instance_id_val: str, adapter, order_service=None) -> None:
     """Poll LiveCommands every ~1s for pending commands for this instance and
     execute them sequentially. We intentionally use polling not changefeed
     here: commands are infrequent (operator actions), and polling is simpler
@@ -5958,7 +6320,7 @@ def _live_state_command_worker(instance_id_val: str, adapter) -> None:
                 continue
             cmd_id = cmd.get("id")
             _log(f"Live command received: type={cmd.get('type')} id={cmd_id} payload={cmd.get('payload')}", "cyan")
-            ok, err, result = _execute_live_command(adapter, cmd)
+            ok, err, result = _execute_live_command(adapter, cmd, order_service)
             if ok:
                 _ls_mod.complete_command(r, conn_local, cmd_id, result=result)
                 _log(f"Live command {cmd_id} completed: {result}", "green")
@@ -5981,7 +6343,7 @@ def _live_state_command_worker(instance_id_val: str, adapter) -> None:
         pass
 
 
-def _start_live_trading_threads(adapter) -> None:
+def _start_live_trading_threads(adapter, order_service=None) -> None:
     """Spawn snapshot + command processor threads once the adapter is ready."""
     global _live_trading_snapshot_thread, _live_trading_command_thread
     try:
@@ -6010,7 +6372,7 @@ def _start_live_trading_threads(adapter) -> None:
     try:
         _live_trading_command_thread = threading.Thread(
             target=_live_state_command_worker,
-            args=(str(instance_id), adapter),
+            args=(str(instance_id), adapter, order_service),
             daemon=True,
             name="live-state-commands",
         )
@@ -6709,6 +7071,40 @@ elif mode == MODE_LIVE:
             # order authority (fail closed if the state is unreadable).
             live_adapter = _install_legacy_containment_gate(
                 live_adapter, str(instance_id))
+            # Task 7 is intentionally stock/Alpaca-only. Robinhood, crypto,
+            # and prediction-market adapters retain their existing paths.
+            if str(live_broker_type or "").strip().lower() == "alpaca":
+                from live_state import LiveOrderService
+                _gate_account_id = str(
+                    live_brokerage_id
+                    or getattr(live_adapter, "_account_id", None)
+                    or getattr(live_adapter, "_instance_id", instance_id)
+                )
+                _live_stock_order_service = LiveOrderService(
+                    account_id=_gate_account_id,
+                    instance_id=str(instance_id),
+                    snapshot_provider=lambda _intent: _live_order_dependency_snapshot(
+                        live_adapter, _intent
+                    ),
+                    # Bound method injection only; every CALL occurs inside
+                    # LiveOrderService after UnifiedOrderGate approval.
+                    transport=live_adapter.submit_order,
+                )
+                _gate_now = datetime.datetime.now(datetime.timezone.utc)
+                with _live_order_dependency_lock:
+                    _live_order_dependency_state.update({
+                        "cash": "healthy",
+                        "positions": "healthy",
+                        "persistence": (
+                            "healthy"
+                            if getattr(live_adapter, "_wal", None) is not None
+                            else "unknown"
+                        ),
+                        "cash_at": _gate_now,
+                        "positions_at": _gate_now,
+                    })
+            else:
+                _live_stock_order_service = None
         except _BrokerError as _be:
             _log(f"Failed to build live broker adapter: {_be}", "red")
             # Phase C (2026-04-29): Discord alert on adapter build failure.
@@ -7287,7 +7683,8 @@ elif mode == MODE_LIVE:
         # (Fix 6) so boot-time reconcile / refresh_orders_today lines are
         # already in the file.
         try:
-            _start_live_trading_threads(live_adapter)
+            _start_live_trading_threads(
+                live_adapter, _live_stock_order_service)
         except Exception as _t_e:
             _log(f"Could not start live-trading state threads: {_t_e}", "yellow")
     except Exception as _e_live:
@@ -9333,6 +9730,16 @@ while not shutdown_requested:
                 # the cycle if both endpoints can't be refreshed. Every step
                 # is logged so the operator can see what happened each hour.
                 _precycle_ok = True
+                if (
+                    mode == MODE_LIVE
+                    and str(live_broker_type or "").strip().lower() == "alpaca"
+                ):
+                    with _live_order_dependency_lock:
+                        _live_order_dependency_state.update({
+                            "risk_state": "unknown",
+                            "watchdog": "unknown",
+                            "risk_snapshot_id": "",
+                        })
                 # 2026-05-07 scheduler refactor: skip pre-cycle RH refresh on
                 # IDLE ticks. Strategy returns {} immediately on IDLE so
                 # there's no point burning a fresh refresh_account /
@@ -9436,12 +9843,33 @@ while not shutdown_requested:
                         "refresh_positions", live_adapter.refresh_positions, 5
                     )
                     if _acct_ok and _pos_ok:
+                        if str(live_broker_type or "").strip().lower() == "alpaca":
+                            _fresh_dependency_at = datetime.datetime.now(
+                                datetime.timezone.utc
+                            )
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state.update({
+                                    "cash": "healthy",
+                                    "positions": "healthy",
+                                    "cash_at": _fresh_dependency_at,
+                                    "positions_at": _fresh_dependency_at,
+                                })
                         _log(
                             "Pre-cycle RH refresh COMPLETE — proceeding to "
                             "hourly cycle with fresh data",
                             "green",
                         )
                     else:
+                        if str(live_broker_type or "").strip().lower() == "alpaca":
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state.update({
+                                    "cash": (
+                                        "healthy" if _acct_ok else "unknown"
+                                    ),
+                                    "positions": (
+                                        "healthy" if _pos_ok else "unknown"
+                                    ),
+                                })
                         _precycle_ok = False
                         _log(
                             f"Pre-cycle RH refresh FAILED "
@@ -9451,6 +9879,7 @@ while not shutdown_requested:
                             "red",
                         )
 
+                _run_once_gate_ok = False
                 if not _precycle_ok:
                     # Hard-skip the hourly cycle.
                     run_once_results = []
@@ -9631,6 +10060,7 @@ while not shutdown_requested:
                                     run_once_results = _rr_fut.result(
                                         timeout=_wd_sec
                                     )
+                                    _run_once_gate_ok = True
                                     # 2026-05-07 scheduler refactor: reset
                                     # consecutive-skip counter on success.
                                     _strategy_consecutive_skips = 0
@@ -9744,6 +10174,26 @@ while not shutdown_requested:
                 # this line, a quiet broker after the per-symbol decision
                 # logs is hard to distinguish from a wedge.
                 if mode == MODE_LIVE:
+                    if (
+                        str(live_broker_type or "").strip().lower() == "alpaca"
+                        and _precycle_ok
+                        and _run_once_gate_ok
+                    ):
+                        _risk_snapshot_id = (
+                            f"risk:{str(instance_id)}:"
+                            f"{current_time.isoformat()}:"
+                            f"{int(_strategy_tick_n)}"
+                        )
+                        with _live_order_dependency_lock:
+                            _live_order_dependency_state.update({
+                                "risk_state": "healthy",
+                                "watchdog": "healthy",
+                                "risk_snapshot_id": _risk_snapshot_id,
+                            })
+                        if _live_stock_order_service is not None:
+                            _live_stock_order_service.risk_snapshot_id = (
+                                _risk_snapshot_id
+                            )
                     try:
                         _n_results = len(run_once_results) if isinstance(run_once_results, (list, tuple)) else 0
                         _log(
@@ -10530,16 +10980,36 @@ while not shutdown_requested:
                     try:
                         _inst = _ks_fut.result(timeout=10.0)
                         if _inst and _inst.get("runCommand") is False:
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state["kill_switch"] = (
+                                    "unhealthy"
+                                )
                             _halt_reason = str(_inst.get("halt_reason") or "kill switch flipped")
                             _log(f"KILL SWITCH ACTIVE: {_halt_reason} — skipping all submits this tick", "red")
                             _exec_order = []  # short-circuit the submit loop
+                        elif _inst is not None:
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state["kill_switch"] = (
+                                    "healthy"
+                                )
+                        else:
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state["kill_switch"] = (
+                                    "unknown"
+                                )
                     except _live_cf.TimeoutError:
+                        with _live_order_dependency_lock:
+                            _live_order_dependency_state["kill_switch"] = (
+                                "unknown"
+                            )
                         _log(
                             "Kill-switch poll hard-timeout (>10s) — "
                             "fail-open, continuing trading",
                             "yellow",
                         )
                 except Exception as _ks_e:
+                    with _live_order_dependency_lock:
+                        _live_order_dependency_state["kill_switch"] = "unknown"
                     _log(f"Kill-switch poll failed: {type(_ks_e).__name__}: {_ks_e} (failing open — continuing)", "yellow")
 
             # 2026-04-22 Fix 3b: sync emulator cash from Alpaca's authoritative
@@ -10560,6 +11030,13 @@ while not shutdown_requested:
                         )
                         raise RuntimeError("cash-sync timeout")
                     _post_sync_cash = float(getattr(_dto, "cash", _pre_sync_cash) or _pre_sync_cash)
+                    with _live_order_dependency_lock:
+                        _live_order_dependency_state.update({
+                            "cash": "healthy",
+                            "cash_at": datetime.datetime.now(
+                                datetime.timezone.utc
+                            ),
+                        })
                     if abs(_post_sync_cash - _pre_sync_cash) > 0.01:
                         _log(
                             f"Pre-cycle cash sync: emulator ${_pre_sync_cash:.2f} "
@@ -10575,17 +11052,55 @@ while not shutdown_requested:
                         )
                         globals()["_cash_sync_was_drift"] = False
                 except Exception as _sync_e:
+                    with _live_order_dependency_lock:
+                        _live_order_dependency_state["cash"] = "unknown"
                     _log(
                         f"Pre-cycle cash sync failed: {type(_sync_e).__name__}: "
                         f"{_sync_e}; proceeding with cached emulator._cash",
                         "yellow",
                     )
+                if (
+                    str(live_broker_type or "").strip().lower() == "alpaca"
+                    and _live_stock_order_service is not None
+                ):
+                    try:
+                        _pos_fut = _PRICE_FETCH_EXECUTOR.submit(
+                            portfolio_emulator.refresh_positions
+                        )
+                        _pos_fut.result(timeout=15.0)
+                        with _live_order_dependency_lock:
+                            _live_order_dependency_state.update({
+                                "positions": "healthy",
+                                "positions_at": datetime.datetime.now(
+                                    datetime.timezone.utc
+                                ),
+                            })
+                    except Exception as _pos_sync_e:
+                        with _live_order_dependency_lock:
+                            _live_order_dependency_state["positions"] = (
+                                "unknown"
+                            )
+                        _log(
+                            f"Pre-submit positions sync failed: "
+                            f"{type(_pos_sync_e).__name__}: {_pos_sync_e}; "
+                            "unified order gate will fail closed",
+                            "yellow",
+                        )
 
             # A6 hoisted: broker-calendar market-open check ONCE per tick (not
             # per-symbol) to avoid log spam during holidays/half-days. Dedup
             # mirrors the "Outside session" / "Running" pattern so we only
             # print on transitions + periodic heartbeats.
             _live_market_open_this_tick = True
+            if (
+                mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+            ):
+                with _live_order_dependency_lock:
+                    _live_order_dependency_state.update({
+                        "calendar": "unknown",
+                        "market_open": False,
+                    })
             if (not _is_crypto_instance_runtime()) and mode == MODE_LIVE and portfolio_emulator is not None and _exec_order:
                 try:
                     # 2026-05-06: bound the market-open check at 10s. Some
@@ -10596,7 +11111,19 @@ while not shutdown_requested:
                     )
                     try:
                         _live_market_open_this_tick = bool(_mo_fut.result(timeout=10.0))
+                        if str(live_broker_type or "").strip().lower() == "alpaca":
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state.update({
+                                    "calendar": "healthy",
+                                    "market_open": _live_market_open_this_tick,
+                                })
                     except _live_cf.TimeoutError:
+                        if str(live_broker_type or "").strip().lower() == "alpaca":
+                            with _live_order_dependency_lock:
+                                _live_order_dependency_state.update({
+                                    "calendar": "unknown",
+                                    "market_open": False,
+                                })
                         _log(
                             "Market-open check hard-timeout (>10s) — "
                             "fail-open, treating market as open this tick",
@@ -10604,6 +11131,12 @@ while not shutdown_requested:
                         )
                         _live_market_open_this_tick = True
                 except Exception:
+                    if str(live_broker_type or "").strip().lower() == "alpaca":
+                        with _live_order_dependency_lock:
+                            _live_order_dependency_state.update({
+                                "calendar": "unknown",
+                                "market_open": False,
+                            })
                     _live_market_open_this_tick = True  # fail-open on adapter issues
                 _last_mkt = _loop_log_last_market_closed
                 if not _live_market_open_this_tick:
@@ -10683,6 +11216,9 @@ while not shutdown_requested:
                             break
                         if _p and float(_p) > 0:
                             prices[_s] = float(_p)
+                            _live_order_quote_times[
+                                str(_s).strip().upper()
+                            ] = datetime.datetime.now(datetime.timezone.utc)
                             _refreshed += 1
                     if _refreshed:
                         _log(f"Pre-submit quote refresh: {_refreshed}/{len(_exec_syms)} {_bt} symbols updated", "cyan")
@@ -10746,7 +11282,14 @@ while not shutdown_requested:
                 data, prices, current_time, _cached_strategies,
                 key=key, secret=secret)
             _residual_sleeve_release(
-                portfolio_emulator, prices, current_time, _cached_strategies)
+                portfolio_emulator, prices, current_time, _cached_strategies,
+                (
+                    _live_stock_order_service
+                    if mode == MODE_LIVE
+                    and str(live_broker_type or "").strip().lower() == "alpaca"
+                    else None
+                ),
+            )
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
                 normalized = None  # reset per-symbol to avoid stale values from previous iteration
@@ -11329,6 +11872,7 @@ while not shutdown_requested:
                             # but short-circuiting here avoids the round-trip
                             # and gives operators a clear log trail.
                             _side_word = "buy" if decision == 1 else "sell"
+                            _z21_intents = set()
 
                             # Z2.1 phase 1 (log-only): observe ghost-sells in
                             # BOTH live and backtest modes. Action is "sell"
@@ -11410,18 +11954,96 @@ while not shutdown_requested:
                             _mpg_submit_ok = False
                             if mode == MODE_LIVE:
                                 try:
-                                    _es_fut = _PRICE_FETCH_EXECUTOR.submit(
-                                        _submit_portfolio_signal,
-                                        portfolio_emulator,
-                                        symbol,
-                                        decision,
-                                        price,
-                                        timestamp=current_time,
-                                        cash_per_trade=cash_to_use,
-                                        sell_fraction=sell_fraction,
-                                        order_source="main_signal",
+                                    _is_alpaca_stock_gate = (
+                                        str(live_broker_type or "").strip().lower()
+                                        == "alpaca"
+                                        and _live_stock_order_service is not None
+                                        and not _is_crypto_instance_runtime()
                                     )
-                                    _es_placed = _es_fut.result(timeout=90.0)
+                                    if _is_alpaca_stock_gate:
+                                        _risk_exit_intents = {
+                                            "fast_loser_cut",
+                                            "trailing_stop_sell",
+                                            "circuit_breaker_sell",
+                                            "hold_limit_sell",
+                                            "deep_loser_protect",
+                                            "forced_exit",
+                                            "downtrend_protection_sell",
+                                        }
+                                        with _live_order_dependency_lock:
+                                            _risk_id = str(
+                                                _live_order_dependency_state.get(
+                                                    "risk_snapshot_id"
+                                                )
+                                                or "risk:unavailable"
+                                            )
+                                        _authoritative_quote_at = (
+                                            _live_order_quote_times.get(
+                                                str(symbol).strip().upper()
+                                            )
+                                            or datetime.datetime.fromtimestamp(
+                                                0, datetime.timezone.utc
+                                            )
+                                        )
+                                        _stock_intent = (
+                                            _build_strategy_stock_intent(
+                                                _live_stock_order_service,
+                                                portfolio_emulator,
+                                                symbol=symbol,
+                                                decision=decision,
+                                                price=price,
+                                                current_time=current_time,
+                                                cash_to_use=cash_to_use,
+                                                sell_fraction=sell_fraction,
+                                                action_intents=_z21_intents,
+                                                is_risk_exit=(
+                                                    decision == -1
+                                                    and (
+                                                        bool(
+                                                            _z21_intents
+                                                            & _risk_exit_intents
+                                                        )
+                                                        or symbol
+                                                        in nexus_sell_enforcement
+                                                    )
+                                                ),
+                                                risk_snapshot_id=_risk_id,
+                                                quote_at=(
+                                                    _authoritative_quote_at
+                                                ),
+                                            )
+                                        )
+                                        _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                            _live_stock_order_service.enqueue,
+                                            _stock_intent,
+                                        )
+                                        _submission = _es_fut.result(
+                                            timeout=90.0
+                                        )
+                                        _es_placed = _submission.accepted
+                                        if not _submission.decision.allowed:
+                                            _log(
+                                                f"ORDER GATE BLOCKED "
+                                                f"{_side_word.upper()} "
+                                                f"{symbol}: "
+                                                f"{','.join(_submission.decision.reason_codes)}",
+                                                "red",
+                                            )
+                                    else:
+                                        # Robinhood and crypto compatibility
+                                        # paths are intentionally unchanged.
+                                        _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                            portfolio_emulator.execute_signal,
+                                            symbol,
+                                            decision,
+                                            price,
+                                            timestamp=current_time,
+                                            cash_per_trade=cash_to_use,
+                                            sell_fraction=sell_fraction,
+                                        )
+                                        _es_placed = _es_fut.result(
+                                            timeout=90.0
+                                        )
                                     _mpg_submit_ok = bool(_es_placed)
                                     # Telemetry only — record the confirmed
                                     # buy/sell + reasoning for the app's "Bot
@@ -11626,7 +12248,15 @@ while not shutdown_requested:
                         # residual_sleeve_enabled=true.
                         _residual_sleeve_deploy(
                             portfolio_emulator, prices, current_time,
-                            _cached_strategies)
+                            _cached_strategies,
+                            (
+                                _live_stock_order_service
+                                if mode == MODE_LIVE
+                                and str(live_broker_type or "").strip().lower()
+                                == "alpaca"
+                                else None
+                            ),
+                        )
                     if not _skip_snapshot:
                         portfolio_emulator.save_portfolio_snapshot(prices, timestamp=current_time)
     
