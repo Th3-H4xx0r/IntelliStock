@@ -43,3 +43,26 @@ def test_live_broker_gate_allows_matching_deployed_artifact(monkeypatch):
                "fingerprint": report_fingerprint(report)}
     monkeypatch.setenv("INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256", digest)
     assert inst._assert_live_broker_start_allowed("test-instance", {"live_readiness_report": payload}) is None
+
+
+def test_broker_subprocess_receives_only_broker_socket_token(monkeypatch):
+    import instance as inst
+    monkeypatch.setattr(inst, "args_list", ["instance.py", "test-instance"])
+    monkeypatch.setattr(inst, "broker_process", None)
+    monkeypatch.setattr(inst, "_crash_entered", False)
+    monkeypatch.setattr(inst, "_crash_loop_latched", False)
+    monkeypatch.setattr(inst, "_assert_live_broker_start_allowed", lambda *args: None)
+    monkeypatch.setattr(inst, "_maybe_start_alpha_watchdog", lambda *args: None)
+    fake_r = MagicMock()
+    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = {"id": "test-instance"}
+    monkeypatch.setattr(inst, "r", fake_r)
+    monkeypatch.setattr(inst, "get_conn", lambda: MagicMock())
+    monkeypatch.setenv("INSTANCE_SOCKET_SUPERVISOR_TOKEN", "supervisor")
+    monkeypatch.setenv("INSTANCE_SOCKET_BROKER_TOKEN", "broker")
+    captured = {}
+    class Proc:
+        def poll(self): return None
+    monkeypatch.setattr(inst.subprocess, "Popen", lambda *a, **kw: captured.update(kw) or Proc())
+    inst.start_broker([])
+    assert "INSTANCE_SOCKET_SUPERVISOR_TOKEN" not in captured["env"]
+    assert captured["env"]["INSTANCE_SOCKET_BROKER_TOKEN"] == "broker"

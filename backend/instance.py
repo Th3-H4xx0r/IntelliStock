@@ -458,10 +458,13 @@ def start_broker(symbols):
             'NULL', 'NULL', time_increment,
         ] + list(symbols)
     _assert_live_broker_start_allowed(instance_id, _instance_doc)
+    broker_env = os.environ.copy()
+    broker_env.pop("INSTANCE_SOCKET_SUPERVISOR_TOKEN", None)
     broker_process = subprocess.Popen(
         cmd,
         cwd=BACKEND_DIR,
         creationflags=0,  # same terminal (no CREATE_NEW_CONSOLE)
+        env=broker_env,
     )
     _maybe_start_alpha_watchdog(instance_id)
     if symbols:

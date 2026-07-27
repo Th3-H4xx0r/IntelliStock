@@ -10,8 +10,8 @@ import argparse
 import hashlib
 import json
 import os
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from rethinkdb import RethinkDB
@@ -27,7 +27,7 @@ class AccountInvariant:
     @classmethod
     def from_docs(cls, *, positions: Iterable[Mapping], orders: Iterable[Mapping]):
         return cls(
-            positions=_document_hashes(positions),
+            positions=_position_hashes(positions),
             orders=_document_hashes(orders),
         )
 
@@ -54,14 +54,38 @@ class InactiveVerification:
     evidence_hash: str
 
 
+def _number(value):
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise RuntimeError("position number is malformed")
+    if not number.is_finite():
+        raise RuntimeError("position number is malformed")
+    return format(number.normalize(), "f")
+
+
+def _position_hashes(documents: Iterable[Mapping]) -> tuple[str, ...]:
+    encoded = []
+    for document in documents or ():
+        if not isinstance(document, Mapping):
+            raise RuntimeError("broker snapshot contains malformed records")
+        asset_id, symbol, side = document.get("asset_id"), document.get("symbol"), document.get("side")
+        if not isinstance(symbol, str) or not symbol or not isinstance(side, str) or not side or not (isinstance(asset_id, str) and asset_id or symbol):
+            raise RuntimeError("position identity is incomplete")
+        document = {"asset_id": asset_id or "", "symbol": symbol, "side": side,
+                    "qty": _number(document.get("qty")), "avg_entry_price": _number(document.get("avg_entry_price"))}
+        normalized = json.dumps(document, sort_keys=True, separators=(",", ":"),
+                                default=str)
+        encoded.append(hashlib.sha256(normalized.encode("utf-8")).hexdigest())
+    return tuple(sorted(encoded))
+
+
 def _document_hashes(documents: Iterable[Mapping]) -> tuple[str, ...]:
     encoded = []
     for document in documents or ():
         if not isinstance(document, Mapping):
             raise RuntimeError("broker snapshot contains malformed records")
-        normalized = json.dumps(document, sort_keys=True, separators=(",", ":"),
-                                default=str)
-        encoded.append(hashlib.sha256(normalized.encode("utf-8")).hexdigest())
+        encoded.append(hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest())
     return tuple(sorted(encoded))
 
 
@@ -144,23 +168,25 @@ def _snapshot_reader(conn, instance_id: str, broker_snapshot_reader, worker_stat
     )
 
 
-def _validate_artifact(path: str, expected_hash: str) -> None:
-    artifact = Path(path)
-    if not artifact.is_file():
-        raise RuntimeError("artifact is unavailable")
-    digest = hashlib.sha256()
-    with artifact.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    if artifact.stat().st_size <= 0 or digest.hexdigest() != expected_hash:
-        raise RuntimeError("artifact identity is invalid")
-
-
-def _docker_worker_state(instance_id: str) -> str:
-    try:
+def _validate_deployed_image(image_ref: str, expected_hash: str, *, client=None) -> None:
+    import re
+    if type(image_ref) is not str or not image_ref or type(expected_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        raise RuntimeError("deployed image identity is unavailable")
+    if client is None:
         import docker
+        client = docker.from_env()
+    image = client.images.get(image_ref)
+    if getattr(image, "id", "") != "sha256:" + expected_hash:
+        raise RuntimeError("deployed image identity is invalid")
+
+
+def _docker_worker_state(instance_id: str, *, client=None) -> str:
+    try:
+        if client is None:
+            import docker
+            client = docker.from_env()
         name = "intellistock-instance-" + "".join(c if c.isalnum() or c in "_.-" else "_" for c in instance_id)[:50]
-        container = docker.from_env().containers.get(name)
+        container = client.containers.get(name)
         container.reload()
         state = getattr(container, "attrs", {}).get("State", {})
         restart_policy = getattr(container, "attrs", {}).get("HostConfig", {}).get("RestartPolicy", {}).get("Name", "")
@@ -176,7 +202,7 @@ def _docker_worker_state(instance_id: str) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Read-only inactive deployment verifier")
     parser.add_argument("--instance-id", required=True)
-    parser.add_argument("--artifact", required=True)
+    parser.add_argument("--image-ref", default=os.environ.get("DOCKER_INSTANCE_IMAGE", ""))
     parser.add_argument("--host", default=os.environ.get("RETHINKDB_HOST", "localhost"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("RETHINKDB_PORT", "28015")))
     args = parser.parse_args(argv)
@@ -190,7 +216,7 @@ def main(argv=None) -> int:
     try:
         result = verify_inactive_deployment(
             lambda: _snapshot_reader(conn, args.instance_id, read_authoritative_snapshot, _docker_worker_state, expected_hash),
-            lambda: _validate_artifact(args.artifact, expected_hash),
+            lambda: _validate_deployed_image(args.image_ref, expected_hash),
         )
     finally:
         conn.close()

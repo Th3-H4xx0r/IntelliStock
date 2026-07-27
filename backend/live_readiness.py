@@ -103,11 +103,14 @@ def report_from_mapping(payload: Mapping, *, instance_id: str,
 
 def assert_live_start_allowed(report: ReadinessReport, *, deployed_artifact_hash: str | None = None) -> None:
     """Permit a real-money spawn only with a complete eligible report."""
-    if (not isinstance(report, ReadinessReport) or len(report.checks) != len(_REQUIRED_LIVE_CHECKS)
-            or {check.name for check in report.checks} != set(_REQUIRED_LIVE_CHECKS)
-            or any(type(check.passed) is not bool or not isinstance(check.reason, str) or not check.reason
-                   or not isinstance(check.evidence_hash, str) or not _SHA256_RE.fullmatch(check.evidence_hash)
-                   for check in report.checks)):
+    if (type(report) is not ReadinessReport or type(report.instance_id) is not str or not report.instance_id
+            or type(report.state) is not ReadinessState or type(report.checks) is not tuple
+            or len(report.checks) != len(_REQUIRED_LIVE_CHECKS)
+            or any(type(check) is not ReadinessCheck or type(check.name) is not str
+                   or type(check.passed) is not bool or type(check.reason) is not str or not check.reason
+                   or type(check.evidence_hash) is not str or not _SHA256_RE.fullmatch(check.evidence_hash)
+                   for check in report.checks)
+            or {check.name for check in report.checks} != set(_REQUIRED_LIVE_CHECKS)):
         raise LiveReadinessError("live readiness checks are incomplete or malformed")
     failures = [check.name for check in report.checks if not check.passed]
     if failures:
