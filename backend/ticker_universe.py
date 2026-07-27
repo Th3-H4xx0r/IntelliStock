@@ -125,7 +125,47 @@ def _get_universe() -> set[str]:
         return _UNIVERSE or set()
 
 
-def is_valid_us_ticker(ticker: str, *, strict: bool = True) -> bool:
+def load_universe_snapshot(*, context, store):
+    """Load dated universe membership for a historical decision."""
+    from point_in_time_data import load_snapshot_payload
+
+    return load_snapshot_payload(store, dataset="universe", context=context)
+
+
+def _snapshot_universe_rows(payload) -> list[dict]:
+    if isinstance(payload, dict):
+        raw_rows = payload.get("rows")
+        if not isinstance(raw_rows, list):
+            raw_rows = payload.get("symbols")
+    else:
+        raw_rows = payload
+    if not isinstance(raw_rows, (list, tuple, set)):
+        return []
+    rows: list[dict] = []
+    for raw in raw_rows:
+        if isinstance(raw, dict):
+            symbol = (
+                raw.get("sym")
+                or raw.get("symbol")
+                or raw.get("ticker")
+                or ""
+            )
+            row = dict(raw)
+            row["sym"] = str(symbol or "").strip().upper().replace(".", "-")
+        else:
+            row = {"sym": str(raw or "").strip().upper().replace(".", "-")}
+        if row["sym"]:
+            rows.append(row)
+    return rows
+
+
+def is_valid_us_ticker(
+    ticker: str,
+    *,
+    strict: bool = True,
+    context=None,
+    snapshot_store=None,
+) -> bool:
     """Return True if `ticker` looks like a real US-listed equity symbol.
 
     Validation:
@@ -148,6 +188,17 @@ def is_valid_us_ticker(ticker: str, *, strict: bool = True) -> bool:
         return False
     if not strict:
         return True
+    if context is not None and not context.is_live:
+        snapshot = load_universe_snapshot(
+            context=context,
+            store=snapshot_store,
+        )
+        membership = {
+            row["sym"]
+            for row in _snapshot_universe_rows(snapshot)
+            if _TICKER_RE.match(row["sym"])
+        }
+        return t.replace(".", "-") in membership
     universe = _get_universe()
     if not universe:
         # Fail open — Nasdaq API unreachable, don't block trading.
@@ -209,8 +260,15 @@ def _fetch_universe_meta() -> list[dict]:
         return []
 
 
-def get_breadth_universe(min_mcap: float = 2e9, min_dollar_volume: float = 5e6,
-                         price_floor: float = 5.0, top_n: int = 500) -> list[str]:
+def get_breadth_universe(
+    min_mcap: float = 2e9,
+    min_dollar_volume: float = 5e6,
+    price_floor: float = 5.0,
+    top_n: int = 500,
+    *,
+    context=None,
+    snapshot_store=None,
+) -> list[str]:
     """Liquidity-floored, dollar-volume-ranked US-equity symbols for the breadth
     scan. Cached (24h TTL, keyed by the floors). Fails open to [] so the caller
     keeps its existing (narrow) universe. Pure metadata — NOT price history, so
@@ -218,6 +276,44 @@ def get_breadth_universe(min_mcap: float = 2e9, min_dollar_volume: float = 5e6,
     downstream. (Universe membership uses current listings — a mild survivorship
     proxy for the liquidity floor, acceptable for a coarse candidate gate.)"""
     global _BREADTH_CACHE, _BREADTH_CACHE_KEY, _BREADTH_FETCHED_AT, _BREADTH_LAST_FAIL_AT
+    if context is not None and not context.is_live:
+        snapshot = load_universe_snapshot(
+            context=context,
+            store=snapshot_store,
+        )
+        snapshot_rows = _snapshot_universe_rows(snapshot)
+        has_metadata = any(
+            any(
+                field in row
+                for field in ("price", "lastsale", "volume", "mcap", "marketCap")
+            )
+            for row in snapshot_rows
+        )
+        if not has_metadata:
+            return [
+                row["sym"]
+                for row in snapshot_rows
+                if _TICKER_RE.match(row["sym"])
+            ][:max(0, int(top_n))]
+        historical_ranked: list[tuple[float, str]] = []
+        for row in snapshot_rows:
+            symbol = row["sym"]
+            price = _parse_money(row.get("price", row.get("lastsale")))
+            volume = _parse_money(row.get("volume"))
+            market_cap = _parse_money(row.get("mcap", row.get("marketCap")))
+            dollar_volume = price * volume
+            if (
+                price >= price_floor
+                and market_cap >= min_mcap
+                and dollar_volume >= min_dollar_volume
+                and _TICKER_RE.match(symbol)
+            ):
+                historical_ranked.append((dollar_volume, symbol))
+        historical_ranked.sort(reverse=True)
+        return [
+            symbol
+            for _dollar_volume, symbol in historical_ranked[:max(0, int(top_n))]
+        ]
     key = (round(min_mcap), round(min_dollar_volume), round(price_floor, 2), int(top_n))
     now = time.time()
     with _UNIVERSE_LOCK:
