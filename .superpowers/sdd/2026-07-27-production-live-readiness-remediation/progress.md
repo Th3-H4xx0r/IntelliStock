@@ -32,3 +32,5 @@ Task 4: review needs fixes (1 Critical — production backtests bypass PIT enfor
 Task 5: review needs fixes (3 Critical — stale bars relabeled as events, non-atomic fill/accounting commit, broker submission treated as confirmed fill; 3 Important and 1 Minor).
 Tasks 3-7: integrated and verified together; 477 compatibility tests passed, including Kalshi and crypto regressions.
 Task 8: complete locally; durable Alpaca lifecycle, ordered normalized event dispatch, confirmed-fill-only accounting, and persistent CAS backend implemented. 90 focused tests passed.
+Task 8: committed at cf8e0b0.
+Task 9: complete locally; broker-first startup plus continuous reconciliation, deferred ownership, manual/external quarantine, and fail-closed snapshot consistency implemented. 96 focused tests passed.

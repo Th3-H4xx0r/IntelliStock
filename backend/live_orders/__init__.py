@@ -9,6 +9,13 @@ from .service import (
     TerminalRetryExhausted,
     new_retry_intent,
 )
+from .reconcile import (
+    AuthoritativeBrokerSnapshot,
+    BrokerOrderSnapshot,
+    BrokerPositionSnapshot,
+    ReconciliationResult,
+    StartupReconciler,
+)
 from .store import (
     AppendResult,
     InMemoryLifecycleBackend,
@@ -31,7 +38,10 @@ from .types import (
 
 __all__ = [
     "AppendResult",
+    "AuthoritativeBrokerSnapshot",
     "BrokerOrderEvent",
+    "BrokerOrderSnapshot",
+    "BrokerPositionSnapshot",
     "ConfirmedFill",
     "DependencySnapshot",
     "EventApplication",
@@ -48,8 +58,10 @@ __all__ = [
     "OrderSource",
     "OrderSubmission",
     "Reservation",
+    "ReconciliationResult",
     "TERMINAL_LIFECYCLE_STATES",
     "TerminalRetryExhausted",
     "UnifiedOrderGate",
+    "StartupReconciler",
     "new_retry_intent",
 ]

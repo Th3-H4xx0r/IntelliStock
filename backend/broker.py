@@ -6054,7 +6054,9 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     }
 
 
-def _live_state_snapshot_worker(instance_id_val: str, adapter) -> None:
+def _live_state_snapshot_worker(
+    instance_id_val: str, adapter, order_service=None
+) -> None:
     """Upsert LiveState every 3s until stop_event fires.
 
     2026-04-22 Round 4 Fix 4: surface silent crashes. Previous version
@@ -6085,6 +6087,11 @@ def _live_state_snapshot_worker(instance_id_val: str, adapter) -> None:
     conn_local = None
     consecutive_failures = 0
     alert_emitted = False  # one-shot until a success resets it
+    reconciliation_interval = max(
+        15.0,
+        float(os.environ.get("ALPACA_RECONCILIATION_INTERVAL_SEC", "60")),
+    )
+    last_reconciliation_at = time.monotonic()
     # 2026-05-05 bug-sweep finding (CRITICAL): with max_workers=2 and an
     # unbounded queue, two consecutive wedges saturate the pool and every
     # subsequent submit() queues forever. Track the previous future and SKIP
@@ -6099,6 +6106,15 @@ def _live_state_snapshot_worker(instance_id_val: str, adapter) -> None:
         return
 
     def _snapshot_tick_blocking(_conn):
+        nonlocal last_reconciliation_at
+        if (
+            order_service is not None
+            and hasattr(adapter, "capture_reconciliation_snapshot")
+            and time.monotonic() - last_reconciliation_at
+            >= reconciliation_interval
+        ):
+            _reconcile_alpaca_ownership(adapter, order_service)
+            last_reconciliation_at = time.monotonic()
         _payload = _compute_live_state_snapshot(instance_id_val, adapter)
         _ls_mod.upsert_live_state(r, _conn, instance_id_val, _payload)
 
@@ -6247,6 +6263,48 @@ def _live_state_snapshot_worker(instance_id_val: str, adapter) -> None:
             conn_local.close(noreply_wait=False)
     except Exception:
         pass
+
+
+def _reconcile_alpaca_ownership(adapter, order_service):
+    """Refresh lifecycle truth before publishing any Alpaca ownership."""
+
+    from live_orders import StartupReconciler
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        broker_snapshot = adapter.capture_reconciliation_snapshot(
+            account_id=order_service.account_id
+        )
+        result = StartupReconciler(
+            lifecycle_store=order_service.lifecycle_store,
+            event_applier=order_service.apply_broker_event,
+        ).reconcile(broker_snapshot)
+        adapter.complete_startup_reconciliation(result)
+        with _live_order_dependency_lock:
+            _live_order_dependency_state.update(
+                {
+                    "positions": (
+                        "healthy" if result.healthy else "unhealthy"
+                    ),
+                    "positions_at": now_utc,
+                    "reconciliation_evidence_hash": result.evidence_hash,
+                }
+            )
+        return result
+    except Exception:
+        try:
+            adapter._reconciliation_healthy = False
+        except Exception:
+            pass
+        with _live_order_dependency_lock:
+            _live_order_dependency_state.update(
+                {
+                    "positions": "unhealthy",
+                    "positions_at": now_utc,
+                    "reconciliation_evidence_hash": "",
+                }
+            )
+        raise
 
 
 def _live_order_dependency_snapshot(adapter, intent):
@@ -6693,7 +6751,7 @@ def _start_live_trading_threads(adapter, order_service=None) -> None:
     try:
         _live_trading_snapshot_thread = threading.Thread(
             target=_live_state_snapshot_worker,
-            args=(str(instance_id), adapter),
+            args=(str(instance_id), adapter, order_service),
             daemon=True,
             name="live-state-snapshot",
         )
@@ -7451,6 +7509,12 @@ elif mode == MODE_LIVE:
                 )
 
         try:
+            _is_alpaca_runtime = (
+                str(live_broker_type or "").strip().lower() == "alpaca"
+            )
+            _effective_clean_room = bool(
+                _clean_room_mode or _is_alpaca_runtime
+            )
             live_adapter = _build_adapter(
                 broker_type=live_broker_type,
                 api_key=key,
@@ -7472,10 +7536,11 @@ elif mode == MODE_LIVE:
                 # clean_room_mode defaults False; when False the adapter
                 # uses the legacy "adopt broker state at boot" behavior.
                 initial_value=_initial_value,
-                clean_room_mode=_clean_room_mode,
+                clean_room_mode=_effective_clean_room,
                 cid_prefix=_cid_prefix,
                 clean_room_retention_days=_clean_room_retention_days,
-                seed_trades_from_broker=(not _clean_room_mode),
+                seed_trades_from_broker=(not _effective_clean_room),
+                defer_ownership_reconciliation=_is_alpaca_runtime,
             )
             # Task 6 containment: block every legacy live submission when
             # this instance's RethinkDB containment state disables legacy
@@ -7511,18 +7576,25 @@ elif mode == MODE_LIVE:
                     _live_stock_order_service.apply_broker_event,
                     account_id=_gate_account_id,
                 )
+                _reconciliation = _reconcile_alpaca_ownership(
+                    live_adapter, _live_stock_order_service
+                )
+                if not _reconciliation.healthy:
+                    _log(
+                        "Alpaca ownership reconciliation unresolved; "
+                        f"new exposure blocked ({','.join(_reconciliation.issues)})",
+                        "red",
+                    )
                 _gate_now = datetime.datetime.now(datetime.timezone.utc)
                 with _live_order_dependency_lock:
                     _live_order_dependency_state.update({
                         "cash": "healthy",
-                        "positions": "healthy",
                         "persistence": (
                             "healthy"
                             if getattr(live_adapter, "_wal", None) is not None
                             else "unknown"
                         ),
                         "cash_at": _gate_now,
-                        "positions_at": _gate_now,
                     })
             else:
                 _live_stock_order_service = None
@@ -7543,13 +7615,16 @@ elif mode == MODE_LIVE:
             except Exception:
                 pass
             sys.exit(5)
-        # Restart reconciliation: query broker for any open WAL rows.
-        try:
-            resolutions = live_adapter.reconcile_wal_with_broker()
-            if resolutions:
-                _log(f"WAL restart reconcile: {resolutions}", "cyan")
-        except Exception as _e:
-            _log(f"WAL reconcile warning: {_e}", "yellow")
+        # Compatibility-only restart reconciliation for non-Alpaca adapters.
+        # Alpaca reconciled broker truth into the append-only lifecycle before
+        # its stream was started.
+        if not _is_alpaca_runtime:
+            try:
+                resolutions = live_adapter.reconcile_wal_with_broker()
+                if resolutions:
+                    _log(f"WAL restart reconcile: {resolutions}", "cyan")
+            except Exception as _e:
+                _log(f"WAL reconcile warning: {_e}", "yellow")
         # 2026-04-22 Fix B: cache today's orders so the buy-loop can skip
         # symbols we already ordered this morning even if Nexus's in-memory
         # state was wiped by the restart. Fix A's date-keyed cid gives

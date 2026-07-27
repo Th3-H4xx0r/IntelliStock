@@ -41,6 +41,7 @@ def build_adapter(
     cid_prefix: str | None = None,
     clean_room_retention_days: int = 180,
     seed_trades_from_broker: bool = True,
+    defer_ownership_reconciliation: bool = False,
 ) -> BrokerAdapter:
     """Build a live BrokerAdapter for the given broker_type.
 
@@ -67,6 +68,7 @@ def build_adapter(
             clean_room_mode=clean_room_mode,
             cid_prefix=cid_prefix,
             clean_room_retention_days=clean_room_retention_days,
+            defer_ownership_reconciliation=defer_ownership_reconciliation,
         )
     if t == "robinhood":
         from broker_adapters.robinhood import RobinhoodAdapter
