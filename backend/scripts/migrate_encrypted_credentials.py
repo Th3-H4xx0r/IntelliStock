@@ -15,8 +15,9 @@ import stat
 import sys
 from typing import Iterable, Mapping
 
-from credential_audit import SECRET_FIELDS_BY_TABLE, scan_secret_fields
+from credential_audit import AUDITED_TABLES, SECRET_FIELDS_BY_TABLE, scan_secret_fields
 from secret_store import decrypt_required, encrypt, is_encrypted
+from strategy_secret_boundary import scrub_inline_strategy_secrets
 
 
 def build_encrypted_patch(row: dict, *, fields: tuple[str, ...]) -> dict:
@@ -39,6 +40,15 @@ def verify_patch(patch: dict, *, fields: tuple[str, ...]) -> None:
         decrypt_required(value, field=field)
 
 
+def build_strategy_scrub_patch(row: dict) -> dict:
+    """Return a patch that removes every legacy inline strategy credential."""
+    original = row.get("strategies")
+    if not isinstance(original, list):
+        return {}
+    cleaned = scrub_inline_strategy_secrets(original, reject_material=False)
+    return {"strategies": cleaned} if cleaned != original else {}
+
+
 def _rows_from_db() -> tuple[object, object, dict[str, list[dict]]]:
     """Load the allowlisted tables.  This function is not called in dry tests."""
     from rethinkdb import RethinkDB
@@ -49,9 +59,11 @@ def _rows_from_db() -> tuple[object, object, dict[str, list[dict]]]:
         port=int(os.environ.get("RETHINKDB_PORT", "28015")),
         timeout=10,
     )
+    database = r.db("IntelliStock")
+    available = set(database.table_list().run(conn))
     rows = {
-        table: list(r.db("IntelliStock").table(table).run(conn))
-        for table in SECRET_FIELDS_BY_TABLE
+        table: list(database.table(table).run(conn)) if table in available else []
+        for table in AUDITED_TABLES
     }
     return r, conn, rows
 
@@ -85,14 +97,18 @@ def _write_backup(path: Path, rows_by_table: Mapping[str, Iterable[dict]]) -> No
         raise RuntimeError("backup file must have mode 0600")
 
 
-def _patches(rows_by_table: Mapping[str, Iterable[dict]]) -> list[tuple[str, str, dict]]:
-    prepared: list[tuple[str, str, dict]] = []
+def _patches(rows_by_table: Mapping[str, Iterable[dict]]) -> list[tuple[str, object, dict]]:
+    prepared: list[tuple[str, object, dict]] = []
     for table, fields in SECRET_FIELDS_BY_TABLE.items():
         for row in rows_by_table.get(table, ()):
             patch = build_encrypted_patch(row, fields=fields)
             verify_patch(patch, fields=fields)
             if patch:
-                prepared.append((table, str(row.get("id", "")), patch))
+                prepared.append((table, row.get("id"), patch))
+    for row in rows_by_table.get("Strategies", ()):
+        patch = build_strategy_scrub_patch(row)
+        if patch:
+            prepared.append(("Strategies", row.get("id"), patch))
     return prepared
 
 

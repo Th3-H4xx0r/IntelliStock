@@ -20,6 +20,12 @@ import requests
 
 from rethinkdb import RethinkDB
 from secret_store import decrypt
+from stock_credential_boundary import (
+    StockCredentialError,
+    is_equity_stock_instance,
+    linked_alpaca_brokerage_id,
+    resolve_linked_alpaca_credentials,
+)
 
 
 _DB_NAME = "IntelliStock"
@@ -86,6 +92,43 @@ def _load_credentials(instance_id: str) -> dict:
         if not inst:
             out["error"] = "instance_not_found"
             return out
+        if is_equity_stock_instance(inst):
+            out["broker_type"] = "alpaca"
+            try:
+                brokerage_id = linked_alpaca_brokerage_id(inst, data=False)
+            except StockCredentialError:
+                out["error"] = "stock_exact_alpaca_link_required"
+                return out
+            out["brokerage_id"] = brokerage_id
+            try:
+                brokerage = (
+                    rdb.db(_DB_NAME)
+                    .table("BrokerageAccounts")
+                    .get(brokerage_id)
+                    .run(conn)
+                )
+            except Exception as exc:
+                out["error"] = (
+                    "brokerage_lookup_failed: "
+                    f"{type(exc).__name__}"
+                )
+                return out
+            try:
+                creds = resolve_linked_alpaca_credentials(
+                    inst,
+                    brokerage,
+                    data=False,
+                )
+            except StockCredentialError:
+                out["error"] = "stock_alpaca_credentials_invalid"
+                return out
+            out["paper"] = creds.paper
+            out["key"] = creds.key
+            out["secret"] = creds.secret
+            return out
+
+        # Compatibility path below is intentionally limited to non-equity
+        # instances.  Stock instances never use instance-level credentials.
         brokerage_id = inst.get("brokerage_id") or None
         broker_type = (inst.get("broker_type") or "alpaca").strip().lower()
         paper_field = inst.get("alpaca_paper")

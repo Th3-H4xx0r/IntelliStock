@@ -112,9 +112,16 @@ def _fetch_broker_positions_and_cash(brokerage_row: dict):
             raise SystemExit(
                 f"alpaca-py not installed; cannot inspect Alpaca broker state ({e})."
             )
-        # Decrypt Alpaca credentials (see broker.py:629-631)
-        _ak = _decrypt_or_passthrough(brokerage_row.get("alpaca_key"))
-        _as = _decrypt_or_passthrough(brokerage_row.get("alpaca_secret"))
+        # Stock inspection obeys the same strict encrypted boundary as runtime.
+        from secret_store import decrypt_required
+        _ak = decrypt_required(
+            brokerage_row.get("alpaca_key"),
+            field="alpaca_key",
+        )
+        _as = decrypt_required(
+            brokerage_row.get("alpaca_secret"),
+            field="alpaca_secret",
+        )
         client = TradingClient(
             api_key=_ak,
             secret_key=_as,

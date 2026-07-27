@@ -3752,7 +3752,10 @@ def api_test_alpaca_brokerage(
     # R16 phase-3: edit-mode path — pull stored creds when caller didn't pass them.
     if (not key or not secret) and body.brokerage_id:
         try:
-            from secret_store import decrypt as _decrypt
+            from stock_credential_boundary import (
+                StockCredentialError,
+                resolve_alpaca_brokerage_credentials,
+            )
             row = (
                 _r_auth.db("IntelliStock")
                 .table("BrokerageAccounts")
@@ -3767,22 +3770,21 @@ def api_test_alpaca_brokerage(
                     detail=f"Brokerage {body.brokerage_id!r} is not an Alpaca account",
                 )
             try:
-                key = _decrypt(row.get("alpaca_key")) or ""
-                secret = _decrypt(row.get("alpaca_secret")) or ""
-            except Exception as _decrypt_exc:
+                stored_creds = resolve_alpaca_brokerage_credentials(
+                    row,
+                    expected_brokerage_id=str(body.brokerage_id),
+                )
+                key = stored_creds.key
+                secret = stored_creds.secret
+            except StockCredentialError:
                 raise HTTPException(
                     status_code=500,
-                    detail=(
-                        f"Could not decrypt stored creds for {body.brokerage_id} "
-                        f"(check INTELLISTOCK_CRED_KEY): "
-                        f"{type(_decrypt_exc).__name__}: {_decrypt_exc}"
-                    ),
+                    detail="Stored Alpaca credentials are unavailable",
                 )
             if paper is None:
-                paper = bool(row.get("alpaca_paper", False))
+                paper = stored_creds.paper
             if feed is None:
-                _stored_feed = str(row.get("alpaca_data_feed") or "").strip().lower()
-                feed = _stored_feed if _stored_feed in ("iex", "sip") else "iex"
+                feed = stored_creds.data_feed
         except HTTPException:
             raise
         except Exception as e:
@@ -3930,18 +3932,19 @@ def api_brokerage_holding_opens(
     opens: dict = {}
     meta: dict = {}
     try:
-        from secret_store import decrypt as _decrypt
+        from stock_credential_boundary import resolve_alpaca_brokerage_credentials
         row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
         btype = str((row or {}).get("brokerage_type") or "").strip().lower()
         if not row or btype != "alpaca":
             _log.info("holding-opens b=%s skip: brokerage_type=%r", brokerage_id, btype)
             return {"opens": {}, "_meta": {"reason": "not-alpaca", "btype": btype}}
-        key = _decrypt(row.get("alpaca_key")) or ""
-        secret = _decrypt(row.get("alpaca_secret")) or ""
-        if not key or not secret:
-            _log.info("holding-opens b=%s skip: missing creds", brokerage_id)
-            return {"opens": {}, "_meta": {"reason": "no-creds"}}
-        paper = bool(row.get("alpaca_paper", False))
+        stored_creds = resolve_alpaca_brokerage_credentials(
+            row,
+            expected_brokerage_id=str(brokerage_id),
+        )
+        key = stored_creds.key
+        secret = stored_creds.secret
+        paper = stored_creds.paper
 
         from alpaca.trading.client import TradingClient
         from alpaca.trading.requests import GetOrdersRequest
@@ -5162,14 +5165,16 @@ def api_brokerage_movers(brokerage_id: str, top: int = 6, conn=Depends(conn_depe
     Empty on any failure or a non-Alpaca account. Read-only."""
     empty = {"gainers": [], "losers": []}
     try:
-        from secret_store import decrypt as _decrypt
+        from stock_credential_boundary import resolve_alpaca_brokerage_credentials
         row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
         if not row or str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
             return empty
-        key = _decrypt(row.get("alpaca_key")) or ""
-        secret = _decrypt(row.get("alpaca_secret")) or ""
-        if not key or not secret:
-            return empty
+        stored_creds = resolve_alpaca_brokerage_credentials(
+            row,
+            expected_brokerage_id=str(brokerage_id),
+        )
+        key = stored_creds.key
+        secret = stored_creds.secret
         import requests as _req
         n = max(1, min(int(top or 6), 20))
         rsp = _req.get(

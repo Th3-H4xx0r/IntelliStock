@@ -19,6 +19,7 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 from rethinkdb import RethinkDB
+from strategy_secret_boundary import scrub_inline_strategy_secrets
 
 r = RethinkDB()
 DB_NAME = "IntelliStock"
@@ -235,6 +236,10 @@ def _normalize_strategy_payload_item(strategy_doc, strict=True):
         strategy_doc.get("conditions") if isinstance(strategy_doc.get("conditions"), dict) else {},
     )
     merged_config = _apply_strategy_config_aliases(canonical_strategy, merged_config)
+    merged_config = scrub_inline_strategy_secrets(
+        merged_config,
+        reject_material=bool(strict),
+    )
 
     return {
         "strategy": canonical_strategy,
@@ -1146,22 +1151,31 @@ def action_create_instance(
         if granularity_time_increment is not None
         else 60
     )
-    # Default Alpaca key/secret from env so backtests and live runs can fetch bars (e.g. AI-created instances)
+    kind_normalized = str(kind or "").strip().lower()
+    non_equity_compatibility = kind_normalized in {"crypto", "kalshi"}
     key_val = (key or "").strip()
     secret_val = (secret or "").strip()
-    if not key_val:
-        key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
-    if not secret_val:
-        secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
+    if not non_equity_compatibility and (key_val or secret_val):
+        raise ValueError(
+            "Stock credentials cannot be stored on an instance; use a linked Alpaca brokerage"
+        )
+    # Preserve the existing non-equity compatibility path. Equity instances
+    # never copy credentials from arguments or process environment.
+    if non_equity_compatibility:
+        if not key_val:
+            key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
+        if not secret_val:
+            secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
     doc = {
         "id": instance_id,
-        "key": key_val,
-        "secret": secret_val,
         "runCommand": bool(run_command),
         "stocks": [],
         "granularity_time_increment": granularity_sec,
         "created_by": created_by if created_by in ("ai", "user") else "user",
     }
+    if non_equity_compatibility:
+        doc["key"] = key_val
+        doc["secret"] = secret_val
     if name:
         doc["name"] = name
     if brokerage_id:
@@ -5538,8 +5552,16 @@ def action_create_backtest(
         raise ValueError("start_date, end_date required")  # V7.3: stocks can be empty for pure discovery
     ensure_backtest_instances_table(conn)
     instance_doc = _resolve_instance_doc(conn, instance_id) if instance_id else None
-    default_key = (instance_doc.get("key") or "") if instance_doc else ""
-    default_secret = (instance_doc.get("secret") or "") if instance_doc else ""
+    kind_normalized = str((instance_doc or {}).get("kind") or "").strip().lower()
+    non_equity_compatibility = kind_normalized in {"crypto", "kalshi"}
+    direct_key = (key or "").strip()
+    direct_secret = (secret or "").strip()
+    if not non_equity_compatibility and (direct_key or direct_secret):
+        raise ValueError(
+            "Stock credentials cannot be queued with a backtest; use a linked Alpaca brokerage"
+        )
+    default_key = (instance_doc.get("key") or "") if instance_doc and non_equity_compatibility else ""
+    default_secret = (instance_doc.get("secret") or "") if instance_doc and non_equity_compatibility else ""
     stocks_list = [s.strip().upper() for s in (stocks if isinstance(stocks, list) else [stocks]) if s and str(s).strip()]
     # V7.3: stocks_list can be empty for pure discovery mode (Nexus discovers its own tickers)
     gran_sec = int(granularity_sec) if granularity_sec is not None else 60
@@ -5547,10 +5569,11 @@ def action_create_backtest(
         initial_cash = 100000.0
     key_val = (key if key is not None else default_key) or ""
     secret_val = (secret if secret is not None else default_secret) or ""
-    if not key_val:
-        key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
-    if not secret_val:
-        secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
+    if non_equity_compatibility:
+        if not key_val:
+            key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
+        if not secret_val:
+            secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
     # Crypto fee emulation: resolve the taker rate to apply in this backtest. A
     # chosen venue emulates that venue's fee; "default"/None uses the instance's
     # own linked brokerage. Persist the resolved rate + venue so the broker fills
@@ -5584,8 +5607,6 @@ def action_create_backtest(
         "status": "pending",
         "run": True,
         "paused": False,
-        "key": key_val,
-        "secret": secret_val,
         "initial_cash": float(initial_cash),
         # Crypto fee emulation (see above). emulate_fee_venue = the user's choice
         # ("default" or a venue id); emulate_taker_rate = the resolved fee applied;
@@ -5595,6 +5616,9 @@ def action_create_backtest(
         "emulate_taker_rate": float(_taker_rate),
         "fee_venue_resolved": _resolved_venue,
     }
+    if non_equity_compatibility:
+        doc["key"] = key_val
+        doc["secret"] = secret_val
     if instance_id:
         doc["instance"] = str(instance_id).strip()
     backtest_id = insert_backtest_with_unique_id(conn, doc)
@@ -7900,23 +7924,24 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
     if doc is None:
         raise ValueError(f"Brokerage account not found: {brokerage_id}")
 
-    btype = doc.get("brokerage_type", "")
+    btype = str(doc.get("brokerage_type") or "").strip().lower()
     account_name = doc.get("account_name", "Account")
 
-    # Decrypt Fernet-stored credentials before passing to broker APIs.
-    try:
-        from secret_store import decrypt as _decrypt
-    except Exception:
-        _decrypt = lambda v: v
-
     if btype == "alpaca":
+        from stock_credential_boundary import resolve_alpaca_brokerage_credentials
+        alpaca_creds = resolve_alpaca_brokerage_credentials(
+            doc,
+            expected_brokerage_id=brokerage_id,
+        )
         data = _fetch_alpaca_portfolio_history(
-            key=_decrypt(doc.get("alpaca_key", "")) or "",
-            secret=_decrypt(doc.get("alpaca_secret", "")) or "",
+            key=alpaca_creds.key,
+            secret=alpaca_creds.secret,
             base_url=doc.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
             range_str=range_str,
         )
     elif btype == "robinhood":
+        # Legacy compatibility only; Robinhood is removed in the final task.
+        from secret_store import decrypt as _decrypt
         data = _fetch_robinhood_portfolio_history(
             access_token=_decrypt(doc.get("robinhood_access_token", "")) or "",
             token_type=doc.get("robinhood_token_type", "Bearer"),
@@ -7952,8 +7977,8 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
     if range_str == "1D" and btype == "alpaca":
         try:
             live_eq = _fetch_alpaca_current_equity(
-                key=_decrypt(doc.get("alpaca_key", "")) or "",
-                secret=_decrypt(doc.get("alpaca_secret", "")) or "",
+                key=alpaca_creds.key,
+                secret=alpaca_creds.secret,
                 base_url=doc.get("alpaca_base_url", "https://paper-api.alpaca.markets"),
             )
         except Exception:
@@ -8533,9 +8558,12 @@ def action_get_model_raw(conn, model_id):
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
     if doc.get("api_key"):
-        from secret_store import decrypt
+        from secret_store import decrypt_required
         doc = dict(doc)
-        doc["api_key"] = decrypt(doc["api_key"])
+        doc["api_key"] = decrypt_required(
+            doc["api_key"],
+            field="Models.api_key",
+        )
     return doc
 
 
@@ -8839,48 +8867,11 @@ def _find_strategies_referencing_model(conn, model_id):
 
 
 def _restore_inline_from_model(conn, model_id, model_doc):
-    """Before force-deleting a model, restore inline credentials into referencing strategies."""
-    if model_doc.get("api_key"):
-        from secret_store import decrypt
-        model_doc = dict(model_doc)
-        model_doc["api_key"] = decrypt(model_doc["api_key"])
-    strategies = list(r.db(DB_NAME).table("Strategies").run(conn))
-    for strat in strategies:
-        changed = False
-        for sub in (strat.get("strategies") or []):
-            cfg = sub.get("config") or {}
-            for key in list(cfg.keys()):
-                if not key.endswith("llm_model_id") or cfg[key] != model_id:
-                    continue
-                prefix = key[: -len("llm_model_id")]
-                cfg[f"{prefix}llm_provider"] = model_doc.get("provider", "")
-                if prefix:
-                    cfg[f"{prefix}llm_model"] = model_doc.get("model", "")
-                else:
-                    cfg["model_name"] = model_doc.get("model", "")
-                cfg[f"{prefix}llm_api_key"] = model_doc.get("api_key", "")
-                if (model_doc.get("provider") or "").lower() == "azure":
-                    cfg[f"{prefix}azure_openai_api_key"] = model_doc.get("api_key", "")
-                    cfg[f"{prefix}azure_openai_endpoint"] = model_doc.get("azure_openai_endpoint", "")
-                    cfg[f"{prefix}azure_openai_api_version"] = model_doc.get("azure_openai_api_version", "2024-10-21")
-                if (model_doc.get("provider") or "").lower() in ("claude-cli", "codex-cli"):
-                    if model_doc.get("cli_path"):
-                        cfg[f"{prefix}cli_path"] = model_doc["cli_path"]
-                    if model_doc.get("extra_args"):
-                        cfg[f"{prefix}extra_args"] = model_doc["extra_args"]
-                if model_doc.get("openai_base_url"):
-                    cfg[f"{prefix}openai_base_url"] = model_doc["openai_base_url"]
-                if model_doc.get("nvidia_base_url"):
-                    cfg[f"{prefix}nvidia_base_url"] = model_doc["nvidia_base_url"]
-                if model_doc.get("reasoning_effort"):
-                    cfg[f"{prefix}llm_reasoning_effort"] = model_doc["reasoning_effort"]
-                del cfg[key]
-                changed = True
-            sub["config"] = cfg
-        if changed:
-            r.db(DB_NAME).table("Strategies").get(strat["id"]).update(
-                {"strategies": strat["strategies"]}
-            ).run(conn)
+    """Refuse the former plaintext credential restoration path."""
+    raise ValueError(
+        "Referenced models cannot be converted to inline credentials; reassign "
+        "or remove every strategy model reference before deletion"
+    )
 
 
 def action_delete_model(conn, model_id, force=False):
@@ -8889,14 +8880,12 @@ def action_delete_model(conn, model_id, force=False):
     if doc is None:
         return {"deleted": False, "id": model_id}
     referencing = _find_strategies_referencing_model(conn, model_id)
-    if referencing and not force:
+    if referencing:
         names = [s["name"] for s in referencing]
         raise ValueError(
             f"Model is used by strategy(ies): {', '.join(names)}. "
-            "Pass force=true to delete anyway (inline credentials will be restored)."
+            "Please reassign or remove those model references before deleting it."
         )
-    if referencing and force:
-        _restore_inline_from_model(conn, model_id, doc)
     r.db(DB_NAME).table(MODELS_TABLE).get(model_id).delete().run(conn)
     try:
         from model_resolver import invalidate_model_cache

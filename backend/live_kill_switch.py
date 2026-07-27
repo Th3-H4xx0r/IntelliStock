@@ -127,18 +127,23 @@ def halt_live_trading(
                 bt = (b.get("brokerage_type") or "alpaca").strip().lower()
                 if bt == "alpaca":
                     try:
-                        from secret_store import decrypt
-                        k = decrypt(b.get("alpaca_key"))
-                        s = decrypt(b.get("alpaca_secret"))
-                        paper = bool(b.get("alpaca_paper", True))
-                        if not k or not s:
-                            continue
+                        from stock_credential_boundary import (
+                            resolve_alpaca_brokerage_credentials,
+                        )
+                        creds = resolve_alpaca_brokerage_credentials(b)
                         from alpaca.trading.client import TradingClient
-                        client = TradingClient(api_key=k, secret_key=s, paper=paper)
+                        client = TradingClient(
+                            api_key=creds.key,
+                            secret_key=creds.secret,
+                            paper=creds.paper,
+                        )
                         canceled = client.cancel_orders() or []
                         summary["orders_canceled"] += len(canceled)
                     except Exception as e:
-                        summary["errors"].append(f"brokerage {b.get('id')}: {e}")
+                        summary["errors"].append(
+                            "Alpaca order-cancel failed "
+                            f"({type(e).__name__})"
+                        )
                     continue
 
                 if bt == "robinhood":

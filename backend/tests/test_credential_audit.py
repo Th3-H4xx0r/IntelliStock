@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+from types import ModuleType
 from unittest.mock import Mock
 
 import pytest
@@ -41,6 +42,57 @@ def test_inventory_only_scans_schema_allowed_secret_fields():
     assert [(finding.table, finding.field, finding.encrypted) for finding in findings] == [
         ("BrokerageAccounts", "alpaca_key", True),
     ]
+
+
+def test_inventory_finds_legacy_stock_and_nested_strategy_credentials_without_values():
+    """Residual stock credential locations are visible, but their values never are."""
+    from credential_audit import scan_secret_fields
+
+    findings = scan_secret_fields({
+        "Instances": [{"id": "stock-1", "key": "CANARY_INSTANCE"}],
+        "BacktestInstances": [{"id": 123, "secret": "CANARY_BACKTEST"}],
+        "Strategies": [{
+            "id": 7,
+            "strategies": [{
+                "strategy": "graph_nexus_analysis",
+                "config": {
+                    "company_article_llm_api_key": "CANARY_STRATEGY",
+                    "max_output_tokens": 500,
+                },
+            }],
+        }],
+    })
+
+    encoded = repr(findings)
+    assert "CANARY" not in encoded
+    assert {(f.table, f.field, f.encrypted) for f in findings} == {
+        ("Instances", "key", False),
+        ("BacktestInstances", "secret", False),
+        ("Strategies", "strategies[0].config.company_article_llm_api_key", False),
+    }
+
+
+def test_strategy_migration_patch_purges_inline_credentials():
+    from scripts.migrate_encrypted_credentials import build_strategy_scrub_patch
+
+    patch = build_strategy_scrub_patch({
+        "id": 7,
+        "strategies": [{
+            "strategy": "graph_nexus_analysis",
+            "config": {
+                "llm_api_key": "CANARY_LLM",
+                "max_positions": 8,
+            },
+        }],
+    })
+
+    assert patch == {
+        "strategies": [{
+            "strategy": "graph_nexus_analysis",
+            "config": {"max_positions": 8},
+        }],
+    }
+    assert "CANARY" not in repr(patch)
 
 
 def test_encrypted_patch_copy_verify_switch_round_trips(with_key):
@@ -115,6 +167,48 @@ def test_migration_default_dry_run_never_updates_database(monkeypatch, capsys):
     assert "CANARY" not in output
     query.update.assert_not_called()
     fake_conn.close.assert_called_once_with()
+
+
+def test_database_inventory_tolerates_optional_tables_not_yet_created(monkeypatch):
+    """Adding an audited schema table must not make read-only inventory crash."""
+    from scripts import migrate_encrypted_credentials as migration
+
+    class _Query:
+        def __init__(self, value):
+            self.value = value
+
+        def run(self, _conn):
+            return self.value
+
+    class _Database:
+        def table_list(self):
+            return _Query(["BrokerageAccounts"])
+
+        def table(self, name):
+            if name != "BrokerageAccounts":
+                raise AssertionError(f"missing table must not be queried: {name}")
+            return _Query([{"id": "acct-1"}])
+
+    class _Rethink:
+        def __init__(self):
+            self.connection = Mock()
+
+        def connect(self, **_kwargs):
+            return self.connection
+
+        def db(self, name):
+            assert name == "IntelliStock"
+            return _Database()
+
+    fake_module = ModuleType("rethinkdb")
+    fake_module.RethinkDB = _Rethink
+    monkeypatch.setitem(sys.modules, "rethinkdb", fake_module)
+
+    _r, _conn, rows = migration._rows_from_db()
+
+    assert rows["BrokerageAccounts"] == [{"id": "acct-1"}]
+    assert rows["Strategies"] == []
+    assert rows["Models"] == []
 
 
 def test_migration_apply_backs_up_before_switching_with_private_mode(monkeypatch, tmp_path, with_key):

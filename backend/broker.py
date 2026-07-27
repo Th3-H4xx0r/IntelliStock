@@ -27,6 +27,14 @@ from model_resolver import resolve_model_refs_in_config
 from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
 from robinhood_data_policy import robinhood_data_fallback_allowed
 from persistence_safety import SecretMaterialError, assert_secret_free, sanitize_snapshot
+from secret_store import decrypt_required
+from stock_credential_boundary import (
+    StockCredentialError,
+    is_equity_stock_instance,
+    linked_alpaca_brokerage_id,
+    resolve_linked_alpaca_credentials,
+)
+from strategy_secret_boundary import scrub_inline_strategy_secrets
 
 try:
     from llm_telemetry import llm_call_context as telemetry_llm_call_context
@@ -564,15 +572,13 @@ def _load_robinhood_extras_from_db(brokerage_id):
 
 
 def _load_live_credentials_from_db(instance_id):
-    """In live mode, read key/secret from Instances row and decrypt.
+    """Resolve live credentials from the instance's exact brokerage link.
 
     Returns (key, secret, broker_type, paper, brokerage_id).
 
-    Fail-loud contract: if the linked brokerage row has Fernet-encrypted creds
-    and decrypt raises (INTELLISTOCK_CRED_KEY missing on this host), we log a
-    RED error and return (None, None, ...). We do NOT silently fall back to
-    legacy instance-level plaintext keys because those may be paper/live-
-    mismatched with the linked brokerage and would cause confusing 401s.
+    Alpaca equities require an exact linked BrokerageAccounts row and strict
+    Fernet decryption. The legacy instance/env path remains reachable only for
+    explicitly non-equity compatibility kinds.
     """
     # Local logger shim: this function runs at module-init time, BEFORE the
     # module-level _log() is defined (it lives further down). Use the
@@ -596,6 +602,36 @@ def _load_live_credentials_from_db(instance_id):
             if not inst_doc:
                 return None, None, "alpaca", True, None
             brokerage_id = inst_doc.get("brokerage_id") or None
+            if is_equity_stock_instance(inst_doc):
+                try:
+                    brokerage_id = linked_alpaca_brokerage_id(inst_doc, data=False)
+                    b_doc = (
+                        _r.db("IntelliStock")
+                        .table("BrokerageAccounts")
+                        .get(brokerage_id)
+                        .run(conn)
+                    )
+                    credentials = resolve_linked_alpaca_credentials(
+                        inst_doc,
+                        b_doc,
+                        data=False,
+                    )
+                except StockCredentialError:
+                    _early_log(
+                        "Equity startup refused: the exact linked Alpaca brokerage "
+                        "or its encrypted credentials are invalid.",
+                        "red",
+                    )
+                    return None, None, "alpaca", True, brokerage_id
+                return (
+                    credentials.key,
+                    credentials.secret,
+                    "alpaca",
+                    credentials.paper,
+                    credentials.brokerage_id,
+                )
+
+            # The remainder is the pre-existing non-equity compatibility path.
             broker_type = (inst_doc.get("broker_type") or "alpaca").strip().lower()
             # Live-readiness P0 #2: require explicit `alpaca_paper` field — no
             # silent default. A typo on a live brokerage row that omits the field
@@ -729,6 +765,31 @@ def _load_live_data_credentials_from_db(instance_id):
             data_bid = inst_doc.get("alpaca_data_brokerage_id") or None
             if not data_bid:
                 return None, None, None, None
+            if is_equity_stock_instance(inst_doc):
+                try:
+                    b_doc = (
+                        _r.db("IntelliStock")
+                        .table("BrokerageAccounts")
+                        .get(data_bid)
+                        .run(conn)
+                    )
+                    credentials = resolve_linked_alpaca_credentials(
+                        inst_doc,
+                        b_doc,
+                        data=True,
+                    )
+                except StockCredentialError:
+                    _early_log(
+                        "Separate Alpaca data credential resolution failed strict validation.",
+                        "red",
+                    )
+                    return None, None, data_bid, None
+                return (
+                    credentials.key,
+                    credentials.secret,
+                    credentials.brokerage_id,
+                    credentials.data_feed,
+                )
             try:
                 b_doc = _r.db("IntelliStock").table("BrokerageAccounts").get(data_bid).run(conn)
             except Exception as _e:
@@ -852,6 +913,12 @@ def _is_crypto_instance_runtime():
     return _instance_kind_and_crypto_config()[0] == "crypto"
 
 
+def _is_non_equity_instance_runtime():
+    """True only for explicitly marked compatibility runtimes."""
+    kind = str(_instance_kind_and_crypto_config()[0] or "").strip().lower()
+    return kind in {"crypto", "kalshi"}
+
+
 def _instance_crypto_taker_fee():
     """Crypto taker fee for THIS instance's venue, for the backtest fee model:
     Binance.US = 0.02%, else Alpaca 0.25%. Returns None (PortfolioEmulator's
@@ -875,6 +942,7 @@ live_data_brokerage_id = None
 data_key = None
 data_secret = None
 data_feed = "iex"  # user-selectable via BrokerageAccounts.alpaca_data_feed; falls back to "iex"
+_non_equity_runtime = _is_non_equity_instance_runtime()
 if mode == MODE_LIVE:
     # Always prefer DB creds in live mode (argv creds, if any, are scrubbed).
     _db_key, _db_secret, live_broker_type, live_broker_paper, live_brokerage_id = _load_live_credentials_from_db(instance_id)
@@ -884,7 +952,11 @@ if mode == MODE_LIVE:
         secret = _db_secret
     # Final fallback to env vars is OFF by default. Set ALLOW_LEGACY_ENV_CREDS=1
     # during initial migration only; remove once all accounts are linked in DB.
-    _allow_env_fallback = os.environ.get("ALLOW_LEGACY_ENV_CREDS", "").strip().lower() in ("1", "true", "yes")
+    _allow_env_fallback = (
+        _non_equity_runtime
+        and os.environ.get("ALLOW_LEGACY_ENV_CREDS", "").strip().lower()
+        in ("1", "true", "yes")
+    )
     if _allow_env_fallback:
         if not key:
             env_key = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
@@ -937,6 +1009,40 @@ if mode == MODE_LIVE:
             data_feed = os.environ.get("ALPACA_DATA_FEED", "iex").strip().lower() or "iex"
             if data_feed not in ("iex", "sip"):
                 data_feed = "iex"
+elif mode == MODE_BACKTEST and not _non_equity_runtime:
+    # Equity backtests receive NULL argv placeholders. Resolve the exact
+    # encrypted trading/data links inside this process instead.
+    (
+        _db_key,
+        _db_secret,
+        live_broker_type,
+        live_broker_paper,
+        live_brokerage_id,
+    ) = _load_live_credentials_from_db(instance_id)
+    (
+        _separate_data_key,
+        _separate_data_secret,
+        live_data_brokerage_id,
+        _data_feed_from_db,
+    ) = _load_live_data_credentials_from_db(instance_id)
+    key = _db_key or ""
+    secret = _db_secret or ""
+    data_key = _separate_data_key or key
+    data_secret = _separate_data_secret or secret
+    if _data_feed_from_db:
+        data_feed = _data_feed_from_db
+
+# Equity code must not accidentally rediscover a legacy credential through one
+# of the many strategy-level environment fallbacks.
+if not _non_equity_runtime:
+    for _legacy_stock_secret_env in (
+        "KEY",
+        "SECRET",
+        "APCA_API_KEY_ID",
+        "APCA_API_SECRET_KEY",
+        "ALLOW_LEGACY_ENV_CREDS",
+    ):
+        os.environ.pop(_legacy_stock_secret_env, None)
 try:
     _bd = os.environ.get("BACKTEST_DIFFICULTY", "").strip()
     if _bd:
@@ -1596,30 +1702,11 @@ def fetch_alpaca_historical_bars(
 
 
 def _resolve_data_brokerage_creds_now():
-    """R17 (2026-04-25): re-resolve Alpaca data-brokerage creds DIRECTLY from
-    RethinkDB at the moment of need, bypassing the module-level
-    ``data_key``/``data_secret`` globals.
+    """Re-resolve market-data credentials at the moment of need.
 
-    The globals are populated at broker boot from
-    ``_load_live_data_credentials_from_db(instance_id)``. That call can
-    return ``None,None,None,None`` for a number of silent reasons:
-    decrypt failure (``INTELLISTOCK_CRED_KEY`` missing on the container,
-    e.g. backtest container has a different env), Instance row missing
-    the ``alpaca_data_brokerage_id`` linkage, or transient RethinkDB
-    connectivity issues. When that happens, the boot-time fallback at
-    lines 404-407 silently sets ``data_key = key`` (the TRADING / paper
-    creds), which then 401s every bars-endpoint request because paper
-    trading creds don't carry the data-API entitlement bound to the
-    live data brokerage.
-
-    This helper short-circuits that whole path: it queries
-    BrokerageAccounts directly, prefers the instance's linked data
-    brokerage if available, otherwise scans for any Alpaca account with
-    ``alpaca_paper=False`` (the typical signature of a live account
-    holding the data subscription). Decrypts on-demand. Returns
-    ``(key, secret, feed)`` or ``(None, None, None)`` on hard failure.
-    Logs each resolution outcome so operators can see why a backtest's
-    bars fetches succeeded or failed.
+    Equities use only the instance's exact data/trading brokerage link and
+    strict ciphertext decryption. Explicit non-equity compatibility runtimes
+    retain the historical global-account discovery behavior.
     """
     try:
         from rethinkdb import RethinkDB as _Rcheck
@@ -1644,16 +1731,20 @@ def _resolve_data_brokerage_creds_now():
         return None, None, None
     try:
         _data_bid = None
-        # Step 1: prefer the explicitly-linked data brokerage on the instance
+        _inst = None
         if instance_id:
             try:
                 _inst = _r17.db("IntelliStock").table("Instances").get(str(instance_id)).run(_conn)
-                if _inst and _inst.get("alpaca_data_brokerage_id"):
-                    _data_bid = str(_inst["alpaca_data_brokerage_id"])
+                if _inst:
+                    _data_bid = linked_alpaca_brokerage_id(
+                        _inst,
+                        data=True,
+                    )
             except Exception:
                 _data_bid = None
-        # Step 2: fallback — scan BrokerageAccounts for an Alpaca live account
-        if not _data_bid:
+        _equity_stock = is_equity_stock_instance(_inst)
+        # Preserve global discovery only for explicitly non-equity runtimes.
+        if not _data_bid and not _equity_stock:
             try:
                 _rows = list(
                     _r17.db("IntelliStock").table("BrokerageAccounts")
@@ -1672,7 +1763,7 @@ def _resolve_data_brokerage_creds_now():
                 _data_bid = None
         if not _data_bid:
             try:
-                _log("R17 cred resolve: no Alpaca brokerage found in BrokerageAccounts table", "yellow")
+                _log("Alpaca data credential resolution found no permitted exact link.", "yellow")
             except NameError:
                 pass
             return None, None, None
@@ -1680,38 +1771,50 @@ def _resolve_data_brokerage_creds_now():
             _row = _r17.db("IntelliStock").table("BrokerageAccounts").get(_data_bid).run(_conn)
         except Exception as _e:
             try:
-                _log(f"R17 cred resolve: BrokerageAccounts.get({_data_bid[:8]}...) failed — {_e}", "yellow")
+                _log("Alpaca data credential lookup failed.", "yellow")
             except NameError:
                 pass
             return None, None, None
         if not _row:
             return None, None, None
-        try:
-            _k = _decrypt(_row.get("alpaca_key")) or None
-            _s = _decrypt(_row.get("alpaca_secret")) or None
-        except Exception as _e:
+        if _equity_stock:
             try:
-                _log(
-                    f"R17 cred resolve: decrypt failed for {_data_bid[:8]}... — "
-                    f"{type(_e).__name__}: {_e} (is INTELLISTOCK_CRED_KEY set on this container?)",
-                    "red",
+                _credentials = resolve_linked_alpaca_credentials(
+                    _inst,
+                    _row,
+                    data=True,
                 )
-            except NameError:
-                pass
-            return None, None, None
+                _k = _credentials.key
+                _s = _credentials.secret
+            except StockCredentialError:
+                try:
+                    _log("Exact linked Alpaca data credentials failed strict validation.", "red")
+                except NameError:
+                    pass
+                return None, None, None
+        else:
+            try:
+                _k = _decrypt(_row.get("alpaca_key")) or None
+                _s = _decrypt(_row.get("alpaca_secret")) or None
+            except Exception as _e:
+                try:
+                    _log(
+                        f"R17 non-equity credential decrypt failed: {type(_e).__name__}: {_e}",
+                        "red",
+                    )
+                except NameError:
+                    pass
+                return None, None, None
         if not _k or not _s:
             return None, None, None
         _feed = str(_row.get("alpaca_data_feed") or "iex").strip().lower()
         if _feed not in ("iex", "sip"):
             _feed = "iex"
-        try:
-            _log(
-                f"R17 cred resolve: using brokerage {_data_bid[:8]}... "
-                f"(paper={_row.get('alpaca_paper', False)}, feed={_feed}, key=...{_k[-4:]})",
-                "cyan",
-            )
-        except NameError:
-            pass
+        if _equity_stock:
+            try:
+                _log(f"Resolved exact linked Alpaca data credentials (feed={_feed}).", "cyan")
+            except NameError:
+                pass
         return _k, _s, _feed
     finally:
         try:
@@ -3487,6 +3590,10 @@ def load_strategies_from_db():
             strategies_array = strategy_doc.get('strategies', [])
             if not isinstance(strategies_array, list):
                 return [], None, None
+            strategies_array = scrub_inline_strategy_secrets(
+                strategies_array,
+                reject_material=False,
+            )
             # Snapshot of strategy schema for storing in BacktestResults (name +
             # strategies at load time). Sanitized: credential values must never
             # reach BacktestResults again (2026-07 plaintext-secret incident).

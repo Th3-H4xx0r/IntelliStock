@@ -35,6 +35,23 @@ def test_model_resolver_injects_plaintext_from_encrypted_model_key(monkeypatch, 
     assert resolved["llm_api_key"] == "model-secret"
 
 
+def test_model_resolver_rejects_plaintext_model_key(monkeypatch):
+    """A legacy plaintext Models row cannot cross the runtime boundary."""
+    import model_resolver
+
+    monkeypatch.setattr(model_resolver, "_get_model_from_cache_or_db", lambda *_args: {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_key": "CANARY_PLAINTEXT_MODEL_KEY",
+    })
+
+    with pytest.raises(RuntimeError, match="plaintext secret"):
+        model_resolver.resolve_model_refs_in_config(
+            None,
+            {"llm_model_id": "model-1"},
+        )
+
+
 def test_action_get_model_raw_decrypts_api_key(monkeypatch, encrypted_key):
     """The internal LLM-test reader receives the usable key, not its cipher."""
     import interactive_utils as iu
@@ -49,6 +66,21 @@ def test_action_get_model_raw_decrypts_api_key(monkeypatch, encrypted_key):
     assert iu.action_get_model_raw(None, "model-1")["api_key"] == "model-secret"
 
 
+def test_action_get_model_raw_rejects_plaintext_api_key(monkeypatch):
+    import interactive_utils as iu
+
+    fake_r = MagicMock()
+    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = {
+        "id": "model-1",
+        "api_key": "CANARY_PLAINTEXT",
+    }
+    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
+
+    with pytest.raises(RuntimeError, match="plaintext secret"):
+        iu.action_get_model_raw(None, "model-1")
+
+
 def test_chatbot_model_resolution_decrypts_api_key(monkeypatch, encrypted_key):
     """Chatbot provider calls must receive the decrypted configured key."""
     from chatbot import orchestration
@@ -58,6 +90,19 @@ def test_chatbot_model_resolution_decrypts_api_key(monkeypatch, encrypted_key):
     })
 
     assert orchestration._resolve_model(None, "model-1")["api_key"] == "model-secret"
+
+
+def test_chatbot_model_resolution_rejects_plaintext_api_key(monkeypatch):
+    from chatbot import orchestration
+
+    monkeypatch.setattr(orchestration, "_fetch_model_doc", lambda *_args: {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_key": "CANARY_PLAINTEXT",
+    })
+
+    with pytest.raises(RuntimeError, match="plaintext secret"):
+        orchestration._resolve_model(None, "model-1")
 
 
 def test_kalshi_analyst_decrypts_model_api_key(monkeypatch, encrypted_key):

@@ -1,6 +1,7 @@
 # Copyright (c) 2020 Pranav Krishna — MIT License (see LICENSE)
 # Backtest engine: watches BacktestInstances table, runs each backtest in a Docker container,
-# then deletes the container and the row when done. Uses key/secret from the row.
+# then deletes the container and the row when done. Equity credentials are
+# resolved by broker.py from the exact encrypted BrokerageAccounts link.
 
 import concurrent.futures
 import os
@@ -40,7 +41,9 @@ DB_NAME = 'IntelliStock'
 RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
 RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
 
-# BacktestInstances schema: id (6-digit int), instance, stocks, start-date, end-date, granularity_sec, status (pending|running), run, key, secret
+# BacktestInstances schema: id (6-digit int), instance, stocks, start-date,
+# end-date, granularity_sec, status (pending|running), run. Legacy non-equity
+# rows may still carry key/secret during their compatibility migration.
 TABLE_NAME = 'BacktestInstances'
 
 # Queue of backtests to run (FIFO); changefeed thread pushes, main thread consumes.
@@ -577,27 +580,39 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         granularity_sec = int(granularity_sec)
     except (TypeError, ValueError):
         granularity_sec = 60
-    key = (row.get('key') or '').strip()
-    secret = (row.get('secret') or '').strip()
-    # If the instance has a separate market-data Alpaca brokerage linked
-    # (UI: "Market-Data Source"), prefer those creds. Backtests hit
-    # data.alpaca.markets — paper accounts 401 on bars/news endpoints, so
-    # the operator-linked LIVE data account is what the strategies need.
+    # Equity secrets must never cross the Docker argv/environment boundary.
+    # The spawned broker has RethinkDB access plus INTELLISTOCK_CRED_KEY and
+    # resolves the exact linked BrokerageAccounts row itself. Keep the legacy
+    # non-equity path byte-for-byte compatible for crypto/Kalshi.
+    key = ""
+    secret = ""
+    non_equity_compatibility = False
     try:
         _conn = get_conn()
         try:
-            _data_key, _data_secret = _resolve_data_brokerage_creds(_conn, instance_id)
+            _instance_doc = _get_instance_doc(_conn, instance_id) or {}
+            _kind = str(_instance_doc.get("kind") or "").strip().lower()
+            non_equity_compatibility = _kind in {"crypto", "kalshi"}
+            if non_equity_compatibility:
+                key = (row.get('key') or '').strip()
+                secret = (row.get('secret') or '').strip()
+                _data_key, _data_secret = _resolve_data_brokerage_creds(_conn, instance_id)
+                if _data_key and _data_secret:
+                    key, secret = _data_key, _data_secret
         finally:
             try:
                 _conn.close()
             except Exception:
                 pass
-        if _data_key and _data_secret:
-            key, secret = _data_key, _data_secret
     except Exception as _e:
+        # Classification uncertainty is stock-safe: do not pass any credentials.
+        key = ""
+        secret = ""
+        non_equity_compatibility = False
         intellistock_logger.log(
-            f"Backtest {row_id}: data-brokerage resolution failed, falling back to row creds: {_e}",
-            "yellow", service="BACKTEST_ENGINE",
+            f"Backtest {row_id}: instance credential mode could not be classified; "
+            "launching without argv/env broker credentials.",
+            "red", service="BACKTEST_ENGINE",
         )
     try:
         initial_cash = float(row.get('initial_cash') or 100000.0)
@@ -618,7 +633,8 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         'python', 'broker.py',
         instance_id, 'backtest',
         start_date, end_date, time_increment,
-        key, secret,
+        key if non_equity_compatibility and key else "NULL",
+        secret if non_equity_compatibility and secret else "NULL",
     ] + symbols + ['--initial-cash', str(initial_cash), '--backtest-id', str(row_id)]
 
     # Crypto fee emulation: pass the resolved taker fee so the PortfolioEmulator
@@ -665,24 +681,20 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
     env['NEO4J_URI'] = neo4j_uri
     env['NEO4J_USER'] = os.environ.get('NEO4J_USER', 'neo4j')
     env['NEO4J_PASSWORD'] = os.environ.get('NEO4J_PASSWORD', 'intellistock')
-    # Alpaca: row key/secret or env defaults (e.g. for AI-created backtests)
-    if key:
-        env['KEY'] = key
-    else:
-        env_key = (os.environ.get('APCA_API_KEY_ID') or os.environ.get('KEY') or '').strip()
-        if env_key:
-            env['KEY'] = env_key
-    if secret:
-        env['SECRET'] = secret
-    else:
-        env_secret = (os.environ.get('APCA_API_SECRET_KEY') or os.environ.get('SECRET') or '').strip()
-        if env_secret:
-            env['SECRET'] = env_secret
-    if not env.get('KEY') or not env.get('SECRET'):
-        intellistock_logger.log(
-            f"Backtest {row_id}: Alpaca key or secret missing in row and env.",
-            "yellow", service="BACKTEST_ENGINE",
-        )
+    if non_equity_compatibility:
+        # Compatibility only: equity backtests never receive KEY/SECRET.
+        if key:
+            env['KEY'] = key
+        else:
+            env_key = (os.environ.get('APCA_API_KEY_ID') or os.environ.get('KEY') or '').strip()
+            if env_key:
+                env['KEY'] = env_key
+        if secret:
+            env['SECRET'] = secret
+        else:
+            env_secret = (os.environ.get('APCA_API_SECRET_KEY') or os.environ.get('SECRET') or '').strip()
+            if env_secret:
+                env['SECRET'] = env_secret
     # LLM keys for strategies that need them (e.g. Earnings)
     gemini_key = (os.environ.get('GEMINI_API_KEY') or '').strip()
     if gemini_key:
@@ -716,7 +728,7 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
             "red", service="BACKTEST_ENGINE",
         )
     allow_legacy = (os.environ.get('ALLOW_LEGACY_ENV_CREDS') or '').strip()
-    if allow_legacy:
+    if allow_legacy and non_equity_compatibility:
         env['ALLOW_LEGACY_ENV_CREDS'] = allow_legacy
     # Pass log directory to broker so it writes full logs to the persistent volume
     log_dir = os.environ.get('BACKTEST_LOG_DIR', '/app/backtest_logs')

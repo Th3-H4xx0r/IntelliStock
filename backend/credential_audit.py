@@ -10,6 +10,7 @@ import hashlib
 from typing import Iterable, Mapping
 
 from secret_store import is_encrypted
+from strategy_secret_boundary import iter_inline_strategy_secrets
 
 
 SECRET_FIELDS_BY_TABLE: Mapping[str, tuple[str, ...]] = {
@@ -21,7 +22,11 @@ SECRET_FIELDS_BY_TABLE: Mapping[str, tuple[str, ...]] = {
         "robinhood_device_token",
     ),
     "Models": ("api_key",),
+    "Instances": ("key", "secret"),
+    "BacktestInstances": ("key", "secret"),
 }
+
+AUDITED_TABLES = tuple(SECRET_FIELDS_BY_TABLE) + ("Strategies",)
 
 
 @dataclass(frozen=True)
@@ -55,4 +60,19 @@ def scan_secret_fields(rows_by_table: Mapping[str, Iterable[dict]]) -> tuple[Sec
                         encrypted=is_encrypted(stored),
                     )
                 )
+    for row in rows_by_table.get("Strategies", ()):
+        row_id_hash = _hash_row_id(row)
+        strategies = row.get("strategies")
+        for field, stored in iter_inline_strategy_secrets(
+            strategies,
+            path="strategies",
+        ):
+            findings.append(
+                SecretFinding(
+                    table="Strategies",
+                    row_id_hash=row_id_hash,
+                    field=field,
+                    encrypted=is_encrypted(stored),
+                )
+            )
     return tuple(findings)

@@ -122,13 +122,16 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
                 f"(was the Models row deleted?)"
             )
             continue
-        # Models.api_key is encrypted at rest.  Keep decrypt()'s legacy
-        # plaintext compatibility while old rows await the migration, but
-        # never inject Fernet ciphertext into a strategy configuration.
+        # Models.api_key is encrypted at rest. Runtime resolution is a strict
+        # consumer boundary: migration inventory may read legacy plaintext,
+        # but strategy execution may never accept it.
         model_doc = dict(model_doc)
         if model_doc.get("api_key"):
-            from secret_store import decrypt
-            model_doc["api_key"] = decrypt(model_doc["api_key"])
+            from secret_store import decrypt_required
+            model_doc["api_key"] = decrypt_required(
+                model_doc["api_key"],
+                field="Models.api_key",
+            )
         _emit_log(
             f"  {key}={model_id}: resolved → provider="
             f"{(model_doc.get('provider') or '').strip().lower()!r} "
