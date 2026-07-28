@@ -29,21 +29,46 @@ function authHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+const isKalshi = computed(
+  () => String(props.account?.brokerage_type || '').toLowerCase() === 'kalshi'
+)
+
+// Kalshi keeps its equity curve behind its own endpoint and returns a
+// different shape. The generic /portfolio-history route is Alpaca-only and
+// answers "Unsupported brokerage type: kalshi", which rendered as a red error
+// on every Kalshi card. Map its payload onto the chart's shape instead.
+function fromKalshi(payload) {
+  const series = Array.isArray(payload?.series) ? payload.series : []
+  const values = series.map((p) => Number(p.value) || 0)
+  const openValue = values.length ? values[0] : 0
+  const currentValue = Number(payload?.value) || (values.length ? values[values.length - 1] : 0)
+  const changeAbs = Number(payload?.day_change) || 0
+  return {
+    timestamps: series.map((p) => new Date(p.ts).getTime()),
+    values,
+    current_value: currentValue,
+    open_value: openValue,
+    change_abs: changeAbs,
+    change_pct: openValue ? (changeAbs / openValue) * 100 : 0,
+  }
+}
+
 async function loadHistory(range) {
   loading.value = true
   error.value   = ''
   scrubIndex.value = null
   scrubLinePercent.value = null
   try {
-    const res = await fetch(
-      `${API_BASE}/brokerages/${props.account.id}/portfolio-history?range=${range}`,
-      { headers: authHeaders() }
-    )
+    const url = isKalshi.value
+      ? `${API_BASE}/brokerages/${props.account.id}/kalshi/portfolio`
+      : `${API_BASE}/brokerages/${props.account.id}/portfolio-history?range=${range}`
+    const res = await fetch(url, { headers: authHeaders() })
     if (!res.ok) {
       const d = await res.json().catch(() => ({}))
       throw new Error(d.detail || `HTTP ${res.status}`)
     }
-    portfolioData.value = await res.json()
+    const body = await res.json()
+    portfolioData.value = isKalshi.value ? fromKalshi(body) : body
   } catch (e) {
     error.value = e.message || 'Failed to load portfolio history'
     portfolioData.value = null
@@ -383,8 +408,10 @@ onMounted(() => loadHistory(activeRange.value))
       <div v-else-if="loading" class="h-8 w-40 rounded-lg bg-surface animate-pulse"></div>
       <div v-else-if="error" class="text-xs text-red-400">{{ error }}</div>
 
-      <!-- Range tabs -->
-      <div class="flex flex-wrap items-center gap-1 mt-4">
+      <!-- Range tabs. Hidden for Kalshi: its portfolio endpoint returns one
+           fixed snapshot series and takes no range, so the buttons would offer
+           a filter that does nothing. -->
+      <div v-if="!isKalshi" class="flex flex-wrap items-center gap-1 mt-4">
         <button
           v-for="r in RANGES"
           :key="r"
