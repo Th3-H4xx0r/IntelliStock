@@ -41,7 +41,14 @@ def default_replay_store():
     """
     import contextlib
 
-    from backtest_replay import RethinkReplayStore
+    from backtest_replay import (
+        BUILD_TABLE,
+        CALL_TABLE,
+        FIXTURE_TABLE,
+        MATRIX_TABLE,
+        RECEIPT_TABLE,
+        RethinkReplayStore,
+    )
     from benchmark_alpha.rethink_store import _RethinkBackend
     from interactive_utils import DB_NAME, get_conn, r
 
@@ -55,6 +62,16 @@ def default_replay_store():
                 conn.close()
             except Exception:
                 pass
+
+    # Create the immutable-record tables on first use. Idempotent, and cheap
+    # next to the run that follows; the alternative is a first publish that
+    # fails on a missing table long after the work was done.
+    with _conn_factory() as conn:
+        existing = set(r.db(DB_NAME).table_list().run(conn))
+        for table in (MATRIX_TABLE, BUILD_TABLE, CALL_TABLE, FIXTURE_TABLE,
+                      RECEIPT_TABLE):
+            if table not in existing:
+                r.db(DB_NAME).table_create(table).run(conn)
 
     return RethinkReplayStore(_RethinkBackend(r, _conn_factory, DB_NAME))
 
