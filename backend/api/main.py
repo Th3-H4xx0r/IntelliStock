@@ -673,6 +673,7 @@ class CreateBacktestBody(BaseModel):
     matrix_arm_id: Optional[str] = None
     cost_scenario_id: Optional[str] = None
     equity_total_cost_bps: Optional[float] = None  # nominal (absent), 25 or 50
+    fixture_ordinal: Optional[int] = None        # which preregistered fixture this run builds
     nexus_candidate_overrides: Optional[Dict[str, Any]] = None
 
 
@@ -2902,6 +2903,7 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
             "matrix_arm_id": body.matrix_arm_id,
             "cost_scenario_id": body.cost_scenario_id,
             "equity_total_cost_bps": body.equity_total_cost_bps,
+            "fixture_ordinal": body.fixture_ordinal,
             "nexus_candidate_overrides": body.nexus_candidate_overrides,
         },
     )

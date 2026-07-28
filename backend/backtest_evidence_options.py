@@ -51,7 +51,7 @@ COST_SCENARIO_TARGETS_BPS = (25.0, 50.0)
 _OPTION_KEYS = frozenset({
     "evidence_mode", "fixture_build_id", "replay_fixture_id",
     "matrix_manifest_id", "matrix_arm_id", "cost_scenario_id",
-    "equity_total_cost_bps", "nexus_candidate_overrides",
+    "equity_total_cost_bps", "nexus_candidate_overrides", "fixture_ordinal",
 })
 
 _ID_KEYS = ("matrix_manifest_id", "matrix_arm_id", "cost_scenario_id")
@@ -141,6 +141,25 @@ def validate_candidate_overrides(value) -> dict:
     return out
 
 
+def _validate_fixture_ordinal(value, mode):
+    """Which of the matrix's preregistered fixtures this run builds.
+
+    Distinct ordinals give distinct build addresses, which is what lets several
+    arms of one matrix record independently instead of colliding on a single
+    construction address.
+    """
+    if mode == "off":
+        if value is not None:
+            raise EvidenceOptionError(
+                "fixture_ordinal requires a non-off evidence_mode")
+        return None
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise EvidenceOptionError("fixture_ordinal must be a non-negative integer")
+    return value
+
+
 def _validate_cost_bps(value):
     if value is None:
         return None
@@ -206,6 +225,8 @@ def validate_evidence_options(payload) -> dict:
     return {
         "evidence_mode": mode,
         **resolved,
+        "fixture_ordinal": _validate_fixture_ordinal(
+            payload.get("fixture_ordinal"), mode),
         "equity_total_cost_bps": _validate_cost_bps(payload.get("equity_total_cost_bps")),
         "nexus_candidate_overrides": validate_candidate_overrides(
             payload.get("nexus_candidate_overrides")),
