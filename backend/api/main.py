@@ -56,6 +56,7 @@ from auth_utils import (
     set_onboarding_completed,
 )
 from strategies_meta import get_available_strategies
+from stock_credential_boundary import StockCredentialError
 from interactive_utils import (
     get_conn,
     parse_granularity_to_seconds,
@@ -862,6 +863,19 @@ def _run(f, *args, **kwargs) -> Any:
         return f(*args, **kwargs)
     except HTTPException:
         raise
+    except StockCredentialError as e:
+        # Nothing is broken server-side: one stored credential is still legacy
+        # plaintext (or otherwise undecryptable) and strict decryption
+        # correctly refuses it. A 500 misdiagnoses that as a backend fault, and
+        # since the dashboard fans out over every brokerage, one un-migrated
+        # row took down the whole panel. 409 lets the other accounts render and
+        # flags the one that needs re-saving. The boundary's message is
+        # deliberately identity-only, never the credential itself.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{e} — open this brokerage and re-save its Alpaca API "
+                    "key and secret to store them encrypted."),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except LookupError as e:
