@@ -510,7 +510,10 @@ def start_instance_container(instance_id, *, preflight=None):
                # this set the boot sequence logs RED + warns but does not
                # touch state; with it, migration-sensitive cache keys are
                # cleared on detection.
-               'LIVE_AUTO_RESET_ON_MIGRATION'):
+               'LIVE_AUTO_RESET_ON_MIGRATION',
+               # Strict PIT evidence capture is disabled by default and reaches
+               # equities workers only when the operator explicitly enables it.
+               'PIT_CAPTURE_ENABLED'):
         _v = os.environ.get(_k)
         if _v:
             env[_k] = _v

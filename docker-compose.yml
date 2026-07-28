@@ -94,6 +94,8 @@ services:
       # Inactive-by-default release posture. An operator must separately set
       # this true before an equities runCommand can create a worker.
       - EQUITIES_INSTANCE_AUTOSTART_ALLOWED=${EQUITIES_INSTANCE_AUTOSTART_ALLOWED:-false}
+      # Evidence capture is opt-in and never starts an equities worker.
+      - PIT_CAPTURE_ENABLED=${PIT_CAPTURE_ENABLED:-0}
       - INSTANCE_RETHINKDB_HOST=rethinkdb
       - INSTANCE_SERVER_URL=http://intellistock-backend:5000
       - INSTANCE_DOCKER_NETWORK=intellistockv4_default

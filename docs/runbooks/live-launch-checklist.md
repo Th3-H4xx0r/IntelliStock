@@ -8,6 +8,28 @@
 ## T-24h (evening before launch)
 
 - [ ] **Lock strategy config.** Decide model, prompt versions, history_scope_id ingredients. Do not change between now and launch.
+- [ ] **Verify strict point-in-time coverage.** Historical Graph Nexus runs now
+  fail closed unless all four dated inputs (graph, fundamentals, universe, and
+  news) are finalized for every requested NYSE session. Run:
+  ```bash
+  cd backend
+  python3 -m scripts.audit_point_in_time_coverage \
+    --start YYYY-MM-DD --end YYYY-MM-DD
+  ```
+  Exit 0 means every session is covered. A missing session or incomplete
+  manifest is not valid promotion evidence. Existing rows without
+  `pit_provenance=strict_verified` remain classified as legacy and cannot make
+  a strict lookback resume or promotion pass.
+- [ ] **Capture or import evidence intentionally.** `PIT_CAPTURE_ENABLED=0` is
+  the safe default. Set it to `1` only for paper/live FULL cycles whose inputs
+  should be recorded; the flag does not start an instance. To validate an
+  offline bundle without mutation:
+  ```bash
+  cd backend
+  python3 -m scripts.import_point_in_time_bundle --bundle /path/to/bundle.json
+  ```
+  After reviewing its manifest ID and hashes, repeat with `--apply` to publish
+  snapshots and then the manifest. Never put credentials in a bundle.
 - [ ] **Run a backtest** with `base_instance_id="main"` and `end_date=today`. Use the configured lookback length (default 120 trading days).
 - [ ] **Verify backtest log:** look for the line `[snapshot] persisted: id=main|graph_nexus_analysis|<hash>|backtest|<end_date>`. If absent, the snapshot wasn't written; investigate before proceeding.
 
@@ -67,6 +89,9 @@
 ## What this checklist does NOT protect against
 
 - Bugs in the new strategy itself (your backtest report is the judge).
+- Profitability or outperformance. Strict PIT provenance prevents hidden
+  future/current-data substitution; it does not prove alpha or authorize live
+  money by itself.
 - Network or broker outages.
 - Sudden config drift made after T-24h (re-run the backtest if you change anything).
 
