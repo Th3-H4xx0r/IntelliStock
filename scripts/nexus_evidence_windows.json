@@ -1,0 +1,58 @@
+{
+  "_comment": [
+    "Task 9 (2026-07-28): the preregistered development matrix for the A1-A4",
+    "Graph Nexus candidates. These five windows are DEVELOPMENT/REGRESSION",
+    "evidence only -- production eligibility still requires the repository's",
+    "evaluate_promotion contract.",
+    "",
+    "`matrix` must be filled in with a complete ExperimentMatrixManifest",
+    "document (one ExperimentSpec per arm per cost scenario) and published via",
+    "POST /backtest-evidence/matrices BEFORE the first backtest of this matrix",
+    "is queued. The runner refuses to start without it, because a manifest",
+    "written after the first result could have its arms reworded to fit.",
+    "",
+    "Gate rules, fixed here so they cannot be renegotiated later:",
+    " - bull and rally must EACH beat SPY after costs (median alpha >= +1pp,",
+    "   positive 90% lower bound from the fixture/session bootstrap)",
+    " - bear, flip and full may degrade by at most 0.5pp median / 1pp worst",
+    " - max drawdown may degrade by at most 0.5pp median / 1pp worst",
+    " - results must survive the 25bps and 50bps one-way cost stress",
+    " - alpha must stay positive after removing the largest winning stock",
+    " - any failed, stopped or missing arm is a gate FAILURE"
+  ],
+  "instance_id": "alpaca-main",
+  "initial_cash": 6000.0,
+  "fixture_count": 10,
+  "trial_count": 250,
+  "cost_scenarios": ["base", "25bps", "50bps"],
+  "arms": ["baseline", "a1_recovery_cap", "a2_breakout_regime", "a3_bull_ramp", "a4_stop_semantics"],
+  "overrides_by_arm": {
+    "baseline": {},
+    "a1_recovery_cap": {
+      "regime_position_cap_recovery_hard_enforce": true
+    },
+    "a2_breakout_regime": {
+      "momentum_breakout_max_nav_pct_by_regime": {
+        "default": 0.06,
+        "bull": 0.10,
+        "recovery": 0.08
+      }
+    },
+    "a3_bull_ramp": {
+      "deployment_ramp_caps_by_regime": {
+        "bull": [0.50, 0.70, 1.00]
+      }
+    },
+    "a4_stop_semantics": {
+      "circuit_breaker_regime_adjustment_semantics_v2": true
+    }
+  },
+  "windows": [
+    {"name": "bear",    "start": "2026-03-02", "end": "2026-03-30"},
+    {"name": "full",    "start": "2026-03-02", "end": "2026-04-27"},
+    {"name": "rally",   "start": "2026-04-27", "end": "2026-05-25"},
+    {"name": "flip",    "start": "2026-01-05", "end": "2026-03-02"},
+    {"name": "june",    "start": "2026-06-01", "end": "2026-07-01"}
+  ],
+  "matrix": null
+}
