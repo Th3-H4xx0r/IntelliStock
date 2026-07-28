@@ -184,6 +184,61 @@ def test_load_processed_dates_falls_back_to_filter_when_index_unavailable():
     chain.get_all.assert_not_called()
 
 
+def test_strict_load_ignores_legacy_unverified_rows():
+    import nexus_lookback_db as nlb
+
+    chain = _build_reql_chain()
+    chain.table_list.return_value.run.return_value = ["GraphNexusTradeContexts"]
+    chain.index_list.return_value.run.return_value = ["instance_id"]
+    chain.pluck.return_value.run.return_value = [
+        {"date_key": "2025-12-31"},
+        {
+            "date_key": "2026-01-01",
+            "pit_provenance": "legacy_unverified",
+        },
+    ]
+
+    with patch.object(nlb, "_connect", return_value=(chain, MagicMock())):
+        out = nlb.load_nexus_processed_trade_context_dates(
+            "inst|scope",
+            ["2025-12-31", "2026-01-01"],
+            require_strict=True,
+        )
+
+    assert out == set()
+
+
+def test_strict_load_accepts_only_complete_verified_provenance():
+    import nexus_lookback_db as nlb
+
+    chain = _build_reql_chain()
+    chain.table_list.return_value.run.return_value = ["GraphNexusTradeContexts"]
+    chain.index_list.return_value.run.return_value = ["instance_id"]
+    chain.pluck.return_value.run.return_value = [
+        {
+            "date_key": "2025-12-31",
+            "pit_provenance": "strict_verified",
+            "pit_manifest_id": "manifest-a",
+            "pit_as_of": "2025-12-31T21:00:00+00:00",
+        },
+        {
+            "date_key": "2026-01-01",
+            "pit_provenance": "strict_verified",
+            "pit_manifest_id": "",
+            "pit_as_of": "2026-01-01T21:00:00+00:00",
+        },
+    ]
+
+    with patch.object(nlb, "_connect", return_value=(chain, MagicMock())):
+        out = nlb.load_nexus_processed_trade_context_dates(
+            "inst|scope",
+            ["2025-12-31", "2026-01-01"],
+            require_strict=True,
+        )
+
+    assert out == {"2025-12-31"}
+
+
 def test_load_processed_dates_swallows_connection_failure():
     """If RethinkDB is unreachable, return empty rather than propagating
     (matches the legacy behavior — the caller will just process every
@@ -247,6 +302,23 @@ def test_historic_lookback_resume_dates_returns_full_when_none_processed():
         out = nlb.historic_lookback_resume_dates("inst|scope", opens)
 
     assert out == opens
+
+
+def test_historic_resume_requires_strict_rows_by_default():
+    import datetime as _dt
+    import nexus_lookback_db as nlb
+
+    opens = [_dt.datetime(2025, 12, 31)]
+    with patch.object(
+        nlb, "load_nexus_processed_trade_context_dates", return_value=set()
+    ) as loader:
+        nlb.historic_lookback_resume_dates("inst|scope", opens)
+
+    loader.assert_called_once_with(
+        "inst|scope",
+        ["2025-12-31"],
+        require_strict=True,
+    )
 
 
 # ── Strategy-side index plumbing tests ────────────────────────────────────

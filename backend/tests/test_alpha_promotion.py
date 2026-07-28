@@ -84,6 +84,7 @@ def passing_evidence(**changes):
         degraded_audit_intervals=0,
         exact_build_paper=True,
         paper_trading_days=60,
+        point_in_time_provenance_verified=True,
     )
     values.update(changes)
     return PromotionEvidence(**values)
@@ -93,6 +94,11 @@ def passing_evidence(**changes):
     ("field", "value", "reason"),
     [
         ("point_in_time_months", 23, "history_months"),
+        (
+            "point_in_time_provenance_verified",
+            False,
+            "point_in_time_provenance",
+        ),
         ("unseen_months", 11, "unseen_months"),
         ("regime_count", 2, "regime_count"),
         ("purged_fold_count", 0, "purged_folds"),
@@ -183,6 +189,15 @@ def test_complete_evidence_can_be_live_eligible_but_never_live_running():
         report, deployed_artifact_hash=evidence.artifact_hash
     )
     assert report.state is not ReadinessState.LIVE_RUNNING
+
+
+def test_truthy_non_boolean_cannot_claim_verified_pit_provenance():
+    evidence = replace(
+        passing_evidence(),
+        point_in_time_provenance_verified="true",
+    )
+
+    assert "point_in_time_provenance" in evaluate_promotion(evidence).reasons
 
 
 def test_missing_calendar_observation_remains_paper_eligible_not_live():

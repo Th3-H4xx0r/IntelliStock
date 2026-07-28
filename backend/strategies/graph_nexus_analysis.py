@@ -10882,6 +10882,7 @@ def _save_trade_contexts_and_outcomes(
     active_events: list[dict],
     config: dict,
     portfolio_emulator=None,
+    point_in_time_context=None,
 ) -> None:
     if conn is None:
         return
@@ -10894,6 +10895,21 @@ def _save_trade_contexts_and_outcomes(
     base_instance_id = str(config.get("base_instance_id") or "").strip() or str(instance_id or "").strip()
     history_scope_id = str(config.get("history_scope_id") or "").strip()
     history_model_stamp = dict(config.get("history_model_stamp") or {})
+    pit_provenance = "legacy_unverified"
+    pit_manifest_id = ""
+    pit_as_of = ""
+    if point_in_time_context is not None:
+        pit_provenance = str(
+            getattr(point_in_time_context, "provenance", "")
+            or "legacy_unverified"
+        ).strip()
+        manifest = getattr(point_in_time_context, "manifest", None)
+        pit_manifest_id = str(
+            getattr(manifest, "manifest_id", "") or ""
+        ).strip()
+        as_of = getattr(point_in_time_context, "as_of", None)
+        if as_of is not None:
+            pit_as_of = as_of.isoformat()
     docs = []
     outcome_docs = []
     stale_outcome_doc_ids: list[str] = []
@@ -10911,6 +10927,9 @@ def _save_trade_contexts_and_outcomes(
             "base_instance_id": base_instance_id,
             "history_scope_id": history_scope_id,
             "history_model_stamp": history_model_stamp,
+            "pit_provenance": pit_provenance,
+            "pit_manifest_id": pit_manifest_id,
+            "pit_as_of": pit_as_of,
             "symbol": sym,
             "date_key": date_key,
             "entry_date": date_key,
@@ -29993,6 +30012,7 @@ class GraphNexusAnalysis:
                 active_events=active_events,
                 config=config,
                 portfolio_emulator=portfolio_emulator,
+                point_in_time_context=point_in_time_context,
             )
 
         # Attach nexus metadata for broker to extract

@@ -94,6 +94,7 @@ class PromotionEvidence:
     degraded_audit_intervals: int
     exact_build_paper: bool
     paper_trading_days: int
+    point_in_time_provenance_verified: bool = False
 
     def __post_init__(self) -> None:
         instance = str(self.instance_id or "").strip()
@@ -205,6 +206,7 @@ _RESEARCH_REASONS = frozenset(
         "config_mismatch",
         "model_mismatch",
         "data_mismatch",
+        "point_in_time_provenance",
     }
 )
 _PAPER_REASONS = frozenset({"paper_build", "paper_config", "paper_days"})
@@ -220,6 +222,10 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
             reasons.append(reason)
 
     require(evidence.point_in_time_months >= 24, "history_months")
+    require(
+        evidence.point_in_time_provenance_verified is True,
+        "point_in_time_provenance",
+    )
     require(evidence.unseen_months >= 12, "unseen_months")
     require(evidence.regime_count >= 3, "regime_count")
     require(evidence.purged_fold_count >= 1, "purged_folds")

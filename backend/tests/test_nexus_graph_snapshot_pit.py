@@ -611,3 +611,106 @@ def test_strict_institutional_cache_rejects_legacy_unscoped_row():
     }
 
     assert graph._institutional_cache_row_matches(legacy, context) is False
+
+
+def test_trade_context_persists_strict_point_in_time_provenance(monkeypatch):
+    inserted: list[dict] = []
+
+    class _Insert:
+        def __init__(self, docs):
+            self.docs = list(docs)
+
+        def run(self, _conn, **_kwargs):
+            inserted.extend(self.docs)
+
+    class _Delete:
+        def run(self, _conn, **_kwargs):
+            return None
+
+    class _Selection:
+        def delete(self):
+            return _Delete()
+
+    class _Table:
+        def insert(self, docs, conflict=None):
+            return _Insert(docs)
+
+        def get_all(self, *_ids):
+            return _Selection()
+
+    class _DB:
+        def table(self, _name):
+            return _Table()
+
+    class _R:
+        def db(self, _name):
+            return _DB()
+
+    monkeypatch.setattr(graph, "_ensure_nexus_history_table", lambda *_a, **_k: None)
+    monkeypatch.setattr(graph, "_get_nexus_db_conn", lambda reuse=False: None)
+    monkeypatch.setattr(graph, "_r", _R())
+
+    graph._save_trade_contexts_and_outcomes(
+        object(),
+        instance_id="inst-a",
+        date_key="2026-03-02",
+        prices={"AAPL": 100.0},
+        scores={"AAPL": {"score": 1, "action_intent": "buy"}},
+        candidate_features={"AAPL": {}},
+        llm_traces={},
+        active_events=[],
+        config={},
+        point_in_time_context=_historical_context(),
+    )
+
+    context_doc = next(doc for doc in inserted if "final_score" in doc)
+    assert context_doc["pit_provenance"] == "strict_verified"
+    assert context_doc["pit_manifest_id"] == "pit-manifest"
+    assert context_doc["pit_as_of"] == "2026-03-02T14:00:00+00:00"
+
+
+def test_trade_context_without_context_is_explicitly_legacy(monkeypatch):
+    inserted: list[dict] = []
+
+    class _Insert:
+        def __init__(self, docs):
+            self.docs = list(docs)
+
+        def run(self, _conn, **_kwargs):
+            inserted.extend(self.docs)
+
+    class _Table:
+        def insert(self, docs, conflict=None):
+            return _Insert(docs)
+
+        def get_all(self, *_ids):
+            raise AssertionError("no stale outcome deletion expected")
+
+    class _DB:
+        def table(self, _name):
+            return _Table()
+
+    class _R:
+        def db(self, _name):
+            return _DB()
+
+    monkeypatch.setattr(graph, "_ensure_nexus_history_table", lambda *_a, **_k: None)
+    monkeypatch.setattr(graph, "_get_nexus_db_conn", lambda reuse=False: None)
+    monkeypatch.setattr(graph, "_r", _R())
+
+    graph._save_trade_contexts_and_outcomes(
+        object(),
+        instance_id="inst-a",
+        date_key="2026-03-02",
+        prices={"AAPL": 100.0},
+        scores={"AAPL": {"score": 1, "action_intent": "buy"}},
+        candidate_features={"AAPL": {}},
+        llm_traces={},
+        active_events=[],
+        config={},
+    )
+
+    context_doc = next(doc for doc in inserted if "final_score" in doc)
+    assert context_doc["pit_provenance"] == "legacy_unverified"
+    assert context_doc["pit_manifest_id"] == ""
+    assert context_doc["pit_as_of"] == ""

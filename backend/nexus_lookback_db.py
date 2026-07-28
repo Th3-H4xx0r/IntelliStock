@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
 from typing import Iterable
 
 
@@ -23,6 +24,25 @@ DB_NAME = "IntelliStock"
 # Module-level cache so the first call per process pays the index
 # existence check and every subsequent call short-circuits.
 _NEXUS_TRADE_CONTEXTS_INDEX_READY = False
+
+
+def _strict_pit_trade_context_row(row: dict) -> bool:
+    """Return whether a persisted row is complete strict-PIT evidence."""
+
+    if not isinstance(row, dict):
+        return False
+    if str(row.get("pit_provenance") or "").strip() != "strict_verified":
+        return False
+    if not str(row.get("pit_manifest_id") or "").strip():
+        return False
+    raw_as_of = str(row.get("pit_as_of") or "").strip()
+    if not raw_as_of:
+        return False
+    try:
+        parsed = datetime.fromisoformat(raw_as_of.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
 def _log(msg: str, color: str = "white") -> None:
@@ -108,7 +128,10 @@ def ensure_nexus_trade_contexts_instance_id_index(r_module, conn) -> bool:
 
 
 def load_nexus_processed_trade_context_dates(
-    instance_id_value: str, date_keys: Iterable[str]
+    instance_id_value: str,
+    date_keys: Iterable[str],
+    *,
+    require_strict: bool = False,
 ) -> set[str]:
     """Return the subset of ``date_keys`` for which at least one
     ``GraphNexusTradeContexts`` row exists for ``instance_id_value``.
@@ -134,7 +157,12 @@ def load_nexus_processed_trade_context_dates(
                 .table("GraphNexusTradeContexts")
                 .get_all(instance_id_value, index="instance_id")
                 .filter(lambda doc: r_module.expr(date_keys).contains(doc["date_key"]))
-                .pluck("date_key")
+                .pluck(
+                    "date_key",
+                    "pit_provenance",
+                    "pit_manifest_id",
+                    "pit_as_of",
+                )
                 .run(conn)
             )
         else:
@@ -145,13 +173,19 @@ def load_nexus_processed_trade_context_dates(
                     lambda doc: (doc["instance_id"] == instance_id_value)
                     & r_module.expr(date_keys).contains(doc["date_key"])
                 )
-                .pluck("date_key")
+                .pluck(
+                    "date_key",
+                    "pit_provenance",
+                    "pit_manifest_id",
+                    "pit_as_of",
+                )
                 .run(conn)
             )
         return {
             str(row.get("date_key") or "").strip()
             for row in rows
             if row.get("date_key")
+            and (not require_strict or _strict_pit_trade_context_row(row))
         }
     except Exception:
         return set()
@@ -163,7 +197,10 @@ def load_nexus_processed_trade_context_dates(
 
 
 def historic_lookback_resume_dates(
-    instance_id_value: str, lookback_opens: list
+    instance_id_value: str,
+    lookback_opens: list,
+    *,
+    require_strict: bool = True,
 ) -> list:
     """Given the full ordered list of trading-session opens, return the
     suffix starting at the first day NOT yet processed. Returns the
@@ -173,7 +210,11 @@ def historic_lookback_resume_dates(
         return []
     ordered = list(lookback_opens)
     date_keys = [dt.strftime("%Y-%m-%d") for dt in ordered]
-    processed = load_nexus_processed_trade_context_dates(instance_id_value, date_keys)
+    processed = load_nexus_processed_trade_context_dates(
+        instance_id_value,
+        date_keys,
+        require_strict=require_strict,
+    )
     if not processed:
         return ordered
     first_missing_idx = None
