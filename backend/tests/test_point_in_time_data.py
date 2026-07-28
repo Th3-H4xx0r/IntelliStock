@@ -6,6 +6,7 @@ import pytest
 
 from point_in_time_data import (
     DatasetManifest,
+    ImmutableSnapshotStore,
     PointInTimeContext,
     PointInTimeDataError,
     filter_available,
@@ -104,11 +105,31 @@ def test_live_context_is_explicit_and_still_uses_aware_utc_time():
 
     assert context.is_live is True
     assert context.strict is False
+    assert context.provenance == "live_current"
     assert context.as_of == _ts("2026-03-02T19:00:00Z")
 
 
+def test_strict_context_exposes_verified_provenance():
+    context = PointInTimeContext(
+        as_of=_ts("2026-03-02T14:00:00Z"),
+        manifest=_manifest(),
+    )
+
+    assert context.provenance == "strict_verified"
+
+
+def test_snapshot_store_coerce_preserves_registry_backed_provider():
+    class Provider:
+        def load_snapshot(self, *, dataset, context):
+            return None
+
+    provider = Provider()
+
+    assert ImmutableSnapshotStore.coerce(provider) is provider
+
+
 def test_immutable_snapshot_store_copies_and_freezes_nested_payloads():
-    from point_in_time_data import ImmutableSnapshotStore, load_snapshot_payload
+    from point_in_time_data import load_snapshot_payload
 
     source = {
         "fundamentals": [

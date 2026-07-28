@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from point_in_time_data import PointInTimeDataError
+import point_in_time_registry
 
 
 UTC = timezone.utc
@@ -109,6 +110,18 @@ def _session_close(session_date: date) -> datetime:
     )
 
 
+@pytest.fixture(autouse=True)
+def _fail_closed_default_registry(monkeypatch):
+    def unavailable(_as_of):
+        raise PointInTimeDataError("no finalized point-in-time manifest exists")
+
+    monkeypatch.setattr(
+        point_in_time_registry,
+        "resolve_default_bundle",
+        unavailable,
+    )
+
+
 def test_broker_routes_graph_backtest_through_strict_historical_entrypoint():
     namespace = _extract_broker_functions(
         "_run_graph_nexus_with_point_in_time",
@@ -153,6 +166,61 @@ def test_broker_routes_graph_backtest_through_strict_historical_entrypoint():
         "ImmutableSnapshotStore"
     )
     assert captured["historical"]["session_close_resolver"] is _session_close
+    assert result[0][1] == {"AAPL": 0}
+
+
+def test_broker_resolves_registered_bundle_without_serialized_config(
+    monkeypatch,
+):
+    from point_in_time_registry import InMemoryPointInTimeRegistry
+
+    registry = InMemoryPointInTimeRegistry()
+    registry.finalize_bundle(
+        as_of=datetime(2026, 3, 2, 13, tzinfo=UTC),
+        datasets={
+            "graph": {"recording_version": 1, "queries": {}},
+            "fundamentals": {"AAPL": {"market_cap": 1_500_000_000_000}},
+            "universe": {"symbols": ["AAPL"]},
+            "news": {"alpaca": [], "google": [], "benzinga": {}},
+        },
+        code_revision="test",
+    )
+    monkeypatch.setattr(
+        point_in_time_registry,
+        "resolve_default_bundle",
+        registry.resolve_bundle,
+    )
+    namespace = _extract_broker_functions(
+        "_run_graph_nexus_with_point_in_time",
+        "run_run_once_strategies",
+    )
+    captured = {}
+
+    class Strategy:
+        def run_historical(self, *args, **kwargs):
+            captured.update(kwargs)
+            return {"AAPL": {"score": 0}}
+
+        def run_once(self, *args, **kwargs):
+            pytest.fail("backtest must not call Graph Nexus run_once directly")
+
+    namespace["_strategy_class_cache"]["graph_nexus_analysis"] = Strategy
+    config = {}
+    result = namespace["run_run_once_strategies"](
+        [{"strategy": "graph_nexus_analysis", "weight": 1.0, "config": config}],
+        ["AAPL"],
+        {"AAPL": 100.0},
+        datetime(2026, 3, 2, 14, tzinfo=UTC),
+        data={"AAPL": []},
+        strategy_caches={},
+    )
+
+    assert config == {}
+    assert captured["context"].manifest.manifest_id.startswith("pit-")
+    assert captured["context"].provenance == "strict_verified"
+    assert captured["session_close_resolver"].__name__ == (
+        "resolve_nyse_session_close"
+    )
     assert result[0][1] == {"AAPL": 0}
 
 

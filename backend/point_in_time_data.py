@@ -79,8 +79,10 @@ class ImmutableSnapshotStore(Mapping[str, Any]):
         self._datasets = frozen
 
     @classmethod
-    def coerce(cls, snapshots: Any) -> "ImmutableSnapshotStore":
+    def coerce(cls, snapshots: Any) -> Any:
         if isinstance(snapshots, cls):
+            return snapshots
+        if callable(getattr(snapshots, "load_snapshot", None)):
             return snapshots
         return cls(snapshots)
 
@@ -234,6 +236,7 @@ class PointInTimeContext:
     manifest: DatasetManifest
     strict: bool = True
     is_live: bool = False
+    provenance: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.manifest, DatasetManifest):
@@ -243,8 +246,35 @@ class PointInTimeContext:
             "as_of",
             require_aware_utc(self.as_of, field="as_of"),
         )
-        object.__setattr__(self, "strict", bool(self.strict))
-        object.__setattr__(self, "is_live", bool(self.is_live))
+        strict = bool(self.strict)
+        is_live = bool(self.is_live)
+        if strict and is_live:
+            raise PointInTimeDataError(
+                "a point-in-time context cannot be both strict and live"
+            )
+        provenance = str(self.provenance or "").strip()
+        if not provenance:
+            provenance = (
+                "live_current"
+                if is_live
+                else "strict_verified"
+                if strict
+                else "legacy_unverified"
+            )
+        expected_provenance = (
+            "live_current"
+            if is_live
+            else "strict_verified"
+            if strict
+            else "legacy_unverified"
+        )
+        if provenance != expected_provenance:
+            raise PointInTimeDataError(
+                "point-in-time provenance is inconsistent with execution mode"
+            )
+        object.__setattr__(self, "strict", strict)
+        object.__setattr__(self, "is_live", is_live)
+        object.__setattr__(self, "provenance", provenance)
 
     @classmethod
     def for_live(

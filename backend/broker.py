@@ -3534,6 +3534,7 @@ def _run_graph_nexus_with_point_in_time(
         PointInTimeContext,
         PointInTimeDataError,
         coerce_dataset_manifest,
+        resolve_nyse_session_close,
     )
 
     as_of = current_time
@@ -3547,24 +3548,55 @@ def _run_graph_nexus_with_point_in_time(
         as_of = as_of.astimezone(_timezone.utc)
 
     if globals().get("mode") == MODE_BACKTEST:
-        manifest = coerce_dataset_manifest(
-            config.get("point_in_time_manifest")
+        pit_keys = (
+            "point_in_time_manifest",
+            "point_in_time_store",
+            "point_in_time_session_close_resolver",
         )
-        store = ImmutableSnapshotStore.coerce(
-            config.get("point_in_time_store")
-        )
-        resolver = config.get("point_in_time_session_close_resolver")
-        if not callable(resolver):
+        supplied = {
+            key: config.get(key)
+            for key in pit_keys
+            if config.get(key) is not None
+        }
+        if supplied and len(supplied) != len(pit_keys):
+            missing = sorted(set(pit_keys) - set(supplied))
             raise PointInTimeDataError(
-                "historical Graph Nexus snapshot inputs require a "
-                "session close resolver"
+                "historical Graph Nexus point-in-time config is incomplete: "
+                + ", ".join(missing)
             )
-        context = PointInTimeContext(
-            as_of=as_of,
-            manifest=manifest,
-            strict=True,
-            is_live=False,
-        )
+        if supplied:
+            manifest = coerce_dataset_manifest(
+                supplied["point_in_time_manifest"]
+            )
+            store = ImmutableSnapshotStore.coerce(
+                supplied["point_in_time_store"]
+            )
+            resolver = supplied["point_in_time_session_close_resolver"]
+            if not callable(resolver):
+                raise PointInTimeDataError(
+                    "historical Graph Nexus snapshot inputs require a "
+                    "session close resolver"
+                )
+            context = PointInTimeContext(
+                as_of=as_of,
+                manifest=manifest,
+                strict=True,
+                is_live=False,
+            )
+        else:
+            from point_in_time_registry import resolve_default_bundle
+
+            bundle = resolve_default_bundle(as_of)
+            manifest = coerce_dataset_manifest(bundle.manifest)
+            store = ImmutableSnapshotStore.coerce(bundle.store)
+            resolver = resolve_nyse_session_close
+            context = PointInTimeContext(
+                as_of=as_of,
+                manifest=manifest,
+                strict=True,
+                is_live=False,
+                provenance=bundle.record.provenance,
+            )
         return instance.run_historical(
             list(symbols),
             prices,
