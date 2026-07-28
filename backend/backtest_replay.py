@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from experiment_registry import ExperimentSpec, validate_benchmark_manifest
@@ -29,6 +30,7 @@ MATRIX_TABLE = "backtest_replay_matrices"
 CALL_TABLE = "backtest_replay_calls"
 FIXTURE_TABLE = "backtest_replay_fixtures"
 RECEIPT_TABLE = "backtest_replay_receipts"
+BUILD_TABLE = "backtest_replay_fixture_builds"
 
 
 class ReplayError(ValueError):
@@ -135,7 +137,7 @@ class ExperimentMatrixManifest:
     arms: Mapping[str, ExperimentSpec]
     combinations: Sequence[Any]
     windows: Sequence[Any]
-    cost_scenarios: Mapping[str, Mapping[str, Any]]
+    cost_scenarios: Mapping[str, Mapping[str, ExperimentSpec]]
     fixture_count: int
     arm_recording_order: Sequence[str]
     trial_count: int
@@ -173,13 +175,28 @@ class ExperimentMatrixManifest:
             raise ReplayError("combinations must be non-empty")
         if not isinstance(self.cost_scenarios, Mapping) or not self.cost_scenarios:
             raise ReplayError("cost_scenarios must be a non-empty mapping")
-        costs: dict[str, Mapping[str, Any]] = {}
+        costs: dict[str, Mapping[str, ExperimentSpec]] = {}
         hashes: dict[str, str] = {}
         for name, scenario in self.cost_scenarios.items():
             key = _text("cost scenario", name)
-            frozen = _immutable_mapping("cost scenario", scenario)
-            costs[key] = frozen
-            hashes[key] = _named_hash("cost-sha256-", _plain(frozen))
+            if not isinstance(scenario, Mapping) or set(scenario) != set(normalized_arms):
+                raise ReplayError("each cost scenario must bind every matrix arm")
+            bound: dict[str, ExperimentSpec] = {}
+            cost_hashes = set()
+            for arm, spec in scenario.items():
+                if not isinstance(spec, ExperimentSpec):
+                    raise ReplayError("cost scenarios must bind ExperimentSpec values")
+                bound[arm] = spec
+                cost_hashes.add(spec.execution_cost_model_hash)
+            if len(cost_hashes) != 1:
+                raise ReplayError("each union fixture cost scenario requires one cost model")
+            if key == "base" and any(
+                bound[arm].fingerprint != normalized_arms[arm].fingerprint
+                for arm in normalized_arms
+            ):
+                raise ReplayError("base cost scenario must bind the declared arm experiments")
+            costs[key] = bound
+            hashes[key] = cost_hashes.pop()
         object.__setattr__(self, "arms", _freeze(normalized_arms))
         object.__setattr__(self, "combinations", _freeze(combinations))
         object.__setattr__(self, "windows", _freeze(windows))
@@ -209,7 +226,17 @@ class ExperimentMatrixManifest:
             },
             "combinations": _plain(self.combinations),
             "windows": _plain(self.windows),
-            "cost_scenarios": _plain(self.cost_scenarios),
+            "cost_scenarios": {
+                scenario: {
+                    arm: {
+                        "experiment_id": spec.experiment_id,
+                        "fingerprint": spec.fingerprint,
+                        "execution_cost_model_hash": spec.execution_cost_model_hash,
+                    }
+                    for arm, spec in specs.items()
+                }
+                for scenario, specs in self.cost_scenarios.items()
+            },
             "fixture_count": self.fixture_count,
             "arm_recording_order": list(self.arm_recording_order),
             "trial_count": self.trial_count,
@@ -225,7 +252,10 @@ class ExperimentMatrixManifest:
             "arms": dict(self.arms),
             "combinations": _plain(self.combinations),
             "windows": _plain(self.windows),
-            "cost_scenarios": _plain(self.cost_scenarios),
+            "cost_scenarios": {
+                scenario: dict(specs)
+                for scenario, specs in self.cost_scenarios.items()
+            },
             "fixture_count": self.fixture_count,
             "arm_recording_order": list(self.arm_recording_order),
             "trial_count": self.trial_count,
@@ -241,6 +271,15 @@ class ExperimentMatrixManifest:
         except KeyError as exc:
             raise ReplayError(f"unknown matrix arm {arm!r}") from exc
 
+    def experiment_for(self, arm_name: str, cost_scenario_id: str) -> ExperimentSpec:
+        """Return the preregistered experiment that owns one arm/cost execution."""
+        try:
+            return self.cost_scenarios[_text("cost_scenario_id", cost_scenario_id)][
+                _text("arm_name", arm_name)
+            ]
+        except KeyError as exc:
+            raise ReplayError("arm/cost scenario is not preregistered") from exc
+
     def to_doc(self) -> dict[str, Any]:
         return {
             "id": self.matrix_id,
@@ -250,7 +289,10 @@ class ExperimentMatrixManifest:
             "arm_ids": _plain(self.arm_ids),
             "combinations": _plain(self.combinations),
             "windows": _plain(self.windows),
-            "cost_scenarios": _plain(self.cost_scenarios),
+            "cost_scenarios": {
+                scenario: {arm: spec.to_doc() for arm, spec in specs.items()}
+                for scenario, specs in self.cost_scenarios.items()
+            },
             "cost_scenario_hashes": _plain(self.cost_scenario_hashes),
             "fixture_count": self.fixture_count,
             "arm_recording_order": list(self.arm_recording_order),
@@ -267,7 +309,13 @@ class ExperimentMatrixManifest:
             matrix = cls(
                 arms={name: ExperimentSpec.from_doc(spec) for name, spec in doc["arms"].items()},
                 combinations=doc["combinations"], windows=doc["windows"],
-                cost_scenarios=doc["cost_scenarios"], fixture_count=doc["fixture_count"],
+                cost_scenarios={
+                    scenario: {
+                        arm: ExperimentSpec.from_doc(spec)
+                        for arm, spec in specs.items()
+                    }
+                    for scenario, specs in doc["cost_scenarios"].items()
+                }, fixture_count=doc["fixture_count"],
                 arm_recording_order=doc["arm_recording_order"], trial_count=doc["trial_count"],
                 bootstrap_seed=doc["bootstrap_seed"], failure_rules=doc["failure_rules"],
                 selection_rule=doc["selection_rule"], implementation_hashes=doc["implementation_hashes"],
@@ -380,8 +428,12 @@ class FixtureBuild:
                  benchmark_manifest: Mapping[str, Any], store: Any | None = None) -> None:
         if not isinstance(matrix, ExperimentMatrixManifest):
             raise ReplayError("matrix must be an ExperimentMatrixManifest")
-        if store is not None:
-            store.require_matrix(matrix.matrix_id)
+        if store is None:
+            raise ReplayError("a durable store is required before fixture building")
+        store.require_matrix(matrix.matrix_id)
+        canonical_window = _plain(window)
+        if not any(_same(canonical_window, declared) for declared in matrix.windows):
+            raise ReplayError("fixture window is not declared by the matrix")
         if isinstance(fixture_ordinal, bool) or not isinstance(fixture_ordinal, int) or not 0 <= fixture_ordinal < matrix.fixture_count:
             raise ReplayError("fixture_ordinal must be within preregistered fixture_count")
         scenario = _text("cost_scenario_id", cost_scenario_id)
@@ -389,7 +441,7 @@ class FixtureBuild:
             raise ReplayError("cost scenario is not preregistered in the matrix")
         self.matrix = matrix
         self.matrix_id = matrix.matrix_id
-        self.window = _plain(window)
+        self.window = canonical_window
         self.fixture_ordinal = fixture_ordinal
         self.cost_scenario_id = scenario
         self.rng_seed_manifest = _immutable_mapping("rng_seed_manifest", rng_seed_manifest)
@@ -399,6 +451,16 @@ class FixtureBuild:
             "matrix_id": matrix.matrix_id, "window": self.window,
             "fixture_ordinal": fixture_ordinal, "cost_scenario_id": scenario,
         })
+        store.reserve_build(
+            self.build_id,
+            {
+                "matrix_id": matrix.matrix_id,
+                "window": self.window,
+                "fixture_ordinal": fixture_ordinal,
+                "cost_scenario_id": scenario,
+                "cost_scenario_hash": matrix.cost_scenario_hashes[scenario],
+            },
+        )
         self._pit_chain: list[Mapping[str, Any]] = []
         self._ledger = ModelEvidenceLedger()
         self._arm_requests: dict[str, set[str]] = {arm: set() for arm in matrix.arms}
@@ -455,6 +517,7 @@ class ReplayReceipt:
     """Arm-local execution receipt; promotion is permitted only with all audits."""
 
     matrix: ExperimentMatrixManifest
+    arm_name: str
     arm_id: str
     fixture: ReplayFixture
     experiment: ExperimentSpec
@@ -475,12 +538,16 @@ class ReplayReceipt:
     def __post_init__(self) -> None:
         if not isinstance(self.matrix, ExperimentMatrixManifest) or not isinstance(self.fixture, ReplayFixture):
             raise ReplayError("receipt requires an immutable matrix and fixture")
-        arm = _text("arm_id", self.arm_id)
-        if arm not in self.matrix.arms:
+        arm_name = _text("arm_name", self.arm_name)
+        arm_id = _text("arm_id", self.arm_id)
+        if arm_name not in self.matrix.arms:
             raise ReplayError("receipt arm is not declared by its matrix")
-        if self.matrix.arms[arm].fingerprint != self.experiment.fingerprint:
-            raise ReplayError("receipt experiment fingerprint differs from matrix arm")
-        if self.fixture.matrix_id != self.matrix.matrix_id or arm not in self.fixture.arm_request_sets:
+        if arm_id != self.matrix.arm_id(arm_name):
+            raise ReplayError("receipt arm ID differs from its preregistered matrix arm ID")
+        selected = self.matrix.experiment_for(arm_name, self.fixture.cost_scenario_id)
+        if selected.fingerprint != self.experiment.fingerprint:
+            raise ReplayError("receipt experiment fingerprint differs from matrix arm/cost scenario")
+        if self.fixture.matrix_id != self.matrix.matrix_id or arm_name not in self.fixture.arm_request_sets:
             raise ReplayError("receipt fixture is not a union fixture for this matrix arm")
         source_identity = validate_replay_source(
             source_tree_hash=self.experiment.source_tree_hash,
@@ -490,6 +557,14 @@ class ReplayReceipt:
         )
         if self.executed_cost_model_hash != self.experiment.execution_cost_model_hash:
             raise ReplayError("receipt execution cost model differs from preregistered experiment")
+        if self.fixture.cost_scenario_hash != self.experiment.execution_cost_model_hash:
+            raise ReplayError("receipt fixture cost scenario differs from preregistered experiment")
+        runtime_digest = _text("dependency_runtime_digest", self.dependency_runtime_digest)
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", runtime_digest) is None:
+            raise ReplayError("dependency_runtime_digest must be a sha256 digest")
+        ledger_hash = _text("trade_ledger_hash", self.trade_ledger_hash)
+        if re.fullmatch(r"trade-ledger-sha256-[0-9a-f]{64}", ledger_hash) is None:
+            raise ReplayError("trade ledger hash must be a canonical trade-ledger-sha256 digest")
         audit = _immutable_mapping("replay_audit", self.replay_audit)
         all_audits = (
             audit.get("complete") is True and self.pit_audit is True and self.execution_audit is True
@@ -497,17 +572,18 @@ class ReplayReceipt:
         )
         identity = {
             "version": "replay-receipt-v1", "matrix_id": self.matrix.matrix_id,
-            "arm_id": arm, "fixture_id": self.fixture.fixture_id,
+            "arm_id": arm_id, "fixture_id": self.fixture.fixture_id,
             "experiment_fingerprint": self.experiment.fingerprint,
             "executed_source_identity": source_identity,
-            "dependency_runtime_digest": _text("dependency_runtime_digest", self.dependency_runtime_digest),
+            "dependency_runtime_digest": runtime_digest,
             "execution_cost_model_hash": self.executed_cost_model_hash,
-            "trade_ledger_hash": _text("trade_ledger_hash", self.trade_ledger_hash),
+            "trade_ledger_hash": ledger_hash,
             "replay_audit": _plain(audit), "pit_audit": self.pit_audit,
             "execution_audit": self.execution_audit, "benchmark_audit": self.benchmark_audit,
             "accounting_audit": self.accounting_audit,
         }
-        object.__setattr__(self, "arm_id", arm)
+        object.__setattr__(self, "arm_name", arm_name)
+        object.__setattr__(self, "arm_id", arm_id)
         object.__setattr__(self, "replay_audit", audit)
         object.__setattr__(self, "executed_source_identity", source_identity)
         object.__setattr__(self, "promotion_eligible", all_audits)
@@ -516,7 +592,8 @@ class ReplayReceipt:
     def to_doc(self) -> dict[str, Any]:
         return {
             "id": self.receipt_id, "record_kind": "replay_receipt", "receipt_id": self.receipt_id,
-            "matrix_id": self.matrix.matrix_id, "arm_id": self.arm_id,
+            "matrix_id": self.matrix.matrix_id, "arm_name": self.arm_name,
+            "arm_id": self.arm_id,
             "fixture_id": self.fixture.fixture_id, "experiment_id": self.experiment.experiment_id,
             "experiment_fingerprint": self.experiment.fingerprint,
             "executed_source_tree_hash": self.executed_source_tree_hash,
@@ -536,6 +613,7 @@ class InMemoryReplayStore:
     def __init__(self) -> None:
         self._matrices: dict[str, ExperimentMatrixManifest] = {}
         self._calls: dict[str, ModelEvidenceRecord] = {}
+        self._builds: dict[str, Mapping[str, Any]] = {}
         self._fixtures: dict[str, ReplayFixture] = {}
         self._receipts: dict[str, ReplayReceipt] = {}
         self.write_order: tuple[str, ...] = ()
@@ -562,6 +640,22 @@ class InMemoryReplayStore:
     def get_matrix(self, matrix_id: str) -> ExperimentMatrixManifest | None:
         return self._matrices.get(matrix_id)
 
+    def reserve_build(self, build_id: str, declaration: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Durably reserve one matrix/window/ordinal/cost construction address."""
+        identifier = _text("build_id", build_id)
+        frozen = _immutable_mapping("build declaration", declaration)
+        prior = self._builds.get(identifier)
+        if prior is not None:
+            if not _same(prior, frozen):
+                raise ReplayError("divergent immutable fixture build row")
+            return prior
+        self._builds[identifier] = frozen
+        self._wrote("build")
+        return frozen
+
+    def reserved_build(self, build_id: str) -> Mapping[str, Any] | None:
+        return self._builds.get(build_id)
+
     def publish_call(self, row: ModelEvidenceRecord) -> ModelEvidenceRecord:
         prior = self._calls.get(row.semantic_id)
         if prior is not None:
@@ -572,17 +666,48 @@ class InMemoryReplayStore:
         self._wrote("call")
         return row
 
-    def publish_fixture(self, fixture: ReplayFixture) -> ReplayFixture:
-        self.require_matrix(fixture.matrix_id)
+    def _preflight_fixture(self, fixture: ReplayFixture) -> tuple[ModelEvidenceRecord, ...]:
+        matrix = self.require_matrix(fixture.matrix_id)
+        declaration = self._builds.get(fixture.build_id)
+        if declaration is None:
+            raise ReplayError("fixture build must be durably reserved before sealing")
+        expected_build = {
+            "matrix_id": fixture.matrix_id,
+            "window": fixture.window,
+            "fixture_ordinal": fixture.fixture_ordinal,
+            "cost_scenario_id": fixture.cost_scenario_id,
+            "cost_scenario_hash": fixture.cost_scenario_hash,
+        }
+        if not _same(declaration, expected_build):
+            raise ReplayError("fixture does not match its preregistered build address")
+        if fixture.cost_scenario_id not in matrix.cost_scenario_hashes:
+            raise ReplayError("fixture cost scenario is not preregistered")
+        if fixture.cost_scenario_hash != matrix.cost_scenario_hashes[fixture.cost_scenario_id]:
+            raise ReplayError("fixture cost scenario hash differs from preregistration")
+        if set(fixture.arm_request_sets) != set(matrix.arms):
+            raise ReplayError("fixture request declarations must cover every matrix arm")
+        candidates = dict(self._calls)
+        unpublished: list[ModelEvidenceRecord] = []
         for row in fixture.records:
-            self.publish_call(row)
+            prior = candidates.get(row.semantic_id)
+            if prior is not None and prior.content_hash != row.content_hash:
+                raise ReplayError("divergent immutable row for semantic ID " + row.semantic_id)
+            if prior is None:
+                candidates[row.semantic_id] = row
+                unpublished.append(row)
         ids = set().union(*(fixture.request_set(arm) for arm in fixture.arm_request_sets))
-        missing = sorted(semantic_id for semantic_id in ids if semantic_id not in self._calls)
+        missing = sorted(semantic_id for semantic_id in ids if semantic_id not in candidates)
         if missing:
             raise ReplayError("fixture manifest cannot precede immutable call rows")
-        ledger = ModelEvidenceLedger(self._calls[semantic_id] for semantic_id in sorted(ids))
+        ledger = ModelEvidenceLedger(candidates[semantic_id] for semantic_id in sorted(ids))
         if ledger.content_hash != fixture.model_ledger_hash:
             raise ReplayError("fixture model ledger hash differs from published call rows")
+        return tuple(unpublished)
+
+    def publish_fixture(self, fixture: ReplayFixture) -> ReplayFixture:
+        unpublished = self._preflight_fixture(fixture)
+        for row in unpublished:
+            self.publish_call(row)
         prior = self._fixtures.get(fixture.fixture_id)
         if prior is not None:
             if not _same(prior.to_doc(), fixture.to_doc()):
@@ -595,11 +720,6 @@ class InMemoryReplayStore:
     def publish_receipt(self, receipt: ReplayReceipt) -> ReplayReceipt:
         self.require_matrix(receipt.matrix.matrix_id)
         fixture = self._fixtures.get(receipt.fixture.fixture_id)
-        if fixture is None:
-            persisted = self.backend.get_record(FIXTURE_TABLE, receipt.fixture.fixture_id)
-            if persisted is not None and _same(persisted, receipt.fixture.to_doc()):
-                self._fixtures[receipt.fixture.fixture_id] = receipt.fixture
-                fixture = receipt.fixture
         if fixture is None:
             raise ReplayError("receipt manifest cannot precede its fixture manifest")
         prior = self._receipts.get(receipt.receipt_id)
@@ -644,6 +764,15 @@ class RethinkReplayStore(InMemoryReplayStore):
         self._matrices[matrix.matrix_id] = matrix
         return matrix
 
+    def reserve_build(self, build_id: str, declaration: Mapping[str, Any]) -> Mapping[str, Any]:
+        doc = {
+            "id": _text("build_id", build_id),
+            "record_kind": "replay_fixture_build",
+            **_plain(_immutable_mapping("build declaration", declaration)),
+        }
+        self._persist(BUILD_TABLE, doc)
+        return super().reserve_build(build_id, declaration)
+
     def require_matrix(self, matrix_id: str) -> ExperimentMatrixManifest:
         matrix = self.get_matrix(matrix_id)
         if matrix is None:
@@ -661,9 +790,9 @@ class RethinkReplayStore(InMemoryReplayStore):
         return super().publish_call(row)
 
     def publish_fixture(self, fixture: ReplayFixture) -> ReplayFixture:
-        # Durable call rows are always published before their fixture manifest.
-        self.require_matrix(fixture.matrix_id)
-        for row in fixture.records:
+        # Validate without writes, then publish calls before the final manifest.
+        unpublished = self._preflight_fixture(fixture)
+        for row in unpublished:
             self.publish_call(row)
         self._persist(FIXTURE_TABLE, fixture.to_doc())
         return super().publish_fixture(fixture)
@@ -671,6 +800,9 @@ class RethinkReplayStore(InMemoryReplayStore):
     def publish_receipt(self, receipt: ReplayReceipt) -> ReplayReceipt:
         self.require_matrix(receipt.matrix.matrix_id)
         if receipt.fixture.fixture_id not in self._fixtures:
-            raise ReplayError("receipt manifest cannot precede its fixture manifest")
+            persisted = self.backend.get_record(FIXTURE_TABLE, receipt.fixture.fixture_id)
+            if persisted is None or not _same(persisted, receipt.fixture.to_doc()):
+                raise ReplayError("receipt manifest cannot precede its fixture manifest")
+            self._fixtures[receipt.fixture.fixture_id] = receipt.fixture
         self._persist(RECEIPT_TABLE, receipt.to_doc())
         return super().publish_receipt(receipt)

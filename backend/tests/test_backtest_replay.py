@@ -1,5 +1,6 @@
 """Contract tests for durable deterministic backtest replay evidence."""
 from datetime import datetime, timezone
+import re
 
 import pytest
 
@@ -50,7 +51,7 @@ def _benchmark_manifest():
     }
 
 
-def _spec(experiment_id, *, cost_version="cost-v1"):
+def _spec(experiment_id, *, cost_version="cost-v1", fee_bps=1.0):
     return ExperimentSpec(
         experiment_id=experiment_id,
         search_scope="bull-rally",
@@ -71,7 +72,7 @@ def _spec(experiment_id, *, cost_version="cost-v1"):
             "version": cost_version,
             "spread_bps": 1.0,
             "slippage_bps": 1.0,
-            "fee_bps": 1.0,
+            "fee_bps": fee_bps,
             "latency_seconds": 0.0,
         },
         start_date="2024-01-02",
@@ -81,14 +82,20 @@ def _spec(experiment_id, *, cost_version="cost-v1"):
     )
 
 
-def _matrix():
+def _matrix(*, stressed=False):
     baseline = _spec("baseline")
     candidate = _spec("candidate")
+    cost_scenarios = {"base": {"baseline": baseline, "candidate": candidate}}
+    if stressed:
+        cost_scenarios["stressed"] = {
+            "baseline": _spec("baseline-stressed", cost_version="cost-v2", fee_bps=4.0),
+            "candidate": _spec("candidate-stressed", cost_version="cost-v2", fee_bps=4.0),
+        }
     return ExperimentMatrixManifest(
         arms={"baseline": baseline, "candidate": candidate},
         combinations=(("baseline", "candidate"),),
         windows=("walk-forward-03",),
-        cost_scenarios={"base": baseline.execution_cost_model},
+        cost_scenarios=cost_scenarios,
         fixture_count=2,
         arm_recording_order=("baseline", "candidate"),
         trial_count=3,
@@ -127,6 +134,9 @@ def _record(label="shared", sequence=1, *, outcome=None):
 
 
 def _build(matrix, *, store=None, cost_scenario_id="base"):
+    if store is None:
+        store = InMemoryReplayStore()
+        store.publish_matrix(matrix)
     return FixtureBuild(
         matrix=matrix,
         window="walk-forward-03",
@@ -150,6 +160,28 @@ def test_matrix_must_be_preregistered_before_fixture_building_and_is_immutable()
     assert ExperimentMatrixManifest(
         **{**matrix.constructor_args(), "bootstrap_seed": 992}
     ).matrix_id != matrix.matrix_id
+
+
+def test_fixture_build_requires_a_published_store_declared_window_and_reservation():
+    matrix = _matrix()
+    args = {
+        "matrix": matrix,
+        "window": "walk-forward-03",
+        "fixture_ordinal": 0,
+        "cost_scenario_id": "base",
+        "rng_seed_manifest": {"simulation": 179},
+        "benchmark_manifest": _benchmark_manifest(),
+    }
+    with pytest.raises(ReplayError, match="durable store"):
+        FixtureBuild(**args)
+    store = InMemoryReplayStore()
+    with pytest.raises(ReplayError, match="preregistered"):
+        FixtureBuild(**args, store=store)
+    store.publish_matrix(matrix)
+    with pytest.raises(ReplayError, match="window"):
+        FixtureBuild(**{**args, "window": "undeclared-window"}, store=store)
+    build = FixtureBuild(**args, store=store)
+    assert store.reserved_build(build.build_id)["matrix_id"] == matrix.matrix_id
 
 
 def test_fixture_build_id_is_preregistered_and_sealed_id_is_content_addressed():
@@ -193,19 +225,31 @@ def test_common_rows_are_identical_and_branch_only_rows_do_not_cross_arm_audits(
 
 
 def test_cost_scenario_is_part_of_build_identity_and_arm_request_set_identity():
-    base = _matrix()
-    alternate = ExperimentMatrixManifest(
-        **{
-            **base.constructor_args(),
-            "cost_scenarios": {
-                "base": base.cost_scenarios["base"],
-                "stressed": {**base.cost_scenarios["base"], "fee_bps": 4.0},
-            },
-        }
-    )
-    assert _build(alternate, cost_scenario_id="base").build_id != _build(
-        alternate, cost_scenario_id="stressed"
+    matrix = _matrix(stressed=True)
+    store = InMemoryReplayStore()
+    store.publish_matrix(matrix)
+    assert _build(matrix, store=store, cost_scenario_id="base").build_id != _build(
+        matrix, store=store, cost_scenario_id="stressed"
     ).build_id
+    fixture = _build(matrix, store=store, cost_scenario_id="stressed").seal()
+    experiment = matrix.experiment_for("baseline", "stressed")
+    receipt = ReplayReceipt(
+        matrix=matrix,
+        arm_name="baseline",
+        arm_id=matrix.arm_id("baseline"),
+        fixture=fixture,
+        experiment=experiment,
+        executed_source_tree_hash="sha256:tree",
+        dependency_runtime_digest="sha256:" + "a" * 64,
+        executed_cost_model_hash=experiment.execution_cost_model_hash,
+        trade_ledger_hash=trade_ledger_hash([], []),
+        replay_audit={"complete": True},
+        pit_audit=True,
+        execution_audit=True,
+        benchmark_audit=True,
+        accounting_audit=True,
+    )
+    assert receipt.promotion_eligible is True
 
 
 def test_store_publishes_calls_before_fixture_and_receipt_and_rejects_divergence():
@@ -217,15 +261,16 @@ def test_store_publishes_calls_before_fixture_and_receipt_and_rejects_divergence
     build.record_model_row("baseline", row)
     fixture = build.seal()
     store.publish_fixture(fixture)
-    assert store.write_order == ("matrix", "call", "fixture")
+    assert store.write_order == ("matrix", "build", "call", "fixture")
 
     receipt = ReplayReceipt(
         matrix=matrix,
-        arm_id="baseline",
+        arm_name="baseline",
+        arm_id=matrix.arm_id("baseline"),
         fixture=fixture,
         experiment=matrix.arms["baseline"],
         executed_source_tree_hash="sha256:tree",
-        dependency_runtime_digest="sha256:runtime",
+        dependency_runtime_digest="sha256:" + "a" * 64,
         executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
         trade_ledger_hash=trade_ledger_hash([{"id": "decision-1"}], [{"id": "fill-1"}]),
         replay_audit={"complete": True},
@@ -237,20 +282,57 @@ def test_store_publishes_calls_before_fixture_and_receipt_and_rejects_divergence
     store.publish_receipt(receipt)
     assert store.write_order[-1] == "receipt"
     assert receipt.promotion_eligible is True
+    assert receipt.to_doc()["arm_id"] == matrix.arm_id("baseline")
+
+    with pytest.raises(ReplayError, match="arm ID"):
+        ReplayReceipt(
+            matrix=matrix,
+            arm_name="baseline",
+            arm_id=matrix.arm_id("candidate"),
+            fixture=fixture,
+            experiment=matrix.arms["baseline"],
+            executed_source_tree_hash="sha256:tree",
+            dependency_runtime_digest="sha256:" + "a" * 64,
+            executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
+            trade_ledger_hash=trade_ledger_hash([], []),
+            replay_audit={"complete": True},
+            pit_audit=True,
+            execution_audit=True,
+            benchmark_audit=True,
+            accounting_audit=True,
+        )
 
 
-def test_receipts_are_promotion_ineligible_until_every_audit_passes():
+def test_receipts_are_promotion_ineligible_until_every_audit_passes_and_reject_bad_hashes():
     matrix = _matrix()
     fixture = _build(matrix).seal()
     receipt = ReplayReceipt(
-        matrix=matrix, arm_id="baseline", fixture=fixture,
+        matrix=matrix, arm_name="baseline", arm_id=matrix.arm_id("baseline"), fixture=fixture,
         experiment=matrix.arms["baseline"], executed_source_tree_hash="sha256:tree",
-        dependency_runtime_digest="sha256:runtime",
+        dependency_runtime_digest="sha256:" + "a" * 64,
         executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
-        trade_ledger_hash="ledger", replay_audit={"complete": False},
+        trade_ledger_hash=trade_ledger_hash([], []), replay_audit={"complete": False},
         pit_audit=True, execution_audit=True, benchmark_audit=True, accounting_audit=True,
     )
     assert receipt.promotion_eligible is False
+    with pytest.raises(ReplayError, match="trade ledger hash"):
+        ReplayReceipt(
+            matrix=matrix, arm_name="baseline", arm_id=matrix.arm_id("baseline"), fixture=fixture,
+            experiment=matrix.arms["baseline"], executed_source_tree_hash="sha256:tree",
+            dependency_runtime_digest="sha256:" + "a" * 64,
+            executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
+            trade_ledger_hash="ledger", replay_audit={"complete": False},
+            pit_audit=True, execution_audit=True, benchmark_audit=True, accounting_audit=True,
+        )
+    with pytest.raises(ReplayError, match="dependency_runtime_digest"):
+        ReplayReceipt(
+            matrix=matrix, arm_name="baseline", arm_id=matrix.arm_id("baseline"), fixture=fixture,
+            experiment=matrix.arms["baseline"], executed_source_tree_hash="sha256:tree",
+            dependency_runtime_digest="runtime",
+            executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
+            trade_ledger_hash=trade_ledger_hash([], []), replay_audit={"complete": False},
+            pit_audit=True, execution_audit=True, benchmark_audit=True, accounting_audit=True,
+        )
 
 
 def test_source_manifest_is_required_for_dirty_or_untracked_executed_trees():
@@ -266,6 +348,50 @@ def test_trade_ledger_hash_is_order_sensitive_and_canonical():
     first = trade_ledger_hash([{"id": "a"}, {"id": "b"}], [{"id": "fill"}])
     assert first == trade_ledger_hash([{"id": "a"}, {"id": "b"}], [{"id": "fill"}])
     assert first != trade_ledger_hash([{"id": "b"}, {"id": "a"}], [{"id": "fill"}])
+    assert re.fullmatch(r"trade-ledger-sha256-[0-9a-f]{64}", first)
+
+
+def test_invalid_fixture_never_persists_a_manifest_and_receipt_requires_fixture():
+    class Backend:
+        def __init__(self):
+            self.rows = {}
+            self.writes = []
+
+        def insert_record(self, table, doc, *, durability):
+            self.writes.append(table)
+            prior = self.rows.get((table, doc["id"]))
+            if prior is None:
+                self.rows[(table, doc["id"])] = dict(doc)
+            return prior
+
+        def get_record(self, table, record_id):
+            return self.rows.get((table, record_id))
+
+    matrix = _matrix()
+    store = RethinkReplayStore(Backend())
+    store.publish_matrix(matrix)
+    build = _build(matrix, store=store)
+    fixture = build.seal()
+    fixture_records = object.__getattribute__(fixture, "records")
+    object.__setattr__(fixture, "model_ledger_hash", "not-the-ledger")
+    with pytest.raises(ReplayError, match="ledger"):
+        store.publish_fixture(fixture)
+    assert "backtest_replay_fixtures" not in store.backend.writes
+    object.__setattr__(fixture, "records", fixture_records)
+
+    memory_store = InMemoryReplayStore()
+    memory_store.publish_matrix(matrix)
+    clean_fixture = _build(matrix, store=memory_store).seal()
+    receipt = ReplayReceipt(
+        matrix=matrix, arm_name="baseline", arm_id=matrix.arm_id("baseline"), fixture=clean_fixture,
+        experiment=matrix.arms["baseline"], executed_source_tree_hash="sha256:tree",
+        dependency_runtime_digest="sha256:" + "a" * 64,
+        executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
+        trade_ledger_hash=trade_ledger_hash([], []), replay_audit={"complete": True},
+        pit_audit=True, execution_audit=True, benchmark_audit=True, accounting_audit=True,
+    )
+    with pytest.raises(ReplayError, match="fixture manifest"):
+        memory_store.publish_receipt(receipt)
 
 
 def test_rethink_store_uses_a_fake_backend_without_database_calls():
@@ -294,6 +420,7 @@ def test_rethink_store_uses_a_fake_backend_without_database_calls():
     store.publish_fixture(build.seal())
     assert [table for table, _, _ in store.backend.writes] == [
         "backtest_replay_matrices",
+        "backtest_replay_fixture_builds",
         "backtest_replay_calls",
         "backtest_replay_fixtures",
     ]
