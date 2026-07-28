@@ -2944,11 +2944,12 @@ def api_publish_evidence_matrix(
     manifest must exist before the first backtest of a matrix is POSTed, so
     arms cannot be added or reworded after seeing results.
     """
-    from backtest_replay import ExperimentMatrixManifest, RethinkReplayStore
+    from backtest_evidence_runtime import default_replay_store
+    from backtest_replay import ExperimentMatrixManifest
 
     try:
         matrix = ExperimentMatrixManifest.from_doc(body.matrix)
-        RethinkReplayStore(conn).publish_matrix(matrix)
+        default_replay_store().publish_matrix(matrix)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {

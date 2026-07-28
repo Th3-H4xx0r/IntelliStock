@@ -1508,11 +1508,12 @@ def _build_backtest_evidence_lifecycle(options, row_id, start_dt, end_dt):
     lifecycle that would later fail to attribute its own artifacts.
     """
     try:
-        from backtest_evidence_runtime import EvidenceRunLifecycle
-        from backtest_replay import RethinkReplayStore
+        from backtest_evidence_runtime import (
+            EvidenceRunLifecycle,
+            default_replay_store,
+        )
 
-        conn = get_conn()
-        store = RethinkReplayStore(conn)
+        store = default_replay_store()
         window = {
             "start": start_dt.date().isoformat() if hasattr(start_dt, "date") else str(start_dt),
             "end": end_dt.date().isoformat() if hasattr(end_dt, "date") else str(end_dt),

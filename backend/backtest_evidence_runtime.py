@@ -31,6 +31,34 @@ from backtest_replay import (
 _RECORD_MODES = frozenset({"record", "record_extend"})
 
 
+def default_replay_store():
+    """Build the production replay store over the immutable-record seam.
+
+    `RethinkReplayStore` needs an `insert_record`/`get_record` backend, NOT a
+    raw RethinkDB connection, and it opens short-lived connections of its own
+    so an immutable publish is never tied to a request- or run-scoped one.
+    Shared by the API and the broker so the two cannot drift.
+    """
+    import contextlib
+
+    from backtest_replay import RethinkReplayStore
+    from benchmark_alpha.rethink_store import _RethinkBackend
+    from interactive_utils import DB_NAME, get_conn, r
+
+    @contextlib.contextmanager
+    def _conn_factory():
+        conn = get_conn()
+        try:
+            yield conn
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    return RethinkReplayStore(_RethinkBackend(r, _conn_factory, DB_NAME))
+
+
 class EvidenceRunLifecycle:
     """Owns evidence activation, PIT capture and terminal finalization."""
 
