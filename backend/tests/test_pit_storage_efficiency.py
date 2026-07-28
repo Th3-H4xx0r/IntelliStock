@@ -129,3 +129,43 @@ def test_daily_cadence_cuts_an_hourly_instance_by_about_seven():
     captures = sum(1 for tick in ticks if g._pit_capture_due(cache, tick, {}))
     assert len(ticks) == 35
     assert captures == 5, f"expected one per day, got {captures}"
+
+
+# ------------------------------------------------- declared research opt-out
+def test_research_mode_is_opt_in_by_name_only():
+    """A run must ASK for the non-strict path; it is never a silent fallback.
+
+    Three guards in run_once all insisted historical => strict, which is
+    correct as a default and is exactly why the opt-out has to be explicit
+    rather than a softened context slipping through.
+    """
+    import inspect
+
+    src = inspect.getsource(g.NexusStrategy.run_once) if hasattr(
+        g, "NexusStrategy") else None
+    if src is None:  # class name differs; fall back to the module source
+        src = open(g.__file__).read()
+    assert '_pit_research' in src
+    assert 'pit_mode' in src
+    # The strict requirement survives for every run that does NOT declare it.
+    assert "and not _pit_research" in src
+
+
+def test_research_provenance_is_named_not_faked():
+    """The opt-out records the ABSENCE of PIT; it never fabricates a manifest."""
+    from point_in_time_data import DatasetManifest, PointInTimeContext
+    from datetime import datetime, timezone
+
+    as_of = datetime(2026, 4, 27, 13, 30, tzinfo=timezone.utc)
+    ctx = PointInTimeContext(
+        as_of=as_of,
+        manifest=DatasetManifest(
+            manifest_id="graph-nexus-research-unverified",
+            source_hashes={"research": "current-state"},
+            created_at=as_of),
+        strict=False,
+        is_live=False,
+    )
+    assert ctx.provenance == "legacy_unverified"
+    assert "research" in ctx.manifest.manifest_id
+    assert ctx.is_live is False, "a backtest must never be labelled live"

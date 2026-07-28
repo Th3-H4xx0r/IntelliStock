@@ -3873,6 +3873,21 @@ def _run_graph_nexus_with_point_in_time(
                 "yellow",
             )
             globals()["_PIT_RESEARCH_MODE_USED"] = True
+            # Declare the opt-out in the provenance record itself rather than
+            # passing no context at all: strict=False + is_live=False is the
+            # dataclass's own "legacy_unverified" state, so every downstream
+            # record says exactly what this run saw. The manifest is named for
+            # what it is and claims no historical snapshot.
+            _research_context = PointInTimeContext(
+                as_of=as_of,
+                manifest=DatasetManifest(
+                    manifest_id="graph-nexus-research-unverified",
+                    source_hashes={"research": "current-state"},
+                    created_at=as_of,
+                ),
+                strict=False,
+                is_live=False,
+            )
             return instance.run_once(
                 list(symbols),
                 prices,
@@ -3884,6 +3899,8 @@ def _run_graph_nexus_with_point_in_time(
                 strategy_cache=strategy_cache,
                 time_increment=time_increment,
                 mode=scheduler_mode,
+                point_in_time_context=_research_context,
+                session_close_resolver=resolve_nyse_session_close,
             )
         else:
             from point_in_time_registry import resolve_default_bundle

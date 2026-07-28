@@ -23086,6 +23086,14 @@ class GraphNexusAnalysis:
         """
         from _phase_alpha_helpers import validate_model_evidence_preflight
         validate_model_evidence_preflight(config)
+        # A run may DECLARE that it is opting out of strict point-in-time
+        # replay. That is only ever legitimate when no frozen snapshots exist
+        # for the window, it must be asked for by name, and the resulting run
+        # is stamped legacy_unverified and can never be promotion-eligible.
+        _pit_research = (
+            str((config or {}).get("pit_mode") or "strict").strip().lower()
+            == "research"
+        )
         if point_in_time_context is None and data is not None:
             from point_in_time_data import PointInTimeDataError
 
@@ -23105,6 +23113,7 @@ class GraphNexusAnalysis:
             if (
                 not point_in_time_context.is_live
                 and not point_in_time_context.strict
+                and not _pit_research
             ):
                 raise PointInTimeDataError(
                     "historical Graph Nexus requires a strict "
