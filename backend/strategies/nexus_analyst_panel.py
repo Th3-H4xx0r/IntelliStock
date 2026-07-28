@@ -63,14 +63,20 @@ except Exception:
     def llm_call_context(**_kwargs):
         yield
 try:
-    from backend._phase_alpha_helpers import evidence_cache_read_allowed
+    from backend._phase_alpha_helpers import (
+        evidence_cache_read_allowed,
+        evidence_cache_write_allowed,
+    )
     from backend.model_evidence import (
         ModelEvidenceContext,
         ModelEvidenceError,
         get_model_evidence_session,
     )
 except ImportError:
-    from _phase_alpha_helpers import evidence_cache_read_allowed
+    from _phase_alpha_helpers import (
+        evidence_cache_read_allowed,
+        evidence_cache_write_allowed,
+    )
     from model_evidence import (
         ModelEvidenceContext,
         ModelEvidenceError,
@@ -216,6 +222,8 @@ def _get_panel_db_conn():
 
 def _save_round_results(conn, instance_id, date_key, agent_role, round1=None, round2=None,
                         prediction_prices: dict[str, float] | None = None):
+    if not evidence_cache_write_allowed("analyst_panel"):
+        return
     if _r is None: return
     conn = _get_panel_db_conn()
     if conn is None: return
@@ -613,6 +621,7 @@ def run_analyst_panel(config: dict, news_summary: str, stock_candidates: list[di
     t0 = perf_counter()
     if not config.get("analyst_panel_enabled", False):
         return "", {}
+    panel_cache_write_allowed = evidence_cache_write_allowed("analyst_panel")
     if (
         evidence_cache_read_allowed("analyst_panel")
         and strategy_cache.get("_analyst_panel_last_run_date") == date_key
@@ -651,7 +660,8 @@ def run_analyst_panel(config: dict, news_summary: str, stock_candidates: list[di
 
     weights = _compute_agent_weights(conn, instance_id, date_key, agents,
                                      config.get("analyst_panel_memory_days", 14))
-    strategy_cache["_analyst_panel_agent_weights"] = weights
+    if panel_cache_write_allowed:
+        strategy_cache["_analyst_panel_agent_weights"] = weights
     used = 0
 
     # Snapshot current prices for accuracy tracking (compare future price vs today's)
@@ -698,9 +708,10 @@ def run_analyst_panel(config: dict, news_summary: str, stock_candidates: list[di
         _log(f"PANEL score adj: {ticker} {adj:+.3f}", "cyan")
 
     ctx = _format_consensus_context(outlook, adjustments, sw, moderator)
-    strategy_cache["_analyst_panel_last_consensus"] = ctx
-    strategy_cache["_analyst_panel_last_adjustments"] = adjustments
-    strategy_cache["_analyst_panel_last_run_date"] = date_key
+    if panel_cache_write_allowed:
+        strategy_cache["_analyst_panel_last_consensus"] = ctx
+        strategy_cache["_analyst_panel_last_adjustments"] = adjustments
+        strategy_cache["_analyst_panel_last_run_date"] = date_key
     _log(f"ANALYST PANEL done: {used} calls in {_format_stage_elapsed(perf_counter() - t0)} | "
          f"{outlook.get('direction')}({outlook.get('confidence',0):.2f}) | {len(adjustments)} stocks", "cyan")
     return ctx, adjustments

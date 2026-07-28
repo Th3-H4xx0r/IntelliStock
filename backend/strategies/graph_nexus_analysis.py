@@ -3076,8 +3076,7 @@ def _load_outcome_context(
 def _get_learning_cache(conn, instance_id: str, refresh_hours: float, *, config: dict | None = None) -> str | None:
     """Return cached learning summary if fresh, else None."""
     from _phase_alpha_helpers import evidence_cache_read_allowed
-    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
-    if not evidence_cache_read_allowed("learning", fixture_artifacts=fixture_artifacts):
+    if not evidence_cache_read_allowed("learning"):
         return None
     if conn is None:
         return None
@@ -3104,6 +3103,9 @@ def _get_learning_cache(conn, instance_id: str, refresh_hours: float, *, config:
 
 
 def _save_learning_cache(conn, instance_id: str, summary: str, *, config: dict | None = None) -> None:
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("learning"):
+        return
     if conn is None:
         return
     _ensure_learning_cache_table(conn)
@@ -3557,6 +3559,9 @@ def _load_llm_cache_rows(conn, table_name: str, cache_ids: list[str]) -> dict[st
 
 
 def _store_llm_cache_rows(conn, table_name: str, rows: list[dict]) -> None:
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("macro_classification"):
+        return
     if conn is None or not rows:
         return
     _ensure_nexus_history_table(conn, table_name)
@@ -4500,10 +4505,7 @@ def _load_active_event_maintenance_cache_doc(
     conn, history_scope_id: str, date_key: str, *, config: dict | None = None
 ) -> dict[str, Any] | None:
     from _phase_alpha_helpers import evidence_cache_read_allowed
-    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
-    if not evidence_cache_read_allowed(
-        "active_event_maintenance", fixture_artifacts=fixture_artifacts
-    ):
+    if not evidence_cache_read_allowed("active_event_maintenance"):
         return None
     if conn is None:
         return None
@@ -4517,6 +4519,9 @@ def _load_active_event_maintenance_cache_doc(
 
 
 def _store_active_event_maintenance_cache_doc(conn, doc: dict[str, Any]) -> None:
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("active_event_maintenance"):
+        return
     if conn is None or not doc:
         return
     _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE)
@@ -14905,8 +14910,7 @@ def _get_cached_articles(
     cached_sentiment: dict[ticker -> {sentiment, event}] or None if not cached for this set.
     """
     from _phase_alpha_helpers import evidence_cache_read_allowed
-    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
-    if not evidence_cache_read_allowed("sentiment", fixture_artifacts=fixture_artifacts):
+    if not evidence_cache_read_allowed("sentiment"):
         return None, None
     if conn is None:
         return None, None
@@ -14988,6 +14992,9 @@ def _save_cached_sentiment(
     context=None,
 ):
     """Save LLM sentiment_data keyed by article-set fingerprint so reuse is only for the same articles."""
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("sentiment"):
+        return
     if conn is None or not isinstance(sentiment_data, dict) or len(sentiment_data) == 0:
         return
     fp = _article_set_fingerprint(articles or []) if articles else ""
@@ -20610,10 +20617,7 @@ def _check_overlay_result_cache(
 ) -> dict | None:
     """Check overlay result cache. Returns cached overlay dict or None."""
     from _phase_alpha_helpers import evidence_cache_read_allowed
-    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
-    if not evidence_cache_read_allowed(
-        "overlay_result", fixture_artifacts=fixture_artifacts
-    ):
+    if not evidence_cache_read_allowed("overlay_result"):
         return None
     if conn is None or _r is None or not config.get("overlay_result_cache_enabled", False):
         return None
@@ -20635,6 +20639,9 @@ def _store_overlay_result_cache(
     active_events: list[dict], config: dict, result: dict,
 ) -> None:
     """Store overlay result in cache."""
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("overlay_result"):
+        return
     if conn is None or _r is None or not config.get("overlay_result_cache_enabled", False):
         return
     if not result:
@@ -24110,6 +24117,13 @@ class GraphNexusAnalysis:
                 )
         # Learning stage: analyze past outcomes into pattern summary (retries daily until enough data)
         if learning_stage_enabled and llm_key:
+            from _phase_alpha_helpers import (
+                evidence_cache_read_allowed,
+                evidence_cache_write_allowed,
+            )
+            _learning_cache_read_allowed = evidence_cache_read_allowed("learning")
+            _learning_cache_write_allowed = evidence_cache_write_allowed("learning")
+            learning_ctx = ""
             learning_context_scope = {
                 "instance_id": instance_id,
                 "base_instance_id": base_instance_id,
@@ -24119,12 +24133,17 @@ class GraphNexusAnalysis:
                 "learning_stage_days": learning_stage_days,
                 "learning_refresh_hours": learning_refresh_hours,
             }
-            if strategy_cache is not None and strategy_cache.get("_nexus_learning_context_scope") != learning_context_scope:
+            if (
+                _learning_cache_read_allowed
+                and _learning_cache_write_allowed
+                and strategy_cache is not None
+                and strategy_cache.get("_nexus_learning_context_scope") != learning_context_scope
+            ):
                 strategy_cache["_nexus_learning_context_built"] = False
                 strategy_cache["_nexus_learning_context"] = ""
                 strategy_cache.pop("_nexus_learning_last_attempt_date", None)
-            _learning_should_run = False
-            if strategy_cache is not None:
+            _learning_should_run = not _learning_cache_read_allowed
+            if _learning_cache_read_allowed and strategy_cache is not None:
                 if strategy_cache.get("_nexus_learning_context_built"):
                     _learning_should_run = False  # already have real content
                 elif strategy_cache.get("_nexus_learning_last_attempt_date") == date_key:
@@ -24144,19 +24163,26 @@ class GraphNexusAnalysis:
                             llm_provider, llm_key, llm_model, use_toon=use_toon, provider_config=llm_provider_config,
                             config=config,
                         )
-                        strategy_cache["_nexus_learning_context"] = learning_ctx
-                        strategy_cache["_nexus_learning_last_attempt_date"] = date_key
+                        if _learning_cache_write_allowed and strategy_cache is not None:
+                            strategy_cache["_nexus_learning_context"] = learning_ctx
+                            strategy_cache["_nexus_learning_last_attempt_date"] = date_key
                         if learning_ctx:
-                            strategy_cache["_nexus_learning_context_built"] = True
+                            if _learning_cache_write_allowed and strategy_cache is not None:
+                                strategy_cache["_nexus_learning_context_built"] = True
                             _log("Learning stage: context built successfully, will use for all subsequent bars", "green")
                         else:
                             _log(f"Learning stage: no usable context yet on {date_key}, will retry next day", "cyan")
-                        strategy_cache["_nexus_learning_context_scope"] = learning_context_scope
+                        if _learning_cache_write_allowed and strategy_cache is not None:
+                            strategy_cache["_nexus_learning_context_scope"] = learning_context_scope
                 except Exception as _learn_err:
-                    strategy_cache["_nexus_learning_last_attempt_date"] = date_key
+                    _raise_model_evidence_error(_learn_err)
+                    if _learning_cache_write_allowed and strategy_cache is not None:
+                        strategy_cache["_nexus_learning_last_attempt_date"] = date_key
                     _log(f"Learning stage error (will retry next day): {_learn_err}", "yellow")
-            if strategy_cache is not None:
+            if _learning_cache_read_allowed and strategy_cache is not None:
                 additional_context += strategy_cache.get("_nexus_learning_context", "")
+            else:
+                additional_context += learning_ctx
 
         # ── Phase 2.5: Adversarial Analyst Panel ──────────────────────────────
         analyst_panel_adjustments: dict[str, float] = {}
@@ -24187,7 +24213,13 @@ class GraphNexusAnalysis:
                 if "sentiment_data" in locals() and isinstance(sentiment_data, dict) and sentiment_data:
                     _ap_sent = sentiment_data
                 else:
-                    _ap_cached_sent = strategy_cache.get("_last_sentiment_data") if strategy_cache else None
+                    from _phase_alpha_helpers import evidence_cache_read_allowed
+                    _ap_cached_sent = (
+                        strategy_cache.get("_last_sentiment_data")
+                        if strategy_cache
+                        and evidence_cache_read_allowed("sentiment")
+                        else None
+                    )
                     _ap_sent = _ap_cached_sent if isinstance(_ap_cached_sent, dict) else {}
                 _ap_max = int(config.get("analyst_panel_max_stocks", 10))
                 _ap_stocks = [
@@ -24209,6 +24241,7 @@ class GraphNexusAnalysis:
                         additional_context += panel_context
                         _log(f"Analyst Panel: consensus added ({len(panel_context)} chars, {len(analyst_panel_adjustments)} stock adjustments)", "green")
             except Exception as _ap_err:
+                _raise_model_evidence_error(_ap_err)
                 _log(f"Analyst Panel error (skipped): {type(_ap_err).__name__}: {str(_ap_err)[:200]}", "yellow")
         if analyst_panel_adjustments:
             config["_analyst_panel_adjustments"] = analyst_panel_adjustments
@@ -24298,6 +24331,7 @@ class GraphNexusAnalysis:
                             if strategy_cache is not None:
                                 strategy_cache["_peb_zero_streak"] = _peb_zero_streak + 1
                     except Exception as exc:
+                        _raise_model_evidence_error(exc)
                         _log(f"Private-entity bridge skipped: {exc}", "yellow")
                         private_entity_resolutions = []
         additional_context += private_entity_context
@@ -24763,7 +24797,11 @@ class GraphNexusAnalysis:
         )
 
         # Cache sentiment_data for the analyst panel on the NEXT bar (Phase 2.5 runs before sentiment)
-        if strategy_cache is not None:
+        from _phase_alpha_helpers import evidence_cache_write_allowed
+        if (
+            strategy_cache is not None
+            and evidence_cache_write_allowed("sentiment")
+        ):
             strategy_cache["_last_sentiment_data"] = dict(sentiment_data)
 
         # ── 2a-pre) Market Trends: apply updates, generate signals, discover stocks ──
@@ -25181,6 +25219,7 @@ class GraphNexusAnalysis:
                 google_articles = []
                 _gn_normalized = []
             except Exception as _macro_join_exc:
+                _raise_model_evidence_error(_macro_join_exc)
                 from point_in_time_data import PointInTimeDataError
 
                 if isinstance(_macro_join_exc, PointInTimeDataError):
@@ -25216,6 +25255,7 @@ class GraphNexusAnalysis:
                         except Exception as _bg_close_exc:
                             _log(f"Active-event maintenance WARN: failed to close background DB connection: {_bg_close_exc}", "yellow")
                 except Exception as _bg_exc:
+                    _raise_model_evidence_error(_bg_exc)
                     raise RuntimeError(f"Event maintenance background worker failed: {_bg_exc}") from _bg_exc
             from concurrent.futures import ThreadPoolExecutor as _MaintTPE
             _maint_executor = _MaintTPE(max_workers=1)
@@ -25267,6 +25307,7 @@ class GraphNexusAnalysis:
                                 if macro_added or macro_dampened:
                                     _log(f"Google News → {macro_added} new tickers added, {macro_dampened} dampened (conflicting macro)", "green")
                 except Exception as e:
+                    _raise_model_evidence_error(e)
                     _log(f"Google News integration error: {e}", "yellow")
             # Wait for event maintenance background thread to complete
             try:
@@ -25274,6 +25315,7 @@ class GraphNexusAnalysis:
                     active_events, _gn_event_traces = _maint_fut.result(timeout=900)
                 llm_traces_global.extend(_gn_event_traces)
             except Exception as _maint_exc:
+                _raise_model_evidence_error(_maint_exc)
                 _exc_desc = repr(_maint_exc) if str(_maint_exc) == "" else str(_maint_exc)
                 _log(f"Active-event maintenance error (non-fatal): {_exc_desc}", "yellow")
                 active_events = []

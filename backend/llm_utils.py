@@ -5557,10 +5557,10 @@ def _store_prompt_cache(prompt: str, model: str, effort: str, response: str, *, 
     bypassed (scoped opt-in path). The RethinkDB table is auto-ensured.
     """
     try:
-        from backend._phase_alpha_helpers import evidence_cache_read_allowed
+        from backend._phase_alpha_helpers import evidence_cache_write_allowed
     except ImportError:
-        from _phase_alpha_helpers import evidence_cache_read_allowed
-    if not evidence_cache_read_allowed("ordinary_prompt"):
+        from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("ordinary_prompt"):
         return
     if not _rethink:
         return
@@ -6790,6 +6790,20 @@ def call_llm_with_prompt_cache(
     Returns:
         (raw_output, from_cache). raw_output is the raw model response; from_cache True if from DB.
     """
+    (
+        _,
+        ModelEvidenceError,
+        _,
+        _,
+        get_model_evidence_session,
+        _,
+    ) = _model_evidence_components()
+    evidence_session = get_model_evidence_session()
+    if evidence_session is not None and evidence_session.mode != "off":
+        raise ModelEvidenceError(
+            "call_llm_with_prompt_cache is unavailable in model-evidence mode; "
+            "use a guarded API with a caller-created ModelEvidenceContext"
+        )
     raw_empty = ("", False)
     if not api_key or not model:
         return raw_empty

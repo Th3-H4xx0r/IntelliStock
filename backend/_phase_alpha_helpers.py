@@ -32,26 +32,41 @@ def _model_evidence_session():
     return get_model_evidence_session()
 
 
-def evidence_cache_read_allowed(
+def evidence_cache_access_allowed(
     cache_kind: str,
     *,
-    fixture_artifacts: frozenset[str] = frozenset(),
+    access: str,
 ) -> bool:
-    """Central policy for mutable caches whose values derive from an LLM."""
-    if cache_kind not in _MODEL_EVIDENCE_CACHE_KINDS:
-        raise ValueError(f"unknown model-evidence cache kind: {cache_kind}")
-    if not isinstance(fixture_artifacts, frozenset):
-        raise ValueError("fixture_artifacts must be an immutable frozenset")
+    """Central read/write policy for mutable caches derived from an LLM."""
     session = _model_evidence_session()
     if session is None or session.mode == "off":
         return True
-    if session.mode in {"record", "record_extend"}:
-        return False
-    # A caller-provided config value is not proof that an artifact belongs to
-    # the sealed replay fixture.  Until the active session exposes verified
-    # fixture artifact identities, replay must fail closed for every mutable
-    # LLM-derived cache.
+    try:
+        from backend.model_evidence import ModelEvidenceError
+    except ImportError:
+        from model_evidence import ModelEvidenceError
+    if cache_kind not in _MODEL_EVIDENCE_CACHE_KINDS:
+        raise ModelEvidenceError(
+            f"unknown model-evidence cache kind: {cache_kind}"
+        )
+    if access not in {"read", "write"}:
+        raise ModelEvidenceError(
+            f"unknown model-evidence cache access: {access}"
+        )
+    # Caller config is never proof that an artifact belongs to the sealed
+    # fixture. Until the active session exposes verified artifact identities,
+    # every evidence mode fails closed for mutable LLM-derived cache access.
     return False
+
+
+def evidence_cache_read_allowed(cache_kind: str, **_ignored) -> bool:
+    """Compatibility wrapper for centralized mutable-cache read policy."""
+    return evidence_cache_access_allowed(cache_kind, access="read")
+
+
+def evidence_cache_write_allowed(cache_kind: str) -> bool:
+    """Return whether a mutable LLM-derived cache may be mutated."""
+    return evidence_cache_access_allowed(cache_kind, access="write")
 
 
 def validate_model_evidence_preflight(config: dict) -> None:
