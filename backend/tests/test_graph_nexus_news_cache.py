@@ -11,9 +11,12 @@ def _patch_news(monkeypatch, cached, sentiment, fresh):
     import strategies.graph_nexus_analysis as g
     monkeypatch.setattr(g, "_get_nexus_db_conn", lambda: object())
     monkeypatch.setattr(g, "_ensure_nexus_cache_table", lambda conn: None)
+    # Keyword-tolerant: the real _get_cached_articles also takes `context` and
+    # (since the 2026-07-28 evidence work) `config`, which the caller threads
+    # through so replay mode can deny mutable-cache reads.
     monkeypatch.setattr(
         g, "_get_cached_articles",
-        lambda conn, dk, sentiment_cache_scope_id="": (cached, sentiment),
+        lambda conn, dk, **kwargs: (cached, sentiment),
     )
     monkeypatch.setattr(g, "_fetch_alpaca_news_all", lambda *a, **k: list(fresh))
     monkeypatch.setattr(g, "_filter_low_signal_alpaca_articles", lambda arts, **k: arts)
