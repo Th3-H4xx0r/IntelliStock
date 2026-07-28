@@ -8182,13 +8182,118 @@ def _get_conviction_aware_floor(
             )
         except (TypeError, ValueError):
             bear_pp = -5.0
-        if regime_lower == "bull":
+        # A4 (2026-07-28): the legacy arithmetic below is INVERTED. Floors are
+        # negative, so adding a positive bull_pp (-15 + 5 = -10) TIGHTENS the
+        # floor and adding a negative bear_pp (-15 - 5 = -20) LOOSENS it —
+        # opposite to both the comments and the risk intent, and the source of
+        # the rally exits clustered on that unintended -10% boundary. v2 uses
+        # the adjustment's MAGNITUDE so bull widens and bear tightens, as
+        # documented. Default OFF: the legacy path is preserved exactly.
+        if bool(config.get("circuit_breaker_regime_adjustment_semantics_v2", False)):
+            if regime_lower == "bull":
+                floor = floor - _abs_pp_or_zero(
+                    config.get("circuit_breaker_regime_adjustment_bull_pp", 5.0))
+            elif regime_lower == "bear":
+                # Tightening must never cross into a positive floor, which
+                # would exit every position at any gain.
+                floor = min(0.0, floor + _abs_pp_or_zero(
+                    config.get("circuit_breaker_regime_adjustment_bear_pp", -5.0)))
+        elif regime_lower == "bull":
             floor = floor + bull_pp  # widens floor (less negative)
         elif regime_lower == "bear":
             floor = floor + bear_pp  # tightens floor (more negative)
         # chop / unknown: no adjustment
 
     return floor, vol_mult, low_vol_threshold
+
+
+def _abs_pp_or_zero(value) -> float:
+    """Magnitude of a percentage-point adjustment, or 0.0 when it is missing,
+    non-finite or non-numeric. Unlike the legacy `config.get(k, d) or d` reads
+    this honours an explicit zero instead of silently restoring the default."""
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return abs(v) if math.isfinite(v) else 0.0
+
+
+def _resolve_effective_open_loss_floor(
+    tier: str,
+    config: dict,
+    *,
+    regime: str | None = None,
+    realized_vol=None,
+    unrealized_pct: float | None = None,
+):
+    """A4 (2026-07-28, pure). Resolve — in ONE place — the floor the circuit
+    breaker actually fires on: tier floor, regime adjustment, operator
+    override, volatility scaling, then the firing test.
+
+    ``realized_vol`` may be a float or a zero-arg callable; the callable form
+    is only invoked when volatility scaling can actually bind, so the caller's
+    expensive closes lookup stays lazy.
+
+    Returns ``(effective_pct, fires, telemetry)``. ``telemetry`` keeps the
+    absolute, volatility, override and final floors separate so a fired exit
+    can be attributed to the component that bound it.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    tier_u = str(tier or "LOW").upper()
+    floor_abs, vol_mult, low_vol_threshold = _get_conviction_aware_floor(
+        tier_u, cfg, regime=regime)
+    crash = (regime is not None
+             and str(regime).strip().lower() == "crash")
+
+    override = None
+    if cfg.get("max_open_loss_pct") is not None:
+        try:
+            override = float(cfg.get("max_open_loss_pct"))
+        except (TypeError, ValueError):
+            override = None
+    effective = floor_abs if override is None else override
+
+    # Operator vol override applies to MID/LOW only; HIGH always disables.
+    if cfg.get("max_open_loss_vol_multiplier") is not None and tier_u != "HIGH":
+        try:
+            vol_mult = float(cfg.get("max_open_loss_vol_multiplier"))
+        except (TypeError, ValueError):
+            pass
+
+    vol_floor = None
+    if not crash and vol_mult > 0 and realized_vol is not None:
+        try:
+            rv = float(realized_vol() if callable(realized_vol) else realized_vol)
+        except (TypeError, ValueError):
+            rv = 0.0
+        # Low-vol disable: quiet names let the absolute floor govern.
+        if rv > 0 and rv >= low_vol_threshold:
+            vol_floor = -vol_mult * rv * 100.0
+            # Pick the TIGHTER (less negative) of the two floors.
+            effective = max(effective, vol_floor)
+
+    fires = crash
+    if not fires and unrealized_pct is not None:
+        try:
+            fires = float(unrealized_pct) <= effective
+        except (TypeError, ValueError):
+            fires = False
+
+    return effective, fires, {
+        "tier": tier_u,
+        "regime": (None if regime is None else str(regime).strip().lower()),
+        "absolute_pct": floor_abs,
+        "volatility_pct": vol_floor,
+        "override_pct": override,
+        "base_pct": effective if vol_floor is None else (
+            floor_abs if override is None else override),
+        "effective_pct": effective,
+        "vol_mult": vol_mult,
+        "low_vol_threshold": low_vol_threshold,
+        "crash_emergency": crash,
+    }
 
 
 def _get_scaled_cash_reserve_floor_pct(
@@ -18970,40 +19075,24 @@ def _evaluate_position_risk(
                                     strategy_cache["_nexus_conviction_telemetry_capped_logged"] = True
                     except Exception:
                         pass
-                _cb_floor_pct, _cb_vol_mult, _cb_low_vol_thresh = _get_conviction_aware_floor(
-                    _cb_tier, config, regime=(_cb_regime if _cb_regime_gated else None)
+                # A4 (2026-07-28): one resolver owns tier floor -> regime
+                # adjustment -> operator override -> vol scaling -> firing, so
+                # the tested floor is the floor that actually fires. The vol
+                # lookup stays lazy — it only runs when scaling can bind.
+                _z31_floor_effective, _cb_fires, _cb_floor_telemetry = (
+                    _resolve_effective_open_loss_floor(
+                        _cb_tier,
+                        config,
+                        regime=(_cb_regime if _cb_regime_gated else None),
+                        realized_vol=lambda: _realized_vol_20d(
+                            _recent_closes_for_symbol(
+                                sym, price_history, portfolio_emulator)),
+                        unrealized_pct=_unrealized_pct,
+                    )
                 )
-                # Back-compat: explicit max_open_loss_pct config overrides the
-                # tier-resolved floor (used by tests / operator overrides).
-                _legacy_override = config.get("max_open_loss_pct")
-                if _legacy_override is not None:
-                    try:
-                        _cb_floor_pct = float(_legacy_override)
-                    except (TypeError, ValueError):
-                        pass
-                _legacy_vol_mult = config.get("max_open_loss_vol_multiplier")
-                if _legacy_vol_mult is not None and _cb_tier != "HIGH":
-                    # Operator override only applies to MID/LOW; HIGH always disables.
-                    try:
-                        _cb_vol_mult = float(_legacy_vol_mult)
-                    except (TypeError, ValueError):
-                        pass
-                # crash regime: sentinel 0.0 from helper means emergency exit
-                _cb_crash_emergency = False
-                if _cb_regime_gated and str(_cb_regime).strip().lower() == "crash":
-                    _cb_crash_emergency = True
-                _z31_floor_effective = _cb_floor_pct
-                if not _cb_crash_emergency and _cb_vol_mult > 0:
-                    _z31_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
-                    _z31_vol = _realized_vol_20d(_z31_closes)
-                    # Low-vol disable: skip vol-scaling on quiet names so the
-                    # absolute floor governs (fixes SNDK pathology).
-                    if _z31_vol > 0 and _z31_vol >= _cb_low_vol_thresh:
-                        _z31_vol_floor_pct = -_cb_vol_mult * _z31_vol * 100.0
-                        # Pick the TIGHTER (less negative) of the two floors.
-                        # max() of two negatives selects the one closer to zero.
-                        _z31_floor_effective = max(_cb_floor_pct, _z31_vol_floor_pct)
-                if _cb_crash_emergency or _unrealized_pct <= _z31_floor_effective:
+                _cb_floor_pct = _cb_floor_telemetry["base_pct"]
+                _cb_crash_emergency = _cb_floor_telemetry["crash_emergency"]
+                if _cb_fires:
                     fresh_score = -1
                     if _cb_crash_emergency:
                         fresh_reason = (
