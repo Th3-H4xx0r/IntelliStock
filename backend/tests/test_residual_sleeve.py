@@ -153,13 +153,15 @@ def test_no_deploy_outside_bull():
 
 
 # ── 2026-07-19: airtight regime position cap helper (BEAR_F6 fix) ──
-_WANTED2 = {"_regime_position_cap_hard"}
+_WANTED2 = {"_regime_position_cap_hard", "_regime_recovery_hard_cap",
+            "_nexus_recovery_flag", "_nexus_bear_capacity_latch"}
 for _node in _tree.body:
     if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED2:
         _mod = ast.Module(body=[_node], type_ignores=[])
         exec(compile(_mod, "broker.py", "exec"), _ns)
-assert "_regime_position_cap_hard" in _ns
-b._regime_position_cap_hard = _ns["_regime_position_cap_hard"]
+for _w in _WANTED2:
+    assert _w in _ns, _w
+    setattr(b, _w, _ns[_w])
 
 CAP_SPEC = [{"strategy": "graph_nexus_analysis", "config": {
     "max_positions": 14, "max_positions_bull": 14,
@@ -176,6 +178,79 @@ def test_cap_hard_returns_regime_cap():
     assert b._regime_position_cap_hard(CAP_SPEC) == ("bull", 14)
     _set_regime("crash")
     assert b._regime_position_cap_hard(CAP_SPEC) == ("crash", 0)
+
+
+# ── 2026-07-28 A1: recovery hard-cap coherence (default OFF) ──
+def _set_recovery(flag=False, latch=False):
+    """Stub the two nexus strategy-cache reads the recovery cap depends on."""
+    b._ns["_nexus_recovery_flag"] = lambda: flag
+    b._ns["_nexus_bear_capacity_latch"] = lambda: latch
+
+
+def _rec_spec(**cfg):
+    base = {"max_positions": 14, "max_positions_bull": 14,
+            "max_positions_chop": 8, "max_positions_bear": 2,
+            "regime_position_cap_recovery_hard_enforce": True,
+            "max_positions_recovery": 14}
+    base.update(cfg)
+    return [{"strategy": "graph_nexus_analysis", "config": base}]
+
+
+def test_recovery_cap_default_off_is_byte_compatible():
+    """Absent flag => the ordinary chop cap, even in a confirmed recovery."""
+    _set_regime("chop")
+    _set_recovery(flag=True)
+    spec = _rec_spec()
+    spec[0]["config"].pop("regime_position_cap_recovery_hard_enforce")
+    assert b._regime_position_cap_hard(spec) == ("chop", 8)
+    assert b._regime_position_cap_hard(
+        _rec_spec(regime_position_cap_recovery_hard_enforce=False)) == ("chop", 8)
+
+
+def test_recovery_cap_raises_cap_when_confirmed():
+    _set_regime("chop")
+    _set_recovery(flag=True)
+    assert b._regime_position_cap_hard(_rec_spec()) == ("recovery", 14)
+
+
+def test_recovery_cap_requires_recovery_flag_and_chop():
+    _set_regime("chop")
+    _set_recovery(flag=False)
+    assert b._regime_position_cap_hard(_rec_spec()) == ("chop", 8)
+    # A recovery flag never overrides a non-chop confirmed regime.
+    _set_recovery(flag=True)
+    for regime, cap in (("bull", 14), ("bear", 2), ("crash", 0)):
+        _set_regime(regime)
+        assert b._regime_position_cap_hard(_rec_spec()) == (regime, cap)
+
+
+def test_recovery_cap_yields_to_bear_capacity_latch():
+    """The latch holds the bear cap through chop interludes in a downtrend."""
+    _set_regime("chop")
+    _set_recovery(flag=True, latch=True)
+    assert b._regime_position_cap_hard(_rec_spec()) == ("chop", 8)
+
+
+def test_recovery_cap_invalid_config_falls_back_to_chop():
+    _set_regime("chop")
+    _set_recovery(flag=True)
+    for bad in (None, "abc", 0, -3, float("nan"), float("inf"), True, [14]):
+        assert b._regime_position_cap_hard(
+            _rec_spec(max_positions_recovery=bad)) == ("chop", 8), bad
+    missing = _rec_spec()
+    missing[0]["config"].pop("max_positions_recovery")
+    assert b._regime_position_cap_hard(missing) == ("chop", 8)
+
+
+def test_recovery_cap_clamps_to_max_positions_and_floors_at_chop():
+    _set_regime("chop")
+    _set_recovery(flag=True)
+    # Never exceeds the global max_positions ceiling.
+    assert b._regime_position_cap_hard(
+        _rec_spec(max_positions_recovery=99)) == ("recovery", 14)
+    # Never LOWERS the ordinary chop cap.
+    assert b._regime_position_cap_hard(
+        _rec_spec(max_positions_recovery=5)) == ("recovery", 8)
 
 
 def test_cap_hard_none_when_no_regime_or_disabled():
