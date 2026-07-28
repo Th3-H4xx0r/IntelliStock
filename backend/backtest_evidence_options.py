@@ -300,6 +300,23 @@ def source_tree_digest(root=None) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def execution_cost_model_hash(model) -> str:
+    """Canonical cost identity for an ExecutionCostModel.
+
+    Mirrors ExperimentSpec.execution_cost_model_hash so a receipt can compare
+    the model the EMULATOR actually used against the one that was
+    preregistered. Deriving the executed hash from the experiment instead would
+    be self-referential and always match.
+    """
+    import hashlib
+
+    from experiment_registry import _canonical_json
+
+    payload = model.as_dict() if hasattr(model, "as_dict") else dict(model)
+    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    return f"cost-sha256-{digest}"
+
+
 def cost_scenario_id(target_one_way_bps) -> str:
     """Stable scenario label used in matrix manifests and receipts."""
     if target_one_way_bps is None:

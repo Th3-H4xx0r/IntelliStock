@@ -1444,6 +1444,7 @@ def _finalize_evidence_success(bt_summary, trades, decisions):
     if lifecycle is None:
         return None
     try:
+        from backtest_evidence_options import execution_cost_model_hash
         from backtest_replay import trade_ledger_hash as _trade_ledger_hash
 
         summary = bt_summary or {}
@@ -1451,6 +1452,9 @@ def _finalize_evidence_success(bt_summary, trades, decisions):
             trade_ledger_hash=_trade_ledger_hash(decisions or [], trades or []),
             executed_source_tree_hash=_executed_source_tree_hash(),
             dependency_runtime_digest=_dependency_runtime_digest(),
+            # The model the EMULATOR was actually built with, not the
+            # preregistered one — ReplayReceipt rejects a mismatch.
+            executed_cost_model_hash=execution_cost_model_hash(_evidence_cost_model),
             audits={
                 "pit": True,
                 # The emulator already decides whether its own fills are

@@ -22,7 +22,10 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
 import model_evidence  # noqa: E402
-from backtest_evidence_options import EvidenceOptionError  # noqa: E402
+from backtest_evidence_options import (  # noqa: E402
+    EvidenceOptionError,
+    execution_cost_model_hash,
+)
 from backtest_evidence_runtime import EvidenceRunLifecycle  # noqa: E402
 from backtest_replay import (  # noqa: E402
     ExperimentMatrixManifest,
@@ -33,6 +36,9 @@ from experiment_registry import ExperimentSpec  # noqa: E402
 _WINDOW = {"start": "2026-03-02", "end": "2026-04-27"}
 _SOURCE_TREE = "sha256:tree"
 _RUNTIME_DIGEST = "sha256:" + "c" * 64
+_COST_MODEL = {"version": "equity-next-event-v1", "spread_bps": 5.0,
+               "slippage_bps": 10.0, "fee_bps": 0.3, "latency_seconds": 0.0}
+_COST_HASH = execution_cost_model_hash(_COST_MODEL)
 
 
 def _source_manifest(name):
@@ -67,9 +73,7 @@ def _spec(label, cost_version="equity-next-event-v1"):
         graph_manifest=_source_manifest("graph"),
         universe_manifest=_source_manifest("universe"),
         benchmark_manifest=dict(_BENCHMARK),
-        execution_cost_model={"version": cost_version, "spread_bps": 5.0,
-                              "slippage_bps": 10.0, "fee_bps": 0.3,
-                              "latency_seconds": 0.0},
+        execution_cost_model=dict(_COST_MODEL, version=cost_version),
         start_date="2026-03-02",
         end_date="2026-04-27",
         fold="walk-forward-01",
@@ -202,6 +206,7 @@ def test_success_seals_the_fixture_and_publishes_an_eligible_receipt():
         trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
         executed_source_tree_hash=_SOURCE_TREE,
         dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
         audits={"pit": True, "execution": True, "benchmark": True, "accounting": True},
     )
     assert receipt.promotion_eligible is True
@@ -218,6 +223,7 @@ def test_missing_audits_produce_an_ineligible_receipt_not_an_exception():
         trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
         executed_source_tree_hash=_SOURCE_TREE,
         dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
         audits={"pit": True, "execution": False, "benchmark": True, "accounting": True},
     )
     assert receipt.promotion_eligible is False
@@ -277,6 +283,7 @@ def test_success_after_abort_is_refused():
             trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
             executed_source_tree_hash=_SOURCE_TREE,
             dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
             audits={"pit": True, "execution": True, "benchmark": True,
                     "accounting": True})
 
@@ -291,6 +298,7 @@ def test_dirty_source_tree_is_still_recorded_but_flagged():
         trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
         executed_source_tree_hash=_SOURCE_TREE,
         dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
         executed_content_manifest={"files": {"backend/broker.py": "sha256:" + "f" * 64}},
         audits={"pit": True, "execution": True, "benchmark": True, "accounting": True},
     )
@@ -336,6 +344,7 @@ def test_terminal_hook_is_a_noop_after_success():
         trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
         executed_source_tree_hash=_SOURCE_TREE,
         dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
         audits={"pit": True, "execution": True, "benchmark": True, "accounting": True})
     before = store.write_order
     exits = []

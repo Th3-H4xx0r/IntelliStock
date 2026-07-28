@@ -169,6 +169,7 @@ class EvidenceRunLifecycle:
         trade_ledger_hash: str,
         executed_source_tree_hash: str,
         dependency_runtime_digest: str,
+        executed_cost_model_hash: str,
         audits: Mapping,
         executed_content_manifest: Mapping | None = None,
     ) -> ReplayReceipt | None:
@@ -195,7 +196,11 @@ class EvidenceRunLifecycle:
             experiment=experiment,
             executed_source_tree_hash=executed_source_tree_hash,
             dependency_runtime_digest=dependency_runtime_digest,
-            executed_cost_model_hash=experiment.execution_cost_model_hash,
+            # The hash of the model the EMULATOR actually used. ReplayReceipt
+            # rejects it if it differs from the preregistered one, which is the
+            # check that stops a receipt claiming a cost basis the fills never
+            # applied. Deriving it from `experiment` would always match.
+            executed_cost_model_hash=executed_cost_model_hash,
             trade_ledger_hash=trade_ledger_hash,
             replay_audit={"complete": bool(audits.get("replay", True))},
             pit_audit=bool(audits.get("pit")),
