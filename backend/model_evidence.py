@@ -473,6 +473,80 @@ class ModelEvidenceReservation:
         return not self.replay_hit
 
 
+@dataclasses.dataclass(frozen=True)
+class ModelEvidenceCleanStartAudit:
+    """Immutable proof that one arm's mutable evidence scopes were cleared."""
+
+    backtest_id: str
+    build_id: str
+    arm_id: str
+    cleared_scope_identities: Mapping[str, str]
+    before_state_hash: str
+    after_state_hash: str
+    verified_empty: bool
+    remaining_entry_count: int
+    completed_at: dt.datetime | str
+    audit_id: str = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        _non_empty_string(self.backtest_id, "backtest_id")
+        _non_empty_string(self.build_id, "build_id")
+        _non_empty_string(self.arm_id, "arm_id")
+        if not isinstance(self.cleared_scope_identities, Mapping):
+            raise ModelEvidenceError("cleared_scope_identities must be a mapping")
+        scopes = dict(self.cleared_scope_identities)
+        if not scopes:
+            raise ModelEvidenceError("cleared_scope_identities must not be empty")
+        _reject_secrets({"cleared_scope_identities": scopes}, path="clean_start_audit")
+        for scope, identity in scopes.items():
+            _non_empty_string(scope, "cleared_scope_identities scope")
+            if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
+                raise ModelEvidenceError(
+                    f"cleared_scope_identities[{scope}] must be a SHA-256 hex digest"
+                )
+        for field_name in ("before_state_hash", "after_state_hash"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ModelEvidenceError(f"{field_name} must be a SHA-256 hex digest")
+        if self.verified_empty is not True:
+            raise ModelEvidenceError("verified_empty must be true")
+        if (
+            isinstance(self.remaining_entry_count, bool)
+            or not isinstance(self.remaining_entry_count, int)
+            or self.remaining_entry_count != 0
+        ):
+            raise ModelEvidenceError("remaining_entry_count must be zero")
+        completed = self.completed_at
+        if isinstance(completed, str):
+            try:
+                parsed = dt.datetime.fromisoformat(completed.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ModelEvidenceError("completed_at must be an ISO-8601 timestamp") from exc
+        elif isinstance(completed, dt.datetime):
+            parsed = completed
+        else:
+            raise ModelEvidenceError("completed_at must be an ISO-8601 timestamp")
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ModelEvidenceError("completed_at must include a timezone")
+        completed_text = parsed.astimezone(dt.timezone.utc).isoformat()
+        object.__setattr__(self, "completed_at", completed_text)
+        object.__setattr__(self, "cleared_scope_identities", _freeze(dict(sorted(scopes.items()))))
+        object.__setattr__(self, "audit_id", _digest(self.canonical_value()))
+
+    def canonical_value(self) -> dict[str, Any]:
+        return {
+            "backtest_id": self.backtest_id,
+            "build_id": self.build_id,
+            "arm_id": self.arm_id,
+            "cleared_scope_identities": _thaw(self.cleared_scope_identities),
+            "before_state_hash": self.before_state_hash,
+            "after_state_hash": self.after_state_hash,
+            "verified_empty": self.verified_empty,
+            "remaining_entry_count": self.remaining_entry_count,
+            "completed_at": self.completed_at,
+        }
+
+
 class ModelEvidenceSession:
     """Arm-scoped consumption accounting over an immutable evidence ledger."""
 
@@ -483,6 +557,8 @@ class ModelEvidenceSession:
         ledger: ModelEvidenceLedger | None = None,
         arm_id: str | None = None,
         declared_occurrences: frozenset[str] | None = None,
+        backtest_id: str | None = None,
+        build_id: str | None = None,
     ) -> None:
         if mode not in _SESSION_MODES:
             raise ModelEvidenceError(f"unsupported evidence mode: {mode}")
@@ -498,15 +574,59 @@ class ModelEvidenceSession:
             declared = None
         else:
             declared = None
+        if (backtest_id is None) != (build_id is None):
+            raise ModelEvidenceError(
+                "backtest_id and build_id must be supplied together"
+            )
+        if backtest_id is not None:
+            _non_empty_string(backtest_id, "backtest_id")
+            _non_empty_string(build_id, "build_id")
         self.mode = mode
         self.ledger = ledger or ModelEvidenceLedger()
         self.arm_id = arm_id
+        self.backtest_id = backtest_id
+        self.build_id = build_id
         self._declared = declared
         self._pending_provider: set[str] = set()
         self._consumed: set[str] = set()
         self._replayed: set[str] = set()
         self._recorded: set[str] = set()
+        self._clean_start_audit: ModelEvidenceCleanStartAudit | None = None
         self._lock = threading.RLock()
+
+    @property
+    def clean_start_audit(self) -> ModelEvidenceCleanStartAudit | None:
+        with self._lock:
+            return self._clean_start_audit
+
+    def bind_clean_start_audit(
+        self, audit: ModelEvidenceCleanStartAudit
+    ) -> ModelEvidenceCleanStartAudit:
+        if not isinstance(audit, ModelEvidenceCleanStartAudit):
+            raise ModelEvidenceError(
+                "clean-start audit must be a ModelEvidenceCleanStartAudit"
+            )
+        if self.mode == "off":
+            raise ModelEvidenceError("clean-start audit cannot be bound in off mode")
+        if self.backtest_id is None or self.build_id is None:
+            raise ModelEvidenceError(
+                "session backtest_id and build_id are required before binding a clean-start audit"
+            )
+        if audit.arm_id != self.arm_id:
+            raise ModelEvidenceError("clean-start audit arm_id does not match session arm_id")
+        if audit.backtest_id != self.backtest_id:
+            raise ModelEvidenceError(
+                "clean-start audit backtest_id does not match session backtest_id"
+            )
+        if audit.build_id != self.build_id:
+            raise ModelEvidenceError(
+                "clean-start audit build_id does not match session build_id"
+            )
+        with self._lock:
+            if self._clean_start_audit is not None:
+                raise ModelEvidenceError("clean-start audit is already bound")
+            self._clean_start_audit = audit
+            return audit
 
     @staticmethod
     def _normalize_occurrences(occurrences: frozenset[str]) -> frozenset[str]:
@@ -607,6 +727,11 @@ class ModelEvidenceSession:
                 "replayed_occurrences": tuple(sorted(self._replayed)),
                 "recorded_occurrences": tuple(sorted(self._recorded)),
                 "ledger_content_hash": self.ledger.content_hash,
+                "clean_start_audit_id": (
+                    self._clean_start_audit.audit_id
+                    if self._clean_start_audit is not None
+                    else None
+                ),
             }
 
 

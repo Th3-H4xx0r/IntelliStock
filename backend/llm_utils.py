@@ -5501,6 +5501,12 @@ def _check_prompt_cache(prompt: str, model: str, effort: str, *, force_cache: bo
     independently of the global cache toggle). The RethinkDB table is
     auto-ensured on the scoped path.
     """
+    try:
+        from backend._phase_alpha_helpers import evidence_cache_read_allowed
+    except ImportError:
+        from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("ordinary_prompt"):
+        return None
     global _prompt_cache_fail_count
     if not _rethink:
         return None
@@ -5550,6 +5556,12 @@ def _store_prompt_cache(prompt: str, model: str, effort: str, response: str, *, 
     When ``force_cache=True`` the global ``_prompt_cache_enabled`` flag is
     bypassed (scoped opt-in path). The RethinkDB table is auto-ensured.
     """
+    try:
+        from backend._phase_alpha_helpers import evidence_cache_read_allowed
+    except ImportError:
+        from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("ordinary_prompt"):
+        return
     if not _rethink:
         return
     if not _prompt_cache_enabled and not force_cache:
@@ -5690,6 +5702,194 @@ def _call_with_capture(provider, api_key, model, prompt, **kw):
     return text, status, body, exc
 
 
+def _model_evidence_components():
+    try:
+        from backend.model_evidence import (
+            ModelEvidenceContext,
+            ModelEvidenceError,
+            ModelEvidenceRecord,
+            canonical_request_envelope,
+            get_model_evidence_session,
+            semantic_request_id,
+        )
+    except ImportError:
+        from model_evidence import (
+            ModelEvidenceContext,
+            ModelEvidenceError,
+            ModelEvidenceRecord,
+            canonical_request_envelope,
+            get_model_evidence_session,
+            semantic_request_id,
+        )
+    return (
+        ModelEvidenceContext,
+        ModelEvidenceError,
+        ModelEvidenceRecord,
+        canonical_request_envelope,
+        get_model_evidence_session,
+        semantic_request_id,
+    )
+
+
+def _evidence_schema(output_type: Any) -> Any:
+    if output_type is None:
+        return None
+    if TypeAdapter is not None:
+        return TypeAdapter(output_type).json_schema()
+    return f"{getattr(output_type, '__module__', '')}.{getattr(output_type, '__qualname__', repr(output_type))}"
+
+
+def _evidence_outcome(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "dict"):
+        return value.dict()
+    return value
+
+
+def _evidence_tool_contract(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int, float, bytes)):
+        return value
+    if isinstance(value, dict):
+        return {key: _evidence_tool_contract(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_evidence_tool_contract(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _evidence_tool_contract(value.model_dump(mode="json"))
+    if callable(value):
+        import inspect
+        name = (
+            f"{getattr(value, '__module__', '')}."
+            f"{getattr(value, '__qualname__', type(value).__qualname__)}"
+        ).strip(".")
+        try:
+            signature = str(inspect.signature(value))
+        except Exception:
+            signature = ""
+        return {
+            "name": name,
+            "signature": signature,
+            "description": inspect.getdoc(value) or "",
+        }
+    return value
+
+
+def _prepare_model_evidence(
+    *,
+    provider: str,
+    model: str,
+    prompt: str,
+    evidence_context: Any,
+    role: str | None,
+    call_kwargs: dict[str, Any],
+    output_type: Any = None,
+):
+    (
+        ModelEvidenceContext,
+        ModelEvidenceError,
+        _ModelEvidenceRecord,
+        canonical_request_envelope,
+        get_model_evidence_session,
+        semantic_request_id,
+    ) = _model_evidence_components()
+    session = get_model_evidence_session()
+    if session is None or session.mode == "off":
+        return None
+    if not isinstance(evidence_context, ModelEvidenceContext):
+        raise ModelEvidenceError(
+            "evidence_context must be a caller-created ModelEvidenceContext"
+        )
+    provider_config = call_kwargs.get("provider_config")
+    generation_settings = {
+        key: value
+        for key, value in call_kwargs.items()
+        if key not in {"system_prompt", "tools", "tool_choice", "use_prompt_cache"}
+    }
+    if provider_config is not None:
+        generation_settings["provider_config"] = provider_config
+    structured = output_type is not None
+    envelope = canonical_request_envelope(
+        requested_provider=(provider or "gemini").strip().lower(),
+        requested_model=model,
+        adapter_identity=(
+            "llm_utils.structured-critical-guard-v1"
+            if structured
+            else "llm_utils.plain-critical-guard-v1"
+        ),
+        prompt=prompt,
+        system_prompt=call_kwargs.get("system_prompt") or "",
+        schema=_evidence_schema(output_type),
+        tools=_evidence_tool_contract(call_kwargs.get("tools")),
+        tool_choice=_evidence_tool_contract(call_kwargs.get("tool_choice")),
+        generation_settings=generation_settings,
+        fallback_policy={
+            "critical_guard_attempts": 4,
+            "critical_guard_backoff_seconds": [1, 2, 4],
+            "guard_role": role or "",
+            "model_candidates": (
+                _structured_model_candidates(provider, model) if structured else [model]
+            ),
+        },
+    )
+    semantic_id = semantic_request_id(envelope, context=evidence_context)
+    reservation = session.reserve(semantic_id)
+    return session, reservation, envelope, evidence_context
+
+
+def _record_model_evidence(prepared, result: Any, *, model: str, structured: bool) -> Any:
+    if prepared is None:
+        return result
+    session, reservation, envelope, context = prepared
+    if reservation.replay_hit:
+        return reservation.outcome
+    _, _, ModelEvidenceRecord, _, _, _ = _model_evidence_components()
+    metadata = {}
+    if structured:
+        try:
+            metadata = dict(_LAST_STRUCTURED_LLM_CALL.data or {})
+        except Exception:
+            metadata = {}
+    attempted = list(metadata.get("attempted_models") or [model])
+    effective = str(metadata.get("effective_model") or model)
+    if effective not in attempted:
+        attempted.append(effective)
+    fallback_state = "not_used"
+    if metadata.get("raw_json_fallback_used"):
+        fallback_state = "raw_json_fallback"
+    elif metadata.get("fallback_used"):
+        fallback_state = "provider_fallback"
+    canonical_outcome = _evidence_outcome(result)
+    record = ModelEvidenceRecord.from_response(
+        semantic_id=reservation.semantic_id,
+        envelope=envelope,
+        context=context,
+        outcome=canonical_outcome,
+        attempted_models=attempted,
+        effective_model=effective,
+        raw_response=canonical_outcome,
+        fallback_state=fallback_state,
+    )
+    session.record(record)
+    return result
+
+
+def _structured_model_evidence_replay(prepared, output_type: Any):
+    if prepared is None or not prepared[1].replay_hit:
+        return None, False
+    outcome = prepared[1].outcome
+    if outcome is None:
+        return None, True
+    _, ModelEvidenceError, _, _, _, _ = _model_evidence_components()
+    if TypeAdapter is None:
+        raise ModelEvidenceError("Pydantic TypeAdapter is required for structured replay")
+    try:
+        return TypeAdapter(output_type).validate_python(outcome), True
+    except Exception as exc:
+        raise ModelEvidenceError(
+            "replayed structured outcome does not match requested schema"
+        ) from exc
+
+
 def _call_llm_with_critical_guard(
     provider: str,
     api_key: str,
@@ -5698,6 +5898,7 @@ def _call_llm_with_critical_guard(
     *,
     attribution_keys: dict[str, Any] | None = None,
     role: str | None = None,
+    evidence_context: Any = None,
     **kw,
 ) -> str:
     """Wraps _call_with_capture with critical-class detection + retry escalation.
@@ -5712,6 +5913,16 @@ def _call_llm_with_critical_guard(
         critical, mark_raised() and raise LLMCriticalFailure.
       - If class is 'none' (normal), return text immediately.
     """
+    prepared_evidence = _prepare_model_evidence(
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        evidence_context=evidence_context,
+        role=role,
+        call_kwargs=kw,
+    )
+    if prepared_evidence is not None and prepared_evidence[1].replay_hit:
+        return prepared_evidence[1].outcome
     import time as _time
     # Use the bare module name so that this resolves to the SAME module object
     # that broker.py imports via `from llm_critical_guard import ...`. If we
@@ -5730,7 +5941,9 @@ def _call_llm_with_critical_guard(
         # A different worker already triggered abort. Pass through one call
         # so the caller's normal error path runs; do not retry, do not raise.
         text, status, body, exc = _call_with_capture(provider, api_key, model, prompt, **kw)
-        return text
+        return _record_model_evidence(
+            prepared_evidence, text, model=model, structured=False
+        )
 
     attempts: list[dict[str, Any]] = []
     text = ""  # ensure defined for the mid-retry short-circuit return below
@@ -5743,7 +5956,9 @@ def _call_llm_with_critical_guard(
         # otherwise raise into a ThreadPoolExecutor Future that nobody awaits,
         # silently swallowing the failure.
         if attempt_idx > 0 and llm_critical_guard.was_already_raised():
-            return text
+            return _record_model_evidence(
+                prepared_evidence, text, model=model, structured=False
+            )
 
         text, status, body, exc = _call_with_capture(provider, api_key, model, prompt, **kw)
 
@@ -5756,7 +5971,9 @@ def _call_llm_with_critical_guard(
         )
 
         if not is_critical:
-            return text
+            return _record_model_evidence(
+                prepared_evidence, text, model=model, structured=False
+            )
 
         attempts.append({
             "attempt": attempt_idx + 1,
@@ -5812,6 +6029,7 @@ def _call_structured_llm_with_critical_guard(
     *,
     attribution_keys: dict[str, Any] | None = None,
     role: str | None = None,
+    evidence_context: Any = None,
     **kw,
 ):
     """Mirror of _call_llm_with_critical_guard for the structured-JSON path.
@@ -5825,6 +6043,22 @@ def _call_structured_llm_with_critical_guard(
     Non-critical failures (None return with no recognised critical signal)
     pass straight through — the caller's existing None-handling fires.
     """
+    prepared_evidence = _prepare_model_evidence(
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        evidence_context=evidence_context,
+        role=role,
+        call_kwargs=kw,
+        output_type=output_type,
+    )
+    replayed, replay_hit = _structured_model_evidence_replay(
+        prepared_evidence, output_type
+    )
+    if replay_hit:
+        return replayed
+    if prepared_evidence is not None:
+        kw["use_prompt_cache"] = False
     import time as _time
     # Use the bare module name so this resolves to the SAME llm_critical_guard
     # module object that broker.py imports — see _call_llm_with_critical_guard
@@ -5845,7 +6079,12 @@ def _call_structured_llm_with_critical_guard(
     if llm_critical_guard.was_already_raised():
         # Another worker already triggered abort. Pass the call through once so
         # the caller's normal error path runs; do not retry, do not re-raise.
-        return call_structured_llm_by_provider(provider, api_key, model, prompt, output_type, **kw)
+        result = call_structured_llm_by_provider(
+            provider, api_key, model, prompt, output_type, **kw
+        )
+        return _record_model_evidence(
+            prepared_evidence, result, model=model, structured=True
+        )
 
     attempts: list[dict[str, Any]] = []
     result = None
@@ -5855,7 +6094,9 @@ def _call_structured_llm_with_critical_guard(
         # between attempts, return the last result (None / non-ok) instead of
         # compounding the raise into a stranded ThreadPoolExecutor Future.
         if attempt_idx > 0 and llm_critical_guard.was_already_raised():
-            return result
+            return _record_model_evidence(
+                prepared_evidence, result, model=model, structured=True
+            )
 
         result = call_structured_llm_by_provider(provider, api_key, model, prompt, output_type, **kw)
         # Inspect _LAST_STRUCTURED_LLM_CALL to classify the response. The
@@ -5867,7 +6108,9 @@ def _call_structured_llm_with_critical_guard(
             data = {}
         ok = bool(data.get("ok"))
         if ok:
-            return result
+            return _record_model_evidence(
+                prepared_evidence, result, model=model, structured=True
+            )
         error_str = str(data.get("error") or "")
         status, body = _parse_structured_error(error_str)
 
@@ -5882,7 +6125,9 @@ def _call_structured_llm_with_critical_guard(
         if not is_critical:
             # Non-critical failure (skeleton output, transient parse error, etc.) —
             # let the caller's existing None-handling fire. Don't retry here.
-            return result
+            return _record_model_evidence(
+                prepared_evidence, result, model=model, structured=True
+            )
 
         attempts.append({
             "attempt": attempt_idx + 1,
@@ -6548,6 +6793,11 @@ def call_llm_with_prompt_cache(
     raw_empty = ("", False)
     if not api_key or not model:
         return raw_empty
+    try:
+        from backend._phase_alpha_helpers import evidence_cache_read_allowed
+    except ImportError:
+        from _phase_alpha_helpers import evidence_cache_read_allowed
+    cache_allowed = evidence_cache_read_allowed("ordinary_prompt")
 
     provider_name = (provider or "gemini").strip().lower()
     provider_meta = _safe_provider_meta(provider_name, provider_config)
@@ -6561,7 +6811,7 @@ def call_llm_with_prompt_cache(
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     cache_id = f"{provider_name}|{model_ref}|{provider_meta_hash}|{prompt_hash}"
 
-    if db_conn is not None and _rethink is not None:
+    if cache_allowed and db_conn is not None and _rethink is not None:
         cached = _prompt_cache_get(db_conn, [cache_id], db_name, prompt_cache_table)
         if cache_id in cached and (cached[cache_id] or "").strip():
             return (cached[cache_id].strip(), True)
@@ -6578,7 +6828,7 @@ def call_llm_with_prompt_cache(
         return ("", False)
 
     raw = raw.strip()
-    if db_conn is not None and _rethink is not None:
+    if cache_allowed and db_conn is not None and _rethink is not None:
         _prompt_cache_save(
             db_conn,
             [

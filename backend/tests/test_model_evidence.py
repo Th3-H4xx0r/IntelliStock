@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from backend.model_evidence import (
+    ModelEvidenceCleanStartAudit,
     ModelEvidenceContext,
     ModelEvidenceError,
     ModelEvidenceLedger,
@@ -61,6 +62,99 @@ def _record(sequence=0, *, outcome={"sentiment": "bullish"}):
         raw_response='{"sentiment":"bullish"}',
         fallback_state="not_used",
     )
+
+
+def _clean_start_audit(*, arm_id="baseline", **overrides):
+    values = {
+        "backtest_id": "backtest-123",
+        "build_id": "build-abc",
+        "arm_id": arm_id,
+        "cleared_scope_identities": {
+            "ordinary_prompt": "1" * 64,
+            "sentiment": "2" * 64,
+        },
+        "before_state_hash": "3" * 64,
+        "after_state_hash": "4" * 64,
+        "verified_empty": True,
+        "remaining_entry_count": 0,
+        "completed_at": dt.datetime(2026, 7, 28, 8, 0, tzinfo=dt.timezone.utc),
+    }
+    values.update(overrides)
+    return ModelEvidenceCleanStartAudit(**values)
+
+
+def test_clean_start_audit_is_immutable_and_content_addressed():
+    first = _clean_start_audit()
+    second = _clean_start_audit(
+        cleared_scope_identities={
+            "sentiment": "2" * 64,
+            "ordinary_prompt": "1" * 64,
+        }
+    )
+
+    assert first.audit_id == second.audit_id
+    assert len(first.audit_id) == 64
+    with pytest.raises(TypeError):
+        first.cleared_scope_identities["sentiment"] = "f" * 64
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"before_state_hash": "bad"}, "before_state_hash"),
+        ({"after_state_hash": "bad"}, "after_state_hash"),
+        ({"verified_empty": False}, "verified_empty"),
+        ({"remaining_entry_count": 1}, "remaining_entry_count"),
+        ({"completed_at": "not-a-timestamp"}, "completed_at"),
+        (
+            {"cleared_scope_identities": {"api_key": "1" * 64}},
+            "secret",
+        ),
+    ],
+)
+def test_clean_start_audit_rejects_invalid_or_nonempty_proof(override, message):
+    with pytest.raises(ModelEvidenceError, match=message):
+        _clean_start_audit(**override)
+
+
+def test_session_binds_matching_clean_start_audit_exactly_once():
+    session = ModelEvidenceSession(
+        mode="record",
+        arm_id="baseline",
+        backtest_id="backtest-123",
+        build_id="build-abc",
+    )
+    audit = _clean_start_audit()
+
+    assert session.bind_clean_start_audit(audit) is audit
+    assert session.clean_start_audit is audit
+    with pytest.raises(ModelEvidenceError, match="already bound"):
+        session.bind_clean_start_audit(audit)
+
+    other = ModelEvidenceSession(
+        mode="record",
+        arm_id="candidate",
+        backtest_id="backtest-123",
+        build_id="build-abc",
+    )
+    with pytest.raises(ModelEvidenceError, match="arm_id"):
+        other.bind_clean_start_audit(audit)
+
+
+def test_session_rejects_mismatched_or_unregistered_clean_start_identity():
+    audit = _clean_start_audit()
+    mismatched_build = ModelEvidenceSession(
+        mode="record",
+        arm_id="baseline",
+        backtest_id="backtest-123",
+        build_id="other-build",
+    )
+    with pytest.raises(ModelEvidenceError, match="build_id"):
+        mismatched_build.bind_clean_start_audit(audit)
+
+    unregistered = ModelEvidenceSession(mode="record", arm_id="baseline")
+    with pytest.raises(ModelEvidenceError, match="backtest_id and build_id"):
+        unregistered.bind_clean_start_audit(audit)
 
 
 @pytest.mark.parametrize(

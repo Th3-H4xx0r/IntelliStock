@@ -8,6 +8,8 @@ import pytest
 def _reset_state():
     import sys
     from backend import llm_critical_guard, llm_utils
+    from backend.model_evidence import clear_model_evidence_session
+    clear_model_evidence_session()
     importlib.reload(llm_critical_guard)
     # Don't reload llm_utils (it's huge & has heavy import side effects);
     # just clear the per-thread stash.
@@ -30,6 +32,7 @@ def _reset_state():
             except Exception:
                 pass
     yield
+    clear_model_evidence_session()
 
 
 def _patch_call(monkeypatch, sequence):
@@ -278,3 +281,26 @@ def test_structured_second_worker_short_circuits_mid_retry(monkeypatch):
     # No exception; result is None passthrough (last non-ok structured return)
     assert result is None
     assert call_count["n"] == 2  # only 2 calls, not 4
+
+
+def test_off_mode_keeps_missing_context_retry_and_backoff_behavior(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+    calls = _patch_call(
+        monkeypatch,
+        [
+            ("", 403, "temporarily blocked", None),
+            ("OK", 200, None, None),
+        ],
+    )
+
+    from backend.llm_utils import _call_llm_with_critical_guard
+
+    assert (
+        _call_llm_with_critical_guard(
+            "azure", "key", "model", "prompt", attribution_keys={}
+        )
+        == "OK"
+    )
+    assert len(calls) == 2
+    assert sleeps == [1]

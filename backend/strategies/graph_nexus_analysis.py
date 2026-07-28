@@ -135,6 +135,52 @@ except ImportError:
 _ARTICLE_CRITICAL_DEGRADE_ALERTED = False
 
 
+def _model_evidence_context(
+    prompt: str,
+    *,
+    decision_at: str = "",
+    call_site: str,
+    role: str,
+    subject: str = "",
+    local_sequence: int | str = 0,
+):
+    """Create a deterministic caller-owned context only for evidence runs."""
+    try:
+        from backend.model_evidence import ModelEvidenceContext, ModelEvidenceError, get_model_evidence_session
+    except ImportError:
+        from model_evidence import ModelEvidenceContext, ModelEvidenceError, get_model_evidence_session
+    session = get_model_evidence_session()
+    if session is None or session.mode == "off":
+        return None
+    resolved_at = str(decision_at or "").strip()
+    if not resolved_at:
+        match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", prompt or "")
+        resolved_at = match.group(0) if match else ""
+    if not resolved_at:
+        raise ModelEvidenceError(
+            f"model-evidence caller {call_site} requires a deterministic decision time"
+        )
+    resolved_subject = str(subject or "").strip()
+    if not resolved_subject:
+        resolved_subject = hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()
+    return ModelEvidenceContext(
+        decision_at=resolved_at,
+        call_site=call_site,
+        role=role,
+        subject=resolved_subject,
+        local_sequence=local_sequence,
+    )
+
+
+def _raise_model_evidence_error(exc: Exception) -> None:
+    try:
+        from backend.model_evidence import ModelEvidenceError
+    except ImportError:
+        from model_evidence import ModelEvidenceError
+    if isinstance(exc, ModelEvidenceError):
+        raise exc
+
+
 def _alert_article_critical_degrade(exc, *, instance_id, stage: str) -> None:
     """Degrade an article-enrichment-role LLM critical failure: re-arm the
     critical guard, log (red), and page the operator ONCE (Task 4, Benzinga-401
@@ -3029,6 +3075,10 @@ def _load_outcome_context(
 
 def _get_learning_cache(conn, instance_id: str, refresh_hours: float, *, config: dict | None = None) -> str | None:
     """Return cached learning summary if fresh, else None."""
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
+    if not evidence_cache_read_allowed("learning", fixture_artifacts=fixture_artifacts):
+        return None
     if conn is None:
         return None
     _ensure_learning_cache_table(conn)
@@ -3160,6 +3210,14 @@ def _build_learning_context(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "learning_summary",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=date_key,
+                call_site="learning_summary",
+                role="learning",
+                subject=instance_id,
+                local_sequence=0,
+            ),
             system_prompt=(
                 "Return a concise structured summary of learned market outcome patterns. "
                 "Do not include markdown or commentary outside the summary field."
@@ -3191,13 +3249,21 @@ def _build_learning_context(
                         "instance_id": (config or {}).get("_telemetry_instance_id"),
                         "call_site": "learning_summary_retry",
                     },
+                    evidence_context=_model_evidence_context(
+                        _retry_prompt,
+                        decision_at=date_key,
+                        call_site="learning_summary_retry",
+                        role="learning",
+                        subject=instance_id,
+                        local_sequence=1,
+                    ),
                     system_prompt="Return a numbered list of market patterns in the summary field.",
                     max_output_tokens=0, retries=1, output_retries=1,
                     provider_config=provider_config,
                 )
                 summary = (_retry_resp.summary if _retry_resp else "").strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                _raise_model_evidence_error(exc)
         if summary:
             _save_learning_cache(conn, instance_id, summary, config=config)
             _log(f"Learning stage complete: generated pattern summary ({len(summary)} chars)", "green")
@@ -3207,6 +3273,7 @@ def _build_learning_context(
             _save_learning_cache(conn, instance_id, "", config=config)
             _log(f"Learning stage: LLM returned empty summary for {len(all_events)} outcomes", "yellow")
     except Exception as e:
+        _raise_model_evidence_error(e)
         _save_learning_cache(conn, instance_id, "", config=config)
         _log(f"Learning stage LLM error: {e}", "yellow")
 
@@ -3448,6 +3515,9 @@ def _llm_cached_doc_id(
 
 
 def _load_llm_cache_rows(conn, table_name: str, cache_ids: list[str]) -> dict[str, dict]:
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("macro_classification"):
+        return {}
     if conn is None or not cache_ids:
         return {}
     _ensure_nexus_history_table(conn, table_name)
@@ -3578,6 +3648,14 @@ def _classify_company_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "company_article",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=date_key,
+                call_site="company_article",
+                role="company_article",
+                subject="|".join(sorted(prompt_ref_map.values())),
+                local_sequence=f"batch:{_split_depth}",
+            ),
             role="company_article",
             system_prompt=system_prompt,
             retries=2,
@@ -3636,6 +3714,14 @@ def _classify_company_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "company_article_single",
                 },
+                evidence_context=_model_evidence_context(
+                    single_prompt,
+                    decision_at=date_key,
+                    call_site="company_article_single",
+                    role="company_article",
+                    subject="|".join(sorted(prompt_ref_map.values())),
+                    local_sequence=f"single:{_split_depth}",
+                ),
                 role="company_article",
                 system_prompt=system_prompt,
                 retries=2,
@@ -3832,6 +3918,14 @@ def _classify_macro_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "macro_article",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=date_key,
+                call_site="macro_article",
+                role="macro_article",
+                subject="|".join(sorted(prompt_ref_map.values())),
+                local_sequence=f"batch:{_split_depth}",
+            ),
             role="macro_article",
             system_prompt=system_prompt,
             retries=2,
@@ -3896,6 +3990,14 @@ def _classify_macro_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "macro_article_single",
                 },
+                evidence_context=_model_evidence_context(
+                    single_prompt,
+                    decision_at=date_key,
+                    call_site="macro_article_single",
+                    role="macro_article",
+                    subject="|".join(sorted(prompt_ref_map.values())),
+                    local_sequence=f"single:{_split_depth}",
+                ),
                 role="macro_article",
                 system_prompt=system_prompt,
                 retries=2,
@@ -4065,6 +4167,7 @@ def _classify_company_article_records(
                 try:
                     docs, trace_rows = _normalize_llm_rows_and_traces(future.result(), context="company_worker")
                 except Exception as exc:
+                    _raise_model_evidence_error(exc)
                     _log(f"Company article LLM worker failed: {exc}", "yellow")
                     continue
                 traces.extend(trace_rows)
@@ -4209,6 +4312,7 @@ def _classify_macro_article_records(
                 try:
                     docs, trace_rows = _normalize_llm_rows_and_traces(future.result(), context="macro_worker")
                 except Exception as exc:
+                    _raise_model_evidence_error(exc)
                     _log(f"Macro article LLM worker failed: {exc}", "yellow")
                     continue
                 traces.extend(trace_rows)
@@ -4392,7 +4496,15 @@ def _active_event_maintenance_doc_id(history_scope_id: str, date_key: str) -> st
     return f"{scope}|{date_key}"
 
 
-def _load_active_event_maintenance_cache_doc(conn, history_scope_id: str, date_key: str) -> dict[str, Any] | None:
+def _load_active_event_maintenance_cache_doc(
+    conn, history_scope_id: str, date_key: str, *, config: dict | None = None
+) -> dict[str, Any] | None:
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
+    if not evidence_cache_read_allowed(
+        "active_event_maintenance", fixture_artifacts=fixture_artifacts
+    ):
+        return None
     if conn is None:
         return None
     _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE)
@@ -4618,7 +4730,9 @@ def _maintain_active_events(
     model_ref = _llm_model_ref(model, provider_config)
     current_fp = _active_event_records_fingerprint(current_events)
     candidate_fp = _active_event_records_fingerprint(candidates)
-    maintenance_cache = _load_active_event_maintenance_cache_doc(conn, cache_scope_id, date_key)
+    maintenance_cache = _load_active_event_maintenance_cache_doc(
+        conn, cache_scope_id, date_key, config=config
+    )
     if maintenance_cache:
         cached_current_fp = str(maintenance_cache.get("current_events_fingerprint") or "").strip()
         cached_candidate_fp = str(maintenance_cache.get("candidate_fingerprint") or "").strip()
@@ -4734,6 +4848,13 @@ def _maintain_active_events(
                             "instance_id": (config or {}).get("_telemetry_instance_id"),
                             "call_site": "event_maintenance",
                         },
+                        evidence_context=_model_evidence_context(
+                            batch_prompt,
+                            decision_at=date_key,
+                            call_site="event_maintenance",
+                            role="event_maintenance",
+                            local_sequence=f"{candidate_fp}:{attempt}",
+                        ),
                         system_prompt=system_prompt,
                         # 2026-05-15: 1024 -> 4096 -> 8192 -> 0 (uncapped).
                         # Each ceiling was insufficient because reasoning
@@ -14774,6 +14895,7 @@ def _get_cached_articles(
     *,
     sentiment_cache_scope_id: str = "",
     context=None,
+    config: dict | None = None,
 ):
     """
     Return (articles, cached_sentiment) for date_key (YYYY-MM-DD).
@@ -14782,6 +14904,10 @@ def _get_cached_articles(
     articles: list or None on miss/invalid.
     cached_sentiment: dict[ticker -> {sentiment, event}] or None if not cached for this set.
     """
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
+    if not evidence_cache_read_allowed("sentiment", fixture_artifacts=fixture_artifacts):
+        return None, None
     if conn is None:
         return None, None
     try:
@@ -15062,6 +15188,7 @@ def _fetch_articles_cached(
     force_fresh: bool = False,
     context=None,
     snapshot_store=None,
+    config: dict | None = None,
 ) -> tuple[list, bool, dict | None]:
     """
     Return (articles, from_cache, cached_sentiment) for the given date range.
@@ -15102,6 +15229,7 @@ def _fetch_articles_cached(
         _ensure_nexus_cache_table(conn)
         cache_kwargs = {
             "sentiment_cache_scope_id": sentiment_cache_scope_id,
+            "config": config,
         }
         if context is not None:
             cache_kwargs["context"] = context
@@ -15471,7 +15599,15 @@ def _hierarchy_llm_provider_config() -> dict[str, Any]:
     }
 
 
-def _structured_hierarchy_validation(prompt: str, output_type: Any, *, system_prompt: str, allow_search: bool, log_label: str):
+def _structured_hierarchy_validation(
+    prompt: str,
+    output_type: Any,
+    *,
+    system_prompt: str,
+    allow_search: bool,
+    log_label: str,
+    decision_at: str = "",
+):
     provider, model, api_key = _hierarchy_llm_config()
     provider_config = _hierarchy_llm_provider_config()
     if not api_key:
@@ -15499,6 +15635,14 @@ def _structured_hierarchy_validation(prompt: str, output_type: Any, *, system_pr
         prompt,
         output_type,
         attribution_keys={"call_site": "structured_hierarchy_validation"},
+        evidence_context=_model_evidence_context(
+            prompt,
+            decision_at=decision_at,
+            call_site="structured_hierarchy_validation",
+            role="hierarchy_validation",
+            subject=log_label,
+            local_sequence=0,
+        ),
         system_prompt=system_prompt,
         tools=tools,
         max_output_tokens=0,
@@ -15748,6 +15892,7 @@ def _resolve_private_entity_news_matches(session, articles: list, as_of_date: st
                 ),
                 allow_search=True,
                 log_label="Private-entity validator",
+                decision_at=as_of_date,
             )
             if not verdict or not verdict.keep:
                 continue
@@ -16327,6 +16472,14 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "sentiment",
                 },
+                evidence_context=_model_evidence_context(
+                    prompt,
+                    decision_at=today_str,
+                    call_site="sentiment",
+                    role="sentiment",
+                    subject=_sent_instance_id or "graph-nexus",
+                    local_sequence=_retry_stage,
+                ),
                 system_prompt=(
                     "Return only structured financial headline classifications as minimal JSON. "
                     "Use the short alias keys (t, s, e, sp, d, r). "
@@ -16477,6 +16630,7 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
 
         return result, future_trades, cancel_recommendations, trend_updates
     except Exception as e:
+        _raise_model_evidence_error(e)
         _log(f"Enhanced LLM sentiment error: {e}", "yellow")
         return _empty4
 
@@ -16579,6 +16733,13 @@ def _classify_macro_news_via_llm(
             prompt,
             _MacroSignalsResponse,
             attribution_keys={"call_site": "macro_news_classification"},
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=today_str,
+                call_site="macro_news_classification",
+                role="macro_classification",
+                local_sequence=0,
+            ),
             system_prompt=macro_batch_sys,
             max_output_tokens=0,
             retries=2,
@@ -16626,6 +16787,7 @@ def _classify_macro_news_via_llm(
             _log(f"Macro classification: {len(valid)} signals from {len(headlines)} headlines", "green")
         return valid
     except Exception as e:
+        _raise_model_evidence_error(e)
         _log(f"Macro classification error: {e}", "yellow")
         return []
 
@@ -16663,6 +16825,13 @@ def _classify_macro_news_via_llm_cached(
 ) -> list[dict]:
     """Cached wrapper for _classify_macro_news_via_llm. Stores result in RethinkDB keyed by
     (date_key, instance_id, model, article fingerprint) so backtest restarts skip the 56s LLM call."""
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("macro_classification"):
+        return _classify_macro_news_via_llm(
+            articles, provider, api_key, model, today_str,
+            available_sectors, available_gov_agencies, num_articles, provider_config,
+            graph_driver=graph_driver,
+        )
     if conn is None or not _nexus_db_available:
         return _classify_macro_news_via_llm(
             articles, provider, api_key, model, today_str,
@@ -16845,6 +17014,13 @@ def _classify_macro_with_tools(
             tool_prompt,
             _MacroSignalsResponse,
             attribution_keys={"call_site": "macro_news_tools_fallback"},
+            evidence_context=_model_evidence_context(
+                tool_prompt,
+                decision_at=today_str,
+                call_site="macro_news_tools_fallback",
+                role="macro_classification",
+                local_sequence=1,
+            ),
             system_prompt=(
                 "Use the available Neo4j tools when needed, then return only structured macro signals. "
                 "Do not include markdown or explanatory prose outside the schema."
@@ -16873,6 +17049,7 @@ def _classify_macro_with_tools(
             })
         return valid
     except Exception as e:
+        _raise_model_evidence_error(e)
         _log(f"Tool-calling fallback error: {e}", "yellow")
     finally:
         # Clean up session
@@ -20432,6 +20609,12 @@ def _check_overlay_result_cache(
     active_events: list[dict], config: dict,
 ) -> dict | None:
     """Check overlay result cache. Returns cached overlay dict or None."""
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    fixture_artifacts = (config or {}).get("model_evidence_fixture_artifacts", frozenset())
+    if not evidence_cache_read_allowed(
+        "overlay_result", fixture_artifacts=fixture_artifacts
+    ):
+        return None
     if conn is None or _r is None or not config.get("overlay_result_cache_enabled", False):
         return None
     _ensure_nexus_history_table(conn, NEXUS_OVERLAY_RESULT_CACHE_TABLE)
@@ -20632,6 +20815,14 @@ def _apply_trade_overlay(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "overlay",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=str(feature_row.get("date_key") or ""),
+                call_site="overlay",
+                role="trade_overlay",
+                subject=symbol,
+                local_sequence=0,
+            ),
             system_prompt=system_prompt,
             max_output_tokens=_overlay_max_output_tokens(config),
             timeout_sec=_overlay_timeout,
@@ -20769,6 +20960,14 @@ def _apply_etf_trade_overlay(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "overlay_etf",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=str(feature_row.get("date_key") or ""),
+                call_site="overlay_etf",
+                role="trade_overlay",
+                subject=symbol,
+                local_sequence=0,
+            ),
             system_prompt=system_prompt,
             max_output_tokens=_overlay_max_output_tokens(config),
             retries=2,
@@ -21051,6 +21250,7 @@ def _apply_ml_and_overlay_to_scores(
                             context=f"overlay_worker:{item['sym']}",
                         )
                     except Exception as exc:
+                        _raise_model_evidence_error(exc)
                         _log(f"Trade overlay worker failed for {item['sym']}: {exc}", "yellow")
                         overlay_results[item["sym"]] = ({}, {})
                     _log_stage_progress(
@@ -22664,6 +22864,8 @@ class GraphNexusAnalysis:
         Run once per trading loop. Fetch news, classify via LLM, propagate through
         Neo4j graph with relationship-aware contagion, return dict[symbol -> score_data].
         """
+        from _phase_alpha_helpers import validate_model_evidence_preflight
+        validate_model_evidence_preflight(config)
         if point_in_time_context is None and data is not None:
             from point_in_time_data import PointInTimeDataError
 
@@ -23769,6 +23971,7 @@ class GraphNexusAnalysis:
                 limit=num_articles, min_articles=min_articles,
                 sentiment_cache_scope_id=sentiment_cache_scope_id,
                 force_fresh=_live_first_touch,
+                config=config,
                 **_pit_news_kwargs,
             )
         except Exception as e:
