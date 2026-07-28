@@ -6454,7 +6454,7 @@ def _create_nexus_graph_driver(
 ):
     """Resolve a replay driver for history or a current driver for live work."""
 
-    if context is not None and not context.is_live:
+    if not _pit_use_legacy_sources(context):
         return load_graph_snapshot(context=context, store=snapshot_store)
     if driver_factory is None:
         from neo4j import GraphDatabase
@@ -7700,7 +7700,7 @@ def _preseed_mcap_cache_from_universe(
     pit_scope_key = "_yf_market_cap_cache_pit_scope"
     active_pit_scope = strategy_cache.get(pit_scope_key)
     requested_pit_scope = None
-    if context is not None and not context.is_live:
+    if not _pit_use_legacy_sources(context):
         requested_pit_scope = context.cache_key("nexus-fundamentals")
     if requested_pit_scope != active_pit_scope and (
         requested_pit_scope is not None or active_pit_scope is not None
@@ -7837,7 +7837,7 @@ def _preseed_mcap_cache_from_universe(
     yf_failures = 0
     yf_attempted = 0
 
-    if context is not None and not context.is_live:
+    if not _pit_use_legacy_sources(context):
         from point_in_time_data import PointInTimeDataError
 
         from collections.abc import Mapping
@@ -24266,7 +24266,7 @@ class GraphNexusAnalysis:
         bz_data: dict = {}
         _strict_news_history = bool(
             point_in_time_context is not None
-            and not point_in_time_context.is_live
+            and not _pit_use_legacy_sources(point_in_time_context)
         )
         if bz_key or _strict_news_history:
             bz_data = _fetch_all_benzinga(
@@ -25716,10 +25716,7 @@ class GraphNexusAnalysis:
                 try:
                     _shared_neo4j_driver.verify_connectivity()
                 except Exception as _conn_check_exc:
-                    if (
-                        point_in_time_context is not None
-                        and not point_in_time_context.is_live
-                    ):
+                    if not _pit_use_legacy_sources(point_in_time_context):
                         from point_in_time_data import PointInTimeDataError
 
                         raise PointInTimeDataError(
