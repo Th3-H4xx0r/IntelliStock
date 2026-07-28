@@ -7987,14 +7987,31 @@ def _preseed_mcap_cache_from_universe(
         color,
     )
     if populated == 0 and n_total > 0:
-        _log(
-            "mcap pre-seed: 0 tickers populated — Tier-3 A1 conviction-tier "
-            "resolution will fall back to raw_score path for all symbols, "
-            "demoting mega-caps to LOW (the BT109429 silent-fail mode). "
-            "Check Neo4j ingestion (_neo4j_market_cap_cache) and yfinance "
-            "reachability.",
-            "red",
-        )
+        # The BT109429 silent-fail mode is an EMPTY underlying cache, not an
+        # incremental top-up that happened to add nothing. Pre-seed is called
+        # per cycle with only the newly-needed tickers (n_total is routinely 1
+        # or 2), so gating the alarm on `populated == 0` alone cried wolf on
+        # every cycle whose one new ticker simply is not a Neo4j Company --
+        # routine for discovered small caps. Only the empty-cache case sends an
+        # operator to check Neo4j ingestion.
+        if not _neo4j_market_cap_cache:
+            _log(
+                "mcap pre-seed: 0 tickers populated AND the Neo4j market-cap "
+                "cache is EMPTY — Tier-3 A1 conviction-tier resolution will "
+                "fall back to raw_score for all symbols, demoting mega-caps to "
+                "LOW (the BT109429 silent-fail mode). Check Neo4j ingestion "
+                "(_neo4j_market_cap_cache) and yfinance reachability.",
+                "red",
+            )
+        else:
+            _log(
+                f"mcap pre-seed: no new market caps resolved this cycle "
+                f"({n_total} requested); the cache still holds "
+                f"{len(_neo4j_market_cap_cache)} companies, so those tickers "
+                "are simply absent upstream and fall to the conservative LOW "
+                "tier.",
+                "yellow",
+            )
     return populated
 
 
@@ -14589,6 +14606,24 @@ def _pit_use_legacy_sources(context) -> bool:
     if context is None:
         return True
     return bool(getattr(context, "uses_live_sources", False))
+
+
+def _overlay_llm_key_available(config) -> bool:
+    """True when the overlay role can actually reach a provider.
+
+    Mirrors how the other LLM roles gate themselves. Without this the overlay
+    dispatches work that cannot succeed and burns its full retry budget per
+    candidate per cycle.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    for key in ("overlay_llm_api_key", "llm_api_key"):
+        if str(cfg.get(key) or "").strip():
+            return True
+    for env in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+                "ANTHROPIC_API_KEY", "AZURE_OPENAI_API_KEY", "LLM_API_KEY"):
+        if str(os.environ.get(env) or "").strip():
+            return True
+    return False
 
 
 def _activate_point_in_time_graph_scope(
@@ -21413,6 +21448,19 @@ def _apply_ml_and_overlay_to_scores(
         _etf_overlay_syms = {item["sym"] for item in etf_overlay_inputs}
         overlay_started = perf_counter()
         workers = min(_nexus_llm_worker_count(config, "overlay_llm_workers", _NEXUS_OVERLAY_LLM_WORKERS), len(all_overlay_inputs) or 1)
+        if all_overlay_inputs and not _overlay_llm_key_available(config):
+            # Every sibling LLM path short-circuits on a missing key ("Company
+            # article LLM classification: skipped (no API key)"); the overlay
+            # did not, so it dispatched every candidate and retried each to
+            # exhaustion. On one run that was 756 doomed retry chains whose
+            # only outcome was "terminal failure after retries — keeping base
+            # score", i.e. the base score it would have kept anyway.
+            _log(
+                f"Trade overlay LLM: skipped (no API key) — "
+                f"{len(all_overlay_inputs)} candidate(s) keep their base score",
+                "yellow",
+            )
+            all_overlay_inputs = []
         if all_overlay_inputs:
             _log(f"Trade overlay LLM: {len(stock_overlay_inputs)} stock + {len(etf_overlay_inputs)} ETF candidate(s) with {workers} worker(s)", "cyan")
             # Fetch price history for overlay candidates (single batch call)
