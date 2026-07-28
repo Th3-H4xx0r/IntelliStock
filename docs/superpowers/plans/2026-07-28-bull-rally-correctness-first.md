@@ -62,7 +62,9 @@ Pydantic, existing next-event equity simulator.
 - `semantic_request_id(envelope, *, context) -> str`
 - `ModelEvidenceRecord`
 - `ModelEvidenceLedger`
+- `ModelEvidenceReservation`
 - `ModelEvidenceSession`
+- `ModelEvidenceSession.reserve(semantic_id) -> ModelEvidenceReservation`
 - `activate_model_evidence_session(session)`, `get_model_evidence_session()`,
   and `clear_model_evidence_session()`
 
@@ -83,16 +85,28 @@ Pydantic, existing next-event equity simulator.
   occurrence has a deterministic occurrence key. Re-publishing the same
   immutable row is idempotent; a second logical occurrence is separately
   consumed, and divergent rows for one key reject fixture finalization.
-- `record`, `record_extend`, and `replay` modes track each arm's declared
-  occurrence set and fail on miss, over-consumption, or unused arm records.
-  `record_extend` replays immutable union rows and records only new branch rows.
-  `off` is a no-op.
+- `record` and `record_extend` require a non-empty arm identity and dynamically
+  observe semantic occurrences while a fixture is being built; they neither
+  require nor accept the final request-set declaration before construction.
+- Before provider dispatch, callers atomically reserve the semantic ID.
+  `record` reserves a provider slot. `record_extend` returns an explicit replay
+  hit for an existing immutable union row (including a recorded `None`) or
+  reserves an absent row for provider completion. Only a reserved provider slot
+  may be recorded; duplicate/unreserved/divergent completion and pending slots
+  fail finalization.
+- Successful `record`/`record_extend` finalization returns the immutable
+  observed occurrence sequence for `FixtureBuild`. The build freezes each
+  observed arm set only when the fixture seals. `replay` alone requires that
+  sealed immutable `frozenset` and fails on undeclared requests, misses,
+  over-consumption, or unused arm records. `off` is a no-op.
 - Import/export is canonical, content-addressed, and immutable.
 
 - [ ] Write tests for canonical identity, secret rejection, explicit occurrence
   keys, concurrent completion-order independence, idempotent publication,
-  repeated logical consumption, `None` replay, record-extend, miss,
-  over-consumption, arm-local unused records, and hash tampering.
+  dynamic recording, atomic single reservation, recorded-`None` replay hits,
+  record-extend hit/miss behavior, unreserved/duplicate completion, pending
+  finalization, strict replay miss/over-consumption/unused checks, and hash
+  tampering.
 - [ ] Run `python3 -m pytest -q backend/tests/test_model_evidence.py` and verify
   RED.
 - [ ] Implement the minimum pure module and verify GREEN.
@@ -137,7 +151,8 @@ Pydantic, existing next-event equity simulator.
   configuration, source-tree, model, trial, or execution-model contracts.
 - A baseline and candidate share one sealed union fixture but have different
   declared request sets, experiment fingerprints, and receipts. Request sets
-  are observed while building and become immutable declarations at seal time.
+  are taken from successful construction-session finalization while building
+  and become immutable declarations only at seal time.
   Common semantic IDs must map to one identical immutable row. Branch-only rows
   do not count as unused for another arm.
 - Build a separate union fixture for every cost scenario because full-path cost

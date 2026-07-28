@@ -142,6 +142,20 @@ same immutable output, and neither arm may call a provider or mutable cache.
 Unused rows belonging only to another declared branch do not fail a run; a
 missing, extra, or unconsumed row in the current arm does.
 
+The model-evidence session enforces that lifecycle at the provider boundary.
+`record` and `record_extend` require an arm identity but do not accept a final
+request-set declaration. Before any provider dispatch, the caller atomically
+reserves the semantic request ID. `record` returns a provider slot;
+`record_extend` returns either an explicit immutable replay hit (whose outcome
+may validly be `None`) or a provider slot for an absent union row. Provider
+completion may publish only its reserved slot, and a duplicate, unreserved,
+divergent, or still-pending slot makes construction finalization fail. A
+successful construction session returns its immutable observed request
+sequence to `FixtureBuild`; sealing converts the complete observed arm set into
+the fixture's immutable declaration. Only `replay` accepts that sealed
+`frozenset`, and replay finalization requires exact declared-versus-consumed
+equality.
+
 This supports deterministic branch-paired comparisons when an allocation
 change alters later portfolio-dependent prompts. It does not pretend that
 branch-specific calls are matched model outputs. Every result reports the

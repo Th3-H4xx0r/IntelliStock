@@ -224,14 +224,31 @@ def test_distinct_occurrences_with_the_same_prompt_are_consumed_separately():
     session.finalize()
 
 
-def test_enabled_sessions_require_immutable_explicit_occurrence_declarations():
-    for mode in ("record", "record_extend", "replay"):
-        with pytest.raises(ModelEvidenceError, match="declared_occurrences"):
-            ModelEvidenceSession(mode=mode, arm_id="baseline")
-        with pytest.raises(ModelEvidenceError, match="immutable"):
-            ModelEvidenceSession(mode=mode, arm_id="baseline", declared_occurrences=set())
+def test_record_dynamically_observes_reserved_provider_occurrences():
+    record = _record()
+    session = ModelEvidenceSession(mode="record", arm_id="baseline")
 
-    assert ModelEvidenceSession(mode="record", arm_id="baseline", declared_occurrences=frozenset())
+    reservation = session.reserve(record.semantic_id)
+    assert reservation.replay_hit is False
+    assert reservation.provider_required is True
+    assert session.record(record) == {"sentiment": "bullish"}
+    receipt = session.finalize()
+
+    assert receipt["observed_occurrences"] == (record.semantic_id,)
+    assert receipt["recorded_occurrences"] == (record.semantic_id,)
+
+
+def test_off_reservation_and_completion_are_no_ops():
+    record = _record()
+    ledger = ModelEvidenceLedger()
+    session = ModelEvidenceSession(mode="off", ledger=ledger)
+
+    reservation = session.reserve(record.semantic_id)
+    assert reservation.replay_hit is False
+    assert reservation.provider_required is True
+    assert session.record(record) == {"sentiment": "bullish"}
+    assert session.finalize() == {"mode": "off"}
+    assert ledger.records == ()
 
 
 def test_none_outcome_is_a_successful_replayable_response():
@@ -243,80 +260,97 @@ def test_none_outcome_is_a_successful_replayable_response():
         declared_occurrences=frozenset({record.semantic_id}),
     )
 
-    assert session.replay(record.semantic_id) is None
-    assert session.finalize()["consumed_occurrences"] == [record.semantic_id]
+    reservation = session.reserve(record.semantic_id)
+    assert reservation.replay_hit is True
+    assert reservation.provider_required is False
+    assert reservation.outcome is None
+    assert session.finalize()["consumed_occurrences"] == (record.semantic_id,)
 
 
-def test_record_extend_public_record_reuses_union_row_and_records_only_new_branch_row():
+def test_record_extend_atomically_replays_union_hit_and_reserves_only_union_miss():
     shared, branch_only = _record(0), _record(1)
     ledger = ModelEvidenceLedger([shared])
     session = ModelEvidenceSession(
         mode="record_extend",
         ledger=ledger,
         arm_id="candidate-a",
-        declared_occurrences=frozenset({shared.semantic_id, branch_only.semantic_id}),
     )
 
-    assert session.record(shared) == {"sentiment": "bullish"}
+    shared_reservation = session.reserve(shared.semantic_id)
+    branch_reservation = session.reserve(branch_only.semantic_id)
+    assert shared_reservation.replay_hit is True
+    assert shared_reservation.outcome == {"sentiment": "bullish"}
+    assert branch_reservation.provider_required is True
     assert session.record(branch_only) == {"sentiment": "bullish"}
     receipt = session.finalize()
 
     assert {row.semantic_id for row in ledger.records} == {shared.semantic_id, branch_only.semantic_id}
-    assert receipt["replayed_occurrences"] == [shared.semantic_id]
-    assert receipt["recorded_occurrences"] == [branch_only.semantic_id]
+    assert receipt["observed_occurrences"] == tuple(sorted({shared.semantic_id, branch_only.semantic_id}))
+    assert receipt["replayed_occurrences"] == (shared.semantic_id,)
+    assert receipt["recorded_occurrences"] == (branch_only.semantic_id,)
 
 
-def test_replay_fails_closed_on_missing_or_over_consumed_occurrences():
+def test_concurrent_pre_provider_reservation_claims_one_provider_slot():
     record = _record()
-    session = ModelEvidenceSession(
-        mode="replay",
-        ledger=ModelEvidenceLedger([record]),
-        arm_id="baseline",
-        declared_occurrences=frozenset({record.semantic_id}),
-    )
-
-    with pytest.raises(ModelEvidenceError, match="miss"):
-        session.replay("f" * 64)
-    assert session.replay(record.semantic_id) == {"sentiment": "bullish"}
-    with pytest.raises(ModelEvidenceError, match="over-consumption"):
-        session.replay(record.semantic_id)
-
-
-def test_record_claims_each_declared_occurrence_once_and_rejects_unused_records():
-    first, second = _record(0), _record(1)
-    session = ModelEvidenceSession(
-        mode="record",
-        arm_id="baseline",
-        declared_occurrences=frozenset({first.semantic_id, second.semantic_id}),
-    )
-
+    session = ModelEvidenceSession(mode="record", arm_id="baseline")
     barrier = threading.Barrier(2)
-    claimed, rejected = [], []
+    reserved, rejected = [], []
 
-    def claim_once():
+    def reserve_once():
         barrier.wait()
         try:
-            claimed.append(session.record(first))
+            reserved.append(session.reserve(record.semantic_id))
         except ModelEvidenceError as exc:
             rejected.append(str(exc))
 
-    threads = [threading.Thread(target=claim_once) for _ in range(2)]
+    threads = [threading.Thread(target=reserve_once) for _ in range(2)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    assert claimed == [{"sentiment": "bullish"}]
-    assert any("over-consumption" in error for error in rejected)
-    with pytest.raises(ModelEvidenceError, match="unused"):
-        session.finalize()
-    assert session.record(second) == {"sentiment": "bullish"}
+    assert len(reserved) == 1
+    assert reserved[0].provider_required is True
+    assert any("already reserved" in error for error in rejected)
+    session.record(record)
     session.finalize()
 
 
-def test_finalize_rejects_unused_records_for_the_current_arm_only():
+def test_record_rejects_unreserved_and_duplicate_provider_completion():
+    record = _record()
+    session = ModelEvidenceSession(mode="record", arm_id="baseline")
+
+    with pytest.raises(ModelEvidenceError, match="unreserved"):
+        session.record(record)
+    session.reserve(record.semantic_id)
+    assert session.record(record) == {"sentiment": "bullish"}
+    with pytest.raises(ModelEvidenceError, match="duplicate"):
+        session.record(record)
+    session.finalize()
+
+
+def test_record_finalization_rejects_pending_provider_reservations():
+    record = _record()
+    session = ModelEvidenceSession(mode="record", arm_id="baseline")
+    session.reserve(record.semantic_id)
+
+    with pytest.raises(ModelEvidenceError, match="pending"):
+        session.finalize()
+
+
+def test_replay_requires_sealed_declaration_and_fails_on_undeclared_miss_and_unused():
     own, another_arm = _record(0), _record(1)
     ledger = ModelEvidenceLedger([own, another_arm])
+    with pytest.raises(ModelEvidenceError, match="declared_occurrences"):
+        ModelEvidenceSession(mode="replay", ledger=ledger, arm_id="baseline")
+    with pytest.raises(ModelEvidenceError, match="immutable"):
+        ModelEvidenceSession(
+            mode="replay",
+            ledger=ledger,
+            arm_id="baseline",
+            declared_occurrences={own.semantic_id},
+        )
+
     session = ModelEvidenceSession(
         mode="replay",
         ledger=ledger,
@@ -324,10 +358,32 @@ def test_finalize_rejects_unused_records_for_the_current_arm_only():
         declared_occurrences=frozenset({own.semantic_id}),
     )
 
+    with pytest.raises(ModelEvidenceError, match="undeclared"):
+        session.reserve(another_arm.semantic_id)
+    missing_session = ModelEvidenceSession(
+        mode="replay",
+        ledger=ledger,
+        arm_id="baseline",
+        declared_occurrences=frozenset({"f" * 64}),
+    )
+    with pytest.raises(ModelEvidenceError, match="miss"):
+        missing_session.reserve("f" * 64)
     with pytest.raises(ModelEvidenceError, match="unused"):
         session.finalize()
-    assert session.replay(own.semantic_id) == {"sentiment": "bullish"}
+    assert session.reserve(own.semantic_id).replay_hit is True
+    with pytest.raises(ModelEvidenceError, match="over-consumption"):
+        session.reserve(own.semantic_id)
     session.finalize()
+
+
+def test_recording_modes_reject_sealed_replay_declarations():
+    for mode in ("record", "record_extend"):
+        with pytest.raises(ModelEvidenceError, match="replay mode"):
+            ModelEvidenceSession(
+                mode=mode,
+                arm_id="baseline",
+                declared_occurrences=frozenset(),
+            )
 
 
 def test_ledger_import_rejects_content_hash_tampering():

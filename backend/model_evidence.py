@@ -53,7 +53,6 @@ _RESPONSE_METADATA_FIELDS = frozenset(
         "outcome_is_none",
     }
 )
-_DECLARATION_REQUIRED = object()
 
 
 class ModelEvidenceError(ValueError):
@@ -452,6 +451,28 @@ class ModelEvidenceLedger:
         return ledger
 
 
+@dataclasses.dataclass(frozen=True)
+class ModelEvidenceReservation:
+    """Result of atomically reserving one semantic occurrence before dispatch."""
+
+    semantic_id: str
+    replay_hit: bool
+    outcome: Any = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.semantic_id, str) or not re.fullmatch(r"[0-9a-f]{64}", self.semantic_id):
+            raise ModelEvidenceError("semantic_id must be a SHA-256 hex digest")
+        if not isinstance(self.replay_hit, bool):
+            raise ModelEvidenceError("replay_hit must be boolean")
+        if not self.replay_hit and self.outcome is not None:
+            raise ModelEvidenceError("a provider reservation cannot carry a replay outcome")
+        object.__setattr__(self, "outcome", _freeze(_json_ready(self.outcome)))
+
+    @property
+    def provider_required(self) -> bool:
+        return not self.replay_hit
+
+
 class ModelEvidenceSession:
     """Arm-scoped consumption accounting over an immutable evidence ledger."""
 
@@ -461,48 +482,82 @@ class ModelEvidenceSession:
         mode: str,
         ledger: ModelEvidenceLedger | None = None,
         arm_id: str | None = None,
-        declared_occurrences: frozenset[str] | object = _DECLARATION_REQUIRED,
+        declared_occurrences: frozenset[str] | None = None,
     ) -> None:
         if mode not in _SESSION_MODES:
             raise ModelEvidenceError(f"unsupported evidence mode: {mode}")
         if mode != "off":
             _non_empty_string(arm_id, "arm_id")
-            if declared_occurrences is _DECLARATION_REQUIRED or declared_occurrences is None:
+        if mode == "replay":
+            if declared_occurrences is None:
                 raise ModelEvidenceError("declared_occurrences is required when evidence is enabled")
+            declared = self._normalize_occurrences(declared_occurrences)
+        elif mode in {"record", "record_extend"}:
+            if declared_occurrences is not None:
+                raise ModelEvidenceError("declared_occurrences is accepted only in replay mode")
+            declared = None
+        else:
+            declared = None
         self.mode = mode
         self.ledger = ledger or ModelEvidenceLedger()
         self.arm_id = arm_id
-        self._declared = None if mode == "off" else self._normalize_occurrences(declared_occurrences)
+        self._declared = declared
+        self._pending_provider: set[str] = set()
         self._consumed: set[str] = set()
         self._replayed: set[str] = set()
         self._recorded: set[str] = set()
         self._lock = threading.RLock()
 
     @staticmethod
-    def _normalize_occurrences(occurrences: frozenset[str] | object) -> frozenset[str]:
+    def _normalize_occurrences(occurrences: frozenset[str]) -> frozenset[str]:
         if not isinstance(occurrences, frozenset):
             raise ModelEvidenceError("declared_occurrences must be an immutable frozenset")
         if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in occurrences):
             raise ModelEvidenceError("declared occurrences must be semantic SHA-256 IDs")
         return frozenset(occurrences)
 
-    def _claim(self, semantic_id: str) -> None:
-        if self._declared is None or semantic_id not in self._declared:
-            raise ModelEvidenceError(f"semantic ID {semantic_id} is not declared for arm {self.arm_id}")
+    @staticmethod
+    def _validate_semantic_id(semantic_id: str) -> None:
+        if not isinstance(semantic_id, str) or not re.fullmatch(r"[0-9a-f]{64}", semantic_id):
+            raise ModelEvidenceError("semantic_id must be a SHA-256 hex digest")
+
+    def _assert_unreserved(self, semantic_id: str) -> None:
+        if semantic_id in self._pending_provider:
+            raise ModelEvidenceError(f"semantic ID {semantic_id} is already reserved")
         if semantic_id in self._consumed or semantic_id in self._recorded:
             raise ModelEvidenceError(f"over-consumption of semantic ID {semantic_id}")
 
-    def replay(self, semantic_id: str) -> Any:
+    def reserve(self, semantic_id: str) -> ModelEvidenceReservation:
+        """Atomically replay a hit or reserve one provider call before dispatch."""
+        self._validate_semantic_id(semantic_id)
         if self.mode == "off":
-            return None
+            return ModelEvidenceReservation(semantic_id=semantic_id, replay_hit=False)
         with self._lock:
-            record = self.ledger.get(semantic_id)
-            if record is None:
-                raise ModelEvidenceError(f"replay miss for semantic ID {semantic_id}")
-            self._claim(semantic_id)
-            self._consumed.add(semantic_id)
-            self._replayed.add(semantic_id)
-            return _thaw(record.outcome)
+            if self.mode == "replay" and semantic_id not in self._declared:
+                raise ModelEvidenceError(
+                    f"undeclared semantic ID {semantic_id} for replay arm {self.arm_id}"
+                )
+            self._assert_unreserved(semantic_id)
+            if self.mode in {"replay", "record_extend"}:
+                record = self.ledger.get(semantic_id)
+                if record is not None:
+                    self._consumed.add(semantic_id)
+                    self._replayed.add(semantic_id)
+                    return ModelEvidenceReservation(
+                        semantic_id=semantic_id,
+                        replay_hit=True,
+                        outcome=_thaw(record.outcome),
+                    )
+                if self.mode == "replay":
+                    raise ModelEvidenceError(f"replay miss for semantic ID {semantic_id}")
+            self._pending_provider.add(semantic_id)
+            return ModelEvidenceReservation(semantic_id=semantic_id, replay_hit=False)
+
+    def replay(self, semantic_id: str) -> Any:
+        reservation = self.reserve(semantic_id)
+        if not reservation.replay_hit:
+            raise ModelEvidenceError("replay unexpectedly reserved a provider call")
+        return _thaw(reservation.outcome)
 
     def record(self, record: ModelEvidenceRecord) -> Any:
         if self.mode == "off":
@@ -510,31 +565,30 @@ class ModelEvidenceSession:
         if self.mode == "replay":
             raise ModelEvidenceError("cannot publish a row in replay mode")
         with self._lock:
-            if self.mode == "record_extend":
-                existing = self.ledger.get(record.semantic_id)
-                if existing is not None:
-                    self.ledger.publish(record)  # reject a divergent union row before claiming it
-                    self._claim(record.semantic_id)
-                    self._consumed.add(record.semantic_id)
-                    self._replayed.add(record.semantic_id)
-                    return _thaw(existing.outcome)
-            self._claim(record.semantic_id)
+            if record.semantic_id in self._recorded:
+                raise ModelEvidenceError(
+                    f"duplicate provider completion for semantic ID {record.semantic_id}"
+                )
+            if record.semantic_id not in self._pending_provider:
+                raise ModelEvidenceError(
+                    f"unreserved provider completion for semantic ID {record.semantic_id}"
+                )
             self.ledger.publish(record)
+            self._pending_provider.remove(record.semantic_id)
             self._recorded.add(record.semantic_id)
             return _thaw(record.outcome)
-
-    def resolve(self, record: ModelEvidenceRecord) -> Any:
-        """Replay if available; otherwise publish only in recording modes."""
-        if self.mode == "replay":
-            return self.replay(record.semantic_id)
-        return self.record(record)
 
     def finalize(self) -> dict[str, Any]:
         if self.mode == "off":
             return {"mode": "off"}
         with self._lock:
+            if self._pending_provider:
+                raise ModelEvidenceError(
+                    f"pending provider reservations for arm {self.arm_id}: "
+                    f"{sorted(self._pending_provider)}"
+                )
             observed = self._consumed | self._recorded
-            if self._declared is not None:
+            if self.mode == "replay":
                 missing = self._declared - observed
                 extra = observed - self._declared
                 if missing:
@@ -545,10 +599,13 @@ class ModelEvidenceSession:
             return {
                 "mode": self.mode,
                 "arm_id": self.arm_id,
-                "declared_occurrences": sorted(self._declared),
-                "consumed_occurrences": sorted(self._consumed),
-                "replayed_occurrences": sorted(self._replayed),
-                "recorded_occurrences": sorted(self._recorded),
+                "observed_occurrences": tuple(sorted(observed)),
+                "declared_occurrences": (
+                    tuple(sorted(self._declared)) if self._declared is not None else None
+                ),
+                "consumed_occurrences": tuple(sorted(self._consumed)),
+                "replayed_occurrences": tuple(sorted(self._replayed)),
+                "recorded_occurrences": tuple(sorted(self._recorded)),
                 "ledger_content_hash": self.ledger.content_hash,
             }
 
