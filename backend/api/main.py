@@ -675,6 +675,7 @@ class CreateBacktestBody(BaseModel):
     cost_scenario_id: Optional[str] = None
     equity_total_cost_bps: Optional[float] = None  # nominal (absent), 25 or 50
     fixture_ordinal: Optional[int] = None        # which preregistered fixture this run builds
+    pit_mode: Optional[str] = None               # strict (default) | research (declared lookahead bias)
     nexus_candidate_overrides: Optional[Dict[str, Any]] = None
 
 
@@ -2918,6 +2919,7 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
             "cost_scenario_id": body.cost_scenario_id,
             "equity_total_cost_bps": body.equity_total_cost_bps,
             "fixture_ordinal": body.fixture_ordinal,
+            "pit_mode": body.pit_mode,
             "nexus_candidate_overrides": body.nexus_candidate_overrides,
         },
     )

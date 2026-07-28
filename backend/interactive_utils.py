@@ -6135,6 +6135,7 @@ _EVIDENCE_SUMMARY_FIELDS = (
     "fixture_id", "trade_ledger_hash", "executed_source_identity",
     "execution_cost_model_hash", "benchmark_manifest", "promotion_eligible",
     "audits", "terminal", "cost_reconciliation", "decision_fill_audit",
+    "pit_mode", "pit_provenance",
 )
 
 

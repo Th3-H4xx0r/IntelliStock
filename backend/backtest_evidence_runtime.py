@@ -323,6 +323,12 @@ class EvidenceRunLifecycle:
             "arm_id": (self._matrix.arm_id(self._arm_name)
                        if self._matrix is not None and self._arm_name else None),
             "cost_scenario_id": self._options.get("cost_scenario_id"),
+            "pit_mode": self._options.get("pit_mode") or "strict",
+            "pit_provenance": (
+                "legacy_unverified"
+                if str(self._options.get("pit_mode") or "strict") == "research"
+                else "strict_verified"
+            ),
             "equity_total_cost_bps": self._options.get("equity_total_cost_bps"),
             "nexus_candidate_overrides": dict(
                 self._options.get("nexus_candidate_overrides") or {}),

@@ -1456,7 +1456,10 @@ def _finalize_evidence_success(bt_summary, trades, decisions):
             # preregistered one — ReplayReceipt rejects a mismatch.
             executed_cost_model_hash=execution_cost_model_hash(_evidence_cost_model),
             audits={
-                "pit": True,
+                # A research run saw current-state data for a past date, so its
+                # PIT audit is false by construction — that is what keeps it
+                # permanently out of promotion.
+                "pit": not bool(globals().get("_PIT_RESEARCH_MODE_USED")),
                 # The emulator already decides whether its own fills are
                 # promotion-grade; reuse that verdict rather than asserting one.
                 "execution": bool(summary.get("execution_promotion_eligible")),
@@ -3850,6 +3853,37 @@ def _run_graph_nexus_with_point_in_time(
                 manifest=manifest,
                 strict=True,
                 is_live=False,
+            )
+        elif str(config.get("pit_mode") or "strict").strip().lower() == "research":
+            # Explicit research opt-out. run_historical cannot help here: it
+            # hard-requires a strict context AND loads all four snapshots from
+            # the immutable store, and in this mode there are none. So this is
+            # the LEGACY current-state path — the strategy sees today's graph,
+            # universe, fundamentals and news while deciding a past date.
+            #
+            # That is real lookahead bias. It is permitted only because it is
+            # DECLARED: the run is stamped legacy_unverified and its evidence
+            # receipt is forced promotion-ineligible, so a research number can
+            # never be mistaken for replayable evidence. Never reachable by
+            # default — pit_mode must be set to "research" for this run.
+            _log(
+                f"PIT RESEARCH MODE: no frozen snapshots for {as_of.isoformat()}; "
+                "running the legacy current-state path. This result carries "
+                "lookahead bias and is NOT promotion-eligible.",
+                "yellow",
+            )
+            globals()["_PIT_RESEARCH_MODE_USED"] = True
+            return instance.run_once(
+                list(symbols),
+                prices,
+                current_time,
+                config,
+                conditions,
+                data=data,
+                portfolio_emulator=portfolio_emulator,
+                strategy_cache=strategy_cache,
+                time_increment=time_increment,
+                mode=scheduler_mode,
             )
         else:
             from point_in_time_registry import resolve_default_bundle
@@ -6942,6 +6976,17 @@ if mode == MODE_BACKTEST:
         # before the snapshot below and before preregistration, so the recorded
         # fingerprint identifies what actually executes. The live Strategies
         # document and the instance doc are never written.
+        if str(_evidence_options.get("pit_mode") or "strict") == "research":
+            _log(
+                "PIT RESEARCH MODE requested: this run opts OUT of strict "
+                "point-in-time replay. Results carry lookahead bias and are "
+                "not promotion-eligible.",
+                "yellow",
+            )
+            for _spec in _cached_strategies or []:
+                if str((_spec or {}).get("strategy") or "") == "graph_nexus_analysis":
+                    _spec["config"] = dict(_spec.get("config") or {},
+                                           pit_mode="research")
         if _evidence_options.get("nexus_candidate_overrides"):
             _cached_strategies = _apply_candidate_overrides(
                 _cached_strategies, _evidence_options["nexus_candidate_overrides"])

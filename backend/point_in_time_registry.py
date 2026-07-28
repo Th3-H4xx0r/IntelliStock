@@ -127,12 +127,59 @@ def _snapshot_hash(dataset: str, payload: Any) -> str:
     return content_hash({"dataset": dataset, "payload": payload})
 
 
+#: Payloads at or above this many bytes of canonical JSON are stored zlib
+#: compressed. The graph export and the news set are the large ones; the
+#: universe is a short ticker list where framing overhead would dominate.
+_COMPRESS_MIN_BYTES = 2048
+
+
+def encode_snapshot_payload(payload: Any) -> dict:
+    """Storage encoding for one snapshot payload.
+
+    Content identity is ALWAYS taken over the canonical uncompressed payload,
+    so compression can never change a snapshot's hash, its dedupe behaviour, or
+    an existing fixture's replay. This only changes how the same bytes are
+    parked in RethinkDB.
+    """
+    import base64
+    import json
+    import zlib
+
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(raw) < _COMPRESS_MIN_BYTES:
+        return {"payload": payload}
+    packed = base64.b64encode(zlib.compress(raw, 6)).decode("ascii")
+    return {"payload_z": packed, "payload_bytes": len(raw)}
+
+
+def decode_snapshot_payload(row: Mapping[str, Any]) -> Any:
+    """Read a snapshot payload written in either encoding.
+
+    Rows predating compression carry a plain `payload`, so both shapes stay
+    readable forever — an old sealed fixture must never become unreplayable
+    because the storage encoding changed.
+    """
+    import base64
+    import json
+    import zlib
+
+    if row.get("payload_z") is not None:
+        raw = zlib.decompress(base64.b64decode(row["payload_z"]))
+        return json.loads(raw.decode("utf-8"))
+    return row.get("payload")
+
+
 def _snapshot_rows_match(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    immutable_keys = ("id", "content_hash", "dataset", "payload", "record_version")
-    return all(
-        canonical_payload(left.get(key)) == canonical_payload(right.get(key))
+    # Compare the DECODED payload: one row may be a legacy plaintext write and
+    # the other a compressed one while both carry identical content.
+    immutable_keys = ("id", "content_hash", "dataset", "record_version")
+    if any(
+        canonical_payload(left.get(key)) != canonical_payload(right.get(key))
         for key in immutable_keys
-    )
+    ):
+        return False
+    return (canonical_payload(decode_snapshot_payload(left))
+            == canonical_payload(decode_snapshot_payload(right)))
 
 
 def _reject_secret_keys(value: Any, *, path: str = "payload") -> None:
@@ -384,7 +431,7 @@ def _build_bundle_rows(
             "effective_at": _iso_z(as_of_utc),
             "available_at": _iso_z(as_of_utc),
             "created_at": _iso_z(captured_at),
-            "payload": payload,
+            **encode_snapshot_payload(payload),
             "record_version": 1,
         }
 
@@ -436,7 +483,7 @@ class _RegistrySnapshotStore:
             raise PointInTimeDataError(
                 f"{name} snapshot dataset identity mismatch"
             )
-        payload = canonical_payload(row.get("payload"))
+        payload = canonical_payload(decode_snapshot_payload(row))
         actual_hash = _snapshot_hash(name, payload)
         if actual_hash != expected_hash or row.get("content_hash") != expected_hash:
             raise PointInTimeDataError(

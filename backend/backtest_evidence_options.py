@@ -52,7 +52,17 @@ _OPTION_KEYS = frozenset({
     "evidence_mode", "fixture_build_id", "replay_fixture_id",
     "matrix_manifest_id", "matrix_arm_id", "cost_scenario_id",
     "equity_total_cost_bps", "nexus_candidate_overrides", "fixture_ordinal",
+    "pit_mode",
 })
+
+#: Point-in-time enforcement for a historical run.
+#:   strict   -- replay from frozen, content-hashed snapshots; refuse if absent.
+#:   research -- explicitly opt out and run the LEGACY current-state path.
+#: Research runs carry real lookahead bias (the strategy sees today's graph,
+#: universe, fundamentals and news for a past date), so they are stamped
+#: provenance=legacy_unverified and can never be promotion-eligible. The point
+#: of naming it is that the bias is declared rather than silently reintroduced.
+PIT_MODES = frozenset({"strict", "research"})
 
 _ID_KEYS = ("matrix_manifest_id", "matrix_arm_id", "cost_scenario_id")
 
@@ -141,6 +151,14 @@ def validate_candidate_overrides(value) -> dict:
     return out
 
 
+def _validate_pit_mode(value):
+    if value is None:
+        return "strict"
+    if isinstance(value, bool) or not isinstance(value, str) or value not in PIT_MODES:
+        raise EvidenceOptionError(f"pit_mode must be one of {sorted(PIT_MODES)}")
+    return value
+
+
 def _validate_fixture_ordinal(value, mode):
     """Which of the matrix's preregistered fixtures this run builds.
 
@@ -227,6 +245,7 @@ def validate_evidence_options(payload) -> dict:
         **resolved,
         "fixture_ordinal": _validate_fixture_ordinal(
             payload.get("fixture_ordinal"), mode),
+        "pit_mode": _validate_pit_mode(payload.get("pit_mode")),
         "equity_total_cost_bps": _validate_cost_bps(payload.get("equity_total_cost_bps")),
         "nexus_candidate_overrides": validate_candidate_overrides(
             payload.get("nexus_candidate_overrides")),

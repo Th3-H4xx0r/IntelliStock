@@ -6550,10 +6550,48 @@ def _capture_point_in_time_bundle(
     )
 
 
-def _finalize_pit_capture_safely(*, enabled: bool, **capture_kwargs):
-    """Best-effort capture boundary that can never change a trade decision."""
+def _pit_capture_due(strategy_cache, as_of, config: dict | None) -> bool:
+    """True when a PIT bundle should be captured for this tick.
+
+    Default cadence is ONE bundle per trading date, not one per tick. Bundle
+    resolution is at-or-before `as_of` and the backtest lookback steps daily,
+    so a daily bundle serves replay identically while storing ~7x less on an
+    hourly instance. The graph export and news set are the large payloads and
+    they are what would otherwise be rewritten every hour.
+
+    `pit_capture_interval="tick"` restores per-tick capture for anyone who
+    genuinely needs intraday granularity.
+    """
+    config = config if isinstance(config, dict) else {}
+    if str(config.get("pit_capture_interval") or "daily").strip().lower() == "tick":
+        return True
+    try:
+        date_key = as_of.date().isoformat()
+    except Exception:
+        return True
+    cache = strategy_cache if isinstance(strategy_cache, dict) else None
+    if cache is None:
+        return True
+    if cache.get("_pit_capture_last_date") == date_key:
+        return False
+    cache["_pit_capture_last_date"] = date_key
+    return True
+
+
+def _finalize_pit_capture_safely(*, enabled: bool, config=None, **capture_kwargs):
+    """Best-effort capture boundary that can never change a trade decision.
+
+    `config` is consumed here (cadence only) and never forwarded to the
+    capture itself.
+    """
 
     if not enabled:
+        return None
+    if not _pit_capture_due(
+        capture_kwargs.get("strategy_cache"),
+        capture_kwargs.get("as_of"),
+        config,
+    ):
         return None
     try:
         manifest = _capture_point_in_time_bundle(**capture_kwargs)
@@ -25501,6 +25539,7 @@ class GraphNexusAnalysis:
             _log("No tickers extracted from Alpaca or Google News; returning hold for all.", "yellow")
             _finalize_pit_capture_safely(
                 enabled=_pit_capture_requested,
+                config=config,
                 as_of=point_in_time_context.as_of
                 if point_in_time_context is not None
                 else current_time,
@@ -30530,6 +30569,7 @@ class GraphNexusAnalysis:
 
         _finalize_pit_capture_safely(
             enabled=_pit_capture_requested,
+            config=config,
             as_of=point_in_time_context.as_of
             if point_in_time_context is not None
             else current_time,
