@@ -113,17 +113,42 @@ Recording mode bypasses every ordinary mutable prompt cache. Any upstream
 LLM-derived sentiment/article/cache artifact must either be bypassed or be
 snapshotted, hashed, and replayed through the evidence fixture; one unbound
 cache read makes a run ineligible. The ledger is separate from temporal market
-datasets and from candidate-specific code. A
-content-addressed replay fixture binds:
+datasets and from candidate-specific code. Each logical call carries a
+caller-supplied evidence context containing decision time, role, symbol or batch
+identity, call site, and deterministic local sequence. That context produces an
+occurrence key; publishing the same immutable row twice is idempotent, but two
+logical occurrences are never collapsed merely because their prompts match.
+
+The matrix manifest preregisters a stable `fixture_build_id` for each
+`(window, fixture_ordinal, cost_scenario_id)` before recording begins. Record
+and `record_extend` requests reference that build ID because the final content
+hash cannot exist until all branches are complete. Sealing the build produces a
+content-addressed `replay_fixture_id` that binds:
 
 - the ordered strict-PIT manifest chain and source hashes used by the window
-- immutable model-call ledger hash
+- an immutable union model-call ledger hash
+- each preregistered arm's declared semantic request-set hash
 - RNG-seed manifest and benchmark-session manifest
 
-This permits several sealed model-output fixtures for uncertainty testing while
-ensuring baseline and candidate consume the same fixture. Exact request
-identity matching fails closed if a candidate changes a prompt or introduces a
-new model call.
+The fixture is built before formal comparison. One preregistered arm records
+first; later arms run in `record_extend` mode, replaying rows already present
+and publishing only previously unseen semantic requests into their declared
+branch. The arm order is fixed in the matrix manifest. Request sets are observed
+during construction and become immutable declared arm sets only when the build
+seals. The fixture is sealed only after every preregistered branch has
+completed. Formal baseline and candidate runs are then replay-only: each
+consumes exactly its declared request set, common semantic IDs resolve to the
+same immutable output, and neither arm may call a provider or mutable cache.
+Unused rows belonging only to another declared branch do not fail a run; a
+missing, extra, or unconsumed row in the current arm does.
+
+This supports deterministic branch-paired comparisons when an allocation
+change alters later portfolio-dependent prompts. It does not pretend that
+branch-specific calls are matched model outputs. Every result reports the
+shared-request fraction and branch-specific request hashes. A pair is described
+as a matched-output experiment only when its semantic request sets are
+identical. Otherwise it is branch-paired development evidence, and any claimed
+effect includes the downstream model-path interaction.
 
 The existing immutable `ExperimentRegistry` remains the source of
 candidate-specific code revision, source-tree hash, effective configuration,
@@ -137,15 +162,17 @@ manifest is hashed into the run; a commit SHA alone is insufficient.
 Replay behavior is fail-closed:
 
 - no provider call or mutable prompt-cache fallback on a replay miss
-- no unused recorded call at replay completion
+- no missing, extra, or unconsumed call in the arm's declared request set
 - no response-schema mismatch
 - no PIT chain, seed, benchmark-session, or replay-ledger drift
 - no mismatch between the completed receipt and its preregistered experiment
 
-Paired A/B evidence additionally requires identical semantic request-ID sets.
-A candidate that adds, omits, or changes a model request is not a matched-output
-experiment and cannot resolve the difference with a provider call. It requires
-a separately approved experiment design rather than silently weakening replay.
+Before producing ten fixtures, a one-window feasibility run must prove that the
+branch-union fixture can be sealed and replayed with identical trade hashes for
+each arm. Any formal replay miss, common-row conflict, unstable arm request
+set, or undeclared branch call stops the matrix. Divergent request sets remain
+valid only under this explicitly preregistered branch-paired design and can
+never be relabeled as matched-output evidence.
 
 Existing PIT manifests remain valid market-data evidence. A complete ordered
 chain is required because each historical decision can resolve a different
@@ -202,11 +229,13 @@ strategy cache's current confirmed regime after detection:
 - required `default`: candidate value 0.06
 
 Recovery is recognized only when current regime is chop and the recovery flag
-is true. When the mapping exists, missing, invalid, chop, bear, crash, and
-unknown labels resolve to its conservative `default`; they never inherit the
-previous profile's scalar. Legacy scalar behavior is retained only when the
-entire mapping is absent. The mapping is base-only and cannot be overridden by
-a previous-cycle regime profile. A bull uplift additionally requires
+is true. The mapping schema requires finite `default`, `bull`, and `recovery`
+values in `(0, 1]`; invalid mappings are rejected before execution. When a
+valid mapping exists, chop, bear, crash, and unknown labels resolve to its
+conservative `default`; they never inherit the previous profile's scalar.
+Legacy scalar behavior is retained only when the entire mapping is absent. The
+mapping is base-only and cannot be overridden by a previous-cycle regime
+profile. A bull uplift additionally requires
 `momentum_breakout_add_respect_gates=true`. The resolved cap and regime are
 logged.
 
@@ -217,8 +246,11 @@ retain their existing timing.
 
 Add `deployment_ramp_caps_by_regime`, absent by default.
 
-During the existing initial deployment-bar sequence, choose caps from the
-current confirmed regime when a mapping exists. The first rally candidate is:
+The base-only mapping accepts only a `bull` entry containing exactly three
+finite values in `(0, 1]`. During the existing initial deployment-bar sequence,
+only current confirmed bull chooses that entry. Recovery, chop, bear, crash,
+unknown, and downgraded labels retain the legacy global caps and chop scaling.
+The first rally candidate is:
 
 - bull: `[0.50, 0.70, 1.00]`
 - every other regime: use the existing global caps
@@ -236,7 +268,8 @@ state, and future portfolio-dependent behavior. With the residual sleeve
 enabled it can materially shift exposure from active stocks into SPY and create
 sleeve deploy/release orders. Experiments separately attribute active-stock
 pacing, SPY beta, sleeve turnover, and costs. Warm live boots that fast-forward
-persisted ramp state are reported separately from empty-book backtests.
+persisted ramp state advance beyond the maximum configured global/bull ramp
+length and are reported separately from empty-book backtests.
 
 ### Candidate A4: corrected circuit-breaker semantics
 
@@ -264,8 +297,9 @@ risk, turnover, blacklist churn, or capital lock worsens beyond the gates.
 
 ## Experiment Matrix
 
-Every row uses matched PIT/model-output bundles, seed, execution model, and
-benchmark sessions.
+Every row uses the same PIT bundle, seed, execution model, and benchmark
+sessions. Common model requests are matched exactly; branch-specific requests
+are identified explicitly rather than being misrepresented as matched outputs.
 
 1. Baseline exact replay, three repetitions per bundle.
 2. A1 alone.
@@ -275,12 +309,34 @@ benchmark sessions.
 6. A4 alone against the unchanged baseline.
 7. Preregistered A4-plus-allocation combinations only if A4 passes alone.
 
-Every candidate, combination, threshold, failed/stopped attempt, repeat count,
-and selection rule is preregistered before execution. A combination is a new
-candidate and must pass the complete matrix itself. At least ten independently
-recorded, preregistered model-output fixtures per primary development window are
-required for model-output uncertainty; repeated replay of one fixture counts
-once.
+Before the first backtest is queued, an immutable experiment-matrix manifest
+preregisters every arm, combination, threshold, cost scenario, fixture count,
+fixture-build ID, arm recording order, failure rule, bootstrap seed, trial
+count, and selection rule. Every build run references the manifest, arm ID,
+cost-scenario ID, and fixture-build ID; every formal replay additionally
+references the sealed replay-fixture ID. A combination is a new candidate and
+must pass the complete matrix itself. Failed, stopped, replay-incomplete, or
+missing arms count as gate failures and remain in the trial count; they are
+never dropped from the denominator.
+
+At least ten independently recorded, preregistered branch-union fixtures per
+primary development window and cost scenario are required for model-output
+uncertainty. Each cost scenario has a separate union fixture because a full
+cost-path resimulation can change holdings and later model requests. Each
+fixture contains one baseline and every declared candidate branch. Repeated
+replay of one fixture verifies determinism but counts as one statistical
+observation.
+
+Confidence bounds use a preregistered hierarchical fixture/session bootstrap,
+not a pool that treats the same market date ten times as ten independent
+sessions. For each of 2,000 seeded replicates, resample complete fixture rows
+with replacement, draw one contiguous five-session block index sequence and
+apply that same sequence to every sampled row, compute the mean daily active
+return within each sampled fixture, then take the median across fixtures. The
+5th and 95th percentiles form the two-sided 90% interval. Candidate-versus-
+baseline safety deltas resample paired rows and the same session blocks. The
+seed, algorithm version, and implementation hash are fixed by the matrix
+manifest. A failed or missing row fails the gate rather than being imputed.
 
 The following are development/regression windows because their trades informed
 diagnosis or candidate construction. Passing them advances a frozen candidate
@@ -312,7 +368,10 @@ those production gates.
 
 - Exact ordered decision/fill ledger hash and final equity match across three
   repetitions to stored numeric precision.
-- Zero provider/cache fallback and zero unconsumed replay entries.
+- Zero provider/cache fallback and zero missing, extra, or unconsumed entries
+  in each arm's declared request set.
+- Every common semantic request ID has one identical immutable record; the
+  shared-request fraction and branch-specific request hashes are reported.
 - Strict PIT source hashes match and every input availability time is at or
   before its decision.
 - Every simulated fill timestamp is strictly after its originating decision.
@@ -322,18 +381,19 @@ those production gates.
 - Bull and rally both have positive after-cost active return versus aligned SPY.
 - Median active return is at least +1.0 percentage point in each primary
   window.
-- The existing 5th-percentile bound of the two-sided 90% five-session block
-  bootstrap over daily active returns is above zero across sealed evidence.
-- A separately registered full rerun that excludes the ex-post largest winning
-  active stock from inception retains positive compounded, capital-weighted
-  pooled primary active return. Subtracting realized ticker P&L is not accepted.
+- The 5th-percentile bound of the preregistered hierarchical two-sided 90%
+  fixture/five-session block bootstrap is above zero across sealed evidence.
+- A ledger-based leave-largest-winner-out attribution sensitivity remains
+  positive on compounded, capital-weighted pooled primary active return. This
+  is explicitly diagnostic rather than a counterfactual rerun or causal claim;
+  any universe-exclusion experiment requires a separate preregistered design.
 
 ### Cross-window safety
 
 - In each bear, flip, and full development window, paired
   `candidate - baseline` median return delta is at least -0.5 percentage points
   and its 10th percentile is at least -1.0 point.
-- Bear and flip remain absolutely profitable in every matched replay.
+- Bear and flip remain absolutely profitable in every formal replay.
 - In each safety window, median maximum-drawdown degradation is no worse than
   0.5 percentage points and its 90th percentile is no worse than 1.0 point.
 - A candidate claimed to be inert in a window must produce the identical
