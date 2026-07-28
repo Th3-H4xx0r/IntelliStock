@@ -717,7 +717,7 @@ _NEXUS_VALID_PROVIDERS = {
     "openrouter",
 }
 # Module-level dedup cache for `LLM key source for role=...` diagnostic
-# log. Each (role, source_tag, masked_key) tuple is logged at most once
+# log. Each (role, source_tag, presence/length metadata) tuple is logged at most once
 # per process lifetime so operators can spot stale inline credentials.
 _LLM_KEY_SOURCE_LOG_SEEN: set[tuple[str, str, str]] = set()
 # Dedup cache for provider/model mismatch warnings (one log per
@@ -1203,19 +1203,19 @@ def _resolve_role_llm_config(config: dict, role: str) -> tuple[str, str, str, st
             _api_key_source = _src
             break
     # Diagnostic: log the resolution path once per (role, source,
-    # masked-key) signature so operators can spot stale inline
+    # non-secret metadata) signature so operators can spot stale inline
     # `*_llm_api_key` config entries shadowing freshly-updated
     # Models-table rows. De-duplication via module-level set keeps
     # log volume bounded across many resolution calls per bar.
-    _masked = (
-        f"len={len(api_key)} prefix={api_key[:4]} suffix={api_key[-4:]}"
-        if len(api_key) >= 8 else f"len={len(api_key)}"
-    )
-    _key_sig = (role or "default", _api_key_source, _masked)
+    # Never log key prefixes/suffixes: fragments can materially reduce the
+    # search space for short credentials and are copied into durable backtest
+    # logs. Presence and length are sufficient for configuration diagnosis.
+    _key_metadata = f"present={bool(api_key)} len={len(api_key)}"
+    _key_sig = (role or "default", _api_key_source, _key_metadata)
     if _key_sig not in _LLM_KEY_SOURCE_LOG_SEEN:
         _LLM_KEY_SOURCE_LOG_SEEN.add(_key_sig)
         _log(
-            f"LLM key source for role={role or 'default'}: {_api_key_source} ({_masked})",
+            f"LLM key source for role={role or 'default'}: {_api_key_source} ({_key_metadata})",
             "cyan",
         )
     model = (

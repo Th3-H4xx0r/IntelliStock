@@ -100,3 +100,21 @@ def test_recovery_profile_overlay_applies():
     assert out["regime_upgrade_confirm_bars"] == 3
     # a config WITHOUT a recovery overlay still maps recovery -> base (identity)
     assert apply_regime_profile(BASE, "recovery") is BASE
+
+
+def test_bull_momentum_cap_can_relax_without_weakening_bear_or_recovery():
+    """The production bull candidate may raise breakout sizing only after the
+    detector has confirmed bull. Bear/chop retain the defensive base ceiling,
+    and recovery retains its separately reviewed profile."""
+    cfg = {
+        "momentum_breakout_max_nav_pct": 0.06,
+        "regime_profiles": {
+            "bull": {"momentum_breakout_max_nav_pct": 0.10},
+            "recovery": {"deployment_ramp_chop_scale": 0.85},
+        },
+    }
+
+    assert apply_regime_profile(cfg, "bull")["momentum_breakout_max_nav_pct"] == 0.10
+    assert apply_regime_profile(cfg, "bear")["momentum_breakout_max_nav_pct"] == 0.06
+    assert apply_regime_profile(cfg, "chop")["momentum_breakout_max_nav_pct"] == 0.06
+    assert apply_regime_profile(cfg, "recovery")["momentum_breakout_max_nav_pct"] == 0.06
