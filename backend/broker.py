@@ -1374,6 +1374,17 @@ def _backtest_uses_equity_benchmark(
         return False
 
 
+def _llm_resolution_is_fatal(run_mode) -> bool:
+    """True when an LLM-credential resolution failure must stop the run.
+
+    Backtests fail closed: they have no previously-resolved credentials to
+    degrade to, and a silently LLM-less run still emits a P&L number that
+    looks like a result. Live keeps going -- continuity of a trading process
+    beats strictness about a transient model-row read.
+    """
+    return str(run_mode or "") == MODE_BACKTEST
+
+
 def _load_backtest_evidence_options(row_id):
     """Task 4 (2026-07-28). Load and REVALIDATE this run's evidence / cost /
     candidate-override contract from its queue row.
@@ -4055,9 +4066,23 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 except Exception:
                     pass
     except Exception as _resolve_e:
-        # Resolution failure (DB connectivity, malformed model row) is
-        # non-fatal — fall through to the baked-in credentials from the
-        # last successful resolution. Log so operators can spot it.
+        if _llm_resolution_is_fatal(mode):
+            # A backtest process just spawned, so there are NO baked-in
+            # credentials to fall back to. Continuing would run an LLM-driven
+            # strategy with no key for any role -- neutral sentiment, no
+            # article classification, no trade overlay -- and still emit a
+            # P&L number. That number measures a different strategy than the
+            # one under test, which is worse than no number at all.
+            _log(
+                f"Model resolution FAILED: {_resolve_e}. Refusing to run a "
+                "backtest with the LLM layer disabled -- the result would not "
+                "measure this strategy. Re-save the model's API key so it is "
+                "stored encrypted (see scripts/migrate_encrypted_credentials.py).",
+                "red",
+            )
+            raise
+        # Live: keep trading on the credentials resolved at the last success
+        # rather than dying on a transient DB or model-row problem.
         _log(f"Model re-resolution warning: {_resolve_e}", "yellow")
     results = []
     cache_store = strategy_caches if isinstance(strategy_caches, dict) else _strategy_cache
