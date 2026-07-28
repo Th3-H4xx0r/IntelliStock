@@ -250,3 +250,26 @@ def test_invalid_cost_target_is_rejected():
     for bad in (0, -1, "25", float("inf"), True):
         with pytest.raises(EvidenceOptionError):
             resolve_execution_cost_model(bad)
+
+
+# ----------------------------------------------------------- source identity
+def test_source_digest_is_stable_and_content_addressed():
+    """Deliberately not a git hash: the deployed container has no .git, so a
+    git identity would be uncomputable exactly where the receipt needs it."""
+    from backtest_evidence_options import source_tree_digest
+    first = source_tree_digest()
+    assert first.startswith("sha256:") and len(first) == 71
+    assert first == source_tree_digest(), "must be deterministic"
+
+
+def test_source_digest_ignores_test_only_edits(tmp_path):
+    from backtest_evidence_options import source_tree_digest
+    (tmp_path / "mod.py").write_text("x = 1\n")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_mod.py").write_text("assert True\n")
+    before = source_tree_digest(str(tmp_path))
+    (tests_dir / "test_mod.py").write_text("assert True  # edited\n")
+    assert source_tree_digest(str(tmp_path)) == before
+    (tmp_path / "mod.py").write_text("x = 2\n")
+    assert source_tree_digest(str(tmp_path)) != before, "executing code must count"

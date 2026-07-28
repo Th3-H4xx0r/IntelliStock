@@ -263,6 +263,43 @@ def resolve_execution_cost_model(target_one_way_bps, base=None) -> ExecutionCost
     )
 
 
+#: Source files whose contents define "what executed". Tests and caches are
+#: excluded so a test-only edit does not invalidate a fixture that is still
+#: byte-identical in every executing path.
+_SOURCE_SKIP_DIRS = ("__pycache__", "/tests/", "/test/")
+
+
+def source_tree_digest(root=None) -> str:
+    """Content digest of the backend source that actually executes.
+
+    Deliberately NOT `git rev-parse HEAD^{tree}`: the deployed container has no
+    `.git`, so a git-based identity would be uncomputable exactly where it
+    matters. Hashing the file contents gives the same answer locally and in the
+    container for the same commit, which is what lets a receipt prove the
+    executed source matches its preregistration.
+    """
+    import hashlib
+    import os as _os
+
+    base = root or _os.path.dirname(_os.path.abspath(__file__))
+    entries = []
+    for dirpath, dirnames, filenames in _os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for name in sorted(filenames):
+            if not name.endswith(".py"):
+                continue
+            full = _os.path.join(dirpath, name)
+            rel = _os.path.relpath(full, base).replace(_os.sep, "/")
+            if any(skip.strip("/") in rel.split("/") for skip in ("tests", "test")):
+                continue
+            with open(full, "rb") as handle:
+                entries.append((rel, hashlib.sha256(handle.read()).hexdigest()))
+    digest = hashlib.sha256()
+    for rel, file_hash in sorted(entries):
+        digest.update(f"{rel}:{file_hash}\n".encode())
+    return "sha256:" + digest.hexdigest()
+
+
 def cost_scenario_id(target_one_way_bps) -> str:
     """Stable scenario label used in matrix manifests and receipts."""
     if target_one_way_bps is None:

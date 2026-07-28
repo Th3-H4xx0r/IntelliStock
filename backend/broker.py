@@ -1432,6 +1432,69 @@ def _record_evidence_pit(decision_at, manifest):
     lifecycle.record_pit(decision_at, payload)
 
 
+def _finalize_evidence_success(bt_summary, trades, decisions):
+    """Seal this run's fixture and publish its receipt. Success path only.
+
+    Returns the read-only projection to store on the BacktestResults row, or
+    None when no evidence run is in flight. Never raises: a failure to publish
+    evidence must not destroy an otherwise-valid backtest result, so it is
+    downgraded to an ineligible outcome and logged.
+    """
+    lifecycle = globals().get("_evidence_lifecycle")
+    if lifecycle is None:
+        return None
+    try:
+        from backtest_replay import trade_ledger_hash as _trade_ledger_hash
+
+        summary = bt_summary or {}
+        lifecycle.succeed(
+            trade_ledger_hash=_trade_ledger_hash(decisions or [], trades or []),
+            executed_source_tree_hash=_executed_source_tree_hash(),
+            dependency_runtime_digest=_dependency_runtime_digest(),
+            audits={
+                "pit": True,
+                # The emulator already decides whether its own fills are
+                # promotion-grade; reuse that verdict rather than asserting one.
+                "execution": bool(summary.get("execution_promotion_eligible")),
+                "benchmark": bool(summary.get("benchmark_complete")),
+                "accounting": not bool(summary.get("accounting_error")),
+            },
+        )
+        _log("Evidence: fixture sealed and receipt published", "green")
+    except Exception as exc:
+        _log(f"Evidence finalization failed ({type(exc).__name__}: {exc}); "
+             "recording an INELIGIBLE outcome", "red")
+        try:
+            lifecycle.abort(f"finalization_error:{type(exc).__name__}")
+        except Exception:
+            pass
+    try:
+        return lifecycle.summary_projection()
+    except Exception:
+        return None
+
+
+def _executed_source_tree_hash():
+    """Content digest of the source that actually executed (see
+    backtest_evidence_options.source_tree_digest for why not git)."""
+    from backtest_evidence_options import source_tree_digest
+    return source_tree_digest()
+
+
+def _dependency_runtime_digest():
+    """Digest of the interpreter + installed distributions this run used."""
+    import hashlib
+    parts = [sys.version]
+    try:
+        from importlib import metadata as _md
+        parts += sorted(
+            f"{d.metadata['Name']}=={d.version}" for d in _md.distributions()
+            if d.metadata and d.metadata.get("Name"))
+    except Exception:
+        pass
+    return "sha256:" + hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
 def _build_backtest_evidence_lifecycle(options, row_id, start_dt, end_dt):
     """Construct the run's single finalization boundary, or None.
 
@@ -9605,6 +9668,15 @@ while not shutdown_requested:
                             # Update existing row if we have id, else insert.
                             # Fail the write closed if any secret material slipped
                             # into the payload (schema, logs, decisions, ...).
+                            # Task 4: the ONLY place a fixture may be sealed. The
+                            # run reached its end and produced a result, so
+                            # finalize evidence and fold the provenance into the
+                            # row before it is written. Every other terminal
+                            # path goes through the abort/exit hook instead.
+                            _evidence_projection = _finalize_evidence_success(
+                                _bt_summary, trades, _backtest_decisions)
+                            if _evidence_projection is not None:
+                                backtest_result["evidence"] = _evidence_projection
                             assert_secret_free(backtest_result)
                             if _backtest_result_id is not None:
                                 r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(backtest_result).run(conn)
