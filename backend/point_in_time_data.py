@@ -276,6 +276,22 @@ class PointInTimeContext:
         object.__setattr__(self, "is_live", is_live)
         object.__setattr__(self, "provenance", provenance)
 
+    @property
+    def is_research(self) -> bool:
+        """A DECLARED research context: historical, but reading current state.
+
+        strict=False with is_live=False is the "legacy_unverified" state. It is
+        only ever constructed by the broker's pit_mode="research" branch, and
+        it exists so a run with no frozen snapshots can still be executed while
+        recording, honestly, that it saw current-state data.
+        """
+        return not self.is_live and not self.strict
+
+    @property
+    def uses_live_sources(self) -> bool:
+        """True when consumers should read current state, not a snapshot."""
+        return self.is_live or self.is_research
+
     @classmethod
     def for_live(
         cls,

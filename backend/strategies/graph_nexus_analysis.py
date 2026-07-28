@@ -14581,15 +14581,14 @@ def _pit_is_research(context) -> bool:
     """
     if context is None:
         return False
-    return bool(not getattr(context, "is_live", False)
-                and not getattr(context, "strict", True))
+    return bool(getattr(context, "is_research", False))
 
 
 def _pit_use_legacy_sources(context) -> bool:
     """True when a consumer should read current state instead of a snapshot."""
-    return (context is None
-            or bool(getattr(context, "is_live", False))
-            or _pit_is_research(context))
+    if context is None:
+        return True
+    return bool(getattr(context, "uses_live_sources", False))
 
 
 def _activate_point_in_time_graph_scope(

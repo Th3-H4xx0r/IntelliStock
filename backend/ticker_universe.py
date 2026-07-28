@@ -188,7 +188,7 @@ def is_valid_us_ticker(
         return False
     if not strict:
         return True
-    if context is not None and not context.is_live:
+    if context is not None and not context.uses_live_sources:
         snapshot = load_universe_snapshot(
             context=context,
             store=snapshot_store,
@@ -297,7 +297,7 @@ def get_breadth_universe(
     proxy for the liquidity floor, acceptable for a coarse candidate gate.)"""
     global _BREADTH_CACHE, _BREADTH_CACHE_KEY, _BREADTH_FETCHED_AT, _BREADTH_LAST_FAIL_AT
     global _BREADTH_META_CACHE
-    if context is not None and not context.is_live:
+    if context is not None and not context.uses_live_sources:
         snapshot = load_universe_snapshot(
             context=context,
             store=snapshot_store,
