@@ -664,3 +664,218 @@ def test_trailing_stop_fires_inside_grace():
     assert score == -1
     assert "Trailing stop" in reason
     assert "grace" not in (reason or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# A4 (2026-07-28): correct absolute circuit-breaker regime semantics
+#
+# The regime adjustment was ADDED to an already-negative floor, so it ran
+# opposite to both its comments and its risk intent:
+#
+#     bull: -15.0 + 5.0  = -10.0   # comment says "widens" -- it TIGHTENS
+#     bear: -15.0 + -5.0 = -20.0   # comment says "tightens" -- it LOOSENS
+#
+# Bull is where winners need room to breathe and bear is where capital
+# preservation matters, so this exited rally winners 5pp early (several rally
+# exits cluster on that unintended -10% boundary) and let bear losers run 5pp
+# further. `circuit_breaker_regime_adjustment_semantics_v2` (default OFF)
+# switches to the absolute form and honours an explicit zero, which the
+# `or`-defaulted reads silently replaced with 5.0.
+# ---------------------------------------------------------------------------
+from strategies.graph_nexus_analysis import (  # noqa: E402
+    _get_conviction_aware_floor,
+    _resolve_effective_open_loss_floor,
+)
+
+_V2 = {"circuit_breaker_regime_adjustment_semantics_v2": True}
+
+
+def _floor(tier, cfg, regime):
+    return _get_conviction_aware_floor(tier, cfg, regime=regime)[0]
+
+
+def test_a4_legacy_arithmetic_is_preserved_exactly():
+    """Default OFF must reproduce today's (inverted) numbers byte-for-byte."""
+    assert _floor("LOW", {}, "bull") == -10.0
+    assert _floor("LOW", {}, "bear") == -20.0
+    assert _floor("MID", {}, "bull") == -15.0
+    assert _floor("HIGH", {}, "bear") == -30.0
+    assert _floor("LOW", {}, "chop") == -15.0
+    assert _floor("LOW", {}, None) == -15.0
+
+
+def test_a4_v2_bull_widens_and_bear_tightens():
+    assert _floor("LOW", _V2, "bull") == -20.0     # room to breathe
+    assert _floor("LOW", _V2, "bear") == -10.0     # capital preservation
+    assert _floor("MID", _V2, "bull") == -25.0
+    assert _floor("HIGH", _V2, "bear") == -20.0
+
+
+def test_a4_v2_uses_magnitude_regardless_of_configured_sign():
+    """Operators have configured bear_pp as -5.0 for a year; the stored sign
+    must not flip the corrected direction."""
+    for bear_pp in (-5.0, 5.0):
+        assert _floor("LOW", dict(
+            _V2, circuit_breaker_regime_adjustment_bear_pp=bear_pp),
+            "bear") == -10.0, bear_pp
+    for bull_pp in (-5.0, 5.0):
+        assert _floor("LOW", dict(
+            _V2, circuit_breaker_regime_adjustment_bull_pp=bull_pp),
+            "bull") == -20.0, bull_pp
+
+
+def test_a4_v2_chop_and_unknown_are_unadjusted():
+    for regime in ("chop", "sideways", ""):
+        assert _floor("LOW", _V2, regime) == -15.0, regime
+
+
+def test_a4_v2_honours_explicit_zero():
+    """`config.get(k, 5.0) or 5.0` turned an explicit 0.0 back into 5.0."""
+    cfg = dict(_V2, circuit_breaker_regime_adjustment_bull_pp=0.0,
+               circuit_breaker_regime_adjustment_bear_pp=0.0)
+    assert _floor("LOW", cfg, "bull") == -15.0
+    assert _floor("LOW", cfg, "bear") == -15.0
+
+
+def test_a4_v2_invalid_adjustment_fails_to_zero():
+    for bad in ("x", None, float("nan"), float("inf"), [], True):
+        assert _floor("LOW", dict(
+            _V2, circuit_breaker_regime_adjustment_bull_pp=bad),
+            "bull") == -15.0, bad
+
+
+def test_a4_v2_bear_tightening_never_crosses_zero():
+    assert _floor("LOW", dict(
+        _V2, circuit_breaker_regime_adjustment_bear_pp=40.0), "bear") == 0.0
+
+
+def test_a4_crash_sentinel_under_both_semantics():
+    for cfg in ({}, _V2):
+        assert _get_conviction_aware_floor("LOW", cfg, regime="crash")[0] == 0.0
+
+
+# ------------------------------- the floor the breaker ACTUALLY fires on ----
+def test_a4_resolver_high_tier_ignores_volatility():
+    eff, fires, tel = _resolve_effective_open_loss_floor(
+        "HIGH", {}, regime=None, realized_vol=0.50, unrealized_pct=-26.0)
+    assert eff == -25.0
+    assert tel["volatility_pct"] is None
+    assert fires is True
+
+
+def test_a4_resolver_skips_vol_scaling_below_low_vol_threshold():
+    """SNDK pathology: 5-7% vol made the vol floor TIGHTER than the absolute."""
+    eff, _, tel = _resolve_effective_open_loss_floor(
+        "LOW", {}, regime=None, realized_vol=0.05, unrealized_pct=-1.0)
+    assert eff == -15.0
+    assert tel["volatility_pct"] is None
+
+
+def test_a4_resolver_takes_tighter_of_absolute_and_volatility():
+    # vol floor = -2.0 * 0.30 * 100 = -60.0 -> the absolute -15.0 is tighter
+    eff, _, tel = _resolve_effective_open_loss_floor(
+        "LOW", {}, regime=None, realized_vol=0.30, unrealized_pct=-1.0)
+    assert tel["volatility_pct"] == -60.0
+    assert eff == -15.0
+    # vol floor = -2.0 * 0.09 * 100 = -18.0 vs a widened bull floor of -20.0
+    eff2, _, tel2 = _resolve_effective_open_loss_floor(
+        "LOW", _V2, regime="bull", realized_vol=0.09, unrealized_pct=-1.0)
+    assert tel2["absolute_pct"] == -20.0
+    assert eff2 == -18.0, "the volatility floor is tighter and must dominate"
+
+
+def test_a4_resolver_override_takes_precedence():
+    eff, _, tel = _resolve_effective_open_loss_floor(
+        "LOW", dict(_V2, max_open_loss_pct=-8.0), regime="bull",
+        realized_vol=None, unrealized_pct=-1.0)
+    assert eff == -8.0
+    assert tel["override_pct"] == -8.0
+    assert tel["absolute_pct"] == -20.0, "telemetry still reports what was overridden"
+
+
+def test_a4_resolver_fires_on_exact_equality():
+    eff, fires, _ = _resolve_effective_open_loss_floor(
+        "LOW", {}, regime=None, realized_vol=None, unrealized_pct=-15.0)
+    assert eff == -15.0 and fires is True
+    _, just_above, _ = _resolve_effective_open_loss_floor(
+        "LOW", {}, regime=None, realized_vol=None, unrealized_pct=-14.99)
+    assert just_above is False
+
+
+def test_a4_resolver_crash_fires_regardless_of_unrealized():
+    _, fires, tel = _resolve_effective_open_loss_floor(
+        "LOW", {}, regime="crash", realized_vol=0.40, unrealized_pct=+12.0)
+    assert fires is True
+    assert tel["crash_emergency"] is True
+    assert tel["volatility_pct"] is None, "no vol scaling on an emergency exit"
+
+
+def test_a4_resolver_defers_realized_vol_until_needed():
+    """The closes lookup is expensive; HIGH tier must not trigger it."""
+    calls = []
+
+    def _vol():
+        calls.append(1)
+        return 0.30
+
+    _resolve_effective_open_loss_floor(
+        "HIGH", {}, regime=None, realized_vol=_vol, unrealized_pct=-1.0)
+    assert calls == []
+    _resolve_effective_open_loss_floor(
+        "LOW", {}, regime=None, realized_vol=_vol, unrealized_pct=-1.0)
+    assert calls == [1]
+
+
+# ------------------------------------ through the REAL position-risk path ---
+def _cb_config(**kw):
+    """Base config with the operator override removed so the tier/regime path
+    actually resolves, and the fast-loser cut pushed out of the way."""
+    cfg = _base_config(fast_loser_cut_pct=-40.0)
+    cfg.pop("max_open_loss_pct")
+    cfg.update(kw)
+    return cfg
+
+
+def _risk_at(pct_move, regime, **cfg_kw):
+    emu = _Emu()
+    emu.add("FOO", 100, 100.0)
+    _, reason, _ = _evaluate_position_risk(
+        "FOO",
+        fresh_score=0,
+        fresh_reason="No graph signal",
+        config=_cb_config(**cfg_kw),
+        portfolio_emulator=emu,
+        strategy_cache={"_market_regime": regime},
+        prices={"FOO": 100.0 + pct_move},
+        price_history={},
+        date_key="2026-04-01",
+        propagated={},
+        entry_buy_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        held_days=5,
+        max_hold_days=90,
+    )
+    return "Circuit breaker" in (reason or "")
+
+
+def test_a4_semantics_change_the_real_bull_exit_decision():
+    """The point of the fix: a -12% bull drawdown exited under the inverted
+    semantics and survives under the corrected ones."""
+    assert _risk_at(-12.0, "bull") is True
+    assert _risk_at(
+        -12.0, "bull",
+        circuit_breaker_regime_adjustment_semantics_v2=True) is False
+
+
+def test_a4_semantics_change_the_real_bear_exit_decision():
+    """Mirror: bear now cuts where it previously rode 5pp further down."""
+    assert _risk_at(-12.0, "bear") is False
+    assert _risk_at(
+        -12.0, "bear",
+        circuit_breaker_regime_adjustment_semantics_v2=True) is True
+
+
+def test_a4_chop_decision_is_identical_under_both_semantics():
+    for v2 in (False, True):
+        kw = {"circuit_breaker_regime_adjustment_semantics_v2": v2}
+        assert _risk_at(-12.0, "chop", **kw) is False
+        assert _risk_at(-16.0, "chop", **kw) is True

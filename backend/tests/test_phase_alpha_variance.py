@@ -30,6 +30,7 @@ for _p in (_BACKEND, _ROOT):
         sys.path.insert(0, _p)
 
 import backend.strategies.graph_nexus_analysis as gna
+import backend._phase_alpha_helpers as phase_alpha
 from backend._phase_alpha_helpers import (
     backtest_determinism_env_vars,
     derive_backtest_seed,
@@ -1127,6 +1128,166 @@ def test_alpha1_force_applied_only_when_flipping_false_to_true():
     }
     _, forced = resolve_use_sentiment_cache(cfg)
     assert forced is False
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"nexus_sentiment_cache_force_in_backtest": True}, "sentiment cache force"),
+        ({"use_sentiment_cache": True}, "sentiment cache off"),
+        ({"nexus_fast_mode": True}, "fast cache mode off"),
+        ({"overlay_result_cache_enabled": True}, "overlay result cache off"),
+    ],
+)
+def test_model_evidence_preflight_rejects_mutable_cache_config_before_resolution(
+    override, message
+):
+    from backend.model_evidence import (
+        ModelEvidenceCleanStartAudit,
+        ModelEvidenceError,
+        ModelEvidenceSession,
+        activate_model_evidence_session,
+        clear_model_evidence_session,
+    )
+
+    session = ModelEvidenceSession(
+        mode="record", arm_id="baseline", backtest_id="backtest", build_id="build"
+    )
+    session.bind_clean_start_audit(
+        ModelEvidenceCleanStartAudit(
+            backtest_id="backtest",
+            build_id="build",
+            arm_id="baseline",
+            cleared_scope_identities={
+                scope: "1" * 64 for scope in phase_alpha._MODEL_EVIDENCE_CACHE_KINDS
+            },
+            before_state_hash="2" * 64,
+            after_state_hash="3" * 64,
+            verified_empty=True,
+            remaining_entry_count=0,
+            completed_at="2026-07-28T08:00:00+00:00",
+        )
+    )
+    activate_model_evidence_session(session)
+    try:
+        config = {
+            "model_evidence_clean_start": True,
+            "nexus_sentiment_cache_force_in_backtest": False,
+            "use_sentiment_cache": False,
+            "nexus_fast_mode": False,
+            "overlay_result_cache_enabled": False,
+        }
+        config.update(override)
+        with pytest.raises(ModelEvidenceError, match=message):
+            phase_alpha.validate_model_evidence_preflight(config)
+    finally:
+        clear_model_evidence_session()
+
+
+def test_model_evidence_preflight_accepts_clean_cache_disabled_config():
+    from backend.model_evidence import (
+        ModelEvidenceCleanStartAudit,
+        ModelEvidenceSession,
+        activate_model_evidence_session,
+        clear_model_evidence_session,
+    )
+
+    session = ModelEvidenceSession(
+        mode="record", arm_id="baseline", backtest_id="backtest", build_id="build"
+    )
+    session.bind_clean_start_audit(
+        ModelEvidenceCleanStartAudit(
+            backtest_id="backtest",
+            build_id="build",
+            arm_id="baseline",
+            cleared_scope_identities={
+                scope: "1" * 64 for scope in phase_alpha._MODEL_EVIDENCE_CACHE_KINDS
+            },
+            before_state_hash="2" * 64,
+            after_state_hash="3" * 64,
+            verified_empty=True,
+            remaining_entry_count=0,
+            completed_at="2026-07-28T08:00:00+00:00",
+        )
+    )
+    activate_model_evidence_session(session)
+    try:
+        phase_alpha.validate_model_evidence_preflight(
+            {
+                "model_evidence_clean_start": False,
+                "nexus_sentiment_cache_force_in_backtest": False,
+                "use_sentiment_cache": False,
+                "nexus_fast_mode": False,
+                "overlay_result_cache_enabled": False,
+            }
+        )
+        assert phase_alpha.evidence_cache_read_allowed("sentiment") is False
+    finally:
+        clear_model_evidence_session()
+
+
+def test_model_evidence_preflight_rejects_config_claim_without_session_audit():
+    from backend.model_evidence import (
+        ModelEvidenceError,
+        ModelEvidenceSession,
+        activate_model_evidence_session,
+        clear_model_evidence_session,
+    )
+
+    activate_model_evidence_session(ModelEvidenceSession(mode="record", arm_id="baseline"))
+    try:
+        with pytest.raises(ModelEvidenceError, match="session-bound"):
+            phase_alpha.validate_model_evidence_preflight(
+                {
+                    "model_evidence_clean_start": True,
+                    "nexus_sentiment_cache_force_in_backtest": False,
+                    "use_sentiment_cache": False,
+                    "nexus_fast_mode": False,
+                    "overlay_result_cache_enabled": False,
+                }
+            )
+    finally:
+        clear_model_evidence_session()
+
+
+def test_model_evidence_preflight_requires_every_centralized_cache_scope():
+    from backend.model_evidence import (
+        ModelEvidenceCleanStartAudit,
+        ModelEvidenceError,
+        ModelEvidenceSession,
+        activate_model_evidence_session,
+        clear_model_evidence_session,
+    )
+
+    session = ModelEvidenceSession(
+        mode="record", arm_id="baseline", backtest_id="backtest", build_id="build"
+    )
+    session.bind_clean_start_audit(
+        ModelEvidenceCleanStartAudit(
+            backtest_id="backtest",
+            build_id="build",
+            arm_id="baseline",
+            cleared_scope_identities={"ordinary_prompt": "1" * 64},
+            before_state_hash="2" * 64,
+            after_state_hash="3" * 64,
+            verified_empty=True,
+            remaining_entry_count=0,
+            completed_at="2026-07-28T08:00:00+00:00",
+        )
+    )
+    activate_model_evidence_session(session)
+    try:
+        with pytest.raises(ModelEvidenceError, match="missing required cleared scopes"):
+            phase_alpha.validate_model_evidence_preflight(
+                {
+                    "nexus_sentiment_cache_force_in_backtest": False,
+                    "use_sentiment_cache": False,
+                    "nexus_fast_mode": False,
+                    "overlay_result_cache_enabled": False,
+                }
+            )
+    finally:
+        clear_model_evidence_session()
 
 
 def test_alpha1_knob_surfaced_in_effective_config():

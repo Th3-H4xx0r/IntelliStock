@@ -135,6 +135,52 @@ except ImportError:
 _ARTICLE_CRITICAL_DEGRADE_ALERTED = False
 
 
+def _model_evidence_context(
+    prompt: str,
+    *,
+    decision_at: str = "",
+    call_site: str,
+    role: str,
+    subject: str = "",
+    local_sequence: int | str = 0,
+):
+    """Create a deterministic caller-owned context only for evidence runs."""
+    try:
+        from backend.model_evidence import ModelEvidenceContext, ModelEvidenceError, get_model_evidence_session
+    except ImportError:
+        from model_evidence import ModelEvidenceContext, ModelEvidenceError, get_model_evidence_session
+    session = get_model_evidence_session()
+    if session is None or session.mode == "off":
+        return None
+    resolved_at = str(decision_at or "").strip()
+    if not resolved_at:
+        match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", prompt or "")
+        resolved_at = match.group(0) if match else ""
+    if not resolved_at:
+        raise ModelEvidenceError(
+            f"model-evidence caller {call_site} requires a deterministic decision time"
+        )
+    resolved_subject = str(subject or "").strip()
+    if not resolved_subject:
+        resolved_subject = hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()
+    return ModelEvidenceContext(
+        decision_at=resolved_at,
+        call_site=call_site,
+        role=role,
+        subject=resolved_subject,
+        local_sequence=local_sequence,
+    )
+
+
+def _raise_model_evidence_error(exc: Exception) -> None:
+    try:
+        from backend.model_evidence import ModelEvidenceError
+    except ImportError:
+        from model_evidence import ModelEvidenceError
+    if isinstance(exc, ModelEvidenceError):
+        raise exc
+
+
 def _alert_article_critical_degrade(exc, *, instance_id, stage: str) -> None:
     """Degrade an article-enrichment-role LLM critical failure: re-arm the
     critical guard, log (red), and page the operator ONCE (Task 4, Benzinga-401
@@ -3029,6 +3075,9 @@ def _load_outcome_context(
 
 def _get_learning_cache(conn, instance_id: str, refresh_hours: float, *, config: dict | None = None) -> str | None:
     """Return cached learning summary if fresh, else None."""
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("learning"):
+        return None
     if conn is None:
         return None
     _ensure_learning_cache_table(conn)
@@ -3054,6 +3103,9 @@ def _get_learning_cache(conn, instance_id: str, refresh_hours: float, *, config:
 
 
 def _save_learning_cache(conn, instance_id: str, summary: str, *, config: dict | None = None) -> None:
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("learning"):
+        return
     if conn is None:
         return
     _ensure_learning_cache_table(conn)
@@ -3160,6 +3212,14 @@ def _build_learning_context(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "learning_summary",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=date_key,
+                call_site="learning_summary",
+                role="learning",
+                subject=instance_id,
+                local_sequence=0,
+            ),
             system_prompt=(
                 "Return a concise structured summary of learned market outcome patterns. "
                 "Do not include markdown or commentary outside the summary field."
@@ -3191,13 +3251,21 @@ def _build_learning_context(
                         "instance_id": (config or {}).get("_telemetry_instance_id"),
                         "call_site": "learning_summary_retry",
                     },
+                    evidence_context=_model_evidence_context(
+                        _retry_prompt,
+                        decision_at=date_key,
+                        call_site="learning_summary_retry",
+                        role="learning",
+                        subject=instance_id,
+                        local_sequence=1,
+                    ),
                     system_prompt="Return a numbered list of market patterns in the summary field.",
                     max_output_tokens=0, retries=1, output_retries=1,
                     provider_config=provider_config,
                 )
                 summary = (_retry_resp.summary if _retry_resp else "").strip()
-            except Exception:
-                pass
+            except Exception as exc:
+                _raise_model_evidence_error(exc)
         if summary:
             _save_learning_cache(conn, instance_id, summary, config=config)
             _log(f"Learning stage complete: generated pattern summary ({len(summary)} chars)", "green")
@@ -3207,6 +3275,7 @@ def _build_learning_context(
             _save_learning_cache(conn, instance_id, "", config=config)
             _log(f"Learning stage: LLM returned empty summary for {len(all_events)} outcomes", "yellow")
     except Exception as e:
+        _raise_model_evidence_error(e)
         _save_learning_cache(conn, instance_id, "", config=config)
         _log(f"Learning stage LLM error: {e}", "yellow")
 
@@ -3448,6 +3517,9 @@ def _llm_cached_doc_id(
 
 
 def _load_llm_cache_rows(conn, table_name: str, cache_ids: list[str]) -> dict[str, dict]:
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("macro_classification"):
+        return {}
     if conn is None or not cache_ids:
         return {}
     _ensure_nexus_history_table(conn, table_name)
@@ -3487,6 +3559,9 @@ def _load_llm_cache_rows(conn, table_name: str, cache_ids: list[str]) -> dict[st
 
 
 def _store_llm_cache_rows(conn, table_name: str, rows: list[dict]) -> None:
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("macro_classification"):
+        return
     if conn is None or not rows:
         return
     _ensure_nexus_history_table(conn, table_name)
@@ -3578,6 +3653,14 @@ def _classify_company_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "company_article",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=date_key,
+                call_site="company_article",
+                role="company_article",
+                subject="|".join(sorted(prompt_ref_map.values())),
+                local_sequence=f"batch:{_split_depth}",
+            ),
             role="company_article",
             system_prompt=system_prompt,
             retries=2,
@@ -3636,6 +3719,14 @@ def _classify_company_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "company_article_single",
                 },
+                evidence_context=_model_evidence_context(
+                    single_prompt,
+                    decision_at=date_key,
+                    call_site="company_article_single",
+                    role="company_article",
+                    subject="|".join(sorted(prompt_ref_map.values())),
+                    local_sequence=f"single:{_split_depth}",
+                ),
                 role="company_article",
                 system_prompt=system_prompt,
                 retries=2,
@@ -3832,6 +3923,14 @@ def _classify_macro_article_chunk(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "macro_article",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=date_key,
+                call_site="macro_article",
+                role="macro_article",
+                subject="|".join(sorted(prompt_ref_map.values())),
+                local_sequence=f"batch:{_split_depth}",
+            ),
             role="macro_article",
             system_prompt=system_prompt,
             retries=2,
@@ -3896,6 +3995,14 @@ def _classify_macro_article_chunk(
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "macro_article_single",
                 },
+                evidence_context=_model_evidence_context(
+                    single_prompt,
+                    decision_at=date_key,
+                    call_site="macro_article_single",
+                    role="macro_article",
+                    subject="|".join(sorted(prompt_ref_map.values())),
+                    local_sequence=f"single:{_split_depth}",
+                ),
                 role="macro_article",
                 system_prompt=system_prompt,
                 retries=2,
@@ -4065,6 +4172,7 @@ def _classify_company_article_records(
                 try:
                     docs, trace_rows = _normalize_llm_rows_and_traces(future.result(), context="company_worker")
                 except Exception as exc:
+                    _raise_model_evidence_error(exc)
                     _log(f"Company article LLM worker failed: {exc}", "yellow")
                     continue
                 traces.extend(trace_rows)
@@ -4209,6 +4317,7 @@ def _classify_macro_article_records(
                 try:
                     docs, trace_rows = _normalize_llm_rows_and_traces(future.result(), context="macro_worker")
                 except Exception as exc:
+                    _raise_model_evidence_error(exc)
                     _log(f"Macro article LLM worker failed: {exc}", "yellow")
                     continue
                 traces.extend(trace_rows)
@@ -4392,7 +4501,12 @@ def _active_event_maintenance_doc_id(history_scope_id: str, date_key: str) -> st
     return f"{scope}|{date_key}"
 
 
-def _load_active_event_maintenance_cache_doc(conn, history_scope_id: str, date_key: str) -> dict[str, Any] | None:
+def _load_active_event_maintenance_cache_doc(
+    conn, history_scope_id: str, date_key: str, *, config: dict | None = None
+) -> dict[str, Any] | None:
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("active_event_maintenance"):
+        return None
     if conn is None:
         return None
     _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE)
@@ -4405,6 +4519,9 @@ def _load_active_event_maintenance_cache_doc(conn, history_scope_id: str, date_k
 
 
 def _store_active_event_maintenance_cache_doc(conn, doc: dict[str, Any]) -> None:
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("active_event_maintenance"):
+        return
     if conn is None or not doc:
         return
     _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE)
@@ -4618,7 +4735,9 @@ def _maintain_active_events(
     model_ref = _llm_model_ref(model, provider_config)
     current_fp = _active_event_records_fingerprint(current_events)
     candidate_fp = _active_event_records_fingerprint(candidates)
-    maintenance_cache = _load_active_event_maintenance_cache_doc(conn, cache_scope_id, date_key)
+    maintenance_cache = _load_active_event_maintenance_cache_doc(
+        conn, cache_scope_id, date_key, config=config
+    )
     if maintenance_cache:
         cached_current_fp = str(maintenance_cache.get("current_events_fingerprint") or "").strip()
         cached_candidate_fp = str(maintenance_cache.get("candidate_fingerprint") or "").strip()
@@ -4734,6 +4853,13 @@ def _maintain_active_events(
                             "instance_id": (config or {}).get("_telemetry_instance_id"),
                             "call_site": "event_maintenance",
                         },
+                        evidence_context=_model_evidence_context(
+                            batch_prompt,
+                            decision_at=date_key,
+                            call_site="event_maintenance",
+                            role="event_maintenance",
+                            local_sequence=f"{candidate_fp}:{attempt}",
+                        ),
                         system_prompt=system_prompt,
                         # 2026-05-15: 1024 -> 4096 -> 8192 -> 0 (uncapped).
                         # Each ceiling was insufficient because reasoning
@@ -7035,6 +7161,59 @@ def _apply_recovery_cap(base_cap: int, recovery_flag, config: dict) -> int:
         return base_cap
 
 
+def _nav_pct_or_none(value):
+    """A NAV fraction in (0, 1], or None. Rejects bools, non-finite floats and
+    anything outside the band — used where an invalid entry must fail to the
+    legacy value rather than silently size a position."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or not (0.0 < v <= 1.0):
+        return None
+    return v
+
+
+def _resolve_momentum_breakout_nav_cap(config: dict, strategy_cache):
+    """A2 (2026-07-28, pure). NAV ceiling for the momentum_breakout_add lane,
+    resolved from THIS cycle's confirmed regime.
+
+    The lane read the scalar `momentum_breakout_max_nav_pct` after the broker
+    had already overlaid the PREVIOUS cycle's regime profile. So a confirmed
+    bull sized breakouts at the base ceiling, while the cycle after a downgrade
+    could still spend the bull one — wrong in both directions.
+
+    `momentum_breakout_max_nav_pct_by_regime` is base-only (`_apply_regime_profile`
+    strips it from overlays) and requires all three of default/bull/recovery in
+    (0, 1]. Absent or invalid, this returns the legacy scalar unchanged, so the
+    default path is byte-compatible. The bull entry additionally requires
+    `momentum_breakout_add_respect_gates` — a raised ceiling is only safe on a
+    lane that honours its sibling blacklist/extension gates.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    legacy = float(cfg.get("momentum_breakout_max_nav_pct", 0.0) or 0.0)
+    mapping = cfg.get("momentum_breakout_max_nav_pct_by_regime")
+    if not isinstance(mapping, dict):
+        return legacy
+    caps = {}
+    for key in ("default", "bull", "recovery"):
+        val = _nav_pct_or_none(mapping.get(key))
+        if val is None:
+            return legacy
+        caps[key] = val
+    cache = strategy_cache if isinstance(strategy_cache, dict) else {}
+    regime = str(cache.get("_market_regime") or "").strip().lower()
+    if regime == "bull":
+        if bool(cfg.get("momentum_breakout_add_respect_gates", False)):
+            return caps["bull"]
+        return caps["default"]
+    if regime == "chop" and bool(cache.get("_market_regime_recovery")):
+        return caps["recovery"]
+    return caps["default"]
+
+
 def _next_bear_capacity_latch(prev, confirmed_regime, recovery_flag, config: dict) -> bool:
     """2026-07-25 (default OFF). Hold the BEAR position cap through chop
     interludes inside a downtrend.
@@ -8003,13 +8182,118 @@ def _get_conviction_aware_floor(
             )
         except (TypeError, ValueError):
             bear_pp = -5.0
-        if regime_lower == "bull":
+        # A4 (2026-07-28): the legacy arithmetic below is INVERTED. Floors are
+        # negative, so adding a positive bull_pp (-15 + 5 = -10) TIGHTENS the
+        # floor and adding a negative bear_pp (-15 - 5 = -20) LOOSENS it —
+        # opposite to both the comments and the risk intent, and the source of
+        # the rally exits clustered on that unintended -10% boundary. v2 uses
+        # the adjustment's MAGNITUDE so bull widens and bear tightens, as
+        # documented. Default OFF: the legacy path is preserved exactly.
+        if bool(config.get("circuit_breaker_regime_adjustment_semantics_v2", False)):
+            if regime_lower == "bull":
+                floor = floor - _abs_pp_or_zero(
+                    config.get("circuit_breaker_regime_adjustment_bull_pp", 5.0))
+            elif regime_lower == "bear":
+                # Tightening must never cross into a positive floor, which
+                # would exit every position at any gain.
+                floor = min(0.0, floor + _abs_pp_or_zero(
+                    config.get("circuit_breaker_regime_adjustment_bear_pp", -5.0)))
+        elif regime_lower == "bull":
             floor = floor + bull_pp  # widens floor (less negative)
         elif regime_lower == "bear":
             floor = floor + bear_pp  # tightens floor (more negative)
         # chop / unknown: no adjustment
 
     return floor, vol_mult, low_vol_threshold
+
+
+def _abs_pp_or_zero(value) -> float:
+    """Magnitude of a percentage-point adjustment, or 0.0 when it is missing,
+    non-finite or non-numeric. Unlike the legacy `config.get(k, d) or d` reads
+    this honours an explicit zero instead of silently restoring the default."""
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return abs(v) if math.isfinite(v) else 0.0
+
+
+def _resolve_effective_open_loss_floor(
+    tier: str,
+    config: dict,
+    *,
+    regime: str | None = None,
+    realized_vol=None,
+    unrealized_pct: float | None = None,
+):
+    """A4 (2026-07-28, pure). Resolve — in ONE place — the floor the circuit
+    breaker actually fires on: tier floor, regime adjustment, operator
+    override, volatility scaling, then the firing test.
+
+    ``realized_vol`` may be a float or a zero-arg callable; the callable form
+    is only invoked when volatility scaling can actually bind, so the caller's
+    expensive closes lookup stays lazy.
+
+    Returns ``(effective_pct, fires, telemetry)``. ``telemetry`` keeps the
+    absolute, volatility, override and final floors separate so a fired exit
+    can be attributed to the component that bound it.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    tier_u = str(tier or "LOW").upper()
+    floor_abs, vol_mult, low_vol_threshold = _get_conviction_aware_floor(
+        tier_u, cfg, regime=regime)
+    crash = (regime is not None
+             and str(regime).strip().lower() == "crash")
+
+    override = None
+    if cfg.get("max_open_loss_pct") is not None:
+        try:
+            override = float(cfg.get("max_open_loss_pct"))
+        except (TypeError, ValueError):
+            override = None
+    effective = floor_abs if override is None else override
+
+    # Operator vol override applies to MID/LOW only; HIGH always disables.
+    if cfg.get("max_open_loss_vol_multiplier") is not None and tier_u != "HIGH":
+        try:
+            vol_mult = float(cfg.get("max_open_loss_vol_multiplier"))
+        except (TypeError, ValueError):
+            pass
+
+    vol_floor = None
+    if not crash and vol_mult > 0 and realized_vol is not None:
+        try:
+            rv = float(realized_vol() if callable(realized_vol) else realized_vol)
+        except (TypeError, ValueError):
+            rv = 0.0
+        # Low-vol disable: quiet names let the absolute floor govern.
+        if rv > 0 and rv >= low_vol_threshold:
+            vol_floor = -vol_mult * rv * 100.0
+            # Pick the TIGHTER (less negative) of the two floors.
+            effective = max(effective, vol_floor)
+
+    fires = crash
+    if not fires and unrealized_pct is not None:
+        try:
+            fires = float(unrealized_pct) <= effective
+        except (TypeError, ValueError):
+            fires = False
+
+    return effective, fires, {
+        "tier": tier_u,
+        "regime": (None if regime is None else str(regime).strip().lower()),
+        "absolute_pct": floor_abs,
+        "volatility_pct": vol_floor,
+        "override_pct": override,
+        "base_pct": effective if vol_floor is None else (
+            floor_abs if override is None else override),
+        "effective_pct": effective,
+        "vol_mult": vol_mult,
+        "low_vol_threshold": low_vol_threshold,
+        "crash_emergency": crash,
+    }
 
 
 def _get_scaled_cash_reserve_floor_pct(
@@ -14774,6 +15058,7 @@ def _get_cached_articles(
     *,
     sentiment_cache_scope_id: str = "",
     context=None,
+    config: dict | None = None,
 ):
     """
     Return (articles, cached_sentiment) for date_key (YYYY-MM-DD).
@@ -14782,6 +15067,9 @@ def _get_cached_articles(
     articles: list or None on miss/invalid.
     cached_sentiment: dict[ticker -> {sentiment, event}] or None if not cached for this set.
     """
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("sentiment"):
+        return None, None
     if conn is None:
         return None, None
     try:
@@ -14862,6 +15150,9 @@ def _save_cached_sentiment(
     context=None,
 ):
     """Save LLM sentiment_data keyed by article-set fingerprint so reuse is only for the same articles."""
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("sentiment"):
+        return
     if conn is None or not isinstance(sentiment_data, dict) or len(sentiment_data) == 0:
         return
     fp = _article_set_fingerprint(articles or []) if articles else ""
@@ -15062,6 +15353,7 @@ def _fetch_articles_cached(
     force_fresh: bool = False,
     context=None,
     snapshot_store=None,
+    config: dict | None = None,
 ) -> tuple[list, bool, dict | None]:
     """
     Return (articles, from_cache, cached_sentiment) for the given date range.
@@ -15102,6 +15394,7 @@ def _fetch_articles_cached(
         _ensure_nexus_cache_table(conn)
         cache_kwargs = {
             "sentiment_cache_scope_id": sentiment_cache_scope_id,
+            "config": config,
         }
         if context is not None:
             cache_kwargs["context"] = context
@@ -15471,7 +15764,15 @@ def _hierarchy_llm_provider_config() -> dict[str, Any]:
     }
 
 
-def _structured_hierarchy_validation(prompt: str, output_type: Any, *, system_prompt: str, allow_search: bool, log_label: str):
+def _structured_hierarchy_validation(
+    prompt: str,
+    output_type: Any,
+    *,
+    system_prompt: str,
+    allow_search: bool,
+    log_label: str,
+    decision_at: str = "",
+):
     provider, model, api_key = _hierarchy_llm_config()
     provider_config = _hierarchy_llm_provider_config()
     if not api_key:
@@ -15499,6 +15800,14 @@ def _structured_hierarchy_validation(prompt: str, output_type: Any, *, system_pr
         prompt,
         output_type,
         attribution_keys={"call_site": "structured_hierarchy_validation"},
+        evidence_context=_model_evidence_context(
+            prompt,
+            decision_at=decision_at,
+            call_site="structured_hierarchy_validation",
+            role="hierarchy_validation",
+            subject=log_label,
+            local_sequence=0,
+        ),
         system_prompt=system_prompt,
         tools=tools,
         max_output_tokens=0,
@@ -15748,6 +16057,7 @@ def _resolve_private_entity_news_matches(session, articles: list, as_of_date: st
                 ),
                 allow_search=True,
                 log_label="Private-entity validator",
+                decision_at=as_of_date,
             )
             if not verdict or not verdict.keep:
                 continue
@@ -16327,6 +16637,14 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": "sentiment",
                 },
+                evidence_context=_model_evidence_context(
+                    prompt,
+                    decision_at=today_str,
+                    call_site="sentiment",
+                    role="sentiment",
+                    subject=_sent_instance_id or "graph-nexus",
+                    local_sequence=_retry_stage,
+                ),
                 system_prompt=(
                     "Return only structured financial headline classifications as minimal JSON. "
                     "Use the short alias keys (t, s, e, sp, d, r). "
@@ -16477,6 +16795,7 @@ def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, mo
 
         return result, future_trades, cancel_recommendations, trend_updates
     except Exception as e:
+        _raise_model_evidence_error(e)
         _log(f"Enhanced LLM sentiment error: {e}", "yellow")
         return _empty4
 
@@ -16579,6 +16898,13 @@ def _classify_macro_news_via_llm(
             prompt,
             _MacroSignalsResponse,
             attribution_keys={"call_site": "macro_news_classification"},
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=today_str,
+                call_site="macro_news_classification",
+                role="macro_classification",
+                local_sequence=0,
+            ),
             system_prompt=macro_batch_sys,
             max_output_tokens=0,
             retries=2,
@@ -16626,6 +16952,7 @@ def _classify_macro_news_via_llm(
             _log(f"Macro classification: {len(valid)} signals from {len(headlines)} headlines", "green")
         return valid
     except Exception as e:
+        _raise_model_evidence_error(e)
         _log(f"Macro classification error: {e}", "yellow")
         return []
 
@@ -16663,6 +16990,13 @@ def _classify_macro_news_via_llm_cached(
 ) -> list[dict]:
     """Cached wrapper for _classify_macro_news_via_llm. Stores result in RethinkDB keyed by
     (date_key, instance_id, model, article fingerprint) so backtest restarts skip the 56s LLM call."""
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("macro_classification"):
+        return _classify_macro_news_via_llm(
+            articles, provider, api_key, model, today_str,
+            available_sectors, available_gov_agencies, num_articles, provider_config,
+            graph_driver=graph_driver,
+        )
     if conn is None or not _nexus_db_available:
         return _classify_macro_news_via_llm(
             articles, provider, api_key, model, today_str,
@@ -16845,6 +17179,13 @@ def _classify_macro_with_tools(
             tool_prompt,
             _MacroSignalsResponse,
             attribution_keys={"call_site": "macro_news_tools_fallback"},
+            evidence_context=_model_evidence_context(
+                tool_prompt,
+                decision_at=today_str,
+                call_site="macro_news_tools_fallback",
+                role="macro_classification",
+                local_sequence=1,
+            ),
             system_prompt=(
                 "Use the available Neo4j tools when needed, then return only structured macro signals. "
                 "Do not include markdown or explanatory prose outside the schema."
@@ -16873,6 +17214,7 @@ def _classify_macro_with_tools(
             })
         return valid
     except Exception as e:
+        _raise_model_evidence_error(e)
         _log(f"Tool-calling fallback error: {e}", "yellow")
     finally:
         # Clean up session
@@ -18733,40 +19075,24 @@ def _evaluate_position_risk(
                                     strategy_cache["_nexus_conviction_telemetry_capped_logged"] = True
                     except Exception:
                         pass
-                _cb_floor_pct, _cb_vol_mult, _cb_low_vol_thresh = _get_conviction_aware_floor(
-                    _cb_tier, config, regime=(_cb_regime if _cb_regime_gated else None)
+                # A4 (2026-07-28): one resolver owns tier floor -> regime
+                # adjustment -> operator override -> vol scaling -> firing, so
+                # the tested floor is the floor that actually fires. The vol
+                # lookup stays lazy — it only runs when scaling can bind.
+                _z31_floor_effective, _cb_fires, _cb_floor_telemetry = (
+                    _resolve_effective_open_loss_floor(
+                        _cb_tier,
+                        config,
+                        regime=(_cb_regime if _cb_regime_gated else None),
+                        realized_vol=lambda: _realized_vol_20d(
+                            _recent_closes_for_symbol(
+                                sym, price_history, portfolio_emulator)),
+                        unrealized_pct=_unrealized_pct,
+                    )
                 )
-                # Back-compat: explicit max_open_loss_pct config overrides the
-                # tier-resolved floor (used by tests / operator overrides).
-                _legacy_override = config.get("max_open_loss_pct")
-                if _legacy_override is not None:
-                    try:
-                        _cb_floor_pct = float(_legacy_override)
-                    except (TypeError, ValueError):
-                        pass
-                _legacy_vol_mult = config.get("max_open_loss_vol_multiplier")
-                if _legacy_vol_mult is not None and _cb_tier != "HIGH":
-                    # Operator override only applies to MID/LOW; HIGH always disables.
-                    try:
-                        _cb_vol_mult = float(_legacy_vol_mult)
-                    except (TypeError, ValueError):
-                        pass
-                # crash regime: sentinel 0.0 from helper means emergency exit
-                _cb_crash_emergency = False
-                if _cb_regime_gated and str(_cb_regime).strip().lower() == "crash":
-                    _cb_crash_emergency = True
-                _z31_floor_effective = _cb_floor_pct
-                if not _cb_crash_emergency and _cb_vol_mult > 0:
-                    _z31_closes = _recent_closes_for_symbol(sym, price_history, portfolio_emulator)
-                    _z31_vol = _realized_vol_20d(_z31_closes)
-                    # Low-vol disable: skip vol-scaling on quiet names so the
-                    # absolute floor governs (fixes SNDK pathology).
-                    if _z31_vol > 0 and _z31_vol >= _cb_low_vol_thresh:
-                        _z31_vol_floor_pct = -_cb_vol_mult * _z31_vol * 100.0
-                        # Pick the TIGHTER (less negative) of the two floors.
-                        # max() of two negatives selects the one closer to zero.
-                        _z31_floor_effective = max(_cb_floor_pct, _z31_vol_floor_pct)
-                if _cb_crash_emergency or _unrealized_pct <= _z31_floor_effective:
+                _cb_floor_pct = _cb_floor_telemetry["base_pct"]
+                _cb_crash_emergency = _cb_floor_telemetry["crash_emergency"]
+                if _cb_fires:
                     fresh_score = -1
                     if _cb_crash_emergency:
                         fresh_reason = (
@@ -20432,6 +20758,9 @@ def _check_overlay_result_cache(
     active_events: list[dict], config: dict,
 ) -> dict | None:
     """Check overlay result cache. Returns cached overlay dict or None."""
+    from _phase_alpha_helpers import evidence_cache_read_allowed
+    if not evidence_cache_read_allowed("overlay_result"):
+        return None
     if conn is None or _r is None or not config.get("overlay_result_cache_enabled", False):
         return None
     _ensure_nexus_history_table(conn, NEXUS_OVERLAY_RESULT_CACHE_TABLE)
@@ -20452,6 +20781,9 @@ def _store_overlay_result_cache(
     active_events: list[dict], config: dict, result: dict,
 ) -> None:
     """Store overlay result in cache."""
+    from _phase_alpha_helpers import evidence_cache_write_allowed
+    if not evidence_cache_write_allowed("overlay_result"):
+        return
     if conn is None or _r is None or not config.get("overlay_result_cache_enabled", False):
         return
     if not result:
@@ -20632,6 +20964,14 @@ def _apply_trade_overlay(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "overlay",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=str(feature_row.get("date_key") or ""),
+                call_site="overlay",
+                role="trade_overlay",
+                subject=symbol,
+                local_sequence=0,
+            ),
             system_prompt=system_prompt,
             max_output_tokens=_overlay_max_output_tokens(config),
             timeout_sec=_overlay_timeout,
@@ -20769,6 +21109,14 @@ def _apply_etf_trade_overlay(
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
                 "call_site": "overlay_etf",
             },
+            evidence_context=_model_evidence_context(
+                prompt,
+                decision_at=str(feature_row.get("date_key") or ""),
+                call_site="overlay_etf",
+                role="trade_overlay",
+                subject=symbol,
+                local_sequence=0,
+            ),
             system_prompt=system_prompt,
             max_output_tokens=_overlay_max_output_tokens(config),
             retries=2,
@@ -21051,6 +21399,7 @@ def _apply_ml_and_overlay_to_scores(
                             context=f"overlay_worker:{item['sym']}",
                         )
                     except Exception as exc:
+                        _raise_model_evidence_error(exc)
                         _log(f"Trade overlay worker failed for {item['sym']}: {exc}", "yellow")
                         overlay_results[item["sym"]] = ({}, {})
                     _log_stage_progress(
@@ -22664,6 +23013,8 @@ class GraphNexusAnalysis:
         Run once per trading loop. Fetch news, classify via LLM, propagate through
         Neo4j graph with relationship-aware contagion, return dict[symbol -> score_data].
         """
+        from _phase_alpha_helpers import validate_model_evidence_preflight
+        validate_model_evidence_preflight(config)
         if point_in_time_context is None and data is not None:
             from point_in_time_data import PointInTimeDataError
 
@@ -23769,6 +24120,7 @@ class GraphNexusAnalysis:
                 limit=num_articles, min_articles=min_articles,
                 sentiment_cache_scope_id=sentiment_cache_scope_id,
                 force_fresh=_live_first_touch,
+                config=config,
                 **_pit_news_kwargs,
             )
         except Exception as e:
@@ -23907,6 +24259,13 @@ class GraphNexusAnalysis:
                 )
         # Learning stage: analyze past outcomes into pattern summary (retries daily until enough data)
         if learning_stage_enabled and llm_key:
+            from _phase_alpha_helpers import (
+                evidence_cache_read_allowed,
+                evidence_cache_write_allowed,
+            )
+            _learning_cache_read_allowed = evidence_cache_read_allowed("learning")
+            _learning_cache_write_allowed = evidence_cache_write_allowed("learning")
+            learning_ctx = ""
             learning_context_scope = {
                 "instance_id": instance_id,
                 "base_instance_id": base_instance_id,
@@ -23916,12 +24275,17 @@ class GraphNexusAnalysis:
                 "learning_stage_days": learning_stage_days,
                 "learning_refresh_hours": learning_refresh_hours,
             }
-            if strategy_cache is not None and strategy_cache.get("_nexus_learning_context_scope") != learning_context_scope:
+            if (
+                _learning_cache_read_allowed
+                and _learning_cache_write_allowed
+                and strategy_cache is not None
+                and strategy_cache.get("_nexus_learning_context_scope") != learning_context_scope
+            ):
                 strategy_cache["_nexus_learning_context_built"] = False
                 strategy_cache["_nexus_learning_context"] = ""
                 strategy_cache.pop("_nexus_learning_last_attempt_date", None)
-            _learning_should_run = False
-            if strategy_cache is not None:
+            _learning_should_run = not _learning_cache_read_allowed
+            if _learning_cache_read_allowed and strategy_cache is not None:
                 if strategy_cache.get("_nexus_learning_context_built"):
                     _learning_should_run = False  # already have real content
                 elif strategy_cache.get("_nexus_learning_last_attempt_date") == date_key:
@@ -23941,19 +24305,26 @@ class GraphNexusAnalysis:
                             llm_provider, llm_key, llm_model, use_toon=use_toon, provider_config=llm_provider_config,
                             config=config,
                         )
-                        strategy_cache["_nexus_learning_context"] = learning_ctx
-                        strategy_cache["_nexus_learning_last_attempt_date"] = date_key
+                        if _learning_cache_write_allowed and strategy_cache is not None:
+                            strategy_cache["_nexus_learning_context"] = learning_ctx
+                            strategy_cache["_nexus_learning_last_attempt_date"] = date_key
                         if learning_ctx:
-                            strategy_cache["_nexus_learning_context_built"] = True
+                            if _learning_cache_write_allowed and strategy_cache is not None:
+                                strategy_cache["_nexus_learning_context_built"] = True
                             _log("Learning stage: context built successfully, will use for all subsequent bars", "green")
                         else:
                             _log(f"Learning stage: no usable context yet on {date_key}, will retry next day", "cyan")
-                        strategy_cache["_nexus_learning_context_scope"] = learning_context_scope
+                        if _learning_cache_write_allowed and strategy_cache is not None:
+                            strategy_cache["_nexus_learning_context_scope"] = learning_context_scope
                 except Exception as _learn_err:
-                    strategy_cache["_nexus_learning_last_attempt_date"] = date_key
+                    _raise_model_evidence_error(_learn_err)
+                    if _learning_cache_write_allowed and strategy_cache is not None:
+                        strategy_cache["_nexus_learning_last_attempt_date"] = date_key
                     _log(f"Learning stage error (will retry next day): {_learn_err}", "yellow")
-            if strategy_cache is not None:
+            if _learning_cache_read_allowed and strategy_cache is not None:
                 additional_context += strategy_cache.get("_nexus_learning_context", "")
+            else:
+                additional_context += learning_ctx
 
         # ── Phase 2.5: Adversarial Analyst Panel ──────────────────────────────
         analyst_panel_adjustments: dict[str, float] = {}
@@ -23984,7 +24355,13 @@ class GraphNexusAnalysis:
                 if "sentiment_data" in locals() and isinstance(sentiment_data, dict) and sentiment_data:
                     _ap_sent = sentiment_data
                 else:
-                    _ap_cached_sent = strategy_cache.get("_last_sentiment_data") if strategy_cache else None
+                    from _phase_alpha_helpers import evidence_cache_read_allowed
+                    _ap_cached_sent = (
+                        strategy_cache.get("_last_sentiment_data")
+                        if strategy_cache
+                        and evidence_cache_read_allowed("sentiment")
+                        else None
+                    )
                     _ap_sent = _ap_cached_sent if isinstance(_ap_cached_sent, dict) else {}
                 _ap_max = int(config.get("analyst_panel_max_stocks", 10))
                 _ap_stocks = [
@@ -24006,6 +24383,7 @@ class GraphNexusAnalysis:
                         additional_context += panel_context
                         _log(f"Analyst Panel: consensus added ({len(panel_context)} chars, {len(analyst_panel_adjustments)} stock adjustments)", "green")
             except Exception as _ap_err:
+                _raise_model_evidence_error(_ap_err)
                 _log(f"Analyst Panel error (skipped): {type(_ap_err).__name__}: {str(_ap_err)[:200]}", "yellow")
         if analyst_panel_adjustments:
             config["_analyst_panel_adjustments"] = analyst_panel_adjustments
@@ -24095,6 +24473,7 @@ class GraphNexusAnalysis:
                             if strategy_cache is not None:
                                 strategy_cache["_peb_zero_streak"] = _peb_zero_streak + 1
                     except Exception as exc:
+                        _raise_model_evidence_error(exc)
                         _log(f"Private-entity bridge skipped: {exc}", "yellow")
                         private_entity_resolutions = []
         additional_context += private_entity_context
@@ -24560,7 +24939,11 @@ class GraphNexusAnalysis:
         )
 
         # Cache sentiment_data for the analyst panel on the NEXT bar (Phase 2.5 runs before sentiment)
-        if strategy_cache is not None:
+        from _phase_alpha_helpers import evidence_cache_write_allowed
+        if (
+            strategy_cache is not None
+            and evidence_cache_write_allowed("sentiment")
+        ):
             strategy_cache["_last_sentiment_data"] = dict(sentiment_data)
 
         # ── 2a-pre) Market Trends: apply updates, generate signals, discover stocks ──
@@ -24978,6 +25361,7 @@ class GraphNexusAnalysis:
                 google_articles = []
                 _gn_normalized = []
             except Exception as _macro_join_exc:
+                _raise_model_evidence_error(_macro_join_exc)
                 from point_in_time_data import PointInTimeDataError
 
                 if isinstance(_macro_join_exc, PointInTimeDataError):
@@ -25013,6 +25397,7 @@ class GraphNexusAnalysis:
                         except Exception as _bg_close_exc:
                             _log(f"Active-event maintenance WARN: failed to close background DB connection: {_bg_close_exc}", "yellow")
                 except Exception as _bg_exc:
+                    _raise_model_evidence_error(_bg_exc)
                     raise RuntimeError(f"Event maintenance background worker failed: {_bg_exc}") from _bg_exc
             from concurrent.futures import ThreadPoolExecutor as _MaintTPE
             _maint_executor = _MaintTPE(max_workers=1)
@@ -25064,6 +25449,7 @@ class GraphNexusAnalysis:
                                 if macro_added or macro_dampened:
                                     _log(f"Google News → {macro_added} new tickers added, {macro_dampened} dampened (conflicting macro)", "green")
                 except Exception as e:
+                    _raise_model_evidence_error(e)
                     _log(f"Google News integration error: {e}", "yellow")
             # Wait for event maintenance background thread to complete
             try:
@@ -25071,6 +25457,7 @@ class GraphNexusAnalysis:
                     active_events, _gn_event_traces = _maint_fut.result(timeout=900)
                 llm_traces_global.extend(_gn_event_traces)
             except Exception as _maint_exc:
+                _raise_model_evidence_error(_maint_exc)
                 _exc_desc = repr(_maint_exc) if str(_maint_exc) == "" else str(_maint_exc)
                 _log(f"Active-event maintenance error (non-fatal): {_exc_desc}", "yellow")
                 active_events = []
@@ -28752,7 +29139,10 @@ class GraphNexusAnalysis:
                         # reference's largest at 6.9%). Count-based limits cannot
                         # fix this -- they trim the tail of the size distribution,
                         # never the head; only a dollar limiter binds.
-                        _mw_ba_nav_cap = float(config.get("momentum_breakout_max_nav_pct", 0.0) or 0.0)
+                        # A2 (2026-07-28): resolved from THIS cycle's regime, not
+                        # the previous cycle's profile overlay.
+                        _mw_ba_nav_cap = _resolve_momentum_breakout_nav_cap(
+                            config, strategy_cache)
                         if _mw_ba_nav_cap > 0 and portfolio_total > 0:
                             _mw_ba_alloc = min(_mw_ba_alloc, portfolio_total * _mw_ba_nav_cap)
                         if _mw_ba_alloc < _mw_ba_min_pos:

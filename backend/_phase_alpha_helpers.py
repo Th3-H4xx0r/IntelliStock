@@ -11,6 +11,96 @@ import hashlib
 import uuid
 
 
+_MODEL_EVIDENCE_CACHE_KINDS = frozenset(
+    {
+        "ordinary_prompt",
+        "sentiment",
+        "overlay_result",
+        "active_event_maintenance",
+        "analyst_panel",
+        "learning",
+        "macro_classification",
+    }
+)
+
+
+def _model_evidence_session():
+    try:
+        from backend.model_evidence import get_model_evidence_session
+    except ImportError:
+        from model_evidence import get_model_evidence_session
+    return get_model_evidence_session()
+
+
+def evidence_cache_access_allowed(
+    cache_kind: str,
+    *,
+    access: str,
+) -> bool:
+    """Central read/write policy for mutable caches derived from an LLM."""
+    session = _model_evidence_session()
+    if session is None or session.mode == "off":
+        return True
+    try:
+        from backend.model_evidence import ModelEvidenceError
+    except ImportError:
+        from model_evidence import ModelEvidenceError
+    if cache_kind not in _MODEL_EVIDENCE_CACHE_KINDS:
+        raise ModelEvidenceError(
+            f"unknown model-evidence cache kind: {cache_kind}"
+        )
+    if access not in {"read", "write"}:
+        raise ModelEvidenceError(
+            f"unknown model-evidence cache access: {access}"
+        )
+    # Caller config is never proof that an artifact belongs to the sealed
+    # fixture. Until the active session exposes verified artifact identities,
+    # every evidence mode fails closed for mutable LLM-derived cache access.
+    return False
+
+
+def evidence_cache_read_allowed(cache_kind: str, **_ignored) -> bool:
+    """Compatibility wrapper for centralized mutable-cache read policy."""
+    return evidence_cache_access_allowed(cache_kind, access="read")
+
+
+def evidence_cache_write_allowed(cache_kind: str) -> bool:
+    """Return whether a mutable LLM-derived cache may be mutated."""
+    return evidence_cache_access_allowed(cache_kind, access="write")
+
+
+def validate_model_evidence_preflight(config: dict) -> None:
+    """Reject mutable-cache/non-clean evidence runs before strategy work."""
+    session = _model_evidence_session()
+    if session is None or session.mode == "off":
+        return
+    try:
+        from backend.model_evidence import ModelEvidenceError
+    except ImportError:
+        from model_evidence import ModelEvidenceError
+    if config.get("nexus_sentiment_cache_force_in_backtest", True) is not False:
+        raise ModelEvidenceError("model evidence requires sentiment cache force disabled")
+    if config.get("use_sentiment_cache", True) is not False:
+        raise ModelEvidenceError("model evidence requires sentiment cache off")
+    if bool(config.get("nexus_fast_mode", False)):
+        raise ModelEvidenceError("model evidence requires fast cache mode off")
+    if bool(config.get("overlay_result_cache_enabled", False)):
+        raise ModelEvidenceError("model evidence requires overlay result cache off")
+    audit = session.clean_start_audit
+    if audit is None:
+        raise ModelEvidenceError(
+            "model evidence requires a session-bound deterministic clean-start audit"
+        )
+    missing_scopes = _MODEL_EVIDENCE_CACHE_KINDS - set(
+        audit.cleared_scope_identities
+    )
+    if missing_scopes:
+        raise ModelEvidenceError(
+            "model evidence clean-start audit is missing required cleared scopes: "
+            f"{sorted(missing_scopes)}"
+        )
+
+
 def resolve_use_sentiment_cache(config: dict) -> tuple[bool, bool]:
     """Phase α.1: return (use_sentiment_cache, force_was_applied).
 

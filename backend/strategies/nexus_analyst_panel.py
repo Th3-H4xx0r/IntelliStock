@@ -63,6 +63,26 @@ except Exception:
     def llm_call_context(**_kwargs):
         yield
 try:
+    from backend._phase_alpha_helpers import (
+        evidence_cache_read_allowed,
+        evidence_cache_write_allowed,
+    )
+    from backend.model_evidence import (
+        ModelEvidenceContext,
+        ModelEvidenceError,
+        get_model_evidence_session,
+    )
+except ImportError:
+    from _phase_alpha_helpers import (
+        evidence_cache_read_allowed,
+        evidence_cache_write_allowed,
+    )
+    from model_evidence import (
+        ModelEvidenceContext,
+        ModelEvidenceError,
+        get_model_evidence_session,
+    )
+try:
     from strategies.graph_nexus_analysis import (
         _resolve_role_llm_config, _resolve_role_llm_provider_config,
         _to_toon, DB_NAME, _get_nexus_db_conn, _normalize_llm_provider,
@@ -98,6 +118,30 @@ PANEL_TABLE = "GraphNexusAnalystPanel"
 _analyst_panel_table_ensured = False
 _RATING_SCORES = {"strong_buy": 2.0, "buy": 1.0, "hold": 0.0, "sell": -1.0, "strong_sell": -2.0}
 _DIR_SCORES = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
+
+
+def _panel_evidence_context(
+    config: dict,
+    *,
+    round_num: int,
+    role_label: str,
+    local_sequence: int,
+) -> ModelEvidenceContext | None:
+    session = get_model_evidence_session()
+    if session is None or session.mode == "off":
+        return None
+    return ModelEvidenceContext(
+        decision_at=str((config or {}).get("_date_key") or ""),
+        call_site=f"nexus_analyst_panel.round{round_num}",
+        role="analyst_panel",
+        subject=role_label,
+        local_sequence=local_sequence,
+    )
+
+
+def _raise_model_evidence_error(exc: Exception) -> None:
+    if isinstance(exc, ModelEvidenceError):
+        raise exc
 
 # --- Default agent roster (10 roles) ----------------------------------------
 _AGENT_DEFS: list[tuple[str, str, str]] = [
@@ -178,6 +222,8 @@ def _get_panel_db_conn():
 
 def _save_round_results(conn, instance_id, date_key, agent_role, round1=None, round2=None,
                         prediction_prices: dict[str, float] | None = None):
+    if not evidence_cache_write_allowed("analyst_panel"):
+        return
     if _r is None: return
     conn = _get_panel_db_conn()
     if conn is None: return
@@ -191,6 +237,8 @@ def _save_round_results(conn, instance_id, date_key, agent_role, round1=None, ro
     except Exception as e: _log(f"Failed to save panel result for {agent_role}: {e}", "yellow")
 def _load_agent_memory(conn, instance_id: str, agent_role: str, date_key: str,
                        memory_days: int = 14) -> str:
+    if not evidence_cache_read_allowed("analyst_panel"):
+        return ""
     if _r is None:
         return ""
     conn = _get_panel_db_conn()
@@ -221,6 +269,8 @@ def _load_agent_memory(conn, instance_id: str, agent_role: str, date_key: str,
 # --- Outcome tracking --------------------------------------------------------
 def fill_analyst_panel_outcomes(conn, instance_id: str, date_key: str,
                                 prices: dict[str, float]):
+    if not evidence_cache_read_allowed("analyst_panel"):
+        return
     if _r is None:
         return
     conn = _get_panel_db_conn()
@@ -261,6 +311,8 @@ def fill_analyst_panel_outcomes(conn, instance_id: str, date_key: str,
 def _compute_agent_weights(conn, instance_id: str, date_key: str, agents: list[dict],
                            memory_days: int = 14) -> dict[str, float]:
     default = {a["role"]: 1.0 for a in agents}
+    if not evidence_cache_read_allowed("analyst_panel"):
+        return default
     if _r is None:
         return default
     conn = _get_panel_db_conn()
@@ -366,6 +418,12 @@ def _run_single_agent(sys_prompt: str, user_prompt: str, out_type: type, config:
                     "instance_id": (config or {}).get("_telemetry_instance_id"),
                     "call_site": f"nexus_analyst_panel.round{round_num}",
                 },
+                evidence_context=_panel_evidence_context(
+                    config,
+                    round_num=round_num,
+                    role_label=role_label,
+                    local_sequence=0,
+                ),
                 system_prompt=sys_prompt, max_output_tokens=0,
                 timeout_sec=timeout, temperature=0.4, provider_config=prov_cfg,
                 retries=1, output_retries=1, http_retries=1,
@@ -395,6 +453,12 @@ def _run_single_agent(sys_prompt: str, user_prompt: str, out_type: type, config:
                         "instance_id": (config or {}).get("_telemetry_instance_id"),
                         "call_site": f"nexus_analyst_panel.round{round_num}.skeleton_retry",
                     },
+                    evidence_context=_panel_evidence_context(
+                        config,
+                        round_num=round_num,
+                        role_label=role_label,
+                        local_sequence=1,
+                    ),
                     system_prompt=sys_prompt, max_output_tokens=0,
                     timeout_sec=timeout, temperature=0.5, provider_config=prov_cfg,
                     retries=0, output_retries=0, http_retries=0, prefer_raw_json=is_azure,
@@ -415,6 +479,7 @@ def _run_single_agent(sys_prompt: str, user_prompt: str, out_type: type, config:
         _log(f"PANEL agent '{role_label}' R{round_num}: done in {elapsed} | ok={bool(resp)}", "cyan" if resp else "yellow")
         return resp
     except Exception as e:
+        _raise_model_evidence_error(e)
         elapsed = _format_stage_elapsed(perf_counter() - t0)
         _log(f"PANEL agent '{role_label}' R{round_num}: FAILED in {elapsed} | model={model} | error={type(e).__name__}: {str(e)[:200]}", "yellow")
         return None
@@ -448,6 +513,7 @@ def _run_parallel_agents(agents: list[dict], build_fn, out_type: type, config: d
                 try:
                     role, data = fut.result(timeout=remaining)
                 except Exception as e:
+                    _raise_model_evidence_error(e)
                     role = futures[fut]
                     _log(f"PANEL agent '{role}' R{round_num}: FAILED | error={type(e).__name__}: {str(e)[:200]}", "yellow")
                     continue
@@ -555,7 +621,11 @@ def run_analyst_panel(config: dict, news_summary: str, stock_candidates: list[di
     t0 = perf_counter()
     if not config.get("analyst_panel_enabled", False):
         return "", {}
-    if strategy_cache.get("_analyst_panel_last_run_date") == date_key:
+    panel_cache_write_allowed = evidence_cache_write_allowed("analyst_panel")
+    if (
+        evidence_cache_read_allowed("analyst_panel")
+        and strategy_cache.get("_analyst_panel_last_run_date") == date_key
+    ):
         return (strategy_cache.get("_analyst_panel_last_consensus", ""),
                 strategy_cache.get("_analyst_panel_last_adjustments", {}))
 
@@ -590,7 +660,8 @@ def run_analyst_panel(config: dict, news_summary: str, stock_candidates: list[di
 
     weights = _compute_agent_weights(conn, instance_id, date_key, agents,
                                      config.get("analyst_panel_memory_days", 14))
-    strategy_cache["_analyst_panel_agent_weights"] = weights
+    if panel_cache_write_allowed:
+        strategy_cache["_analyst_panel_agent_weights"] = weights
     used = 0
 
     # Snapshot current prices for accuracy tracking (compare future price vs today's)
@@ -637,9 +708,10 @@ def run_analyst_panel(config: dict, news_summary: str, stock_candidates: list[di
         _log(f"PANEL score adj: {ticker} {adj:+.3f}", "cyan")
 
     ctx = _format_consensus_context(outlook, adjustments, sw, moderator)
-    strategy_cache["_analyst_panel_last_consensus"] = ctx
-    strategy_cache["_analyst_panel_last_adjustments"] = adjustments
-    strategy_cache["_analyst_panel_last_run_date"] = date_key
+    if panel_cache_write_allowed:
+        strategy_cache["_analyst_panel_last_consensus"] = ctx
+        strategy_cache["_analyst_panel_last_adjustments"] = adjustments
+        strategy_cache["_analyst_panel_last_run_date"] = date_key
     _log(f"ANALYST PANEL done: {used} calls in {_format_stage_elapsed(perf_counter() - t0)} | "
          f"{outlook.get('direction')}({outlook.get('confidence',0):.2f}) | {len(adjustments)} stocks", "cyan")
     return ctx, adjustments

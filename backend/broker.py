@@ -2520,10 +2520,67 @@ def _regime_position_cap_hard(cached_strategies):
                     "bear": int(cfg.get("max_positions_bear", min(mx, 8)) or 8),
                     "crash": int(cfg.get("max_positions_crash", 0) or 0),
                 }
+                # A1 (2026-07-28): a confirmed recovery raises the STRATEGY's
+                # Z4.1 gate to max_positions_recovery, but this execution gate
+                # kept enforcing the chop cap — so recovery candidates were
+                # blocked at the last hop. Default OFF; never returns None.
+                if regime == "chop" and bool(cfg.get(
+                        "regime_position_cap_recovery_hard_enforce", False)):
+                    _rec = _regime_recovery_hard_cap(cfg, mx, caps["chop"])
+                    if _rec is not None:
+                        return "recovery", _rec
                 return regime, caps[regime]
         return None
     except Exception:
         return None
+
+
+def _regime_recovery_hard_cap(cfg, max_positions, chop_cap):
+    """A1 (2026-07-28, pure). Effective execution-time cap during a confirmed
+    recovery, or None when the recovery state/config does not qualify — the
+    caller then falls back to the ordinary chop cap, never to None.
+
+    Qualifies only when the strategy stamped the recovery flag AND the bear
+    capacity latch is clear (the latch deliberately holds the bear cap through
+    chop interludes inside a downtrend, so a recovery must not override it).
+    Only ever RAISES, and never above the global `max_positions` ceiling.
+    """
+    if not _nexus_recovery_flag() or _nexus_bear_capacity_latch():
+        return None
+    raw = cfg.get("max_positions_recovery")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        rec = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if rec <= 0:
+        return None
+    return min(int(max_positions), max(int(chop_cap), rec))
+
+
+def _nexus_recovery_flag():
+    """Confirmed-recovery flag stamped each cycle by the nexus strategy
+    (`_market_regime_recovery`); False when unavailable — conservative."""
+    try:
+        cache = (globals().get("_strategy_cache") or {}).get(
+            "graph_nexus_analysis") or {}
+        return bool(cache.get("_market_regime_recovery"))
+    except Exception:
+        return False
+
+
+def _nexus_bear_capacity_latch():
+    """Bear-capacity latch stamped by the nexus strategy
+    (`_bear_capacity_latch`, default OFF). True means a downtrend still owns
+    the book's capacity despite a chop label. False when unavailable, matching
+    the strategy-side default."""
+    try:
+        cache = (globals().get("_strategy_cache") or {}).get(
+            "graph_nexus_analysis") or {}
+        return bool(cache.get("_bear_capacity_latch"))
+    except Exception:
+        return False
 
 
 def _sleeve_market_regime():
@@ -3477,6 +3534,16 @@ def load_strategies_from_db():
             pass
         return [], None, None
 
+# Keys that must never ride in a regime_profiles overlay. Beyond the regime_*/
+# max_positions* prefixes stripped below, these are per-regime MAPPINGS that are
+# themselves resolved against the current regime — letting the previous cycle's
+# profile overwrite one would reintroduce exactly the lag they exist to fix.
+_REGIME_PROFILE_BASE_ONLY_KEYS = frozenset({
+    "residual_sleeve_bear_require_fresh_pct",
+    "momentum_breakout_max_nav_pct_by_regime",
+})
+
+
 def _apply_regime_profile(config, regime):
     """2026-07-23 regime auto-switch. Overlay config["regime_profiles"][regime]
     onto a COPY of config so the strategy's levers switch by the confirmed market
@@ -3504,7 +3571,7 @@ def _apply_regime_profile(config, regime):
     # These belong in the base only (adversarial-review gap #3).
     _safe = {k: v for k, v in overlay.items()
              if not (k.startswith("regime_") or k.startswith("max_positions")
-                     or k == "residual_sleeve_bear_require_fresh_pct")}
+                     or k in _REGIME_PROFILE_BASE_ONLY_KEYS)}
     if not _safe:
         return config
     merged = dict(config)
