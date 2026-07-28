@@ -149,6 +149,111 @@ def _reject_secret_keys(value: Any, *, path: str = "payload") -> None:
             _reject_secret_keys(item, path=f"{path}[{index}]")
 
 
+def _news_available_at(record: Mapping[str, Any]) -> Any:
+    containers = [record]
+    metadata = record.get("metadata")
+    if isinstance(metadata, Mapping):
+        containers.append(metadata)
+    for container in containers:
+        for key in (
+            "available_at",
+            "published_at",
+            "published_date",
+            "publication_time",
+            "created_at",
+            "updated_at",
+            "last_updated",
+        ):
+            value = container.get(key)
+            if value is not None and str(value).strip():
+                return value
+    return None
+
+
+def _validate_news_records(
+    records: Any,
+    *,
+    path: str,
+    as_of: datetime,
+) -> None:
+    if not isinstance(records, (list, tuple)):
+        raise PointInTimeDataError(f"{path} must be a record list")
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            raise PointInTimeDataError(
+                f"{path}[{index}] must be a mapping"
+            )
+        try:
+            available_at = require_aware_utc(
+                _news_available_at(record),
+                field=f"{path}[{index}] availability",
+            )
+        except PointInTimeDataError as exc:
+            raise PointInTimeDataError(
+                f"{path}[{index}] availability is not provable"
+            ) from exc
+        if available_at > as_of:
+            raise PointInTimeDataError(
+                f"{path}[{index}] availability is after bundle cutoff"
+            )
+
+
+def _validate_bundle_datasets(
+    datasets: Mapping[str, Any],
+    *,
+    as_of: datetime,
+) -> None:
+    graph = datasets["graph"]
+    if (
+        not isinstance(graph, Mapping)
+        or graph.get("recording_version") != 1
+        or not isinstance(graph.get("queries"), Mapping)
+    ):
+        raise PointInTimeDataError(
+            "graph snapshot queries must be a replayable mapping"
+        )
+    if not isinstance(datasets["fundamentals"], Mapping):
+        raise PointInTimeDataError(
+            "fundamentals snapshot must be a ticker mapping"
+        )
+    universe = datasets["universe"]
+    if not isinstance(universe, (Mapping, list, tuple, set, frozenset)):
+        raise PointInTimeDataError(
+            "universe snapshot must contain membership rows"
+        )
+    news = datasets["news"]
+    if not isinstance(news, Mapping):
+        raise PointInTimeDataError(
+            "news snapshot must be a source mapping"
+        )
+    missing_news = sorted({"alpaca", "google", "benzinga"} - set(news))
+    if missing_news:
+        raise PointInTimeDataError(
+            "news snapshot is missing sources: " + ", ".join(missing_news)
+        )
+    _validate_news_records(
+        news["alpaca"],
+        path="news.alpaca",
+        as_of=as_of,
+    )
+    _validate_news_records(
+        news["google"],
+        path="news.google",
+        as_of=as_of,
+    )
+    benzinga = news["benzinga"]
+    if not isinstance(benzinga, Mapping):
+        raise PointInTimeDataError(
+            "news.benzinga must be a data-type mapping"
+        )
+    for data_type, records in benzinga.items():
+        _validate_news_records(
+            records,
+            path=f"news.benzinga.{data_type}",
+            as_of=as_of,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class StoredManifest:
     manifest_id: str
@@ -258,6 +363,8 @@ def _build_bundle_rows(
         raise PointInTimeDataError(
             "PIT bundle contains unsupported datasets: " + ", ".join(extra)
         )
+    _reject_secret_keys(datasets, path="datasets")
+    _validate_bundle_datasets(datasets, as_of=as_of_utc)
 
     snapshots: dict[str, dict[str, Any]] = {}
     source_hashes: dict[str, str] = {}
@@ -267,7 +374,6 @@ def _build_bundle_rows(
     )
     for name in REQUIRED_DATASETS:
         raw_payload = datasets[name]
-        _reject_secret_keys(raw_payload, path=name)
         payload = canonical_payload(raw_payload)
         source_hash = _snapshot_hash(name, payload)
         source_hashes[name] = source_hash

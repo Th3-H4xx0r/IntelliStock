@@ -118,6 +118,27 @@ def test_replay_fails_closed_for_unrecorded_query():
             session.run("MATCH (n) RETURN n")
 
 
+def test_replay_audit_remembers_a_swallowed_query_miss():
+    replay = ReplayGraphDriver({"recording_version": 1, "queries": {}})
+    try:
+        replay.session().run("MATCH (n) RETURN n")
+    except PointInTimeDataError:
+        pass
+
+    with pytest.raises(PointInTimeDataError, match="replay failed"):
+        replay.assert_replay_complete()
+
+
+def test_replay_audit_rejects_unconsumed_recorded_queries():
+    recorder = RecordingGraphDriver(_Driver([[{"ticker": "AAPL"}]]))
+    with recorder.session() as session:
+        list(session.run("MATCH (n:Company) RETURN n.ticker AS ticker"))
+    replay = ReplayGraphDriver(recorder.export())
+
+    with pytest.raises(PointInTimeDataError, match="unconsumed"):
+        replay.assert_replay_complete()
+
+
 @pytest.mark.parametrize(
     "query",
     [

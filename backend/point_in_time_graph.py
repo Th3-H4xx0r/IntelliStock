@@ -257,7 +257,7 @@ class _ReplaySession:
 class ReplayGraphDriver:
     """Read-only driver backed solely by an immutable recorded ledger."""
 
-    __slots__ = ("_queries", "_positions", "_lock")
+    __slots__ = ("_queries", "_positions", "_failures", "_lock")
 
     def __init__(self, payload):
         canonical = _canonical_payload(payload)
@@ -271,6 +271,7 @@ class ReplayGraphDriver:
             )
         self._queries = canonical["queries"]
         self._positions: dict[str, int] = {}
+        self._failures: list[str] = []
         self._lock = threading.RLock()
 
     def session(self, **_kwargs):
@@ -282,30 +283,54 @@ class ReplayGraphDriver:
     def close(self):
         return None
 
+    def assert_replay_complete(self):
+        with self._lock:
+            if self._failures:
+                raise PointInTimeDataError(
+                    "point-in-time graph replay failed: "
+                    + self._failures[0]
+                )
+            unconsumed = 0
+            for identity, entry in self._queries.items():
+                occurrences = (
+                    entry.get("occurrences")
+                    if isinstance(entry, dict)
+                    else None
+                )
+                if not isinstance(occurrences, list):
+                    raise PointInTimeDataError(
+                        "point-in-time graph replay contains invalid occurrences"
+                    )
+                unconsumed += max(
+                    0,
+                    len(occurrences) - self._positions.get(identity, 0),
+                )
+            if unconsumed:
+                raise PointInTimeDataError(
+                    "point-in-time graph replay has "
+                    f"{unconsumed} unconsumed query occurrence(s)"
+                )
+
+    def _fail(self, message: str):
+        self._failures.append(message)
+        raise PointInTimeDataError(message)
+
     def _next_occurrence(self, identity, query, parameters):
         with self._lock:
             entry = self._queries.get(identity)
             if not isinstance(entry, dict):
-                raise PointInTimeDataError(
-                    "graph snapshot has no recorded query"
-                )
+                self._fail("graph snapshot has no recorded query")
             if (
                 entry.get("query") != query
                 or entry.get("parameters") != parameters
             ):
-                raise PointInTimeDataError(
-                    "graph snapshot query identity mismatch"
-                )
+                self._fail("graph snapshot query identity mismatch")
             occurrences = entry.get("occurrences")
             if not isinstance(occurrences, list):
-                raise PointInTimeDataError(
-                    "graph snapshot occurrences are invalid"
-                )
+                self._fail("graph snapshot occurrences are invalid")
             position = self._positions.get(identity, 0)
             if position >= len(occurrences):
-                raise PointInTimeDataError(
-                    "graph snapshot query occurrences exhausted"
-                )
+                self._fail("graph snapshot query occurrences exhausted")
             self._positions[identity] = position + 1
             return deepcopy(occurrences[position])
 

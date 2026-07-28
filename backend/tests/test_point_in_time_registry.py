@@ -17,7 +17,7 @@ def _ts(value: str) -> datetime:
 
 def _datasets() -> dict:
     return {
-        "graph": {"recording_version": 1, "queries": []},
+        "graph": {"recording_version": 1, "queries": {}},
         "fundamentals": {
             "AAPL": {"market_cap": 1_000_000_000_000},
         },
@@ -35,7 +35,7 @@ def _datasets() -> dict:
             "alpaca": [
                 {
                     "id": "known-at-cutoff",
-                    "created_at": "2026-07-28T19:59:00Z",
+                    "created_at": "2026-07-28T18:59:00Z",
                     "headline": "Known news",
                 }
             ],
@@ -164,3 +164,37 @@ def test_snapshot_payload_rejects_secret_shaped_keys(payload):
 
 def test_content_hash_is_mapping_order_invariant():
     assert content_hash({"b": 2, "a": 1}) == content_hash({"a": 1, "b": 2})
+
+
+@pytest.mark.parametrize(
+    "article",
+    [
+        {"id": "undated"},
+        {
+            "id": "future",
+            "created_at": "2026-07-28T20:01:00Z",
+        },
+    ],
+)
+def test_finalize_rejects_news_without_provable_cutoff(article):
+    datasets = _datasets()
+    datasets["news"]["alpaca"] = [article]
+
+    with pytest.raises(PointInTimeDataError, match="news.*availability"):
+        InMemoryPointInTimeRegistry().finalize_bundle(
+            as_of=_ts("2026-07-28T20:00:00Z"),
+            datasets=datasets,
+            code_revision="abc123",
+        )
+
+
+def test_finalize_rejects_non_replayable_graph_payload():
+    datasets = _datasets()
+    datasets["graph"] = {"recording_version": 1, "queries": []}
+
+    with pytest.raises(PointInTimeDataError, match="graph.*queries"):
+        InMemoryPointInTimeRegistry().finalize_bundle(
+            as_of=_ts("2026-07-28T20:00:00Z"),
+            datasets=datasets,
+            code_revision="abc123",
+        )

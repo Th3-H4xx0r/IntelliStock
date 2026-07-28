@@ -2059,6 +2059,35 @@ def _benzinga_available_at(record: dict):
     return None
 
 
+def _strict_news_source(*, context, snapshot_store, source: str):
+    """Load one historical news source without touching current providers."""
+
+    if context is None or context.is_live:
+        return None
+    from collections.abc import Mapping
+    from point_in_time_data import PointInTimeDataError, load_snapshot_payload
+
+    if not context.strict:
+        raise PointInTimeDataError(
+            "historical news context must be strict"
+        )
+    payload = load_snapshot_payload(
+        snapshot_store,
+        dataset="news",
+        context=context,
+    )
+    if not isinstance(payload, Mapping):
+        raise PointInTimeDataError(
+            "news snapshot payload must be a source mapping"
+        )
+    source_name = str(source or "").strip().lower()
+    if source_name not in payload:
+        raise PointInTimeDataError(
+            f"news snapshot is missing source {source_name}"
+        )
+    return payload[source_name]
+
+
 def _fetch_all_benzinga(
     config: dict,
     date_key: str,
@@ -2066,6 +2095,7 @@ def _fetch_all_benzinga(
     strategy_cache: dict | None = None,
     *,
     context=None,
+    snapshot_store=None,
 ) -> dict[str, list]:
     """
     Fetch all enabled Benzinga data sources for the given date and tickers.
@@ -2077,6 +2107,56 @@ def _fetch_all_benzinga(
     the pre-fetched data with zero API calls. This keeps total API usage to
     ~2-10 calls for a full 64-day backtest instead of ~128.
     """
+    source_map = [
+        ("benzinga_ratings_enabled",           "ratings"),
+        ("benzinga_insights_enabled",           "insights"),
+        ("benzinga_insider_trades_enabled",     "insider_trades"),
+        ("benzinga_gov_trades_enabled",         "gov_trades"),
+        ("benzinga_ma_enabled",                 "ma"),
+        ("benzinga_ipo_enabled",                "ipos"),
+        ("benzinga_splits_enabled",             "splits"),
+        ("benzinga_earnings_calendar_enabled",  "earnings"),
+        ("benzinga_company_actions_enabled",    "company_actions"),
+        ("benzinga_prediction_markets_enabled", "prediction_markets"),
+    ]
+    strict_payload = _strict_news_source(
+        context=context,
+        snapshot_store=snapshot_store,
+        source="benzinga",
+    )
+    if strict_payload is not None:
+        from collections.abc import Mapping
+        from point_in_time_data import PointInTimeDataError, filter_available
+
+        if not isinstance(strict_payload, Mapping):
+            raise PointInTimeDataError(
+                "news.benzinga snapshot must be a data-type mapping"
+            )
+        enabled_types = {
+            data_type
+            for config_key, data_type in source_map
+            if config.get(config_key, True)
+        }
+        results: dict[str, list] = {}
+        for raw_type, raw_records in strict_payload.items():
+            data_type = str(raw_type or "").strip()
+            if data_type not in enabled_types:
+                continue
+            if not isinstance(raw_records, (list, tuple)):
+                raise PointInTimeDataError(
+                    f"news.benzinga.{data_type} snapshot must be a record list"
+                )
+            visible = list(
+                filter_available(
+                    raw_records,
+                    context=context,
+                    available_at=_benzinga_available_at,
+                )
+            )
+            if visible:
+                results[data_type] = visible
+        return results
+
     import datetime as _dt_bz
 
     bz_key = (config.get("benzinga_api_key") or "").strip() or os.environ.get("BENZINGA_API_KEY", "").strip()
@@ -2105,20 +2185,6 @@ def _fetch_all_benzinga(
     lookback = int(config.get("benzinga_lookback_days", 7))
     lookahead = int(config.get("benzinga_lookahead_days", 0))
     discovery_enabled = bool(config.get("benzinga_discovery_enabled", True))
-
-    # Map config keys to data_type strings
-    source_map = [
-        ("benzinga_ratings_enabled",           "ratings"),
-        ("benzinga_insights_enabled",           "insights"),
-        ("benzinga_insider_trades_enabled",     "insider_trades"),
-        ("benzinga_gov_trades_enabled",         "gov_trades"),
-        ("benzinga_ma_enabled",                 "ma"),
-        ("benzinga_ipo_enabled",                "ipos"),
-        ("benzinga_splits_enabled",             "splits"),
-        ("benzinga_earnings_calendar_enabled",  "earnings"),
-        ("benzinga_company_actions_enabled",    "company_actions"),
-        ("benzinga_prediction_markets_enabled", "prediction_markets"),
-    ]
 
     _BROAD_DISCOVERY_TYPES = {"ratings", "earnings"}
 
@@ -6248,6 +6314,137 @@ def load_fundamentals_snapshot(*, context, store):
     from point_in_time_data import load_snapshot_payload
 
     return load_snapshot_payload(store, dataset="fundamentals", context=context)
+
+
+def _create_nexus_graph_driver(
+    *,
+    context,
+    snapshot_store,
+    neo4j_uri: str,
+    neo4j_user: str,
+    neo4j_password: str,
+    capture_enabled: bool,
+    driver_factory=None,
+):
+    """Resolve a replay driver for history or a current driver for live work."""
+
+    if context is not None and not context.is_live:
+        return load_graph_snapshot(context=context, store=snapshot_store)
+    if driver_factory is None:
+        from neo4j import GraphDatabase
+
+        driver_factory = GraphDatabase.driver
+    driver = driver_factory(
+        neo4j_uri,
+        auth=(neo4j_user, neo4j_password),
+        connection_timeout=30,
+        max_connection_lifetime=300,
+        connection_acquisition_timeout=60,
+        max_connection_pool_size=10,
+    )
+    if capture_enabled:
+        from point_in_time_graph import RecordingGraphDriver
+
+        driver = RecordingGraphDriver(driver)
+    return driver
+
+
+def _pit_capture_enabled(config: dict | None, context, mode) -> bool:
+    if context is None or not context.is_live:
+        return False
+    if str(mode or "FULL").strip().upper() != "FULL":
+        return False
+    config = config if isinstance(config, dict) else {}
+    raw = (
+        config.get("pit_capture_enabled")
+        if "pit_capture_enabled" in config
+        else os.environ.get("PIT_CAPTURE_ENABLED", "")
+    )
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _capture_point_in_time_bundle(
+    *,
+    as_of,
+    recording_driver,
+    strategy_cache: dict | None,
+    alpaca_articles,
+    google_articles,
+    benzinga_data,
+    registry=None,
+    code_revision: str = "",
+):
+    """Finalize the exact external inputs consumed by one successful cycle."""
+
+    exporter = getattr(recording_driver, "export", None)
+    if not callable(exporter):
+        raise RuntimeError("PIT graph recorder is unavailable")
+    if registry is None:
+        from point_in_time_registry import RethinkPointInTimeRegistry
+
+        registry = RethinkPointInTimeRegistry()
+    from ticker_universe import snapshot_current_universe
+
+    fundamentals: dict[str, dict[str, float]] = {}
+    market_cap_sources = [
+        _neo4j_market_cap_cache,
+        (strategy_cache or {}).get("_yf_market_cap_cache", {}),
+    ]
+    for source in market_cap_sources:
+        if not isinstance(source, dict):
+            continue
+        for raw_symbol, raw_market_cap in source.items():
+            symbol = str(raw_symbol or "").strip().upper()
+            try:
+                market_cap = float(raw_market_cap or 0.0)
+            except (TypeError, ValueError):
+                market_cap = 0.0
+            if symbol and market_cap > 0:
+                fundamentals[symbol] = {"market_cap": market_cap}
+
+    revision = (
+        str(code_revision or "").strip()
+        or str(os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "").strip()
+        or str(os.environ.get("GIT_COMMIT_SHA") or "").strip()
+        or "unknown"
+    )
+    return registry.finalize_bundle(
+        as_of=as_of,
+        datasets={
+            "graph": exporter(),
+            "fundamentals": fundamentals,
+            "universe": snapshot_current_universe(),
+            "news": {
+                "alpaca": list(alpaca_articles or []),
+                "google": list(google_articles or []),
+                "benzinga": dict(benzinga_data or {}),
+            },
+        },
+        code_revision=revision,
+    )
+
+
+def _finalize_pit_capture_safely(*, enabled: bool, **capture_kwargs):
+    """Best-effort capture boundary that can never change a trade decision."""
+
+    if not enabled:
+        return None
+    try:
+        manifest = _capture_point_in_time_bundle(**capture_kwargs)
+        manifest_id = str(getattr(manifest, "manifest_id", "") or "").strip()
+        _log(
+            "PIT capture finalized"
+            + (f" | manifest={manifest_id}" if manifest_id else ""),
+            "cyan",
+        )
+        return manifest
+    except Exception as exc:
+        _log(
+            "PIT capture failed | datasets=graph,fundamentals,universe,news "
+            f"| error={type(exc).__name__}",
+            "yellow",
+        )
+        return None
 
 
 def _point_in_time_closes(
@@ -14845,6 +15042,7 @@ def _fetch_articles_cached(
     sentiment_cache_scope_id: str = "",
     force_fresh: bool = False,
     context=None,
+    snapshot_store=None,
 ) -> tuple[list, bool, dict | None]:
     """
     Return (articles, from_cache, cached_sentiment) for the given date range.
@@ -14857,6 +15055,29 @@ def _fetch_articles_cached(
     so the caller re-runs the LLM on the fresh articles instead of adopting the
     stale backtest sentiment (which would skip the LLM entirely).
     """
+    strict_articles = _strict_news_source(
+        context=context,
+        snapshot_store=snapshot_store,
+        source="alpaca",
+    )
+    if strict_articles is not None:
+        from point_in_time_data import PointInTimeDataError
+
+        if not isinstance(strict_articles, (list, tuple)):
+            raise PointInTimeDataError(
+                "news.alpaca snapshot must be an article list"
+            )
+        sanitized = _filter_low_signal_alpaca_articles(
+            list(strict_articles),
+            date_key=date_key,
+            log_prefix="Alpaca PIT article sanitize",
+        )
+        return (
+            _filter_articles_for_context(sanitized, context),
+            True,
+            None,
+        )
+
     conn = _get_nexus_db_conn()
     if conn:
         _ensure_nexus_cache_table(conn)
@@ -16273,6 +16494,7 @@ def _classify_macro_news_via_llm(
     available_gov_agencies: list[str],
     num_articles: int = 50,
     provider_config: dict[str, Any] | None = None,
+    graph_driver=None,
 ) -> list[dict]:
     """
     Classify Google News articles into structured macro signals via a single LLM call.
@@ -16378,6 +16600,7 @@ def _classify_macro_news_via_llm(
             valid = _classify_macro_with_tools(
                 text, api_key, model, today_str,
                 available_sectors, available_gov_agencies,
+                graph_driver=graph_driver,
             )
 
         if valid:
@@ -16417,6 +16640,7 @@ def _classify_macro_news_via_llm_cached(
     provider_config: dict[str, Any] | None = None,
     conn=None,
     instance_id: str = "",
+    graph_driver=None,
 ) -> list[dict]:
     """Cached wrapper for _classify_macro_news_via_llm. Stores result in RethinkDB keyed by
     (date_key, instance_id, model, article fingerprint) so backtest restarts skip the 56s LLM call."""
@@ -16424,6 +16648,7 @@ def _classify_macro_news_via_llm_cached(
         return _classify_macro_news_via_llm(
             articles, provider, api_key, model, today_str,
             available_sectors, available_gov_agencies, num_articles, provider_config,
+            graph_driver=graph_driver,
         )
     try:
         fp_parts = "|".join(
@@ -16444,6 +16669,7 @@ def _classify_macro_news_via_llm_cached(
     result = _classify_macro_news_via_llm(
         articles, provider, api_key, model, today_str,
         available_sectors, available_gov_agencies, num_articles, provider_config,
+        graph_driver=graph_driver,
     )
     if result and cache_id:
         try:
@@ -16463,6 +16689,8 @@ def _classify_macro_with_tools(
     today_str: str,
     available_sectors: list[str],
     available_gov_agencies: list[str],
+    *,
+    graph_driver=None,
 ) -> list[dict]:
     """
     Fallback: use Gemini function-calling to let the LLM query Neo4j
@@ -16479,6 +16707,9 @@ def _classify_macro_with_tools(
         if _tool_session[0] is not None:
             return _tool_session[0]
         try:
+            if graph_driver is not None:
+                _tool_session[0] = graph_driver.session()
+                return _tool_session[0]
             from neo4j import GraphDatabase
             uri, user, pw = _resolve_neo4j_runtime_config()
             driver = GraphDatabase.driver(uri, auth=(user, pw))
@@ -16766,6 +16997,7 @@ def _fetch_google_news_cached(
     *,
     log_context: str = "foreground",
     context=None,
+    snapshot_store=None,
 ) -> list[dict]:
     """
     Fetch Google News articles with RethinkDB caching (same pattern as Alpaca cache).
@@ -16773,6 +17005,25 @@ def _fetch_google_news_cached(
     """
     if not config.get("google_news_enabled", True):
         return []
+
+    strict_articles = _strict_news_source(
+        context=context,
+        snapshot_store=snapshot_store,
+        source="google",
+    )
+    if strict_articles is not None:
+        from point_in_time_data import PointInTimeDataError
+
+        if not isinstance(strict_articles, (list, tuple)):
+            raise PointInTimeDataError(
+                "news.google snapshot must be an article list"
+            )
+        sanitized = _filter_low_signal_alpaca_articles(
+            list(strict_articles),
+            date_key=date_key,
+            log_prefix="Google PIT article sanitize",
+        )
+        return _filter_articles_for_context(sanitized, context)
 
     try:
         from google_news import (
@@ -22307,6 +22558,7 @@ class GraphNexusAnalysis:
             ImmutableSnapshotStore,
             PointInTimeContext,
             PointInTimeDataError,
+            load_snapshot_payload,
         )
         from ticker_universe import load_universe_snapshot
 
@@ -22328,14 +22580,22 @@ class GraphNexusAnalysis:
 
         # Fail closed before the large strategy pipeline can mutate caches or
         # contact a present-day source.
-        load_graph_snapshot(context=context, store=point_in_time_store)
+        graph_driver = load_graph_snapshot(
+            context=context,
+            store=point_in_time_store,
+        )
         fundamentals = load_fundamentals_snapshot(
             context=context,
             store=point_in_time_store,
         )
         load_universe_snapshot(context=context, store=point_in_time_store)
+        load_snapshot_payload(
+            point_in_time_store,
+            dataset="news",
+            context=context,
+        )
 
-        return self.run_once(
+        result = self.run_once(
             symbols,
             prices,
             current_time,
@@ -22348,9 +22608,14 @@ class GraphNexusAnalysis:
             mode=mode,
             point_in_time_context=context,
             point_in_time_store=point_in_time_store,
+            point_in_time_graph=graph_driver,
             point_in_time_fundamentals=fundamentals,
             session_close_resolver=session_close_resolver,
         )
+        audit_replay = getattr(graph_driver, "assert_replay_complete", None)
+        if callable(audit_replay):
+            audit_replay()
+        return result
 
     def run_once(
         self,
@@ -22372,6 +22637,7 @@ class GraphNexusAnalysis:
                     # See docs/superpowers/specs/2026-05-07-live-broker-scheduler-design.md.
         point_in_time_context=None,
         point_in_time_store=None,
+        point_in_time_graph=None,
         point_in_time_fundamentals=None,
         session_close_resolver=None,
     ) -> dict:
@@ -22410,6 +22676,11 @@ class GraphNexusAnalysis:
                 raise PointInTimeDataError(
                     "historical Graph Nexus requires a session close resolver"
                 )
+        _pit_capture_requested = _pit_capture_enabled(
+            config,
+            point_in_time_context,
+            mode,
+        )
         if isinstance(strategy_cache, dict):
             strategy_cache["_point_in_time_context"] = point_in_time_context
             if point_in_time_fundamentals is not None:
@@ -23473,6 +23744,7 @@ class GraphNexusAnalysis:
                 and not point_in_time_context.is_live
             ):
                 _pit_news_kwargs["context"] = point_in_time_context
+                _pit_news_kwargs["snapshot_store"] = point_in_time_store
             articles, from_cache, cached_sentiment = _fetch_articles_cached(
                 date_key, start_dt, end_dt, alpaca_key, alpaca_secret,
                 limit=num_articles, min_articles=min_articles,
@@ -23518,8 +23790,19 @@ class GraphNexusAnalysis:
             _log("Benzinga WARN: set_benzinga_backtest_mode unavailable; continuing without explicit backtest-mode toggle", "yellow")
         bz_key = (config.get("benzinga_api_key") or "").strip() or os.environ.get("BENZINGA_API_KEY", "").strip()
         bz_data: dict = {}
-        if bz_key:
-            bz_data = _fetch_all_benzinga(config, date_key, symbols_list, strategy_cache=strategy_cache)
+        _strict_news_history = bool(
+            point_in_time_context is not None
+            and not point_in_time_context.is_live
+        )
+        if bz_key or _strict_news_history:
+            bz_data = _fetch_all_benzinga(
+                config,
+                date_key,
+                symbols_list,
+                strategy_cache=strategy_cache,
+                context=point_in_time_context if _strict_news_history else None,
+                snapshot_store=point_in_time_store if _strict_news_history else None,
+            )
         else:
             _log("Benzinga: no API key configured (set benzinga_api_key in config or BENZINGA_API_KEY env)", "cyan")
 
@@ -23715,11 +23998,22 @@ class GraphNexusAnalysis:
         global _shared_neo4j_driver
         _shared_neo4j_driver = None
         try:
-            if point_in_time_context is not None:
-                _shared_neo4j_driver = load_graph_snapshot(
+            _historical_graph = bool(
+                point_in_time_context is not None
+                and not point_in_time_context.is_live
+            )
+            if _historical_graph and point_in_time_graph is not None:
+                _shared_neo4j_driver = point_in_time_graph
+            else:
+                _shared_neo4j_driver = _create_nexus_graph_driver(
                     context=point_in_time_context,
-                    store=point_in_time_store,
+                    snapshot_store=point_in_time_store,
+                    neo4j_uri=neo4j_uri,
+                    neo4j_user=neo4j_user,
+                    neo4j_password=neo4j_password,
+                    capture_enabled=_pit_capture_requested,
                 )
+            if _historical_graph:
                 _log(
                     "Neo4j: using point-in-time graph snapshot "
                     f"(manifest={point_in_time_context.manifest.manifest_id}, "
@@ -23727,17 +24021,12 @@ class GraphNexusAnalysis:
                     "cyan",
                 )
             else:
-                from neo4j import GraphDatabase as _GraphDatabase
-
-                _shared_neo4j_driver = _GraphDatabase.driver(
-                    neo4j_uri,
-                    auth=(neo4j_user, neo4j_password),
-                    connection_timeout=30,               # 30s to establish connection
-                    max_connection_lifetime=300,          # Recycle stale connections after 5 min
-                    connection_acquisition_timeout=60,    # Wait up to 60s for pooled connection
-                    max_connection_pool_size=10,
+                _capture_suffix = " | PIT recording=ON" if _pit_capture_requested else ""
+                _log(
+                    f"Neo4j: shared driver connected to {_uri_for_log(neo4j_uri)}"
+                    f"{_capture_suffix}",
+                    "cyan",
                 )
-                _log(f"Neo4j: shared driver connected to {_uri_for_log(neo4j_uri)}", "cyan")
             # Pre-load dynamic ETF-sector/theme mappings from Neo4j (refreshed per session)
             if config.get("etf_allocation_enabled", True):
                 _load_neo4j_etf_mappings(_shared_neo4j_driver, force_refresh=True)
@@ -23825,6 +24114,13 @@ class GraphNexusAnalysis:
                     _pit_google_kwargs = {}
                     if point_in_time_context is not None:
                         _pit_google_kwargs["context"] = point_in_time_context
+                    if (
+                        point_in_time_context is not None
+                        and not point_in_time_context.is_live
+                    ):
+                        _pit_google_kwargs["snapshot_store"] = (
+                            point_in_time_store
+                        )
                     _bg_articles = _fetch_google_news_cached(
                         date_key,
                         start_dt,
@@ -24722,6 +25018,7 @@ class GraphNexusAnalysis:
                                 provider_config=_macro_provider_config,
                                 conn=conn,
                                 instance_id=instance_id,
+                                graph_driver=_shared_neo4j_driver,
                             )
                             if macro_signals:
                                 symbols_set = set(symbols_list)
@@ -24763,6 +25060,17 @@ class GraphNexusAnalysis:
             _log("Google News: skipped (no LLM API key for classification)", "cyan")
         if not mentioned:
             _log("No tickers extracted from Alpaca or Google News; returning hold for all.", "yellow")
+            _finalize_pit_capture_safely(
+                enabled=_pit_capture_requested,
+                as_of=point_in_time_context.as_of
+                if point_in_time_context is not None
+                else current_time,
+                recording_driver=_shared_neo4j_driver,
+                strategy_cache=strategy_cache,
+                alpaca_articles=articles,
+                google_articles=google_articles,
+                benzinga_data=bz_data,
+            )
             if _shared_neo4j_driver is not None:
                 try:
                     _shared_neo4j_driver.close()
@@ -24912,14 +25220,20 @@ class GraphNexusAnalysis:
                         _shared_neo4j_driver.close()
                     except Exception:
                         pass
-                    from neo4j import GraphDatabase as _GraphDatabase
-                    _shared_neo4j_driver = _GraphDatabase.driver(
-                        neo4j_uri,
-                        auth=(neo4j_user, neo4j_password),
-                        connection_timeout=30,
-                        max_connection_lifetime=300,
-                        connection_acquisition_timeout=60,
-                        max_connection_pool_size=10,
+                    if _pit_capture_requested:
+                        _log(
+                            "PIT capture skipped for this cycle after graph "
+                            "driver reconnect",
+                            "yellow",
+                        )
+                        _pit_capture_requested = False
+                    _shared_neo4j_driver = _create_nexus_graph_driver(
+                        context=point_in_time_context,
+                        snapshot_store=point_in_time_store,
+                        neo4j_uri=neo4j_uri,
+                        neo4j_user=neo4j_user,
+                        neo4j_password=neo4j_password,
+                        capture_enabled=False,
                     )
                     _log("Neo4j: driver reconnected successfully", "green")
                 propagated = _compute_propagated_scores(
@@ -29770,6 +30084,18 @@ class GraphNexusAnalysis:
                         _snap_conn.close()
                     except Exception:
                         pass
+
+        _finalize_pit_capture_safely(
+            enabled=_pit_capture_requested,
+            as_of=point_in_time_context.as_of
+            if point_in_time_context is not None
+            else current_time,
+            recording_driver=_shared_neo4j_driver,
+            strategy_cache=strategy_cache,
+            alpaca_articles=articles,
+            google_articles=google_articles,
+            benzinga_data=bz_data,
+        )
 
         # ── Close shared Neo4j driver ──────────────────────────────────────
         if _shared_neo4j_driver is not None:

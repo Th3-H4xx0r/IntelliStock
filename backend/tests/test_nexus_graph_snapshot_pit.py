@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import sys
+import types
 
 import pytest
 
@@ -261,7 +263,15 @@ def test_historical_entrypoint_requires_a_point_in_time_context():
 def test_historical_entrypoint_preloads_snapshots_and_delegates(monkeypatch):
     strategy = graph.GraphNexusAnalysis()
     context = _historical_context()
-    graph_driver = object()
+
+    class GraphDriver:
+        def __init__(self):
+            self.audit_calls = 0
+
+        def assert_replay_complete(self):
+            self.audit_calls += 1
+
+    graph_driver = GraphDriver()
     store = {
         "graph": [
             {
@@ -285,6 +295,18 @@ def test_historical_entrypoint_preloads_snapshots_and_delegates(monkeypatch):
                 "effective_at": _ts("2026-03-01T00:00:00Z"),
                 "available_at": _ts("2026-03-01T01:00:00Z"),
                 "payload": {"symbols": ["AAPL"]},
+            }
+        ],
+        "news": [
+            {
+                "manifest_id": "pit-manifest",
+                "effective_at": _ts("2026-03-01T00:00:00Z"),
+                "available_at": _ts("2026-03-01T01:00:00Z"),
+                "payload": {
+                    "alpaca": [],
+                    "google": [],
+                    "benzinga": {},
+                },
             }
         ],
     }
@@ -321,6 +343,78 @@ def test_historical_entrypoint_preloads_snapshots_and_delegates(monkeypatch):
         1_500_000_000_000
     )
     assert captured["session_close_resolver"] is resolver
+    assert captured["point_in_time_graph"] is graph_driver
+    assert graph_driver.audit_calls == 1
+
+
+def test_live_context_opens_current_graph_instead_of_snapshot_store():
+    context = PointInTimeContext.for_live(
+        as_of=_ts("2026-03-02T14:00:00Z"),
+        manifest=_manifest(),
+    )
+    current_driver = object()
+    calls = []
+
+    driver = graph._create_nexus_graph_driver(
+        context=context,
+        snapshot_store=None,
+        neo4j_uri="bolt://neo4j:7687",
+        neo4j_user="neo4j",
+        neo4j_password="password",
+        capture_enabled=False,
+        driver_factory=lambda uri, **kwargs: calls.append((uri, kwargs))
+        or current_driver,
+    )
+
+    assert driver is current_driver
+    assert calls[0][0] == "bolt://neo4j:7687"
+
+
+def test_macro_tool_fallback_uses_bound_graph_driver(monkeypatch):
+    queries = []
+
+    class Session:
+        def run(self, query, **params):
+            queries.append((query, params))
+            return [{"ticker": "AAPL", "name": "Apple"}]
+
+        def close(self):
+            return None
+
+    class Driver:
+        def session(self):
+            return Session()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "neo4j",
+        types.SimpleNamespace(
+            GraphDatabase=types.SimpleNamespace(
+                driver=lambda *args, **kwargs: pytest.fail(
+                    "bound graph driver must prevent a current Neo4j connection"
+                )
+            )
+        ),
+    )
+
+    def fake_guarded(*args, **kwargs):
+        kwargs["tools"][0]("Technology")
+        return types.SimpleNamespace(macro_signals=[])
+
+    monkeypatch.setattr(graph, "_scl_guarded", fake_guarded)
+
+    result = graph._classify_macro_with_tools(
+        "Technology demand accelerates",
+        "api-key",
+        "model",
+        "2026-03-02",
+        ["Technology"],
+        [],
+        graph_driver=Driver(),
+    )
+
+    assert result == []
+    assert queries
 
 
 def test_historical_entrypoint_requires_strict_context():

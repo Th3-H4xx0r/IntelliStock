@@ -134,14 +134,13 @@ def load_universe_snapshot(*, context, store):
 
 def _snapshot_universe_rows(payload) -> list[dict]:
     if isinstance(payload, dict):
-        raw_rows = payload.get("rows")
-        if not isinstance(raw_rows, list):
-            raw_rows = payload.get("symbols")
+        raw_rows = list(payload.get("rows") or [])
+        raw_rows.extend(payload.get("symbols") or [])
     else:
         raw_rows = payload
     if not isinstance(raw_rows, (list, tuple, set)):
         return []
-    rows: list[dict] = []
+    rows_by_symbol: dict[str, dict] = {}
     for raw in raw_rows:
         if isinstance(raw, dict):
             symbol = (
@@ -155,8 +154,9 @@ def _snapshot_universe_rows(payload) -> list[dict]:
         else:
             row = {"sym": str(raw or "").strip().upper().replace(".", "-")}
         if row["sym"]:
-            rows.append(row)
-    return rows
+            existing = rows_by_symbol.get(row["sym"], {})
+            rows_by_symbol[row["sym"]] = {**existing, **row}
+    return list(rows_by_symbol.values())
 
 
 def is_valid_us_ticker(
@@ -215,6 +215,26 @@ _BREADTH_CACHE: list[str] | None = None
 _BREADTH_CACHE_KEY: tuple | None = None
 _BREADTH_FETCHED_AT: float = 0.0
 _BREADTH_LAST_FAIL_AT: float = 0.0
+_BREADTH_META_CACHE: list[dict] = []
+
+
+def snapshot_current_universe() -> dict:
+    """Return an owned snapshot of current membership and breadth metadata."""
+
+    with _UNIVERSE_LOCK:
+        symbols = {
+            str(symbol or "").strip().upper().replace(".", "-")
+            for symbol in (_UNIVERSE or set())
+            if str(symbol or "").strip()
+        }
+        rows = [dict(row) for row in (_BREADTH_META_CACHE or [])]
+    for row in rows:
+        symbol = str(row.get("sym") or "").strip().upper().replace(".", "-")
+        if symbol:
+            row["sym"] = symbol
+            symbols.add(symbol)
+    rows.sort(key=lambda row: str(row.get("sym") or ""))
+    return {"symbols": sorted(symbols), "rows": rows}
 
 
 def _parse_money(v) -> float:
@@ -276,6 +296,7 @@ def get_breadth_universe(
     downstream. (Universe membership uses current listings — a mild survivorship
     proxy for the liquidity floor, acceptable for a coarse candidate gate.)"""
     global _BREADTH_CACHE, _BREADTH_CACHE_KEY, _BREADTH_FETCHED_AT, _BREADTH_LAST_FAIL_AT
+    global _BREADTH_META_CACHE
     if context is not None and not context.is_live:
         snapshot = load_universe_snapshot(
             context=context,
@@ -329,6 +350,8 @@ def get_breadth_universe(
         with _UNIVERSE_LOCK:
             _BREADTH_LAST_FAIL_AT = time.time()
         return list(_BREADTH_CACHE or [])
+    with _UNIVERSE_LOCK:
+        _BREADTH_META_CACHE = [dict(row) for row in meta]
     ranked = []
     for m in meta:
         if (m["price"] >= price_floor and m["mcap"] >= min_mcap

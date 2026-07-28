@@ -38,6 +38,23 @@ def _article(article_id: str, published_at: str) -> dict:
     }
 
 
+def _news_store(*, alpaca=None, google=None, benzinga=None) -> dict:
+    return {
+        "news": [
+            {
+                "manifest_id": "news-manifest",
+                "effective_at": _ts("2026-03-02T13:00:00Z"),
+                "available_at": _ts("2026-03-02T13:00:00Z"),
+                "payload": {
+                    "alpaca": list(alpaca or []),
+                    "google": list(google or []),
+                    "benzinga": dict(benzinga or {}),
+                },
+            }
+        ]
+    }
+
+
 def test_full_day_article_cache_is_filtered_before_sentiment_reuse(monkeypatch):
     context = _context("2026-03-02T14:00:00Z")
     cached = [
@@ -49,7 +66,9 @@ def test_full_day_article_cache_is_filtered_before_sentiment_reuse(monkeypatch):
     monkeypatch.setattr(
         graph,
         "_get_cached_articles",
-        lambda conn, date_key, **kwargs: (list(cached), {"AAPL": {"sentiment": 1}}),
+        lambda *args, **kwargs: pytest.fail(
+            "strict history must not consult the mutable article cache"
+        ),
     )
     monkeypatch.setattr(
         graph,
@@ -66,6 +85,7 @@ def test_full_day_article_cache_is_filtered_before_sentiment_reuse(monkeypatch):
         limit=50,
         min_articles=1,
         context=context,
+        snapshot_store=_news_store(alpaca=cached),
     )
 
     assert [article["id"] for article in articles] == ["13:59"]
@@ -188,6 +208,7 @@ def test_google_news_cache_is_filtered_at_the_same_boundary(monkeypatch):
         {"google_news_enabled": True},
         conn=object(),
         context=_context("2026-03-02T14:00:00Z"),
+        snapshot_store=_news_store(google=cached),
     )
 
     assert [article["id"] for article in articles] == ["13:59"]
@@ -199,9 +220,8 @@ def test_strict_news_context_rejects_an_undated_cached_article(monkeypatch):
     monkeypatch.setattr(
         graph,
         "_get_cached_articles",
-        lambda conn, date_key, **kwargs: (
-            [{"id": "undated", "headline": "Undated market update"}],
-            None,
+        lambda *args, **kwargs: pytest.fail(
+            "strict history must not consult the mutable article cache"
         ),
     )
 
@@ -215,6 +235,11 @@ def test_strict_news_context_rejects_an_undated_cached_article(monkeypatch):
             limit=50,
             min_articles=1,
             context=_context("2026-03-02T14:00:00Z"),
+            snapshot_store=_news_store(
+                alpaca=[
+                    {"id": "undated", "headline": "Undated market update"}
+                ]
+            ),
         )
 
 
@@ -285,11 +310,14 @@ def test_benzinga_cache_is_filtered_on_aware_publication_time(monkeypatch):
     }
 
     result = graph._fetch_all_benzinga(
-        {"benzinga_api_key": "test-key"},
+        {},
         "2026-03-02",
         ["AAPL", "MSFT"],
-        strategy_cache=cache,
+        strategy_cache={},
         context=_context("2026-03-02T14:00:00Z"),
+        snapshot_store=_news_store(
+            benzinga=cache["_bz_bulk_data"],
+        ),
     )
 
     assert [row["ticker"] for row in result["ratings"]] == ["AAPL"]
@@ -306,9 +334,12 @@ def test_benzinga_strict_history_rejects_undated_cached_records(monkeypatch):
 
     with pytest.raises(PointInTimeDataError, match="availability timestamp"):
         graph._fetch_all_benzinga(
-            {"benzinga_api_key": "test-key"},
+            {},
             "2026-03-02",
             ["AAPL"],
-            strategy_cache=cache,
+            strategy_cache={},
             context=_context("2026-03-02T14:00:00Z"),
+            snapshot_store=_news_store(
+                benzinga=cache["_bz_bulk_data"],
+            ),
         )

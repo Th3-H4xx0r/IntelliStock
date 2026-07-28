@@ -152,3 +152,26 @@ def test_live_context_explicitly_uses_current_universe(monkeypatch):
     )
 
     assert symbols == ["CURR"]
+
+
+def test_current_universe_snapshot_keeps_membership_and_breadth_metadata(
+    monkeypatch,
+):
+    monkeypatch.setattr(ticker_universe, "_UNIVERSE", {"AAPL", "BRK.B"})
+    monkeypatch.setattr(
+        ticker_universe,
+        "_BREADTH_META_CACHE",
+        [
+            {
+                "sym": "AAPL",
+                "price": 200.0,
+                "volume": 10_000_000,
+                "mcap": 3_000_000_000_000,
+            }
+        ],
+    )
+
+    snapshot = ticker_universe.snapshot_current_universe()
+
+    assert snapshot["symbols"] == ["AAPL", "BRK-B"]
+    assert snapshot["rows"][0]["sym"] == "AAPL"
