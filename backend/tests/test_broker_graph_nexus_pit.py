@@ -17,7 +17,10 @@ BROKER_PATH = Path(__file__).resolve().parents[1] / "broker.py"
 
 def _extract_broker_functions(*names: str):
     tree = ast.parse(BROKER_PATH.read_text())
-    wanted = set(names)
+    # The strict-historical dispatch binds each resolved PIT manifest to its
+    # decision through this helper, so it must come along or the dispatch
+    # NameErrors before it ever reaches run_historical.
+    wanted = set(names) | {"_record_evidence_pit"}
     nodes = [
         node
         for node in tree.body
