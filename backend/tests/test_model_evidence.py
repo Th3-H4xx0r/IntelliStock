@@ -50,9 +50,11 @@ def _context(sequence=0, *, subject="AAPL"):
 
 def _record(sequence=0, *, outcome={"sentiment": "bullish"}):
     envelope = _envelope()
+    context = _context(sequence)
     return ModelEvidenceRecord.from_response(
-        semantic_id=semantic_request_id(envelope, context=_context(sequence)),
+        semantic_id=semantic_request_id(envelope, context=context),
         envelope=envelope,
+        context=context,
         outcome=outcome,
         attempted_models=("openai/gpt-5",),
         effective_model="openai/gpt-5",
@@ -61,18 +63,43 @@ def _record(sequence=0, *, outcome={"sentiment": "bullish"}):
     )
 
 
-def test_canonical_identity_covers_all_request_affecting_fields():
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("requested_provider", "bedrock"),
+        ("requested_model", "anthropic/claude-sonnet"),
+        ("adapter_identity", "backend.llm_utils.bedrock"),
+        ("prompt", [{"role": "user", "content": "Analyse MSFT."}]),
+        ("system_prompt", "Return a plain-text rationale."),
+        ("schema", b'{"type":"array"}'),
+        ("tools", [{"type": "function", "function": {"name": "news"}}]),
+        ("tool_choice", "none"),
+        ("generation_settings", {"temperature": 0.1, "max_tokens": 128}),
+        ("fallback_policy", {"allow_fallback": False, "models": []}),
+        ("canonicalization_version", "model-evidence-v2"),
+    ],
+)
+def test_canonical_identity_covers_every_request_affecting_field(field, replacement):
     baseline = _envelope()
-    changed_temperature = _envelope(generation_settings={"temperature": 0.1, "max_tokens": 128})
-    changed_schema = _envelope(schema=b'{"type":"array"}')
+    changed = _envelope(**{field: replacement})
+
+    assert baseline != changed
+    assert semantic_request_id(baseline, context=_context()) != semantic_request_id(changed, context=_context())
+
+
+def test_canonical_identity_stores_schema_as_bytes_and_requires_complete_envelope():
+    baseline = _envelope()
 
     assert baseline == _envelope()
     assert baseline["schema_bytes"] == "eyJ0eXBlIjoib2JqZWN0In0="
-    assert baseline != changed_temperature
-    assert baseline != changed_schema
+    with pytest.raises(ModelEvidenceError, match="canonical envelope"):
+        semantic_request_id({}, context=_context())
 
 
-@pytest.mark.parametrize("secret_key", ["api_key", "nestedSecret", "Authorization"])
+@pytest.mark.parametrize(
+    "secret_key",
+    ["api_key", "nestedSecret", "Authorization", "accessToken", "refreshToken", "idToken"],
+)
 def test_secret_bearing_request_values_are_rejected_recursively(secret_key):
     with pytest.raises(ModelEvidenceError, match="secret"):
         _envelope(generation_settings={"nested": {secret_key: "never-record-me"}})
@@ -115,6 +142,62 @@ def test_semantic_ids_are_independent_of_concurrent_completion_order():
     assert completed == expected
 
 
+def test_direct_record_constructor_rejects_unverified_identity_and_incomplete_metadata():
+    envelope = _envelope()
+    context = _context()
+    with pytest.raises(ModelEvidenceError, match="semantic_id"):
+        ModelEvidenceRecord(
+            semantic_id="0" * 64,
+            envelope=envelope,
+            context=context,
+            outcome={"sentiment": "bullish"},
+            response_metadata={},
+        )
+    with pytest.raises(ModelEvidenceError, match="response_metadata"):
+        ModelEvidenceRecord(
+            semantic_id=semantic_request_id(envelope, context=context),
+            envelope=envelope,
+            context=context,
+            outcome={"sentiment": "bullish"},
+            response_metadata={},
+        )
+    with pytest.raises(ModelEvidenceError, match="secret"):
+        ModelEvidenceRecord(
+            semantic_id=semantic_request_id(envelope, context=context),
+            envelope=envelope,
+            context=context,
+            outcome={"refreshToken": "never-persist"},
+            response_metadata=_record().canonical_value()["response_metadata"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "error"),
+    [
+        ("attempted_models", [], "attempted_models"),
+        ("effective_model", "other/model", "effective_model"),
+        ("raw_response_hash", "not-a-hash", "raw_response_hash"),
+        ("validated_response_hash", "0" * 64, "validated_response_hash"),
+        ("fallback_state", "", "fallback_state"),
+        ("successful", False, "successful"),
+        ("outcome_is_none", True, "outcome_is_none"),
+    ],
+)
+def test_direct_record_constructor_validates_every_required_response_field(field, replacement, error):
+    record = _record()
+    metadata = record.canonical_value()["response_metadata"]
+    metadata[field] = replacement
+
+    with pytest.raises(ModelEvidenceError, match=error):
+        ModelEvidenceRecord(
+            semantic_id=record.semantic_id,
+            envelope=record.canonical_value()["envelope"],
+            context=record.context,
+            outcome={"sentiment": "bullish"},
+            response_metadata=metadata,
+        )
+
+
 def test_republishing_an_identical_immutable_row_is_idempotent():
     ledger = ModelEvidenceLedger()
     record = _record()
@@ -133,12 +216,22 @@ def test_distinct_occurrences_with_the_same_prompt_are_consumed_separately():
         mode="replay",
         ledger=ledger,
         arm_id="candidate-a",
-        declared_occurrences={first.semantic_id, second.semantic_id},
+        declared_occurrences=frozenset({first.semantic_id, second.semantic_id}),
     )
 
     assert session.replay(first.semantic_id) == {"sentiment": "bullish"}
     assert session.replay(second.semantic_id) == {"sentiment": "bullish"}
     session.finalize()
+
+
+def test_enabled_sessions_require_immutable_explicit_occurrence_declarations():
+    for mode in ("record", "record_extend", "replay"):
+        with pytest.raises(ModelEvidenceError, match="declared_occurrences"):
+            ModelEvidenceSession(mode=mode, arm_id="baseline")
+        with pytest.raises(ModelEvidenceError, match="immutable"):
+            ModelEvidenceSession(mode=mode, arm_id="baseline", declared_occurrences=set())
+
+    assert ModelEvidenceSession(mode="record", arm_id="baseline", declared_occurrences=frozenset())
 
 
 def test_none_outcome_is_a_successful_replayable_response():
@@ -147,20 +240,25 @@ def test_none_outcome_is_a_successful_replayable_response():
         mode="replay",
         ledger=ModelEvidenceLedger([record]),
         arm_id="baseline",
-        declared_occurrences={record.semantic_id},
+        declared_occurrences=frozenset({record.semantic_id}),
     )
 
     assert session.replay(record.semantic_id) is None
     assert session.finalize()["consumed_occurrences"] == [record.semantic_id]
 
 
-def test_record_extend_reuses_union_row_and_records_only_new_branch_row():
+def test_record_extend_public_record_reuses_union_row_and_records_only_new_branch_row():
     shared, branch_only = _record(0), _record(1)
     ledger = ModelEvidenceLedger([shared])
-    session = ModelEvidenceSession(mode="record_extend", ledger=ledger, arm_id="candidate-a")
+    session = ModelEvidenceSession(
+        mode="record_extend",
+        ledger=ledger,
+        arm_id="candidate-a",
+        declared_occurrences=frozenset({shared.semantic_id, branch_only.semantic_id}),
+    )
 
-    assert session.resolve(shared) == {"sentiment": "bullish"}
-    assert session.resolve(branch_only) == {"sentiment": "bullish"}
+    assert session.record(shared) == {"sentiment": "bullish"}
+    assert session.record(branch_only) == {"sentiment": "bullish"}
     receipt = session.finalize()
 
     assert {row.semantic_id for row in ledger.records} == {shared.semantic_id, branch_only.semantic_id}
@@ -174,7 +272,7 @@ def test_replay_fails_closed_on_missing_or_over_consumed_occurrences():
         mode="replay",
         ledger=ModelEvidenceLedger([record]),
         arm_id="baseline",
-        declared_occurrences={record.semantic_id},
+        declared_occurrences=frozenset({record.semantic_id}),
     )
 
     with pytest.raises(ModelEvidenceError, match="miss"):
@@ -184,6 +282,38 @@ def test_replay_fails_closed_on_missing_or_over_consumed_occurrences():
         session.replay(record.semantic_id)
 
 
+def test_record_claims_each_declared_occurrence_once_and_rejects_unused_records():
+    first, second = _record(0), _record(1)
+    session = ModelEvidenceSession(
+        mode="record",
+        arm_id="baseline",
+        declared_occurrences=frozenset({first.semantic_id, second.semantic_id}),
+    )
+
+    barrier = threading.Barrier(2)
+    claimed, rejected = [], []
+
+    def claim_once():
+        barrier.wait()
+        try:
+            claimed.append(session.record(first))
+        except ModelEvidenceError as exc:
+            rejected.append(str(exc))
+
+    threads = [threading.Thread(target=claim_once) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert claimed == [{"sentiment": "bullish"}]
+    assert any("over-consumption" in error for error in rejected)
+    with pytest.raises(ModelEvidenceError, match="unused"):
+        session.finalize()
+    assert session.record(second) == {"sentiment": "bullish"}
+    session.finalize()
+
+
 def test_finalize_rejects_unused_records_for_the_current_arm_only():
     own, another_arm = _record(0), _record(1)
     ledger = ModelEvidenceLedger([own, another_arm])
@@ -191,7 +321,7 @@ def test_finalize_rejects_unused_records_for_the_current_arm_only():
         mode="replay",
         ledger=ledger,
         arm_id="baseline",
-        declared_occurrences={own.semantic_id},
+        declared_occurrences=frozenset({own.semantic_id}),
     )
 
     with pytest.raises(ModelEvidenceError, match="unused"):
@@ -216,10 +346,12 @@ def test_active_session_is_shared_by_worker_threads_and_can_be_cleared():
     lock = threading.Lock()
 
     activate_model_evidence_session(session)
-    threads = [
-        threading.Thread(target=lambda: (lock.acquire(), seen.append(get_model_evidence_session()), lock.release()))
-        for _ in range(4)
-    ]
+
+    def worker():
+        with lock:
+            seen.append(get_model_evidence_session())
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
     for thread in threads:
         thread.start()
     for thread in threads:

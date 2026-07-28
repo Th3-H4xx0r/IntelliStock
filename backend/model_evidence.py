@@ -27,6 +27,33 @@ _SECRET_KEY = re.compile(
 )
 _LEDGER_VERSION = "model-evidence-ledger-v1"
 _SESSION_MODES = frozenset({"off", "record", "record_extend", "replay"})
+_REQUEST_FIELDS = frozenset(
+    {
+        "canonicalization_version",
+        "requested_provider",
+        "requested_model",
+        "adapter_identity",
+        "prompt",
+        "system_prompt",
+        "schema_bytes",
+        "tools",
+        "tool_choice",
+        "generation_settings",
+        "fallback_policy",
+    }
+)
+_RESPONSE_METADATA_FIELDS = frozenset(
+    {
+        "attempted_models",
+        "effective_model",
+        "raw_response_hash",
+        "validated_response_hash",
+        "fallback_state",
+        "successful",
+        "outcome_is_none",
+    }
+)
+_DECLARATION_REQUIRED = object()
 
 
 class ModelEvidenceError(ValueError):
@@ -38,8 +65,10 @@ def _reject_secrets(value: Any, *, path: str = "request") -> None:
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise ModelEvidenceError(f"{path} keys must be strings")
+            normalized_key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+            normalized_key = re.sub(r"[^a-zA-Z0-9]+", "_", normalized_key).casefold()
             # `max_tokens` is a normal generation setting, not a credential.
-            if key.casefold() != "max_tokens" and _SECRET_KEY.search(key):
+            if normalized_key != "max_tokens" and _SECRET_KEY.search(normalized_key):
                 raise ModelEvidenceError(f"secret-bearing key is not allowed: {path}.{key}")
             _reject_secrets(nested, path=f"{path}.{key}")
     elif isinstance(value, (list, tuple)):
@@ -118,6 +147,35 @@ def _schema_bytes(schema: Any) -> bytes:
     return _canonical_bytes(schema)
 
 
+def _validate_canonical_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and return the only request shape eligible for evidence IDs."""
+    if not isinstance(envelope, Mapping):
+        raise ModelEvidenceError("canonical envelope must be a mapping")
+    canonical = json.loads(_canonical_bytes(envelope).decode("utf-8"))
+    if set(canonical) != _REQUEST_FIELDS:
+        raise ModelEvidenceError("canonical envelope must contain every required request field")
+    for field in (
+        "canonicalization_version",
+        "requested_provider",
+        "requested_model",
+        "adapter_identity",
+    ):
+        _non_empty_string(canonical[field], field)
+    if canonical["prompt"] is None or canonical["system_prompt"] is None:
+        raise ModelEvidenceError("canonical envelope requires complete prompt and system_prompt")
+    if not isinstance(canonical["schema_bytes"], str):
+        raise ModelEvidenceError("canonical envelope schema_bytes must be base64 text")
+    try:
+        base64.b64decode(canonical["schema_bytes"], validate=True)
+    except ValueError as exc:
+        raise ModelEvidenceError("canonical envelope schema_bytes is invalid") from exc
+    if not isinstance(canonical["generation_settings"], dict):
+        raise ModelEvidenceError("canonical envelope generation_settings must be a mapping")
+    if not isinstance(canonical["fallback_policy"], dict):
+        raise ModelEvidenceError("canonical envelope fallback_policy must be a mapping")
+    return canonical
+
+
 def canonical_request_envelope(
     *,
     requested_provider: str,
@@ -153,9 +211,8 @@ def canonical_request_envelope(
         "generation_settings": _json_ready(generation_settings or {}),
         "fallback_policy": _json_ready(fallback_policy or {}),
     }
-    _reject_secrets(envelope)
     # Round-trip through canonical JSON makes key order and mutable inputs inert.
-    return json.loads(_canonical_bytes(envelope).decode("utf-8"))
+    return _validate_canonical_envelope(envelope)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -202,7 +259,7 @@ def semantic_request_id(envelope: Mapping[str, Any], *, context: ModelEvidenceCo
     """Return a request ID that is stable across worker scheduling/order."""
     if not isinstance(context, ModelEvidenceContext):
         raise ModelEvidenceError("context must be a ModelEvidenceContext")
-    canonical_envelope = json.loads(_canonical_bytes(envelope).decode("utf-8"))
+    canonical_envelope = _validate_canonical_envelope(envelope)
     return _digest(
         {
             "canonicalization_version": canonical_envelope.get("canonicalization_version"),
@@ -218,18 +275,49 @@ class ModelEvidenceRecord:
 
     semantic_id: str
     envelope: Mapping[str, Any]
+    context: ModelEvidenceContext
     outcome: Any
     response_metadata: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         if not isinstance(self.semantic_id, str) or not re.fullmatch(r"[0-9a-f]{64}", self.semantic_id):
             raise ModelEvidenceError("semantic_id must be a SHA-256 hex digest")
-        canonical_envelope = json.loads(_canonical_bytes(self.envelope).decode("utf-8"))
-        canonical_outcome = _json_ready(self.outcome)
+        if not isinstance(self.context, ModelEvidenceContext):
+            raise ModelEvidenceError("context must be a ModelEvidenceContext")
+        canonical_envelope = _validate_canonical_envelope(self.envelope)
+        expected_semantic_id = semantic_request_id(canonical_envelope, context=self.context)
+        if self.semantic_id != expected_semantic_id:
+            raise ModelEvidenceError("semantic_id does not match the canonical envelope and context")
+        canonical_outcome = json.loads(_canonical_bytes(self.outcome).decode("utf-8"))
         canonical_metadata = json.loads(_canonical_bytes(self.response_metadata).decode("utf-8"))
+        self._validate_response_metadata(canonical_metadata, canonical_outcome)
         object.__setattr__(self, "envelope", _freeze(canonical_envelope))
         object.__setattr__(self, "outcome", _freeze(canonical_outcome))
         object.__setattr__(self, "response_metadata", _freeze(canonical_metadata))
+
+    @staticmethod
+    def _validate_response_metadata(metadata: Mapping[str, Any], outcome: Any) -> None:
+        missing = _RESPONSE_METADATA_FIELDS - set(metadata)
+        if missing:
+            raise ModelEvidenceError(f"response_metadata missing required fields: {sorted(missing)}")
+        attempted = metadata["attempted_models"]
+        if not isinstance(attempted, list) or not attempted or any(
+            not isinstance(model, str) or not model.strip() for model in attempted
+        ):
+            raise ModelEvidenceError("response_metadata attempted_models must be non-empty model text")
+        effective = metadata["effective_model"]
+        if not isinstance(effective, str) or not effective.strip() or effective not in attempted:
+            raise ModelEvidenceError("response_metadata effective_model must be an attempted model")
+        for field in ("raw_response_hash", "validated_response_hash"):
+            if not isinstance(metadata[field], str) or not re.fullmatch(r"[0-9a-f]{64}", metadata[field]):
+                raise ModelEvidenceError(f"response_metadata {field} must be a SHA-256 hex digest")
+        if metadata["validated_response_hash"] != _digest(outcome):
+            raise ModelEvidenceError("response_metadata validated_response_hash does not match outcome")
+        _non_empty_string(metadata["fallback_state"], "response_metadata fallback_state")
+        if metadata["successful"] is not True:
+            raise ModelEvidenceError("response_metadata successful must be true for persisted outcomes")
+        if metadata["outcome_is_none"] is not (outcome is None):
+            raise ModelEvidenceError("response_metadata outcome_is_none must match outcome")
 
     @classmethod
     def from_response(
@@ -237,6 +325,7 @@ class ModelEvidenceRecord:
         *,
         semantic_id: str,
         envelope: Mapping[str, Any],
+        context: ModelEvidenceContext,
         outcome: Any,
         attempted_models: Iterable[str] = (),
         effective_model: str | None = None,
@@ -259,6 +348,7 @@ class ModelEvidenceRecord:
         return cls(
             semantic_id=semantic_id,
             envelope=envelope,
+            context=context,
             outcome=outcome,
             response_metadata=metadata,
         )
@@ -267,6 +357,7 @@ class ModelEvidenceRecord:
         return {
             "semantic_id": self.semantic_id,
             "envelope": _thaw(self.envelope),
+            "context": self.context.canonical_value(),
             "outcome": _thaw(self.outcome),
             "response_metadata": _thaw(self.response_metadata),
         }
@@ -348,6 +439,7 @@ class ModelEvidenceLedger:
                     ModelEvidenceRecord(
                         semantic_id=row["semantic_id"],
                         envelope=row["envelope"],
+                        context=ModelEvidenceContext(**row["context"]),
                         outcome=row["outcome"],
                         response_metadata=row["response_metadata"],
                     )
@@ -369,32 +461,36 @@ class ModelEvidenceSession:
         mode: str,
         ledger: ModelEvidenceLedger | None = None,
         arm_id: str | None = None,
-        declared_occurrences: Iterable[str] | None = None,
+        declared_occurrences: frozenset[str] | object = _DECLARATION_REQUIRED,
     ) -> None:
         if mode not in _SESSION_MODES:
             raise ModelEvidenceError(f"unsupported evidence mode: {mode}")
-        if mode != "off" and not _non_empty_string(arm_id, "arm_id"):
-            raise ModelEvidenceError("arm_id is required when evidence is enabled")
+        if mode != "off":
+            _non_empty_string(arm_id, "arm_id")
+            if declared_occurrences is _DECLARATION_REQUIRED or declared_occurrences is None:
+                raise ModelEvidenceError("declared_occurrences is required when evidence is enabled")
         self.mode = mode
         self.ledger = ledger or ModelEvidenceLedger()
         self.arm_id = arm_id
-        self._declared = self._normalize_occurrences(declared_occurrences)
+        self._declared = None if mode == "off" else self._normalize_occurrences(declared_occurrences)
         self._consumed: set[str] = set()
         self._replayed: set[str] = set()
         self._recorded: set[str] = set()
         self._lock = threading.RLock()
 
     @staticmethod
-    def _normalize_occurrences(occurrences: Iterable[str] | None) -> set[str] | None:
-        if occurrences is None:
-            return None
-        supplied = tuple(occurrences)
-        normalized = set(supplied)
-        if len(normalized) != len(supplied):
-            raise ModelEvidenceError("declared occurrence IDs must be unique")
-        if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in normalized):
+    def _normalize_occurrences(occurrences: frozenset[str] | object) -> frozenset[str]:
+        if not isinstance(occurrences, frozenset):
+            raise ModelEvidenceError("declared_occurrences must be an immutable frozenset")
+        if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in occurrences):
             raise ModelEvidenceError("declared occurrences must be semantic SHA-256 IDs")
-        return normalized
+        return frozenset(occurrences)
+
+    def _claim(self, semantic_id: str) -> None:
+        if self._declared is None or semantic_id not in self._declared:
+            raise ModelEvidenceError(f"semantic ID {semantic_id} is not declared for arm {self.arm_id}")
+        if semantic_id in self._consumed or semantic_id in self._recorded:
+            raise ModelEvidenceError(f"over-consumption of semantic ID {semantic_id}")
 
     def replay(self, semantic_id: str) -> Any:
         if self.mode == "off":
@@ -403,10 +499,7 @@ class ModelEvidenceSession:
             record = self.ledger.get(semantic_id)
             if record is None:
                 raise ModelEvidenceError(f"replay miss for semantic ID {semantic_id}")
-            if self._declared is not None and semantic_id not in self._declared:
-                raise ModelEvidenceError(f"semantic ID {semantic_id} is not declared for arm {self.arm_id}")
-            if semantic_id in self._consumed:
-                raise ModelEvidenceError(f"over-consumption of semantic ID {semantic_id}")
+            self._claim(semantic_id)
             self._consumed.add(semantic_id)
             self._replayed.add(semantic_id)
             return _thaw(record.outcome)
@@ -417,8 +510,15 @@ class ModelEvidenceSession:
         if self.mode == "replay":
             raise ModelEvidenceError("cannot publish a row in replay mode")
         with self._lock:
-            if self._declared is not None and record.semantic_id not in self._declared:
-                raise ModelEvidenceError(f"semantic ID {record.semantic_id} is not declared for arm {self.arm_id}")
+            if self.mode == "record_extend":
+                existing = self.ledger.get(record.semantic_id)
+                if existing is not None:
+                    self.ledger.publish(record)  # reject a divergent union row before claiming it
+                    self._claim(record.semantic_id)
+                    self._consumed.add(record.semantic_id)
+                    self._replayed.add(record.semantic_id)
+                    return _thaw(existing.outcome)
+            self._claim(record.semantic_id)
             self.ledger.publish(record)
             self._recorded.add(record.semantic_id)
             return _thaw(record.outcome)
@@ -426,9 +526,6 @@ class ModelEvidenceSession:
     def resolve(self, record: ModelEvidenceRecord) -> Any:
         """Replay if available; otherwise publish only in recording modes."""
         if self.mode == "replay":
-            return self.replay(record.semantic_id)
-        if self.mode == "record_extend" and self.ledger.get(record.semantic_id) is not None:
-            self.ledger.publish(record)  # verify identical before consuming the union row
             return self.replay(record.semantic_id)
         return self.record(record)
 
@@ -448,7 +545,7 @@ class ModelEvidenceSession:
             return {
                 "mode": self.mode,
                 "arm_id": self.arm_id,
-                "declared_occurrences": sorted(self._declared if self._declared is not None else observed),
+                "declared_occurrences": sorted(self._declared),
                 "consumed_occurrences": sorted(self._consumed),
                 "replayed_occurrences": sorted(self._replayed),
                 "recorded_occurrences": sorted(self._recorded),
