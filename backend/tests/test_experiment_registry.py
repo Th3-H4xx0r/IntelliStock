@@ -117,6 +117,18 @@ def test_spec_deep_freezes_inputs_and_has_order_independent_fingerprint():
         spec.effective_config["a"] = 3
 
 
+def test_spec_exposes_replay_hash_helpers_without_changing_legacy_documents():
+    spec = _spec()
+
+    assert spec.execution_cost_model_hash.startswith("cost-sha256-")
+    assert spec.source_manifest_chain == (
+        spec.dataset_manifest,
+        spec.graph_manifest,
+        spec.universe_manifest,
+    )
+    assert ExperimentSpec.from_doc(spec.to_doc()).fingerprint == spec.fingerprint
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

@@ -459,6 +459,23 @@ class ExperimentSpec:
             "fingerprint": self.fingerprint,
         }
 
+    @property
+    def execution_cost_model_hash(self) -> str:
+        """Canonical cost identity for replay receipts without a duplicate field."""
+        digest = hashlib.sha256(
+            _canonical_json(self.execution_cost_model).encode("utf-8")
+        ).hexdigest()
+        return f"cost-sha256-{digest}"
+
+    @property
+    def source_manifest_chain(self) -> tuple[FrozenDict, FrozenDict, FrozenDict]:
+        """Ordered source manifests used by replay's PIT provenance chain."""
+        return (
+            self.dataset_manifest,
+            self.graph_manifest,
+            self.universe_manifest,
+        )
+
     @classmethod
     def from_doc(cls, doc: Mapping[str, Any]) -> "ExperimentSpec":
         payload = dict(doc)
