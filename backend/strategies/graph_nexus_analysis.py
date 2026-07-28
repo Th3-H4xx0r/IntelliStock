@@ -7161,6 +7161,59 @@ def _apply_recovery_cap(base_cap: int, recovery_flag, config: dict) -> int:
         return base_cap
 
 
+def _nav_pct_or_none(value):
+    """A NAV fraction in (0, 1], or None. Rejects bools, non-finite floats and
+    anything outside the band — used where an invalid entry must fail to the
+    legacy value rather than silently size a position."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or not (0.0 < v <= 1.0):
+        return None
+    return v
+
+
+def _resolve_momentum_breakout_nav_cap(config: dict, strategy_cache):
+    """A2 (2026-07-28, pure). NAV ceiling for the momentum_breakout_add lane,
+    resolved from THIS cycle's confirmed regime.
+
+    The lane read the scalar `momentum_breakout_max_nav_pct` after the broker
+    had already overlaid the PREVIOUS cycle's regime profile. So a confirmed
+    bull sized breakouts at the base ceiling, while the cycle after a downgrade
+    could still spend the bull one — wrong in both directions.
+
+    `momentum_breakout_max_nav_pct_by_regime` is base-only (`_apply_regime_profile`
+    strips it from overlays) and requires all three of default/bull/recovery in
+    (0, 1]. Absent or invalid, this returns the legacy scalar unchanged, so the
+    default path is byte-compatible. The bull entry additionally requires
+    `momentum_breakout_add_respect_gates` — a raised ceiling is only safe on a
+    lane that honours its sibling blacklist/extension gates.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    legacy = float(cfg.get("momentum_breakout_max_nav_pct", 0.0) or 0.0)
+    mapping = cfg.get("momentum_breakout_max_nav_pct_by_regime")
+    if not isinstance(mapping, dict):
+        return legacy
+    caps = {}
+    for key in ("default", "bull", "recovery"):
+        val = _nav_pct_or_none(mapping.get(key))
+        if val is None:
+            return legacy
+        caps[key] = val
+    cache = strategy_cache if isinstance(strategy_cache, dict) else {}
+    regime = str(cache.get("_market_regime") or "").strip().lower()
+    if regime == "bull":
+        if bool(cfg.get("momentum_breakout_add_respect_gates", False)):
+            return caps["bull"]
+        return caps["default"]
+    if regime == "chop" and bool(cache.get("_market_regime_recovery")):
+        return caps["recovery"]
+    return caps["default"]
+
+
 def _next_bear_capacity_latch(prev, confirmed_regime, recovery_flag, config: dict) -> bool:
     """2026-07-25 (default OFF). Hold the BEAR position cap through chop
     interludes inside a downtrend.
@@ -28997,7 +29050,10 @@ class GraphNexusAnalysis:
                         # reference's largest at 6.9%). Count-based limits cannot
                         # fix this -- they trim the tail of the size distribution,
                         # never the head; only a dollar limiter binds.
-                        _mw_ba_nav_cap = float(config.get("momentum_breakout_max_nav_pct", 0.0) or 0.0)
+                        # A2 (2026-07-28): resolved from THIS cycle's regime, not
+                        # the previous cycle's profile overlay.
+                        _mw_ba_nav_cap = _resolve_momentum_breakout_nav_cap(
+                            config, strategy_cache)
                         if _mw_ba_nav_cap > 0 and portfolio_total > 0:
                             _mw_ba_alloc = min(_mw_ba_alloc, portfolio_total * _mw_ba_nav_cap)
                         if _mw_ba_alloc < _mw_ba_min_pos:

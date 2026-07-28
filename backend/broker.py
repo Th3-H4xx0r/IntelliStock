@@ -3534,6 +3534,16 @@ def load_strategies_from_db():
             pass
         return [], None, None
 
+# Keys that must never ride in a regime_profiles overlay. Beyond the regime_*/
+# max_positions* prefixes stripped below, these are per-regime MAPPINGS that are
+# themselves resolved against the current regime — letting the previous cycle's
+# profile overwrite one would reintroduce exactly the lag they exist to fix.
+_REGIME_PROFILE_BASE_ONLY_KEYS = frozenset({
+    "residual_sleeve_bear_require_fresh_pct",
+    "momentum_breakout_max_nav_pct_by_regime",
+})
+
+
 def _apply_regime_profile(config, regime):
     """2026-07-23 regime auto-switch. Overlay config["regime_profiles"][regime]
     onto a COPY of config so the strategy's levers switch by the confirmed market
@@ -3561,7 +3571,7 @@ def _apply_regime_profile(config, regime):
     # These belong in the base only (adversarial-review gap #3).
     _safe = {k: v for k, v in overlay.items()
              if not (k.startswith("regime_") or k.startswith("max_positions")
-                     or k == "residual_sleeve_bear_require_fresh_pct")}
+                     or k in _REGIME_PROFILE_BASE_ONLY_KEYS)}
     if not _safe:
         return config
     merged = dict(config)

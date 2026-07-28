@@ -116,3 +116,89 @@ def test_nav_ceiling_binds_when_set():
 def test_nav_ceiling_never_raises_an_allocation():
     """A generous ceiling must not inflate a cash-constrained buy."""
     assert _alloc(6000.0, 300.0, nav_cap=0.50) == 285.0   # 0.95 * free cash
+
+
+# ------------------------------------------------- A2: current-regime NAV cap
+# The lane read the scalar `momentum_breakout_max_nav_pct` AFTER the broker had
+# already overlaid the PREVIOUS cycle's regime profile, so a confirmed-bull
+# breakout stayed at the base ceiling while a downgraded cycle could still
+# spend the bull one. The mapping below is base-only and read against THIS
+# cycle's regime.
+_NAV_MAP = {"default": 0.06, "bull": 0.10, "recovery": 0.08}
+
+
+def _nav_cfg(**kw):
+    c = {"momentum_breakout_max_nav_pct": 0.06,
+         "momentum_breakout_add_respect_gates": True,
+         "momentum_breakout_max_nav_pct_by_regime": dict(_NAV_MAP)}
+    c.update(kw)
+    return c
+
+
+def _cache(regime, recovery=False):
+    return {"_market_regime": regime, "_market_regime_recovery": recovery}
+
+
+def test_nav_cap_legacy_scalar_when_mapping_absent():
+    """Byte-compatible: no mapping => the existing scalar, whatever the regime."""
+    cfg = _nav_cfg()
+    cfg.pop("momentum_breakout_max_nav_pct_by_regime")
+    for regime in ("bull", "chop", "bear", "crash", ""):
+        assert g._resolve_momentum_breakout_nav_cap(
+            cfg, _cache(regime, True)) == 0.06, regime
+    # And the lane's own default (0 = off) survives.
+    assert g._resolve_momentum_breakout_nav_cap({}, _cache("bull")) == 0.0
+
+
+def test_nav_cap_bull_uses_bull_entry():
+    assert g._resolve_momentum_breakout_nav_cap(
+        _nav_cfg(), _cache("bull")) == 0.10
+
+
+def test_nav_cap_bull_requires_gate_coherence():
+    """The raised ceiling is only safe when the lane honours its sibling gates."""
+    assert g._resolve_momentum_breakout_nav_cap(
+        _nav_cfg(momentum_breakout_add_respect_gates=False),
+        _cache("bull")) == 0.06
+
+
+def test_nav_cap_recovery_is_chop_plus_flag():
+    assert g._resolve_momentum_breakout_nav_cap(
+        _nav_cfg(), _cache("chop", True)) == 0.08
+    assert g._resolve_momentum_breakout_nav_cap(
+        _nav_cfg(), _cache("chop", False)) == 0.06
+
+
+def test_nav_cap_non_bull_labels_use_default_not_previous_scalar():
+    for regime in ("chop", "bear", "crash", "", "unknown", None):
+        assert g._resolve_momentum_breakout_nav_cap(
+            _nav_cfg(), _cache(regime)) == 0.06, regime
+
+
+def test_nav_cap_requires_all_three_keys():
+    for missing in ("default", "bull", "recovery"):
+        m = dict(_NAV_MAP)
+        m.pop(missing)
+        assert g._resolve_momentum_breakout_nav_cap(
+            _nav_cfg(momentum_breakout_max_nav_pct_by_regime=m),
+            _cache("bull")) == 0.06, missing
+
+
+def test_nav_cap_rejects_invalid_entries():
+    for bad in (0, -0.1, 1.5, float("nan"), float("inf"), "x", True, None, []):
+        m = dict(_NAV_MAP, bull=bad)
+        assert g._resolve_momentum_breakout_nav_cap(
+            _nav_cfg(momentum_breakout_max_nav_pct_by_regime=m),
+            _cache("bull")) == 0.06, bad
+    for bad in (None, [], "x", 0.06):
+        assert g._resolve_momentum_breakout_nav_cap(
+            _nav_cfg(momentum_breakout_max_nav_pct_by_regime=bad),
+            _cache("bull")) == 0.06, bad
+
+
+def test_nav_cap_accepts_full_nav_and_missing_cache():
+    m = dict(_NAV_MAP, bull=1.0)
+    assert g._resolve_momentum_breakout_nav_cap(
+        _nav_cfg(momentum_breakout_max_nav_pct_by_regime=m),
+        _cache("bull")) == 1.0
+    assert g._resolve_momentum_breakout_nav_cap(_nav_cfg(), None) == 0.06

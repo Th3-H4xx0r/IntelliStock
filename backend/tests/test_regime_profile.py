@@ -15,12 +15,20 @@ if _backend not in sys.path:
 
 # broker.py argparse-SystemExits under pytest — extract just the pure helper.
 _WANTED = {"_apply_regime_profile"}
+# Module-level constants the helper closes over must come along too.
+_WANTED_CONST = {"_REGIME_PROFILE_BASE_ONLY_KEYS"}
 _src = open(os.path.join(_backend, "broker.py")).read()
 _tree = ast.parse(_src)
 _ns = {}
 for _node in _tree.body:
-    if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:
+    _take = (isinstance(_node, ast.FunctionDef) and _node.name in _WANTED) or (
+        isinstance(_node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id in _WANTED_CONST
+                for t in _node.targets))
+    if _take:
         exec(compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"), _ns)
+for _w in _WANTED_CONST:
+    assert _w in _ns, _w
 apply_regime_profile = _ns["_apply_regime_profile"]
 
 BULL = {"profit_take_gain_pct": 100, "trailing_stop_activation_pct": 40,
@@ -118,3 +126,20 @@ def test_bull_momentum_cap_can_relax_without_weakening_bear_or_recovery():
     assert apply_regime_profile(cfg, "bear")["momentum_breakout_max_nav_pct"] == 0.06
     assert apply_regime_profile(cfg, "chop")["momentum_breakout_max_nav_pct"] == 0.06
     assert apply_regime_profile(cfg, "recovery")["momentum_breakout_max_nav_pct"] == 0.06
+
+
+# ── 2026-07-28 A2/A3: per-regime MAPPINGS are base-only ──
+def test_per_regime_mappings_are_stripped_from_overlays():
+    """A profile overlay must not be able to overwrite a mapping that is itself
+    resolved against the current regime — that is the lag these keys fix."""
+    base = {"momentum_breakout_max_nav_pct_by_regime":
+            {"default": 0.06, "bull": 0.10, "recovery": 0.08},
+            "profit_take_gain_pct": 50,
+            "regime_profiles": {"bull": {
+                "profit_take_gain_pct": 100,
+                "momentum_breakout_max_nav_pct_by_regime": {"default": 0.99},
+            }}}
+    out = apply_regime_profile(base, "bull")
+    assert out["profit_take_gain_pct"] == 100
+    assert out["momentum_breakout_max_nav_pct_by_regime"] == {
+        "default": 0.06, "bull": 0.10, "recovery": 0.08}
