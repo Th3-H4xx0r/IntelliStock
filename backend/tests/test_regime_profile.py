@@ -134,12 +134,15 @@ def test_per_regime_mappings_are_stripped_from_overlays():
     resolved against the current regime — that is the lag these keys fix."""
     base = {"momentum_breakout_max_nav_pct_by_regime":
             {"default": 0.06, "bull": 0.10, "recovery": 0.08},
+            "deployment_ramp_caps_by_regime": {"bull": [0.50, 0.70, 1.00]},
             "profit_take_gain_pct": 50,
             "regime_profiles": {"bull": {
                 "profit_take_gain_pct": 100,
                 "momentum_breakout_max_nav_pct_by_regime": {"default": 0.99},
+                "deployment_ramp_caps_by_regime": {"bull": [1.0, 1.0, 1.0]},
             }}}
     out = apply_regime_profile(base, "bull")
     assert out["profit_take_gain_pct"] == 100
     assert out["momentum_breakout_max_nav_pct_by_regime"] == {
         "default": 0.06, "bull": 0.10, "recovery": 0.08}
+    assert out["deployment_ramp_caps_by_regime"] == {"bull": [0.50, 0.70, 1.00]}

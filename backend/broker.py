@@ -1374,6 +1374,110 @@ def _backtest_uses_equity_benchmark(
         return False
 
 
+def _load_backtest_evidence_options(row_id):
+    """Task 4 (2026-07-28). Load and REVALIDATE this run's evidence / cost /
+    candidate-override contract from its queue row.
+
+    The API validated this before writing the row; revalidating here means a
+    hand-edited or hand-replayed row cannot smuggle an unapproved strategy
+    override or a half-configured evidence mode into a run. Invalid stored
+    content is fatal — a run that cannot prove what it is must not go on to
+    produce artifacts that look like evidence.
+
+    A row that cannot be READ resolves to the all-default "off" contract. That
+    is the safe direction: an off run seals no fixture and publishes no
+    receipt, so a transient DB failure degrades to an ordinary backtest rather
+    than to unattributable evidence.
+    """
+    from backtest_evidence_options import validate_evidence_options
+
+    stored = {}
+    if row_id is not None and r is not None:
+        conn = None
+        try:
+            conn = get_conn()
+            key = int(row_id) if str(row_id).isdigit() else str(row_id)
+            row = r.db(DB_NAME).table("BacktestInstances").get(key).run(conn)
+            stored = (row or {}).get("evidence") or {}
+        except Exception as exc:
+            _log(f"Evidence contract: queue row unreadable ({exc}); running without evidence", "yellow")
+            stored = {}
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+    return validate_evidence_options(stored)
+
+
+def _record_evidence_pit(decision_at, manifest):
+    """Bind one resolved PIT manifest to its decision on the active lifecycle.
+
+    A no-op unless an evidence run is in flight. Raises through on a genuine
+    ordering violation — an out-of-order or future-dated manifest means the run
+    is not point-in-time clean, and a run that is not clean must fail rather
+    than seal a fixture that quietly says it was.
+    """
+    lifecycle = globals().get("_evidence_lifecycle")
+    if lifecycle is None:
+        return
+    payload = manifest
+    if not isinstance(payload, dict):
+        for attr in ("to_doc", "as_dict", "canonical_value"):
+            method = getattr(manifest, attr, None)
+            if callable(method):
+                payload = method()
+                break
+    lifecycle.record_pit(decision_at, payload)
+
+
+def _build_backtest_evidence_lifecycle(options, row_id, start_dt, end_dt):
+    """Construct the run's single finalization boundary, or None.
+
+    Returns None (and logs) when the matrix, store or benchmark manifest cannot
+    be resolved. That degrades the run to an ordinary backtest, which seals no
+    fixture and publishes no receipt — far better than proceeding with a
+    lifecycle that would later fail to attribute its own artifacts.
+    """
+    try:
+        from backtest_evidence_runtime import EvidenceRunLifecycle
+        from backtest_replay import RethinkReplayStore
+
+        conn = get_conn()
+        store = RethinkReplayStore(conn)
+        window = {
+            "start": start_dt.date().isoformat() if hasattr(start_dt, "date") else str(start_dt),
+            "end": end_dt.date().isoformat() if hasattr(end_dt, "date") else str(end_dt),
+        }
+        matrix = store.require_matrix(options.get("matrix_manifest_id"))
+        arm_name = next(
+            (name for name, value in matrix.arm_ids.items()
+             if value == options.get("matrix_arm_id")), None)
+        if arm_name is None:
+            raise ValueError("declared arm is not part of the published matrix")
+        experiment = matrix.experiment_for(arm_name, options.get("cost_scenario_id"))
+        lifecycle = EvidenceRunLifecycle(
+            options=options,
+            backtest_id=str(row_id),
+            store=store,
+            window=window,
+            fixture_ordinal=int(options.get("fixture_ordinal") or 0),
+            benchmark_manifest=dict(experiment.benchmark_manifest),
+            rng_seed_manifest={"source": "preregistered", "seed": experiment.seed},
+        )
+        lifecycle.begin()
+        _log(f"Evidence lifecycle active for arm {arm_name!r}", "cyan")
+        return lifecycle
+    except Exception as exc:
+        _log(
+            f"Evidence lifecycle unavailable ({type(exc).__name__}: {exc}); "
+            "this run will produce NO evidence artifacts",
+            "red",
+        )
+        return None
+
+
 def _preregister_backtest_experiment(
     strategy_schema,
     *,
@@ -3541,7 +3645,36 @@ def load_strategies_from_db():
 _REGIME_PROFILE_BASE_ONLY_KEYS = frozenset({
     "residual_sleeve_bear_require_fresh_pct",
     "momentum_breakout_max_nav_pct_by_regime",
+    "deployment_ramp_caps_by_regime",
 })
+
+
+def _nexus_deployment_ramp_max_len(cached_strategies):
+    """A3 (2026-07-28, pure). Longest deployment ramp any regime could select,
+    for the warm-boot fast-forward below.
+
+    Over-estimating is harmless — a bar index past the end of the ramp simply
+    leaves `ramp_cap_pct=1.0`, i.e. ungated. UNDER-estimating leaves a warm
+    book throttled to a fraction of starting equity, which is the exact F1b
+    pathology. So this takes the max over every configured list without
+    revalidating them, and falls back to the strategy's baked default of 3.
+    """
+    best = 3
+    try:
+        for spec in (cached_strategies or []):
+            if str((spec or {}).get("strategy") or "") != "graph_nexus_analysis":
+                continue
+            cfg = (spec or {}).get("config") or {}
+            candidates = [cfg.get("deployment_ramp_caps")]
+            by_regime = cfg.get("deployment_ramp_caps_by_regime")
+            if isinstance(by_regime, dict):
+                candidates.extend(by_regime.values())
+            for caps in candidates:
+                if isinstance(caps, (list, tuple)):
+                    best = max(best, len(caps))
+    except Exception:
+        return 3
+    return best
 
 
 def _apply_regime_profile(config, regime):
@@ -3664,6 +3797,10 @@ def _run_graph_nexus_with_point_in_time(
                 is_live=False,
                 provenance=bundle.record.provenance,
             )
+        # Task 4: bind the RESOLVED manifest to the decision it fed, before the
+        # decision is taken. A fixture that cannot show which snapshot produced
+        # each decision cannot prove the run was point-in-time clean.
+        _record_evidence_pit(current_time, manifest)
         return instance.run_historical(
             list(symbols),
             prices,
@@ -6687,6 +6824,33 @@ if mode == MODE_BACKTEST:
 symbols_for_data = list(symbols or [])
 
 if mode == MODE_BACKTEST:
+    # Task 4 (2026-07-28): resolve this run's evidence/cost/override contract
+    # FIRST. Model resolution, candidate overrides, experiment preregistration,
+    # the PIT lookback and the emulator's cost model all depend on it, and a
+    # mis-declared arm has to fail before a multi-hour window burns.
+    from backtest_evidence_options import (
+        apply_candidate_overrides as _apply_candidate_overrides,
+        resolve_execution_cost_model as _resolve_execution_cost_model,
+    )
+    _evidence_options = _load_backtest_evidence_options(backtest_row_id)
+    _evidence_cost_model = _resolve_execution_cost_model(
+        _evidence_options.get("equity_total_cost_bps"))
+    _evidence_lifecycle = None
+    if _evidence_options.get("evidence_mode") != "off":
+        _log(
+            f"Evidence contract: mode={_evidence_options['evidence_mode']} "
+            f"arm={_evidence_options.get('matrix_arm_id')} "
+            f"cost_scenario={_evidence_options.get('cost_scenario_id')}",
+            "cyan",
+        )
+        # Intercept FORCED exits. os._exit skips try/finally, atexit and
+        # destructors, so wrapping the call itself is the only place a
+        # non-success terminal can be persisted before the process dies. Only
+        # ever installed for an evidence run — live trading never reaches here.
+        _evidence_lifecycle = _build_backtest_evidence_lifecycle(
+            _evidence_options, backtest_row_id, start_dt, end_dt_input)
+        if _evidence_lifecycle is not None:
+            os._exit = _evidence_lifecycle.install_terminal_hook(os._exit)
     # Load strategies early so we can add SPY to the fetch when Breakout strategy is used
     _cached_strategies, _strategy_row_id, _backtest_strategy_schema = load_strategies_from_db()
     if _cached_strategies:
@@ -6706,6 +6870,18 @@ if mode == MODE_BACKTEST:
         except Exception as _e:
             _log(f"Model resolution warning: {_e}", "yellow")
         _cached_strategies = sorted(_cached_strategies, key=lambda s: int(s.get('execution_position', 0)))
+        # Apply the allowlisted A1-A4 candidate overrides to an in-memory COPY,
+        # before the snapshot below and before preregistration, so the recorded
+        # fingerprint identifies what actually executes. The live Strategies
+        # document and the instance doc are never written.
+        if _evidence_options.get("nexus_candidate_overrides"):
+            _cached_strategies = _apply_candidate_overrides(
+                _cached_strategies, _evidence_options["nexus_candidate_overrides"])
+            _log(
+                "Applied candidate overrides to the in-memory nexus spec: "
+                + ", ".join(sorted(_evidence_options["nexus_candidate_overrides"])),
+                "cyan",
+            )
         if isinstance(_backtest_strategy_schema, dict):
             _backtest_strategy_schema["strategies"] = sanitize_snapshot(
                 list(_cached_strategies)
@@ -6921,11 +7097,16 @@ if mode == MODE_BACKTEST:
     # Emulated-fee override (--taker-fee) wins; else resolve from the instance venue.
     _bt_taker_fee = emulated_taker_fee if emulated_taker_fee is not None else _instance_crypto_taker_fee()
     _bt_is_crypto = _is_crypto_instance_runtime()
+    # Task 4: the SAME resolved cost-model object that goes into experiment
+    # preregistration is handed to the emulator, so a receipt can never claim a
+    # cost basis the fills did not actually use. (Crypto ignores it — that path
+    # charges the venue taker fee instead.)
     portfolio_emulator = create_backtest_emulator(
         initial_cash=initial_cash,
         taker_fee=_bt_taker_fee,
         is_crypto=_bt_is_crypto,
         execution_delay=backtest_increment_td,
+        cost_model=None if _bt_is_crypto else _evidence_cost_model,
     )
     _bt_execution_kind = "legacy-immediate-crypto" if _bt_is_crypto else "equity-next-event-v1"
     _log("PortfolioEmulator initialized for backtest (initial_cash=%s, taker_fee=%s%s, execution=%s)."
@@ -7646,12 +7827,14 @@ elif mode == MODE_LIVE:
             _has_prior_tick = bool(_nexus_cache.get("_deployment_last_bar_key"))
             if _warm_position_count > 0 and _bar_now <= 1 and not _has_prior_tick:
                 # Strategy's baked default ramp is length 3 ([0.5, 0.7, 0.9]);
-                # bug-sweep corrected from 5. If the config overrides this
-                # to a longer schedule, `_get_deployment_ramp_bar_index`
-                # at graph_nexus_analysis.py:6561 harmlessly stays at
-                # `ramp_cap_pct=1.0` when bar_index > len — the ramp gate
-                # disables, which is exactly what we want.
-                _ramp_caps_len = 3
+                # bug-sweep corrected from 5. A3 (2026-07-28): read the actual
+                # configured length instead of assuming 3, because a longer
+                # global list or a per-regime ramp would leave the tail of the
+                # ramp still active on a warm boot — the very throttling F1b
+                # exists to clear. Over-shooting is safe: once bar_index passes
+                # the end, `_get_deployment_ramp_bar_index` leaves
+                # `ramp_cap_pct=1.0` and the gate disables.
+                _ramp_caps_len = _nexus_deployment_ramp_max_len(_cached_strategies)
                 _nexus_cache["_deployment_bar_index"] = int(_ramp_caps_len)
                 # Seed `_deployment_last_bar_key` to a sentinel so the next
                 # call inside `_get_deployment_ramp_bar_index` DOESN'T

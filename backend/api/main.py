@@ -662,6 +662,18 @@ class CreateBacktestBody(BaseModel):
     # own brokerage. None / "default" = use the instance's linked brokerage.
     # Recognized: binanceus | alpaca | kraken | coinbase (see broker_adapters.fees).
     emulate_fee_venue: Optional[str] = None
+    # Deterministic-replay evidence contract (2026-07-28). All optional; a POST
+    # that omits them queues an ordinary backtest exactly as before. Validated
+    # by backtest_evidence_options before the row is written, and again at
+    # broker startup so a hand-edited row cannot smuggle anything past here.
+    evidence_mode: Optional[str] = None          # off | record | record_extend | replay
+    fixture_build_id: Optional[str] = None       # required for record modes
+    replay_fixture_id: Optional[str] = None      # required for formal replay
+    matrix_manifest_id: Optional[str] = None     # required for every non-off mode
+    matrix_arm_id: Optional[str] = None
+    cost_scenario_id: Optional[str] = None
+    equity_total_cost_bps: Optional[float] = None  # nominal (absent), 25 or 50
+    nexus_candidate_overrides: Optional[Dict[str, Any]] = None
 
 
 class KalshiBacktestBody(BaseModel):
@@ -2882,7 +2894,49 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
         secret=body.secret,
         initial_cash=body.initial_cash,
         emulate_fee_venue=body.emulate_fee_venue,
+        evidence_options={
+            "evidence_mode": body.evidence_mode,
+            "fixture_build_id": body.fixture_build_id,
+            "replay_fixture_id": body.replay_fixture_id,
+            "matrix_manifest_id": body.matrix_manifest_id,
+            "matrix_arm_id": body.matrix_arm_id,
+            "cost_scenario_id": body.cost_scenario_id,
+            "equity_total_cost_bps": body.equity_total_cost_bps,
+            "nexus_candidate_overrides": body.nexus_candidate_overrides,
+        },
     )
+
+
+class PublishEvidenceMatrixBody(BaseModel):
+    matrix: Dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/backtest-evidence/matrices", response_class=JSONResponse)
+def api_publish_evidence_matrix(
+    body: PublishEvidenceMatrixBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Publish one immutable experiment matrix manifest.
+
+    Preregistration only: this queues nothing and starts no instance. The
+    manifest must exist before the first backtest of a matrix is POSTed, so
+    arms cannot be added or reworded after seeing results.
+    """
+    from backtest_replay import ExperimentMatrixManifest, RethinkReplayStore
+
+    try:
+        matrix = ExperimentMatrixManifest.from_doc(body.matrix)
+        RethinkReplayStore(conn).publish_matrix(matrix)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "matrix_id": matrix.matrix_id,
+        "arm_ids": dict(matrix.arm_ids),
+        "cost_scenario_hashes": dict(matrix.cost_scenario_hashes),
+        "fixture_count": matrix.fixture_count,
+        "trial_count": matrix.trial_count,
+    }
 
 
 @app.delete("/backtests/{backtest_id}", response_class=JSONResponse)

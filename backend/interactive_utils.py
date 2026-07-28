@@ -5547,9 +5547,17 @@ def action_create_backtest(
     secret=None,
     initial_cash=100000.0,
     emulate_fee_venue=None,
+    evidence_options=None,
 ):
     if not start_date or not end_date:
         raise ValueError("start_date, end_date required")  # V7.3: stocks can be empty for pure discovery
+    # Deterministic-replay contract (2026-07-28). Validated BEFORE the row is
+    # written so a mis-declared arm never reaches the queue; the broker
+    # revalidates the stored copy. Drop keys the caller left as None so an
+    # ordinary POST resolves to the all-default "off" contract.
+    from backtest_evidence_options import validate_evidence_options
+    _evidence = validate_evidence_options(
+        {k: v for k, v in (evidence_options or {}).items() if v is not None})
     ensure_backtest_instances_table(conn)
     instance_doc = _resolve_instance_doc(conn, instance_id) if instance_id else None
     kind_normalized = str((instance_doc or {}).get("kind") or "").strip().lower()
@@ -5621,6 +5629,17 @@ def action_create_backtest(
         doc["secret"] = secret_val
     if instance_id:
         doc["instance"] = str(instance_id).strip()
+    # Only stamp the evidence block when the run actually declares one, so an
+    # ordinary backtest row stays byte-identical to before.
+    if (_evidence["evidence_mode"] != "off"
+            or _evidence["equity_total_cost_bps"] is not None
+            or _evidence["nexus_candidate_overrides"]):
+        if non_equity_compatibility:
+            raise ValueError(
+                "deterministic-replay evidence is equities-only; "
+                "crypto and Kalshi backtests cannot declare it"
+            )
+        doc["evidence"] = dict(_evidence)
     backtest_id = insert_backtest_with_unique_id(conn, doc)
     # Post "Queued" to #backtests so the same message can be edited with progress/P&L by broker/engine
     try:
@@ -6103,7 +6122,32 @@ def action_summarize_backtest(conn, backtest_id):
         "pause_sample":       doc.get("pause_sample"),
         "paused_at":          doc.get("paused_at"),
         "resumed_at":         doc.get("resumed_at"),
+        # Deterministic-replay provenance (2026-07-28). Read-only identities and
+        # audit verdicts only — never prompts, model responses or credentials.
+        # Absent on ordinary backtests, so existing consumers are unaffected.
+        "evidence": _evidence_summary_projection(doc),
     }
+
+
+_EVIDENCE_SUMMARY_FIELDS = (
+    "evidence_mode", "matrix_id", "arm_name", "arm_id", "cost_scenario_id",
+    "equity_total_cost_bps", "nexus_candidate_overrides", "receipt_id",
+    "fixture_id", "trade_ledger_hash", "executed_source_identity",
+    "execution_cost_model_hash", "benchmark_manifest", "promotion_eligible",
+    "audits", "terminal", "cost_reconciliation", "decision_fill_audit",
+)
+
+
+def _evidence_summary_projection(doc):
+    """Project only the whitelisted evidence fields off a BacktestResults row.
+
+    A whitelist rather than a blacklist: the stored block grows over time and a
+    blacklist would leak the first field someone forgets to exclude.
+    """
+    stored = (doc or {}).get("evidence")
+    if not isinstance(stored, dict) or not stored:
+        return None
+    return {key: stored[key] for key in _EVIDENCE_SUMMARY_FIELDS if key in stored}
 
 
 def action_backtest_logs(conn, backtest_id):
