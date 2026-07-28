@@ -1,7 +1,7 @@
 # Confirmed-bull momentum breakout sizing
 
-**Date:** 2026-07-28  
-**Scope:** Strategy 179 equities / Alpaca only  
+**Date:** 2026-07-28
+**Scope:** Strategy 179 equities / Alpaca only
 **Safety boundary:** configuration-only, inactive instance, no change to bear/chop/recovery sizing
 
 ## Finding
