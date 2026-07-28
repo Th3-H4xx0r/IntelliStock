@@ -169,3 +169,46 @@ def test_research_provenance_is_named_not_faked():
     assert ctx.provenance == "legacy_unverified"
     assert "research" in ctx.manifest.manifest_id
     assert ctx.is_live is False, "a backtest must never be labelled live"
+
+
+def test_research_context_reads_current_state_everywhere():
+    """One principle, not five patches: every strict consumer treats a
+    declared research context exactly like the legacy/live path.
+
+    These guards each independently raised "historical X context must be
+    strict", so relaxing only one just moved the failure to the next."""
+    from point_in_time_data import DatasetManifest, PointInTimeContext
+    from datetime import datetime, timezone
+
+    as_of = datetime(2026, 4, 27, 13, 30, tzinfo=timezone.utc)
+
+    def ctx(strict, is_live):
+        return PointInTimeContext(
+            as_of=as_of,
+            manifest=DatasetManifest(manifest_id="m", source_hashes={"a": "b"},
+                                     created_at=as_of),
+            strict=strict, is_live=is_live)
+
+    research = ctx(False, False)
+    strict = ctx(True, False)
+    live = ctx(False, True)
+
+    assert g._pit_is_research(research) is True
+    assert g._pit_is_research(strict) is False
+    assert g._pit_is_research(live) is False
+    assert g._pit_is_research(None) is False
+
+    # Research reads current state, exactly like live; strict must NOT.
+    assert g._pit_use_legacy_sources(research) is True
+    assert g._pit_use_legacy_sources(live) is True
+    assert g._pit_use_legacy_sources(None) is True
+    assert g._pit_use_legacy_sources(strict) is False
+
+
+def test_strict_runs_are_still_fully_guarded():
+    """The escape hatch must not weaken the default path."""
+    src = open(g.__file__).read()
+    for guard in ("historical news context must be strict",
+                  "historical market-cap context must be strict",
+                  "historical institutional cache context must be strict"):
+        assert guard in src, f"strict guard removed: {guard}"

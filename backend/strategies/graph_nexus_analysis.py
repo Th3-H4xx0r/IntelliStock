@@ -2108,7 +2108,7 @@ def _benzinga_available_at(record: dict):
 def _strict_news_source(*, context, snapshot_store, source: str):
     """Load one historical news source without touching current providers."""
 
-    if context is None or context.is_live:
+    if _pit_use_legacy_sources(context):
         return None
     from collections.abc import Mapping
     from point_in_time_data import PointInTimeDataError, load_snapshot_payload
@@ -5205,7 +5205,7 @@ def _dated_market_cap(
         raise PointInTimeDataError(
             "market-cap context must be a PointInTimeContext"
         )
-    if context.is_live:
+    if _pit_use_legacy_sources(context):
         return None
     if not context.strict:
         raise PointInTimeDataError(
@@ -14569,6 +14569,29 @@ _neo4j_market_cap_cache: dict[str, float] = {}
 _active_point_in_time_graph_scope = None
 
 
+def _pit_is_research(context) -> bool:
+    """True for a DECLARED research context (non-live and non-strict).
+
+    Such a context can only be built by the broker's pit_mode="research"
+    branch, and run_once still requires the config to declare it, so this is a
+    label check rather than a second door. Every strict consumer below treats a
+    research context exactly like the legacy/live path: it reads current state.
+    The context stays stamped legacy_unverified so nothing downstream can
+    mistake what it saw for verified point-in-time evidence.
+    """
+    if context is None:
+        return False
+    return bool(not getattr(context, "is_live", False)
+                and not getattr(context, "strict", True))
+
+
+def _pit_use_legacy_sources(context) -> bool:
+    """True when a consumer should read current state instead of a snapshot."""
+    return (context is None
+            or bool(getattr(context, "is_live", False))
+            or _pit_is_research(context))
+
+
 def _activate_point_in_time_graph_scope(
     context,
     *,
@@ -14583,7 +14606,7 @@ def _activate_point_in_time_graph_scope(
     global _neo4j_market_cap_cache
 
     requested_scope = None
-    if context is not None and not context.is_live:
+    if not _pit_use_legacy_sources(context):
         requested_scope = context.cache_key("nexus-graph")
 
     global_scope_changed = requested_scope != _active_point_in_time_graph_scope
@@ -18202,7 +18225,7 @@ def _institutional_cache_binding(
     """Return persistent cache identity bound to strict graph decision time."""
 
     base = str(base_instance_id or "default")[:24]
-    if context is not None and not context.is_live:
+    if not _pit_use_legacy_sources(context):
         from point_in_time_data import PointInTimeContext, PointInTimeDataError
 
         if not isinstance(context, PointInTimeContext) or not context.strict:
@@ -18223,7 +18246,7 @@ def _institutional_cache_row_matches(row: dict, context) -> bool:
 
     if not isinstance(row, dict):
         return False
-    if context is None or context.is_live:
+    if _pit_use_legacy_sources(context):
         return True
     if not context.strict:
         return False
