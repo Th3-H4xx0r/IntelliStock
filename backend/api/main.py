@@ -2907,6 +2907,25 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
     )
 
 
+@app.get("/backtest-evidence/source-identity", response_class=JSONResponse)
+def api_evidence_source_identity(current_user: dict = Depends(get_current_user)):
+    """The executing source digest of THIS deployment.
+
+    Preregistration has to name the source that will actually run, and that is
+    the container's code, not the operator's checkout. Without this the two are
+    only equal by luck, and every receipt fails its source check. Read-only:
+    a content digest and the interpreter version, no paths and no secrets.
+    """
+    import sys as _sys
+
+    from backtest_evidence_options import source_tree_digest
+
+    return {
+        "source_tree_hash": source_tree_digest(),
+        "python_version": _sys.version.split()[0],
+    }
+
+
 class PublishEvidenceMatrixBody(BaseModel):
     matrix: Dict[str, Any] = Field(default_factory=dict)
 
