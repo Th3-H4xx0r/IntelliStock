@@ -3541,7 +3541,36 @@ def load_strategies_from_db():
 _REGIME_PROFILE_BASE_ONLY_KEYS = frozenset({
     "residual_sleeve_bear_require_fresh_pct",
     "momentum_breakout_max_nav_pct_by_regime",
+    "deployment_ramp_caps_by_regime",
 })
+
+
+def _nexus_deployment_ramp_max_len(cached_strategies):
+    """A3 (2026-07-28, pure). Longest deployment ramp any regime could select,
+    for the warm-boot fast-forward below.
+
+    Over-estimating is harmless — a bar index past the end of the ramp simply
+    leaves `ramp_cap_pct=1.0`, i.e. ungated. UNDER-estimating leaves a warm
+    book throttled to a fraction of starting equity, which is the exact F1b
+    pathology. So this takes the max over every configured list without
+    revalidating them, and falls back to the strategy's baked default of 3.
+    """
+    best = 3
+    try:
+        for spec in (cached_strategies or []):
+            if str((spec or {}).get("strategy") or "") != "graph_nexus_analysis":
+                continue
+            cfg = (spec or {}).get("config") or {}
+            candidates = [cfg.get("deployment_ramp_caps")]
+            by_regime = cfg.get("deployment_ramp_caps_by_regime")
+            if isinstance(by_regime, dict):
+                candidates.extend(by_regime.values())
+            for caps in candidates:
+                if isinstance(caps, (list, tuple)):
+                    best = max(best, len(caps))
+    except Exception:
+        return 3
+    return best
 
 
 def _apply_regime_profile(config, regime):
@@ -7646,12 +7675,14 @@ elif mode == MODE_LIVE:
             _has_prior_tick = bool(_nexus_cache.get("_deployment_last_bar_key"))
             if _warm_position_count > 0 and _bar_now <= 1 and not _has_prior_tick:
                 # Strategy's baked default ramp is length 3 ([0.5, 0.7, 0.9]);
-                # bug-sweep corrected from 5. If the config overrides this
-                # to a longer schedule, `_get_deployment_ramp_bar_index`
-                # at graph_nexus_analysis.py:6561 harmlessly stays at
-                # `ramp_cap_pct=1.0` when bar_index > len — the ramp gate
-                # disables, which is exactly what we want.
-                _ramp_caps_len = 3
+                # bug-sweep corrected from 5. A3 (2026-07-28): read the actual
+                # configured length instead of assuming 3, because a longer
+                # global list or a per-regime ramp would leave the tail of the
+                # ramp still active on a warm boot — the very throttling F1b
+                # exists to clear. Over-shooting is safe: once bar_index passes
+                # the end, `_get_deployment_ramp_bar_index` leaves
+                # `ramp_cap_pct=1.0` and the gate disables.
+                _ramp_caps_len = _nexus_deployment_ramp_max_len(_cached_strategies)
                 _nexus_cache["_deployment_bar_index"] = int(_ramp_caps_len)
                 # Seed `_deployment_last_bar_key` to a sentinel so the next
                 # call inside `_get_deployment_ramp_bar_index` DOESN'T

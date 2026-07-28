@@ -10502,7 +10502,40 @@ def _get_effective_nexus_config(config: dict) -> dict[str, Any]:
         ),
     }
 
-def _get_deployment_ramp_caps(config: dict) -> list[float]:
+def _bull_deployment_ramp_caps(config: dict):
+    """A3 (2026-07-28, pure). The confirmed-bull ramp from the base-only
+    `deployment_ramp_caps_by_regime` mapping, or None when it is absent or not
+    strictly valid.
+
+    Requires a `bull` entry of EXACTLY three finite caps in (0, 1]. Anything
+    else returns None so the caller falls back to the global list — a
+    malformed edit must never deploy FASTER than the reviewed ramp.
+    """
+    mapping = (config or {}).get("deployment_ramp_caps_by_regime")
+    if not isinstance(mapping, dict):
+        return None
+    raw = mapping.get("bull")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        return None
+    caps = []
+    for item in raw:
+        val = _nav_pct_or_none(item)
+        if val is None:
+            return None
+        caps.append(val)
+    return caps
+
+
+def _get_deployment_ramp_caps(config: dict, strategy_cache: dict | None = None) -> list[float]:
+    # A3 (2026-07-28): only a CURRENT confirmed bull may use its own ramp.
+    # Recovery, chop, bear, crash, unknown and any downgraded label keep the
+    # global list (and, for chop, its existing defensive scaling). A global
+    # loosening was measured and rejected: deployment_bar1_cap_pct 0.9 -> 0.5
+    # gained +7.04pp on the rally window and cost -13.91pp on the flagship.
+    if str((strategy_cache or {}).get("_market_regime") or "").strip().lower() == "bull":
+        bull_caps = _bull_deployment_ramp_caps(config)
+        if bull_caps is not None:
+            return bull_caps
     raw_caps = config.get("deployment_ramp_caps")
     if isinstance(raw_caps, (list, tuple)):
         caps = []
@@ -10583,7 +10616,7 @@ def _compute_available_buy_budget(
     ramp_cap_pct = 1.0
     ramp_room = cash_after_floor
     if bool(config.get("deployment_ramp_enabled", True)):
-        ramp_caps = _get_deployment_ramp_caps(config)
+        ramp_caps = _get_deployment_ramp_caps(config, strategy_cache)
         ramp_bar = _get_deployment_ramp_bar_index(strategy_cache, current_time, date_key)
         if ramp_bar <= len(ramp_caps):
             ramp_cap_pct = max(0.0, min(1.0, float(ramp_caps[ramp_bar - 1] or 0.0)))
