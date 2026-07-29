@@ -2925,6 +2925,74 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
     )
 
 
+class MigrateCredentialsBody(BaseModel):
+    apply: bool = False
+
+
+@app.post("/admin/credentials/migrate", response_class=JSONResponse)
+def api_migrate_credentials(
+    body: MigrateCredentialsBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """Encrypt legacy plaintext credential fields in place.
+
+    Rows written before the encrypted-at-rest boundary still hold plaintext,
+    and strict decryption correctly refuses them — which is what took the
+    dashboard down and what stops a backtest resolving its LLM key. Editing a
+    row through the UI only re-encrypts the fields actually re-entered, so an
+    untouched key stays legacy forever; this closes that gap directly.
+
+    Dry-run by default: returns counts and hashed row IDs only. Never returns,
+    logs, or echoes a credential value.
+    """
+    from credential_audit import SECRET_FIELDS_BY_TABLE, AUDITED_TABLES, scan_secret_fields
+    from scripts.migrate_encrypted_credentials import (
+        build_encrypted_patch,
+        build_strategy_scrub_patch,
+        verify_patch,
+    )
+    from interactive_utils import DB_NAME as _DB, r as _r
+
+    available = set(_r.db(_DB).table_list().run(conn))
+    rows = {t: (list(_r.db(_DB).table(t).run(conn)) if t in available else [])
+            for t in AUDITED_TABLES}
+
+    findings = scan_secret_fields(rows)
+    plaintext = [f for f in findings if not f.encrypted]
+    report = {
+        "mode": "apply" if body.apply else "dry-run",
+        "credential_fields": len(findings),
+        "plaintext_fields": len(plaintext),
+        "encrypted_fields": len(findings) - len(plaintext),
+        "plaintext_by_table": {
+            t: sum(1 for f in plaintext if f.table == t)
+            for t in sorted({f.table for f in plaintext})
+        },
+    }
+    if not body.apply:
+        return report
+
+    switched = 0
+    try:
+        for table, fields in SECRET_FIELDS_BY_TABLE.items():
+            for row in rows.get(table, ()):
+                patch = build_encrypted_patch(row, fields=fields)
+                verify_patch(patch, fields=fields)   # must decrypt back cleanly
+                if patch:
+                    _r.db(_DB).table(table).get(row.get("id")).update(patch).run(conn)
+                    switched += 1
+        for row in rows.get("Strategies", ()):
+            patch = build_strategy_scrub_patch(row)
+            if patch:
+                _r.db(_DB).table("Strategies").get(row.get("id")).update(patch).run(conn)
+                switched += 1
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"migration aborted: {exc}")
+    report["rows_switched"] = switched
+    return report
+
+
 @app.get("/backtest-evidence/source-identity", response_class=JSONResponse)
 def api_evidence_source_identity(current_user: dict = Depends(get_current_user)):
     """The executing source digest of THIS deployment.
