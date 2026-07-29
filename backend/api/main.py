@@ -2927,6 +2927,10 @@ def api_create_backtest(body: CreateBacktestBody, conn=Depends(conn_dependency),
 
 class MigrateCredentialsBody(BaseModel):
     apply: bool = False
+    # Scrubbing inline Strategies secrets DELETES them; encryption is
+    # reversible. Opt in separately so an irreversible cleanup is never a
+    # side effect of fixing a credential.
+    scrub_strategies: bool = False
 
 
 @app.post("/admin/credentials/migrate", response_class=JSONResponse)
@@ -2982,14 +2986,16 @@ def api_migrate_credentials(
                 if patch:
                     _r.db(_DB).table(table).get(row.get("id")).update(patch).run(conn)
                     switched += 1
-        for row in rows.get("Strategies", ()):
-            patch = build_strategy_scrub_patch(row)
-            if patch:
-                _r.db(_DB).table("Strategies").get(row.get("id")).update(patch).run(conn)
-                switched += 1
+        if body.scrub_strategies:
+            for row in rows.get("Strategies", ()):
+                patch = build_strategy_scrub_patch(row)
+                if patch:
+                    _r.db(_DB).table("Strategies").get(row.get("id")).update(patch).run(conn)
+                    switched += 1
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"migration aborted: {exc}")
     report["rows_switched"] = switched
+    report["strategies_scrubbed"] = bool(body.scrub_strategies)
     return report
 
 
