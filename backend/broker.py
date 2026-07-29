@@ -4066,7 +4066,11 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 except Exception:
                     pass
     except Exception as _resolve_e:
-        if _llm_resolution_is_fatal(mode):
+        # NB: the `mode` PARAMETER here is the scheduler mode (FULL/MONITOR)
+        # and it shadows the module-level run mode. Read the run mode off
+        # globals() explicitly -- comparing the parameter against
+        # MODE_BACKTEST silently never matched, leaving this guard inert.
+        if _llm_resolution_is_fatal(globals().get("mode")):
             # A backtest process just spawned, so there are NO baked-in
             # credentials to fall back to. Continuing would run an LLM-driven
             # strategy with no key for any role -- neutral sentiment, no

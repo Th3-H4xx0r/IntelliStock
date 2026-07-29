@@ -49,6 +49,22 @@ def test_resolution_failure_is_fatal_for_a_backtest():
         "model-resolution failure must be classified, not blanket-swallowed")
 
 
+def test_guard_reads_the_run_mode_not_the_scheduler_mode():
+    """The first version of this guard was INERT.
+
+    `run_run_once_strategies(..., mode=None)` takes the SCHEDULER mode
+    (FULL/MONITOR) and that parameter shadows the module-level run mode. So
+    `_llm_resolution_is_fatal(mode)` compared "FULL" against "backtest" and
+    never fired. Testing the helper in isolation passed happily while the
+    call site did nothing -- so assert the wiring, not just the helper.
+    """
+    src = _func("run_run_once_strategies")
+    assert 'globals().get("mode")' in src, (
+        "must read the module-level run mode, not the shadowing parameter")
+    assert "_llm_resolution_is_fatal(mode)" not in src, (
+        "the scheduler-mode parameter must not be used for this decision")
+
+
 def test_live_mode_still_degrades_gracefully():
     """A live broker must not die because the Models row is briefly unreadable;
     it keeps trading on the credentials it already resolved."""
