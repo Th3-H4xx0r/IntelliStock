@@ -1861,6 +1861,7 @@ def _build_llm_trace(role: str, provider: str, model: str, prompt: str, system_p
     _log(
         f"LLM/{role}: provider={trace['provider']} model={trace['effective_model']} ok={trace['ok']} "
         f"fallback={trace['fallback_used']} raw_json_fallback={trace['raw_json_fallback_used']} "
+        f"tokens={_format_llm_usage(trace.get('usage'))} "
         f"prompt={trace['prompt_hash'][:10]}...{err_suffix}",
         "cyan" if trace["ok"] else "yellow",
     )
@@ -1875,6 +1876,35 @@ except ImportError:
     _toon_encode_fn = None
     _TOON_AVAILABLE = False
 _TOON_IMPORT_ATTEMPTED = _TOON_AVAILABLE
+
+
+def _format_llm_usage(usage) -> str:
+    """Render token usage for the per-call log line.
+
+    The trace has carried `usage` all along but never printed it, so operators
+    could not see token cost per call without querying LLMUsage. Providers
+    disagree on the key names, so accept both families and report `n/a` when a
+    provider returns nothing rather than printing a misleading zero.
+    """
+    if not isinstance(usage, dict) or not usage:
+        return "n/a"
+
+    def _pick(*names):
+        for name in names:
+            value = usage.get(name)
+            if isinstance(value, (int, float)) and value >= 0:
+                return int(value)
+        return None
+
+    prompt = _pick("prompt_tokens", "input_tokens", "inputTokens")
+    completion = _pick("completion_tokens", "output_tokens", "outputTokens")
+    total = _pick("total_tokens", "totalTokens")
+    if total is None and (prompt is not None or completion is not None):
+        total = (prompt or 0) + (completion or 0)
+    if prompt is None and completion is None and total is None:
+        return "n/a"
+    fmt = lambda v: "?" if v is None else str(v)
+    return f"{fmt(prompt)}in/{fmt(completion)}out/{fmt(total)}tot"
 
 
 def _ensure_toon_encoder() -> bool:
