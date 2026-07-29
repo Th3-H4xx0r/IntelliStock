@@ -1636,21 +1636,13 @@ def _get_sentiment_prompt_limits(
     effective_history_tickers = requested_history_tickers
     effective_history_entries = requested_history_entries
     effective_context_chars = requested_context_chars
-    # An UNBOUNDED output on a large reasoning model is how one sentiment call
-    # stalled an entire 85-day lookback: the request never returned, and the
-    # per-attempt timeout DOUBLES (180s -> 360s -> 720s), so a single day can
-    # burn ~21 minutes before it even fails. The prompt already asks for "under
-    # 1500 total output tokens" -- this makes that a limit instead of a
-    # request, with headroom for a reasoning model's hidden tokens. Set
-    # sentiment_llm_max_output_tokens explicitly to override; 0 still means
-    # unlimited but is now opt-in rather than the default.
-    _raw_sent_cap = (config or {}).get("sentiment_llm_max_output_tokens")
-    try:
-        max_output_tokens = 8000 if _raw_sent_cap is None else int(_raw_sent_cap)
-    except (TypeError, ValueError):
-        max_output_tokens = 8000
-    if max_output_tokens < 0:
-        max_output_tokens = 8000
+    # 0 is a SENTINEL, not "unbounded": llm_utils maps <=0 to the
+    # reasoning-safe _OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS (32768) so a
+    # reasoning model's thinking tokens do not consume the wire cap before the
+    # JSON is emitted. Clamping this to 8000 did exactly that -- 20-to-42 token
+    # empty responses, failed validation, retries, and ~229s per bar against a
+    # normal ~54 min whole backtest. Leave it at 0.
+    max_output_tokens = 0
     retry_min_articles = max(6, min(10, requested_num_articles))
     outer_attempts = 0
     auto_reduced = False

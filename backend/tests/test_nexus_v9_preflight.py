@@ -251,11 +251,9 @@ def test_sentiment_prompt_limits_auto_reduce_gpt_oss_lookback():
     assert limits["max_pending_trades"] == 8
     assert limits["max_history_tickers"] == 4
     assert limits["max_history_entries"] == 4
-    # Was 0 (unlimited). An unbounded output is what let a single sentiment
-    # call hang bt#396880 at bar 1/85 for 11+ minutes, so the default is now
-    # bounded. Auto-reduction of the PROMPT — what this test is actually
-    # about — is unchanged.
-    assert limits["max_output_tokens"] > 0
+    # 0 is the reasoning-safe sentinel (llm_utils maps <=0 to 32768), NOT an
+    # absent cap. Clamping it starved the model's thinking budget.
+    assert limits["max_output_tokens"] == 0
     assert limits["auto_reduced"] is True
 
 
