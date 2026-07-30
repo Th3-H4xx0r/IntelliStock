@@ -308,9 +308,13 @@ services:
     container_name: intellistock-rethinkdb
     # --cache-size: MB for query cache (default is half of available); more = better throughput
     command: rethinkdb --bind all -d /data --cache-size 2048
+    # RethinkDB runs unauthenticated, so the publish address decides who can
+    # read/write the whole database. Default 0.0.0.0 assumes the host is only
+    # reachable over a private network (Tailscale); set RETHINKDB_BIND_ADDR to
+    # a specific interface (or 127.0.0.1) on any host with a public address.
     ports:
-      - "127.0.0.1:28015:28015"   # Driver port, local host access only
-      - "127.0.0.1:${RETHINKDB_WEB_PORT:-8080}:8080"   # Admin UI, local host access only
+      - "${RETHINKDB_BIND_ADDR:-0.0.0.0}:28015:28015"   # Driver port
+      - "${RETHINKDB_BIND_ADDR:-0.0.0.0}:${RETHINKDB_WEB_PORT:-8080}:8080"   # Admin UI
     volumes:
       - rethinkdb_data:/data
     restart: unless-stopped
