@@ -648,3 +648,78 @@ def test_episode_latch_rearms_on_regime_upgrade():
     _set_regime("bear")  # NEW bear episode → deploys again
     b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 4, 20, 15), BEAR_SPEC)
     assert len(emu.signals) == 1
+
+
+# --- 2026-07-30 bear-persistence gate (residual_sleeve_bear_min_dwell_days) ---
+#
+# 17 of 19 backtests on the 2026-03-30..04-27 bull window parked 35% of NAV in
+# SQQQ on DAY 1 of a +12.8% month and were stopped out for a deterministic
+# -3.94pp. The regime label was legitimately "bear" there (ret20 -7.4%, at the
+# 20-day low) and its ret5 was MORE negative than any bar of the genuine
+# 2026-03-02..03-30 bear window, so no price threshold separates them.
+# Persistence does: that "bear" lasted 4 days, the real one 21.
+
+def _bear_spec_with_dwell(days):
+    cfg = dict(BEAR_SPEC[0]["config"])
+    cfg["residual_sleeve_bear_min_dwell_days"] = days
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def test_dwell_gate_absent_is_byte_identical():
+    _set_regime("bear")
+    _set_dwell(0)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 3, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+def test_dwell_gate_blocks_a_brand_new_bear():
+    _set_regime("bear")
+    _set_dwell(1)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 3, 15),
+                              _bear_spec_with_dwell(5))
+    assert emu.signals == [], "must not hedge into a 1-day-old bear"
+
+
+def test_dwell_gate_allows_a_sustained_bear():
+    _set_regime("bear")
+    _set_dwell(6)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 10, 15),
+                              _bear_spec_with_dwell(5))
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+def test_dwell_gate_boundary_is_inclusive():
+    _set_regime("bear")
+    _set_dwell(5)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 10, 15),
+                              _bear_spec_with_dwell(5))
+    assert len(emu.signals) == 1, "dwell == threshold must deploy"
+
+
+def test_dwell_gate_missing_cache_is_conservative():
+    """No dwell state (cache absent) reads as 0 and must BLOCK, not deploy."""
+    _set_regime("bear")
+    b._ns.pop("_strategy_cache", None)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 3, 15),
+                              _bear_spec_with_dwell(5))
+    assert emu.signals == []
+
+
+def test_dwell_gate_does_not_touch_exits():
+    """The gate is deploy-only: a held leg still auto-sells on a regime upgrade
+    even while the dwell would have blocked a fresh park."""
+    _set_regime("chop")
+    _set_dwell(0)
+    b._RESIDUAL_SLEEVE_STATE["last_park_ts"] = datetime(2026, 3, 20, 14)
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 28.0}, datetime(2026, 3, 20, 15),
+                               _bear_spec_with_dwell(5))
+    assert len(emu.signals) == 1
+    assert emu.signals[0]["sell_fraction"] == 1.0

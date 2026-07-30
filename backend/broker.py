@@ -2629,6 +2629,17 @@ def _residual_sleeve_config(cached_strategies):
                 # proxy move is down at least this much. 0 = off (always hedge in
                 # bear). Skips the -$236 SQQQ drag in a stale-bear-bull-opening.
                 "bear_require_fresh_pct": float(cfg.get("residual_sleeve_bear_require_fresh_pct", 0.0) or 0.0),
+                # 2026-07-30 minimum bear PERSISTENCE before the first park.
+                # 0 = off (default, byte-identical). 17 of 19 backtests on the
+                # 2026-03-30..04-27 bull window parked 35% of NAV in a 3x
+                # inverse on DAY 1 of a +12.8% month and were stopped out for a
+                # deterministic -3.94pp. No price threshold separates that bar
+                # from a real bear (ret20 was -7.4% AT the 20-day low, and its
+                # ret5 was MORE negative than any bar in the genuine bear
+                # window, so the fresh-decline gate above cannot help).
+                # Persistence can: that window's "bear" lasted 4 days, while
+                # 2026-03-02..03-30 runs 21 consecutive bear days.
+                "bear_min_dwell_days": int(cfg.get("residual_sleeve_bear_min_dwell_days", 0) or 0),
                 # 2026-07-23 conviction-scaled hedge (default OFF -> static
                 # bear_alloc_pct). Scale the SQQQ NAV cap UP with downtrend
                 # conviction: alloc = clamp(base + slope*max(0,-ret20-start),
@@ -3276,6 +3287,18 @@ def _residual_sleeve_deploy(
                 _log("[sleeve] bear leg SKIPPED — rally onset "
                      "(short MA reclaimed off a fresh 20d low)", "cyan")
                 return
+            # 2026-07-30 bear-persistence gate (default 0 = OFF). Gates the
+            # first park only; the existing conviction ratchet still scales the
+            # leg up afterwards, and every EXIT path (leg stop, trailing bank,
+            # protective exit, episode latch) is untouched.
+            _min_dwell = int(cfg.get("bear_min_dwell_days", 0) or 0)
+            if _min_dwell > 0:
+                _dwell_now = int(((globals().get("_strategy_cache") or {}).get(
+                    "graph_nexus_analysis") or {}).get("_bear_dwell_bars", 0) or 0)
+                if _dwell_now < _min_dwell:
+                    _log(f"[sleeve] bear leg SKIPPED — bear only {_dwell_now}d old "
+                         f"(needs {_min_dwell}d of persistence)", "cyan")
+                    return
             if _RESIDUAL_SLEEVE_STATE.get("bear_stop_episode"):
                 return  # already stopped out this bear episode — stay in cash
             # Re-entry dwell after any bear-leg exit (stop-loss/protective):
