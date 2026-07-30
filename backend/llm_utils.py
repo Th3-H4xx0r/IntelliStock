@@ -374,15 +374,22 @@ def _backoff_sleep_seconds(attempt: int, base: float = 2.0, cap: float = 60.0) -
     return exp + jitter
 
 
+#: Ceiling on an honoured Retry-After. The header is slept on directly and
+#: takes precedence over the capped backoff at every provider call site, so an
+#: uncapped value (a provider answering "Retry-After: 3600") parks a worker for
+#: an hour with no telemetry and blows through every outer join budget.
+_RETRY_AFTER_MAX_SEC = float(os.environ.get("LLM_RETRY_AFTER_MAX_SEC", "120") or 120.0)
+
+
 def _retry_after_seconds(headers: dict | None) -> int:
-    """Parse HTTP Retry-After header (seconds). Returns 0 if not present/parseable."""
+    """Parse HTTP Retry-After (seconds), bounded by _RETRY_AFTER_MAX_SEC."""
     if not headers:
         return 0
     ra = headers.get("Retry-After")
     if not ra:
         return 0
     try:
-        return max(0, int(str(ra).strip()))
+        return max(0, min(int(str(ra).strip()), int(_RETRY_AFTER_MAX_SEC)))
     except Exception:
         return 0
 
@@ -3282,8 +3289,35 @@ def google_cse_search(
 _LLM_MAX_ATTEMPT_TIMEOUT = float(os.environ.get("LLM_MAX_ATTEMPT_TIMEOUT", "300") or 300.0)
 
 
-def _attempt_timeout(base, attempt: int) -> float:
-    """Per-attempt read timeout with exponential backoff, bounded."""
+#: Total wall-clock budget for ONE _call_* invocation, across every attempt.
+#: A per-attempt cap cannot bound a ladder: Azure runs 5 attempts, so capping
+#: each rung at 300s still permits 1380s of socket time -- past the 900s
+#: maintenance join the cap was introduced to fit inside. Only a shared
+#: deadline actually bounds the call.
+_LLM_TOTAL_CALL_BUDGET = float(os.environ.get("LLM_TOTAL_CALL_BUDGET", "600") or 600.0)
+
+
+def _call_deadline(budget=None) -> float:
+    """Monotonic instant by which one _call_* invocation must be finished."""
+    try:
+        seconds = float(budget) if budget else _LLM_TOTAL_CALL_BUDGET
+    except (TypeError, ValueError):
+        seconds = _LLM_TOTAL_CALL_BUDGET
+    return time.monotonic() + max(1.0, seconds)
+
+
+def _deadline_expired(deadline) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _attempt_timeout(base, attempt: int, deadline=None) -> float:
+    """Per-attempt read timeout with exponential backoff, bounded.
+
+    Clamped to the remaining call budget when a deadline is supplied, so the
+    LAST attempt cannot run past it. Never returns <= 0; an expired deadline
+    yields a 1s attempt that fails fast rather than a negative timeout, which
+    requests would treat as no timeout at all.
+    """
     try:
         seconds = float(base or 0) or 180.0
     except (TypeError, ValueError):
@@ -3292,7 +3326,10 @@ def _attempt_timeout(base, attempt: int) -> float:
         n = max(0, int(attempt))
     except (TypeError, ValueError):
         n = 0
-    return min(seconds * (2 ** n), _LLM_MAX_ATTEMPT_TIMEOUT)
+    capped = min(seconds * (2 ** n), _LLM_MAX_ATTEMPT_TIMEOUT)
+    if deadline is not None:
+        capped = min(capped, max(1.0, deadline - time.monotonic()))
+    return max(1.0, capped)
 
 
 def _log_token_usage(provider: str, model: str, data: dict) -> None:
@@ -3431,9 +3468,10 @@ def _call_gemini(
         max_retries = max(0, int(retries or 0))
         retriable_status = {429, 500, 502, 503, 504}
 
+        _call_budget_deadline = _call_deadline()
         for attempt in range(max_retries + 1):
             # If we retry, give the model more time (up to 2x the user-provided timeout).
-            attempt_timeout = _attempt_timeout(timeout, attempt)
+            attempt_timeout = _attempt_timeout(timeout, attempt, deadline=_call_budget_deadline)
 
             try:
                 connect_timeout = min(15, attempt_timeout)
@@ -3721,8 +3759,10 @@ def _call_deepseek(
         max_retries = max(0, int(retries or 0))
         retriable_status = {429, 500, 502, 503, 504}
 
+        _call_budget_deadline = _call_deadline()
+
         for attempt in range(max_retries + 1):
-            attempt_timeout = _attempt_timeout(timeout, attempt)
+            attempt_timeout = _attempt_timeout(timeout, attempt, deadline=_call_budget_deadline)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -3937,8 +3977,10 @@ def _call_openai(
         max_retries = max(0, int(retries or 0))
         retriable_status = {429, 500, 502, 503, 504}
 
+        _call_budget_deadline = _call_deadline()
+
         for attempt in range(max_retries + 1):
-            attempt_timeout = _attempt_timeout(timeout, attempt)
+            attempt_timeout = _attempt_timeout(timeout, attempt, deadline=_call_budget_deadline)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -4677,8 +4719,10 @@ def _call_nvidia(
         max_retries = max(0, int(retries or 0))
         retriable_status = {429, 500, 502, 503, 504}
 
+        _call_budget_deadline = _call_deadline()
+
         for attempt in range(max_retries + 1):
-            attempt_timeout = _attempt_timeout(timeout, attempt)
+            attempt_timeout = _attempt_timeout(timeout, attempt, deadline=_call_budget_deadline)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = _requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -4691,6 +4735,14 @@ def _call_nvidia(
                     _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
                 except Exception:
                     pass
+                # Every sibling provider records here. Without it a hung
+                # OpenRouter call leaves NO row at all, so /llm-cost reports a
+                # clean run while the caller is blocked -- precisely the
+                # signature of the nemotron sentiment hang.
+                _safe_record(
+                    provider="nvidia", model=model, ok=False,
+                    error=f"timeout after {attempt_timeout}s",
+                )
                 return ""
             except _requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
@@ -4706,6 +4758,10 @@ def _call_nvidia(
                     )
                 except Exception:
                     pass
+                _safe_record(
+                    provider="nvidia", model=model, ok=False,
+                    error=f"{type(_req_e).__name__}: {str(_req_e)[:180]}",
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
@@ -4890,8 +4946,10 @@ def _call_openrouter(
         max_retries = max(0, int(retries or 0))
         retriable_status = {429, 500, 502, 503, 504}
 
+        _call_budget_deadline = _call_deadline()
+
         for attempt in range(max_retries + 1):
-            attempt_timeout = _attempt_timeout(timeout, attempt)
+            attempt_timeout = _attempt_timeout(timeout, attempt, deadline=_call_budget_deadline)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = _requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -4903,6 +4961,14 @@ def _call_openrouter(
                     _stash_last_http(status=None, body=f"timeout after {attempt_timeout}s", exc=_to_e)
                 except Exception:
                     pass
+                # Every sibling provider records here. Without it a hung
+                # OpenRouter call leaves NO row, so /llm-cost reports a clean
+                # run while the caller is blocked -- the exact signature of the
+                # nemotron sentiment hang.
+                _safe_record(
+                    provider="openrouter", model=model, ok=False,
+                    error=f"timeout after {attempt_timeout}s",
+                )
                 return ""
             except _requests.exceptions.RequestException as _req_e:
                 if attempt < max_retries:
@@ -4917,6 +4983,10 @@ def _call_openrouter(
                     )
                 except Exception:
                     pass
+                _safe_record(
+                    provider="openrouter", model=model, ok=False,
+                    error=f"{type(_req_e).__name__}: {str(_req_e)[:180]}",
+                )
                 return ""
 
             if r.status_code in retriable_status and attempt < max_retries:
@@ -5223,8 +5293,13 @@ def _call_azure_openai(
         _LOW_TOKEN_MAX_RETRIES = 2
 
 
+        _call_budget_deadline = _call_deadline()
         for attempt in range(max_retries + _LOW_TOKEN_MAX_RETRIES + 1):
-            attempt_timeout = _attempt_timeout(timeout, attempt)
+            # Low-token retries add ATTEMPTS, not backoff. Letting them climb
+            # the ladder pushed Azure's worst case to 1380s of socket time,
+            # past the 900s maintenance join the cap exists to fit inside, so
+            # they reuse the last rung instead of extending it.
+            attempt_timeout = _attempt_timeout(timeout, min(attempt, max_retries), deadline=_call_budget_deadline)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
