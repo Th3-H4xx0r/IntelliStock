@@ -4397,9 +4397,18 @@ def _load_nexus_processed_trade_context_dates(instance_id_value, date_keys):
 def _historic_lookback_resume_dates(instance_id_value, lookback_opens):
     """Thin shim — delegates to ``nexus_lookback_db`` so the resume-date
     logic has a single home (the legacy duplicate here was diverging
-    from the extracted module after the index refactor)."""
+    from the extracted module after the index refactor).
+
+    A research run may resume from the research rows it wrote on a previous
+    attempt. Without this it restarted all 85 lookback days every time, because
+    the resume filter only accepted strict_verified provenance and a research
+    run never produces any.
+    """
     from nexus_lookback_db import historic_lookback_resume_dates
-    return historic_lookback_resume_dates(instance_id_value, lookback_opens)
+    _opts = globals().get("_evidence_options") or {}
+    _research = str(_opts.get("pit_mode") or "strict").strip().lower() == "research"
+    return historic_lookback_resume_dates(
+        instance_id_value, lookback_opens, allow_research=_research)
 
 
 def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, portfolio_emulator, time_increment, alpaca_key, alpaca_secret):

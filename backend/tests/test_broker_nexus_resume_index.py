@@ -314,10 +314,14 @@ def test_historic_resume_requires_strict_rows_by_default():
     ) as loader:
         nlb.historic_lookback_resume_dates("inst|scope", opens)
 
+    # Strict by default remains the invariant. allow_research is opt-in and
+    # only a research run passes it — a strict run resuming from unverified
+    # rows would launder current-state data into a strict result.
     loader.assert_called_once_with(
         "inst|scope",
         ["2025-12-31"],
         require_strict=True,
+        allow_research=False,
     )
 
 

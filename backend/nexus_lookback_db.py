@@ -45,6 +45,37 @@ def _strict_pit_trade_context_row(row: dict) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
+def _resumable_trade_context_row(row: dict, *, allow_research: bool) -> bool:
+    """Whether a persisted row lets a lookback day be SKIPPED on resume.
+
+    A strict run may only resume from strict evidence -- resuming it from
+    unverified rows would launder current-state data into a strict result.
+
+    A research run is a different matter. It writes pit_provenance=
+    "legacy_unverified" by design, so the strict predicate rejected every day
+    it had just finished and each rerun restarted all 85 days from scratch. A
+    research run resuming research rows is self-consistent, so accept those
+    (and strict rows, which are strictly better evidence). The manifest/as_of
+    completeness checks still apply, so a half-written row never counts.
+    """
+    if _strict_pit_trade_context_row(row):
+        return True
+    if not allow_research or not isinstance(row, dict):
+        return False
+    if str(row.get("pit_provenance") or "").strip() != "legacy_unverified":
+        return False
+    if not str(row.get("pit_manifest_id") or "").strip():
+        return False
+    raw_as_of = str(row.get("pit_as_of") or "").strip()
+    if not raw_as_of:
+        return False
+    try:
+        parsed = datetime.fromisoformat(raw_as_of.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def _log(msg: str, color: str = "white") -> None:
     """Best-effort log — falls back to print if intellistock_logger isn't
     available (e.g. in unit tests)."""
@@ -132,6 +163,7 @@ def load_nexus_processed_trade_context_dates(
     date_keys: Iterable[str],
     *,
     require_strict: bool = False,
+    allow_research: bool = False,
 ) -> set[str]:
     """Return the subset of ``date_keys`` for which at least one
     ``GraphNexusTradeContexts`` row exists for ``instance_id_value``.
@@ -185,7 +217,10 @@ def load_nexus_processed_trade_context_dates(
             str(row.get("date_key") or "").strip()
             for row in rows
             if row.get("date_key")
-            and (not require_strict or _strict_pit_trade_context_row(row))
+            and (
+                not require_strict
+                or _resumable_trade_context_row(row, allow_research=allow_research)
+            )
         }
     except Exception:
         return set()
@@ -201,6 +236,7 @@ def historic_lookback_resume_dates(
     lookback_opens: list,
     *,
     require_strict: bool = True,
+    allow_research: bool = False,
 ) -> list:
     """Given the full ordered list of trading-session opens, return the
     suffix starting at the first day NOT yet processed. Returns the
@@ -214,6 +250,7 @@ def historic_lookback_resume_dates(
         instance_id_value,
         date_keys,
         require_strict=require_strict,
+        allow_research=allow_research,
     )
     if not processed:
         return ordered
