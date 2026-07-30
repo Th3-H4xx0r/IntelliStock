@@ -2715,6 +2715,15 @@ def _regime_position_cap_hard(cached_strategies):
                     _rec = _regime_recovery_hard_cap(cfg, mx, caps["chop"])
                     if _rec is not None:
                         return "recovery", _rec
+                # 2026-07-30 rally-onset: mirror the strategy's Z4.1 release. A1
+                # directly above is the precedent -- a cap raised only on the
+                # strategy side is blocked at this hop. Gated by the SAME
+                # strategy-side flag that produces the signal, so one switch
+                # covers both halves. Only ever raises (bear cap -> chop cap).
+                if (regime == "bear"
+                        and bool(cfg.get("regime_rally_onset_enabled", False))
+                        and _sleeve_rally_onset()):
+                    return "rally-onset", max(caps["bear"], caps["chop"])
                 return regime, caps[regime]
         return None
     except Exception:
@@ -2778,6 +2787,21 @@ def _sleeve_market_regime():
         return str(cache.get("_market_regime") or "").strip().lower()
     except Exception:
         return ""
+
+
+def _sleeve_rally_onset():
+    """2026-07-30 rally-onset flag, stamped by the nexus detector into
+    `_market_regime_diag["rally_onset"]` (default OFF at the source, so this is
+    False for every existing config). True means the tape reclaimed its short MA
+    and lifted off a FRESH 20-session low while the label is still "bear".
+    Consumers may only RELAX a bear restriction on it. False when unavailable —
+    conservative."""
+    try:
+        cache = (globals().get("_strategy_cache") or {}).get(
+            "graph_nexus_analysis") or {}
+        return bool((cache.get("_market_regime_diag") or {}).get("rally_onset"))
+    except Exception:
+        return False
 
 
 def _residual_sleeve_prepare(data, prices, current_time, cached_strategies,
@@ -3239,6 +3263,19 @@ def _residual_sleeve_deploy(
                         return
                 except (TypeError, ValueError, AttributeError):
                     pass
+            # 2026-07-30 rally-onset suppressor (default OFF). The confirmed
+            # regime lags a V-bottom by ~2 sessions (see _rally_onset in
+            # graph_nexus_analysis): parking — or ADDING to — a 3x inverse leg on
+            # a tape that has already reclaimed its short MA off a FRESH 20-day
+            # low is the most expensive bear behavior there is. This gates the
+            # ADD only: the leg stop-loss, the trailing bank, the protective exit
+            # and the one-stop-per-episode latch are untouched, and the flag is
+            # False on every bar of the 2026-03-02..03-30 bear window whose
+            # sleeve produces 116% of that window's profit.
+            if _sleeve_rally_onset():
+                _log("[sleeve] bear leg SKIPPED — rally onset "
+                     "(short MA reclaimed off a fresh 20d low)", "cyan")
+                return
             if _RESIDUAL_SLEEVE_STATE.get("bear_stop_episode"):
                 return  # already stopped out this bear episode — stay in cash
             # Re-entry dwell after any bear-leg exit (stop-loss/protective):

@@ -4,11 +4,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_rethinkdb_host_ports_bind_only_to_loopback():
+def test_rethinkdb_host_ports_bind_through_a_configurable_address():
+    """RethinkDB runs unauthenticated, so its publish address is a security
+    control. It was pinned to 127.0.0.1, which made the database unreachable
+    from any other host — including over a private Tailscale network — so the
+    address is now RETHINKDB_BIND_ADDR. The invariant that still matters is that
+    BOTH ports go through that single variable: a bare "28015:28015" would
+    publish an unauthenticated database on every interface with no way to
+    override it per host.
+    """
     compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
-    assert '"127.0.0.1:28015:28015"' in compose
-    assert '"127.0.0.1:${RETHINKDB_WEB_PORT:-8080}:8080"' in compose
+    assert '"${RETHINKDB_BIND_ADDR:-0.0.0.0}:28015:28015"' in compose
+    assert ('"${RETHINKDB_BIND_ADDR:-0.0.0.0}:${RETHINKDB_WEB_PORT:-8080}:8080"'
+            in compose)
     assert '\n      - "28015:28015"' not in compose
+    assert '\n      - "8080:8080"' not in compose
 
 
 def test_backend_requires_socket_control_master_key_during_compose_interpolation():

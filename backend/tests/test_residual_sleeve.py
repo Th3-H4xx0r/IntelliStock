@@ -33,6 +33,10 @@ _ns = {
                                "last_bear_exit_ts": None},
     "_sleeve_market_regime": lambda: "bull",
     "_sleeve_circuit_tier": lambda: "",
+    # Rally-onset suppressor (default OFF in production). Both
+    # _residual_sleeve_deploy and _regime_position_cap_hard consult it, so it
+    # must be stubbed here or they raise NameError under the AST harness.
+    "_sleeve_rally_onset": lambda: False,
 }
 for _node in _tree.body:
     if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:

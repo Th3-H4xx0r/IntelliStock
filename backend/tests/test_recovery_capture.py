@@ -24,7 +24,11 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
 _WANTED = {"_detect_market_regime", "_apply_regime_hysteresis",
-           "_recovery_override_regime", "_next_recovery_flag", "_apply_recovery_cap"}
+           "_recovery_override_regime", "_next_recovery_flag", "_apply_recovery_cap",
+           # _detect_market_regime stamps the rally-onset flag unconditionally;
+           # omitting it here raises NameError inside the detector's try/except
+           # and silently degrades every case to the blind "chop" fallback.
+           "_rally_onset"}
 _src = open(os.path.join(_backend, "strategies", "graph_nexus_analysis.py")).read()
 _tree = ast.parse(_src)
 

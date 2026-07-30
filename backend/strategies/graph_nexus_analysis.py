@@ -6888,6 +6888,87 @@ def _recovery_override_regime(closes, current, ret5, config, diag):
     return None
 
 
+def _rally_onset(closes, current, config, diag) -> bool:
+    """2026-07-30 rally-onset flag (default OFF; pure apart from `diag`).
+
+    `_recovery_override_regime` above cannot fire on the first bars off a
+    V-bottom because two of its three predicates look BACKWARD ACROSS the crash
+    leg: `ret5` measures from 5 sessions ago and `off_low` normalises against a
+    `hi20` that still holds the pre-crash high. Replayed against bt#426579's
+    bull window (2026-03-30..04-27, SPY proxy):
+
+        sim     ret20    ret5   >ma10  off_low  %off 20d low  bars since low
+        03-30   -7.57   -2.23   False   0.000    +0.00        0  <- IS the low
+        03-31   -7.93   -3.57   False   0.000    +0.00        0  <- IS the low
+        04-01   -4.41   -0.43   True    0.346    +2.91        1
+        04-02   -4.36   -0.24   True    0.472    +3.68        2
+        04-03   -3.74   +1.66   True    0.515    +3.78        3  <- override fires
+
+    So the label stayed "bear" for two sessions AFTER the tape had reclaimed its
+    short MA and lifted ~3% off a low set one or two sessions earlier, with
+    max_positions_bear=2 pinning the book at ~85% cash through the sharpest leg
+    of the rally.
+
+    This flag exists ONLY to bridge those bars. It NEVER changes the regime
+    label: the detector still returns "bear", so the bear RS gate, the extension
+    gate, the bear-book trim, the sleeve's protective exit / leg stop / episode
+    latch and the profile overlay are all untouched. Its consumers may only
+    RELAX a bear-side restriction (position caps; the sleeve's bear-leg ADD).
+
+    Predicates, all required:
+      1. short-MA reclaim -- REUSES `regime_recovery_ma_bars`, the same knob and
+         value the recovery override uses;
+      2. depth: >= `regime_rally_onset_bounce_pct` above the 20-session closing
+         LOW -- measured off the low, not normalised by the range, so a stale
+         pre-crash high cannot suppress it;
+      3. freshness: that low was set within
+         `regime_rally_onset_max_bars_since_low` sessions. This is what makes it
+         a V-turn detector rather than a bear-rally chaser, and it bounds the
+         flag's lifetime without any persisted state.
+
+    Calibration: over every SPY session 2022-01-01..2026-06-18 that the ret20
+    branch labels bear (207 sim days), the defaults fire on 5 days (2022-10-05,
+    2022-10-14, 2025-03-18, 2026-04-01, 2026-04-02); 4 of 5 are followed by a
+    positive 5-day move, mean +1.83%. ZERO fire inside 2026-03-02..03-30 -- that
+    window never reclaims its 10-day MA on any of its 20 sim days, so the SQQQ
+    sleeve producing 116% of that window's profit is structurally unreachable by
+    this flag. Loosening either threshold degrades fast (bounce>=2.0 /
+    since_low<=5 fires on 27 days, mean 5d -0.53%).
+    """
+    if not bool(config.get("regime_rally_onset_enabled", False)) or len(closes) < 21:
+        return False
+    try:
+        _ma_bars = int(config.get("regime_recovery_ma_bars", 20) or 20)
+    except (TypeError, ValueError):
+        _ma_bars = 20
+    if _ma_bars < 2:
+        _ma_bars = 20
+    try:
+        _bounce_min = float(config.get("regime_rally_onset_bounce_pct", 2.5) or 2.5)
+    except (TypeError, ValueError):
+        _bounce_min = 2.5
+    _raw_since = config.get("regime_rally_onset_max_bars_since_low", 2)
+    try:
+        _max_since_low = 2 if _raw_since is None else int(_raw_since)
+    except (TypeError, ValueError):
+        _max_since_low = 2
+    if _max_since_low < 0:
+        _max_since_low = 2
+    _ma = sum(closes[-_ma_bars:]) / min(len(closes), _ma_bars)
+    _w = closes[-20:]
+    _lo20 = min(_w)
+    if _lo20 <= 0:
+        return False
+    _bounce = (current - _lo20) / _lo20 * 100.0
+    _since_low = len(_w) - 1 - max(i for i, v in enumerate(_w) if v == _lo20)
+    if current > _ma and _bounce >= _bounce_min and _since_low <= _max_since_low:
+        diag["rally_onset"] = {"bounce": round(_bounce, 2),
+                               "since_low": _since_low,
+                               "ma_bars": _ma_bars}
+        return True
+    return False
+
+
 def _detect_market_regime(
     strategy_cache: dict | None,
     config: dict,
@@ -6985,6 +7066,11 @@ def _detect_market_regime(
         # override below.
         _ret5 = ((current - closes[-6]) / closes[-6] * 100.0) if (len(closes) >= 6 and closes[-6] > 0) else 0.0
         diag["ret5"] = round(_ret5, 2)
+        # 2026-07-30 rally-onset flag (default OFF) -- see _rally_onset. Stamped
+        # UNCONDITIONALLY, exactly like ret5 above, because its consumers (the
+        # position caps and the sleeve bear leg) run on bars this function
+        # labels "bear". It never affects the label returned below.
+        _rally_onset(closes, current, config, diag)
         ma_50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else current
         ma_200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else current
         bear_dd_pct = float(config.get("regime_bear_spy_drawdown_pct", 5.0) or 5.0)
@@ -27455,6 +27541,28 @@ class GraphNexusAnalysis:
                             f"cap {_z41_pre_rec}->{_z41_capped}",
                             "cyan",
                         )
+                    # 2026-07-30 rally-onset capacity release (default OFF). See
+                    # _rally_onset in the detector: on 2026-04-01/04-02 the tape
+                    # had reclaimed its 10-day MA and was +2.9%/+3.7% off a 20-day
+                    # low set 1-2 sessions earlier, but ret5 (-0.43/-0.24) and
+                    # off_low (0.346/0.472) still carried the 03-26..03-30 crash
+                    # leg, so the recovery override could not fire and the book
+                    # stayed pinned at max_positions_bear=2 (~85% cash) through
+                    # the sharpest leg of the rally. Release the CAP only, to the
+                    # CHOP cap, and only from "bear" (never crash). The regime
+                    # LABEL is unchanged, so the bear RS gate, the extension gate,
+                    # the bear-book trim and the sleeve keep their bear behavior.
+                    # Only ever raises.
+                    if _z41_regime == "bear" and bool(
+                            ((strategy_cache or {}).get("_market_regime_diag") or {}).get("rally_onset")):
+                        _z41_ro = _z41_caps["chop"]
+                        if _z41_ro > _z41_capped:
+                            _log(
+                                f"Rally-onset capacity: regime={_z41_regime} (label unchanged) "
+                                f"cap {_z41_capped}->{_z41_ro}",
+                                "cyan",
+                            )
+                            _z41_capped = _z41_ro
                     # 2026-07-26 bear capacity latch (default OFF). Hold the BEAR
                     # cap through a plain-chop interlude so the bear-book trim's
                     # freed slots are not immediately refilled.
