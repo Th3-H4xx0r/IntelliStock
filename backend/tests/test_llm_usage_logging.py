@@ -50,6 +50,13 @@ def test_negative_or_bogus_values_are_ignored():
     assert fmt({"prompt_tokens": -5, "completion_tokens": None}) == "n/a"
 
 
-def test_the_log_line_actually_includes_it():
+def test_the_log_line_includes_it_only_when_known():
+    """Several paths (OpenRouter structured calls among them) print their token
+    counts from llm_utils but never populate trace["usage"], so an
+    unconditional field rendered a misleading "tokens=n/a" on the most common
+    line. The field is emitted only when the provider actually reported usage;
+    /backtests/{id}/llm-cost remains the authoritative total either way."""
     src = open(g.__file__).read()
-    assert "tokens={_format_llm_usage(trace.get('usage'))}" in src
+    assert '_usage_text = _format_llm_usage(trace.get("usage"))' in src
+    assert '_tokens_field = "" if _usage_text == "n/a"' in src
+    assert '"{_tokens_field}"'.strip('"') in src

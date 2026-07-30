@@ -1864,10 +1864,16 @@ def _build_llm_trace(role: str, provider: str, model: str, prompt: str, system_p
         err_text = trace.get("error") or ""
         if err_text:
             err_suffix = f" error={err_text[:220]!r}"
+    # Only emit the tokens field when the provider actually reported usage.
+    # Several paths (notably OpenRouter structured calls) print their counts
+    # from llm_utils but never populate trace["usage"], so an unconditional
+    # field rendered a misleading "tokens=n/a" on the most common line.
+    _usage_text = _format_llm_usage(trace.get("usage"))
+    _tokens_field = "" if _usage_text == "n/a" else f"tokens={_usage_text} "
     _log(
         f"LLM/{role}: provider={trace['provider']} model={trace['effective_model']} ok={trace['ok']} "
         f"fallback={trace['fallback_used']} raw_json_fallback={trace['raw_json_fallback_used']} "
-        f"tokens={_format_llm_usage(trace.get('usage'))} "
+        f"{_tokens_field}"
         f"prompt={trace['prompt_hash'][:10]}...{err_suffix}",
         "cyan" if trace["ok"] else "yellow",
     )

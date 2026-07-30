@@ -3274,6 +3274,27 @@ def google_cse_search(
     return results
 
 
+#: Ceiling for a single attempt's read timeout. Doubling without a ceiling let
+#: one hung provider request hold the socket for 720s on attempt 2 -- long
+#: enough to outlive the 900s event-maintenance join and stall an entire
+#: lookback bar for 12+ minutes with nothing logged and no retry fired.
+#: Retrying is useful; waiting 12 minutes on one attempt is not.
+_LLM_MAX_ATTEMPT_TIMEOUT = float(os.environ.get("LLM_MAX_ATTEMPT_TIMEOUT", "300") or 300.0)
+
+
+def _attempt_timeout(base, attempt: int) -> float:
+    """Per-attempt read timeout with exponential backoff, bounded."""
+    try:
+        seconds = float(base or 0) or 180.0
+    except (TypeError, ValueError):
+        seconds = 180.0
+    try:
+        n = max(0, int(attempt))
+    except (TypeError, ValueError):
+        n = 0
+    return min(seconds * (2 ** n), _LLM_MAX_ATTEMPT_TIMEOUT)
+
+
 def _log_token_usage(provider: str, model: str, data: dict) -> None:
     """Log input/output token counts from LLM API response."""
     try:
@@ -3412,7 +3433,7 @@ def _call_gemini(
 
         for attempt in range(max_retries + 1):
             # If we retry, give the model more time (up to 2x the user-provided timeout).
-            attempt_timeout = timeout if attempt == 0 else timeout * 2
+            attempt_timeout = _attempt_timeout(timeout, attempt)
 
             try:
                 connect_timeout = min(15, attempt_timeout)
@@ -3701,7 +3722,7 @@ def _call_deepseek(
         retriable_status = {429, 500, 502, 503, 504}
 
         for attempt in range(max_retries + 1):
-            attempt_timeout = timeout if attempt == 0 else timeout * 2
+            attempt_timeout = _attempt_timeout(timeout, attempt)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -3917,7 +3938,7 @@ def _call_openai(
         retriable_status = {429, 500, 502, 503, 504}
 
         for attempt in range(max_retries + 1):
-            attempt_timeout = timeout if attempt == 0 else timeout * 2
+            attempt_timeout = _attempt_timeout(timeout, attempt)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -4657,7 +4678,7 @@ def _call_nvidia(
         retriable_status = {429, 500, 502, 503, 504}
 
         for attempt in range(max_retries + 1):
-            attempt_timeout = timeout if attempt == 0 else timeout * 2
+            attempt_timeout = _attempt_timeout(timeout, attempt)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = _requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -4870,7 +4891,7 @@ def _call_openrouter(
         retriable_status = {429, 500, 502, 503, 504}
 
         for attempt in range(max_retries + 1):
-            attempt_timeout = timeout if attempt == 0 else timeout * 2
+            attempt_timeout = _attempt_timeout(timeout, attempt)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = _requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
@@ -5203,7 +5224,7 @@ def _call_azure_openai(
 
 
         for attempt in range(max_retries + _LOW_TOKEN_MAX_RETRIES + 1):
-            attempt_timeout = timeout if attempt == 0 else timeout * 2
+            attempt_timeout = _attempt_timeout(timeout, attempt)
             connect_timeout = min(15, attempt_timeout)
             try:
                 r = requests.post(url, headers=headers, json=body, timeout=(connect_timeout, attempt_timeout))
