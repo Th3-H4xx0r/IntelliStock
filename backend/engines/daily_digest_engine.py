@@ -97,13 +97,21 @@ def _call_llm(prompt: str, config: dict) -> str | None:
 
 def _call_llm_gemini(prompt: str, model: str, api_key: str) -> str | None:
     try:
-        url = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s" % (model, api_key)
+        # The key travels in a HEADER, not the query string. As `?key=%s` it
+        # was written verbatim into every proxy, gateway and access log between
+        # here and Google. chatbot/llm.py already uses x-goog-api-key.
+        url = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.5, "maxOutputTokens": 2048},
         }
         req_module = __import__("urllib.request", fromlist=["request"])
-        req = req_module.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+        req = req_module.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
         with req_module.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             for c in data.get("candidates", []):

@@ -27,7 +27,10 @@ _ANALYST_MAX_ATTEMPTS = max(1, int(os.environ.get("KALSHI_ANALYST_LLM_ATTEMPTS",
 _ANALYST_BACKOFF_BASE_SEC = max(0.0, float(os.environ.get("KALSHI_ANALYST_LLM_BACKOFF_SEC", "2")))
 _ANALYST_BACKOFF_CAP_SEC = max(0.0, float(os.environ.get("KALSHI_ANALYST_LLM_BACKOFF_CAP_SEC", "20")))
 # Optional per-attempt timeout override (seconds); blank -> inherit llm_utils default.
-_ANALYST_TIMEOUT_SEC = os.environ.get("KALSHI_ANALYST_LLM_TIMEOUT_SEC", "").strip()
+# Defaulted rather than opt-in: the env var was unset everywhere, so each of
+# 3 attempts inherited the 180s global default (~9 min per match), and the live
+# in-play tilt invokes this synchronously inside a 30s monitoring tick.
+_ANALYST_TIMEOUT_SEC = os.environ.get("KALSHI_ANALYST_LLM_TIMEOUT_SEC", "30").strip()
 
 
 def build_prompt(features, markets: list[str], news: str = "") -> str:

@@ -434,13 +434,34 @@ def _load_finbert(strategy_cache: dict):
         return cache["tokenizer"], cache["model"]
 
     try:
+        # This runs INLINE on the broker thread inside run_once. Without a hub
+        # timeout a slow or wedged huggingface.co stalls the entire strategy
+        # pass, and the `except Exception` below never fires because a hang is
+        # not an exception. Bound the hub before importing transformers, since
+        # huggingface_hub reads these at import time.
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT",
+                              os.environ.get("FINBERT_HUB_TIMEOUT_SEC", "15"))
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT",
+                              os.environ.get("FINBERT_HUB_TIMEOUT_SEC", "15"))
+
         from transformers import AutoTokenizer, AutoModelForSequenceClassification
         import torch
 
         model_name = "ProsusAI/finbert"
         _log("Loading FinBERT model (first run)...", "cyan")
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        # Prefer a baked-in/cached copy; only reach the network when the cache
+        # is genuinely empty, and even then under the timeouts set above.
+        _offline = str(os.environ.get("FINBERT_LOCAL_ONLY", "")).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+            model = AutoModelForSequenceClassification.from_pretrained(model_name, local_files_only=True)
+        except Exception as _cache_miss:
+            if _offline:
+                raise
+            _log(f"FinBERT not in local cache ({type(_cache_miss).__name__}); "
+                 "fetching from the hub under a bounded timeout", "yellow")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForSequenceClassification.from_pretrained(model_name)
         model.eval()
 
         cache["tokenizer"] = tokenizer

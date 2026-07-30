@@ -4210,12 +4210,23 @@ def _classify_company_article_records(
                 ): chunk
                 for chunk in chunks
             }
-            for idx, future in enumerate(as_completed(future_map), 1):
+            from llm_deadline import collect_bounded as _collect_bounded
+            _raw = _collect_bounded(
+                list(future_map),
+                per_call_timeout=_llm_call_window(120),
+                max_total=_llm_pool_ceiling(120, len(chunks)),
+                on_error=lambda exc, _f: (
+                    _raise_model_evidence_error(exc),
+                    _log(f"Company article LLM worker failed: {exc}", "yellow"),
+                ),
+                log=_log, label="company-article batches",
+            )
+            for idx, _res in enumerate(_raw, 1):
                 try:
-                    docs, trace_rows = _normalize_llm_rows_and_traces(future.result(), context="company_worker")
+                    docs, trace_rows = _normalize_llm_rows_and_traces(_res, context="company_worker")
                 except Exception as exc:
                     _raise_model_evidence_error(exc)
-                    _log(f"Company article LLM worker failed: {exc}", "yellow")
+                    _log(f"Company article normalize failed: {exc}", "yellow")
                     continue
                 traces.extend(trace_rows)
                 docs_to_store.extend(docs)
@@ -4355,12 +4366,23 @@ def _classify_macro_article_records(
                 ): chunk
                 for chunk in chunks
             }
-            for idx, future in enumerate(as_completed(future_map), 1):
+            from llm_deadline import collect_bounded as _collect_bounded
+            _raw = _collect_bounded(
+                list(future_map),
+                per_call_timeout=_llm_call_window(90),
+                max_total=_llm_pool_ceiling(90, len(chunks)),
+                on_error=lambda exc, _f: (
+                    _raise_model_evidence_error(exc),
+                    _log(f"Macro article LLM worker failed: {exc}", "yellow"),
+                ),
+                log=_log, label="macro-article batches",
+            )
+            for idx, _res in enumerate(_raw, 1):
                 try:
-                    docs, trace_rows = _normalize_llm_rows_and_traces(future.result(), context="macro_worker")
+                    docs, trace_rows = _normalize_llm_rows_and_traces(_res, context="macro_worker")
                 except Exception as exc:
                     _raise_model_evidence_error(exc)
-                    _log(f"Macro article LLM worker failed: {exc}", "yellow")
+                    _log(f"Macro article normalize failed: {exc}", "yellow")
                     continue
                 traces.extend(trace_rows)
                 docs_to_store.extend(docs)
@@ -4949,14 +4971,27 @@ def _maintain_active_events(
         if n_batches == 1:
             batch_results.append(_run_maint_batch(candidate_batches[0]))
         else:
-            with ThreadPoolExecutor(max_workers=_maint_max_workers) as _pool:
+            # Bounded: this inner join used `_as_completed(_futs)` and
+            # `_fut.result()` with no timeout, so one wedged batch pinned the
+            # stage and the 900s outer join then discarded ALL of it. Budget
+            # stays inside that outer join so partial results survive.
+            from llm_deadline import collect_bounded, shutdown_bounded
+            _pool = ThreadPoolExecutor(max_workers=_maint_max_workers)
+            try:
                 _futs = {}
                 for _bi, b in enumerate(candidate_batches):
                     _futs[_pool.submit(_run_maint_batch, b)] = b
                     if _bi < len(candidate_batches) - 1:
                         time_sleep(0.1)  # V16: reduced stagger (llm_utils handles 429 retries)
-                for _fut in _as_completed(_futs):
-                    batch_results.append(_fut.result())
+                _collected = collect_bounded(
+                    list(_futs),
+                    per_call_timeout=_llm_call_window(_maint_timeout),
+                    max_total=_llm_pool_ceiling(_maint_timeout, len(candidate_batches)),
+                    log=_log, label="event-maintenance batches",
+                )
+                batch_results.extend(_collected)
+            finally:
+                shutdown_bounded(_pool)
 
         # Merge updates across batches — keep highest-confidence entry per cluster_key
         merged_by_ck: dict[str, dict] = {}
@@ -14668,6 +14703,27 @@ def _overlay_llm_key_available(config) -> bool:
     return False
 
 
+def _llm_call_window(per_call_sec, slack: int = 30) -> float:
+    """How long ONE LLM call may go without completing before the pool treats
+    it as stalled. Per CALL, not per batch: a large healthy batch must never be
+    cut off just for being large. The window restarts on every completion."""
+    try:
+        base = float(per_call_sec or 0) or 180.0
+    except (TypeError, ValueError):
+        base = 180.0
+    return base + slack
+
+
+def _llm_pool_ceiling(per_call_sec, n_items: int, slack: int = 60) -> float:
+    """Absolute ceiling for a pool, for the pathological case where calls
+    trickle in just fast enough to keep resetting the per-call window."""
+    try:
+        base = float(per_call_sec or 0) or 180.0
+    except (TypeError, ValueError):
+        base = 180.0
+    return base * max(1, int(n_items or 1)) + slack
+
+
 def _activate_point_in_time_graph_scope(
     context,
     *,
@@ -21291,6 +21347,10 @@ def _apply_etf_trade_overlay(
             max_output_tokens=_overlay_max_output_tokens(config),
             retries=2,
             output_retries=2,
+            # The stock leg has always passed this; the ETF leg did not, so it
+            # silently inherited the 180s env default instead of the 60s the
+            # operator configured.
+            timeout_sec=int((config or {}).get("overlay_llm_timeout_sec", 60) or 60),
             provider_config=provider_config,
             prefer_raw_json=True,
         )

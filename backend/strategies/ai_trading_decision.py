@@ -75,7 +75,12 @@ def _call_llm(
             attribution_keys={
                 "call_site": "ai_trading_decision.get_final_decision",
             },
-            max_output_tokens=max_tokens,
+            # Live decision path: 180s x 3 attempts = 540s PER SYMBOL, serially.
+        # A timeout here is indistinguishable from "no override", so it silently
+        # became "keep current decision" after nine minutes of blocking.
+        timeout_sec=int(os.environ.get("AI_TRADING_DECISION_LLM_TIMEOUT_SEC", "30") or 30),
+        retries=1,
+        max_output_tokens=max_tokens,
             provider_config=resolved_provider_config,
         )
         if not (out and out.strip()):

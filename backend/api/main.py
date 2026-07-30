@@ -859,6 +859,22 @@ class UpdateBrokerageBody(BaseModel):
     alpaca_data_feed: Optional[str] = Field(default=None, pattern="^(iex|sip)$")
 
 
+def _require_loopback(request) -> None:
+    """Reject anything that did not originate inside the container.
+
+    llm_utils posts raw model output to this endpoint over plain HTTP with no
+    token; adding auth would break that caller, so the boundary is the network
+    instead. Without it the route is an unauthenticated disk-fill primitive.
+    """
+    host = ""
+    try:
+        host = (request.client.host or "") if request.client else ""
+    except Exception:
+        host = ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="loopback only")
+
+
 def _run(f, *args, **kwargs) -> Any:
     try:
         return f(*args, **kwargs)
@@ -1573,6 +1589,10 @@ def api_test_llm_config(body: LlmConfigTestBody, conn=Depends(conn_dependency), 
         timeout_sec=30,
         retries=0,
         output_retries=0,
+        # retries=0 alone did NOT make this single-shot: http_retries defaults
+        # to 2, and a rate-limited provider backs off 60s then 120s, so this
+        # "fast-fail 30s" endpoint could hold an anyio threadpool thread ~270s.
+        http_retries=0,
         provider_config=provider_config,
     )
     _structured_elapsed_ms = int((time.monotonic() - _structured_started) * 1000)
@@ -5595,9 +5615,17 @@ class LLMOutputBody(BaseModel):
     logged_at: Optional[str] = None
 
 
+#: Ceiling on one stored raw-output log. Unbounded writes on an unauthenticated
+#: endpoint are a disk-fill primitive.
+_LLM_OUTPUT_MAX_CHARS = int(os.environ.get("LLM_OUTPUT_MAX_CHARS", "200000") or 200000)
+
+
 @app.post("/llm/outputs", response_class=JSONResponse)
-def api_llm_output_save(body: LLMOutputBody):
-    """Save a raw LLM output log. Unprotected — called internally by llm_utils."""
+def api_llm_output_save(body: LLMOutputBody, request: Request):
+    """Save a raw LLM output log. Loopback-only: llm_utils posts to it from
+    inside the container. It had no auth and no size cap, so anything that
+    could reach the port could fill the disk."""
+    _require_loopback(request)
     import uuid as _uuid
     output_id = _uuid.uuid4().hex
     os.makedirs(_LLM_OUTPUT_LOG_DIR, exist_ok=True)
@@ -5612,15 +5640,19 @@ def api_llm_output_save(body: LLMOutputBody):
     if body.prompt_hash:
         lines.append(f"prompt_hash: {body.prompt_hash}")
     lines.append("")
-    lines.append(body.raw_output)
+    _raw = body.raw_output or ""
+    if len(_raw) > _LLM_OUTPUT_MAX_CHARS:
+        _raw = _raw[:_LLM_OUTPUT_MAX_CHARS] + f"\n...[truncated at {_LLM_OUTPUT_MAX_CHARS} chars]"
+    lines.append(_raw)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     return {"id": output_id}
 
 
 @app.get("/llm/outputs/{output_id}", response_class=JSONResponse)
-def api_llm_output_get(output_id: str):
-    """Retrieve a raw LLM output log by ID. Unprotected."""
+def api_llm_output_get(output_id: str, current_user: dict = Depends(get_current_user)):
+    """Retrieve a raw LLM output log by ID. Authenticated: these files hold raw
+    model output, which can contain prompt content."""
     import re as _re
     if not _re.match(r"^[a-f0-9]{32}$", output_id):
         raise HTTPException(status_code=400, detail="Invalid output ID")

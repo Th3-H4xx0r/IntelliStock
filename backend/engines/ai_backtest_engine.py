@@ -703,6 +703,11 @@ def _call_structured_llm(prompt: str, config: dict, output_type: Any, system_pro
             max_output_tokens=max_output_tokens,
             retries=2,
             output_retries=2,
+            # retries were set but timeout_sec was not, so each of 3 attempts
+            # got the full 180s default and http_retries added 2 more beneath
+            # each, with 60s/120s backoff on a 429.
+            timeout_sec=90,
+            http_retries=1,
             temperature=0.3,
             provider_config=provider_config,
         )
