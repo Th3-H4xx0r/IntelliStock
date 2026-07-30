@@ -67,3 +67,44 @@ def test_research_is_a_valid_declared_value():
 def test_unknown_pit_mode_is_still_rejected():
     with pytest.raises(Exception):
         validate_evidence_options({"pit_mode": "yolo"})
+
+
+# ------------------------------------------------------- client body shapes
+def test_mobile_and_web_bodies_carry_no_pit_mode():
+    """Neither client sends pit_mode, which is the point.
+
+    mobile/lib/.../backtest_detail_controller.dart builds
+    {instance_id, stocks, start_date, end_date, granularity, initial_cash,
+     emulate_fee_venue} and POSTs /backtests. The web UI sends the same shape.
+    Both therefore inherit the equities default from action_create_backtest
+    rather than each needing their own copy of the decision.
+    """
+    for body in (
+        # mobile rerun
+        {"instance_id": "alpaca-main", "stocks": ["AAPL"], "start_date": "2026-03-02",
+         "end_date": "2026-03-30", "granularity": "3600", "initial_cash": 6000,
+         "emulate_fee_venue": "default"},
+        # web "new backtest"
+        {"instance_id": "alpaca-main", "stocks": [], "start_date": "2026-03-02",
+         "end_date": "2026-03-30", "granularity": "3600", "initial_cash": 6000.0},
+    ):
+        assert "pit_mode" not in body
+        # Nothing in these bodies is an evidence option, so the contract sees {}
+        opts = {k: v for k, v in body.items()
+                if k in {"evidence_mode", "pit_mode", "equity_total_cost_bps",
+                         "nexus_candidate_overrides"}}
+        assert validate_evidence_options(opts)["pit_mode"] == "strict", (
+            "the library default stays strict; the equities creation path is "
+            "what opts these clients into research")
+
+
+def test_every_equity_creator_shares_the_one_choke_point():
+    """UI, CLI, chatbot, rerun script and Discord bot all call this function,
+    so the default cannot drift between clients."""
+    import subprocess
+    root = os.path.dirname(_backend)
+    out = subprocess.run(
+        ["grep", "-rln", "action_create_backtest", f"{_backend}", f"{root}/scripts"],
+        capture_output=True, text=True).stdout
+    for caller in ("cli.py", "chatbot/tools.py", "rerun_backtest.py"):
+        assert caller in out, f"{caller} should route through action_create_backtest"
