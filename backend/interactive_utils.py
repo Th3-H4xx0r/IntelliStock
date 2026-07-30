@@ -5556,8 +5556,8 @@ def action_create_backtest(
     # revalidates the stored copy. Drop keys the caller left as None so an
     # ordinary POST resolves to the all-default "off" contract.
     from backtest_evidence_options import validate_evidence_options
-    _evidence = validate_evidence_options(
-        {k: v for k, v in (evidence_options or {}).items() if v is not None})
+    _evidence_in = {k: v for k, v in (evidence_options or {}).items() if v is not None}
+    _evidence = validate_evidence_options(_evidence_in)
     ensure_backtest_instances_table(conn)
     instance_doc = _resolve_instance_doc(conn, instance_id) if instance_id else None
     kind_normalized = str((instance_doc or {}).get("kind") or "").strip().lower()
@@ -5568,6 +5568,17 @@ def action_create_backtest(
         raise ValueError(
             "Stock credentials cannot be queued with a backtest; use a linked Alpaca brokerage"
         )
+    # Strict point-in-time replay needs frozen snapshots, and none exist for
+    # historical windows — capture only happens on live ticks. Left strict, every
+    # equities backtest fails at lookback bar 1, which is why the UI could not
+    # start one at all. So EQUITIES default to the declared research opt-out:
+    # current-state data, stamped legacy_unverified and permanently
+    # promotion-ineligible. Applied here rather than in the API layer so every
+    # creation path inherits it — UI, CLI, chatbot, rerun script, Discord bot.
+    # Crypto and Kalshi never get it; point-in-time replay is equities-only.
+    if not non_equity_compatibility and _evidence_in.get("pit_mode") is None:
+        _evidence["pit_mode"] = "research"
+
     default_key = (instance_doc.get("key") or "") if instance_doc and non_equity_compatibility else ""
     default_secret = (instance_doc.get("secret") or "") if instance_doc and non_equity_compatibility else ""
     stocks_list = [s.strip().upper() for s in (stocks if isinstance(stocks, list) else [stocks]) if s and str(s).strip()]
@@ -5632,6 +5643,7 @@ def action_create_backtest(
     # Only stamp the evidence block when the run actually declares one, so an
     # ordinary backtest row stays byte-identical to before.
     if (_evidence["evidence_mode"] != "off"
+            or _evidence["pit_mode"] != "strict"
             or _evidence["equity_total_cost_bps"] is not None
             or _evidence["nexus_candidate_overrides"]):
         if non_equity_compatibility:
