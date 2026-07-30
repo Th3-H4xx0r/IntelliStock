@@ -2640,6 +2640,9 @@ def _residual_sleeve_config(cached_strategies):
                 # Persistence can: that window's "bear" lasted 4 days, while
                 # 2026-03-02..03-30 runs 21 consecutive bear days.
                 "bear_min_dwell_days": int(cfg.get("residual_sleeve_bear_min_dwell_days", 0) or 0),
+                # 2026-07-30 beta floor: also park idle cash in the sleeve
+                # symbol on CHOP bars, not just confirmed bull. False = OFF.
+                "chop_enabled": bool(cfg.get("residual_sleeve_chop_enabled", False)),
                 # 2026-07-23 conviction-scaled hedge (default OFF -> static
                 # bear_alloc_pct). Scale the SQQQ NAV cap UP with downtrend
                 # conviction: alloc = clamp(base + slope*max(0,-ret20-start),
@@ -3380,7 +3383,18 @@ def _residual_sleeve_deploy(
                  f"(regime={regime}, leg={cur_val + deploy:.0f}/"
                  f"{_alloc * nav:.0f} cap, alloc={_alloc:.0%}, ok={bok})", "cyan")
             return
-        if regime != "bull":
+        # 2026-07-30 beta floor in chop (default OFF -> byte-identical).
+        # A rally off a bottom reads "chop" for most of its length, and idle
+        # cash sits dead through it: forensics on bt#426579 measured -3.28pp of
+        # pure cash drag, with 20.5% of bars under 50% deployed and $4,897
+        # idle for five straight days while SPY ran. The sleeve already exists
+        # to park idle cash in SPY; it just waits for a bull confirmation that
+        # arrives near the end of the move. Admitting chop gives the book a
+        # benchmark-tracking floor while the stock lanes are still gated.
+        # bear/crash never reach here (the bear leg returns above), and the
+        # protective full exit on a downgrade is unchanged.
+        _sleeve_regimes = ("bull", "chop") if bool(cfg.get("chop_enabled")) else ("bull",)
+        if regime not in _sleeve_regimes:
             return
         sym = cfg["symbol"]
         px = float((prices or {}).get(sym) or 0.0)

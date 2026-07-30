@@ -723,3 +723,66 @@ def test_dwell_gate_does_not_touch_exits():
                                _bear_spec_with_dwell(5))
     assert len(emu.signals) == 1
     assert emu.signals[0]["sell_fraction"] == 1.0
+
+
+# --- 2026-07-30 chop beta floor (residual_sleeve_chop_enabled) ---
+#
+# A rally off a bottom reads "chop" for most of its length. bt#426579 left
+# $4,897 idle for five straight days while SPY ran, for a measured -3.28pp of
+# cash drag. The sleeve already parks idle cash in SPY; it just waits for a
+# bull confirmation that arrives near the end of the move.
+
+def _spec_chop(enabled):
+    cfg = dict(SPEC[0]["config"])
+    cfg["residual_sleeve_chop_enabled"] = enabled
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def test_chop_floor_off_by_default_is_byte_identical():
+    _set_regime("chop")
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 4, 7, 15), SPEC)
+    assert emu.signals == [], "default must not deploy in chop"
+
+
+def test_chop_floor_deploys_when_enabled():
+    _set_regime("chop")
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 4, 7, 15),
+                              _spec_chop(True))
+    assert len(emu.signals) == 1
+    assert emu.signals[0]["sym"] == "SPY"
+    # Same park-floor arithmetic as bull: 1800 - (15%+2%)*6000 = 780.
+    assert abs(emu.signals[0]["cash_per_trade"] - 780.0) < 1e-6
+
+
+def test_chop_floor_still_never_deploys_in_bear_or_crash():
+    """The beta floor must not put long beta on in a downtrend."""
+    for regime in ("bear", "crash"):
+        _set_regime(regime)
+        emu = _Emu(cash=1800.0, nav=6000.0)
+        # No bear_symbol configured in SPEC, so the bear leg cannot absorb it —
+        # this proves the chop flag alone never opens a long in bear/crash.
+        b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 3, 10, 15),
+                                  _spec_chop(True))
+        assert emu.signals == [], f"chop floor must stay out of regime={regime!r}"
+
+
+def test_chop_floor_bull_behaviour_unchanged():
+    _set_regime("bull")
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 4, 22, 15),
+                              _spec_chop(True))
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 780.0) < 1e-6
+
+
+def test_chop_floor_protective_exit_still_full_on_downgrade():
+    """Parked in chop, then the regime rolls to bear: exit must be full."""
+    _set_regime("bear")
+    b._RESIDUAL_SLEEVE_STATE["last_park_ts"] = datetime(2026, 4, 7, 14)
+    emu = _Emu(cash=3000.0, nav=6000.0, sleeve_qty=3.0)
+    b._residual_sleeve_release(emu, {"SPY": 600.0}, datetime(2026, 4, 8, 15),
+                               _spec_chop(True))
+    assert len(emu.signals) == 1
+    assert emu.signals[0]["sell_fraction"] == 1.0
