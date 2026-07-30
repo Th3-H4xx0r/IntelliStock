@@ -197,13 +197,31 @@ class PortfolioEmulator:
 
     def get_portfolio_value(self, prices):
         """
-        Current portfolio value: cash + sum(positions[t] * prices[t]) for all positions.
-        prices: dict ticker -> price (use live/current prices for each ticker).
-        Missing tickers in prices are valued at 0.
+        Current portfolio value: cash + sum(positions[t] * prices[t]).
+
+        A held ticker absent from `prices` is carried at its LAST KNOWN price.
+        It used to contribute nothing, i.e. be valued at zero, which made a
+        position silently vanish from the valuation for as long as its symbol
+        was missing from the bar and then reappear — producing cliff-drops and
+        plateaus in the portfolio curve that look like market moves but are
+        not. `_last_prices` was already being maintained for exactly this
+        fallback ("V3: Track last known prices for portfolio_total fallback")
+        and simply was not consulted here.
+
+        This is not cosmetic: this value is NAV. It feeds position sizing,
+        the single-position cap, ramp room, portfolio_value_high/low,
+        max_drawdown_magnitude and the drawdown halt — so a spurious zero
+        could halt trading or mis-size a buy.
+
+        Only a ticker never seen at any price is skipped; there is nothing to
+        carry forward for it.
         """
         value = self._cash
+        last = getattr(self, "_last_prices", None) or {}
         for ticker, shares in self._positions.items():
             p = (prices or {}).get(ticker)
+            if p is None:
+                p = last.get(ticker)
             if p is not None:
                 value += shares * float(p)
         return value
