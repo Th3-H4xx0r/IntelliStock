@@ -49,14 +49,22 @@ def _to_date_str(dt) -> str:
     return s[:10] if len(s) >= 10 else s
 
 
-def alpaca_bars_cache_key(symbol: str, start_dt, end_dt, timeframe: str, feed: str) -> str:
+def alpaca_bars_cache_key(symbol: str, start_dt, end_dt, timeframe: str,
+                          feed: str, adjustment: str = "raw") -> str:
     """
     Deterministic cache key for one chunk of Alpaca bars.
-    Same (symbol, start, end, timeframe, feed) always yields the same key.
+    Same (symbol, start, end, timeframe, feed, adjustment) yields the same key.
+
+    2026-08-02: `adjustment` is part of the identity. A raw chunk and a
+    split-adjusted chunk of the same window are DIFFERENT data, and serving one
+    for the other reintroduces exactly the unadjusted-split corruption this
+    cache was silently laundering (VGT 8-for-1 read as an 87% crash). Old raw
+    rows simply become unreachable rather than wrong — no purge required.
     """
     start_s = _to_date_str(start_dt)
     end_s = _to_date_str(end_dt)
-    raw = f"{symbol}|{start_s}|{end_s}|{timeframe}|{feed}"
+    adj = str(adjustment or "raw").strip().lower() or "raw"
+    raw = f"{symbol}|{start_s}|{end_s}|{timeframe}|{feed}|{adj}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -86,6 +94,7 @@ def get_bars_chunk_cached(
     timeframe: str,
     feed: str,
     fetch_fn,
+    adjustment: str = "raw",
     db_name: str = DEFAULT_DB_NAME,
     table_name: str = ALPACA_BARS_CACHE_TABLE,
 ):
@@ -108,7 +117,7 @@ def get_bars_chunk_cached(
     """
     if conn is not None and _rethink is not None:
         _ensure_bars_cache_table(conn, db_name, table_name)
-        cache_id = alpaca_bars_cache_key(symbol, chunk_start, chunk_end, timeframe, feed)
+        cache_id = alpaca_bars_cache_key(symbol, chunk_start, chunk_end, timeframe, feed, adjustment)
         try:
             doc = _rethink.db(db_name).table(table_name).get(cache_id).run(conn)
             if doc and "bars" in doc:
@@ -125,7 +134,7 @@ def get_bars_chunk_cached(
     bars = fetch_fn()
     if conn is not None and _rethink is not None and isinstance(bars, list):
         try:
-            cache_id = alpaca_bars_cache_key(symbol, chunk_start, chunk_end, timeframe, feed)
+            cache_id = alpaca_bars_cache_key(symbol, chunk_start, chunk_end, timeframe, feed, adjustment)
             bars_json = json.dumps(bars)
             payload = bars_json
             compressed = False

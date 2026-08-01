@@ -8643,6 +8643,36 @@ def _resolve_position_peak_state(
             peak_price = fallback_price
     if peak_price <= 0.0:
         peak_price = fallback_price
+    # 2026-08-02 SPLIT-AWARE PEAK. This is the sole reader of every `_peak_*`
+    # key, and those keys are PERSISTED to RethinkDB (they are not in the
+    # strategy_cache persistence blacklist), so a stale peak survives restarts.
+    # After an unadjusted 8-for-1 a stored peak of $808.88 sits against a live
+    # price of $101.57 -> drop_from_peak reads 87.5%, which trips the trailing
+    # stop, releases the rotation winner-lock, dissolves big-winner protection
+    # and disengages peak protection. Restating the peak here fixes all of them
+    # at once because they all read through this function.
+    #
+    # A REVERSE split is the mirror and is worse: the peak ratchets UP 10x at
+    # :19686 and every later true price then looks like a huge drawdown, so the
+    # position can never be held again.
+    if isinstance(strategy_cache, dict) and peak_price > 0.0 and fallback_price > 0.0:
+        try:
+            from split_detect import detect_split_ratio
+            _sp_ratio = detect_split_ratio(peak_price, fallback_price)
+            if _sp_ratio is not None:
+                peak_price = peak_price * _sp_ratio
+                strategy_cache[peak_key] = peak_price
+                # The armed ratchet was set against the pre-split scale; a
+                # reverse split would otherwise leave the stop armed forever.
+                strategy_cache.pop(f"{peak_key}::armed", None)
+                _log(
+                    f"Split-adjusted peak for {ticker}: restated by {_sp_ratio:g}x "
+                    f"to ${peak_price:.2f} (price ${fallback_price:.2f}) — a split "
+                    f"is not a drawdown",
+                    "cyan",
+                )
+        except Exception:
+            pass
     return peak_key, peak_price
 
 
@@ -20317,6 +20347,67 @@ def _breadth_scan_movers(
     return list(_admitted.keys())
 
 
+def _split_adjust_bars(bars):
+    """Return a split-CONTINUOUS copy of a daily bar list (oldest-first).
+
+    2026-08-02. The Alpaca bars request omits the `adjustment` parameter, so
+    Alpaca's RAW default applies and every series spanning a corporate action
+    carries a step discontinuity. VGT 8-for-1: $808.88 -> $101.57 between two
+    bars. Left raw, a 20-day return over that step reads about -87%, which sets
+    the regime detector to bear, deletes the name from breadth discovery, and
+    poisons every moving average and volatility estimate built on the series.
+
+    This is the single write-path into `_overlay_bars_raw`, so adjusting here
+    covers the regime detector, breadth scanner, momentum discovery and
+    rediscovery, the falling-knife filter, sector context and price-trend
+    detection at once. OHLC are scaled together so intrabar relationships hold.
+    """
+    if not isinstance(bars, list) or len(bars) < 2:
+        return bars
+    try:
+        from split_detect import adjust_closes_for_splits
+        closes = []
+        for b in bars:
+            if not isinstance(b, dict):
+                return bars
+            c = b.get("c", b.get("close"))
+            closes.append(float(c) if c is not None else 0.0)
+        if any(c <= 0 for c in closes):
+            return bars
+        _adj, found = adjust_closes_for_splits(closes)
+        if not found:
+            return bars
+        # Cumulative factor to apply to every bar BEFORE each split index.
+        factors = [1.0] * len(bars)
+        for idx, ratio in found:
+            for j in range(idx):
+                factors[j] /= ratio
+        out = []
+        for b, f in zip(bars, factors):
+            if f == 1.0:
+                out.append(b)
+                continue
+            nb = dict(b)
+            for k in ("o", "h", "l", "c", "open", "high", "low", "close"):
+                if nb.get(k) is not None:
+                    try:
+                        nb[k] = float(nb[k]) * f
+                    except (TypeError, ValueError):
+                        pass
+            for k in ("v", "volume"):
+                if nb.get(k) is not None:
+                    try:
+                        nb[k] = float(nb[k]) / f
+                    except (TypeError, ValueError):
+                        pass
+            out.append(nb)
+        _log(f"Split-adjusted bar series: {len(found)} split(s) "
+             f"{[(i, round(r, 2)) for i, r in found]}", "cyan")
+        return out
+    except Exception:
+        return bars
+
+
 def _ensure_overlay_bars_cached(
     symbols: list[str],
     alpaca_key: str,
@@ -20381,7 +20472,7 @@ def _ensure_overlay_bars_cached(
             if _end_gap > 7 or _start_gap > 7:
                 still_missing.append(sym)
                 continue
-            bars_cache[sym] = rdb_bars
+            bars_cache[sym] = _split_adjust_bars(rdb_bars)
         else:
             still_missing.append(sym)
 
@@ -20404,6 +20495,7 @@ def _ensure_overlay_bars_cached(
 
         for sym in batch:
             sym_bars = fetched.get(sym) or []
+            sym_bars = _split_adjust_bars(sym_bars)
             bars_cache[sym] = sym_bars
             _overlay_bars_cache_set(conn, sym, sym_bars,
                                     fetch_start=fetch_start,

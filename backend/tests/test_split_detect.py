@@ -1,0 +1,98 @@
+"""Split detection (2026-08-02). See backend/split_detect.py.
+
+Anchored on the real event: VGT 8-for-1 on 2026-04-21, $808.88 -> $101.57
+(ratio 7.964), which cost three backtest runs before it was found.
+"""
+import os
+import sys
+
+_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+from split_detect import (  # noqa: E402
+    detect_split_ratio, adjust_closes_for_splits, MIN_MOVE_PCT,
+)
+
+
+def test_detects_the_real_vgt_split():
+    assert detect_split_ratio(808.88, 101.57) == 8.0
+
+
+def test_forward_split_returns_share_multiplier():
+    for ratio in (2.0, 3.0, 4.0, 5.0, 10.0, 20.0):
+        assert detect_split_ratio(1000.0, 1000.0 / ratio) == ratio
+
+
+def test_reverse_split_returns_share_divisor():
+    # 1-for-10 reverse: price x10, shares /10 -> ratio 0.1
+    assert abs(detect_split_ratio(2.0, 20.0) - 0.1) < 1e-9
+
+
+def test_ordinary_crash_is_not_a_split():
+    """The property that matters most: never erase a real loss."""
+    for pct in (0.36, 0.40, 0.45, 0.55, 0.60, 0.70):
+        assert detect_split_ratio(100.0, 100.0 * (1 - pct)) is None, pct
+
+
+def test_small_moves_are_ignored():
+    assert detect_split_ratio(100.0, 100.0 * (1 - MIN_MOVE_PCT / 2)) is None
+    assert detect_split_ratio(100.0, 99.0) is None
+
+
+def test_near_miss_ratios_rejected():
+    # 2.20x and 7.0x-adjacent values are not split factors within tolerance
+    assert detect_split_ratio(110.0, 50.0) is None       # 2.20x
+    assert detect_split_ratio(100.0, 11.5) is None       # 8.70x
+
+
+def test_tolerance_boundary_is_respected():
+    assert detect_split_ratio(100.0, 100.0 / 8.0) == 8.0           # exact
+    assert detect_split_ratio(100.0, 100.0 / 7.90) == 8.0          # 1.25% off
+    assert detect_split_ratio(100.0, 100.0 / 7.70) is None         # 3.8% off
+
+
+def test_bad_input_is_safe():
+    for a, b in ((None, 10.0), (10.0, None), (0.0, 10.0), (10.0, 0.0),
+                 (-5.0, 10.0), ("x", 10.0)):
+        assert detect_split_ratio(a, b) is None
+
+
+def test_series_is_made_continuous():
+    """A 20-bar series spanning an 8-for-1 split must show a real return, not -87%."""
+    pre = [800.0, 802.0, 806.0, 808.0]
+    post = [101.0, 102.0, 103.0]
+    adj, found = adjust_closes_for_splits(pre + post)
+    assert len(found) == 1 and found[0][1] == 8.0
+    # pre-split prices restated onto the post-split scale
+    assert abs(adj[0] - 100.0) < 0.01
+    assert abs(adj[3] - 101.0) < 0.01
+    # the series is now monotone-ish and the total return is sane, not -87%
+    total = (adj[-1] / adj[0] - 1) * 100
+    assert 0.0 < total < 10.0, total
+
+
+def test_series_without_a_split_is_unchanged():
+    closes = [100.0, 101.0, 99.0, 103.0, 97.0]
+    adj, found = adjust_closes_for_splits(closes)
+    assert found == []
+    assert adj == closes
+
+
+def test_series_with_a_real_crash_is_unchanged():
+    closes = [100.0, 101.0, 55.0, 54.0, 56.0]   # -45%, not a split
+    adj, found = adjust_closes_for_splits(closes)
+    assert found == [] and adj == closes
+
+
+def test_multiple_splits_compound_correctly():
+    # 2-for-1 then 5-for-1: the earliest price divides by 10 overall
+    closes = [1000.0, 500.0, 100.0]
+    adj, found = adjust_closes_for_splits(closes)
+    assert [r for _, r in found] == [2.0, 5.0]
+    assert abs(adj[0] - 100.0) < 1e-6 and abs(adj[1] - 100.0) < 1e-6
+
+
+def test_empty_and_short_series():
+    assert adjust_closes_for_splits([]) == ([], [])
+    assert adjust_closes_for_splits([100.0]) == ([100.0], [])

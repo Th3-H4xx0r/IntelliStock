@@ -77,3 +77,45 @@ def test_missing_or_zero_price_is_ignored():
     assert abs(pe.get_positions()["VGT"] - 1.1119) < 1e-6
     pe.save_portfolio_snapshot({"VGT": 0.0})          # zero
     assert abs(pe.get_positions()["VGT"] - 1.1119) < 1e-6
+
+
+# --- the half-fix that mattered: cost basis, not just share count ---
+#
+# Restating shares fixes NAV but decisions read the ENTRY price out of trade
+# history: unrealized_pct = (current - entry)/entry. An unrestated $808 entry
+# against a $101 post-split price still reads -87.4%, so the circuit breaker
+# still liquidates a position that did nothing. That is exactly how the
+# original bug converted a phantom mark into a realised -$765.
+
+def test_entry_price_is_restated_so_pnl_is_not_minus_87pct():
+    pe = _held("VGT", shares=1.3192, price=681.69)
+    pe.save_portfolio_snapshot({"VGT": 808.88})
+    pe.save_portfolio_snapshot({"VGT": 101.57})       # 8-for-1
+    entry = [t for t in pe.get_trade_history() if t["ticker"] == "VGT"][0]
+    unrealized_pct = (101.57 - entry["price"]) / entry["price"] * 100.0
+    # True economics: bought at $681.69 pre-split = $85.21 post-split, now
+    # $101.57 -> a genuine +19.2% GAIN. Unrestated it reads -85%, which is what
+    # made the circuit breaker liquidate it.
+    assert unrealized_pct > 0, (
+        f"entry ${entry['price']:.2f} -> unrealized {unrealized_pct:+.1f}%; "
+        "a circuit breaker would fire on a winning position")
+    assert abs(unrealized_pct - 19.2) < 1.0
+
+
+def test_trade_shares_are_restated_too():
+    pe = _held("VGT", shares=1.3192, price=681.69)
+    pe.save_portfolio_snapshot({"VGT": 808.88})
+    pe.save_portfolio_snapshot({"VGT": 101.57})
+    entry = [t for t in pe.get_trade_history() if t["ticker"] == "VGT"][0]
+    assert abs(entry["shares"] - 1.3192 * 8) < 1e-6
+    # notional is preserved: shares x price is unchanged by the split
+    assert abs(entry["shares"] * entry["price"] - 1.3192 * 681.69) < 0.01
+
+
+def test_crypto_is_never_split_reconciled():
+    """A ~50% single-bar drawdown in an altcoin is real, not a 2-for-1."""
+    pe = _held("BTC/USD", shares=0.05, price=100000.0)
+    pe._is_crypto = True
+    before = pe.get_positions()["BTC/USD"]          # fees make the fill < 0.05
+    pe.save_portfolio_snapshot({"BTC/USD": 50000.0})
+    assert abs(pe.get_positions()["BTC/USD"] - before) < 1e-12

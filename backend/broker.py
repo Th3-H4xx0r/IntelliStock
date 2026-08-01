@@ -968,7 +968,14 @@ def fetch_alpaca_historical_bars(
     timeframe="1Min",  # Default, will be overridden by caller
     db_conn=None,
     feed=None,  # 2026-04-23: user-selectable via BrokerageAccounts.alpaca_data_feed
-    adjustment=None,  # None preserves Alpaca's raw default; SPY benchmark uses "all"
+    # 2026-08-02: Alpaca's /v2/stocks/bars defaults to adjustment=raw, so EVERY
+    # series in this system was unadjusted. VGT's 8-for-1 therefore arrived as an
+    # 87% one-bar crash ($808.88 -> $101.57) and stop-lossed a winning position
+    # in three separate backtest runs. "split" restates the series for share
+    # count only -- no dividend total-return, so prices stay comparable to the
+    # traded tape. The SPY benchmark keeps "all" (broker.py ~1289) because a
+    # benchmark should be total-return.
+    adjustment="split",
 ):
     """
     Fetch historical OHLCV bars from Alpaca Data API v2 by requesting smaller date-range
@@ -1199,10 +1206,15 @@ def fetch_alpaca_historical_bars(
 
     def fetch_one_chunk(sym, chunk_start, chunk_end, log_empty_once=None, retry_smaller=False):
         """Fetch bars for one symbol in [chunk_start, chunk_end); from cache if available, else Alpaca."""
-        if db_conn and get_bars_chunk_cached and adjustment in (None, "", "raw"):
+        # The cache key now carries `adjustment` (price_utils.alpaca_bars_cache_key),
+        # so every mode caches independently and cannot cross-contaminate. This
+        # gate previously admitted raw only, which meant flipping the default
+        # above would have silently disabled the bar cache for every backtest.
+        if db_conn and get_bars_chunk_cached:
             bars, from_cache = get_bars_chunk_cached(
                 db_conn, sym, chunk_start, chunk_end, timeframe, feed,
                 lambda: _do_fetch_one_chunk(sym, chunk_start, chunk_end, log_empty_once, retry_smaller),
+                adjustment=adjustment,
             )
             if from_cache and bars:
                 try:
@@ -12758,6 +12770,47 @@ while not shutdown_requested:
                                 )
                                 _trade_skipped_no_price = True
                                 continue
+                            # ── 2026-08-02 SPLIT GUARD. A stock split arrives as a
+                            # clean step in an UNADJUSTED feed (VGT 8-for-1:
+                            # $808.88 -> $101.57 between two bars, then trading
+                            # normally at $101). Nothing economic happened, but
+                            # every price-derived signal reads an 87% crash, so
+                            # the circuit breaker and trailing stop both fire and
+                            # a REAL sell goes out on a position that did nothing.
+                            # The existing price-sanity check above cannot catch
+                            # it: that one is buy-only.
+                            #
+                            # Suppress ALL orders in the name for this tick and
+                            # alert. Missing one tick of trading in a split name
+                            # costs nothing; liquidating it at 1/8 of book — and,
+                            # because lineage stays pre-split, orphaning the other
+                            # 7/8 as unmanaged shares — is unrecoverable.
+                            try:
+                                _sg_last = None
+                                _sg_ph = ((price_history or {}).get(symbol) or []) if price_history else []
+                                if isinstance(_sg_ph, list):
+                                    for _sg_b in reversed(_sg_ph[-5:]):
+                                        if isinstance(_sg_b, dict):
+                                            _sg_c = _sg_b.get("c") or _sg_b.get("close")
+                                            if _sg_c:
+                                                _sg_last = float(_sg_c)
+                                                break
+                                if _sg_last is None:
+                                    _sg_last = (globals().get("_last_seen_price") or {}).get(symbol)
+                                if _sg_last and price:
+                                    from split_detect import detect_split_ratio
+                                    _sg_ratio = detect_split_ratio(_sg_last, float(price))
+                                    if _sg_ratio is not None:
+                                        _log(
+                                            f"SPLIT GUARD: {symbol} ${_sg_last:.2f} -> ${float(price):.2f} "
+                                            f"looks like a {_sg_ratio:g}-for-1 split, not a price move — "
+                                            f"suppressing all orders in this name this tick",
+                                            "red",
+                                        )
+                                        _trade_skipped_no_price = True
+                                        continue
+                            except Exception:
+                                pass
                             # ── Task 7: hard max_positions gate. Block a NEW-name
                             # buy that would push the projected open-position count
                             # to/over the cap. Adds/winner-adds to names already

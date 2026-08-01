@@ -226,12 +226,6 @@ class PortfolioEmulator:
                 value += shares * float(p)
         return value
 
-    # Ratios a real corporate action actually uses. A genuine one-bar move of
-    # this size that ALSO lands within 1.5% of one of these is not a market
-    # move — intraday moves that large halt the tape, and they do not arrive at
-    # exactly 8.000x.
-    _SPLIT_RATIOS = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 15.0, 20.0)
-
     def reconcile_splits(self, prices):
         """Restate share counts for HELD positions whose price gapped by an
         unadjusted split ratio. Returns a list of (ticker, ratio, old, new).
@@ -255,30 +249,55 @@ class PortfolioEmulator:
         """
         if not bool(getattr(self, "_split_reconcile_enabled", True)):
             return []
+        # Crypto does not split. A ~50% single-bar drawdown in an altcoin is
+        # entirely possible and would otherwise be misread as a 2-for-1,
+        # doubling the coin count out of thin air.
+        if bool(getattr(self, "_is_crypto", False)):
+            return []
+        from split_detect import detect_split_ratio
+
         last = getattr(self, "_last_prices", None) or {}
         adjusted = []
         for ticker, shares in list(self._positions.items()):
-            new_px = (prices or {}).get(ticker)
-            old_px = last.get(ticker)
             try:
-                new_px = float(new_px or 0.0)
-                old_px = float(old_px or 0.0)
+                new_px = float((prices or {}).get(ticker) or 0.0)
+                old_px = float(last.get(ticker) or 0.0)
+                shares = float(shares or 0.0)
             except (TypeError, ValueError):
                 continue
             if new_px <= 0 or old_px <= 0 or shares <= 0:
                 continue
-            for ratio in self._SPLIT_RATIOS:
-                # forward split: price falls by `ratio`, shares multiply by it
-                for factor, observed in ((ratio, old_px / new_px),
-                                         (1.0 / ratio, new_px / old_px)):
-                    if abs(observed / ratio - 1.0) <= 0.015:
-                        new_shares = shares * (old_px / new_px)
-                        self._positions[ticker] = new_shares
-                        adjusted.append((ticker, old_px / new_px, shares, new_shares))
-                        break
-                else:
+            ratio = detect_split_ratio(old_px, new_px)
+            if ratio is None:
+                continue
+            # `ratio` is always the share multiplier: 8.0 for an 8-for-1,
+            # 0.1 for a 1-for-10 reverse. Position value is preserved.
+            new_shares = shares * ratio
+            self._positions[ticker] = new_shares
+            # Restating the share count alone is NOT enough, and shipping only
+            # that is what left the original bug half-fixed. Decisions read the
+            # ENTRY price out of trade history:
+            #     unrealized_pct = (current - entry) / entry * 100
+            # so an unrestated $808 entry against a $101 post-split price still
+            # reads -87.4%, and the circuit breaker still liquidates a position
+            # that did nothing. Restate the executed prices and share counts on
+            # this symbol's open lineage so cost basis stays economically true.
+            for tr in self._trades:
+                if str(tr.get("ticker") or "") != ticker:
                     continue
-                break
+                try:
+                    if tr.get("price") is not None:
+                        tr["price"] = float(tr["price"]) / ratio
+                    if tr.get("shares") is not None:
+                        tr["shares"] = float(tr["shares"]) * ratio
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(last, dict) and ticker in last:
+                try:
+                    last[ticker] = float(last[ticker]) / ratio
+                except (TypeError, ValueError):
+                    pass
+            adjusted.append((ticker, ratio, shares, new_shares))
         return adjusted
 
     def save_portfolio_snapshot(self, prices, timestamp=None):
