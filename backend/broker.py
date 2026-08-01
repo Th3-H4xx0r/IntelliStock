@@ -3802,6 +3802,11 @@ _REGIME_PROFILE_BASE_ONLY_KEYS = frozenset({
     "residual_sleeve_bear_require_fresh_pct",
     "momentum_breakout_max_nav_pct_by_regime",
     "deployment_ramp_caps_by_regime",
+    # Risk exits must not be switchable by the regime they protect against.
+    # The older nexus_monitor_risk_exit_execution_enabled lives only in the
+    # bull/recovery overlays, which is why stops executed solely in confirmed
+    # bull. Keeping this one base-only makes that mis-scoping impossible.
+    "nexus_monitor_risk_exit_always_enabled",
 })
 
 

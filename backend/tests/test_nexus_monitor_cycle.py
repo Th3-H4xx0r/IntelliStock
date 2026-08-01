@@ -297,3 +297,62 @@ def test_unknown_entry_dedup_uses_stable_instance_id(base_config):
     key = next(iter(logged))
     assert isinstance(key, str)
     assert key == "test-instance-123|XYZ|2026-05-01"
+
+
+# --- 2026-07-31: risk-exit EXECUTION gate ---
+#
+# The monitor computing SELL is not enough — the symbol must reach
+# _nexus_sell_enforcement or the broker never acts on it. In the doc-179
+# production config the enabling flag lived only in regime_profiles.bull/
+# .recovery, so on the 2026-04-22 CAR cascade the monitor logged SELL on six
+# consecutive bars and every one was dropped here; the position sold 22h later
+# at $253 instead of $619. nexus_monitor_risk_exit_always_enabled is base-only
+# (see test_regime_profile.py) so a regime overlay cannot switch stops off.
+
+def _forced_exit_monitor(strat, cfg):
+    """A position deep enough through its trailing stop to force an exit."""
+    pe = _emulator_with_position("CAR", 10, 300.0, entry_ts=_utc(2026, 4, 13, 14, 0))
+    cache = {}
+    # Establish the peak, then collapse the price.
+    strat._run_monitor_cycle(
+        symbols_list=["CAR"], prices={"CAR": 752.62}, price_history={},
+        config=cfg, portfolio_emulator=pe, strategy_cache=cache,
+        date_key="2026-04-22", current_time=_utc(2026, 4, 22, 13, 0),
+    )
+    return strat._run_monitor_cycle(
+        symbols_list=["CAR"], prices={"CAR": 535.55}, price_history={},
+        config=cfg, portfolio_emulator=pe, strategy_cache=cache,
+        date_key="2026-04-22", current_time=_utc(2026, 4, 22, 17, 0),
+    )
+
+
+def test_risk_exit_not_enforced_by_default(base_config):
+    """Default OFF: the sell may be computed but must not be enforced."""
+    out = _forced_exit_monitor(_strategy(), dict(base_config))
+    assert out.get("_nexus_sell_enforcement") == []
+
+
+def test_risk_exit_enforced_by_the_always_flag(base_config):
+    """The regime-independent flag enforces it even with the legacy
+    (overlay-scoped) flag absent — which is the whole point of the fix."""
+    cfg = dict(base_config)
+    cfg["nexus_monitor_risk_exit_always_enabled"] = True
+    out = _forced_exit_monitor(_strategy(), cfg)
+    forced = [s for s, e in out.items()
+              if not s.startswith("_nexus_") and isinstance(e, dict)
+              and e.get("score") == -1 and e.get("_forced_exit")]
+    if forced:
+        assert "CAR" in out.get("_nexus_sell_enforcement", []), (
+            "monitor forced an exit but it never reached sell enforcement")
+
+
+def test_legacy_flag_still_works(base_config):
+    """The pre-existing flag keeps its behaviour — this is additive."""
+    cfg = dict(base_config)
+    cfg["nexus_monitor_risk_exit_execution_enabled"] = True
+    out = _forced_exit_monitor(_strategy(), cfg)
+    forced = [s for s, e in out.items()
+              if not s.startswith("_nexus_") and isinstance(e, dict)
+              and e.get("score") == -1 and e.get("_forced_exit")]
+    if forced:
+        assert "CAR" in out.get("_nexus_sell_enforcement", [])

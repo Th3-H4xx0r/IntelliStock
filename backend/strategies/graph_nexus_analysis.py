@@ -23092,7 +23092,14 @@ class GraphNexusAnalysis:
                 # gap-down. Skip the defer for backtest ticks when monitor
                 # risk-exit execution is enabled. Live behavior is unchanged.
                 and not (
-                    bool(config.get("nexus_monitor_risk_exit_execution_enabled", False))
+                    (
+                        bool(config.get("nexus_monitor_risk_exit_execution_enabled", False))
+                        # Same regime-independent flag as the execution gate
+                        # below: without it the pre-open bars re-defer the exit
+                        # and it is dropped anyway (observed in bt#148462 on
+                        # 2026-04-23 12:00/13:00, "Pre-market sell DEFERRED").
+                        or bool(config.get("nexus_monitor_risk_exit_always_enabled", False))
+                    )
                     and bool(config.get("nexus_dual_cadence_backtest_simulation", False))
                 )
             ):
@@ -23207,7 +23214,22 @@ class GraphNexusAnalysis:
         # The broker executes enforcement sells via V7.5 injection + the
         # decision override, independent of the (empty) discovery universe.
         # Default OFF; live behavior byte-identical until enabled.
-        if bool(config.get("nexus_monitor_risk_exit_execution_enabled", False)):
+        # 2026-07-31 REGIME-INDEPENDENT RISK EXIT. In the doc-179 production
+        # config the flag above lives ONLY in regime_profiles.bull/.recovery
+        # (base is false), so intraday risk exits execute only once the regime
+        # has confirmed bull — and are silently dropped in bear, chop and crash,
+        # i.e. exactly when protection matters most. Verified on the 2026-04-22
+        # CAR cascade: the monitor computed SELL on six consecutive bars
+        # ("Trailing stop SELL: ... drop=28.8% >= 24%") and every one was
+        # discarded at this gate; the position finally sold 22h later, $619 ->
+        # $253. This second flag is stripped from every overlay by
+        # _REGIME_PROFILE_BASE_ONLY_KEYS, so its BASE value always wins and a
+        # regime profile cannot switch risk exits back off.
+        # Default OFF; behavior byte-identical until enabled.
+        if (
+            bool(config.get("nexus_monitor_risk_exit_execution_enabled", False))
+            or bool(config.get("nexus_monitor_risk_exit_always_enabled", False))
+        ):
             for _msym, _mentry in out.items():
                 if (
                     isinstance(_mentry, dict)

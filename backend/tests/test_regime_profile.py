@@ -146,3 +146,40 @@ def test_per_regime_mappings_are_stripped_from_overlays():
     assert out["momentum_breakout_max_nav_pct_by_regime"] == {
         "default": 0.06, "bull": 0.10, "recovery": 0.08}
     assert out["deployment_ramp_caps_by_regime"] == {"bull": [0.50, 0.70, 1.00]}
+
+
+# --- 2026-07-31: risk exits must not be regime-switchable ---
+#
+# nexus_monitor_risk_exit_execution_enabled lives ONLY in regime_profiles.bull
+# and .recovery in the doc-179 production config, so intraday risk exits
+# executed solely once the regime confirmed bull and were silently dropped in
+# bear/chop/crash — protection gated on the market being good. The replacement
+# flag is base-only so an overlay can never switch stops back off.
+
+def test_always_flag_cannot_be_disabled_by_an_overlay():
+    base = {
+        "nexus_monitor_risk_exit_always_enabled": True,
+        "regime_profiles": {
+            "bear": {"nexus_monitor_risk_exit_always_enabled": False},
+            "bull": {"nexus_monitor_risk_exit_always_enabled": False},
+        },
+    }
+    for regime in ("bear", "bull"):
+        merged = apply_regime_profile(base, regime)
+        assert merged["nexus_monitor_risk_exit_always_enabled"] is True, (
+            f"{regime} overlay disabled a base-only risk-exit flag")
+
+
+def test_always_flag_cannot_be_enabled_by_an_overlay_either():
+    """Strip is unconditional, so the base value wins in both directions —
+    an overlay cannot silently turn risk exits ON in one regime only."""
+    base = {
+        "nexus_monitor_risk_exit_always_enabled": False,
+        "regime_profiles": {"bull": {"nexus_monitor_risk_exit_always_enabled": True}},
+    }
+    assert apply_regime_profile(base, "bull")[
+        "nexus_monitor_risk_exit_always_enabled"] is False
+
+
+def test_always_flag_is_declared_base_only():
+    assert "nexus_monitor_risk_exit_always_enabled" in _ns["_REGIME_PROFILE_BASE_ONLY_KEYS"]
