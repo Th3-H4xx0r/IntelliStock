@@ -8660,7 +8660,13 @@ def _resolve_position_peak_state(
             from split_detect import detect_split_ratio
             _sp_ratio = detect_split_ratio(peak_price, fallback_price)
             if _sp_ratio is not None:
-                peak_price = peak_price * _sp_ratio
+                # detect_split_ratio returns the SHARE multiplier, so a PRICE
+                # divides by it (split_detect.py contract: shares *= ratio,
+                # price /= ratio). Multiplying here restated VGT's peak to
+                # $6471 -- a 98.4% drop-from-peak, worse than the 87.4% bug it
+                # was meant to fix -- and persisted it, after which 6471/101 =
+                # 63.7x matches no split ratio and the error is unrepairable.
+                peak_price = peak_price / _sp_ratio
                 strategy_cache[peak_key] = peak_price
                 # The armed ratchet was set against the pre-split scale; a
                 # reverse split would otherwise leave the stop armed forever.
@@ -20362,6 +20368,16 @@ def _split_adjust_bars(bars):
     rediscovery, the falling-knife filter, sector context and price-trend
     detection at once. OHLC are scaled together so intrabar relationships hold.
     """
+    # DEFAULT OFF. Bars are now requested with adjustment="split" (broker.py),
+    # so the server already restates them and inference on top is redundant.
+    # It is also actively dangerous: measured against 345 real discontinuities
+    # in these caches, only 96 were splits — 176 were GENUINE crashes (MLTX
+    # -90% on a trial failure, ATYR -83%), a 65% false-positive rate. Silently
+    # rewriting those would erase real losses from the regime detector and the
+    # falling-knife filter. Enable only to repair a cache known to predate the
+    # adjustment change, and prefer purging that cache instead.
+    if os.environ.get("NEXUS_INFER_BAR_SPLITS", "0").strip() not in ("1", "true", "True"):
+        return bars
     if not isinstance(bars, list) or len(bars) < 2:
         return bars
     try:

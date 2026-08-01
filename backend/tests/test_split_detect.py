@@ -96,3 +96,35 @@ def test_multiple_splits_compound_correctly():
 def test_empty_and_short_series():
     assert adjust_closes_for_splits([]) == ([], [])
     assert adjust_closes_for_splits([100.0]) == ([100.0], [])
+
+
+# --- the peak sign, and why bar inference is off by default ---
+
+def test_price_divides_by_the_share_multiplier():
+    """The contract: shares *= ratio, price /= ratio. Getting this backwards on
+    a stored peak restated VGT's $808.88 to $6471 — a 98.4% drop-from-peak,
+    worse than the 87.4% bug it was meant to fix — and persisted it."""
+    ratio = detect_split_ratio(808.88, 101.57)
+    assert ratio == 8.0
+    assert abs(808.88 / ratio - 101.11) < 0.01      # correct
+    assert abs(808.88 * ratio - 6471.04) < 0.01     # what the bug produced
+
+
+def test_price_ratio_alone_cannot_separate_a_crash_from_a_split():
+    """The limit of this heuristic, stated explicitly.
+
+    Measured on the production caches: of 345 one-bar discontinuities only 96
+    were splits — 176 were GENUINE crashes, a 65% false-positive rate. Most
+    crashes land on no round ratio and are correctly rejected...
+    """
+    assert detect_split_ratio(100.0, 17.0) is None    # ATYR-style -83%
+    assert detect_split_ratio(100.0, 12.0) is None    # MREO-style -88%
+    assert detect_split_ratio(100.0, 55.0) is None    # -45%
+
+    # ...but an exactly-90% collapse is ARITHMETICALLY IDENTICAL to a 10:1
+    # split and is indistinguishable from price alone. This is why the ratio
+    # test may gate an ORDER for one tick (cheap if wrong) but must never
+    # silently rewrite stored prices (unbounded if wrong), and why bar-level
+    # inference is opt-in while adjustment="split" from the venue is the
+    # default. A corporate-actions feed is the only real disambiguator.
+    assert detect_split_ratio(100.0, 10.0) == 10.0
