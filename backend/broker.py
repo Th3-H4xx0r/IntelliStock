@@ -12798,13 +12798,39 @@ while not shutdown_requested:
                                 if _sg_last is None:
                                     _sg_last = (globals().get("_last_seen_price") or {}).get(symbol)
                                 if _sg_last and price:
-                                    from split_detect import detect_split_ratio
+                                    from split_detect import (
+                                        detect_split_ratio,
+                                        reconcile_with_corporate_action,
+                                    )
                                     _sg_ratio = detect_split_ratio(_sg_last, float(price))
                                     if _sg_ratio is not None:
+                                        # Confirm against the authoritative
+                                        # splits calendar where it is available.
+                                        # Inference alone cannot separate a -90%
+                                        # crash from a 10:1 (65% false-positive
+                                        # rate measured on these caches), so the
+                                        # calendar is what distinguishes
+                                        # "corporate action" from "the position
+                                        # really did collapse".
+                                        _sg_auth = None
+                                        try:
+                                            from corporate_actions import split_multiplier_for
+                                            _sg_auth = reconcile_with_corporate_action(
+                                                _sg_ratio,
+                                                split_multiplier_for(symbol, current_time),
+                                            )
+                                        except Exception:
+                                            _sg_auth = None
+                                        # Suppress either way: skipping one tick
+                                        # in a name costs a bar of latency, while
+                                        # trading through an unadjusted split
+                                        # sells at 1/8 of book and orphans the
+                                        # rest. Confidence only changes the log.
                                         _log(
                                             f"SPLIT GUARD: {symbol} ${_sg_last:.2f} -> ${float(price):.2f} "
-                                            f"looks like a {_sg_ratio:g}-for-1 split, not a price move — "
-                                            f"suppressing all orders in this name this tick",
+                                            f"= {_sg_ratio:g}x share multiplier "
+                                            f"({'CONFIRMED by splits calendar' if _sg_auth else 'unconfirmed — inferred from price only'})"
+                                            f" — suppressing all orders in this name this tick",
                                             "red",
                                         )
                                         _trade_skipped_no_price = True
