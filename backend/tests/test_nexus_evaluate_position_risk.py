@@ -879,3 +879,66 @@ def test_a4_chop_decision_is_identical_under_both_semantics():
         kw = {"circuit_breaker_regime_adjustment_semantics_v2": v2}
         assert _risk_at(-12.0, "chop", **kw) is False
         assert _risk_at(-16.0, "chop", **kw) is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-31: cap the pnl-scaling widening on parabolic winners
+#
+# trailing_stop_pnl_scaling_enabled WIDENS the trail as a winner grows (up to
+# trailing_stop_scale_max_multiplier). That is backwards for a blow-off: CAR
+# peaked at +141.9%, took the full 2x, and its threshold went 12% -> 24%, so it
+# held through a 17.8% drawdown and exited the next day 59% off the peak.
+# ---------------------------------------------------------------------------
+
+
+def _peak_then_drop(cfg, peak_px, drop_px):
+    """Establish a peak, then re-evaluate after a fall. Returns (score, reason)."""
+    emu = _Emu()
+    emu.add("PARA", 100, 100.0)
+    sc: dict = {}
+    common = dict(fresh_score=0, fresh_reason="hold", portfolio_emulator=emu,
+                  strategy_cache=sc, price_history={}, propagated={},
+                  entry_buy_ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                  max_hold_days=90)
+    _evaluate_position_risk("PARA", config=cfg, prices={"PARA": peak_px},
+                            date_key="2026-04-22", held_days=9, **common)
+    score, reason, _ = _evaluate_position_risk(
+        "PARA", config=cfg, prices={"PARA": drop_px},
+        date_key="2026-04-22", held_days=9, **common)
+    return score, reason
+
+
+# Peak +150% (100 -> 250), then a 20% fall to 200. Base trail 12%.
+# With scaling ON the trail is widened to ~24%, so 20% must NOT fire.
+# With the cap ON the trail stays 12%, so 20% MUST fire.
+_SCALED = dict(trailing_stop_activation_pct=10.0, trailing_stop_pct=12.0,
+               trailing_stop_pnl_scaling_enabled=True,
+               mega_winner_protect_enabled=False, peak_protection_enabled=False,
+               profit_take_enabled=False, initial_grace_enabled=False,
+               max_open_loss_pct=-15.0, fast_loser_cut_pct=-10.0)
+
+
+def test_pnl_scaling_widens_the_trail_and_holds_a_parabolic_drawdown():
+    """Documents today's behaviour — the bug this cap addresses."""
+    score, _ = _peak_then_drop(dict(_SCALED), 250.0, 200.0)
+    assert score != -1, "20% drawdown fired despite the widened trail"
+
+
+def test_cap_restores_the_base_trail_on_a_parabolic_winner():
+    cfg = dict(_SCALED, trailing_stop_pnl_scaling_disable_above_pct=100.0)
+    score, reason = _peak_then_drop(cfg, 250.0, 200.0)
+    assert score == -1, f"cap did not restore the 12% trail (reason={reason!r})"
+
+
+def test_cap_default_off_is_byte_identical():
+    cfg = dict(_SCALED, trailing_stop_pnl_scaling_disable_above_pct=0.0)
+    assert _peak_then_drop(cfg, 250.0, 200.0)[0] == _peak_then_drop(dict(_SCALED), 250.0, 200.0)[0]
+
+
+def test_cap_leaves_modest_winners_scaled():
+    """Below the cap threshold the widening still applies — this only targets
+    parabolic names, not ordinary winners."""
+    cfg = dict(_SCALED, trailing_stop_pnl_scaling_disable_above_pct=100.0)
+    # Peak +40% (100 -> 140) is under the 100% cap, so scaling still widens.
+    score, _ = _peak_then_drop(cfg, 140.0, 122.0)  # ~12.9% drop
+    assert score != -1, "cap fired below its threshold"

@@ -19600,7 +19600,20 @@ def _evaluate_position_risk(
                     _peak_gain_pct = ((_peak_price_for_scale - _orig_ep_hoist) / _orig_ep_hoist) * 100.0
                 else:
                     _peak_gain_pct = float(_unrealized_pct or 0.0)
-                if bool(config.get("trailing_stop_pnl_scaling_enabled", True)) and not _has_amplifier_adds:
+                # 2026-07-31: the scaling below WIDENS the trail as a winner
+                # grows (up to trailing_stop_scale_max_multiplier), which is
+                # backwards for a parabolic blow-off — the wider the band, the
+                # further a vertical name falls before the stop fires. CAR
+                # peaked at +141.9%, took the full 2x, and its threshold went
+                # 12% -> 24%; it therefore held at a 17.8% drawdown and exited a
+                # day later 59% off the peak. This cap disables the widening
+                # once peak gain exceeds N% (0.0 = OFF = today's behaviour).
+                _ts_scale_off_above = float(
+                    config.get("trailing_stop_pnl_scaling_disable_above_pct", 0.0) or 0.0)
+                if (bool(config.get("trailing_stop_pnl_scaling_enabled", True))
+                        and not _has_amplifier_adds
+                        and not (_ts_scale_off_above > 0.0
+                                 and _peak_gain_pct >= _ts_scale_off_above)):
                     _orig_gain_pct = _peak_gain_pct
                     if _orig_gain_pct >= 25.0:
                         _ts_scale_floor = float(config.get("trailing_stop_scale_floor_pnl", 25.0))
