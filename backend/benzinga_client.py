@@ -654,10 +654,31 @@ def _fetch_splits_raw(
     items = _paginate("/api/v2/calendar/splits", params, token, "splits", max_results)
     out = []
     for it in items:
+        # 2026-08-02: `ratio` stays a display string for the LLM prompts that
+        # already consume it, but a machine-readable SHARE MULTIPLIER is
+        # emitted alongside it. Without this the splits calendar could only be
+        # read as prose, so price corruption was inferred from bar ratios
+        # instead — and a -90% crash is arithmetically identical to a 10:1
+        # split, which inference can never resolve. This field is the
+        # authoritative disambiguator. Convention: split_to new shares for
+        # split_from old, so an 8-for-1 is from=1 to=8 -> 8.0, and a 1-for-10
+        # reverse is from=10 to=1 -> 0.1, matching split_detect's contract
+        # (shares *= ratio, price /= ratio).
+        _sf, _st = it.get("split_from"), it.get("split_to")
+        _mult = None
+        try:
+            _sf_f, _st_f = float(_sf), float(_st)
+            if _sf_f > 0 and _st_f > 0:
+                _mult = _st_f / _sf_f
+        except (TypeError, ValueError):
+            _mult = None
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date") or it.get("execution_date", ""),
             "ratio": f"{it.get('split_from', '?')}-for-{it.get('split_to', '?')}",
+            "share_multiplier": _mult,
+            "split_from": _sf,
+            "split_to": _st,
             "type": it.get("split_type") or it.get("adjustment_type", ""),
         })
     return out

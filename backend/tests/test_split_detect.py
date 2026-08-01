@@ -128,3 +128,34 @@ def test_price_ratio_alone_cannot_separate_a_crash_from_a_split():
     # inference is opt-in while adjustment="split" from the venue is the
     # default. A corporate-actions feed is the only real disambiguator.
     assert detect_split_ratio(100.0, 10.0) == 10.0
+
+
+# --- authoritative confirmation, the only real disambiguator ---
+
+def test_corporate_action_confirms_and_returns_the_exact_ratio():
+    """VGT printed 7.964 for a true 8.0. Restating by the observed value leaves
+    a residual error in every downstream return, so the feed's value wins."""
+    from split_detect import reconcile_with_corporate_action
+    assert reconcile_with_corporate_action(7.964, 8.0) == 8.0
+
+
+def test_corporate_action_rejects_a_crash_that_mimics_a_split():
+    """A -90% collapse looks like a 10:1. If the feed says the action was 2:1
+    (or says nothing), the price move was NOT that action."""
+    from split_detect import reconcile_with_corporate_action
+    assert reconcile_with_corporate_action(10.0, 2.0) is None
+    assert reconcile_with_corporate_action(10.0, None) is None
+
+
+def test_corporate_action_alone_is_authoritative():
+    """A split that happened while the instance was stopped leaves no bar
+    ratio to infer from — the feed still resolves it."""
+    from split_detect import reconcile_with_corporate_action
+    assert reconcile_with_corporate_action(None, 8.0) == 8.0
+
+
+def test_corporate_action_handles_reverse_and_bad_input():
+    from split_detect import reconcile_with_corporate_action
+    assert reconcile_with_corporate_action(0.1, 0.1) == 0.1
+    assert reconcile_with_corporate_action(8.0, 1.0) is None      # no-op ratio
+    assert reconcile_with_corporate_action(8.0, "x") is None
