@@ -226,12 +226,74 @@ class PortfolioEmulator:
                 value += shares * float(p)
         return value
 
+    # Ratios a real corporate action actually uses. A genuine one-bar move of
+    # this size that ALSO lands within 1.5% of one of these is not a market
+    # move — intraday moves that large halt the tape, and they do not arrive at
+    # exactly 8.000x.
+    _SPLIT_RATIOS = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 15.0, 20.0)
+
+    def reconcile_splits(self, prices):
+        """Restate share counts for HELD positions whose price gapped by an
+        unadjusted split ratio. Returns a list of (ticker, ratio, old, new).
+
+        Backtests read raw bars, and the feed does NOT split-adjust. VGT split
+        8:1 mid-window: its close went $808.88 -> $101.57 in a single bar
+        (ratio 7.96) while the share count stayed put, so NAV fell 13.6%
+        instantly and the position booked a phantom -$765 against a true
+        +$168. That turned a +13.54% run into -0.92% -- and it did it to two
+        independent runs before it was caught. Any backtest spanning a split in
+        a held name is silently corrupted, and the corruption looks exactly
+        like a market crash on the equity curve.
+
+        This is deliberately conservative: it fires only when the ratio is
+        within 1.5% of a real split factor, so an ordinary gap-down (or even a
+        genuine -50% halt-and-reopen) is left alone. Detection is symmetric --
+        the same test with the ratio inverted catches reverse splits.
+
+        Live mode is unaffected: this class is backtest-only, and a live broker
+        reports post-split share counts through the positions API.
+        """
+        if not bool(getattr(self, "_split_reconcile_enabled", True)):
+            return []
+        last = getattr(self, "_last_prices", None) or {}
+        adjusted = []
+        for ticker, shares in list(self._positions.items()):
+            new_px = (prices or {}).get(ticker)
+            old_px = last.get(ticker)
+            try:
+                new_px = float(new_px or 0.0)
+                old_px = float(old_px or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if new_px <= 0 or old_px <= 0 or shares <= 0:
+                continue
+            for ratio in self._SPLIT_RATIOS:
+                # forward split: price falls by `ratio`, shares multiply by it
+                for factor, observed in ((ratio, old_px / new_px),
+                                         (1.0 / ratio, new_px / old_px)):
+                    if abs(observed / ratio - 1.0) <= 0.015:
+                        new_shares = shares * (old_px / new_px)
+                        self._positions[ticker] = new_shares
+                        adjusted.append((ticker, old_px / new_px, shares, new_shares))
+                        break
+                else:
+                    continue
+                break
+        return adjusted
+
     def save_portfolio_snapshot(self, prices, timestamp=None):
         """
         Record current portfolio value at this moment with the given prices.
         prices: dict ticker -> price (live/current prices for valuation).
         timestamp: optional datetime (e.g. current_time in backtest loop).
         """
+        # Before valuing anything: a held name whose price gapped by a split
+        # factor must have its share count restated, or NAV -- which drives
+        # sizing, the drawdown halt and max_drawdown_magnitude -- takes a
+        # double-digit phantom hit.
+        for _t, _r, _old, _new in self.reconcile_splits(prices):
+            print(f"[emulator] SPLIT RECONCILED {_t}: ratio {_r:.2f}x, "
+                  f"{_old:.4f} -> {_new:.4f} shares (price feed was unadjusted)")
         value = self.get_portfolio_value(prices)
         # V3: Track last known prices for portfolio_total fallback
         if prices:
