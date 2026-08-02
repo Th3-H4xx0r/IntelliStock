@@ -2011,16 +2011,77 @@ def _to_toon(data, use_toon: bool = True) -> str:
     return json.dumps(data, separators=(',', ':'))
 
 
+# ── Prompt-payload canonicalization ───────────────────────────────────────
+#
+# `llm_utils._prompt_cache_key` hashes the prompt STRING, so two runs share a
+# cache row only if their prompts are byte-identical. Measured on four
+# replicate runs of one window+config (bt 258930 / 738395 / 145317 / 259145,
+# 2026-03-30→04-27 @900s): 1,167-1,577 newly-written cache rows each and ZERO
+# key overlap between any pair — every call a miss, every miss a fresh sample
+# at temperature 0.2, and a replicate P&L spread that swamps the 2-5pp of alpha
+# the strategy is being measured for.
+#
+# Two of the causes are pure encoding noise, and they die here, at the single
+# chokepoint every structured prompt block passes through:
+#
+#   * Float repr. Most values that reach a prompt are never rounded
+#     (`feature_row.base_raw_score`, every entry in `base_components`, analog
+#     `latest_return`), and neither `_to_prompt_payload` nor the TOON encoder
+#     rounds — so a last-bit difference renders as "0.30000000000000004"
+#     instead of "0.3", changing the hash while changing nothing a model could
+#     act on. Six places is orders of magnitude below any decision threshold in
+#     this strategy and still strictly finer than the `round(x, 4)` most
+#     producers already apply.
+#   * Dict key order. The TOON tabular encoding derives its header from the
+#     union of keys in first-seen order, so the same content rebuilt from a
+#     RethinkDB row in a different insertion order yields a different header
+#     and a different prompt.
+#
+# List ORDER is deliberately preserved: a price series and a ranked-reason list
+# both carry meaning in their order. Callers holding an unordered bag (active
+# events, historical analogs) impose their own total order before they get
+# here — see `_sorted_active_event_records` and `_canonical_historical_analogs`.
+
+_PROMPT_FLOAT_PLACES = 6
+_PROMPT_CANON_MAX_DEPTH = 12
+
+
+def _canonicalize_prompt_value(value: Any, _depth: int = 0) -> Any:
+    """Sort dict keys and quantize floats so identical content renders
+    identically. Structure-preserving otherwise — see the block comment."""
+    if _depth >= _PROMPT_CANON_MAX_DEPTH:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _canonicalize_prompt_value(value[key], _depth + 1)
+            for key in sorted(value, key=str)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_prompt_value(item, _depth + 1) for item in value]
+    # bool is an int subclass; neither needs quantizing and both must not be
+    # coerced to float (True would render as 1.0).
+    if isinstance(value, bool) or isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return value
+        # `+ 0.0` folds -0.0 into 0.0; their reprs differ and the sign of a
+        # zero is never meaningful in these payloads.
+        return round(value, _PROMPT_FLOAT_PLACES) + 0.0
+    return value
+
+
 def _to_prompt_payload(data, use_toon: bool = True) -> str:
     """
     Render structured prompt context in the most compact safe form available.
-    Normalizes non-JSON values via `default=str`, then uses TOON when enabled.
+    Normalizes non-JSON values via `default=str`, canonicalizes key order and
+    float precision so the prompt hash is stable, then uses TOON when enabled.
     """
     try:
         normalized = json.loads(json.dumps(data, default=str, ensure_ascii=False))
     except Exception:
         normalized = data
-    return _to_toon(normalized, use_toon=use_toon)
+    return _to_toon(_canonicalize_prompt_value(normalized), use_toon=use_toon)
 
 
 def _truncate_prompt_text(value: Any, max_chars: int) -> str:
@@ -11381,7 +11442,15 @@ def _retrieve_historical_analogs(conn, instance_id: str, as_of_date: str, candid
             .table(NEXUS_TRADE_OUTCOMES_TABLE)
             .get_all(instance_id, index="instance_id")
             .filter(lambda doc: doc["entry_date"].lt(as_of_date))
-            .order_by(_r.desc("latest_observation_date"))
+            # `id` is the tiebreak, not decoration. `_update_indefinite_outcomes`
+            # rewrites `latest_observation_date` to the current bar on every
+            # unresolved row, so by mid-window most of the table shares one
+            # value and this `order_by` is a single enormous tie that RethinkDB
+            # resolves in index-scan order. `.limit(80)` then makes that
+            # arbitrary order decide MEMBERSHIP, and the five survivors land in
+            # the overlay prompt — a different five per run, which is one of the
+            # reasons two replicate runs never shared a prompt-cache row.
+            .order_by(_r.desc("latest_observation_date"), _r.desc("id"))
             .limit(80)
             .run(conn)
         )
@@ -21427,6 +21496,132 @@ def _format_benzinga_for_symbol(bz_data: dict[str, list], symbol: str, use_toon:
     return "Benzinga data for " + sym_upper + ":\n" + "\n".join(sections) + "\n"
 
 
+# ── Overlay prompt canonicalization ───────────────────────────────────────
+#
+# `_canonicalize_prompt_value` kills the encoding-noise half of the cache-miss
+# problem (float repr, key order). The other half is semantic: fields that
+# genuinely differ between two runs of the same window while saying nothing new
+# about the trade. They are handled here, per-payload, because deciding what is
+# safe to drop needs to know what the field means — a blanket strip at the
+# `_to_prompt_payload` chokepoint would also delete `supporting_article_hashes`
+# from the event-maintenance prompt, which the model is asked to cite back.
+
+_OVERLAY_STRIP_KEYS = frozenset({
+    # Scope/provenance stamps the strategy attaches to its own history rows.
+    "supporting_article_hashes", "article_hash", "history_scope_id",
+    "base_instance_id", "history_model_stamp", "strategy_config_hash",
+    "feature_version", "cache_scope_id", "instance_id",
+    # 2026-08-02: the set above was only ever applied to `active_events`.
+    # `feature_row` and `base_score_doc` went into the prompt untouched, so
+    # anything run-scoped riding along in them reached the hash. Nothing below
+    # is decision-bearing — they are row identity, PIT bookkeeping, telemetry
+    # correlation ids, and wall-clock stamps.
+    "id", "backtest_id", "run_id",
+    "pit_manifest_id", "pit_provenance", "pit_as_of",
+    "trained_at", "cached_at", "computed_at", "generated_at",
+    "created_at", "updated_at",
+    "_telemetry_backtest_id", "_telemetry_instance_id",
+})
+
+
+def _strip_run_scoped(value: Any, _depth: int = 0) -> Any:
+    """Recursively drop `_OVERLAY_STRIP_KEYS` from a prompt payload."""
+    if _depth >= _PROMPT_CANON_MAX_DEPTH:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _strip_run_scoped(item, _depth + 1)
+            for key, item in value.items()
+            if key not in _OVERLAY_STRIP_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_strip_run_scoped(item, _depth + 1) for item in value]
+    return value
+
+
+def _training_row_band(rows: Any) -> int:
+    """Collapse the ML training-row count to a 1-2-5 magnitude band.
+
+    `ml_training_rows` is `NexusModelBundle.row_count`: how many
+    context-by-outcome rows this instance had accumulated when the bar's model
+    was fitted. It grows every bar, and two runs of the same window never agree
+    on it — run 2 starts against a table that already holds run 1's rows, and
+    because the two runs trade different symbols they write different ones.
+    Embedded raw it changed the overlay prompt on literally every call, which on
+    its own pins the cache hit rate at zero.
+
+    It is not decoration: the prompt warns the model when the ML head was fitted
+    on very little data. But only the order of magnitude carries that warning,
+    so a 1-2-5 ladder keeps "trained on ~2000 rows" while making 2,431 and 2,687
+    the same prompt.
+    """
+    try:
+        n = int(rows or 0)
+    except (TypeError, ValueError):
+        return 0
+    if n <= 0:
+        return 0
+    band = 1
+    while band * 10 <= n:
+        band *= 10
+    for step in (5, 2, 1):
+        if n >= band * step:
+            return band * step
+    return band
+
+
+def _canonicalize_overlay_base_doc(base_score_doc: Any) -> dict:
+    """Strip run-scoped keys and band `ml_training_rows` in the base-score doc."""
+    doc = _strip_run_scoped(base_score_doc if isinstance(base_score_doc, dict) else {})
+    ml = doc.get("ml")
+    if isinstance(ml, dict) and "ml_training_rows" in ml:
+        ml = dict(ml)
+        ml["ml_training_rows"] = _training_row_band(ml.get("ml_training_rows"))
+        doc["ml"] = ml
+    return doc
+
+
+def _canonical_active_event_order(events: Any) -> list[dict]:
+    """Re-apply `_sorted_active_event_records`' ordering, without renormalizing.
+
+    Every production path already hands the overlay a sorted list, so this is a
+    no-op there. It exists because the overlay TRUNCATES the list
+    (`overlay_max_events_per_symbol`, default 12): if a future caller ever
+    forwards events straight off an unordered RethinkDB scan, an unstable order
+    would silently change WHICH events the model sees, not just the order it
+    sees them in. Ordering only — no field is rewritten.
+    """
+    return sorted(
+        (ev for ev in (events or []) if isinstance(ev, dict)),
+        key=lambda ev: (
+            str(ev.get("event_cluster_key") or ""),
+            str(ev.get("event_name") or ""),
+            str(ev.get("event_type") or ""),
+        ),
+    )
+
+
+def _canonical_historical_analogs(analogs: Any) -> list[dict]:
+    """Impose a total order on the analog list before it reaches the prompt.
+
+    `_retrieve_historical_analogs` reads `GraphNexusTradeOutcomes` ordered only
+    by `latest_observation_date` — a field `_update_indefinite_outcomes`
+    rewrites to the current bar on hundreds of rows every bar, so most of the
+    80-row window is one giant tie that RethinkDB breaks by index-scan order.
+    The result is a bag of comparable past trades, not a ranking, so a total
+    order costs nothing and stops the prompt reshuffling between runs.
+    Most-recent-first is kept; the symbol/event tiebreak is what makes it total.
+    """
+    rows = [dict(row) for row in (analogs or []) if isinstance(row, dict)]
+    rows.sort(key=lambda row: (
+        str(row.get("symbol") or ""),
+        str(row.get("dominant_event_type") or ""),
+        str(row.get("government_action_type") or ""),
+    ))
+    rows.sort(key=lambda row: str(row.get("entry_date") or ""), reverse=True)
+    return rows
+
+
 # ── Overlay result cache (fast mode only) ─────────────────────────────────
 
 def _overlay_result_cache_key(
@@ -21517,6 +21712,7 @@ def _apply_trade_overlay(
     config: dict,
     price_history: dict | None = None,
     benzinga_context: str = "",
+    date_key: str = "",
 ) -> tuple[dict, dict]:
     provider, api_key, model, prompt_version = _resolve_role_llm_config(config, "overlay")
     provider_config = _resolve_role_llm_provider_config(config, "overlay")
@@ -21535,17 +21731,23 @@ def _apply_trade_overlay(
         "Keep reason_codes/feature_boosts/feature_penalties to max 3 items each, max 5 words per item. "
         "Minimize total output tokens."
     )
-    _OVERLAY_STRIP_KEYS = {
-        "supporting_article_hashes", "article_hash", "history_scope_id",
-        "base_instance_id", "history_model_stamp", "strategy_config_hash",
-        "feature_version", "cache_scope_id", "instance_id",
-    }
+    # Canonicalize the two payloads that were previously handed to the prompt
+    # exactly as built: `base_score_doc` carries `ml.ml_training_rows`, which
+    # differs on every bar and between runs, and `feature_row` was never
+    # stripped at all. See `_canonicalize_overlay_base_doc`.
+    base_score_doc = _canonicalize_overlay_base_doc(base_score_doc)
+    feature_row_ctx = _strip_run_scoped(feature_row if isinstance(feature_row, dict) else {})
+    # `feature_row` never carried a `date_key` (it is the ML feature vector),
+    # so every `feature_row.get("date_key")` below silently resolved to "" —
+    # collapsing every date into one overlay-result-cache bucket and leaving
+    # `decision_at` blank on the evidence record. Take it from the caller.
+    date_key = str(date_key or feature_row_ctx.get("date_key") or "")
     # ── Fast mode: check overlay result cache before building prompt ──
     _fast_mode_overlay = bool(config.get("nexus_fast_mode", False))
     if _fast_mode_overlay:
         _raw_score = float(base_score_doc.get("graph_raw_score", 0.0) or 0.0)
         _cache_conn = _get_nexus_db_conn(reuse=False)
-        _cached = _check_overlay_result_cache(_cache_conn, symbol, feature_row.get("date_key", ""), _raw_score, active_events, config)
+        _cached = _check_overlay_result_cache(_cache_conn, symbol, date_key, _raw_score, active_events, config)
         if _cache_conn:
             try:
                 _cache_conn.close()
@@ -21554,6 +21756,7 @@ def _apply_trade_overlay(
         if _cached is not None:
             return _cached, {}
     # ── Fast mode: trim events to symbol-relevant only ──
+    active_events = _canonical_active_event_order(active_events)
     _max_events = int(config.get("overlay_max_events_per_symbol", 12) or 12)
     if _fast_mode_overlay:
         _max_events = min(_max_events, int(config.get("overlay_max_events_per_symbol", 5) or 5))
@@ -21563,7 +21766,7 @@ def _apply_trade_overlay(
         if not _relevant:
             _relevant = active_events  # fallback to all if none match
         active_events = _relevant
-    stripped_events = [{k: v for k, v in ev.items() if k not in _OVERLAY_STRIP_KEYS} for ev in active_events[:_max_events]]
+    stripped_events = _strip_run_scoped(list(active_events[:_max_events]))
     # ── Fast mode: trim price history ──
     _price_bar_limit = int(config.get("overlay_price_history_bars", 0) or 0)
     if _fast_mode_overlay and _price_bar_limit > 0 and price_history:
@@ -21600,8 +21803,9 @@ def _apply_trade_overlay(
     _ml_data_conf = float(_ml_doc.get("ml_data_confidence", 1.0) or 1.0)
     _ml_train_rows = int(_ml_doc.get("ml_training_rows", 0) or 0)
     if _ml_data_conf < 0.5 and _ml_train_rows > 0:
+        # "~" because the count is banded — see `_training_row_band`.
         ml_quality_ctx = (
-            f"IMPORTANT: ML model trained on only {_ml_train_rows} rows (confidence: {_ml_data_conf*100:.0f}%). "
+            f"IMPORTANT: ML model trained on only ~{_ml_train_rows} rows (confidence: {_ml_data_conf*100:.0f}%). "
             "ML predictions are UNRELIABLE. Weight graph relationships, news sentiment, and price action "
             "MORE heavily than ML signals.\n"
         )
@@ -21621,11 +21825,11 @@ def _apply_trade_overlay(
         + ml_quality_ctx
         + graph_ctx
         + f"Base score context: {_to_prompt_payload(base_score_doc, use_toon=use_toon)}\n"
-        f"Feature row: {_to_prompt_payload(feature_row, use_toon=use_toon)}\n"
+        f"Feature row: {_to_prompt_payload(feature_row_ctx, use_toon=use_toon)}\n"
         + price_ctx
         + bz_ctx
         + f"Active events as of evaluation date: {_to_prompt_payload(stripped_events, use_toon=use_toon)}\n"
-        f"Historical analogs: {_to_prompt_payload(historical_analogs[:5], use_toon=use_toon)}\n"
+        f"Historical analogs: {_to_prompt_payload(_canonical_historical_analogs(historical_analogs)[:5], use_toon=use_toon)}\n"
         'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["strong_earnings"],"ra":"Q3 beat estimates"}\n'
         "Return only the bounded overlay decision."
     )
@@ -21653,7 +21857,7 @@ def _apply_trade_overlay(
             },
             evidence_context=_model_evidence_context(
                 prompt,
-                decision_at=str(feature_row.get("date_key") or ""),
+                decision_at=date_key,
                 call_site="overlay",
                 role="trade_overlay",
                 subject=symbol,
@@ -21693,7 +21897,7 @@ def _apply_trade_overlay(
     if _fast_mode_overlay:
         _store_conn = _get_nexus_db_conn(reuse=False)
         _store_overlay_result_cache(
-            _store_conn, symbol, feature_row.get("date_key", ""),
+            _store_conn, symbol, date_key,
             float(base_score_doc.get("graph_raw_score", 0.0) or 0.0),
             active_events, config, _result_dict,
         )
@@ -21721,6 +21925,10 @@ def _build_etf_trend_context(symbol: str, active_trends: list, config: dict) -> 
             })
     if not matching_trends:
         return "No specific trend context available"
+    # `active_trends` arrives in RethinkDB scan order, which is not a ranking
+    # and is not stable across runs. Order the block so the ETF overlay prompt
+    # hashes the same for the same set of trends.
+    matching_trends.sort(key=lambda t: (str(t.get("name") or ""), str(t.get("last_confirmed") or "")))
     use_toon = bool(config.get("use_toon_format", True))
     return _to_prompt_payload(matching_trends, use_toon=use_toon)
 
@@ -21734,6 +21942,7 @@ def _apply_etf_trade_overlay(
     active_trends: list,
     config: dict,
     price_history: dict | None = None,
+    date_key: str = "",
 ) -> tuple[dict, dict]:
     """Trade overlay for ETFs — uses trend context instead of company context."""
     provider, api_key, model, prompt_version = _resolve_role_llm_config(config, "overlay")
@@ -21753,12 +21962,11 @@ def _apply_etf_trade_overlay(
         "Keep reason_codes/feature_boosts/feature_penalties to max 3 items each, max 5 words per item. "
         "Minimize total output tokens."
     )
-    _OVERLAY_STRIP_KEYS = {
-        "supporting_article_hashes", "article_hash", "history_scope_id",
-        "base_instance_id", "history_model_stamp", "strategy_config_hash",
-        "feature_version", "cache_scope_id", "instance_id",
-    }
-    stripped_events = [{k: v for k, v in ev.items() if k not in _OVERLAY_STRIP_KEYS} for ev in active_events[:12]]
+    base_score_doc = _canonicalize_overlay_base_doc(base_score_doc)
+    date_key = str(date_key or (feature_row or {}).get("date_key") or "")
+    stripped_events = _strip_run_scoped(_canonical_active_event_order(active_events)[:12])
+    # The ETF leg never rendered `feature_row` into its prompt, so there is no
+    # feature block to canonicalize here — only the base doc and the events.
     price_ctx = ""
     if price_history:
         price_ctx = (
@@ -21798,7 +22006,7 @@ def _apply_etf_trade_overlay(
             },
             evidence_context=_model_evidence_context(
                 prompt,
-                decision_at=str(feature_row.get("date_key") or ""),
+                decision_at=date_key,
                 call_site="overlay_etf",
                 role="trade_overlay",
                 subject=symbol,
@@ -22072,6 +22280,7 @@ def _apply_ml_and_overlay_to_scores(
                         config=config,
                         price_history=_overlay_price_history.get(item["sym"]),
                         benzinga_context=_format_benzinga_for_symbol(bz_data or {}, item["sym"], use_toon=_use_toon),
+                        date_key=date_key,
                     )
                     future_map[fut] = item
                     _submit_idx += 1
@@ -22094,6 +22303,7 @@ def _apply_ml_and_overlay_to_scores(
                         active_trends=active_trends or [],
                         config=config,
                         price_history=_overlay_price_history.get(item["sym"]),
+                        date_key=date_key,
                     )
                     future_map[fut] = item
                     _submit_idx += 1

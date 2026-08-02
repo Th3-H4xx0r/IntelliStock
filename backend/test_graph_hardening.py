@@ -2435,7 +2435,11 @@ class GraphHardeningTests(unittest.TestCase):
              patch.object(gna, "_TOON_IMPORT_ATTEMPTED", True), \
              patch.object(gna, "_toon_encode_fn", None):
             rendered = gna._to_prompt_payload(payload, use_toon=True)
-        self.assertIn("[2]{ref,headline,symbols}:", rendered)
+        # The tabular header is sorted, not first-seen: `_canonicalize_prompt_value`
+        # orders dict keys so the same content can't render two ways and miss the
+        # prompt cache. The shape (one header, one row per record) is what this
+        # test is about.
+        self.assertIn("[2]{headline,ref,symbols}:", rendered)
         self.assertNotIn('"headline":', rendered)
         self.assertNotIn('{"ref"', rendered)
 
