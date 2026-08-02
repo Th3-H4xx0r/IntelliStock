@@ -786,3 +786,55 @@ def test_chop_floor_protective_exit_still_full_on_downgrade():
                                _spec_chop(True))
     assert len(emu.signals) == 1
     assert emu.signals[0]["sell_fraction"] == 1.0
+
+
+# --- 2026-08-02: chop parking gated on the 20-day proxy return ---
+#
+# Bull-window chop is a rally being confirmed; parking there earns. Bear-window
+# chop is an interlude between down legs — where 19 of 19 bear-leg entries were
+# opened — and parking there spends the cash that funds the SQQQ hedge.
+# Measured: bear went +10.17% -> +3.61% with chop parking on.
+
+def _spec_chop_ret20(min_ret20):
+    cfg = dict(SPEC[0]["config"])
+    cfg["residual_sleeve_chop_enabled"] = True
+    if min_ret20 is not None:
+        cfg["residual_sleeve_chop_min_ret20_pct"] = min_ret20
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def _set_ret20(v):
+    b._ns["_strategy_cache"] = {"graph_nexus_analysis": {"_market_regime_diag": {"ret20": v}}}
+
+
+def test_chop_park_blocked_when_ret20_negative():
+    _set_regime("chop"); _set_ret20(-5.2)          # bear-adjacent chop
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 3, 17, 15),
+                              _spec_chop_ret20(0.0))
+    assert emu.signals == [], "parked long beta on a bear-adjacent chop bar"
+
+
+def test_chop_park_allowed_when_ret20_positive():
+    _set_regime("chop"); _set_ret20(+3.4)          # rally being confirmed
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 4, 13, 15),
+                              _spec_chop_ret20(0.0))
+    assert len(emu.signals) == 1
+
+
+def test_chop_ret20_gate_off_by_default():
+    """Key absent -> today's behaviour, parks regardless of ret20."""
+    _set_regime("chop"); _set_ret20(-5.2)
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 3, 17, 15),
+                              _spec_chop_ret20(None))
+    assert len(emu.signals) == 1
+
+
+def test_chop_gate_does_not_affect_bull_bars():
+    _set_regime("bull"); _set_ret20(-5.2)          # gate must not touch bull
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 4, 22, 15),
+                              _spec_chop_ret20(0.0))
+    assert len(emu.signals) == 1

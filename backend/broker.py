@@ -2655,6 +2655,11 @@ def _residual_sleeve_config(cached_strategies):
                 # 2026-07-30 beta floor: also park idle cash in the sleeve
                 # symbol on CHOP bars, not just confirmed bull. False = OFF.
                 "chop_enabled": bool(cfg.get("residual_sleeve_chop_enabled", False)),
+                # Gate chop parking on the 20-day proxy return. None = OFF.
+                "chop_min_ret20_pct": (
+                    None if cfg.get("residual_sleeve_chop_min_ret20_pct") is None
+                    else float(cfg.get("residual_sleeve_chop_min_ret20_pct"))
+                ),
                 # 2026-07-23 conviction-scaled hedge (default OFF -> static
                 # bear_alloc_pct). Scale the SQQQ NAV cap UP with downtrend
                 # conviction: alloc = clamp(base + slope*max(0,-ret20-start),
@@ -3406,6 +3411,31 @@ def _residual_sleeve_deploy(
         # bear/crash never reach here (the bear leg returns above), and the
         # protective full exit on a downgrade is unchanged.
         _sleeve_regimes = ("bull", "chop") if bool(cfg.get("chop_enabled")) else ("bull",)
+        # 2026-08-02: not every chop bar is the same chop bar. In a BULL window
+        # chop is the rally still being confirmed, and parking there is the
+        # point. In a BEAR window chop is an interlude between down legs — and
+        # it is where 19 of 19 bear-leg entries were opened — so parking long
+        # beta there spends the very cash that funds the SQQQ hedge. Measured:
+        # the bear window went +10.17% -> +3.61% with chop parking on, a 6.56pp
+        # give-back, while bull gained.
+        #
+        # The 20-day proxy return separates them. It is negative through a bear
+        # window and turns positive as a rally matures, so requiring it to be
+        # positive keeps the bull-window parking that earns and drops the
+        # bear-window parking that bleeds. 0.0 = OFF = today's behaviour.
+        if regime == "chop" and "chop" in _sleeve_regimes:
+            _chop_min_ret20 = cfg.get("chop_min_ret20_pct")
+            if _chop_min_ret20 is not None:
+                try:
+                    _sc_diag = ((globals().get("_strategy_cache") or {}).get(
+                        "graph_nexus_analysis") or {}).get("_market_regime_diag") or {}
+                    _ret20 = _sc_diag.get("ret20")
+                    if _ret20 is not None and float(_ret20) < float(_chop_min_ret20):
+                        _log(f"[sleeve] chop park SKIPPED — ret20 {float(_ret20):+.1f}% "
+                             f"below {float(_chop_min_ret20):+.1f}% (bear-adjacent chop)", "cyan")
+                        return
+                except (TypeError, ValueError):
+                    pass
         if regime not in _sleeve_regimes:
             return
         sym = cfg["symbol"]
