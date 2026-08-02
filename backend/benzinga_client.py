@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -69,6 +70,34 @@ _BZ_PERSISTED_STATE_LOADED = False
 # prevents duplicate HTTP calls, so bypassing the counter is safe.
 _BZ_BACKTEST_MODE = False
 _BZ_401_ALERTED = False  # one-shot Discord alert per process on Benzinga 401
+
+
+def _availability_stamp(date_value):
+    """Conservative availability timestamp for a Benzinga record, or "".
+
+    Benzinga's calendar endpoints return an EVENT date and no publication
+    timestamp -- not one of the keys `_benzinga_available_at` looks for
+    (`available_at`, `published_at`, `created_at`, ...) appears anywhere in the
+    responses this module normalizes. `filter_available` refuses a record it
+    cannot date, so in research mode it was silently dropping 100% of Benzinga
+    records: every backtest ran with analyst ratings, insider trades,
+    congressional trades, M&A, IPOs, splits and the earnings calendar blank,
+    while live ran with all of them. The backtest was not testing the live
+    strategy.
+
+    We cannot invent a publication time we do not have, so we take the close of
+    the record's OWN date as a lower bound on availability. 21:00Z is after the
+    US session close in both EST and EDT, so a record dated D first becomes
+    visible on D+1 -- a decision during D cannot see it. That is deliberately
+    late: erring late costs a day of signal, erring early would leak.
+
+    Anything with a real timestamp is unaffected -- `_benzinga_available_at`
+    checks the explicit publication keys first and only falls through to this.
+    """
+    date_text = str(date_value or "").strip()[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text):
+        return ""
+    return f"{date_text}T21:00:00Z"
 
 
 def set_benzinga_backtest_mode(enabled: bool):
@@ -456,6 +485,7 @@ def _fetch_ratings_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date", ""),
+            "available_at": _availability_stamp(it.get("date", "")),
             "analyst": it.get("analyst_name") or it.get("analyst", ""),
             "action": it.get("action_company", ""),
             "rating": it.get("rating_current", ""),
@@ -486,6 +516,7 @@ def _fetch_insights_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date", ""),
+            "available_at": _availability_stamp(it.get("date", "")),
             "firm": it.get("firm", ""),
             "rating": it.get("rating", ""),
             "action": it.get("rating_action", ""),
@@ -528,6 +559,7 @@ def _fetch_insider_transactions_raw(
             out.append({
                 "ticker": (it.get("company_symbol") or ticker).upper(),
                 "date": it.get("filing_date") or it.get("date_transaction", ""),
+                "available_at": _availability_stamp(it.get("filing_date") or it.get("date_transaction", "")),
                 "insider": it.get("owner_name") or it.get("insider_name", ""),
                 "title": it.get("owner_title") or it.get("insider_title", ""),
                 "direction": direction,
@@ -568,6 +600,7 @@ def _fetch_gov_trades_raw(
             out.append({
                 "ticker": (it.get("ticker") or ticker).upper(),
                 "date": it.get("transaction_date") or it.get("date", ""),
+                "available_at": _availability_stamp(it.get("transaction_date") or it.get("date", "")),
                 "politician": it.get("politician_name") or it.get("representative", ""),
                 "chamber": it.get("chamber", ""),
                 "direction": (it.get("transaction_type") or "").lower(),
@@ -598,6 +631,7 @@ def _fetch_ma_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date", ""),
+            "available_at": _availability_stamp(it.get("date", "")),
             "name": it.get("name", ""),
             "deal_type": it.get("deal_type", ""),
             "deal_status": it.get("deal_status", ""),
@@ -626,6 +660,7 @@ def _fetch_ipos_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date") or it.get("pricing_date", ""),
+            "available_at": _availability_stamp(it.get("date") or it.get("pricing_date", "")),
             "name": it.get("name", ""),
             "exchange": it.get("exchange", ""),
             "price_min": it.get("price_min"),
@@ -675,6 +710,7 @@ def _fetch_splits_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date") or it.get("execution_date", ""),
+            "available_at": _availability_stamp(it.get("date") or it.get("execution_date", "")),
             "ratio": f"{it.get('split_from', '?')}-for-{it.get('split_to', '?')}",
             "share_multiplier": _mult,
             "split_from": _sf,
@@ -704,6 +740,7 @@ def _fetch_earnings_calendar_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date", ""),
+            "available_at": _availability_stamp(it.get("date", "")),
             "time": it.get("time", ""),  # BMO/AMC
             "name": it.get("name", ""),
             "eps_est": it.get("eps_estimate") or it.get("eps_estimated"),
@@ -738,6 +775,7 @@ def _fetch_company_actions_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date", ""),
+            "available_at": _availability_stamp(it.get("date", "")),
             "name": it.get("name") or it.get("security_name") or "",
             "event": it.get("event_type") or it.get("action_type") or it.get("dividend_type") or "dividend",
             "amount": it.get("dividend_amount") or it.get("dividend") or it.get("amount"),
@@ -783,6 +821,7 @@ def _fetch_prediction_markets_raw(
         out.append({
             "ticker": (it.get("ticker") or "").upper(),
             "date": it.get("date", ""),
+            "available_at": _availability_stamp(it.get("date", "")),
             "firm": it.get("firm", ""),
             "stance": stance,
             "thesis": (it.get("insight") or it.get("thesis") or "")[:200],

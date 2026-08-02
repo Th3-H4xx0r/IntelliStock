@@ -640,6 +640,87 @@ def _omit_temperature(model: str) -> bool:
     return False
 
 
+# ── Deterministic sampling ────────────────────────────────────────────────
+# Every sampling call site in this module used to hard-code temperature=0.2
+# (and top_p=0.95 on the NVIDIA/OpenRouter paths) with no seed. At 0.2 the
+# decode is still stochastic, and the per-candidate trade overlay is a
+# fan-out of hundreds of such calls per backtest whose `delta_score`,
+# `confidence_delta` and `reason_codes` feed ranking, sizing and buy/sell
+# blocks directly. Measured on two replicate runs of the same window
+# (bt 738395 vs 259145): 308 of 2544 shared decisions came back with a
+# different overlay verdict and 4 flipped action outright — enough to send
+# the two runs into different books entirely.
+#
+# In deterministic mode we ask for greedy decoding (temperature 0, top_p 1)
+# and pass a fixed seed to the providers that honour one. Greedy decoding is
+# the strongest determinism a hosted model offers; it is NOT a guarantee
+# (see the module docs in tests/test_backtest_determinism.py for what
+# remains). LIVE runs are untouched — the flag is only ever set for
+# backtests.
+_DETERMINISTIC_TEMPERATURE = 0.0
+_DETERMINISTIC_TOP_P = 1.0
+_DEFAULT_DETERMINISTIC_SEED = 20260101
+
+
+def deterministic_sampling_active() -> bool:
+    """True when this process must sample greedily for reproducibility.
+
+    Driven by ``NEXUS_LLM_DETERMINISTIC``, which the backtest engine forwards
+    into every spawned broker container (see
+    ``_phase_alpha_helpers.backtest_determinism_env_vars``). Unset means live
+    or an ad-hoc process, where provider defaults are kept.
+    """
+    raw = os.environ.get("NEXUS_LLM_DETERMINISTIC")
+    if raw is None:
+        return False
+    return str(raw).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def deterministic_seed() -> int:
+    """Seed handed to providers that accept one. Overridable for A/B work."""
+    raw = (os.environ.get("NEXUS_LLM_SEED") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_DETERMINISTIC_SEED
+
+
+def effective_temperature(default: float) -> float:
+    """Temperature to send: 0.0 in deterministic mode, else the caller's."""
+    if deterministic_sampling_active():
+        return _DETERMINISTIC_TEMPERATURE
+    try:
+        return float(default)
+    except (TypeError, ValueError):
+        return 0.2
+
+
+def effective_top_p(default: float | None) -> float | None:
+    """top_p to send: 1.0 in deterministic mode (no nucleus truncation)."""
+    if deterministic_sampling_active():
+        return _DETERMINISTIC_TOP_P
+    return default
+
+
+def apply_deterministic_sampling(body: dict, *, model: str = "") -> dict:
+    """Mutate an OpenAI-style request body in place for greedy decoding.
+
+    No-op outside deterministic mode. Skips `temperature` for the reasoning
+    models that reject it, exactly as the surrounding call sites do.
+    """
+    if not deterministic_sampling_active() or not isinstance(body, dict):
+        return body
+    if not _omit_temperature(model):
+        body["temperature"] = _DETERMINISTIC_TEMPERATURE
+    else:
+        body.pop("temperature", None)
+    body["top_p"] = _DETERMINISTIC_TOP_P
+    body["seed"] = deterministic_seed()
+    return body
+
+
 def _http_retry_backoff_seconds(error_text: str, attempt: int) -> float:
     """Backoff for transient HTTP retries. Uses 60s base for 429/
     rate-limit errors (some providers — notably NVIDIA NIM — keep
@@ -1708,6 +1789,9 @@ def _build_structured_model_settings(
     if p == "openrouter" and effective_max_tokens is None:
         effective_max_tokens = _OPENROUTER_UNCAPPED_MAX_OUTPUT_TOKENS
     skip_temp = _omit_temperature(model)
+    # Deterministic backtests decode greedily regardless of the caller's value.
+    temperature = effective_temperature(temperature)
+    _det = deterministic_sampling_active()
     if p == "gemini" and GoogleModelSettings is not None:
         if effective_max_tokens is None or effective_max_tokens < 256:
             effective_max_tokens = 256
@@ -1719,10 +1803,15 @@ def _build_structured_model_settings(
         )
         if not skip_temp:
             kwargs["temperature"] = float(temperature)
+        if _det:
+            kwargs["top_p"] = _DETERMINISTIC_TOP_P
         return GoogleModelSettings(**kwargs)
     kwargs = dict(max_tokens=effective_max_tokens, timeout=timeout, parallel_tool_calls=False)
     if not skip_temp:
         kwargs["temperature"] = float(temperature)
+    if _det:
+        kwargs["top_p"] = _DETERMINISTIC_TOP_P
+        kwargs["seed"] = deterministic_seed()
     if p == "openrouter":
         # Opt into OpenRouter's per-call USD cost envelope on the native
         # structured path too — the plain _call_openrouter path already sends
@@ -2071,6 +2160,16 @@ def _call_codex_cli_structured_from_strategy(
                 _cached_obj = _validate_structured_output_from_raw_text(output_type, _cached_raw)
             except Exception:
                 _cached_obj = None
+            # A cache must be a pure speedup: a HIT has to return exactly what a
+            # MISS would have returned, or the cache is silently changing
+            # results. The live path rejects skeleton output (an all-defaults
+            # object carrying no model opinion) and retries — see the
+            # `_is_skeleton_structured_output` raise in the raw-JSON path. Until
+            # this check was mirrored here, a cached skeleton was accepted as
+            # `ok=True` and short-circuited that retry, so whether a run got a
+            # real opinion or a neutral default depended on cache warmth.
+            if _cached_obj is not None and _is_skeleton_structured_output(_cached_obj):
+                _cached_obj = None
             if _cached_obj is not None:
                 _LAST_STRUCTURED_LLM_CALL.data = {
                     "provider": "codex-cli",
@@ -2403,6 +2502,16 @@ def _call_claude_cli_structured_from_strategy(
             try:
                 _cached_obj = _validate_structured_output_from_raw_text(output_type, _cached_raw)
             except Exception:
+                _cached_obj = None
+            # A cache must be a pure speedup: a HIT has to return exactly what a
+            # MISS would have returned, or the cache is silently changing
+            # results. The live path rejects skeleton output (an all-defaults
+            # object carrying no model opinion) and retries — see the
+            # `_is_skeleton_structured_output` raise in the raw-JSON path. Until
+            # this check was mirrored here, a cached skeleton was accepted as
+            # `ok=True` and short-circuited that retry, so whether a run got a
+            # real opinion or a neutral default depended on cache warmth.
+            if _cached_obj is not None and _is_skeleton_structured_output(_cached_obj):
                 _cached_obj = None
             if _cached_obj is not None:
                 _LAST_STRUCTURED_LLM_CALL.data = {
@@ -2759,6 +2868,16 @@ def call_structured_llm_by_provider(
             try:
                 _cached_obj = _validate_structured_output_from_raw_text(output_type, _cached_raw)
             except Exception:
+                _cached_obj = None
+            # A cache must be a pure speedup: a HIT has to return exactly what a
+            # MISS would have returned, or the cache is silently changing
+            # results. The live path rejects skeleton output (an all-defaults
+            # object carrying no model opinion) and retries — see the
+            # `_is_skeleton_structured_output` raise in the raw-JSON path. Until
+            # this check was mirrored here, a cached skeleton was accepted as
+            # `ok=True` and short-circuited that retry, so whether a run got a
+            # real opinion or a neutral default depended on cache warmth.
+            if _cached_obj is not None and _is_skeleton_structured_output(_cached_obj):
                 _cached_obj = None
             if _cached_obj is not None:
                 _LAST_STRUCTURED_LLM_CALL.data = {
@@ -3452,7 +3571,10 @@ def _call_gemini(
     url = f"{GEMINI_BASE}/models/{model}:generateContent"
     headers = {"Content-Type": "application/json"}
     params = {"key": api_key}
-    gen_cfg: dict = {"temperature": 0.2}
+    gen_cfg: dict = {"temperature": effective_temperature(0.2)}
+    if deterministic_sampling_active():
+        gen_cfg["topP"] = _DETERMINISTIC_TOP_P
+        gen_cfg["seed"] = deterministic_seed()
     if max_output_tokens and max_output_tokens > 0:
         gen_cfg["maxOutputTokens"] = max_output_tokens
     if response_mime_type:
@@ -3753,6 +3875,7 @@ def _call_deepseek(
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
         }
+        apply_deterministic_sampling(body, model=model)
         if max_output_tokens and max_output_tokens > 0:
             body["max_tokens"] = max_output_tokens
         timeout = _coerce_timeout_sec(timeout_sec)
@@ -3958,6 +4081,7 @@ def _call_openai(
         }
         if not _omit_temperature(model):
             body["temperature"] = 0.2
+        apply_deterministic_sampling(body, model=model)
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
             if max_output_tokens and max_output_tokens > 0:
@@ -4702,6 +4826,7 @@ def _call_nvidia(
         }
         if not _omit_temperature(model):
             body["temperature"] = 0.2
+        apply_deterministic_sampling(body, model=model)
         if max_output_tokens and max_output_tokens > 0:
             body["max_tokens"] = max_output_tokens
         extra = _nvidia_reasoning_extra_body(reasoning_effort)
@@ -4905,6 +5030,7 @@ def _call_openrouter(
         }
         if not _omit_temperature(model):
             body["temperature"] = 0.2
+        apply_deterministic_sampling(body, model=model)
         # Always send an explicit max_tokens for OpenRouter: honour a positive
         # caller cap, else inject the generous reasoning-safe default so a
         # reasoning model's thinking tokens don't exhaust the provider-default
@@ -5273,6 +5399,7 @@ def _call_azure_openai(
         }
         if not _omit_temperature(deployment_name):
             body["temperature"] = 0.2
+        apply_deterministic_sampling(body, model=deployment_name)
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
         if max_output_tokens and max_output_tokens > 0:
@@ -6704,8 +6831,10 @@ def call_gemini_with_tools(
             "contents": contents,
             "tools": tools,
             "generationConfig": {
-                "temperature": 0.2,
+                "temperature": effective_temperature(0.2),
                 "maxOutputTokens": max_output_tokens,
+                **({"topP": _DETERMINISTIC_TOP_P, "seed": deterministic_seed()}
+                   if deterministic_sampling_active() else {}),
             },
         }
         try:
@@ -6783,8 +6912,10 @@ def call_gemini_with_grounding(
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "tools": [{"googleSearch": {}}],
         "generationConfig": {
-            "temperature": 0.1,
+            "temperature": effective_temperature(0.1),
             **({"maxOutputTokens": max_output_tokens} if max_output_tokens and max_output_tokens > 0 else {}),
+            **({"topP": _DETERMINISTIC_TOP_P, "seed": deterministic_seed()}
+               if deterministic_sampling_active() else {}),
         },
     }
     try:

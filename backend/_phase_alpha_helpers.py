@@ -224,6 +224,21 @@ def backtest_determinism_env_vars(environ: dict) -> dict:
     det = (environ.get("NEXUS_BACKTEST_DETERMINISM") or "").strip()
     if det:
         out["NEXUS_BACKTEST_DETERMINISM"] = det
+    # Greedy LLM decoding inside the spawned backtest container. The prompt
+    # cache alone cannot deliver reproducibility: it only helps when the prompt
+    # is byte-identical, and the overlay prompt embeds graph analogs and
+    # LLM-maintained active events that drift between runs, so in practice the
+    # cache missed on essentially every call (each of four replicate runs of
+    # the same window wrote ~1.2-1.6k NEW cache rows). With sampling unpinned
+    # each miss then drew a fresh sample at temperature 0.2. This var makes
+    # llm_utils decode greedily; it is set ONLY here, so live keeps provider
+    # defaults. Follows the determinism kill-switch when the operator sets it.
+    out["NEXUS_LLM_DETERMINISTIC"] = "0" if det.lower() in (
+        "0", "false", "no", "off",
+    ) else "1"
+    seed = (environ.get("NEXUS_LLM_SEED") or "").strip()
+    if seed:
+        out["NEXUS_LLM_SEED"] = seed
     return out
 
 

@@ -492,6 +492,14 @@ def start_instance_container(instance_id, *, preflight=None):
         'RETHINKDB_HOST': rethink_host,
         'RETHINKDB_PORT': str(RETHINKDB_PORT),
         'SERVER_URL': server_url,
+        # Stable `set` iteration for the strategy's discovery/selection paths.
+        # Backtest containers already get this (backtest_determinism_env_vars);
+        # live instances did not, so a set of ticker strings iterated in a
+        # different order after every container restart and the same market
+        # state could produce a different candidate ordering. PYTHONHASHSEED
+        # must be present in the container env before the interpreter starts,
+        # which is exactly what passing it to `docker run` does.
+        'PYTHONHASHSEED': (os.environ.get('PYTHONHASHSEED') or '').strip() or '0',
     }
     # Pass through API keys needed by broker strategies.
     # INTELLISTOCK_CRED_KEY is REQUIRED for the broker to decrypt Fernet-

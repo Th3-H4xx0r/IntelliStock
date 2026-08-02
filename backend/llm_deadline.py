@@ -81,10 +81,25 @@ def collect_bounded(futures, *, per_call_timeout, max_total=None,
     `on_error(exc, future)` is called for a future that raised; its result is
     skipped. Exceptions never propagate — one bad worker must not take down
     the batch.
+
+    Results are returned in SUBMISSION order, never completion order. This is
+    a correctness requirement, not a nicety: callers `.extend()` these results
+    straight into candidate/article lists that are later ranked and truncated,
+    so a completion-order list makes the strategy's output depend on which
+    provider call happened to return first. `wait()` hands back a *set* of
+    futures, and a set of `Future` objects iterates in id()-hash — i.e. memory
+    address — order, which no amount of PYTHONHASHSEED can stabilise. Two runs
+    of the same backtest would therefore rank the same articles differently.
+    Indexing by submission position and emitting in that order removes it.
     """
-    pending = set(futures or [])
-    if not pending:
+    ordered = list(futures or [])
+    if not ordered:
         return BoundedJoinResult([])
+    # First occurrence wins if a caller ever submits the same future twice.
+    index_of = {}
+    for position, future in enumerate(ordered):
+        index_of.setdefault(future, position)
+    pending = set(ordered)
 
     def _seconds(value, fallback):
         try:
@@ -99,7 +114,7 @@ def collect_bounded(futures, *, per_call_timeout, max_total=None,
     if max_total is not None:
         hard_deadline = started + _seconds(max_total, window)
 
-    results = []
+    by_index: dict[int, object] = {}
     while pending:
         budget = window
         if hard_deadline is not None:
@@ -110,9 +125,11 @@ def collect_bounded(futures, *, per_call_timeout, max_total=None,
         done, pending = wait(pending, timeout=budget, return_when=FIRST_COMPLETED)
         if not done:
             break          # a full window with nothing finishing = stalled
-        for future in done:
+        # `done` is a set; sort by submission index so the on_error callbacks
+        # also fire in a stable order (several of them append to shared lists).
+        for future in sorted(done, key=lambda f: index_of.get(f, 0)):
             try:
-                results.append(future.result(timeout=0))
+                by_index[index_of.get(future, len(ordered))] = future.result(timeout=0)
             except Exception as exc:
                 if on_error is not None:
                     try:
@@ -120,6 +137,7 @@ def collect_bounded(futures, *, per_call_timeout, max_total=None,
                     except Exception:
                         pass
 
+    results = [by_index[i] for i in sorted(by_index)]
     abandoned = 0
     for future in pending:
         abandoned += 1

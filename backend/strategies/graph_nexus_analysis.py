@@ -5080,7 +5080,9 @@ def _maintain_active_events(
             _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENT_HISTORY_TABLE).insert(history_docs, conflict="replace").run(conn)
         except Exception as exc:
             _log(f"Active-event persistence error: {exc}", "yellow")
-    reloaded = _load_active_events_as_of(conn, instance_id, date_key, history_scope_id=history_scope_id)
+    reloaded = _sorted_active_event_records(
+        _load_active_events_as_of(conn, instance_id, date_key, history_scope_id=history_scope_id)
+    )
     if conn is not None:
         _store_active_event_maintenance_cache_doc(conn, {
             "id": _active_event_maintenance_doc_id(cache_scope_id, date_key),
@@ -13659,7 +13661,7 @@ def _identify_top_momentum_guaranteed_buys(
             continue
         if r60 >= min_60d and r20 >= min_20d:
             candidates.append((sym, raw, r60))
-    candidates.sort(key=lambda x: x[2], reverse=True)
+    candidates.sort(key=lambda x: (-x[2], str(x[0])))
     return [c[0] for c in candidates[:max_count]]
 
 
@@ -15132,7 +15134,7 @@ def _load_neo4j_market_cap_cache(driver) -> None:
         with driver.session() as session:
             result = session.run(
                 "MATCH (c:Company) WHERE c.yf_market_cap IS NOT NULL AND c.yf_market_cap > 0 "
-                "RETURN c.ticker AS ticker, c.yf_market_cap AS mc LIMIT 15000"
+                "RETURN c.ticker AS ticker, c.yf_market_cap AS mc ORDER BY ticker LIMIT 15000"
             )
             for rec in result:
                 t = str(rec.get("ticker") or "").strip().upper()
@@ -15311,7 +15313,7 @@ def _get_etfs_for_trend(trend: dict, max_etfs: int = 4) -> list[str]:
         if kw in text:
             for etf in etfs:
                 etf_scores[etf] = etf_scores.get(etf, 0) + 1
-    ranked = sorted(etf_scores, key=lambda e: -etf_scores[e])
+    ranked = sorted(etf_scores, key=lambda e: (-etf_scores[e], str(e)))
     return ranked[:max_etfs]
 
 
@@ -16478,6 +16480,7 @@ def _public_company_candidates_for_alias(session, alias: str) -> list[dict]:
                OR toLower(coalesce(c.canonical_name, c.name, '')) = $alias_norm
                OR toLower(coalesce(c.name, '')) = $alias_norm
             RETURN c.ticker AS ticker, coalesce(c.canonical_name, c.name, c.ticker) AS name
+            ORDER BY ticker
             LIMIT 5
             """,
             alias_upper=alias_upper,
@@ -17651,7 +17654,7 @@ def _classify_macro_with_tools(
                 (
                     "MATCH (c:Company)-[r:IN_SECTOR]->(s:Sector {name: $sector}) "
                     "WHERE " + _edge_active_after_clause("r") + " "
-                    "RETURN c.ticker AS ticker, c.name AS name LIMIT 20"
+                    "RETURN c.ticker AS ticker, c.name AS name ORDER BY ticker LIMIT 20"
                 ),
                 sector=sector,
                 as_of_date=today_str,
@@ -17718,7 +17721,7 @@ def _classify_macro_with_tools(
                 (
                     f"MATCH (a:Company {{ticker: $ticker}})-[r:{rel}]-(b:Company) "
                     f"WHERE {_edge_active_after_clause('r')} "
-                    "RETURN b.ticker AS ticker, b.name AS name LIMIT 15"
+                    "RETURN b.ticker AS ticker, b.name AS name ORDER BY ticker LIMIT 15"
                 ),
                 ticker=(ticker or "").upper().strip(),
                 as_of_date=today_str,
@@ -17872,7 +17875,7 @@ def _resolve_macro_signals_to_tickers(
                         "WITH s "
                         "MATCH (c:Company)-[r:IN_SECTOR]->(s) "
                         "WHERE " + _edge_active_after_clause("r") + " "
-                        "RETURN c.ticker AS ticker LIMIT 30"
+                        "RETURN c.ticker AS ticker ORDER BY ticker LIMIT 30"
                     ),
                     commodity=commodity,
                     as_of_date=as_of_date or "",
@@ -17894,7 +17897,7 @@ def _resolve_macro_signals_to_tickers(
                     (
                         "MATCH (c:Company)-[r:IN_SECTOR]->(s:Sector {name: $sector}) "
                         "WHERE " + _edge_active_after_clause("r") + " "
-                        "RETURN c.ticker AS ticker LIMIT 50"
+                        "RETURN c.ticker AS ticker ORDER BY ticker LIMIT 50"
                     ),
                     sector=sector,
                     as_of_date=as_of_date or "",
@@ -18115,7 +18118,14 @@ def _query_1hop(session, tickers: set, direction: str, rels: list | None = None,
 
 
 def _query_sector_peers(session, tickers: set, as_of_date: str = "") -> list[dict]:
-    """Batch query: find same-sector peers of all mentioned tickers via IN_SECTOR."""
+    """Batch query: find same-sector peers of all mentioned tickers via IN_SECTOR.
+
+    Determinism: the LIMIT below truncates, so without an ORDER BY it is not
+    "500 peers" but "whichever 500 Neo4j happened to emit" -- a different
+    subset on every run, from a `tickers` SET whose UNWIND order also varied.
+    Two runs of the same config therefore scored different peer universes.
+    Sorting both the seed list and the result makes the truncation stable.
+    """
     if not tickers:
         return []
     q = """
@@ -18125,6 +18135,7 @@ def _query_sector_peers(session, tickers: set, as_of_date: str = "") -> list[dic
       AND __DATE_R1__
       AND __DATE_R2__
     RETURN src AS source, peer.ticker AS target, sec.name AS sector
+    ORDER BY source, target, sector
     LIMIT 500
     """
     try:
@@ -18167,7 +18178,7 @@ def _query_macro_sector_flow(session, tickers: set, as_of_date: str = "") -> lis
       AND (__DATE_F__)
     RETURN src AS source, target.ticker AS target, s1.name AS from_sector,
            s2.name AS to_sector, coalesce(f.flow_value, 0) AS flow_value
-    ORDER BY f.flow_value DESC
+    ORDER BY f.flow_value DESC, source, target
     LIMIT 500
     """
     try:
@@ -18222,6 +18233,7 @@ def _query_2hop_chains(session, tickers: set, direction: str, rels: list | None 
              max(coalesce(r1.confidence, 0.5)) AS conf1,
              max(coalesce(r2.confidence, 0.5)) AS conf2
         RETURN DISTINCT src AS source, target, rel1, rel2, conf1, conf2
+        ORDER BY source, target, rel1, rel2
         LIMIT 500
         """
     else:
@@ -19241,7 +19253,11 @@ def _compute_propagated_scores(
     for ticker, contribs in contributions.items():
         if not contribs:
             continue
-        contribs.sort(key=lambda x: abs(x[0]), reverse=True)
+        # Tiebreak on the contributor id. The decay below is POSITION-weighted
+        # (0.5**i), so two tied contributions of opposite sign swapping places
+        # flips the aggregate's sign -- +0.175 becomes -0.175, a buy becomes a
+        # sell -- purely on dict/set ordering.
+        contribs.sort(key=lambda x: (-abs(x[0]), str(x[1])))
         total = contribs[0][0]
         for i, (score, _) in enumerate(contribs[1:], 1):
             total += score * (0.5 ** i)
@@ -21969,12 +21985,17 @@ def _apply_ml_and_overlay_to_scores(
             if _skipped_fast > 0:
                 _log(f"Overlay SKIP [fast]: {_skipped_fast} candidate(s) skipped (high-conviction/zero-evidence)", "cyan")
         # Sort by signal strength (type split happens below, sort only affects within-type ordering)
+        # Ties are COMMON here -- an all-zero key tuple is the normal case for a
+        # candidate with no evidence -- and the list is truncated below, so the
+        # tiebreak decides which candidates get an overlay LLM call at all.
+        # Without the symbol as a final key that was upstream ordering.
         overlay_inputs.sort(
             key=lambda item: (
                 abs(float(item["raw_net_pre_overlay"])),
                 float(item["ml"].get("ml_confidence", 0.0) or 0.0),
                 float(item["feature_row"].get("position_open", 0.0) or 0.0),
                 _candidate_positive_evidence_count(item["feature_row"]) + _candidate_negative_evidence_count(item["feature_row"]),
+                str(item.get("sym") or ""),
             ),
             reverse=True,
         )
@@ -26235,11 +26256,15 @@ class GraphNexusAnalysis:
                     _log(f"Neo4j WARN: failed to close shared driver on early-return path: {_drv_close_exc}", "yellow")
             return {s: 0 for s in symbols_list}
         if not active_events:
-            active_events = _load_active_events_as_of(
-                conn,
-                instance_id,
-                date_key,
-                history_scope_id=active_event_history_scope_id,
+            # sorted: these records are sliced [:12] into every symbol's overlay
+            # prompt, so an unsorted cursor changed what the LLM was shown.
+            active_events = _sorted_active_event_records(
+                _load_active_events_as_of(
+                    conn,
+                    instance_id,
+                    date_key,
+                    history_scope_id=active_event_history_scope_id,
+                )
             )
 
         # ── 2b) Review pending future trades against fresh sentiment ──────
@@ -27240,8 +27265,10 @@ class GraphNexusAnalysis:
         max_etf_buys_per_day = int(config.get("max_etf_buys_per_day", 3))
         etf_buys_scored = sorted(
             etf_buys,
-            key=lambda sym: abs(float((scores.get(sym) or {}).get("raw_net_score", 0.0) or 0.0)),
-            reverse=True,
+            key=lambda sym: (
+                -abs(float((scores.get(sym) or {}).get("raw_net_score", 0.0) or 0.0)),
+                str(sym),
+            ),
         )
 
         # V6 Fix E: ETF sector deduplication — max 1 ETF per sector/theme
@@ -27514,8 +27541,10 @@ class GraphNexusAnalysis:
                 # Sort by raw_net_score for tiered allocation
                 stock_buys_scored = sorted(
                     stock_buys or [],
-                    key=lambda sym: abs(float((scores.get(sym) or {}).get("raw_net_score", 0.0) or 0.0)),
-                    reverse=True,
+                    key=lambda sym: (
+                        -abs(float((scores.get(sym) or {}).get("raw_net_score", 0.0) or 0.0)),
+                        str(sym),
+                    ),
                 )
 
                 # --- V5: Split into pools FIRST, then apply caps per-pool ---
@@ -28808,7 +28837,9 @@ class GraphNexusAnalysis:
                 # winners like DGII (+18%) aren't excluded from add-on buys just because
                 # their current raw score (e.g. 0.27) is below buy_threshold (0.3).
                 _wa_raw_min = float(config.get("winner_add_min_raw_score", 0.25) or 0.25)
-                for _sym in _open_positions_set:
+                # sorted(): this appends to an ordered candidate list, so set
+                # iteration order leaked into which winner-adds were considered.
+                for _sym in sorted(_open_positions_set):
                     if _sym not in _held_add_candidates:
                         _sym_raw = float((scores.get(_sym) or {}).get("raw_net_score", 0.0) or 0.0)
                         if _sym_raw >= _wa_raw_min:
@@ -30303,7 +30334,9 @@ class GraphNexusAnalysis:
                     and q["ticker"] not in _bfq_mw_sized
                     and q["ticker"] not in nexus_position_sizes
                 ]
-                _bfq_direct_candidates.sort(key=lambda q: -float(q.get("raw_net_score", 0.0) or 0.0))
+                _bfq_direct_candidates.sort(
+                    key=lambda q: (-float(q.get("raw_net_score", 0.0) or 0.0),
+                                   str(q.get("ticker") or "")))
                 if _bfq_direct_candidates:
                     _bfq_direct_best = _bfq_direct_candidates[0]
                     _bfq_direct_sym = _bfq_direct_best["ticker"]
@@ -30600,7 +30633,9 @@ class GraphNexusAnalysis:
                 # Sort by score descending. Age boost removed — it doesn't help when items
                 # enter the queue on the same bar (all get equal boost, relative order unchanged).
                 # The real fix is equalizing priority rank for high-conviction direct items.
-                _bfq_unfilled.sort(key=lambda q: -float(q.get("raw_net_score", 0.0) or 0.0))
+                _bfq_unfilled.sort(
+                    key=lambda q: (-float(q.get("raw_net_score", 0.0) or 0.0),
+                                   str(q.get("ticker") or "")))
                 if _bfq_unfilled and _bfq_rotation_count < _bfq_rotation_max:
                     # Find weakest held positions eligible for rotation
                     _held_positions = []
