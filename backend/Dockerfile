@@ -79,6 +79,15 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Copy backend application
 COPY . .
 
+# Code-version stamp for backtest provenance. Two backtest rows are
+# otherwise indistinguishable from replicates even when different code
+# produced them -- the mistake that made this project's A/B results
+# unreadable for weeks. Supply GIT_COMMIT_SHA from the builder when it is
+# available; broker.py falls back to a content fingerprint when it is not,
+# so the stamp is never empty.
+ARG GIT_COMMIT_SHA=""
+ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
+
 # Pre-train the CandlesStrategy model so backtests load weights from disk
 # instead of retraining (~30s, 99% CPU) on every run.
 RUN python strategies/pretrain_candles.py

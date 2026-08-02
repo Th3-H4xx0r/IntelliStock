@@ -38,6 +38,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
       args:
+        # Code-version stamp for backtest provenance (see broker.py
+        # _code_version_stamp). Empty is fine -- broker.py falls back to a
+        # content fingerprint so the stamp is never blank.
+        - GIT_COMMIT_SHA=${GIT_COMMIT_SHA:-}
         # Build the claude CLI into the image by default. Set to 0 to skip
         # (smaller image; only relevant if you'll never use the "claude-cli"
         # LLM provider).

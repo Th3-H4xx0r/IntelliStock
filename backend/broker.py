@@ -87,6 +87,23 @@ def _code_version_stamp():
             ).stdout.strip()
         except Exception:
             stamp = ""
+    if not stamp:
+        # Neither is available inside the deployed image: the container has no
+        # .git, and the first probe run came back with an EMPTY stamp, which is
+        # no more useful for separating code versions than having no field at
+        # all. Fall back to a content fingerprint of this module -- it changes
+        # on every build that changed the code, which is the only property the
+        # noise analysis actually needs. Prefixed so nobody mistakes it for a
+        # commit sha.
+        try:
+            import hashlib  # noqa: PLC0415
+            here = os.path.abspath(__file__)
+            st = os.stat(here)
+            with open(here, "rb") as _fh:
+                digest = hashlib.sha1(_fh.read()).hexdigest()[:10]
+            stamp = f"build:{digest}:{int(st.st_mtime)}"
+        except Exception:
+            stamp = ""
     _CODE_VERSION_CACHE = stamp
     return stamp
 
