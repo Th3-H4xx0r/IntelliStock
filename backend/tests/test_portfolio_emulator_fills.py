@@ -232,7 +232,14 @@ def test_each_equity_broker_emission_shape_waits_for_next_quote(
     assert fills[-1].source == broker_path
 
 
-def test_default_legacy_helpers_remain_immediate_for_compatibility():
+def test_default_legacy_helpers_remain_immediate_but_not_free():
+    """The legacy path still fills on the spot — it just is not free anymore.
+
+    Immediacy is the compatibility guarantee (crypto backtests and the verify_*
+    scripts depend on it). Costlessness never was: this path is reachable for
+    an EQUITY ticker riding a crypto-kind instance, where before 2026-08-02 it
+    filled at the mid with no spread, slippage or fee at all.
+    """
     emulator = PortfolioEmulator(1_000.0)
 
     assert emulator.execute_signal(
@@ -240,7 +247,13 @@ def test_default_legacy_helpers_remain_immediate_for_compatibility():
     )
 
     assert emulator.get_cash() == pytest.approx(900.0)
-    assert emulator.get_positions()["SPY"] == pytest.approx(1.0)
+    shares = emulator.get_positions()["SPY"]
+    assert 0.99 < shares < 1.0
+    assert shares == pytest.approx(
+        100.0 / emulator._equity_fill("buy", 1.0, 100.0)[0]
+        / (1.0 + emulator._equity_cost_model.fee_bps / 10_000.0),
+        rel=1e-9,
+    )
 
 
 def test_broker_factory_activates_next_event_only_for_equity_backtests():

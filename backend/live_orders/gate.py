@@ -132,6 +132,23 @@ class UnifiedOrderGate:
         ):
             blockers.append("quote.reference_price_mismatch")
         if not snapshot.market_open:
+            # No reduce-only exemption here, deliberately. `market_open` is the
+            # FULL 04:00-20:00 ET window (regular plus extended), so a closed
+            # market means there is no venue at all, not merely no regular
+            # session. Alpaca rejects orders that are not extended-hours
+            # eligible when they are submitted between 16:00 and 19:00 ET and
+            # queues anything later for the next open, so an "emergency exit"
+            # let through here does not exit anything: it becomes a resting
+            # order that fills at the next open at a price nobody evaluated,
+            # while the strategy independently re-emits the same exit on that
+            # open. Two exits, one of them unbounded.
+            #
+            # What must never happen is the exit getting STUCK, and that is
+            # handled where it belongs: order identity re-mints itself every
+            # minute for sells, terminal-without-fill records escalate to a
+            # fresh retry, and abandoned rows retire instead of pinning the
+            # whole cycle unhealthy. The exit is deferred to the next session,
+            # not lost.
             blockers.append("market.closed")
 
         # Position identity/freshness is needed both to cap reductions and to

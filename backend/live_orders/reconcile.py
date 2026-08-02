@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Callable, Mapping, Optional
@@ -249,6 +249,41 @@ def _result_hash(
     ).hexdigest()
 
 
+DEFAULT_ABANDONED_ORDER_GRACE = timedelta(minutes=2)
+
+
+def _abandoned_stub_event(
+    snapshot: AuthoritativeBrokerSnapshot, record
+) -> BrokerOrderEvent:
+    return BrokerOrderEvent(
+        event_id=hashlib.sha256(
+            "|".join(
+                (
+                    "abandoned",
+                    record.client_order_id,
+                    record.state.value,
+                    snapshot.observed_at.isoformat(),
+                )
+            ).encode("utf-8")
+        ).hexdigest(),
+        account_id=record.intent.account_id,
+        instance_id=record.intent.instance_id,
+        client_order_id=record.client_order_id,
+        broker_order_id=None,
+        symbol=record.intent.symbol,
+        side=record.intent.side,
+        state=LifecycleState.EXPIRED,
+        cumulative_quantity=Decimal("0"),
+        cumulative_average_price=None,
+        cumulative_fees=Decimal("0"),
+        occurred_at=snapshot.observed_at,
+        reason=(
+            "broker reconciliation: never acknowledged and absent from a "
+            "complete broker snapshot"
+        ),
+    )
+
+
 class StartupReconciler:
     """Reconcile broker truth into the lifecycle before classifying ownership."""
 
@@ -257,9 +292,50 @@ class StartupReconciler:
         *,
         lifecycle_store: OrderLifecycleStore,
         event_applier: Callable[[BrokerOrderEvent], object],
+        abandoned_grace: timedelta = DEFAULT_ABANDONED_ORDER_GRACE,
     ) -> None:
         self.lifecycle_store = lifecycle_store
         self.event_applier = event_applier
+        self.abandoned_grace = abandoned_grace
+
+    def _resolve_abandoned(
+        self, snapshot: AuthoritativeBrokerSnapshot, record
+    ) -> bool:
+        """Retire a local order the broker has never heard of. Returns True
+        when the record was closed out and must not raise an issue.
+
+        A row that reached UNKNOWN (ambiguous POST) or never left
+        INTENT/SUBMITTING and is absent from an authoritative, complete broker
+        snapshot describes an order that does not exist. Left alone it is
+        non-terminal forever, so every reconcile raised
+        ``local_order_missing_broker``, ``healthy`` stayed False, and the
+        trading cycle — including risk exits — was skipped. One dropped POST
+        was a permanent inability to sell.
+
+        Only rows with NO broker order id and NO filled quantity qualify.
+        Those contribute nothing to lineage, so retiring them cannot lose a
+        position; anything the broker did acknowledge stays an open issue,
+        because that really is a discrepancy a human must see.
+        """
+
+        if record.broker_order_id or record.cumulative_quantity > 0:
+            return False
+        if record.state not in (
+            LifecycleState.INTENT,
+            LifecycleState.SUBMITTING,
+            LifecycleState.UNKNOWN,
+        ):
+            return False
+        last_seen = max(event.occurred_at for event in record.events)
+        if snapshot.observed_at - last_seen < self.abandoned_grace:
+            # Still inside the window where a genuinely-accepted order may not
+            # have surfaced in the orders endpoint yet. Fail closed for now.
+            return False
+        try:
+            self.event_applier(_abandoned_stub_event(snapshot, record))
+        except Exception:
+            return False
+        return True
 
     def reconcile(
         self, snapshot: AuthoritativeBrokerSnapshot
@@ -352,13 +428,27 @@ class StartupReconciler:
             )
             if record.intent.account_id == snapshot.account_id
         }
+        retired = False
         for cid, record in records.items():
-            if not record.terminal and cid not in seen_known:
-                unresolved[record.intent.symbol] = max(
-                    unresolved.get(record.intent.symbol, Decimal("0")),
-                    record.intent.quantity - record.cumulative_quantity,
+            if record.terminal or cid in seen_known:
+                continue
+            if self._resolve_abandoned(snapshot, record):
+                retired = True
+                continue
+            unresolved[record.intent.symbol] = max(
+                unresolved.get(record.intent.symbol, Decimal("0")),
+                record.intent.quantity - record.cumulative_quantity,
+            )
+            issues.append(f"local_order_missing_broker:{cid}")
+
+        if retired:
+            records = {
+                record.client_order_id: record
+                for record in self.lifecycle_store.list_for_instance(
+                    snapshot.instance_id
                 )
-                issues.append(f"local_order_missing_broker:{cid}")
+                if record.intent.account_id == snapshot.account_id
+            }
 
         lineage: dict[str, Decimal] = {}
         all_events: list[BrokerOrderEvent] = []

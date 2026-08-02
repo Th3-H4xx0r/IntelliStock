@@ -347,7 +347,11 @@ class OrderLifecycleStore:
         if self.backend.create(row):
             return _record_from_row(row)
         existing = self.require(intent.idempotency_key)
-        if existing.intent != intent:
+        # Compare identity, not every field: a re-emitted decision carries a
+        # fresh risk_snapshot_id and drifted sizing while naming the same
+        # order, and rejecting that as "drift" would deny the caller the
+        # existing broker truth it needs to avoid posting a duplicate.
+        if not existing.intent.same_identity(intent):
             raise LifecycleConflict("client-order identity drift")
         return existing
 

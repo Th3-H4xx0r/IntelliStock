@@ -2712,6 +2712,185 @@ def _residual_sleeve_config(cached_strategies):
 _RESIDUAL_SLEEVE_STATE: dict = {"last_park_ts": None, "bear_entry_px": None,
                                 "last_bear_exit_ts": None}
 
+# 2026-08-02 backtest<->live parity: Alpaca rejects any equity order under $1
+# of notional, but the sleeve's release path had no floor at all while deploy
+# has floored at max($50, min_deploy_pct*NAV) since it was written. That
+# asymmetry let a $2 cash shortfall emit a $2 sell, and the emulator happily
+# filled it: a trade-ledger audit of the best-performing run found 219 of its
+# 260 trades were under $1 and together moved $52 of $16,286 of notional, i.e.
+# ~84% of that run's trades could never have executed live. Modelling the
+# rejection is what makes the backtest describe the account.
+# $5 rather than $1: the release is priced off THIS bar and fills on the next
+# one, so a $1.01 decision can slip under the real floor before it is
+# submitted. The margin costs nothing — the orders it drops are dust.
+_RESIDUAL_SLEEVE_MIN_RELEASE_USD = 5.0
+
+# 2026-08-02 restart parity. _RESIDUAL_SLEEVE_STATE above is process memory
+# only, and this host restarts often (17 times in 12 days on record). Every
+# field it loses is a live-only safety control:
+#   bear_entry_px     -> None disarms the -10% leg stop-loss outright
+#   bear_peak_px      -> None disarms the trailing peak-bank
+#   bear_stop_episode -> False re-arms a leg that already stopped out once,
+#                        which BULL_F7e measured as a second -10% (-$484)
+#   last_park_ts      -> None bypasses min_park_hours, so a fresh park can
+#                        round-trip on the very next tick
+# A restart therefore turned a stop-protected hedge into an unprotected one,
+# silently. Piggy-back on the nexus strategy cache: the live loop already
+# flushes it to RethinkDB every tick and rehydrates it at boot, and
+# strategy_cache_persistence round-trips the datetimes (__iso__ envelope). No
+# new table, no new writer, no new failure mode. Backtest deliberately keeps
+# purely in-memory per-run state — persisting it would leak one run's open
+# hedge into the next run's first bar.
+_RESIDUAL_SLEEVE_PERSIST_KEY = "_residual_sleeve_state"
+# Only the fields whose loss changes a trading decision. _bear_confirmed_qty is
+# excluded: it is rebuilt per fill by _apply_backtest_confirmed_fill_state and a
+# stale copy would mis-weight the next entry basis.
+_RESIDUAL_SLEEVE_PERSIST_FIELDS = (
+    "last_park_ts",
+    "bear_entry_px",
+    "bear_peak_px",
+    "last_bear_exit_ts",
+    "bear_stop_episode",
+    "bear_alloc_ratchet",
+)
+
+
+def _residual_sleeve_universe_symbols(cached_strategies, include_bear=True):
+    """Symbols the residual sleeve trades on its own account.
+
+    Nothing else pulls these into the price/mark plumbing: no strategy votes on
+    them, so they are usually absent from the instance universe (doc-179 runs
+    with an empty `stocks` list and discovers everything). Without bars the
+    sleeve silently no-ops (BULL_F/BEAR_F both ran with a completely inert
+    sleeve because SPY was never fetched); without a live mark it is worse than
+    a no-op, because the sleeve still decides to trade and only then does the
+    order gate block the intent on quote.invalid_price.
+
+    Bull leg first, then bear leg, de-duplicated and normalised with the SAME
+    .strip().upper() that _residual_sleeve_config uses — a padded config value
+    must resolve to the string the sleeve later looks up, not a near-miss.
+
+    ``include_bear=False`` is for the backtest bulk bar-fetch, whose historical
+    scope was the bull leg only; see the call site for why widening it there
+    buys nothing.
+    """
+    out: list = []
+    for spec in (cached_strategies or []):
+        cfg = (spec or {}).get("config") or {}
+        if not bool(cfg.get("residual_sleeve_enabled", False)):
+            continue
+        _legs = [cfg.get("residual_sleeve_symbol", "SPY")]
+        if include_bear:
+            _legs.append(cfg.get("residual_sleeve_bear_symbol", ""))
+        for _raw in _legs:
+            _sym = str(_raw or "").strip().upper()
+            if _sym and _sym not in out:
+                out.append(_sym)
+    return out
+
+
+def _subscribe_residual_sleeve_marks(live_adapter, base_symbols,
+                                     cached_strategies):
+    """Extend the live mark subscription to cover the sleeve's own symbols.
+
+    Boot order forces a second subscribe rather than a wider first one: the mark
+    stream has to start before trade_updates ("only after the durable event sink
+    is bound"), and the strategy specs — the only place the sleeve symbols are
+    configured — are not read from the DB until after that. AlpacaMarkStream's
+    set_symbols() is idempotent and reconciles subscriptions in place, and
+    start() returns immediately while the thread is alive, so the second call is
+    one subscribe frame.
+
+    Without a mark the sleeve does not fail early — it decides to trade and THEN
+    the order gate blocks the intent on quote.invalid_price, which reads like a
+    data outage rather than a missing subscription. Backtest never saw this
+    because the sleeve symbol was injected into the bar-fetch universe.
+    """
+    if live_adapter is None:
+        return
+    _sleeve_syms = _residual_sleeve_universe_symbols(cached_strategies)
+    if not _sleeve_syms:
+        return
+    _wanted = list(base_symbols or ())
+    # --symbols is not case-normalised at parse time; the stream upper-cases
+    # anyway, so compare that way or a lower-case universe re-subscribes for
+    # nothing.
+    _have = {str(s).strip().upper() for s in _wanted}
+    _missing = [s for s in _sleeve_syms if s not in _have]
+    if not _missing:
+        return
+    try:
+        _status = live_adapter.start_market_marks(tuple(_wanted + _missing))
+    except Exception as _sm_exc:
+        _log(f"[sleeve] could not subscribe marks for "
+             f"{', '.join(_missing)}: {type(_sm_exc).__name__}: {_sm_exc} — "
+             "the sleeve will be gate-blocked on quote.invalid_price", "red")
+        return
+    _log(f"Subscribed {', '.join(_missing)} to the mark stream for the "
+         "residual sleeve", "cyan")
+    if isinstance(_status, dict) and _status.get("overflow"):
+        # set_symbols keeps the first max_symbols in sorted order; a sleeve
+        # symbol that lands past the cap is silently unmarked, so say so.
+        _log("Alpaca mark-stream subscription overflow after adding sleeve "
+             f"symbols; affected symbols fail closed: {_status['overflow']}",
+             "red")
+
+
+def _residual_sleeve_state_persist():
+    """Mirror the sleeve's decision state into the nexus strategy cache so the
+    existing per-tick RethinkDB flush carries it across a restart. Live-only
+    and best-effort: a persistence failure must never abort a trading tick."""
+    if globals().get("mode") != MODE_LIVE:
+        return
+    try:
+        _cache = _strategy_cache.setdefault("graph_nexus_analysis", {})
+        _cache[_RESIDUAL_SLEEVE_PERSIST_KEY] = {
+            _k: _RESIDUAL_SLEEVE_STATE.get(_k)
+            for _k in _RESIDUAL_SLEEVE_PERSIST_FIELDS
+        }
+    except Exception:
+        pass
+
+
+def _residual_sleeve_state_restore():
+    """One-shot rehydrate of the sleeve state from the persisted nexus cache.
+
+    Called from the tick body AFTER the boot/first-tick cache load, so the
+    stop-loss basis is armed before the first sleeve decision of the process.
+    Only fills fields this process has not already written — a live write beats
+    a stale snapshot, the same precedence
+    strategy_cache_persistence.merge_loaded_cache_into uses.
+    """
+    if globals().get("_RESIDUAL_SLEEVE_STATE_RESTORED"):
+        return
+    if globals().get("mode") != MODE_LIVE:
+        return
+    globals()["_RESIDUAL_SLEEVE_STATE_RESTORED"] = True
+    try:
+        _saved = (_strategy_cache.get("graph_nexus_analysis") or {}).get(
+            _RESIDUAL_SLEEVE_PERSIST_KEY)
+        if not isinstance(_saved, dict):
+            return
+        _restored = []
+        for _k in _RESIDUAL_SLEEVE_PERSIST_FIELDS:
+            _v = _saved.get(_k)
+            # Falsy == "at default"; there is nothing to restore and nothing to
+            # clobber. (False and 0.0 compare equal, which is what we want for
+            # bear_stop_episode / bear_alloc_ratchet.)
+            if not _v or _RESIDUAL_SLEEVE_STATE.get(_k):
+                continue
+            _RESIDUAL_SLEEVE_STATE[_k] = _v
+            _restored.append(_k)
+        if _restored:
+            _log(
+                f"[sleeve] restored {', '.join(_restored)} from the persisted "
+                "nexus cache — a restart would otherwise disarm the leg stop",
+                "green",
+            )
+    except Exception as _rs_exc:
+        _log(f"[sleeve] state restore skipped: "
+             f"{type(_rs_exc).__name__}: {_rs_exc}", "yellow")
+
 
 def _sleeve_circuit_tier():
     """Current drawdown-circuit tier from the nexus strategy cache ('' when
@@ -2895,6 +3074,27 @@ def _residual_sleeve_release(
         def _submit_release(
                 symbol, price, quantity, reason, *, sell_fraction,
                 order_source):
+            # 2026-08-02 minimum release size. Every sleeve sell funnels through
+            # here, so this is the single place a sub-minimum order can be
+            # stopped. Deploy has always floored at max($50, min_deploy_pct*NAV);
+            # release had no floor, so a $2 cash shortfall emitted a $2 sell that
+            # Alpaca rejects outright. Skipping is the FAITHFUL model of the live
+            # outcome — the position stays put and the next bar re-evaluates,
+            # exactly what happens after a rejection — where filling it invents a
+            # trade the account never made.
+            # Protective and full exits are deliberately NOT exempt: live cannot
+            # fill those either, and exempting them would reintroduce the very
+            # divergence this floor exists to remove. A sub-$5 leg is dust whose
+            # P&L is below the noise of a single tick.
+            _rel_notional = abs(float(quantity or 0.0)) * abs(float(price or 0.0))
+            if _rel_notional < _RESIDUAL_SLEEVE_MIN_RELEASE_USD:
+                _log(
+                    f"[sleeve] release SKIPPED {symbol}: ${_rel_notional:.2f} < "
+                    f"${_RESIDUAL_SLEEVE_MIN_RELEASE_USD:.2f} minimum ({reason}) "
+                    "— the live broker would reject this order",
+                    "yellow",
+                )
+                return False
             if order_service is None:
                 return _submit_portfolio_signal(
                     portfolio_emulator,
@@ -3858,6 +4058,57 @@ def load_strategies_from_db():
         except Exception:
             pass
         return [], None, None
+
+
+# 2026-08-02: config keys nothing reads. A dead key is worse than a missing one
+# because the operator believes a control is armed: doc-179 carries
+# ``max_single_position_pct: 0.15``, which reads like the broker's 15% single-
+# position cap and does nothing at all — its only other occurrence in the repo
+# is the comment naming the env var. The real strategy-side cap is
+# ``single_position_max_pct`` (graph_nexus_analysis._clip_to_single_position_cap),
+# and doc-179 sets that too, at 25.
+#
+# WARN, do not alias. The two keys disagree on UNITS: single_position_max_pct is
+# percent-points (doc-179 = 25 meaning 25%) while the dead key was named after
+# BROKER_MAX_SINGLE_POSITION_PCT, a fraction (0.15 meaning 15%). Silently
+# aliasing doc-179's live 0.15 would set a 0.15% per-position cap and stop the
+# book from buying anything. Neither reading is safely inferable from the value,
+# so the only honest move is to tell the operator and change nothing.
+# Hard-failing is also wrong here: refusing to boot a real-money instance over a
+# stray config key is a bigger outage than the key itself.
+_DEAD_STRATEGY_CONFIG_KEYS = {
+    "max_single_position_pct": (
+        "no code reads it. For the strategy-side cap use "
+        "`single_position_max_pct` (PERCENT points, doc-179 = 25). For the "
+        "broker-side hard ceiling use the BROKER_MAX_SINGLE_POSITION_PCT env "
+        "var (FRACTION, default 0.15). The units differ, so this value is NOT "
+        "auto-migrated"
+    ),
+}
+
+
+def _warn_dead_strategy_config_keys(cached_strategies):
+    """Log once per dead config key found on any loaded strategy spec.
+
+    Runs in BOTH modes: a key that does nothing in live does nothing in
+    backtest either, and the operator needs to hear about it from whichever
+    run they are watching.
+    """
+    try:
+        for spec in (cached_strategies or []):
+            cfg = (spec or {}).get("config") or {}
+            name = str((spec or {}).get("strategy") or "?")
+            for _dead, _why in _DEAD_STRATEGY_CONFIG_KEYS.items():
+                if _dead not in cfg:
+                    continue
+                _log(
+                    f"DEAD CONFIG KEY: '{_dead}' = {cfg.get(_dead)!r} on "
+                    f"strategy '{name}' has NO effect — {_why}.",
+                    "red",
+                )
+    except Exception:
+        pass
+
 
 # Keys that must never ride in a regime_profiles overlay. Beyond the regime_*/
 # max_positions* prefixes stripped below, these are per-regime MAPPINGS that are
@@ -7253,15 +7504,24 @@ if mode == MODE_BACKTEST:
                 symbols_for_fetch.append('SPY')
                 _log(f"Adding SPY to bar data for {name} strategy market filter", "cyan")
             # Don't break - check all strategies
-        # P&L sweep 2026-07-19: the residual sleeve trades its own symbol —
-        # without bars it has no price and silently no-ops (BULL_F/BEAR_F ran
-        # with a completely inert sleeve because SPY was never fetched).
-        _sleeve_cfg = (s.get('config') or {})
-        if bool(_sleeve_cfg.get('residual_sleeve_enabled', False)):
-            _sleeve_sym = str(_sleeve_cfg.get('residual_sleeve_symbol', 'SPY')).upper()
-            if _sleeve_sym and _sleeve_sym not in symbols_for_fetch:
-                symbols_for_fetch.append(_sleeve_sym)
-                _log(f"Adding {_sleeve_sym} to bar data for the residual sleeve", "cyan")
+    # P&L sweep 2026-07-19: the residual sleeve trades its own symbols — without
+    # bars they have no price and the sleeve silently no-ops (BULL_F/BEAR_F both
+    # ran with a completely inert sleeve because SPY was never fetched).
+    # 2026-08-02: hoisted out of the per-strategy loop into the shared helper
+    # _residual_sleeve_universe_symbols, because this block was backtest-only
+    # and that is exactly why LIVE never resolved the sleeve symbols for its
+    # mark subscription (see _subscribe_residual_sleeve_marks).
+    # include_bear=False keeps this list byte-identical to what it has always
+    # fetched. The bear leg is not missing anything: _residual_sleeve_prepare
+    # loads BOTH legs on demand through the same incremental loader discovered
+    # symbols use. Adding it here would only pull the bear symbol into
+    # symbols_for_data, and from there into every price_history rebuild, for no
+    # behavioural gain.
+    for _sleeve_sym in _residual_sleeve_universe_symbols(
+            _cached_strategies, include_bear=False):
+        if _sleeve_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_sleeve_sym)
+            _log(f"Adding {_sleeve_sym} to bar data for the residual sleeve", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)
@@ -8474,6 +8734,19 @@ else:
     _pre_decision_specs = [s for s in (_cached_strategies or []) if s not in _post_decision_specs]
     _run_once_specs = [s for s in _pre_decision_specs if (str(s.get("execution_scope") or "per_symbol").strip().lower() == "run_once")]
     _per_symbol_specs = [s for s in _pre_decision_specs if s not in _run_once_specs]
+
+# Both modes reach here with _cached_strategies resolved (backtest loaded it far
+# earlier, live a few lines up), so config hygiene lives here rather than being
+# duplicated into each branch.
+_warn_dead_strategy_config_keys(_cached_strategies)
+
+# The sleeve's own symbols were only ever injected into the BACKTEST bar-fetch
+# universe. In live they were never subscribed, so the sleeve's marks stayed
+# empty and its intents were gate-blocked on quote.invalid_price. The mark
+# stream started before the specs were loaded, hence the top-up here.
+if mode == MODE_LIVE and globals().get("_is_alpaca_runtime"):
+    _subscribe_residual_sleeve_marks(
+        globals().get("live_adapter"), symbols, _cached_strategies)
 
 # Start thread to watch for strategy changes (only in live mode, not backtest)
 if mode == MODE_LIVE:
@@ -12175,6 +12448,10 @@ while not shutdown_requested:
             # Residual sleeve (P&L sweep 2026-07-19): free sleeve capital for
             # active picks BEFORE the execution pass when cash runs low.
             # Inert unless residual_sleeve_enabled=true in the nexus config.
+            # The restore is one-shot and runs here, after the tick's own
+            # strategy-cache load, so the leg stop-loss basis is armed before
+            # the first sleeve decision this process makes.
+            _residual_sleeve_state_restore()
             _residual_sleeve_prepare(
                 data, prices, current_time, _cached_strategies,
                 key=key, secret=secret)
@@ -12187,6 +12464,7 @@ while not shutdown_requested:
                     else None
                 ),
             )
+            _residual_sleeve_state_persist()
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
                 normalized = None  # reset per-symbol to avoid stale values from previous iteration
@@ -12586,18 +12864,30 @@ while not shutdown_requested:
                                 _sizing_ceiling = _scp_ceiling
                             available = max(0.0, _sizing_ceiling - reserved_total - _effective_floor)
                             cash_to_use = min(cash_per_trade, available)
-                            # Live-readiness HIGH #9: broker-side max_single_position_pct cap.
+                            # Live-readiness HIGH #9: broker-side single-position cap.
                             # Strategy can stack to 30-40% sector cap; broker enforces a hard
                             # ceiling (default 15% of equity) regardless of strategy output.
                             # Failsafe — disable by setting BROKER_MAX_SINGLE_POSITION_PCT=0.
+                            # NOTE: the FRACTION here and the strategy's
+                            # `single_position_max_pct` (PERCENT points, doc-179 = 25) are
+                            # two different caps in two different units; the tighter one
+                            # wins, which today is this 15%.
                             try:
                                 _max_single_pct = float(os.environ.get("BROKER_MAX_SINGLE_POSITION_PCT", "0.15") or "0.15")
                             except (ValueError, TypeError):
                                 _max_single_pct = 0.15
+                            # 2026-08-02: this used to carry `and mode == MODE_LIVE`, so the
+                            # tightest position cap in the system applied ONLY to real money
+                            # and no backtest ever modelled it. Every sizing result the
+                            # backtest reported for a high-conviction name was therefore
+                            # unreachable live, and the divergence grew with conviction —
+                            # precisely where it matters. The cap now applies in both modes,
+                            # keeping today's live value (0.15) as the default so live
+                            # behaviour is unchanged and the backtest moves to meet it.
                             # Crypto instances set explicit per-coin allocations
                             # (e.g. 20%, 50%), so the equity 15% single-position
                             # safety cap must NOT trim them — honor the user's donut.
-                            if _max_single_pct > 0 and mode == MODE_LIVE and not _is_crypto_instance_runtime():
+                            if _max_single_pct > 0 and not _is_crypto_instance_runtime():
                                 try:
                                     # Q4 fix: use CURRENT portfolio value (cash + positions) so
                                     # the cap scales with equity growth, not stuck at start-equity.
@@ -13198,6 +13488,32 @@ while not shutdown_requested:
                         data=None, symbols=symbols, key=key, secret=secret,
                         label="post-tick portfolio-snapshot EPPI", timeout=30.0,
                     )
+                    # 2026-08-02 — the sleeve could not BUY in live. Deploy was
+                    # called from the `else` below, whose siblings are the two
+                    # MODE_LIVE branches, and MODE_LIVE/MODE_BACKTEST are the
+                    # only modes: that branch is backtest-only, so cd88b85's
+                    # live order-service plumbing was threaded into a call site
+                    # live never reached and could only ever evaluate to None.
+                    # Release IS on the shared tick path, so live ran the sleeve
+                    # SELL-ONLY: it liquidated on a regime turn and never parked
+                    # a dollar back, which is not a conservative subset of the
+                    # backtested strategy, it is a different one.
+                    # Same position in the tick as backtest (after the EPPI
+                    # price refresh, before the snapshot) so both modes park on
+                    # identical prices and the snapshot reflects the park. The
+                    # IDLE branch above still skips it — an IDLE tick moved no
+                    # cash, so there is nothing to park.
+                    _residual_sleeve_deploy(
+                        portfolio_emulator, prices, current_time,
+                        _cached_strategies,
+                        (
+                            _live_stock_order_service
+                            if str(live_broker_type or "").strip().lower()
+                            == "alpaca"
+                            else None
+                        ),
+                    )
+                    _residual_sleeve_state_persist()
                     try:
                         _snap_fut = _SNAPSHOT_EXECUTOR.submit(
                             portfolio_emulator.save_portfolio_snapshot,
@@ -13243,16 +13559,14 @@ while not shutdown_requested:
                         # Residual sleeve (P&L sweep 2026-07-19): park idle
                         # cash above the buffer at cycle end. Inert unless
                         # residual_sleeve_enabled=true.
+                        # Only backtest reaches this branch (both MODE_LIVE
+                        # cases are handled above), so the order service is
+                        # unconditionally None here — the emulator executes the
+                        # park. The live twin of this call is in the MODE_LIVE
+                        # branch above; keep the two in step.
                         _residual_sleeve_deploy(
                             portfolio_emulator, prices, current_time,
-                            _cached_strategies,
-                            (
-                                _live_stock_order_service
-                                if mode == MODE_LIVE
-                                and str(live_broker_type or "").strip().lower()
-                                == "alpaca"
-                                else None
-                            ),
+                            _cached_strategies, None,
                         )
                     if not _skip_snapshot:
                         portfolio_emulator.save_portfolio_snapshot(prices, timestamp=current_time)

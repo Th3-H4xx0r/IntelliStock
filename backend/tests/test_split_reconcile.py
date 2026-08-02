@@ -16,8 +16,12 @@ if _BACKEND not in sys.path:
 from portfolio_emulator import PortfolioEmulator  # noqa: E402
 
 
-def _held(ticker="VGT", shares=1.1119, price=808.88):
+def _held(ticker="VGT", shares=1.1119, price=808.88, enable=True):
+    """Reconciliation is DEFAULT OFF (bars are server split-adjusted, so any
+    ratio match is a false positive on a real crash). These tests opt in to
+    exercise the mechanism; test_default_is_off pins the default itself."""
     pe = PortfolioEmulator(initial_cash=10000.0)
+    pe._split_reconcile_enabled = enable
     pe.buy(ticker, shares, price)
     pe.save_portfolio_snapshot({ticker: price})
     return pe
@@ -49,14 +53,30 @@ def test_ordinary_crash_is_left_alone():
     assert abs(pe.get_positions()["XYZ"] - 10.0) < 1e-6, "real loss was erased"
 
 
-def test_halved_price_that_is_not_a_split_still_reconciles_only_near_ratio():
-    """Exactly 2.00x IS a plausible 2:1 split and is reconciled; 2.20x is not."""
-    pe = _held("AAA", shares=10.0, price=100.0)
+def test_exact_halving_is_indistinguishable_and_is_why_the_default_is_off():
+    """A clean -50% move is arithmetically identical to a 2-for-1 split.
+
+    With adjustment="split" now the default on bar fetches, a real split no
+    longer produces a step in backtest bars at all -- so the only thing that can
+    still match a ratio here is a GENUINE CRASH. Reconciling that fabricates
+    shares and erases the loss. Hence the default is OFF; this test documents
+    the ambiguity rather than endorsing the behaviour.
+    """
+    pe = _held("AAA", shares=10.0, price=100.0, enable=True)
     pe.save_portfolio_snapshot({"AAA": 50.0})
-    assert abs(pe.get_positions()["AAA"] - 20.0) < 1e-6
-    pe2 = _held("BBB", shares=10.0, price=110.0)
-    pe2.save_portfolio_snapshot({"BBB": 50.0})       # 2.20x — not a split
-    assert abs(pe2.get_positions()["BBB"] - 10.0) < 1e-6
+    assert abs(pe.get_positions()["AAA"] - 20.0) < 1e-6      # opted in: fires
+    pe2 = _held("BBB", shares=10.0, price=100.0, enable=False)
+    pe2.save_portfolio_snapshot({"BBB": 50.0})
+    assert abs(pe2.get_positions()["BBB"] - 10.0) < 1e-6     # default: safe
+
+
+def test_default_is_off():
+    """The safety posture itself: a fresh emulator must not reconcile."""
+    pe = PortfolioEmulator(initial_cash=10000.0)
+    pe.buy("VGT", 1.0, 808.88)
+    pe.save_portfolio_snapshot({"VGT": 808.88})
+    pe.save_portfolio_snapshot({"VGT": 101.57})
+    assert abs(pe.get_positions()["VGT"] - 1.0) < 1e-9
 
 
 def test_untouched_when_disabled():
@@ -104,18 +124,23 @@ def test_entry_price_is_restated_so_pnl_is_not_minus_87pct():
 
 def test_trade_shares_are_restated_too():
     pe = _held("VGT", shares=1.3192, price=681.69)
+    entry = [t for t in pe.get_trade_history() if t["ticker"] == "VGT"][0]
+    # Snapshot the executed notional BEFORE reconciliation. Since 2026-08-02
+    # equity fills carry spread and slippage, so the recorded price is the
+    # fill (~30 bps above the $681.69 asked) and hardcoding the decision price
+    # here would test the cost model rather than the split restatement.
+    notional_before = entry["shares"] * entry["price"]
     pe.save_portfolio_snapshot({"VGT": 808.88})
     pe.save_portfolio_snapshot({"VGT": 101.57})
     entry = [t for t in pe.get_trade_history() if t["ticker"] == "VGT"][0]
     assert abs(entry["shares"] - 1.3192 * 8) < 1e-6
     # notional is preserved: shares x price is unchanged by the split
-    assert abs(entry["shares"] * entry["price"] - 1.3192 * 681.69) < 0.01
+    assert abs(entry["shares"] * entry["price"] - notional_before) < 0.01
 
 
 def test_crypto_is_never_split_reconciled():
     """A ~50% single-bar drawdown in an altcoin is real, not a 2-for-1."""
-    pe = _held("BTC/USD", shares=0.05, price=100000.0)
-    pe._is_crypto = True
+    pe = _held("BTC/USD", shares=0.05, price=100000.0, enable=True)
     before = pe.get_positions()["BTC/USD"]          # fees make the fill < 0.05
     pe.save_portfolio_snapshot({"BTC/USD": 50000.0})
     assert abs(pe.get_positions()["BTC/USD"] - before) < 1e-12

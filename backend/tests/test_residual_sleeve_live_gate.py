@@ -34,6 +34,19 @@ _ns = {
     "_sleeve_circuit_tier": lambda: "",
     "_sleeve_rally_onset": lambda: False,
 }
+# Module-level constants the extracted functions close over. Pulled from the
+# source rather than hardcoded so a change to the real floor shows up here.
+_WANTED_CONSTS = {"_RESIDUAL_SLEEVE_MIN_RELEASE_USD"}
+for _node in _TREE.body:
+    if isinstance(_node, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id in _WANTED_CONSTS for t in _node.targets
+    ):
+        exec(
+            compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"),
+            _ns,
+        )
+for _const in _WANTED_CONSTS:
+    assert _const in _ns, f"failed to extract {_const} from broker.py"
 for _node in _TREE.body:
     if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:
         exec(

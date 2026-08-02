@@ -40,6 +40,16 @@ _ns = {
     # must be stubbed here or they raise NameError under the AST harness.
     "_sleeve_rally_onset": lambda: False,
 }
+# Module-level constants the extracted functions close over. Pulled from the
+# source rather than hardcoded so a change to the real floor shows up here.
+_WANTED_CONSTS = {"_RESIDUAL_SLEEVE_MIN_RELEASE_USD"}
+for _node in _tree.body:
+    if isinstance(_node, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id in _WANTED_CONSTS for t in _node.targets
+    ):
+        exec(compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"), _ns)
+for _name in _WANTED_CONSTS:
+    assert _name in _ns, f"failed to extract {_name} from broker.py"
 for _node in _tree.body:
     if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:
         _mod = ast.Module(body=[_node], type_ignores=[])
@@ -881,3 +891,48 @@ def test_blank_chop_ret20_string_does_not_disable_the_sleeve():
     assert b._chop_ret20_cfg({"residual_sleeve_chop_min_ret20_pct": "bogus"}) is None
     assert b._chop_ret20_cfg({"residual_sleeve_chop_min_ret20_pct": "2.5"}) == 2.5
     assert b._chop_ret20_cfg({}) is None
+
+
+# ── 2026-08-02: minimum release size (backtest <-> live parity) ──
+# Deploy has always floored at max($50, min_deploy_pct*NAV); release had no
+# floor at all, so a $2 cash shortfall emitted a $2 sell. Alpaca rejects any
+# order under $1 of notional, so those fills existed only in the emulator: an
+# audit of the best-performing run found 219 of its 260 trades under $1.
+
+def test_release_below_the_minimum_is_skipped():
+    # cash $1 short of the 15% target -> a $1.00 sell, which live rejects.
+    emu = _Emu(cash=899.0, nav=6000.0, sleeve_qty=3.0)
+    b._residual_sleeve_release(emu, {"SPY": 600.0}, datetime(2026, 3, 3, 15), SPEC)
+    assert emu.signals == [], "a sub-minimum release must not be emitted"
+
+
+def test_release_at_the_minimum_still_executes():
+    # $6 short -> a $6.00 sell, above the $5 floor.
+    emu = _Emu(cash=894.0, nav=6000.0, sleeve_qty=3.0)
+    b._residual_sleeve_release(emu, {"SPY": 600.0}, datetime(2026, 3, 3, 15), SPEC)
+    assert len(emu.signals) == 1
+    notional = emu.signals[0]["sell_fraction"] * 3.0 * 600.0
+    assert notional >= b._ns["_RESIDUAL_SLEEVE_MIN_RELEASE_USD"]
+
+
+def test_the_floor_is_comfortably_above_the_broker_minimum():
+    """Alpaca's real floor is $1. The release is priced off THIS bar and fills
+    on the next, so a $1.01 decision can slip under it before submission."""
+    assert b._ns["_RESIDUAL_SLEEVE_MIN_RELEASE_USD"] >= 2.0
+
+
+def test_protective_exit_of_a_dust_position_is_also_skipped():
+    """Protective exits are NOT exempt: live cannot fill a $3 sell either, and
+    exempting them would put the divergence straight back."""
+    _set_regime("bear")
+    emu = _Emu(cash=3000.0, nav=6000.0, sleeve_qty=0.005)  # $3 of SPY
+    b._residual_sleeve_release(emu, {"SPY": 600.0}, datetime(2026, 3, 3, 15), SPEC)
+    assert emu.signals == []
+
+
+def test_protective_exit_above_the_minimum_is_untouched():
+    _set_regime("bear")
+    emu = _Emu(cash=3000.0, nav=6000.0, sleeve_qty=3.0)
+    b._residual_sleeve_release(emu, {"SPY": 600.0}, datetime(2026, 3, 3, 15), SPEC)
+    assert len(emu.signals) == 1
+    assert emu.signals[0]["sell_fraction"] == 1.0

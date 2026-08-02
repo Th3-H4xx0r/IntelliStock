@@ -18,6 +18,12 @@ SCHEMA_VERSION = 1
 DEFAULT_SOFT_DRAWDOWN = Decimal("0.05")
 DEFAULT_HARD_DRAWDOWN = Decimal("0.09")
 DEFAULT_KILL_DRAWDOWN = Decimal("0.12")
+# Exposure caps are fractions of CURRENT equity, never absolute dollars. They
+# live here rather than inline in initialize_risk_state because
+# evaluate_drawdown has to reapply the identical fractions on every refresh.
+DEFAULT_MAX_ORDER_FRACTION = Decimal("0.10")
+DEFAULT_MAX_SYMBOL_FRACTION = Decimal("0.20")
+DEFAULT_MAX_LEVERAGED_FRACTION = Decimal("0.10")
 DEFAULT_SLEEVE_COOLDOWN = timedelta(hours=24)
 DEFAULT_LEVERAGED_SYMBOLS = frozenset(
     {"SQQQ", "TQQQ", "SPXU", "UPRO", "SOXL", "SOXS"}
@@ -30,6 +36,10 @@ class RiskStateUnavailable(RuntimeError):
 
 class RiskStateConflict(RuntimeError):
     """Another writer advanced the same risk record."""
+
+
+class RiskStateBootstrapRefused(RiskStateUnavailable):
+    """A funded account asked to create risk state from an unsafe posture."""
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -309,10 +319,75 @@ def initialize_risk_state(
         high_water_equity=equity_value,
         last_equity=equity_value,
         observed_at=observed_at,
-        max_order_notional=equity_value * Decimal("0.10"),
-        max_symbol_notional=equity_value * Decimal("0.20"),
-        max_leveraged_notional=equity_value * Decimal("0.10"),
+        max_order_notional=equity_value * DEFAULT_MAX_ORDER_FRACTION,
+        max_symbol_notional=equity_value * DEFAULT_MAX_SYMBOL_FRACTION,
+        max_leveraged_notional=equity_value * DEFAULT_MAX_LEVERAGED_FRACTION,
     )
+
+
+def initialize_live_risk_state(
+    instance_id: str,
+    account_id: str,
+    equity,
+    observed_at: datetime,
+    *,
+    paper: bool,
+    open_position_count: int,
+    open_order_count: int,
+    trading_blocked: bool = False,
+) -> AccountRiskState:
+    """Bootstrap risk state for a real-money account, but only from a flat book.
+
+    Only paper was ever allowed to create this row, for a good reason: a
+    bootstrap sets the high-water mark to whatever equity exists right now, so
+    a row that goes missing mid-drawdown would come back forgiving the entire
+    drawdown and re-arming new exposure. The cost of that rule was that a
+    funded account had no row at all, ``risk_state`` health stayed ``unknown``,
+    and the gate blocked every buy - a live account would boot silently
+    sell-only and nobody would know until the first signal did nothing.
+
+    A flat book resolves the conflict. With no positions and no working orders
+    there is no unrealised loss for a stale high-water mark to hide: current
+    equity IS the peak by construction, so bootstrapping is exactly as safe as
+    it is on paper. Anything else refuses, which leaves the caller in the same
+    fail-closed posture as before and gives an operator a legible reason.
+    """
+
+    if paper:
+        return initialize_risk_state(instance_id, account_id, equity, observed_at)
+
+    refusals: list[str] = []
+    if trading_blocked:
+        refusals.append("account trading is blocked at the broker")
+    try:
+        positions = int(open_position_count)
+    except (TypeError, ValueError):
+        positions = -1
+    try:
+        orders = int(open_order_count)
+    except (TypeError, ValueError):
+        orders = -1
+    if positions != 0:
+        refusals.append(
+            "book is not flat"
+            if positions > 0
+            else "open position count is unknown"
+        )
+    if orders != 0:
+        refusals.append(
+            "working orders exist"
+            if orders > 0
+            else "open order count is unknown"
+        )
+    try:
+        _decimal(equity, "equity", positive=True)
+    except ValueError:
+        refusals.append("broker equity is unavailable or non-positive")
+    if refusals:
+        raise RiskStateBootstrapRefused(
+            "live risk-state bootstrap refused: " + "; ".join(refusals)
+        )
+    return initialize_risk_state(instance_id, account_id, equity, observed_at)
 
 
 def evaluate_drawdown(
@@ -344,6 +419,25 @@ def evaluate_drawdown(
         if drawdown >= soft
         else "normal"
     )
+    # Rescale the exposure caps against the equity we just observed. They were
+    # written once at bootstrap and never touched again, so they stayed pinned
+    # to whatever the account was worth the day the row was created: an account
+    # that doubled kept a cap sized for half of it, and - the dangerous
+    # direction - an account that halved kept permission to put 20% of its
+    # ORIGINAL equity into a single symbol, which is 40% of what is actually
+    # left. A cap denominated in stale dollars is not a risk limit.
+    #
+    # A cap of None means "no limit configured"; rescaling it would invent one,
+    # so those are preserved as-is.
+    caps = {}
+    for name, fraction in (
+        ("max_order_notional", DEFAULT_MAX_ORDER_FRACTION),
+        ("max_symbol_notional", DEFAULT_MAX_SYMBOL_FRACTION),
+        ("max_leveraged_notional", DEFAULT_MAX_LEVERAGED_FRACTION),
+    ):
+        caps[name] = (
+            equity * fraction if getattr(state, name) is not None else None
+        )
     return replace(
         state,
         high_water_equity=high,
@@ -352,6 +446,7 @@ def evaluate_drawdown(
         drawdown=drawdown,
         level=level,
         new_exposure_allowed=(level == "normal"),
+        **caps,
     )
 
 

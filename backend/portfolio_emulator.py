@@ -1,10 +1,22 @@
 """
 PortfolioEmulator: used only for backtesting. Tracks cash, positions, trades,
 and portfolio value snapshots over time.
+
+Its job is to be WRONG IN THE SAME DIRECTION AS THE LIVE ACCOUNT, or ideally
+slightly against itself. Until 2026-08-02 it was wrong in the strategy's
+favour on five separate axes at once — equity fills were free (no spread, no
+slippage, no fee), sub-$1 orders that Alpaca rejects filled anyway, sell
+proceeds were spendable the instant they landed, fresh buys were marked at
+their own above-mid fill price, and held positions earned no distributions
+while the SPY series they were scored against was total-return. Each of those
+is now modelled, each is configurable, and each is reported in
+``get_realism_summary()`` so a result can be read against its own assumptions.
+Read the module constants below before changing any of them: the numbers are
+sourced from this book's measured liquidity, not from convenience.
 """
 
 import copy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import math
 
 try:
@@ -32,14 +44,138 @@ except ImportError:  # Package import path used by repository-root pytest.
 
 # Crypto is NEVER commission-free: backtest fills must model the taker fee.
 # Source the fee from the crypto core so sizing and fills stay in lock-step;
-# guard the import so any failure falls back to the known taker fee and never
-# breaks the (commission-free) equity paths. Only ever applied to crypto
-# symbols (detected via "/" in the ticker — equities never contain a slash).
+# guard the import so any failure falls back to the known taker fee.
+# Only ever applied to crypto symbols (detected via "/" in the ticker —
+# equities never contain a slash).
 try:  # pragma: no cover - trivial import guard
     from strategies.crypto.core import CRYPTO_FEES as _CRYPTO_FEES
     _CRYPTO_TAKER_FEE = float(_CRYPTO_FEES["taker"])
 except Exception:  # pragma: no cover - fall back so equity paths never break
     _CRYPTO_TAKER_FEE = 0.0025
+
+
+# --------------------------------------------------------------------------
+# Equity execution costs. "Commission-free" is a marketing term, not a cost
+# model.
+#
+# This emulator used to charge equities NOTHING: no spread, no slippage, no
+# fee. Every backtest number this project has ever produced was therefore a
+# gross return quoted as if orders executed at the mid of a bar close with
+# infinite depth. A run instrumented with the nominal upstream model
+# (equity-next-event-v1: 5 bps spread / 10 bps slippage / 0.3 bps fee =
+# 12.8 bps one-way) still cost a median $26.09 per 20-session run on $6,000
+# — 0.435% per 20 sessions, ~5.4%/yr, implying ~43x annual turnover. That
+# nominal model is itself optimistic: 5 bps of quoted spread describes SPY,
+# not this book.
+#
+# The book this strategy actually trades has a 60-day median dollar volume of
+# $2.4M-$7.9M per name. At that liquidity the realistic all-in one-way cost is
+# 25-35 bps, so the components below are set to land at the middle of that
+# band:
+#
+#   spread_bps    24.0  quoted spread; a marketable order pays HALF (12.0 bps)
+#   slippage_bps  18.0  impact + adverse selection on a market order that
+#                       crosses and walks the book
+#   fee_bps        0.3  SEC Section 31 (~0.28 bps of principal, sell side) +
+#                       FINRA TAF ($0.000166/share, sell side). Alpaca charges
+#                       no commission; these pass-throughs are still real.
+#   one-way      = 24/2 + 18 + 0.3 = 30.3 bps      round trip ~60.6 bps
+#
+# At the ~43x/yr turnover measured above that is ~12.5%/yr of drag versus the
+# ~5.4%/yr the nominal model showed and the 0%/yr the emulator charged before.
+# That is larger than any alpha this project has claimed, which is the point:
+# a cost model that flatters the strategy is worse than no backtest at all.
+#
+# `latency` stays zero deliberately. The T+1 fill discipline is enforced by
+# the emulator's `execution_delay` plus the simulator's strict
+# "quote must be after the decision" rule; putting latency here as well would
+# double-count the same delay.
+#
+# Every component is configurable — pass an explicit ExecutionCostModel to run
+# a sensitivity sweep (see backtest_evidence_options.resolve_execution_cost_model,
+# which scales all three components to a target one-way cost).
+LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL = ExecutionCostModel(
+    version="equity-next-event-v2-liquidity30",
+    spread_bps=24.0,
+    slippage_bps=18.0,
+    fee_bps=0.3,
+    latency=timedelta(0),
+)
+
+#: Alpaca rejects any equity order whose notional is under $1 (the fractional
+#: minimum). An audit of the best-performing backtest to date found 219 of its
+#: 260 trades were sub-$1 — $52 of $16,286 total notional — meaning ~84% of the
+#: trades that produced the headline number could never have been placed. The
+#: emulator has to refuse them or the equity curve is built on orders the
+#: broker would have bounced. Applies to BOTH sides: a fractional position
+#: worth less than a dollar cannot be sold either, so dust is genuinely stuck.
+MIN_EQUITY_ORDER_NOTIONAL = 1.0
+
+#: Fraction of equity sell proceeds usable in the same cycle. Alpaca's instant
+#: settlement advances most of an unsettled sale but not all of it, and this
+#: project's own LIVE sizing already haircuts anticipated proceeds by the same
+#: 0.95 (`nexus_broker_utils.buy_ceiling`). Crediting 100% instantly — which is
+#: what this emulator did — lets a backtest recycle capital slightly faster
+#: than the live account can, which compounds over a high-turnover run.
+SETTLED_SELL_PROCEEDS_FRACTION = 0.95
+
+#: When the withheld remainder becomes spendable. US equities settle T+1.
+DEFAULT_SETTLEMENT_DELAY = timedelta(days=1)
+
+#: Annual distribution yields used to accrue dividends onto held equities.
+#:
+#: This exists because the two sides of the benchmark comparison do NOT share a
+#: return convention. Verified 2026-08-02 against the live cache: all 4,000
+#: sampled AlpacaBarsCache chunks hash under adjustment="split"
+#: (price_utils.alpaca_bars_cache_key folds `adjustment` into the row id), so
+#: the traded series — and therefore the whole equity curve — is PRICE RETURN.
+#: The SPY benchmark is fetched separately at broker.py:1302 with
+#: adjustment="all" and experiment_registry pins `total_return: True`, so the
+#: benchmark is TOTAL RETURN. Every `active_return` / `information_ratio` this
+#: project has computed therefore charged the strategy SPY's ~1.25%/yr of
+#: distributions that its own holdings were never credited.
+#:
+#: Only symbols listed here accrue. Anything absent uses
+#: `default_dividend_yield` (0.0), which is both conservative and roughly true
+#: for the microcap-ish discovered universe. Values are trailing-12-month
+#: distribution yields rounded to the nearest 5 bps; they are ESTIMATES and are
+#: meant to be overridden per run via `dividend_yields=`.
+#:
+#: Deliberately NOT seeded: leveraged/inverse ETFs (TQQQ, SQQQ, …). Their
+#: distributions are mostly collateral interest and therefore track the fed
+#: funds rate rather than the index — a fixed number here would be wrong in
+#: both directions across a multi-year window. Set them explicitly per run.
+DEFAULT_EQUITY_DIVIDEND_YIELDS = {
+    # S&P 500 trackers
+    "SPY": 0.0125,
+    "VOO": 0.0125,
+    "IVV": 0.0125,
+    "SPLG": 0.0125,
+    # Total market
+    "VTI": 0.0125,
+    # Nasdaq-100 — the sleeve this strategy actually holds long
+    "QQQ": 0.0050,
+    "QQQM": 0.0055,
+    # Other broad indices that show up as sleeve/benchmark proxies
+    "DIA": 0.0155,
+    "IWM": 0.0110,
+    "VGT": 0.0060,
+}
+
+
+def _as_utc(value):
+    """Normalize a trade/snapshot timestamp for arithmetic.
+
+    The legacy equity backtest clock is naive and the event-time API is aware;
+    mixing them raises TypeError on subtraction, which would surface as a
+    mid-run crash rather than a bad number. Returns None for anything that is
+    not a datetime so callers can simply skip time-dependent accounting.
+    """
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class PortfolioEmulator:
@@ -56,6 +192,12 @@ class PortfolioEmulator:
         *,
         execution_simulator=None,
         execution_delay=None,
+        equity_cost_model=None,
+        min_order_notional=MIN_EQUITY_ORDER_NOTIONAL,
+        settled_sell_proceeds_fraction=SETTLED_SELL_PROCEEDS_FRACTION,
+        settlement_delay=DEFAULT_SETTLEMENT_DELAY,
+        dividend_yields=None,
+        default_dividend_yield=0.0,
     ):
         try:
             initial_cash = float(initial_cash)
@@ -87,11 +229,116 @@ class PortfolioEmulator:
         self._trades = []    # list of { timestamp, action, ticker, shares, price, total, cash_after }
         self._portfolio_snapshots = []  # list of { timestamp, value, cash, positions_snapshot, prices }
         self._last_prices = {}  # V7.3: track last known prices for portfolio valuation fallback
-        # Crypto fee accounting (equities are commission-free, so these stay 0):
-        # total taker fees actually charged, and total crypto notional traded
-        # (gross, both legs) — the base for per-platform fee estimates.
+        # Crypto fee accounting: total taker fees actually charged, and total
+        # crypto notional traded (gross, both legs) — the base for per-platform
+        # fee estimates. Stays 0 on a pure-equity run; equity execution cost is
+        # accounted separately below because its shape is different (three
+        # named components, not one embedded fee).
         self._crypto_fees_paid = 0.0
         self._crypto_volume = 0.0
+        # Equity execution cost model. Applied to EVERY equity fill, including
+        # the legacy immediate buy()/sell() path — which is not dead code: a
+        # crypto-kind instance carrying an equity ticker in its watchlist
+        # builds an emulator with no execution simulator, so before this its
+        # equity fills were free and instant. When a simulator IS attached we
+        # reuse ITS model so the two paths can never disagree about what a
+        # fill cost.
+        if equity_cost_model is None:
+            equity_cost_model = (
+                execution_simulator.cost_model
+                if isinstance(execution_simulator, NextEventExecutionSimulator)
+                else LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
+            )
+        if not isinstance(equity_cost_model, ExecutionCostModel):
+            raise ValueError("equity_cost_model must be an ExecutionCostModel")
+        self._equity_cost_model = equity_cost_model
+        self._equity_fees_paid = 0.0
+        self._equity_spread_cost = 0.0
+        self._equity_slippage_cost = 0.0
+        self._equity_volume = 0.0
+        # Orders the live broker would have rejected outright.
+        try:
+            min_order_notional = float(min_order_notional)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "min_order_notional must be finite and nonnegative"
+            ) from exc
+        if not math.isfinite(min_order_notional) or min_order_notional < 0:
+            raise ValueError("min_order_notional must be finite and nonnegative")
+        self._min_order_notional = min_order_notional
+        self._sub_minimum_rejects = 0
+        self._sub_minimum_reject_notional = 0.0
+        # T+1 settlement: [(settles_at_utc, still_withheld)] for equity sells.
+        try:
+            settled_fraction = float(settled_sell_proceeds_fraction)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "settled_sell_proceeds_fraction must be between 0 and 1"
+            ) from exc
+        if not math.isfinite(settled_fraction) or not 0.0 <= settled_fraction <= 1.0:
+            raise ValueError(
+                "settled_sell_proceeds_fraction must be between 0 and 1"
+            )
+        if (
+            not isinstance(settlement_delay, timedelta)
+            or not math.isfinite(settlement_delay.total_seconds())
+            or settlement_delay.total_seconds() < 0
+        ):
+            raise ValueError("settlement_delay must be a nonnegative timedelta")
+        self._settled_sell_proceeds_fraction = settled_fraction
+        self._settlement_delay = settlement_delay
+        self._unsettled_tranches = []
+        self._clock = None
+        # Dividend accrual (see DEFAULT_EQUITY_DIVIDEND_YIELDS for why).
+        try:
+            default_yield = float(default_dividend_yield)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "default_dividend_yield must be finite and nonnegative"
+            ) from exc
+        if not math.isfinite(default_yield) or default_yield < 0:
+            raise ValueError(
+                "default_dividend_yield must be finite and nonnegative"
+            )
+        self._default_dividend_yield = default_yield
+        self._dividend_yields = {
+            str(sym).strip().upper(): float(rate)
+            for sym, rate in (
+                DEFAULT_EQUITY_DIVIDEND_YIELDS
+                if dividend_yields is None
+                else dividend_yields
+            ).items()
+        }
+        if any(
+            not math.isfinite(rate) or rate < 0
+            for rate in self._dividend_yields.values()
+        ):
+            raise ValueError("dividend yields must be finite and nonnegative")
+        self._dividends_credited = 0.0
+        self._dividends_by_symbol = {}
+        self._dividend_accrual_clock = None
+        # Pattern-day-trader diagnostics. A $6k account is far under the
+        # $25,000 PDT threshold, so in a MARGIN account only three day trades
+        # are permitted per rolling five business days. Nothing here enforces
+        # that — the account type is not knowable from inside a backtest — but
+        # a run that needs dozens of same-session round trips to make its
+        # number is not a run that could have happened, and the summary now
+        # says so out loud instead of hiding it.
+        self._intraday_opens = {}
+        self._day_trades_by_date = {}
+        # Staleness of the last-known-price fallback. Carrying a held name at
+        # its last print is right for a symbol missing from one bar and wrong
+        # for one that has stopped trading: a halted or delisted position stays
+        # marked at full value forever and props up NAV, sizing and the
+        # drawdown halt. Nothing here haircuts it — inventing a liquidation
+        # price would be its own fiction — but a run that leaned on a mark for
+        # days can no longer do so invisibly.
+        self._price_seen_at = {}
+        self._max_stale_mark_seconds = 0.0
+        self._stale_marked_symbols = {}
+        # Set by create_backtest_emulator when it overrides an optimistic
+        # nominal model, so the substitution is auditable downstream.
+        self._execution_cost_model_requested_version = None
         if (
             execution_simulator is not None
             and not isinstance(execution_simulator, NextEventExecutionSimulator)
@@ -121,6 +368,175 @@ class PortfolioEmulator:
     def has_next_event_execution(self):
         return self._execution_simulator is not None
 
+    # -- realism helpers ---------------------------------------------------
+
+    @staticmethod
+    def _is_crypto(ticker):
+        """Crypto symbols carry a slash ("BTC/USD"); equities never do.
+
+        The same convention already gates the taker fee, split reconciliation
+        and the exit-when-blind path, so keep one definition of it.
+        """
+        return "/" in str(ticker)
+
+    def _advance_clock(self, timestamp):
+        """Move the settlement clock forward and release matured proceeds.
+
+        Only ever called with a timestamp the caller actually supplied. A run
+        that trades without timestamps (older harnesses, scripts) simply never
+        withholds anything — modelling settlement with no clock would strand
+        cash for the life of the run, which is a worse lie than not modelling
+        it at all.
+        """
+        now = _as_utc(timestamp)
+        if now is None:
+            return None
+        if self._clock is None or now > self._clock:
+            self._clock = now
+        if self._unsettled_tranches:
+            self._unsettled_tranches = [
+                (settles_at, amount)
+                for settles_at, amount in self._unsettled_tranches
+                if settles_at > self._clock and amount > 1e-12
+            ]
+        return self._clock
+
+    def _withheld_cash(self):
+        """Sell proceeds booked into cash but not yet spendable."""
+        if not self._unsettled_tranches:
+            return 0.0
+        return sum(amount for _settles_at, amount in self._unsettled_tranches)
+
+    def get_buying_power(self, reserved=0.0):
+        """Cash that could actually fund a new order right now.
+
+        Distinct from `get_cash()` on purpose: unsettled sell proceeds are part
+        of the account's cash (and therefore of NAV) but cannot be spent yet.
+        Conflating the two is exactly how a backtest recycles capital faster
+        than the live account does.
+        """
+        try:
+            reserved = float(reserved or 0.0)
+        except (TypeError, ValueError):
+            reserved = 0.0
+        return max(0.0, self._cash - self._withheld_cash() - reserved)
+
+    def _withhold_sell_proceeds(self, ticker, proceeds, timestamp):
+        """Withhold the unsettled slice of an equity sale until T+1."""
+        if self._is_crypto(ticker):
+            return  # crypto settles on the spot at every venue we trade
+        now = self._advance_clock(timestamp)
+        if now is None or self._settlement_delay.total_seconds() <= 0:
+            return
+        withheld = float(proceeds) * (
+            1.0 - self._settled_sell_proceeds_fraction
+        )
+        if withheld <= 1e-12:
+            return
+        self._unsettled_tranches.append(
+            (now + self._settlement_delay, withheld)
+        )
+
+    def _equity_fill(self, side, shares, mid):
+        """Price one equity fill through the cost model.
+
+        Mirrors NextEventExecutionSimulator.on_quote exactly — touch price,
+        then slippage, then a fee on the resulting notional — so the legacy
+        immediate path and the next-event path cannot disagree about what an
+        identical fill cost. Returns (fill_price, fees, spread_cost,
+        slippage_cost).
+        """
+        model = self._equity_cost_model
+        half_spread = mid * model.spread_bps / 20_000.0
+        if side == "buy":
+            touch = mid + half_spread
+            fill_price = touch * (1.0 + model.slippage_bps / 10_000.0)
+        else:
+            touch = mid - half_spread
+            fill_price = touch * (1.0 - model.slippage_bps / 10_000.0)
+        if not math.isfinite(fill_price) or fill_price <= 0:
+            raise ValueError("equity cost model produced a nonpositive fill price")
+        notional = shares * fill_price
+        fees = notional * model.fee_bps / 10_000.0
+        return (
+            fill_price,
+            fees,
+            abs(touch - mid) * shares,
+            abs(fill_price - touch) * shares,
+        )
+
+    def _book_equity_costs(self, fees, spread_cost, slippage_cost, notional):
+        self._equity_fees_paid += fees
+        self._equity_spread_cost += spread_cost
+        self._equity_slippage_cost += slippage_cost
+        self._equity_volume += notional
+
+    def _rejects_below_minimum(self, ticker, notional):
+        """True when the live broker would bounce this order on notional.
+
+        Counted rather than raised: the strategy asked for something the market
+        cannot do, which is a fact about the strategy, and a backtest that
+        crashed there would just be re-run with the check off.
+        """
+        if self._is_crypto(ticker):
+            return False  # crypto minimums are per-asset and far smaller
+        if self._min_order_notional <= 0:
+            return False
+        if notional >= self._min_order_notional - 1e-12:
+            return False
+        self._sub_minimum_rejects += 1
+        self._sub_minimum_reject_notional += max(0.0, float(notional))
+        return True
+
+    def _track_mark_staleness(self, prices, timestamp):
+        """Measure how long each held name has been valued off a stale print.
+
+        The last-known-price fallback in get_portfolio_value exists to stop a
+        one-bar gap from making a position vanish, and it is right for that.
+        It is also, unmodified, an assumption that a name which has stopped
+        printing is still worth exactly what it was worth when it stopped —
+        which is the optimistic reading of a halt, a delisting or a data
+        outage. Record the exposure so a run cannot lean on it silently.
+        """
+        now = _as_utc(timestamp)
+        if now is None:
+            return
+        for symbol in (prices or {}):
+            self._price_seen_at[symbol] = now
+        for symbol in self._positions:
+            seen_at = self._price_seen_at.get(symbol)
+            if seen_at is None:
+                continue
+            stale = (now - seen_at).total_seconds()
+            if stale <= 0:
+                continue
+            self._stale_marked_symbols[symbol] = max(
+                stale, self._stale_marked_symbols.get(symbol, 0.0)
+            )
+            self._max_stale_mark_seconds = max(
+                self._max_stale_mark_seconds, stale
+            )
+
+    def _record_day_trade_leg(self, ticker, action, shares, timestamp):
+        """Track same-session round trips for the PDT diagnostic."""
+        now = _as_utc(timestamp)
+        if now is None or self._is_crypto(ticker):
+            return
+        session = now.date()
+        key = (str(ticker), session)
+        if action == "buy":
+            self._intraday_opens[key] = (
+                self._intraday_opens.get(key, 0.0) + float(shares)
+            )
+            return
+        opened = self._intraday_opens.get(key, 0.0)
+        if opened <= 1e-12:
+            return
+        self._intraday_opens[key] = max(0.0, opened - float(shares))
+        self._day_trades_by_date[session] = (
+            self._day_trades_by_date.get(session, 0) + 1
+        )
+
     def buy(self, ticker, shares, price, timestamp=None):
         """
         Execute a buy: spend cash and add to positions.
@@ -128,35 +544,66 @@ class PortfolioEmulator:
         shares: float (can be fractional)
         price: float (price per share)
         timestamp: optional datetime for the trade record (caller can pass current_time)
-        Returns: True if trade was executed, False if insufficient cash.
+        Returns: True if trade was executed, False if insufficient cash, if the
+        notional is below what the broker would accept, or if the equity cost
+        model pushes the all-in cost past available buying power.
         """
         if shares <= 0 or price <= 0:
             return False
-        total = shares * price
-        if total > self._cash:
+        self._advance_clock(timestamp)
+        if self._rejects_below_minimum(ticker, shares * price):
             return False
-        self._cash -= total
-        # Crypto is NOT commission-free: the taker fee is charged on notional, so
-        # the same cash (the full `total`, still decremented above) buys fewer
-        # coins. Equity symbols (no "/") keep the EXACT commission-free math.
-        filled_shares = shares
-        if "/" in ticker:
-            filled_shares = shares * (1.0 - self._taker_fee)
-            # The taker fee is embedded as fewer coins; record it (and the gross
-            # notional) for the backtest fee summary.
-            self._crypto_fees_paid += total * self._taker_fee
-            self._crypto_volume += total
-        self._positions[ticker] = self._positions.get(ticker, 0.0) + filled_shares
-        self._trades.append({
+        trade = {
             "timestamp": timestamp,
             "action": "buy",
             "ticker": ticker,
+        }
+        if self._is_crypto(ticker):
+            # Crypto is NOT commission-free: the taker fee is charged on
+            # notional, so the same cash buys fewer coins. Byte-identical to
+            # the pre-cost-model math — crypto venues quote a taker fee that
+            # already subsumes what the equity model splits out.
+            total = shares * price
+            if total > self._cash:
+                return False
+            filled_shares = shares * (1.0 - self._taker_fee)
+            self._crypto_fees_paid += total * self._taker_fee
+            self._crypto_volume += total
+            self._cash -= total
+            fill_price = price
+        else:
+            # Equities pay spread + slippage + pass-through fees. The share
+            # count asked for is the share count received; what moves is the
+            # cash it takes to get them, so a caller that sized against the
+            # mid now discovers it cannot afford the whole clip — which is
+            # precisely what happens live.
+            fill_price, fees, spread_cost, slippage_cost = self._equity_fill(
+                "buy", shares, price
+            )
+            notional = shares * fill_price
+            total = notional + fees
+            if total > self.get_buying_power():
+                return False
+            filled_shares = shares
+            self._book_equity_costs(fees, spread_cost, slippage_cost, notional)
+            self._cash -= total
+            trade.update({
+                "fees": fees,
+                "spread_cost": spread_cost,
+                "slippage_cost": slippage_cost,
+                "cost_model_version": self._equity_cost_model.version,
+                "decision_price": price,
+            })
+        self._positions[ticker] = self._positions.get(ticker, 0.0) + filled_shares
+        self._record_day_trade_leg(ticker, "buy", filled_shares, timestamp)
+        trade.update({
             "shares": filled_shares,
-            "price": price,
+            "price": fill_price,
             "total": total,
             "cash_after": self._cash,
         })
-        print(f"TRADE: Buy {filled_shares} shares of {ticker} at {price} for a total of {total} cash_after: {self._cash}")
+        self._trades.append(trade)
+        print(f"TRADE: Buy {filled_shares} shares of {ticker} at {fill_price} for a total of {total} cash_after: {self._cash}")
         return True
 
     def sell(self, ticker, shares, price, timestamp=None):
@@ -171,28 +618,52 @@ class PortfolioEmulator:
             shares = current  # sell all we have
         if shares <= 0:
             return False
-        total = shares * price
-        # Crypto is NOT commission-free: the taker fee is charged on notional, so
-        # proceeds credited to cash are net of the fee. Equity symbols (no "/")
-        # keep the EXACT commission-free math.
-        if "/" in ticker:
-            self._crypto_fees_paid += total * self._taker_fee
-            self._crypto_volume += total
-            total = total * (1.0 - self._taker_fee)
-        self._cash += total
-        self._positions[ticker] = current - shares
-        if self._positions[ticker] <= 0:
-            del self._positions[ticker]
-        self._trades.append({
+        self._advance_clock(timestamp)
+        # The floor bites on exits too, and it is not symmetric with the buy
+        # case: a fractional position that has decayed below $1 cannot be
+        # closed at all. Dust that the emulator used to sweep away for free
+        # now stays on the books exactly as it would live.
+        if self._rejects_below_minimum(ticker, shares * price):
+            return False
+        trade = {
             "timestamp": timestamp,
             "action": "sell",
             "ticker": ticker,
+        }
+        if self._is_crypto(ticker):
+            total = shares * price
+            self._crypto_fees_paid += total * self._taker_fee
+            self._crypto_volume += total
+            total = total * (1.0 - self._taker_fee)
+            fill_price = price
+        else:
+            fill_price, fees, spread_cost, slippage_cost = self._equity_fill(
+                "sell", shares, price
+            )
+            notional = shares * fill_price
+            total = notional - fees
+            self._book_equity_costs(fees, spread_cost, slippage_cost, notional)
+            trade.update({
+                "fees": fees,
+                "spread_cost": spread_cost,
+                "slippage_cost": slippage_cost,
+                "cost_model_version": self._equity_cost_model.version,
+                "decision_price": price,
+            })
+        self._cash += total
+        self._withhold_sell_proceeds(ticker, total, timestamp)
+        self._positions[ticker] = current - shares
+        if self._positions[ticker] <= 0:
+            del self._positions[ticker]
+        self._record_day_trade_leg(ticker, "sell", shares, timestamp)
+        trade.update({
             "shares": shares,
-            "price": price,
+            "price": fill_price,
             "total": total,
             "cash_after": self._cash,
         })
-        print(f"TRADE: Sell {shares} shares of {ticker} at {price} for a total of {total} cash_after: {self._cash}")
+        self._trades.append(trade)
+        print(f"TRADE: Sell {shares} shares of {ticker} at {fill_price} for a total of {total} cash_after: {self._cash}")
         return True
 
     def get_portfolio_value(self, prices):
@@ -247,18 +718,30 @@ class PortfolioEmulator:
         Live mode is unaffected: this class is backtest-only, and a live broker
         reports post-split share counts through the positions API.
         """
-        if not bool(getattr(self, "_split_reconcile_enabled", True)):
+        # 2026-08-02 DEFAULT OFF. Bars are now fetched with adjustment="split"
+        # (broker.py), so a genuine split no longer produces a step in backtest
+        # bars at all. The only thing left that can still match a split ratio is
+        # a REAL CRASH -- and reconciling that fabricates shares out of thin air
+        # and erases the loss from the equity curve. Enable only for a cache
+        # known to predate the adjustment change, and prefer purging it instead.
+        if not bool(getattr(self, "_split_reconcile_enabled", False)):
             return []
         # Crypto does not split. A ~50% single-bar drawdown in an altcoin is
         # entirely possible and would otherwise be misread as a 2-for-1,
         # doubling the coin count out of thin air.
-        if bool(getattr(self, "_is_crypto", False)):
-            return []
         from split_detect import detect_split_ratio
 
         last = getattr(self, "_last_prices", None) or {}
         adjusted = []
         for ticker, shares in list(self._positions.items()):
+            # Crypto never splits, and a ~50% single-bar drawdown in an altcoin
+            # is entirely ordinary. The previous `_is_crypto` attribute check was
+            # DEAD CODE: create_backtest_emulator drops its is_crypto argument and
+            # the attribute is never set, so getattr always returned False and
+            # every crypto backtest was exposed. Detect from the symbol
+            # convention, which buy()/sell() already rely on.
+            if "/" in str(ticker):
+                continue
             try:
                 new_px = float((prices or {}).get(ticker) or 0.0)
                 old_px = float(last.get(ticker) or 0.0)
@@ -290,6 +773,12 @@ class PortfolioEmulator:
                         tr["price"] = float(tr["price"]) / ratio
                     if tr.get("shares") is not None:
                         tr["shares"] = float(tr["shares"]) * ratio
+                    # The decision price rides along or it becomes a stale
+                    # pre-split number sitting next to a restated fill.
+                    if tr.get("decision_price") is not None:
+                        tr["decision_price"] = (
+                            float(tr["decision_price"]) / ratio
+                        )
                 except (TypeError, ValueError):
                     pass
             if isinstance(last, dict) and ticker in last:
@@ -313,6 +802,11 @@ class PortfolioEmulator:
         for _t, _r, _old, _new in self.reconcile_splits(prices):
             print(f"[emulator] SPLIT RECONCILED {_t}: ratio {_r:.2f}x, "
                   f"{_old:.4f} -> {_new:.4f} shares (price feed was unadjusted)")
+        self._advance_clock(timestamp)
+        # Distributions accrue on the position, not on the trade, so this is
+        # the only hook that sees every held name on every bar.
+        self.accrue_dividends(prices, timestamp)
+        self._track_mark_staleness(prices, timestamp)
         value = self.get_portfolio_value(prices)
         # V3: Track last known prices for portfolio_total fallback
         if prices:
@@ -326,6 +820,134 @@ class PortfolioEmulator:
             "positions_snapshot": copy.copy(self._positions),
             "prices": copy.copy(prices) if prices else {},
         })
+
+    def apply_dividend(self, ticker, amount_per_share, timestamp=None):
+        """Credit a known cash distribution on a held position.
+
+        The exact, event-driven path: hand it a real ex-date and a real
+        per-share amount from a corporate-actions feed and it books the cash.
+        Nothing in this repo fetches distributions yet, which is why the
+        yield-accrual fallback below exists — but when that feed is wired,
+        this is the seam, and a run that uses it should set the accrual yields
+        to zero so the two do not double-count.
+        """
+        shares = float(self._positions.get(ticker, 0.0) or 0.0)
+        if shares <= 0:
+            return 0.0
+        try:
+            amount_per_share = float(amount_per_share)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("amount_per_share must be finite") from exc
+        if not math.isfinite(amount_per_share) or amount_per_share <= 0:
+            return 0.0
+        cash = shares * amount_per_share
+        self._cash += cash
+        self._dividends_credited += cash
+        key = str(ticker)
+        self._dividends_by_symbol[key] = (
+            self._dividends_by_symbol.get(key, 0.0) + cash
+        )
+        self._trades.append({
+            "timestamp": timestamp,
+            "action": "dividend",
+            "ticker": ticker,
+            "shares": shares,
+            "price": amount_per_share,
+            "total": cash,
+            "cash_after": self._cash,
+        })
+        return cash
+
+    def accrue_dividends(self, prices, timestamp):
+        """Accrue distributions onto held equities, pro-rata by calendar time.
+
+        THIS IS THE FIX FOR A REAL, MEASURED APPLES-TO-ORANGES COMPARISON, not
+        a refinement. The traded bar series is fetched with adjustment="split"
+        (verified 2026-08-02: 4,000/4,000 sampled AlpacaBarsCache chunks hash
+        under "split", and the cache key folds `adjustment` into the row id),
+        so the portfolio's entire equity curve is PRICE RETURN. The SPY
+        benchmark it is scored against is fetched with adjustment="all" and
+        the experiment registry pins total_return=True, so the benchmark is
+        TOTAL RETURN. Result: every active_return / information_ratio /
+        deflated-Sharpe number this project has produced silently charged the
+        strategy ~1.25%/yr of SPY distributions while crediting its own
+        holdings zero.
+
+        Accrual is on ACT/365 calendar time, so the gaps between snapshots
+        (nights, weekends, holidays) accrue too and the pieces sum to the full
+        window — dividends do not care that the exchange was shut.
+
+        This is deliberately an approximation of a lumpy quarterly cash flow.
+        A yield only accrues for symbols explicitly listed in
+        `dividend_yields`; everything else gets `default_dividend_yield`
+        (0.0), so an unknown microcap is assumed to pay nothing. The error
+        that leaves is one-sided in the safe direction: it understates the
+        strategy, never flatters it.
+        """
+        now = _as_utc(timestamp)
+        if now is None:
+            return 0.0
+        previous = self._dividend_accrual_clock
+        self._dividend_accrual_clock = now
+        if previous is None:
+            return 0.0
+        elapsed_days = (now - previous).total_seconds() / 86_400.0
+        if elapsed_days <= 0:
+            return 0.0
+        last = getattr(self, "_last_prices", None) or {}
+        total = 0.0
+        for ticker, shares in self._positions.items():
+            if self._is_crypto(ticker) or shares <= 0:
+                continue
+            rate = self._dividend_yields.get(
+                str(ticker).strip().upper(), self._default_dividend_yield
+            )
+            if rate <= 0:
+                continue
+            mark = (prices or {}).get(ticker)
+            if mark is None:
+                mark = last.get(ticker)
+            try:
+                mark = float(mark)
+            except (TypeError, ValueError):
+                continue
+            if mark <= 0:
+                continue
+            cash = shares * mark * rate * elapsed_days / 365.0
+            if cash <= 0:
+                continue
+            self._cash += cash
+            self._dividends_credited += cash
+            key = str(ticker)
+            self._dividends_by_symbol[key] = (
+                self._dividends_by_symbol.get(key, 0.0) + cash
+            )
+            total += cash
+        return total
+
+    def get_dividend_summary(self):
+        """What the portfolio was credited, and on what basis.
+
+        `return_basis` is the load-bearing field: it tells a reader whether the
+        equity curve is comparable to a total-return benchmark or not.
+        """
+        credited = bool(self._dividends_credited > 0)
+        return {
+            "dividends_credited": round(self._dividends_credited, 6),
+            "dividends_by_symbol": {
+                sym: round(amount, 6)
+                for sym, amount in self._dividends_by_symbol.items()
+            },
+            "dividend_yields": dict(self._dividend_yields),
+            "default_dividend_yield": self._default_dividend_yield,
+            # Bars are split-adjusted only, so price appreciation carries no
+            # distributions; whatever is credited above is what makes the
+            # curve total-return.
+            "return_basis": (
+                "total_return_accrued" if credited else "price_return"
+            ),
+            "benchmark_return_basis": "total_return",
+        }
 
     def get_trade_history(self):
         """Return list of all trades, each with timestamp, action, ticker, shares, price, total, cash_after."""
@@ -352,18 +974,33 @@ class PortfolioEmulator:
         return self._cash
 
     def get_available_cash(self, reserved: float = 0.0):
-        """Cash available for non-reserving strategies (e.g. total_cash - reserved_capital)."""
-        return max(0.0, self._cash - float(reserved))
+        """Cash available for non-reserving strategies (e.g. total_cash - reserved_capital).
+
+        Now also nets out unsettled sell proceeds: this is the surface
+        strategies size against, and sizing against money the broker has not
+        released is how a backtest turns capital over faster than the account
+        can.
+        """
+        return self.get_buying_power(reserved)
 
     def get_positions(self):
         """Current positions: dict ticker -> shares (copy)."""
         return copy.copy(self._positions)
 
     def get_positions_value(self, prices):
-        """Value of positions only (excluding cash) using given prices."""
+        """Value of positions only (excluding cash) using given prices.
+
+        Uses the same last-known-price fallback as get_portfolio_value. It did
+        not, which meant the two disagreed by the value of any held name
+        missing from this bar's price dict — the exact cliff-drop that
+        fallback was added to get_portfolio_value to kill.
+        """
         v = 0.0
+        last = getattr(self, "_last_prices", None) or {}
         for ticker, shares in self._positions.items():
             p = (prices or {}).get(ticker)
+            if p is None:
+                p = last.get(ticker)
             if p is not None:
                 v += shares * float(p)
         return v
@@ -375,6 +1012,22 @@ class PortfolioEmulator:
         if self._execution_simulator is not None:
             self._execution_simulator.submit(order)
         self._recorded_orders.append(order)
+
+    @staticmethod
+    def _fill_mid(fill, quantity):
+        """Recover the quote mid a fill was priced off.
+
+        Falls back to the fill price if the costs are not decomposable (a
+        hand-built fill in a test, or a zero quantity), which is the old
+        behavior and never worse than it.
+        """
+        if quantity <= 1e-12:
+            return fill.price
+        offset = (fill.spread_cost + fill.slippage_cost) / quantity
+        mid = fill.price - offset if fill.side == "buy" else fill.price + offset
+        if not math.isfinite(mid) or mid <= 0:
+            return fill.price
+        return mid
 
     def apply_fill(self, fill):
         """Apply only the new cumulative quantity from a confirmed fill event."""
@@ -395,10 +1048,13 @@ class PortfolioEmulator:
                 "incremental_quantity must equal the new cumulative delta"
             )
 
+        self._advance_clock(fill.executed_at)
         gross = delta * fill.price
         if fill.side == "buy":
             cash_delta = gross + fill.fees
-            if cash_delta > self._cash + 1e-9:
+            # Buying power, not raw cash: proceeds from a sale that has not
+            # settled are in the balance but are not yet spendable.
+            if cash_delta > self.get_buying_power() + 1e-9:
                 raise ValueError("confirmed buy fill exceeds available cash")
             new_cash = self._cash - cash_delta
             new_quantity = self._positions.get(fill.symbol, 0.0) + delta
@@ -417,11 +1073,25 @@ class PortfolioEmulator:
             trade_total = cash_delta
 
         self._cash = new_cash
+        if fill.side == "sell":
+            self._withhold_sell_proceeds(
+                fill.symbol, cash_delta, fill.executed_at
+            )
         if new_quantity > 1e-12:
             self._positions[fill.symbol] = new_quantity
         else:
             self._positions.pop(fill.symbol, None)
-        self._last_prices[fill.symbol] = fill.price
+        self._record_day_trade_leg(
+            fill.symbol, fill.side, delta, fill.executed_at
+        )
+        # Mark at the MID the fill was priced off, not at the fill itself. A
+        # buy fills above the mid by half the spread plus slippage, so storing
+        # fill.price here marked every freshly-bought position ~30 bps above
+        # what it was worth and carried that inflation forward through
+        # get_portfolio_value's last-known-price fallback. The mid is exactly
+        # recoverable because spread_cost and slippage_cost are both booked as
+        # (distance x quantity) against it.
+        self._last_prices[fill.symbol] = self._fill_mid(fill, delta)
         self._applied_cumulative_fills[fill.order_id] = (
             fill.cumulative_quantity
         )
@@ -546,9 +1216,74 @@ class PortfolioEmulator:
             emitted.extend(self.process_quote(quote))
         return tuple(emitted)
 
+    def get_realism_summary(self):
+        """Everything the emulator models that a naive backtest does not.
+
+        Kept separate from the promotion-gating provenance keys so adding a
+        realism metric can never silently change what is promotable — but it
+        rides along in the backtest summary, because these numbers are the
+        difference between a result and a fantasy. Read
+        ``sub_minimum_rejected_order_count`` first: if it is a large fraction
+        of the trade count, the run's headline number came from orders the
+        broker would have refused.
+        """
+        day_trade_dates = sorted(self._day_trades_by_date)
+        worst_rolling_5 = 0
+        for index, _date in enumerate(day_trade_dates):
+            window = day_trade_dates[max(0, index - 4):index + 1]
+            worst_rolling_5 = max(
+                worst_rolling_5,
+                sum(self._day_trades_by_date[d] for d in window),
+            )
+        summary = {
+            "equity_cost_model_version": self._equity_cost_model.version,
+            "equity_cost_model": self._equity_cost_model.as_dict(),
+            "equity_cost_model_requested_version": getattr(
+                self, "_execution_cost_model_requested_version", None
+            ),
+            "equity_one_way_cost_bps": (
+                self._equity_cost_model.spread_bps / 2.0
+                + self._equity_cost_model.slippage_bps
+                + self._equity_cost_model.fee_bps
+            ),
+            "legacy_equity_fees": round(self._equity_fees_paid, 6),
+            "legacy_equity_spread_cost": round(self._equity_spread_cost, 6),
+            "legacy_equity_slippage_cost": round(self._equity_slippage_cost, 6),
+            "legacy_equity_volume": round(self._equity_volume, 2),
+            "min_order_notional": self._min_order_notional,
+            "sub_minimum_rejected_order_count": self._sub_minimum_rejects,
+            "sub_minimum_rejected_notional": round(
+                self._sub_minimum_reject_notional, 6
+            ),
+            "settled_sell_proceeds_fraction": (
+                self._settled_sell_proceeds_fraction
+            ),
+            "settlement_delay_seconds": (
+                self._settlement_delay.total_seconds()
+            ),
+            "unsettled_cash": round(self._withheld_cash(), 6),
+            # Diagnostic only. Under $25,000 a MARGIN account is capped at
+            # three day trades per rolling five business days; nothing here
+            # enforces that because the account type is not knowable from a
+            # backtest, but a run whose worst window is well above three did
+            # not describe something the account could have done.
+            "day_trade_count": sum(self._day_trades_by_date.values()),
+            "day_trades_worst_rolling_5_sessions": worst_rolling_5,
+            "pdt_limit_reference": 3,
+            # A held name valued off a print this old was, for that long,
+            # assumed to still be worth what it last traded at.
+            "max_stale_mark_seconds": round(self._max_stale_mark_seconds, 3),
+            "stale_marked_symbols": {
+                symbol: round(seconds, 3)
+                for symbol, seconds in self._stale_marked_symbols.items()
+            },
+        }
+        summary.update(self.get_dividend_summary())
+        return summary
+
     def get_execution_summary(self):
         if self._execution_simulator is None:
-            return {
+            summary = {
                 "execution_provenance_complete": False,
                 "execution_cost_model_version": None,
                 "execution_cost_model": None,
@@ -559,6 +1294,8 @@ class PortfolioEmulator:
                 "rejected_order_count": None,
                 "fill_provenance": [],
             }
+            summary.update(self.get_realism_summary())
+            return summary
         summary = self._execution_simulator.execution_summary()
         summary["execution_provenance_complete"] = bool(
             summary.get("execution_provenance_complete")
@@ -568,6 +1305,7 @@ class PortfolioEmulator:
             summary["execution_provenance_error"] = (
                 "price event availability was relabeled"
             )
+        summary.update(self.get_realism_summary())
         return summary
 
     def execute_signal(
@@ -625,9 +1363,11 @@ class PortfolioEmulator:
                     float(value or 0.0)
                     for value in self._execution_cash_reservations.values()
                 )
+                # Buying power, not raw cash: in-flight buy reservations AND
+                # the unsettled slice of recent sales are both off the table.
                 amount_to_use = min(
                     cash_per_trade,
-                    max(0.0, self._cash - reserved_cash),
+                    self.get_buying_power(reserved_cash),
                 )
                 if amount_to_use <= 0:
                     return False
@@ -663,6 +1403,16 @@ class PortfolioEmulator:
                 if shares <= 0:
                     return False
                 side = "sell"
+            # Never submit what the broker would reject. Alpaca bounces any
+            # equity order under $1 of notional, and an audit of the
+            # best-performing run found 219 of its 260 trades were sub-$1 —
+            # $52 of $16,286 — so ~84% of the trades behind that number could
+            # not have been placed. Gate at submission, on the decision price,
+            # because that is the number the broker sees. Not an exception:
+            # the strategy asking for an impossible clip is a property of the
+            # strategy, and it is counted into the realism summary instead.
+            if self._rejects_below_minimum(ticker, shares * price):
+                return False
             order = SimulationOrder(
                 order_id=order_id,
                 symbol=ticker,
@@ -686,10 +1436,23 @@ class PortfolioEmulator:
                 source=order.source,
             )
         if signal == 1:
-            amount_to_use = min(cash_per_trade, self._cash)
+            amount_to_use = min(cash_per_trade, self.get_buying_power())
             if amount_to_use <= 0:
                 return False
-            shares = amount_to_use / price
+            if self._is_crypto(ticker):
+                shares = amount_to_use / price
+            else:
+                # Size against the ALL-IN cost per share, not the mid, or the
+                # order asks for more shares than the cash can pay for and
+                # buy() bounces the whole trade at the last moment.
+                model = self._equity_cost_model
+                all_in = (
+                    price
+                    * (1.0 + model.spread_bps / 20_000.0)
+                    * (1.0 + model.slippage_bps / 10_000.0)
+                    * (1.0 + model.fee_bps / 10_000.0)
+                )
+                shares = amount_to_use / all_in
             return self.buy(ticker, shares, price, timestamp=timestamp)
         if signal == -1:
             total_shares = self._positions.get(ticker, 0.0)
@@ -784,20 +1547,52 @@ def create_backtest_emulator(
     is_crypto,
     execution_delay,
     cost_model=None,
+    allow_nominal_cost_model=False,
 ):
-    """Build the broker's emulator without changing crypto compatibility."""
+    """Build the broker's emulator without changing crypto compatibility.
+
+    ``cost_model=None`` now resolves to LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
+    (~30 bps one-way), not the upstream nominal model (~12.8 bps). See that
+    constant for why 12.8 bps does not describe a book whose names trade
+    $2.4M-$7.9M a day.
+
+    A caller that passes the nominal model *by value* gets the liquidity model
+    substituted, loudly. That is not second-guessing an explicit choice: the
+    only way to arrive at exactly DEFAULT_EQUITY_EXECUTION_COST_MODEL is for
+    ``resolve_execution_cost_model`` to have been handed ``None``, i.e. for no
+    cost scenario to have been chosen at all. Every deliberate stress arm
+    carries a scaled, ``+stress``-versioned model and passes through
+    untouched, so sensitivity sweeps still mean what they say. Pass
+    ``allow_nominal_cost_model=True`` to reproduce a pre-2026-08 run.
+    """
     if is_crypto:
         return PortfolioEmulator(
             initial_cash=initial_cash,
             taker_fee=taker_fee,
         )
+    requested_version = None
     if cost_model is None:
-        cost_model = DEFAULT_EQUITY_EXECUTION_COST_MODEL
+        cost_model = LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
     if not isinstance(cost_model, ExecutionCostModel):
         raise ValueError("cost_model must be an ExecutionCostModel")
-    return PortfolioEmulator(
+    if cost_model == DEFAULT_EQUITY_EXECUTION_COST_MODEL and not allow_nominal_cost_model:
+        requested_version = cost_model.version
+        cost_model = LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
+        print(
+            "[emulator] equity cost model substituted: "
+            f"{requested_version} (nominal, ~12.8 bps one-way) -> "
+            f"{cost_model.version} (~30 bps one-way, sized to this book's "
+            "$2.4M-$7.9M median dollar volume). Pass an explicit "
+            "ExecutionCostModel or allow_nominal_cost_model=True to override."
+        )
+    emulator = PortfolioEmulator(
         initial_cash=initial_cash,
         taker_fee=taker_fee,
         execution_simulator=NextEventExecutionSimulator(cost_model),
         execution_delay=execution_delay,
     )
+    # Surfaced so a receipt cannot quietly claim a cost basis the fills did
+    # not use: broker.py hashes the model it RESOLVED into the preregistration
+    # (broker.py:1481) while the fills used the model above.
+    emulator._execution_cost_model_requested_version = requested_version
+    return emulator

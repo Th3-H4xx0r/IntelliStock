@@ -27,7 +27,7 @@ import hashlib
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -48,6 +48,7 @@ from market_marks import (
 )
 from broker_adapters.errors import (
     BrokerError,
+    BrokerPreflightBlocked,
     InsufficientBuyingPower,
     PDTRestricted,
     AssetHalted,
@@ -201,6 +202,12 @@ class AlpacaAdapter(BrokerAdapter):
         self._api_secret = api_secret
         self._paper = paper
         self._account_equity = None
+        # Day-trade facts for the pre-submit PDT guard. None means "never
+        # read"; the guard refuses to judge on an unknown count rather than
+        # inventing one.
+        self._daytrade_count: Optional[int] = None
+        self._pattern_day_trader = False
+        self._account_facts_at: float = 0.0
 
         self._instance_id = instance_id
         self._wal = wal
@@ -721,6 +728,124 @@ class AlpacaAdapter(BrokerAdapter):
 
     # --- Order submission ---
 
+    def _account_risk_facts(self) -> Optional[tuple[float, float, int]]:
+        """(equity, cash, day_trade_count) for pre-submit checks, or None.
+
+        Served from the cache ``refresh_account`` fills, refreshed when the
+        day-trade count has never been read or has gone stale. None means we
+        could not establish the facts, and the caller must not pretend it can
+        judge the order.
+        """
+
+        with self._lock:
+            equity = self._account_equity
+            cash = self._cash
+            day_trades = self._daytrade_count
+            observed_at = self._account_facts_at
+        if (
+            equity is not None
+            and day_trades is not None
+            and (time.time() - observed_at) < 120.0
+        ):
+            return float(equity), float(cash), int(day_trades)
+        try:
+            account = self.refresh_account()
+            return (
+                float(account.equity),
+                float(account.cash),
+                int(account.daytrade_count),
+            )
+        except Exception as exc:
+            _alog(
+                "BROKER",
+                f"PDT preflight skipped for this order: account read failed "
+                f"({type(exc).__name__}: {exc}). Alpaca still enforces PDT "
+                f"server-side; we simply cannot pre-empt it this cycle.",
+                "yellow",
+            )
+            return None
+
+    def _preflight_buy(
+        self,
+        *,
+        symbol: str,
+        qty: Optional[float],
+        notional: Optional[float],
+        limit_price: Optional[float],
+        client_order_id: str,
+    ) -> None:
+        """Run the PDT / buying-power gate before opening new exposure.
+
+        2026-08-02: ``broker_adapters/_preflight.preflight_order`` has held the
+        correct rule since it was written — under $25k equity, a 4th day trade
+        in the rolling window triggers a 90-day closing-only restriction — and
+        had ZERO callers repo-wide. The strategy recycles cash intraday, so on
+        a sub-$25k margin account that restriction is a matter of when, not if,
+        and it locks the real account out of opening anything for three months.
+
+        Only BUYS are checked. Blocking a sell to avoid completing a day trade
+        would leave the position on the books overnight and is precisely the
+        "cannot exit" failure this whole path exists to prevent; the correct
+        lever is to stop OPENING the round trip. When account facts are
+        unavailable the order proceeds — refusing to trade on a failed REST
+        read would hand a transient outage the power to halt the strategy.
+        """
+
+        facts = self._account_risk_facts()
+        if facts is None:
+            return
+        equity, cash, day_trades = facts
+        est_price = float(limit_price or 0.0)
+        if est_price <= 0:
+            est_price = float(self._last_prices.get(str(symbol).upper(), 0) or 0.0)
+        est_qty = float(qty or 0.0)
+        if est_qty <= 0 and notional and est_price > 0:
+            est_qty = float(notional) / est_price
+
+        from broker_adapters._preflight import preflight_order
+
+        try:
+            preflight_order(
+                symbol=symbol,
+                side="buy",
+                qty=est_qty,
+                est_price=est_price,
+                account_equity=equity,
+                cash_available=cash,
+                day_trade_count=day_trades,
+                # Tradability is not cached and costs a REST call to learn;
+                # Alpaca rejects an untradable symbol authoritatively.
+                asset_tradable=True,
+                # Fractionability is deliberately NOT adjudicated here.
+                # submit_order already floors a fractional quantity for a
+                # known-non-fractionable symbol and retries whole shares after
+                # a rejection; letting preflight block it instead would turn a
+                # recoverable floor into a dropped order.
+                asset_fractionable=True,
+                is_fractional=False,
+            )
+        except BrokerError as blocked:
+            _alog(
+                "BROKER",
+                f"PREFLIGHT BLOCKED buy {symbol}: {type(blocked).__name__}: "
+                f"{blocked} (equity=${equity:,.2f} day_trades={day_trades} "
+                f"cash=${cash:,.2f}) cid={client_order_id[:24]}",
+                "red",
+            )
+            if self._alert_reject is not None:
+                try:
+                    self._alert_reject(
+                        instance_id=self._instance_id,
+                        symbol=symbol,
+                        side="buy",
+                        reason_class=type(blocked).__name__,
+                        reason_text=str(blocked),
+                        client_order_id=client_order_id,
+                    )
+                except Exception:
+                    pass
+            raise
+
     def submit_order(
         self,
         symbol: str,
@@ -746,6 +871,47 @@ class AlpacaAdapter(BrokerAdapter):
             raise BrokerError(
                 f"pre-submit reconciliation unavailable for {client_order_id}"
             ) from lookup_error
+
+        # 2026-08-02 extended-hours order class. Alpaca supports fractional
+        # quantities during regular hours only, so a fractional order that also
+        # carries extended_hours=True is refused outright. Every strategy
+        # quantity is fractional (cash / price at 8 decimal places), which left
+        # a real window - 04:00-09:30 and 16:00-20:00 ET, where the gate
+        # considers the market open - in which an EXIT was submitted in an
+        # order class that could never fill. Whole shares are the only legal
+        # extended-hours size. This is the last checkpoint before the POST, so
+        # it holds no matter which caller built the style.
+        if extended_hours:
+            if qty is None and notional is not None:
+                raise BrokerPreflightBlocked(
+                    f"{symbol} notional orders are regular-hours only; "
+                    "extended hours needs a whole-share quantity"
+                )
+            if qty is not None and float(qty) != int(float(qty)):
+                _whole = float(int(float(qty)))
+                if _whole < 1.0:
+                    raise BrokerPreflightBlocked(
+                        f"{symbol} extended-hours order needs whole shares; "
+                        f"qty={float(qty):.6f} floors to 0 — retry in the "
+                        f"regular session"
+                    )
+                _alog(
+                    "BROKER",
+                    f"Extended-hours whole-share floor for {symbol}: "
+                    f"{float(qty):.4f} -> {_whole:.0f} (Alpaca rejects "
+                    f"fractional orders outside regular hours)",
+                    "cyan",
+                )
+                qty = _whole
+
+        if side.lower() == "buy":
+            self._preflight_buy(
+                symbol=symbol,
+                qty=qty,
+                notional=notional,
+                limit_price=limit_price,
+                client_order_id=client_order_id,
+            )
 
         self._wal.record_intent(client_order_id, symbol, side, qty, notional)
 
@@ -881,6 +1047,13 @@ class AlpacaAdapter(BrokerAdapter):
                 ) from e
 
             parsed = _parse_error(e)
+            # Reaching here means get_order_by_client_id SUCCEEDED and found
+            # nothing: positive evidence that Alpaca holds no such order. That
+            # is the difference between "rejected" and "unknown", and the
+            # lifecycle needs it — recording a definite rejection as UNKNOWN
+            # left a non-terminal row nothing could ever resolve, which made
+            # every later reconcile unhealthy and blocked risk exits.
+            parsed.broker_definitive_rejection = True
 
             # 2026-04-30 Task D-revision: try-then-floor for fractional
             # rejection. If qty was fractional AND Alpaca rejected with
@@ -1107,13 +1280,92 @@ class AlpacaAdapter(BrokerAdapter):
             submitted_at_utc=getattr(o, "submitted_at", None),
         )
 
+    def _walk_orders(
+        self,
+        *,
+        status,
+        since: Optional[datetime] = None,
+        page_size: int = 500,
+        max_pages: int = 40,
+    ) -> tuple[list, bool]:
+        """Page through get_orders until exhausted. Returns (orders, complete).
+
+        Alpaca caps a single get_orders response; asking for `limit` rows and
+        receiving exactly `limit` means "there is more", not "that is all".
+        Walk backwards through submitted_at instead of trusting one page.
+        `complete` is False only when the page cap is hit, so callers can still
+        fail closed on a genuinely unbounded history.
+        """
+
+        from alpaca.trading.requests import GetOrdersRequest
+
+        page_size = max(1, int(page_size))
+        seen: dict[str, Any] = {}
+        until: Optional[datetime] = None
+        for _ in range(max(1, int(max_pages))):
+            kwargs: dict[str, Any] = {
+                "status": status,
+                "limit": page_size,
+                "direction": "desc",
+            }
+            if since is not None:
+                kwargs["after"] = since
+            if until is not None:
+                kwargs["until"] = until
+            page = list(
+                self._client.get_orders(filter=GetOrdersRequest(**kwargs)) or []
+            )
+            for raw in page:
+                key = str(getattr(raw, "id", "") or "") or str(
+                    getattr(raw, "client_order_id", "") or ""
+                )
+                if key:
+                    seen.setdefault(key, raw)
+            if len(page) < page_size:
+                return list(seen.values()), True
+            stamps = [
+                stamp
+                for stamp in (
+                    getattr(raw, "submitted_at", None) for raw in page
+                )
+                if isinstance(stamp, datetime)
+            ]
+            if not stamps:
+                # No cursor to advance on; another identical request would
+                # return the same page forever. Report incomplete rather than
+                # spin.
+                return list(seen.values()), False
+            oldest = min(stamps)
+            if oldest.tzinfo is None:
+                oldest = oldest.replace(tzinfo=timezone.utc)
+            # Step strictly past the boundary so a page whose rows all share
+            # one submitted_at cannot stall the walk.
+            until = oldest - timedelta(microseconds=1)
+        return list(seen.values()), False
+
     def capture_reconciliation_snapshot(
-        self, *, account_id: str, order_limit: int = 500
+        self,
+        *,
+        account_id: str,
+        order_limit: int = 500,
+        history_days: int = 30,
     ):
         """Read one fail-closed account/position/order snapshot.
 
         Positions are fetched twice around the order query. Any difference,
-        endpoint failure, or full order page makes the result unhealthy.
+        endpoint failure, or truncated order history makes the result
+        unhealthy.
+
+        Orders arrive as two walks rather than one 500-row page. The old
+        single-page ``status=ALL, limit=500`` query described the account's
+        whole lifetime, so the first time a live account accumulated 500 orders
+        the page came back full, ``orders_complete`` went False, and it never
+        went True again - permanently unhealthy, and an unhealthy reconcile
+        skips the trading cycle including risk exits. Splitting it fixes the
+        unboundedness at the source: OPEN orders are the ones reconciliation
+        must match against local records and there are never many, while the
+        terminal history only has to reach back far enough to cover records
+        this instance could still be holding open.
         """
 
         from live_orders import (
@@ -1145,14 +1397,26 @@ class AlpacaAdapter(BrokerAdapter):
         try:
             self._client.get_account()
             first_positions = _positions(self._client.get_all_positions())
+            orders_complete = True
             try:
                 from alpaca.trading.enums import QueryOrderStatus
-                from alpaca.trading.requests import GetOrdersRequest
 
-                request = GetOrdersRequest(
-                    status=QueryOrderStatus.ALL, limit=int(order_limit)
+                open_orders, open_complete = self._walk_orders(
+                    status=QueryOrderStatus.OPEN, page_size=int(order_limit)
                 )
-                raw_orders = list(self._client.get_orders(filter=request) or [])
+                history, history_complete = self._walk_orders(
+                    status=QueryOrderStatus.ALL,
+                    since=observed_at - timedelta(days=max(1, int(history_days))),
+                    page_size=int(order_limit),
+                )
+                by_id: dict[str, Any] = {}
+                for raw in list(open_orders) + list(history):
+                    key = str(getattr(raw, "id", "") or "") or str(
+                        getattr(raw, "client_order_id", "") or ""
+                    )
+                    by_id.setdefault(key, raw)
+                raw_orders = list(by_id.values())
+                orders_complete = bool(open_complete and history_complete)
             except ImportError:
                 raw_orders = list(self._client.get_orders() or [])
             second_positions = _positions(self._client.get_all_positions())
@@ -1213,7 +1477,7 @@ class AlpacaAdapter(BrokerAdapter):
                 orders=tuple(normalized_orders),
                 broker_available=True,
                 positions_stable=(first_positions == second_positions),
-                orders_complete=(len(raw_orders) < int(order_limit)),
+                orders_complete=orders_complete,
             )
         except Exception:
             fallback = []
@@ -1507,6 +1771,18 @@ class AlpacaAdapter(BrokerAdapter):
         with self._lock:
             self._cash = cash
             self._account_equity = equity
+            # Cached for the pre-submit PDT guard, which must not make its own
+            # REST call on every buy.
+            try:
+                self._daytrade_count = int(
+                    getattr(acct, "daytrade_count", 0) or 0
+                )
+                self._pattern_day_trader = bool(
+                    getattr(acct, "pattern_day_trader", False)
+                )
+                self._account_facts_at = time.time()
+            except (TypeError, ValueError):
+                self._daytrade_count = None
         return AccountDTO(
             equity=equity,
             pattern_day_trader=bool(getattr(acct, "pattern_day_trader", False)),
@@ -2141,13 +2417,32 @@ class AlpacaAdapter(BrokerAdapter):
 
     # --- PortfolioEmulator compatibility shims ---
 
-    def _order_style_for_now(self, price: float, side: str, now_utc: datetime) -> dict:
+    def _order_style_for_now(
+        self,
+        price: float,
+        side: str,
+        now_utc: datetime,
+        quantity: Optional[float] = None,
+    ) -> dict:
         """Return order_type/limit_price/extended_hours appropriate for the
         current session. Alpaca rejects non-LIMIT-DAY orders in pre/post-market
         with 422, so outside RTH we auto-flip to marketable LIMIT + DAY +
         extended_hours=True. Buys get a small upward slippage buffer; sells get
         a downward buffer — both marketable against the last known price.
+
+        2026-08-02: the returned style also carries ``quantity`` and ``defer``,
+        because the extended-hours flip was only half the rule. Alpaca supports
+        fractional quantities during regular hours only — a fractional
+        ``extended_hours=True`` limit order is rejected outright. Every
+        strategy quantity is fractional (cash / price, 8 decimal places), so
+        outside RTH the adapter was building an order class the broker is
+        guaranteed to refuse, and an exit attempted in that window could not
+        execute at all. Whole shares are the only extended-hours-legal size, so
+        floor to them; when flooring leaves nothing to trade there is no legal
+        order to place and the caller must wait for the open, which ``defer``
+        says explicitly instead of leaving a doomed POST to discover it.
         """
+
         try:
             from live_calendar import is_nyse_open
             _in_rth = bool(is_nyse_open(now_utc))
@@ -2158,6 +2453,8 @@ class AlpacaAdapter(BrokerAdapter):
                 "order_type": "market",
                 "limit_price": None,
                 "extended_hours": False,
+                "quantity": quantity,
+                "defer": False,
             }
         # Extended hours: build a marketable limit.
         try:
@@ -2170,10 +2467,17 @@ class AlpacaAdapter(BrokerAdapter):
             limit = round(float(price) * (1.0 - buffer_pct), 2)
         if limit <= 0:
             limit = round(float(price), 2)
+        whole = quantity
+        defer = False
+        if quantity is not None:
+            whole = float(int(float(quantity)))
+            defer = whole < 1.0
         return {
             "order_type": "limit",
             "limit_price": limit,
             "extended_hours": True,
+            "quantity": whole,
+            "defer": defer,
         }
 
     def buy(
@@ -2196,8 +2500,16 @@ class AlpacaAdapter(BrokerAdapter):
             style = {"order_type": "market", "limit_price": None, "extended_hours": False}
             _tif = "gtc"
         else:
-            style = self._order_style_for_now(price, "buy", ts)
+            style = self._order_style_for_now(price, "buy", ts, quantity=shares)
             _tif = "day"
+            if style.get("defer"):
+                _alog("BROKER",
+                      f"SKIP buy {ticker} — {shares:.4f} share(s) is below one whole "
+                      f"share and extended hours accepts whole shares only; "
+                      f"deferring to the regular session",
+                      "yellow")
+                return False
+            shares = float(style.get("quantity") or shares)
         try:
             self.submit_order(
                 ticker, "buy", qty=shares, notional=None,
@@ -2241,8 +2553,19 @@ class AlpacaAdapter(BrokerAdapter):
             style = {"order_type": "market", "limit_price": None, "extended_hours": False}
             _tif = "gtc"
         else:
-            style = self._order_style_for_now(price, "sell", ts)
+            style = self._order_style_for_now(price, "sell", ts, quantity=shares)
             _tif = "day"
+            if style.get("defer"):
+                # Deliberately not a silent skip: this is an exit that did not
+                # go out, and the operator has to be able to see it queued for
+                # the open rather than assume the position was closed.
+                _alog("BROKER",
+                      f"DEFER sell {ticker} — {shares:.4f} share(s) is below one "
+                      f"whole share and extended hours accepts whole shares only; "
+                      f"the exit retries in the regular session",
+                      "yellow")
+                return False
+            shares = float(style.get("quantity") or shares)
         try:
             self.submit_order(
                 ticker, "sell", qty=shares, notional=None,

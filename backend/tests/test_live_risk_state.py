@@ -12,10 +12,12 @@ from live_orders import (
 )
 from live_risk_state import (
     InMemoryRiskBackend,
+    RiskStateBootstrapRefused,
     RiskStateStore,
     RiskStateUnavailable,
     apply_confirmed_fill,
     evaluate_drawdown,
+    initialize_live_risk_state,
     initialize_risk_state,
 )
 
@@ -110,6 +112,97 @@ def test_store_rejects_identity_and_high_water_regression():
     lowered = replace(lowered, high_water_equity=Decimal("99"))
     with pytest.raises(ValueError, match="high-water"):
         store.save(lowered)
+
+
+def test_exposure_caps_follow_current_equity_instead_of_freezing():
+    """Caps were written once at bootstrap and never updated, so they stayed
+    denominated in the equity the row was created with — forever."""
+
+    state = initialize_risk_state(
+        "alpaca-main", "account-1", Decimal("10000"), NOW
+    )
+    assert state.max_order_notional == Decimal("1000")
+
+    halved = evaluate_drawdown(
+        state, Decimal("5000"), NOW + timedelta(minutes=1)
+    )
+    assert halved.max_order_notional == Decimal("500")
+    assert halved.max_symbol_notional == Decimal("1000")
+    assert halved.max_leveraged_notional == Decimal("500")
+
+    grown = evaluate_drawdown(
+        halved, Decimal("20000"), NOW + timedelta(minutes=2)
+    )
+    assert grown.max_order_notional == Decimal("2000")
+    assert grown.max_symbol_notional == Decimal("4000")
+
+
+def test_uncapped_risk_state_is_not_given_a_cap_by_a_refresh():
+    state = replace(
+        initialize_risk_state("alpaca-main", "account-1", Decimal("100"), NOW),
+        max_order_notional=None,
+    )
+    refreshed = evaluate_drawdown(state, Decimal("120"), NOW + timedelta(minutes=1))
+
+    assert refreshed.max_order_notional is None
+    assert refreshed.max_symbol_notional == Decimal("24")
+
+
+def test_live_account_bootstraps_risk_state_from_a_flat_book():
+    """Without a row the gate blocks every buy, so a funded account would boot
+    silently sell-only. A flat book makes the bootstrap as safe as paper."""
+
+    state = initialize_live_risk_state(
+        "alpaca-main",
+        "account-1",
+        Decimal("25000"),
+        NOW,
+        paper=False,
+        open_position_count=0,
+        open_order_count=0,
+    )
+
+    assert state.high_water_equity == Decimal("25000")
+    assert state.new_exposure_allowed is True
+    assert state.max_order_notional == Decimal("2500")
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        {"open_position_count": 1},
+        {"open_order_count": 1},
+        {"trading_blocked": True},
+        {"open_position_count": None},
+    ),
+)
+def test_live_bootstrap_refuses_anything_but_a_flat_book(unsafe):
+    """A bootstrap resets the high-water mark to current equity; with exposure
+    on the books that would forgive a real drawdown."""
+
+    kwargs = {
+        "paper": False,
+        "open_position_count": 0,
+        "open_order_count": 0,
+    }
+    kwargs.update(unsafe)
+    with pytest.raises(RiskStateBootstrapRefused):
+        initialize_live_risk_state(
+            "alpaca-main", "account-1", Decimal("25000"), NOW, **kwargs
+        )
+
+
+def test_paper_bootstrap_is_unconditional():
+    state = initialize_live_risk_state(
+        "alpaca-main",
+        "account-1",
+        Decimal("1000"),
+        NOW,
+        paper=True,
+        open_position_count=3,
+        open_order_count=2,
+    )
+    assert state.last_equity == Decimal("1000")
 
 
 def test_confirmed_sell_updates_sleeve_and_starts_cooldown():

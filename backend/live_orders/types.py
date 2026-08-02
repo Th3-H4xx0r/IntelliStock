@@ -88,6 +88,21 @@ def _normalized_decimal(value: Decimal) -> str:
     return "0" if rendered in ("-0", "") else rendered
 
 
+def _session_date(value: datetime) -> str:
+    """Collapse a decision timestamp onto its US-equities trading date.
+
+    The exchange day, not the UTC day: 00:00 UTC lands at 19:00 ET in winter,
+    which would split a single after-hours session across two identities.
+    """
+
+    try:
+        from zoneinfo import ZoneInfo
+
+        return value.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
 @dataclass(frozen=True, slots=True)
 class OrderIntent:
     """One immutable request to change live stock exposure."""
@@ -109,6 +124,7 @@ class OrderIntent:
     tif: str = "day"
     extended_hours: bool = False
     reference_price: Optional[Decimal] = None
+    identity_payload: str = field(init=False)
     idempotency_key: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -186,41 +202,73 @@ class OrderIntent:
         ):
             object.__setattr__(self, name, value)
 
-        canonical = {
+        # 2026-08-02 duplicate-buy regression. This hash used to cover
+        # decision_at/quote_at at MICROSECOND precision plus quantity, prices
+        # and risk_snapshot_id — every one of which changes when the same
+        # logical decision is re-emitted (a restart replays the decision on a
+        # different bar; risk_snapshot_id carries the risk-state version and
+        # advances every tick). The client order id therefore changed too,
+        # Alpaca's duplicate-cid check could not see the morning's order, and
+        # a SECOND real buy landed. The legacy date-keyed cid in
+        # broker_adapters/_client_order_id.py had exactly this property and it
+        # was lost when order identity moved into OrderIntent.
+        #
+        # The two sides are deliberately asymmetric, because the two failures
+        # are not symmetric:
+        #
+        # BUY  — a duplicate spends real cash that the strategy never intended
+        #        to deploy, so identity collapses to (account, instance,
+        #        source, symbol, side, trading day, retry_ordinal). Re-emitting
+        #        a buy for the same name on the same session date is the SAME
+        #        order however much the sizing drifted in between, and the
+        #        second submit is short-circuited against broker truth instead
+        #        of posted.
+        # SELL — a suppressed exit traps capital, which is strictly worse than
+        #        an extra exit (the gate caps every reduce-only sell at the
+        #        held quantity and refuses non-reduce sells outright, so a
+        #        duplicate can never go short). Sells therefore keep quantity
+        #        and bucket the decision to the MINUTE: two identical exits
+        #        inside one tick collapse, but the next minute always mints a
+        #        fresh identity, so no exit can ever be permanently deduped
+        #        against a dead order.
+        identity = {
             "account_id": account_id,
             "instance_id": instance_id,
             "source": source.value,
-            "reason": reason,
             "symbol": symbol,
             "side": side.value,
-            "quantity": _normalized_decimal(quantity),
-            "reduce_only": bool(self.reduce_only),
-            "decision_at": decision_at.isoformat(timespec="microseconds"),
-            "quote_at": quote_at.isoformat(timespec="microseconds"),
-            "risk_snapshot_id": risk_snapshot_id,
+            "session_date": _session_date(decision_at),
             "retry_ordinal": retry_ordinal,
-            "order_type": order_type,
-            "limit_price": (
-                _normalized_decimal(limit_price) if limit_price is not None else None
-            ),
-            "tif": tif,
-            "extended_hours": extended_hours,
-            "reference_price": (
-                _normalized_decimal(reference_price)
-                if reference_price is not None
-                else None
-            ),
         }
-        digest = hashlib.sha256(
-            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        if side is not OrderSide.BUY:
+            identity["decision_minute"] = decision_at.replace(
+                second=0, microsecond=0
+            ).isoformat(timespec="minutes")
+            identity["quantity"] = _normalized_decimal(quantity)
+            identity["reduce_only"] = bool(self.reduce_only)
+        payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         # Preserve the existing clean-room classifier contract: every
         # strategy-owned WAL row begins with this instance's 8-char prefix.
         instance_prefix = re.sub(r"[^A-Za-z0-9]", "", instance_id)[:8] or "x"
         retry_suffix = f"-{retry_ordinal}"
         digest_room = 48 - len(instance_prefix) - 1 - len(retry_suffix)
         key = f"{instance_prefix}-{digest[:digest_room]}{retry_suffix}"
+        object.__setattr__(self, "identity_payload", payload)
         object.__setattr__(self, "idempotency_key", key)
+
+    def same_identity(self, other: "OrderIntent") -> bool:
+        """True when two intents name the same logical order.
+
+        Only the fields that feed ``idempotency_key`` count. Sizing, prices and
+        risk_snapshot_id drift between re-emissions of one decision; treating
+        that drift as a different order is what let a duplicate buy through.
+        """
+
+        return (
+            isinstance(other, OrderIntent)
+            and other.identity_payload == self.identity_payload
+        )
 
 
 @dataclass(frozen=True, slots=True)
