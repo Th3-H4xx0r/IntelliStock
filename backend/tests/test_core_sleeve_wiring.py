@@ -469,12 +469,40 @@ def test_an_exhausted_budget_still_permits_a_core_sell():
     assert len(emu.signals) == 1, "the budget blocked a reduce-only release"
 
 
-def test_an_exhausted_budget_blocks_a_band_core_buy():
+def test_an_exhausted_budget_does_NOT_block_a_band_core_buy():
+    """The core is exempt from the discretionary budget. This is the fix for
+    the failure bt 152918 exhibited: establishing a 60% core costs ~60% of NAV
+    in one-way turnover, more than a 50%/month budget allows on its own, so the
+    budget blocked the buys the core needed to assemble itself. The book froze
+    at ~50% invested with the core pinned to its 30% clamp floor, and the
+    allocation the design exists to hold was unreachable.
+
+    The core cannot run away without the budget: a +/-5pp band and a 5-day
+    cadence hard-cap it at 4.2 rebalances a month.
+    """
     spec = _core_spec(turnover_budget_monthly_pct=0.01)
     b._turnover_ledger_record(NOW, 99_000.0, "t")
     emu = _Emu(cash=6000.0, nav=6000.0)
     b._residual_sleeve_deploy(emu, {"SPY": 600.0}, NOW, spec)
+    assert emu.signals, "an exhausted budget must not starve the index core"
+
+
+def test_the_escape_hatch_restores_the_old_coupling():
+    spec = _core_spec(turnover_budget_monthly_pct=0.01,
+                      core_respects_turnover_budget=True)
+    b._turnover_ledger_record(NOW, 99_000.0, "t")
+    emu = _Emu(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, NOW, spec)
     assert emu.signals == []
+
+
+def test_the_satellite_lane_is_still_budgeted():
+    """Exempting the core must not exempt the discretionary lane -- that is the
+    whole point of the budget."""
+    spec = _core_spec(turnover_budget_monthly_pct=0.01)
+    b._turnover_ledger_record(NOW, 99_000.0, "t")
+    blocked, _used = b._core_turnover_state(spec, 6000.0, NOW)
+    assert blocked is True
 
 
 def test_the_budget_is_inert_without_the_core():

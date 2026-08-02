@@ -2994,6 +2994,15 @@ def _turnover_ledger_rolling(current_time):
         return 0.0
 
 
+def _core_sleeve_cfg_raw(cached_strategies):
+    """Raw graph_nexus_analysis config dict, or {} -- used by the core-sleeve
+    escape hatches that must be read before CoreSleeveConfig is parsed."""
+    for spec in (cached_strategies or []):
+        if "graph_nexus" in str((spec or {}).get("strategy", "")).lower():
+            return dict((spec or {}).get("config") or {})
+    return {}
+
+
 def _core_turnover_state(cached_strategies, nav, current_time):
     """``(blocked, used_fraction_of_nav)`` for the rolling turnover budget.
 
@@ -3113,6 +3122,26 @@ def _core_sleeve_decide(portfolio_emulator, prices, current_time,
     # parts briefly exceed NAV.
     satellite_value = max(0.0, nav - cash - core_value - hedge_value)
     _blocked, _used = _core_turnover_state(cached_strategies, nav, current_time)
+    # The CORE is exempt from the discretionary turnover budget, and this is not
+    # a loophole -- it is the difference between the two mechanisms.
+    #
+    # Validation run bt 152918 proved why: establishing a 60% core costs ~60% of
+    # NAV in one-way turnover, which on its own exceeds a 50%/month budget. The
+    # budget therefore blocked the very buys the core needed to assemble itself,
+    # the book froze at ~50% invested with the core pinned at its 30% floor, and
+    # the design could never reach the allocation it exists to hold. A budget
+    # meant to throttle speculative churn was starving the low-turnover baseline.
+    #
+    # The core cannot run away without it: it is already bounded by a +/-5pp
+    # weight band and a 5-day cadence, which hard-caps it at 4.2 rebalances a
+    # month. The satellite -- the actually discretionary lane -- stays fully
+    # budgeted, and core notional is still BOOKED into the ledger, so the budget
+    # continues to see the whole picture and throttle the satellite correctly.
+    # `core_respects_turnover_budget` restores the old coupling if an operator
+    # ever wants it.
+    if not bool((_core_sleeve_cfg_raw(cached_strategies) or {}).get(
+            "core_respects_turnover_budget", False)):
+        _blocked = False
     from core_sleeve import core_rebalance_order
     return core_rebalance_order(
         core_cfg,
