@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "profit_take_enabled": false, "profit_take_tiers": [], "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_break_glass_recent_runup_block_pct": 0.0, "rotation_break_glass_recent_runup_lookback_bars": 20, "rotation_prevalidate_sector_cap_enabled": true, "fast_loser_cut_recent_runup_block_pct": 0.0, "fast_loser_cut_recent_runup_lookback_bars": 20, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "rotation_graph_gate_max_loss_pct": 0.0, "anchor_reinforce_target_pct": 0.0, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "sector_watchlist": {}}}
+# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "profit_take_enabled": false, "profit_take_tiers": [], "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_break_glass_recent_runup_block_pct": 0.0, "rotation_break_glass_recent_runup_lookback_bars": 20, "rotation_prevalidate_sector_cap_enabled": true, "fast_loser_cut_recent_runup_block_pct": 0.0, "fast_loser_cut_recent_runup_lookback_bars": 20, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "rotation_graph_gate_max_loss_pct": 0.0, "anchor_reinforce_target_pct": 0.0, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "rank_band_enabled": false, "rank_band_entry_pct": 10.0, "rank_band_exit_pct": 50.0, "profit_take_disabled": false, "trailing_stop_disabled": false, "catastrophic_stop_enabled": false, "catastrophic_stop_pct": -20.0, "edge_type_corroboration_weight": 1.0, "sector_watchlist": {}}}
 # INTELLISTOCK_DESCRIPTION: Advanced graph-based news contagion analysis with market trend tracking, Benzinga data sources, outcome tracking, and learning stage. Fetches today's news from Alpaca AND Google News (macro/geopolitical), enriches with Benzinga data (analyst ratings, analyst insights, insider trades, government trades, M&A, upcoming IPOs, stock splits, earnings calendar, company actions, prediction markets — all enable/disable configurable), uses LLM to classify sentiment AND event type per ticker, classifies macro news into sectors/themes and resolves to tickers via Neo4j (hybrid: structured classification + Gemini tool-calling fallback), then propagates through Neo4j using relationship-aware weights (10 edge types with directional propagation, sentiment inversion for competitors, edge confidence/revenue/obligation weighting, event-type amplification, sector peer contagion, macro sector-to-sector supply flows, 2-hop supply chain chains, patent partnership depth, and institutional co-holding correlation with position-size weighting). Tracks market trends across runs, discovers new stocks from trends, enforces sells on trend reversals. Outcome tracking stores event→price outcomes in RethinkDB for LLM pattern recognition. Learning stage pre-loads past outcome patterns before first trade (configurable lookback, cached). Uses TOON format for token-efficient LLM inputs. Returns symbol -> score with detailed graph reasoning. Runs once per loop (run_once).
 # DIFFICULTY: 8
 """
@@ -10250,7 +10250,9 @@ def _balanced_allocation_schedule(count: int) -> list[float]:
     return [1.0 / count] * count if count > 0 else []
 
 
-def _conviction_allocation_schedule(ranked: list[dict]) -> list[float]:
+def _conviction_allocation_schedule(
+    ranked: list[dict], config: dict | None = None,
+) -> list[float]:
     """Weight allocation proportional to each candidate's raw_net_score.
     A stock with score 0.90 gets 3x the capital of one with score 0.30.
     Floors each score at 0.10 so even low-conviction picks get some capital.
@@ -10260,7 +10262,30 @@ def _conviction_allocation_schedule(ranked: list[dict]) -> list[float]:
     collapse to 1/N equal-weight. Mix in `n_paths` as a +5%/extra-path bonus
     (capped at +50% for 11+ paths) to restore differentiation within the
     saturated cluster. n_paths is reliably populated upstream (line 15037 /
-    15395) and already used as a tiebreaker by other sort paths (15414, 15421)."""
+    15395) and already used as a tiebreaker by other sort paths (15414, 15421).
+
+    `edge_type_corroboration_weight` (default 1.0 = today's behaviour) scales
+    that path bonus. It exists because the bonus reads path COUNT as evidence
+    strength, and the paths it counts are different edge types on the same
+    graph: SUPPLIER_OF, COMPETES_WITH, PARENT_OF, sector-peer, conglomerate
+    sibling. Ali & Hirshleifer (JFE 2020) show industry, geographic, customer,
+    supplier-industry, segment and technology momentum all lose significance
+    once shared-analyst-coverage is controlled — they are ONE effect wearing
+    six hats. So "five edge types agree" is not five independent confirmations;
+    a name reachable through five relationship types is mostly a name with
+    dense analyst coverage. Set the weight to 0.0 to price agreement across
+    edge types at zero and let raw_net_score alone size the position; leave it
+    at 1.0 to keep the +5%/path bonus intact. Deliberately a dial, not a
+    deletion: the bonus also does real work as a tiebreak inside the +1.0
+    saturation cluster, where every raw_net_score is identical."""
+    config = config or {}
+    try:
+        _corroboration_w = float(
+            config.get("edge_type_corroboration_weight", 1.0)
+        )
+    except (TypeError, ValueError):
+        _corroboration_w = 1.0
+    _corroboration_w = max(0.0, _corroboration_w)
     scores = []
     for item in ranked:
         raw_in = float(item.get("raw_net_score", 0.0) or 0.0)
@@ -10271,7 +10296,7 @@ def _conviction_allocation_schedule(ranked: list[dict]) -> list[float]:
             raw_in = 0.0
         raw = max(0.10, raw_in)
         n_paths = int(item.get("n_paths", 0) or 0)
-        path_bonus = min(0.50, 0.05 * max(0, n_paths - 1))
+        path_bonus = min(0.50, 0.05 * max(0, n_paths - 1)) * _corroboration_w
         scores.append(raw * (1.0 + path_bonus))
     total = sum(scores)
     if total <= 0:
@@ -10444,7 +10469,7 @@ def _plan_executable_stock_buy_slate(
         if profile == "balanced":
             weights = _balanced_allocation_schedule(count)
         elif profile == "conviction":
-            weights = _conviction_allocation_schedule(subset)
+            weights = _conviction_allocation_schedule(subset, config)
         else:
             weights = [1.0 / count] * count
         feasible = True
@@ -19513,7 +19538,25 @@ def _alert_risk_pipeline_skip(instance_id: str, sym: str) -> None:
 #   "Trailing stop: …"    "Hold-limit exit: …"
 # Forensic audit of backtest 586767: ZERO risk exits fired all run because
 # grace vetoed fast-loser/circuit-breaker cuts for the whole ~10d median hold.
-_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit", "Profit take")
+_RISK_EXIT_TAGS = ("Fast loser", "Circuit breaker", "Trailing stop", "Hold-limit",
+                   "Profit take", "Catastrophic stop")
+
+# The subset of risk-exit tags that also set `_forced_exit` on the score doc.
+# `_forced_exit` is what the sweep near the end of run_once reads to add a
+# symbol to `nexus_sell_enforcement` — without it the broker can silently drop
+# the order for any held name that has aged out of the discovery universe.
+#
+# This tuple was previously a literal `["Fast loser", "Trailing stop",
+# "Hold-limit", "Circuit breaker"]` copy-pasted at THREE sites (the two
+# `_finalize_scores` emit branches and the monitor cycle). Three copies is how
+# a new protective exit ends up forced at one site and not the others, which
+# reads as "the stop fired but nothing sold". One definition now.
+#
+# NB: "Profit take" is deliberately absent — a profit-take is a PARTIAL trim
+# carrying a sell_fraction, and forcing it into sell enforcement would make the
+# broker liquidate the whole position (see the monitor-cycle deferral below).
+_FORCED_EXIT_TAGS = ("Fast loser", "Trailing stop", "Hold-limit",
+                     "Circuit breaker", "Catastrophic stop")
 
 
 def _profit_take_next_tier(config, unrealized_pct, entry_key, prior_marker):
@@ -19895,6 +19938,57 @@ def _evaluate_position_risk(
                                 _fl_blacklist[sym] = {"date": date_key, "bars_remaining": int(config.get("fast_loser_blacklist_days", 20)), "_created_this_bar": True}
                                 _log(f"Fast loser BLACKLIST: {sym} blocked for {_fl_blacklist[sym]['bars_remaining']} bars", "red")
 
+                # ── Catastrophic position stop (default OFF) ──────────────
+                # The single unconditional loss floor that survives when an
+                # operator turns the trailing stop off (`trailing_stop_disabled`).
+                #
+                # Kaminski & Lo: under a random walk the "stopping premium" is
+                # ALWAYS negative — a stop only adds return when price
+                # autocorrelation at the evaluation frequency is at least as
+                # large as the Sharpe ratio at that frequency, which daily US
+                # equities do not deliver. Han/Zhou/Zhu's pro-stop result
+                # decomposes to +3 bps/month on the LONG leg (insignificant)
+                # while adding ~40% turnover; the whole effect lives in the
+                # short leg, which this long-only book does not have. So this
+                # is deliberately NOT an alpha claim — it is ruin control, and
+                # it is priced as such: one wide floor, one evaluation per day.
+                #
+                # Why it is not just another circuit-breaker tier: the tier
+                # floor matrix (_resolve_effective_open_loss_floor) is
+                # conviction- and regime-conditioned and an operator can widen
+                # every tier out of the way. This floor is unconditional — no
+                # tier, no regime gate, and explicitly NOT bypassable by peak
+                # protection (which defers losers to "the trailing stop", the
+                # very mechanism this replaces). If both fire, whichever is
+                # tighter wins simply by evaluating first.
+                #
+                # side_effect_mode=="full" is the daily/full cycle, so the
+                # comparison is against a settled daily mark rather than an
+                # intraday tick. That matters: a stop evaluated on intraday
+                # marks fires on noise and re-prices the whole rationale above.
+                # Same reason the profit-take block below defers to the daily
+                # cycle.
+                _cat_stop_enabled = bool(config.get("catastrophic_stop_enabled", False))
+                _cat_stop_pct = float(config.get("catastrophic_stop_pct", -20.0) or -20.0)
+                if (
+                    _cat_stop_enabled
+                    and side_effect_mode == "full"
+                    and fresh_score >= 0
+                    and _cat_stop_pct < 0
+                    and _unrealized_pct <= _cat_stop_pct
+                ):
+                    fresh_score = -1
+                    fresh_reason = (
+                        f"Catastrophic stop: {_unrealized_pct:.1f}% loss hit the "
+                        f"unconditional {_cat_stop_pct:.0f}% floor"
+                    )
+                    _log(
+                        f"[sell-gate] {sym} | gate=catastrophic_stop | "
+                        f"unrealized={_unrealized_pct:.1f}% | floor={_cat_stop_pct:.0f}% | "
+                        f"result=fired",
+                        "red",
+                    )
+
                 # Z3.2 (2026-05-15): default activation lowered from 10% to 5%
                 # AND vol-scaled per-symbol with an upper cap so high-vol
                 # names don't need an unreasonable gain before trail kicks in.
@@ -20007,13 +20101,31 @@ def _evaluate_position_risk(
                                 "magenta",
                             )
                             _ts_drop = _mwp_new_ts
+                # `trailing_stop_disabled` (default False) suppresses the SELL
+                # only — every line of peak bookkeeping below still runs.
+                # The high-water mark this block maintains is not private to the
+                # trailing stop: peak protection, winner-add's
+                # drawdown-from-peak gate and the mega-winner widener all read
+                # the same `_peak_key`. Skipping the block wholesale would
+                # silently freeze those three at whatever HWM they last saw,
+                # which is a different (and much worse) change than "no trailing
+                # stop" — a stale HWM makes drawdown-from-peak read 0% forever.
+                _ts_disabled = bool(config.get("trailing_stop_disabled", False))
                 _sc = strategy_cache if strategy_cache is not None else {}
                 _peak_key, _stored_peak = _resolve_position_peak_state(_sc, sym, entry_buy_ts, _cp)
                 if _trailing_stop_armed(_sc, _peak_key, _unrealized_pct, _ts_activation, _peak_protected) and fresh_score >= 0:
                     _peak = max(_stored_peak, _cp)
                     _sc[_peak_key] = _peak
                     _drop_from_peak = ((_peak - _cp) / _peak) * 100.0 if _peak > 0 else 0
-                    if _drop_from_peak >= _ts_drop:
+                    if _ts_disabled:
+                        if _drop_from_peak >= _ts_drop:
+                            _log(
+                                f"Trailing stop SUPPRESSED (trailing_stop_disabled): {sym} "
+                                f"drop={_drop_from_peak:.1f}% >= {_ts_drop:.0f}% — held; "
+                                f"catastrophic stop is the floor",
+                                "yellow",
+                            )
+                    elif _drop_from_peak >= _ts_drop:
                         fresh_score = -1
                         fresh_reason = f"Trailing stop: dropped {_drop_from_peak:.1f}% from peak ${_peak:.2f}"
                         _log(f"Trailing stop SELL: {sym} peak=${_peak:.2f} cp=${_cp:.2f} drop={_drop_from_peak:.1f}% >= {_ts_drop:.0f}% threshold (peak_protected={_peak_protected})", "red")
@@ -20023,7 +20135,25 @@ def _evaluate_position_risk(
                 elif _unrealized_pct < _ts_activation:
                     _sc[_peak_key] = max(_stored_peak, _cp)
 
-                _profit_take_enabled = bool(config.get("profit_take_enabled", False))
+                # `profit_take_disabled` (default False) is a KILL SWITCH that
+                # outranks `profit_take_enabled` and `profit_take_tiers`. It
+                # exists as a separate key because the live config sets those
+                # two — flipping them there is a hand-edit of a real-money
+                # document, whereas this is one boolean an A/B can carry.
+                #
+                # Odean (JF 1998): the winners investors sold subsequently
+                # OUTPERFORMED the losers they kept. Frazzini (JF 2006): the
+                # post-news drift is LARGER when the news and the unrealised
+                # gain point the same way — worth over 200 bps/month. A
+                # profit-take tier fires precisely on a held winner with news
+                # agreement, i.e. it sells the exact position where the drift
+                # is strongest, and pays ~23 bps one-way for the privilege.
+                # Tiers are also a leading source of short holds here: each tier
+                # crossing is its own round trip on the same name.
+                _profit_take_enabled = (
+                    bool(config.get("profit_take_enabled", False))
+                    and not bool(config.get("profit_take_disabled", False))
+                )
                 _profit_take_gain_pct = float(config.get("profit_take_gain_pct", 40.0) or 40.0)
                 _profit_take_sell_fraction = float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
                 _profit_take_tiers_cfg = config.get("profit_take_tiers") or []
@@ -20378,7 +20508,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
             out[sym] = {
                 "score": final_score,
                 "reason": f"{fresh_reason} | scheduled: {ft_reasons}",
-                "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
+                "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in _FORCED_EXIT_TAGS)),
             }
             if "Profit take" in fresh_reason and final_score == -1:
                 out[sym]["sell_fraction"] = _epr_extras.get(
@@ -20388,7 +20518,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
             out[sym] = {
                 "score": fresh_score,
                 "reason": fresh_reason,
-                "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"])),
+                "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in _FORCED_EXIT_TAGS)),
             }
             if "Profit take" in fresh_reason and fresh_score == -1:
                 out[sym]["sell_fraction"] = _epr_extras.get(
@@ -22653,6 +22783,154 @@ def _apply_portfolio_circuit_breaker(scores: dict, symbols_list: list[str], port
     return scores
 
 
+def _rank_band_cutoffs(
+    universe_size: int, entry_pct: float, exit_pct: float,
+) -> tuple[int, int]:
+    """1-based rank of the buy band's upper edge and the hold band's lower edge.
+
+    A name ranked at or above `entry_cut` may be bought; a name ranked worse
+    than `exit_cut` may be sold on signal; everything between is the no-trade
+    band. Pure.
+
+    `exit_cut` is floored at `entry_cut` on purpose. If an operator typos
+    exit_pct below entry_pct the band inverts, and an inverted band is not a
+    tighter filter — it makes EVERY held name simultaneously below the sell
+    edge and above the buy edge, i.e. it liquidates the book on the next bar
+    and blocks the rebuy. Clamping degrades that typo to "buy and sell at the
+    same rank", which is exactly today's no-band behaviour.
+    """
+    n = max(0, int(universe_size))
+    if n <= 0:
+        return 0, 0
+    entry_cut = max(1, math.ceil(n * max(0.0, float(entry_pct)) / 100.0))
+    exit_cut = max(entry_cut, math.ceil(n * max(0.0, float(exit_pct)) / 100.0))
+    return entry_cut, min(n, exit_cut)
+
+
+def _apply_rank_band_gate(
+    scores: dict,
+    symbols_list: list[str],
+    portfolio_emulator,
+    config: dict,
+) -> dict:
+    """Novy-Marx & Velikov buy/hold spread (the "sS" rule). Default OFF.
+
+    Enter only when a name reaches the top `rank_band_entry_pct` of the blended
+    ranking; exit on signal only once it falls out of the top
+    `rank_band_exit_pct`. Never trade inside the band — no entry, no add, no
+    signal exit.
+
+    Why this and not a tighter buy_threshold: a threshold moves both edges
+    together, so a name oscillating around it round-trips every time it
+    crosses. The band decouples them, and the round trip needs a full
+    entry->exit traverse of the ranking instead of one tick across a line.
+    Novy-Marx & Velikov (RFS 2016) call the buy/hold spread "the most effective
+    cost mitigation technique" and find anomalies above 50% turnover/month
+    rarely survive costs at all. Chen & Velikov size it for the highest-
+    turnover quartile — which is where this book sits — at +0.44%/month net,
+    surrendering only ~11% of the gross signal. Measured here: ~290%/month
+    turnover at a measured 23.2 bps one-way = 8.07%/yr of drag.
+
+    Ranking metric is `_rotation_effective_score` — raw_net_score blended with
+    the ML edge — because that is already THE cross-sectional conviction
+    ranking in this file (the rotation lane ranks incumbents against
+    challengers with it). A second, subtly different ranking would mean the
+    band could evict a name the rotation lane still ranks top-quartile.
+
+    Never touches a protective exit. A forced exit (`_forced_exit`) or any
+    `_RISK_EXIT_TAGS` reason fires regardless of rank — the band is a
+    cost-control on SIGNAL trades, and a stop that a ranking can veto is not a
+    stop. This is the same precedent as V31 grace, which gates signal sells
+    only.
+
+    ETF-allocation and sleeve legs are exempt. Their conviction is trend
+    strength and regime, not the news/graph/ML blend, so their raw_net_score is
+    structurally near zero; ranking them against stocks would not tighten the
+    ETF sleeve, it would silently switch it off.
+    """
+    if not bool(config.get("rank_band_enabled", False)):
+        return scores
+
+    entry_pct = float(config.get("rank_band_entry_pct", 10.0) or 0.0)
+    exit_pct = float(config.get("rank_band_exit_pct", 50.0) or 0.0)
+
+    _exempt = set(_ALL_ETF_TICKERS) | _sleeve_symbols(config)
+    ranked: list[tuple[float, str]] = []
+    # Deduped: symbols_list is assembled from several discovery lanes plus the
+    # held-position union, and a repeated ticker would inflate the denominator
+    # the percentile cutoffs are computed from — a universe that looks 5%
+    # larger than it is quietly widens the entry band.
+    _seen: set[str] = set()
+    for sym in symbols_list:
+        if not sym or str(sym).startswith("_") or sym in _exempt or sym in _seen:
+            continue
+        sc = scores.get(sym)
+        if not isinstance(sc, dict):
+            continue
+        _seen.add(sym)
+        ranked.append((_rotation_effective_score(sc, config), str(sym)))
+    if not ranked:
+        return scores
+
+    # Descending conviction, ticker as the tiebreak. The tiebreak is not
+    # cosmetic: dict iteration order decides who sits on the decile boundary
+    # otherwise, so the same bar replayed could buy a different name.
+    ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+    entry_cut, exit_cut = _rank_band_cutoffs(len(ranked), entry_pct, exit_pct)
+
+    held: set[str] = set()
+    if portfolio_emulator is not None:
+        try:
+            if hasattr(portfolio_emulator, "get_positions"):
+                _pos = portfolio_emulator.get_positions() or {}
+            else:
+                _pos = getattr(portfolio_emulator, "_positions", None) or {}
+            held = {str(s) for s, q in _pos.items() if float(q or 0.0) > 0.0}
+        except Exception as _rb_exc:
+            # Without the held set we cannot tell an entry from an add, and
+            # guessing would either block every buy or let every sell through.
+            # Fail OPEN: today's behaviour, loudly.
+            _log(f"Rank band: position read failed ({_rb_exc}) — band skipped this bar", "yellow")
+            return scores
+
+    blocked_buys: list[str] = []
+    held_sells: list[str] = []
+    for rank, (blended, sym) in enumerate(ranked, start=1):
+        sc = scores[sym]
+        score = int(sc.get("score", 0) or 0)
+        if score == 1 and rank > entry_cut:
+            sc["score"] = 0
+            sc["action_intent"] = "hold"
+            sc["reason"] = (
+                f"RANK_BAND: {sym} ranked #{rank}/{len(ranked)} (blended={blended:+.3f}) "
+                f"is outside the top-{entry_pct:.0f}% entry band (#{entry_cut}) | "
+                f"{str(sc.get('reason') or '')}"
+            )[:1500]
+            blocked_buys.append(sym)
+        elif score == -1 and sym in held and rank <= exit_cut:
+            _reason = str(sc.get("reason") or "")
+            if sc.get("_forced_exit") or any(tag in _reason for tag in _RISK_EXIT_TAGS):
+                continue
+            sc["score"] = 0
+            sc["action_intent"] = "hold"
+            sc["reason"] = (
+                f"RANK_BAND: {sym} ranked #{rank}/{len(ranked)} (blended={blended:+.3f}) "
+                f"still inside the top-{exit_pct:.0f}% hold band (#{exit_cut}) | {_reason}"
+            )[:1500]
+            held_sells.append(sym)
+
+    if blocked_buys or held_sells:
+        _log(
+            f"Rank band (entry<=#{entry_cut}, exit>#{exit_cut} of {len(ranked)}): "
+            f"blocked {len(blocked_buys)} buy(s) "
+            f"[{', '.join(blocked_buys[:8])}{'...' if len(blocked_buys) > 8 else ''}], "
+            f"held {len(held_sells)} signal sell(s) "
+            f"[{', '.join(held_sells[:8])}{'...' if len(held_sells) > 8 else ''}]",
+            "cyan",
+        )
+    return scores
+
+
 def _apply_buy_price_floor(
     scores: dict,
     symbols_list: list[str],
@@ -23657,7 +23935,7 @@ class GraphNexusAnalysis:
                     and _epr_reason
                     and any(
                         x in _epr_reason
-                        for x in ["Fast loser", "Trailing stop", "Hold-limit", "Circuit breaker"]
+                        for x in _FORCED_EXIT_TAGS
                     )
                 ),
             }
@@ -27110,6 +27388,12 @@ class GraphNexusAnalysis:
                 alpaca_secret=alpaca_secret,
                 active_trends=active_trends,
             )
+        # Buy/hold spread. Placed FIRST in the filter chain, before the circuit
+        # breaker, because it is the only filter that is part of "what does the
+        # ranking say" rather than a portfolio-level risk veto — and because
+        # the circuit breaker's mass-liquidation cap should count the sells that
+        # will actually be submitted, not the ones the band is about to retract.
+        scores = _apply_rank_band_gate(scores, symbols_list, portfolio_emulator, config)
         scores = _apply_portfolio_circuit_breaker(scores, symbols_list, portfolio_emulator, config)
         scores = _apply_buy_price_floor(scores, symbols_list, prices, data, portfolio_emulator, config)
         scores = _apply_quality_filter(scores, symbols_list, prices, data, portfolio_emulator, config, strategy_cache=strategy_cache, date_key=date_key)

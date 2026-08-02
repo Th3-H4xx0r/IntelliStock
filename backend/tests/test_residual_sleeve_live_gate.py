@@ -37,9 +37,20 @@ _ns = {
 # Module-level constants the extracted functions close over. Pulled from the
 # source rather than hardcoded so a change to the real floor shows up here.
 _WANTED_CONSTS = {"_RESIDUAL_SLEEVE_MIN_RELEASE_USD"}
+# 2026-08-03: pull the whole index-core helper family in by prefix. The sleeve
+# bodies swallow every exception, so a helper missing from this namespace turns
+# each test below into a silent assertion about a no-op instead of a failure.
+_CORE_PREFIXES = ("_core_sleeve", "_core_turnover", "_turnover_ledger", "_CORE_")
+
+
+def _is_core_family(name):
+    return any(str(name).startswith(p) for p in _CORE_PREFIXES)
+
+
 for _node in _TREE.body:
     if isinstance(_node, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id in _WANTED_CONSTS for t in _node.targets
+        isinstance(t, ast.Name) and (t.id in _WANTED_CONSTS or _is_core_family(t.id))
+        for t in _node.targets
     ):
         exec(
             compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"),
@@ -48,7 +59,8 @@ for _node in _TREE.body:
 for _const in _WANTED_CONSTS:
     assert _const in _ns, f"failed to extract {_const} from broker.py"
 for _node in _TREE.body:
-    if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:
+    if isinstance(_node, ast.FunctionDef) and (
+            _node.name in _WANTED or _is_core_family(_node.name)):
         exec(
             compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"),
             _ns,

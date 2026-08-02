@@ -43,15 +43,31 @@ _ns = {
 # Module-level constants the extracted functions close over. Pulled from the
 # source rather than hardcoded so a change to the real floor shows up here.
 _WANTED_CONSTS = {"_RESIDUAL_SLEEVE_MIN_RELEASE_USD"}
+# 2026-08-03: the index core is a FAMILY of broker helpers that the sleeve
+# functions call (_core_sleeve_cfg, the turnover ledger, ...). Extract them by
+# prefix rather than by name. The sleeve bodies are wrapped in a bare
+# `except Exception`, so a helper missing from this namespace does not raise —
+# it logs "deploy skipped" in yellow and every assertion in this file silently
+# tests a no-op. Prefix matching means adding one more helper cannot reopen
+# that hole.
+_CORE_PREFIXES = ("_core_sleeve", "_core_turnover", "_turnover_ledger", "_CORE_")
+
+
+def _is_core_family(name):
+    return any(str(name).startswith(p) for p in _CORE_PREFIXES)
+
+
 for _node in _tree.body:
     if isinstance(_node, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id in _WANTED_CONSTS for t in _node.targets
+        isinstance(t, ast.Name) and (t.id in _WANTED_CONSTS or _is_core_family(t.id))
+        for t in _node.targets
     ):
         exec(compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"), _ns)
 for _name in _WANTED_CONSTS:
     assert _name in _ns, f"failed to extract {_name} from broker.py"
 for _node in _tree.body:
-    if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:
+    if isinstance(_node, ast.FunctionDef) and (
+            _node.name in _WANTED or _is_core_family(_node.name)):
         _mod = ast.Module(body=[_node], type_ignores=[])
         exec(compile(_mod, "broker.py", "exec"), _ns)
 for _name in _WANTED:

@@ -2805,7 +2805,349 @@ _RESIDUAL_SLEEVE_PERSIST_FIELDS = (
     "last_bear_exit_ts",
     "bear_stop_episode",
     "bear_alloc_ratchet",
+    # 2026-08-03 index core. Both fields are turnover controls, so losing them
+    # fails in the EXPENSIVE direction and they belong here for exactly the
+    # reason the bear fields do:
+    #   last_core_rebalance_ts -> None reads as "never rebalanced", which
+    #                             bypasses the 5-day cadence, so a host that
+    #                             restarts 17 times in 12 days would rebalance
+    #                             the core on every boot
+    #   turnover_ledger        -> [] reads as "no notional traded this month",
+    #                             which un-blocks a budget that had already
+    #                             bound; a restart would silently refund it
+    "last_core_rebalance_ts",
+    "turnover_ledger",
 )
+
+# 2026-08-03 INDEX-CORE ALLOCATION — docs/strategies/index-core-allocation-design.md
+#
+# The core reuses `residual_sleeve_symbol` (SPY) deliberately. `_sleeve_symbols`
+# (graph_nexus_analysis.py) and its six exemption sites already key off that one
+# string, so the scorer, the position safety net, the bear-book trim, broker
+# sell-enforcement and the regime position cap all already refuse to touch it.
+# Introducing a second "core symbol" without adding it there would let five
+# independent lanes sell the core on its first bar. Wiring the core through the
+# existing sleeve is therefore a SIZING-RULE change, not new machinery — which
+# is the whole reason this is cheap to do safely.
+_CORE_SLEEVE_LAST_REBALANCE_KEY = "last_core_rebalance_ts"
+_CORE_TURNOVER_LEDGER_KEY = "turnover_ledger"
+# 21 trading sessions = the design's rolling month. Bucketed by SESSION DATE and
+# not by trade: every evaluation stamps today's (possibly empty) bucket, so a
+# quiet week ages the window out. A ledger that only advanced when you traded
+# would let one heavy day hold the budget shut forever.
+_CORE_TURNOVER_SESSIONS = 21
+# ...and a calendar backstop, because the session count alone is not enough. If
+# the loop does not RUN for a stretch — a stopped instance, a weekend plus a
+# holiday plus an outage — no buckets are created, so 21 buckets can span months
+# and a budget could still be blocking on notional traded last quarter. That is
+# not hypothetical here: the ledger is persisted across restarts precisely
+# because this host restarts often. 31 days is 21 sessions at 5/7 plus slack, so
+# in normal operation the session count is what binds and this never fires.
+_CORE_TURNOVER_MAX_AGE_DAYS = 31
+# Reason string of the last core no-op we logged, so a 900s loop does not emit
+# 26 identical "within_band" lines a day. Not persisted — it is pure log state.
+_CORE_SLEEVE_LAST_HOLD_REASON = "_core_last_hold_reason"
+
+
+def _core_sleeve_cfg(cached_strategies):
+    """Parsed core-sleeve levers, or None when the master flag is off.
+
+    ONE parse point, the same contract `_residual_sleeve_config` follows: never
+    raise out of here, because a raise would silently disable the core at every
+    call site at once. Returns None rather than a disabled config object so each
+    caller's guard is a plain ``is None`` and the legacy branch under it stays
+    textually reachable and byte-identical.
+
+    ``core_sleeve_enabled`` is absent from Strategies doc 179, so this returns
+    None for the live book: today's behaviour is unchanged until somebody sets
+    the flag. That is not politeness, it is the deploy plan — this is a
+    real-money system and the new path ships dark.
+
+    The ``core_sleeve`` import is deferred because broker.py is not import-safe
+    (argparse at module scope SystemExits under pytest) and the AST-extraction
+    test harnesses exec these functions into a stub namespace; a module-level
+    import would make every one of them stub a module they never exercise.
+    """
+    try:
+        for spec in (cached_strategies or []):
+            cfg = (spec or {}).get("config") or {}
+            if str((spec or {}).get("strategy") or "") == "graph_nexus_analysis" \
+                    or "core_sleeve_enabled" in cfg:
+                if not bool(cfg.get("core_sleeve_enabled", False)):
+                    return None
+                if not bool(cfg.get("residual_sleeve_enabled", False)):
+                    # FAIL CLOSED. The core's six sell-exemptions all come from
+                    # `_sleeve_symbols` (graph_nexus_analysis.py:7459), and that
+                    # function returns an EMPTY set unless residual_sleeve_enabled
+                    # is true. So a core armed without the sleeve is a large,
+                    # permanently-held position that the scorer, the position
+                    # safety net, the bear-book trim, broker sell-enforcement and
+                    # the regime position cap can all sell — five independent
+                    # lanes, on its first bar. That is strictly worse than no
+                    # core, so refuse to arm and say why.
+                    if not globals().get("_core_needs_sleeve_logged"):
+                        globals()["_core_needs_sleeve_logged"] = True
+                        _log(
+                            "core_sleeve_enabled=true but residual_sleeve_enabled"
+                            "=false — the index core is REFUSING to arm. The core"
+                            " reuses residual_sleeve_symbol to inherit the six "
+                            "_sleeve_symbols exemptions; without the sleeve flag "
+                            "those are empty and five separate lanes would sell "
+                            "the core.",
+                            "red",
+                        )
+                    return None
+                from core_sleeve import core_sleeve_config
+                return core_sleeve_config(cfg)
+    except Exception as _cs_exc:
+        _log(f"[core] config parse failed ({type(_cs_exc).__name__}: {_cs_exc})"
+             " — the index core is INERT this tick", "red")
+    return None
+
+
+def _turnover_ledger_bucket_key(current_time):
+    """Session key for the rolling ledger ('' when the clock is unusable)."""
+    try:
+        if hasattr(current_time, "date"):
+            return current_time.date().isoformat()
+        return str(current_time or "")[:10]
+    except Exception:
+        return ""
+
+
+def _turnover_ledger_touch(current_time):
+    """The rolling ledger with this session's bucket present and the window
+    trimmed to the last `_CORE_TURNOVER_SESSIONS` sessions.
+
+    Rows are ``[session_date, one_way_notional]``. Plain lists of JSON scalars
+    on purpose: this piggy-backs on `_RESIDUAL_SLEEVE_PERSIST_KEY` and rides the
+    nexus strategy cache to RethinkDB, so it must survive the same round-trip
+    the sleeve state already survives — no new table, no new writer, no new
+    failure mode.
+    """
+    _key = _turnover_ledger_bucket_key(current_time)
+    if not _key:
+        return []
+    _ledger = _RESIDUAL_SLEEVE_STATE.get(_CORE_TURNOVER_LEDGER_KEY)
+    if not isinstance(_ledger, list):
+        _ledger = []
+        _RESIDUAL_SLEEVE_STATE[_CORE_TURNOVER_LEDGER_KEY] = _ledger
+    if not any(isinstance(_row, list) and str(_row[0]) == _key for _row in _ledger):
+        _ledger.append([_key, 0.0])
+        # Sort rather than assume append order: a backtest replays in order but
+        # a live restart rehydrates a persisted ledger whose newest row may be
+        # ahead of the first tick after boot, and an unsorted window would trim
+        # the wrong end.
+        _ledger.sort(key=lambda _row: str(_row[0]))
+    # Calendar backstop first (see _CORE_TURNOVER_MAX_AGE_DAYS): with the loop
+    # stopped, no buckets are created, so trimming by COUNT alone would leave a
+    # months-old row in the window and keep the budget shut on notional the book
+    # traded last quarter.
+    try:
+        from datetime import date as _date, timedelta as _td
+        _cutoff = _date.fromisoformat(_key) - _td(days=_CORE_TURNOVER_MAX_AGE_DAYS)
+        _ledger[:] = [_row for _row in _ledger
+                      if _date.fromisoformat(str(_row[0])) > _cutoff]
+    except (TypeError, ValueError, IndexError):
+        pass
+    if len(_ledger) > _CORE_TURNOVER_SESSIONS:
+        del _ledger[:len(_ledger) - _CORE_TURNOVER_SESSIONS]
+    return _ledger
+
+
+def _turnover_ledger_record(current_time, notional, label=""):
+    """Book one-way traded notional into the rolling ledger.
+
+    Every discretionary trade the book makes goes through here, which is what
+    lets the budget be measured in the same units the design's arithmetic uses
+    (Sigma|trade notional| / NAV over 21 sessions). Best-effort: a bookkeeping
+    failure must never abort a trade.
+
+    Recording is deliberately UNCONDITIONAL — it does not check
+    `core_sleeve_enabled`. Nothing reads the ledger unless the core is on
+    (`_core_turnover_state` returns (False, 0.0) otherwise), so no trading
+    decision changes; but it means the operator can read today's real turnover
+    off a book running the legacy path, and the budget has 21 sessions of true
+    history the moment the flag is flipped instead of starting blind. The cost
+    is at most 21 rows of [date, float] in the strategy cache.
+    """
+    try:
+        _amt = abs(float(notional or 0.0))
+        if _amt <= 0.0:
+            return
+        _key = _turnover_ledger_bucket_key(current_time)
+        for _row in _turnover_ledger_touch(current_time):
+            if str(_row[0]) == _key:
+                _row[1] = float(_row[1] or 0.0) + _amt
+                return
+    except Exception:
+        pass
+
+
+def _turnover_ledger_rolling(current_time):
+    """One-way notional traded over the trailing 21 sessions ($)."""
+    try:
+        return sum(float(_row[1] or 0.0)
+                   for _row in _turnover_ledger_touch(current_time)
+                   if isinstance(_row, list) and len(_row) >= 2)
+    except Exception:
+        return 0.0
+
+
+def _core_turnover_state(cached_strategies, nav, current_time):
+    """``(blocked, used_fraction_of_nav)`` for the rolling turnover budget.
+
+    ``(False, 0.0)`` whenever the core sleeve or the budget itself is off, so an
+    unconfigured book is never budget-blocked and today's behaviour is
+    unchanged. `turnover_budget_monthly_pct` defaults to 0 == OFF even with the
+    core on, so enabling the core does not silently arm a trade blocker.
+
+    The target is <=50%/month (Novy-Marx & Velikov: anomaly spreads above ~50%
+    monthly turnover rarely survive their own trading costs). Measured here:
+    ~290%/month live, ~466%/month on bt 852704.
+    """
+    _core = _core_sleeve_cfg(cached_strategies)
+    if _core is None:
+        return False, 0.0
+    try:
+        from core_sleeve import turnover_budget_state
+        return turnover_budget_state(
+            _core,
+            rolling_notional=_turnover_ledger_rolling(current_time),
+            nav=float(nav or 0.0),
+        )
+    except Exception:
+        return False, 0.0
+
+
+def _core_sleeve_bear_dwell():
+    """Consecutive confirmed bear/crash TRADING DAYS, from the nexus cache.
+
+    `_bear_dwell_bars` is stamped once per new date_key while the confirmed
+    regime is bear/crash and reset to 0 on any upgrade, so it really is days,
+    not bars. Same field the existing `residual_sleeve_bear_min_dwell_days` gate
+    reads — one persistence primitive, not two that can disagree. 0 when
+    unavailable, which reads as "no persistence yet" and therefore no de-risk.
+    """
+    try:
+        cache = (globals().get("_strategy_cache") or {}).get(
+            "graph_nexus_analysis") or {}
+        return int(cache.get("_bear_dwell_bars", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _core_sleeve_days_since_rebalance(current_time):
+    """Days since the last cadence-governed core rebalance.
+
+    None when there has never been one, which lets the FIRST rebalance build the
+    core immediately — a cold book has to be allowed to get invested.
+
+    Returns 0 ("just rebalanced", so the cadence gate blocks) when the stored
+    stamp cannot be differenced. That direction is deliberate: this is a
+    turnover-REDUCTION control, so an unreadable clock must fail toward fewer
+    trades, never toward more.
+    """
+    _last = _RESIDUAL_SLEEVE_STATE.get(_CORE_SLEEVE_LAST_REBALANCE_KEY)
+    if not _last:
+        return None
+    try:
+        from datetime import datetime as _dt
+        if isinstance(_last, str):
+            _last = _dt.fromisoformat(_last)
+        _now = current_time
+        # strategy_cache_persistence round-trips tz-aware datetimes, but a
+        # backtest clock is naive; subtracting across the two raises TypeError
+        # and would otherwise be indistinguishable from "never rebalanced".
+        if getattr(_now, "tzinfo", None) is None \
+                and getattr(_last, "tzinfo", None) is not None:
+            _last = _last.replace(tzinfo=None)
+        elif getattr(_now, "tzinfo", None) is not None \
+                and getattr(_last, "tzinfo", None) is None:
+            _last = _last.replace(tzinfo=_now.tzinfo)
+        return max(0, int((_now - _last).total_seconds() // 86400))
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return 0
+
+
+def _core_sleeve_decide(portfolio_emulator, prices, current_time,
+                        cached_strategies, sleeve_cfg, core_cfg,
+                        funding_request=0.0):
+    """This bar's core order (a `core_sleeve.RebalanceOrder`), or None when the
+    book cannot be measured this bar.
+
+    ONE decision function. `_residual_sleeve_release` executes its SELL side at
+    cycle start and `_residual_sleeve_deploy` its BUY side at cycle end, and
+    BOTH of those are reached in live and in backtest — so there is a single
+    sizing rule with no mode-specific copy that can drift. That is not a
+    stylistic preference: `_residual_sleeve_deploy` sat in a backtest-only
+    branch for weeks while its live-order-service argument was unreachable dead
+    code, and live ran the sleeve sell-only the entire time.
+    `test_core_sleeve_live_reachability.py` asserts the two-mode property
+    structurally so it cannot regress silently again.
+    """
+    core_sym = (sleeve_cfg or {}).get("symbol") or ""
+    bear_sym = (sleeve_cfg or {}).get("bear_symbol") or ""
+    core_px = float((prices or {}).get(core_sym) or 0.0)
+    if core_px <= 0.0:
+        return None  # no mark for the core: nothing here is decidable
+    nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
+    if nav <= 0.0:
+        return None
+    cash = float(portfolio_emulator.get_cash() or 0.0)
+    positions = portfolio_emulator.get_positions() or {}
+    core_value = float((positions or {}).get(core_sym, 0.0) or 0.0) * core_px
+    hedge_value = 0.0
+    if bear_sym:
+        hedge_value = (float((positions or {}).get(bear_sym, 0.0) or 0.0)
+                       * float((prices or {}).get(bear_sym) or 0.0))
+    # Satellite as a NAV RESIDUAL, never as a sum over individually priced
+    # positions. A held name with no bar this tick would sum to $0 of satellite,
+    # which raises the core target by exactly that name's weight and makes the
+    # core BUY into a book that is already fully invested — the one arithmetic
+    # error in this design that spends real money. NAV is the emulator's own
+    # aggregate and now carries a held position at its last known price
+    # (d6faf1a), so the residual cannot silently lose a name. An unpriced hedge
+    # leg lands in the satellite bucket, which lowers the core target — the
+    # conservative direction. Clamped at 0 because a stale mark can make the
+    # parts briefly exceed NAV.
+    satellite_value = max(0.0, nav - cash - core_value - hedge_value)
+    _blocked, _used = _core_turnover_state(cached_strategies, nav, current_time)
+    from core_sleeve import core_rebalance_order
+    return core_rebalance_order(
+        core_cfg,
+        nav=nav,
+        core_value=core_value,
+        satellite_value=satellite_value,
+        cash=cash,
+        regime=_sleeve_market_regime(),
+        bear_dwell_days=_core_sleeve_bear_dwell(),
+        days_since_rebalance=_core_sleeve_days_since_rebalance(current_time),
+        funding_request=funding_request,
+        circuit_tier=_sleeve_circuit_tier(),
+        turnover_exhausted=_blocked,
+    )
+
+
+def _core_sleeve_log_hold(order, where):
+    """Log a core no-op once per CHANGE of reason.
+
+    Every no-op says why — the sleeve's failure mode in this file has always
+    been silence ('[sleeve] ENABLED but no SPY price' went unnoticed for a whole
+    forensics cycle). But release and deploy both evaluate the same rule on the
+    same bar, and a 900s backtest loop would emit ~52 identical `within_band`
+    lines a day, which is its own kind of silence.
+    """
+    try:
+        _prev = _RESIDUAL_SLEEVE_STATE.get(_CORE_SLEEVE_LAST_HOLD_REASON)
+        if _prev == order.reason:
+            return
+        _RESIDUAL_SLEEVE_STATE[_CORE_SLEEVE_LAST_HOLD_REASON] = order.reason
+        _log(f"[core] hold ({where}) — {order.reason}: core "
+             f"{order.current_weight:.1%} vs target {order.target_weight:.1%} "
+             "of NAV", "cyan")
+    except Exception:
+        pass
 
 
 def _residual_sleeve_universe_symbols(cached_strategies, include_bear=True):
@@ -3117,12 +3459,19 @@ def _residual_sleeve_prepare(data, prices, current_time, cached_strategies,
 
 def _residual_sleeve_release(
         portfolio_emulator, prices, current_time, cached_strategies,
-        order_service=None):
+        order_service=None, funding_request=0.0):
     """Cycle start: free the sleeve for active picks when cash is low, and
     ALWAYS liquidate it when the regime turns bear/crash (BEAR_F guardrail
     failure 2026-07-19: an exit-less sleeve rode SPY down −8%, flipping the
     bear window from +0.87% to −7.77%). The trend-conditioned regime gate —
-    not a drawdown gate — is what the measured counterfactuals prescribe."""
+    not a drawdown gate — is what the measured counterfactuals prescribe.
+
+    ``funding_request`` is the dollar total of satellite buys the allocator has
+    already approved for this bar. It is ignored unless ``core_sleeve_enabled``,
+    where it is the ONE thing allowed to bypass the rebalance cadence: the
+    sleeve's original job is to hand capital back to the allocator instantly,
+    and a cadence that starved it would turn every 5-day window into a
+    do-nothing window."""
     try:
         def _submit_release(
                 symbol, price, quantity, reason, *, sell_fraction,
@@ -3149,7 +3498,7 @@ def _residual_sleeve_release(
                 )
                 return False
             if order_service is None:
-                return _submit_portfolio_signal(
+                _rel_result = _submit_portfolio_signal(
                     portfolio_emulator,
                     symbol,
                     -1,
@@ -3158,6 +3507,13 @@ def _residual_sleeve_release(
                     sell_fraction=sell_fraction,
                     order_source=order_source,
                 )
+                # Turnover is one-way notional, so a sleeve/core SELL counts
+                # exactly like a satellite sell. Booking it here rather than at
+                # the two call sites means no future release path can forget to.
+                if _rel_result:
+                    _turnover_ledger_record(
+                        current_time, _rel_notional, f"sleeve sell {symbol}")
+                return _rel_result
             from datetime import datetime as _dt, timezone as _tz
             from decimal import Decimal
             from live_orders import OrderIntent, OrderSide, OrderSource
@@ -3217,6 +3573,9 @@ def _residual_sleeve_release(
                     f"{','.join(submission.decision.reason_codes)}",
                     "yellow",
                 )
+            if submission.accepted:
+                _turnover_ledger_record(
+                    current_time, _rel_notional, f"sleeve sell {symbol}")
             return submission.accepted
 
         cfg = _residual_sleeve_config(cached_strategies)
@@ -3392,6 +3751,67 @@ def _residual_sleeve_release(
         if px <= 0:
             _log(f"[sleeve] no {sym} price this bar — holding sleeve", "yellow")
             return
+        # ── 2026-08-03 INDEX CORE, sell side. Master flag core_sleeve_enabled;
+        # None means OFF and every line below is byte-identical to today.
+        #
+        # What this replaces, and why. Today's release fires on a CASH LEVEL
+        # (refill to 15% of NAV) with a 2pp hysteresis band against deploy's 17%
+        # park floor — so every stock-lane trade drags cash across the band and
+        # the sleeve churns. Measured on bt 987397: $4,131 of SPY notional on a
+        # $6,000 book over 20 sessions, 20.8% of NAV traded to hold an average
+        # 4.2% position, and the median cash weight pinned at exactly 15.0%.
+        # And on bear/crash it liquidates outright (`sell_qty = qty; frac = 1.0`)
+        # — 60pp of one-way notional in a single bar, the largest discrete
+        # turnover event this system can produce, on a detector whose own
+        # comment says it lags a V-bottom by ~2 sessions.
+        #
+        # The core rule triggers on a WEIGHT BAND (±5pp) plus a cadence floor,
+        # and BOUNDS the bear move (halve toward cash) instead of zeroing it.
+        _core = _core_sleeve_cfg(cached_strategies)
+        if _core is not None:
+            _corder = _core_sleeve_decide(
+                portfolio_emulator, prices, current_time, cached_strategies,
+                cfg, _core, funding_request=funding_request)
+            if _corder is None:
+                return
+            if _corder.notional >= 0.0:
+                # Release owns the SELL side only. A positive (buy) decision is
+                # executed by _residual_sleeve_deploy at cycle end, on the same
+                # rule, in both modes.
+                _core_sleeve_log_hold(_corder, "release")
+                return
+            _csell_qty = min(qty, (-_corder.notional) / px)
+            if _csell_qty <= 0:
+                return
+            _cfrac = min(1.0, _csell_qty / qty)
+            _cwhy = (f"core rebalance: {_corder.reason} "
+                     f"({_corder.current_weight:.1%} -> "
+                     f"{_corder.target_weight:.1%} of NAV)")
+            _cok = _submit_release(
+                sym,
+                px,
+                _csell_qty,
+                _cwhy,
+                sell_fraction=_cfrac,
+                order_source=(
+                    "residual_bull_protective_exit"
+                    if _corder.reason == "bear_derisk"
+                    else "residual_bull_refill"
+                ),
+            )
+            # Stamp the cadence clock for the moves the cadence GOVERNS — band
+            # moves and the bear de-risk (stamping the de-risk is what caps
+            # regime round trips at ~2/yr, since the re-entry then has to wait
+            # out core_rebalance_min_days). A `funding` release is capital the
+            # allocator already approved and must stay instant, so it
+            # deliberately does NOT reset the clock: resetting it there would
+            # let one busy buy day freeze the band for five sessions.
+            if _signal_result_is_confirmed(_cok) and _corder.reason != "funding":
+                _RESIDUAL_SLEEVE_STATE[_CORE_SLEEVE_LAST_REBALANCE_KEY] = current_time
+            _RESIDUAL_SLEEVE_STATE.pop(_CORE_SLEEVE_LAST_HOLD_REASON, None)
+            _log(f"[core] released {_csell_qty:.4f} {sym} @ {px:.2f} "
+                 f"({_cwhy}, ok={_cok})", "cyan")
+            return
         nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
         cash = float(portfolio_emulator.get_cash() or 0.0)
         protective = regime in ("bear", "crash")
@@ -3454,7 +3874,7 @@ def _residual_sleeve_deploy(
         def _submit_deploy(
                 symbol, price, cash_amount, reason, *, order_source):
             if order_service is None:
-                return _submit_portfolio_signal(
+                _dep_result = _submit_portfolio_signal(
                     portfolio_emulator,
                     symbol,
                     1,
@@ -3463,6 +3883,12 @@ def _residual_sleeve_deploy(
                     cash_per_trade=cash_amount,
                     order_source=order_source,
                 )
+                # See the matching book in _submit_release: turnover is ONE-WAY
+                # notional, so a park counts the same as any other buy.
+                if _dep_result:
+                    _turnover_ledger_record(
+                        current_time, cash_amount, f"sleeve buy {symbol}")
+                return _dep_result
             from datetime import datetime as _dt, timezone as _tz
             from decimal import Decimal
             from live_orders import OrderIntent, OrderSide, OrderSource
@@ -3524,6 +3950,9 @@ def _residual_sleeve_deploy(
                     f"{','.join(submission.decision.reason_codes)}",
                     "yellow",
                 )
+            if submission.accepted:
+                _turnover_ledger_record(
+                    current_time, cash_amount, f"sleeve buy {symbol}")
             return submission.accepted
 
         cfg = _residual_sleeve_config(cached_strategies)
@@ -3543,6 +3972,73 @@ def _residual_sleeve_deploy(
             # one-stop-per-episode latch and reset the conviction ratchet.
             _RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
             _RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
+        # ── 2026-08-03 INDEX CORE, buy side. Master flag core_sleeve_enabled;
+        # None means OFF and every legacy branch below is byte-identical.
+        #
+        # This runs in EVERY regime, not just a confirmed bull. "Hold the market
+        # unless the graph says otherwise" is the entire restructure: with the
+        # bull-only gate the book sat in cash through the chop bars that make up
+        # most of a recovery, and the measured result was a mean 25.1% cash +
+        # 4.2% in a 3x-inverse through a window where SPY total return was
+        # +13.23%. A bear does not turn the core off here either — it scales the
+        # TARGET (core_bear_scale, to cash) inside core_target_weight, so the
+        # de-risk is bounded and reversible instead of a full liquidation.
+        #
+        # The circuit-tier early return above still applies, unchanged: a core
+        # must not be ADDED to while the drawdown circuit is at hard/kill. It
+        # can still shrink, because release runs before this on the same tick.
+        _core = _core_sleeve_cfg(cached_strategies)
+        if _core is not None:
+            sym = cfg["symbol"]
+            px = float((prices or {}).get(sym) or 0.0)
+            if px <= 0:
+                if not globals().get("_sleeve_no_price_logged"):
+                    globals()["_sleeve_no_price_logged"] = True
+                    _log(f"[core] ENABLED but no {sym} price available — the "
+                         "index core is INERT (is the symbol in the bar "
+                         "universe?)", "red")
+                return
+            if cfg.get("bear_symbol"):
+                # Deliberate, not an oversight: with an index core the bear
+                # de-risk routes to CASH and the inverse leg is never parked.
+                # A -3x daily-rebalanced instrument carries a structurally
+                # negative decay term outside a monotone decline; it cost
+                # 1.67pp time-weighted on the bull window and consumed 15.0% of
+                # all traded notional there; and it needed SIX independent
+                # suppressors before it stopped losing money, which is evidence
+                # the signal does not separate the cases it has to separate.
+                # Its EXIT machinery in _residual_sleeve_release is left armed
+                # so an already-open leg from a pre-core run can still close.
+                if not globals().get("_core_bear_leg_skip_logged"):
+                    globals()["_core_bear_leg_skip_logged"] = True
+                    _log(f"[core] bear leg {cfg['bear_symbol']} will NOT be "
+                         "parked — the index core routes bear de-risk to cash",
+                         "yellow")
+            _corder = _core_sleeve_decide(
+                portfolio_emulator, prices, current_time, cached_strategies,
+                cfg, _core)
+            if _corder is None:
+                return
+            if _corder.notional <= 0.0:
+                # Deploy owns the BUY side only; a negative decision is executed
+                # by _residual_sleeve_release at the next cycle start.
+                _core_sleeve_log_hold(_corder, "deploy")
+                return
+            _cok = _submit_deploy(
+                sym,
+                px,
+                _corder.notional,
+                f"core rebalance: {_corder.reason}",
+                order_source="residual_bull_deploy",
+            )
+            if _signal_result_is_confirmed(_cok):
+                _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
+                _RESIDUAL_SLEEVE_STATE[_CORE_SLEEVE_LAST_REBALANCE_KEY] = current_time
+            _RESIDUAL_SLEEVE_STATE.pop(_CORE_SLEEVE_LAST_HOLD_REASON, None)
+            _log(f"[core] bought ${_corder.notional:.2f} {sym} @ {px:.2f} "
+                 f"({_corder.reason}: {_corder.current_weight:.1%} -> "
+                 f"{_corder.target_weight:.1%} of NAV, ok={_cok})", "cyan")
+            return
         if regime in ("bear", "crash") and cfg.get("bear_symbol"):
             bsym = cfg["bear_symbol"]
             # 2026-07-22 fresh-decline gate: don't hedge a STALE bear (ret20 down
@@ -12595,6 +13091,23 @@ while not shutdown_requested:
             _residual_sleeve_prepare(
                 data, prices, current_time, _cached_strategies,
                 key=key, secret=secret)
+            # 2026-08-03 index core: the funding request the core is allowed to
+            # bypass its rebalance cadence for. Sized off the buy_cash the
+            # allocator has ALREADY approved this bar (`_nexus_executable_buys`
+            # ∩ `_nexus_position_sizes`), not off a cash target — sizing a
+            # release off a cash target is precisely what makes today's sleeve
+            # hand back more than the book asked for and re-park it next bar.
+            # Zero when the core is off, and _residual_sleeve_release ignores it
+            # entirely on the legacy path, so this is inert until the flag flips.
+            _core_funding_request = 0.0
+            try:
+                for _fr_sym in (nexus_executable_buys or ()):
+                    _fr_hint = (nexus_position_sizes or {}).get(_fr_sym) or {}
+                    if isinstance(_fr_hint, dict):
+                        _core_funding_request += max(
+                            0.0, float(_fr_hint.get("buy_cash", 0.0) or 0.0))
+            except (TypeError, ValueError, AttributeError):
+                _core_funding_request = 0.0
             _residual_sleeve_release(
                 portfolio_emulator, prices, current_time, _cached_strategies,
                 (
@@ -12603,8 +13116,44 @@ while not shutdown_requested:
                     and str(live_broker_type or "").strip().lower() == "alpaca"
                     else None
                 ),
+                _core_funding_request,
             )
             _residual_sleeve_state_persist()
+
+            # ── 2026-08-03 HARD MONTHLY TURNOVER BUDGET (default OFF).
+            # Evaluated ONCE per tick, on the shared path both modes run, so the
+            # live book and the backtest cannot disagree about whether the
+            # budget binds. Nothing in the equity path had a turnover constraint
+            # before this: `benchmark_alpha/research_policy.py` has a
+            # `turnover_cap`, but its own docstring says it is a non-trading
+            # research policy with "no broker, WAL, runtime, or order-intent
+            # dependency" — it cannot constrain an execution path.
+            #
+            # It blocks NEW DISCRETIONARY SPEND only. Sells are never blocked:
+            # decision == -1 is reduce_only by construction in this codebase, so
+            # every protective exit, stop, DD-circuit exit and bear de-risk still
+            # runs at full budget. A budget that traps you in a loser costs more
+            # than the commissions it saves.
+            _turnover_blocked, _turnover_used = False, 0.0
+            try:
+                _turnover_blocked, _turnover_used = _core_turnover_state(
+                    _cached_strategies,
+                    (portfolio_emulator.get_portfolio_value(prices)
+                     if portfolio_emulator is not None else 0.0),
+                    current_time,
+                )
+                if _turnover_blocked:
+                    _log(
+                        f"TURNOVER BUDGET BINDING: {_turnover_used * 100.0:.0f}% "
+                        f"of NAV traded in the last {_CORE_TURNOVER_SESSIONS} "
+                        "sessions — new discretionary BUYS are blocked this "
+                        "tick; risk exits and reduce-only sells are unaffected",
+                        "yellow",
+                    )
+            except Exception as _tb_exc:
+                _log(f"turnover budget check failed ({type(_tb_exc).__name__}: "
+                     f"{_tb_exc}) — budget inert this tick", "yellow")
+                _turnover_blocked, _turnover_used = False, 0.0
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
                 normalized = None  # reset per-symbol to avoid stale values from previous iteration
@@ -12899,6 +13448,39 @@ while not shutdown_requested:
                             if _rsv_cfg.get("enabled") and symbol == (_rsv_cfg.get("bear_symbol") or None):
                                 _log(f"SKIP BUY {symbol} — reserved sleeve bear symbol", "yellow")
                                 continue
+                            # 2026-08-03 turnover budget (default OFF). Enforced
+                            # at the SAME choke point as the regime cap, because
+                            # that is the one hop every buy lane passes through:
+                            # backfill-queue drain, momentum watchlist,
+                            # direct-reserved, rotations and initial buys. A
+                            # budget wired anywhere else would leave a lane
+                            # un-gated, which is exactly how the strategy-side
+                            # Z4.1 capacity gate turned out to be porous
+                            # (BEAR_F6). Blocking the BUY leg of a rotation is
+                            # the point: a rotation is 2x notional and is churn
+                            # by construction, and its funding SELL still runs.
+                            if _turnover_blocked:
+                                _log(
+                                    f"TURNOVER BUDGET BLOCK: {symbol} skipped — "
+                                    f"{_turnover_used * 100.0:.0f}% of NAV traded "
+                                    f"in {_CORE_TURNOVER_SESSIONS} sessions",
+                                    "yellow",
+                                )
+                                _nexus_cache = _strategy_cache.get("graph_nexus_analysis")
+                                if _nexus_cache is not None:
+                                    _nexus_cache.setdefault("_broker_skipped_buys", []).append({
+                                        "ticker": symbol,
+                                        "allocated": round(float(cash_per_trade or 0.0), 2),
+                                        "reason": "turnover_budget",
+                                        "price": round(float(price), 4),
+                                        "raw_net_score": round(float(nexus_hint.get("raw_net_score", 0.0) or 0.0), 4),
+                                        "signal_source": str(nexus_hint.get("signal_source") or ""),
+                                        "is_watchlist_member": bool(nexus_hint.get("is_watchlist_member")),
+                                        "is_watchlist_priority": bool(nexus_hint.get("is_watchlist_priority")),
+                                        "is_propagation_expansion": bool(nexus_hint.get("is_propagation_expansion")),
+                                    })
+                                    _log(f"Gate skips reported back: {symbol} (turnover_budget)", "magenta")
+                                continue
                             _rc = _regime_position_cap_hard(_cached_strategies)
                             if _rc is not None:
                                 _rc_positions = getattr(portfolio_emulator, "_positions", {}) or {}
@@ -12941,7 +13523,25 @@ while not shutdown_requested:
                             _cash_floor_min_positions = int((nexus_position_sizes or {}).get("_cash_reserve_hard_min_positions", 5) or 5)
                             _cash_floor_release_after_min_positions = bool((nexus_position_sizes or {}).get("_cash_reserve_release_after_min_positions", True))
                             _high_conviction = (nexus_position_sizes or {}).get(symbol, {}).get("high_conviction", False)
-                            _open_positions = sum(1 for _qty in (portfolio_emulator._positions or {}).values() if float(_qty or 0.0) > 0.0)
+                            # 2026-08-03: this counter releases the HARD cash
+                            # floor once the book holds `_cash_floor_min_positions`
+                            # names, and it counted the sleeve legs. With an
+                            # index core the core leg is held on essentially
+                            # every bar, so the count sat permanently +1 and the
+                            # floor released one name earlier than the operator
+                            # configured. `_rc_open` (the regime cap, ~30 lines
+                            # up) already excludes sleeve legs; this one did not.
+                            # Gated on the core flag so a book without a core is
+                            # byte-identical — the pre-existing inconsistency is
+                            # real but changing it unasked is a live P&L change.
+                            _cf_exclude = set()
+                            if _core_sleeve_cfg(_cached_strategies) is not None:
+                                _cf_sleeve_cfg = _residual_sleeve_config(_cached_strategies)
+                                _cf_exclude = {_cf_sleeve_cfg.get("symbol") or "",
+                                               _cf_sleeve_cfg.get("bear_symbol") or ""} - {""}
+                            _open_positions = sum(
+                                1 for _sym_op, _qty in (portfolio_emulator._positions or {}).items()
+                                if float(_qty or 0.0) > 0.0 and _sym_op not in _cf_exclude)
                             if _cash_floor_hard:
                                 _can_bypass_floor = _cash_floor_release_after_min_positions and _high_conviction and _open_positions >= _cash_floor_min_positions
                             else:
@@ -13366,6 +13966,29 @@ while not shutdown_requested:
                             # cannot credit a rotation slot (which would admit
                             # the paired buy and land the book at cap+1 live).
                             _mpg_submit_ok = False
+                            # 2026-08-03 turnover ledger. Size the trade BEFORE
+                            # submitting: after the submit the backtest emulator
+                            # has already mutated `_positions`, so a sell read
+                            # afterwards measures what is LEFT, not what was
+                            # sold. Booked below, once, on the shared path both
+                            # modes converge on — a ledger that only counted
+                            # backtest fills would report a live turnover of
+                            # zero and never bind.
+                            _to_notional = 0.0
+                            try:
+                                if decision == 1:
+                                    _to_notional = abs(float(cash_to_use or 0.0))
+                                elif decision == -1:
+                                    _to_pos = getattr(portfolio_emulator, "_positions", {}) or {}
+                                    _to_qty = float(
+                                        _to_pos.get(str(symbol).strip().upper(), 0.0)
+                                        or _to_pos.get(symbol, 0.0) or 0.0)
+                                    _to_frac = (
+                                        1.0 if sell_fraction is None
+                                        else max(0.0, min(1.0, float(sell_fraction))))
+                                    _to_notional = _to_qty * _to_frac * float(price or 0.0)
+                            except (TypeError, ValueError, AttributeError):
+                                _to_notional = 0.0
                             if mode == MODE_LIVE:
                                 try:
                                     _is_alpaca_stock_gate = (
@@ -13507,6 +14130,16 @@ while not shutdown_requested:
                                     order_source="main_signal",
                                 )
                                 _mpg_submit_ok = bool(_mpg_result)
+
+                            # Book this trade's one-way notional. Same statement
+                            # for live and backtest, after both branches have
+                            # converged, so the budget measures the same thing
+                            # in both — the failure this whole feature exists to
+                            # avoid is a control that binds in one mode only.
+                            if _mpg_submit_ok:
+                                _turnover_ledger_record(
+                                    current_time, _to_notional,
+                                    f"main_signal {'buy' if decision == 1 else 'sell'} {symbol}")
 
                             # ── Task 7: keep the running cycle counts current so
                             # later buys in this _exec_order see this emission. A
