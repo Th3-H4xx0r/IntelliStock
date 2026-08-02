@@ -57,6 +57,40 @@ except Exception:
 if __name__ == '__main__' and 'broker' not in sys.modules:
     sys.modules['broker'] = sys.modules['__main__']
 
+_CODE_VERSION_CACHE = None
+
+
+def _code_version_stamp():
+    """Short git SHA of the running code, or "" if it cannot be determined.
+
+    Without this, two backtest rows are indistinguishable from replicates even
+    when different code produced them. That is not hypothetical: analysing 49
+    same-config pairs, the 31 that shared a commit had a 2.11pp median spread
+    while the 18 that straddled one had 6.12pp -- and the single worst "noise"
+    case, a 16.73pp gap, turned out to be 88% one VGT 8-for-1 split handled by
+    two different code versions. Any future noise measurement that cannot
+    separate those two populations will overstate nondeterminism.
+
+    Read once per process; a container never changes code mid-run.
+    """
+    global _CODE_VERSION_CACHE
+    if _CODE_VERSION_CACHE is not None:
+        return _CODE_VERSION_CACHE
+    stamp = str(os.environ.get("GIT_COMMIT_SHA") or "").strip()[:12]
+    if not stamp:
+        try:
+            import subprocess  # noqa: PLC0415
+            stamp = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+            ).stdout.strip()
+        except Exception:
+            stamp = ""
+    _CODE_VERSION_CACHE = stamp
+    return stamp
+
+
 ### GLOBAL VARIABLES
 MODE_LIVE = "live"
 MODE_BACKTEST = "backtest"
@@ -10155,6 +10189,7 @@ while not shutdown_requested:
                                 'pnl_percent_per_stock': pnl_percent_per_stock,
                                 'stock_price_change': stock_price_change,
                                 'time_elapsed_seconds': time_elapsed_seconds,
+                                'code_version': _code_version_stamp(),
                                 'start_date': backtest_start_date,
                                 'end_date': backtest_end_date,
                                 'tickers': all_traded if all_traded else (symbols if symbols else []),
