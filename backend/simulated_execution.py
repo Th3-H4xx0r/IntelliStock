@@ -89,12 +89,23 @@ DEFAULT_EQUITY_EXECUTION_COST_MODEL = ExecutionCostModel(
     latency=timedelta(0),
 )
 
-#: What this book actually costs to trade. The nominal model above is 12.8 bps
-#: one-way; measured against the names the strategy really holds -- 60-day
-#: median dollar volume of $2.4M (PLSE), $6.8M (VEON), $7.6M (CAPR), $7.9M
-#: (NRIX) -- an all-in 25-35 bps on market orders is the honest band, and this
-#: sits at its midpoint. Alpaca charges no commission; the 0.3 bps fee is the
-#: SEC 31 and FINRA TAF sell-side pass-throughs.
+#: What this book actually costs to trade -- MEASURED, not modelled.
+#:
+#: 2026-08-02: priced 61 of alpaca-main's 62 real live fills against the SIP
+#: NBBO at each fill timestamp. Results:
+#:   quoted spread   median 17.5 bps, mean 41.8, NOTIONAL-WEIGHTED 45.6, p90 109.0
+#:   slippage vs mid median +0.0 bps, mean -0.6, notional-weighted +0.1
+#:
+#: Two findings worth keeping. First, slippage is ~ZERO: ~$500 orders cannot
+#: move a book, and Alpaca's market-maker routing delivers price improvement
+#: about as often as it costs (AMZN filled 30.8 bps INSIDE the mid). The
+#: earlier 18 bps slippage assumption was wrong for this account and is now 0.1.
+#: Second, use the NOTIONAL-WEIGHTED spread, not the median: the median trade
+#: sees 17.5 bps but the larger trades are in wider-spread names, so the
+#: median understates the money actually paid by 2.6x.
+#:
+#: One-way = 45.6/2 + 0.1 + 0.3 = 23.2 bps. Alpaca charges no commission; the
+#: 0.3 bps is the SEC 31 and FINRA TAF sell-side pass-throughs.
 #:
 #: It lives HERE, beside the nominal model, because resolve_execution_cost_model
 #: hashes whichever model it returns into the experiment receipt while the
@@ -103,9 +114,9 @@ DEFAULT_EQUITY_EXECUTION_COST_MODEL = ExecutionCostModel(
 #: substituted to this one -- a provenance record asserting a cost basis that
 #: was never used.
 LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL = ExecutionCostModel(
-    version="equity-next-event-v2-liquidity30",
-    spread_bps=24.0,
-    slippage_bps=18.0,
+    version="equity-measured-v3-nbbo23",
+    spread_bps=45.6,
+    slippage_bps=0.1,
     fee_bps=0.3,
     latency=timedelta(0),
 )

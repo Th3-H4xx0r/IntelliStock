@@ -43,21 +43,33 @@ def _quote(symbol, at, mid, model=LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL):
 # --------------------------------------------------------------------------
 
 
-def test_default_cost_model_lands_in_the_measured_liquidity_band():
-    """~30 bps one-way, not the ~12.8 bps the nominal model charges.
+def test_default_cost_model_matches_the_measured_nbbo_cost():
+    """~23 bps one-way, measured -- not the ~12.8 bps the nominal model charges.
 
-    The book's names trade $2.4M-$7.9M a day; all-in one-way cost there is
-    25-35 bps. A default outside that band is a thumb on the scale.
+    2026-08-02: priced 61 of alpaca-main's 62 real live fills against the SIP
+    NBBO at each fill timestamp. Notional-weighted spread 45.6 bps, slippage
+    +0.1 bps => 23.2 bps one-way. The band is +/-3 bps around that.
+
+    The earlier 25-35 band came from a liquidity MODEL that assumed 18 bps of
+    slippage. The measurement says slippage is ~zero -- $500 orders cannot move
+    a book, and market-maker routing gives price improvement about as often as
+    it costs. Use the NOTIONAL-WEIGHTED spread, never the median: the median
+    trade sees 17.5 bps, but larger trades sit in wider-spread names, so the
+    median understates money actually paid by 2.6x.
     """
     model = LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
     one_way = model.spread_bps / 2.0 + model.slippage_bps + model.fee_bps
-    assert 25.0 <= one_way <= 35.0
+    assert 20.0 <= one_way <= 26.0
+    assert model.slippage_bps <= 1.0, "measured slippage was ~0; do not reintroduce a modelled 18 bps"
     nominal = (
         DEFAULT_EQUITY_EXECUTION_COST_MODEL.spread_bps / 2.0
         + DEFAULT_EQUITY_EXECUTION_COST_MODEL.slippage_bps
         + DEFAULT_EQUITY_EXECUTION_COST_MODEL.fee_bps
     )
-    assert one_way > 2.0 * nominal
+    # Measured 23.2 vs nominal 12.8 = 1.81x. The nominal model is still far too
+    # cheap for this book, but the true multiple is 1.8x, not the 2.4x the
+    # pre-measurement model implied.
+    assert one_way > 1.5 * nominal
     # All three components are separately real and separately configurable.
     assert model.spread_bps > 0 and model.slippage_bps > 0 and model.fee_bps > 0
 
