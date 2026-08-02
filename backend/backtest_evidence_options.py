@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from simulated_execution import (
+    LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
     DEFAULT_EQUITY_EXECUTION_COST_MODEL,
     ExecutionCostModel,
 )
@@ -284,7 +285,10 @@ def resolve_execution_cost_model(target_one_way_bps, base=None) -> ExecutionCost
     proportions -- the alternative, post-hoc subtracting embedded fill costs,
     would let a receipt claim a cost basis the fills never used.
     """
-    model = base if base is not None else DEFAULT_EQUITY_EXECUTION_COST_MODEL
+    # Default to the model the emulator actually fills with. Defaulting to
+    # the nominal model here while create_backtest_emulator substituted the
+    # liquidity one made the receipt claim a cost basis the fills never used.
+    model = base if base is not None else LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
     if not isinstance(model, ExecutionCostModel):
         raise EvidenceOptionError("base must be an ExecutionCostModel")
     if target_one_way_bps is None:

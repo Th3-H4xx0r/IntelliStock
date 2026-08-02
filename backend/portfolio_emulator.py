@@ -22,6 +22,7 @@ import math
 try:
     from simulated_execution import (
         DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+        LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
         ExecutionCostModel,
         NextEventExecutionSimulator,
         SimulationFill,
@@ -33,6 +34,7 @@ try:
 except ImportError:  # Package import path used by repository-root pytest.
     from backend.simulated_execution import (
         DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+        LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
         ExecutionCostModel,
         NextEventExecutionSimulator,
         SimulationFill,
@@ -94,13 +96,9 @@ except Exception:  # pragma: no cover - fall back so equity paths never break
 # Every component is configurable — pass an explicit ExecutionCostModel to run
 # a sensitivity sweep (see backtest_evidence_options.resolve_execution_cost_model,
 # which scales all three components to a target one-way cost).
-LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL = ExecutionCostModel(
-    version="equity-next-event-v2-liquidity30",
-    spread_bps=24.0,
-    slippage_bps=18.0,
-    fee_bps=0.3,
-    latency=timedelta(0),
-)
+# Defined in simulated_execution beside the nominal model so the experiment
+# receipt and the fills can never name different models. Re-exported here
+# because this is where callers expect it.
 
 #: Alpaca rejects any equity order whose notional is under $1 (the fractional
 #: minimum). An audit of the best-performing backtest to date found 219 of its

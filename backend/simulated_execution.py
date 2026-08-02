@@ -89,6 +89,27 @@ DEFAULT_EQUITY_EXECUTION_COST_MODEL = ExecutionCostModel(
     latency=timedelta(0),
 )
 
+#: What this book actually costs to trade. The nominal model above is 12.8 bps
+#: one-way; measured against the names the strategy really holds -- 60-day
+#: median dollar volume of $2.4M (PLSE), $6.8M (VEON), $7.6M (CAPR), $7.9M
+#: (NRIX) -- an all-in 25-35 bps on market orders is the honest band, and this
+#: sits at its midpoint. Alpaca charges no commission; the 0.3 bps fee is the
+#: SEC 31 and FINRA TAF sell-side pass-throughs.
+#:
+#: It lives HERE, beside the nominal model, because resolve_execution_cost_model
+#: hashes whichever model it returns into the experiment receipt while the
+#: emulator does the filling. With the two definitions in different modules the
+#: receipt claimed `equity-next-event-v1` on runs whose fills had already been
+#: substituted to this one -- a provenance record asserting a cost basis that
+#: was never used.
+LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL = ExecutionCostModel(
+    version="equity-next-event-v2-liquidity30",
+    spread_bps=24.0,
+    slippage_bps=18.0,
+    fee_bps=0.3,
+    latency=timedelta(0),
+)
+
 
 @dataclass(frozen=True)
 class SimulationOrder:

@@ -33,6 +33,7 @@ from backtest_evidence_options import (  # noqa: E402
 )
 from simulated_execution import (  # noqa: E402
     DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+    LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
     ExecutionCostModel,
 )
 
@@ -214,9 +215,20 @@ def _one_way(model):
 
 
 def test_nominal_scenario_returns_the_base_model_unchanged():
+    """No stress target -> the default model, untouched.
+
+    The default is the LIQUIDITY model, not the nominal one: it is what the
+    emulator actually fills with, and resolving to anything else here made the
+    experiment receipt claim a cost basis the fills never used.
+    """
     model = resolve_execution_cost_model(None)
-    assert model == DEFAULT_EQUITY_EXECUTION_COST_MODEL
+    assert model == LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
     assert isinstance(model, ExecutionCostModel)
+
+
+def test_an_explicit_base_is_returned_unchanged():
+    model = resolve_execution_cost_model(None, base=DEFAULT_EQUITY_EXECUTION_COST_MODEL)
+    assert model == DEFAULT_EQUITY_EXECUTION_COST_MODEL
 
 
 def test_stress_scenarios_hit_the_target_one_way_cost():
@@ -226,7 +238,7 @@ def test_stress_scenarios_hit_the_target_one_way_cost():
 
 
 def test_stress_scenarios_preserve_component_proportions():
-    base = DEFAULT_EQUITY_EXECUTION_COST_MODEL
+    base = LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
     model = resolve_execution_cost_model(50.0)
     scale = _one_way(model) / _one_way(base)
     assert model.spread_bps == pytest.approx(base.spread_bps * scale)
@@ -238,7 +250,7 @@ def test_stress_scenarios_preserve_component_proportions():
 def test_stress_scenarios_are_versioned_distinctly():
     versions = {resolve_execution_cost_model(t).version for t in (None, 25.0, 50.0)}
     assert len(versions) == 3
-    assert resolve_execution_cost_model(25.0).version != DEFAULT_EQUITY_EXECUTION_COST_MODEL.version
+    assert resolve_execution_cost_model(25.0).version != LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL.version
 
 
 def test_cost_model_resolution_is_deterministic():
