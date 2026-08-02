@@ -11,6 +11,7 @@ import socket as _socket_default
 # still complete; anything beyond is a hang.
 _socket_default.setdefaulttimeout(45)
 import time
+import math
 import threading
 import argparse
 import time
@@ -2609,6 +2610,18 @@ def _conviction_bear_alloc(cfg, regime, ret20, ret5, dwell, prev_ratchet):
     return alloc, alloc
 
 
+def _chop_ret20_cfg(cfg):
+    """None (= gate off) unless a finite number is configured."""
+    _v = cfg.get("residual_sleeve_chop_min_ret20_pct")
+    if _v is None or _v == "":
+        return None
+    try:
+        _f = float(_v)
+        return _f if math.isfinite(_f) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _residual_sleeve_config(cached_strategies):
     """P&L sweep 2026-07-19: config for the residual SPY sleeve (idle cash
     parks in a broad ETF instead of dragging at 0% — the 3-regime forensics
@@ -2656,10 +2669,10 @@ def _residual_sleeve_config(cached_strategies):
                 # symbol on CHOP bars, not just confirmed bull. False = OFF.
                 "chop_enabled": bool(cfg.get("residual_sleeve_chop_enabled", False)),
                 # Gate chop parking on the 20-day proxy return. None = OFF.
-                "chop_min_ret20_pct": (
-                    None if cfg.get("residual_sleeve_chop_min_ret20_pct") is None
-                    else float(cfg.get("residual_sleeve_chop_min_ret20_pct"))
-                ),
+                # Coerce like every neighbouring numeric key: a blank UI field
+                # ("") must not raise out of _residual_sleeve_config, which would
+                # silently disable the whole sleeve at three call sites.
+                "chop_min_ret20_pct": _chop_ret20_cfg(cfg),
                 # 2026-07-23 conviction-scaled hedge (default OFF -> static
                 # bear_alloc_pct). Scale the SQQQ NAV cap UP with downtrend
                 # conviction: alloc = clamp(base + slope*max(0,-ret20-start),
@@ -3426,16 +3439,26 @@ def _residual_sleeve_deploy(
         if regime == "chop" and "chop" in _sleeve_regimes:
             _chop_min_ret20 = cfg.get("chop_min_ret20_pct")
             if _chop_min_ret20 is not None:
+                # FAIL CLOSED. Previously a missing/NaN ret20 skipped the gate and
+                # PARKED — every failure mode fell toward the exact behaviour this
+                # gate exists to prevent (measured at -6.56pp on the bear window).
+                # That is reachable, not theoretical: _detect_market_regime's blind
+                # path returns regime_blind_fallback ("chop") with ret20 still None
+                # when no proxy has >=21 point-in-time closes. With chop parking
+                # enabled, "neutral capacity" silently became an active long
+                # deployment in a downtrend.
+                _sc_diag = ((globals().get("_strategy_cache") or {}).get(
+                    "graph_nexus_analysis") or {}).get("_market_regime_diag") or {}
                 try:
-                    _sc_diag = ((globals().get("_strategy_cache") or {}).get(
-                        "graph_nexus_analysis") or {}).get("_market_regime_diag") or {}
-                    _ret20 = _sc_diag.get("ret20")
-                    if _ret20 is not None and float(_ret20) < float(_chop_min_ret20):
-                        _log(f"[sleeve] chop park SKIPPED — ret20 {float(_ret20):+.1f}% "
-                             f"below {float(_chop_min_ret20):+.1f}% (bear-adjacent chop)", "cyan")
-                        return
+                    _ret20 = float(_sc_diag.get("ret20"))
+                    _ok = math.isfinite(_ret20) and _ret20 >= float(_chop_min_ret20)
                 except (TypeError, ValueError):
-                    pass
+                    _ret20, _ok = None, False
+                if not _ok:
+                    _log(f"[sleeve] chop park SKIPPED — ret20 "
+                         f"{'unavailable' if _ret20 is None else format(_ret20, '+.1f') + '%'} "
+                         f"vs required {float(_chop_min_ret20):+.1f}% (fail-closed)", "cyan")
+                    return
         if regime not in _sleeve_regimes:
             return
         sym = cfg["symbol"]
@@ -12851,20 +12874,40 @@ while not shutdown_requested:
                                             )
                                         except Exception:
                                             _sg_auth = None
-                                        # Suppress either way: skipping one tick
-                                        # in a name costs a bar of latency, while
-                                        # trading through an unadjusted split
-                                        # sells at 1/8 of book and orphans the
-                                        # rest. Confidence only changes the log.
+                                        # Asymmetric suppression. Inference has a
+                                        # 65% false-positive rate on these caches
+                                        # (176 of 345 one-bar discontinuities were
+                                        # genuine crashes), so "suppress all orders"
+                                        # cuts BOTH ways: on a real -90% collapse it
+                                        # silently swallows the protective SELL and
+                                        # holds the position into the hole. Blocking
+                                        # an exit is the one failure this guard must
+                                        # not cause.
+                                        #   CONFIRMED by the splits calendar -> the
+                                        #     price move is bookkeeping, not economics;
+                                        #     suppress everything for one tick.
+                                        #   UNCONFIRMED -> block only BUYs (entering at
+                                        #     a misread price is the cheap mistake) and
+                                        #     let sells through, because if it really is
+                                        #     a crash the sell is exactly right, and if
+                                        #     it is an unlisted split the position was
+                                        #     going to be restated anyway.
+                                        _sg_block_all = bool(_sg_auth)
+                                        if _sg_block_all or decision == 1:
+                                            _log(
+                                                f"SPLIT GUARD: {symbol} ${_sg_last:.2f} -> ${float(price):.2f} "
+                                                f"= {_sg_ratio:g}x share multiplier "
+                                                f"({'CONFIRMED by splits calendar — suppressing all orders' if _sg_auth else 'unconfirmed — suppressing BUYs only, exits still allowed'})"
+                                                f" in this name this tick",
+                                                "red",
+                                            )
+                                            _trade_skipped_no_price = True
+                                            continue
                                         _log(
-                                            f"SPLIT GUARD: {symbol} ${_sg_last:.2f} -> ${float(price):.2f} "
-                                            f"= {_sg_ratio:g}x share multiplier "
-                                            f"({'CONFIRMED by splits calendar' if _sg_auth else 'unconfirmed — inferred from price only'})"
-                                            f" — suppressing all orders in this name this tick",
-                                            "red",
+                                            f"SPLIT GUARD: {symbol} {_sg_ratio:g}x step unconfirmed by the "
+                                            f"splits calendar — allowing this exit (a real crash must be sellable)",
+                                            "yellow",
                                         )
-                                        _trade_skipped_no_price = True
-                                        continue
                             except Exception:
                                 pass
                             # ── Task 7: hard max_positions gate. Block a NEW-name

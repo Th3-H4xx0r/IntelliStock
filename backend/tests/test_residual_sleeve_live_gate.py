@@ -15,10 +15,12 @@ _TREE = ast.parse(
 _WANTED = {
     "_conviction_bear_alloc",
     "_residual_sleeve_config",
+    "_chop_ret20_cfg",
     "_residual_sleeve_release",
     "_residual_sleeve_deploy",
 }
 _ns = {
+    "math": __import__("math"),
     "_log": lambda *_a, **_k: None,
     "_RESIDUAL_SLEEVE_STATE": {
         "last_park_ts": None,
@@ -30,6 +32,7 @@ _ns = {
     },
     "_sleeve_market_regime": lambda: "bull",
     "_sleeve_circuit_tier": lambda: "",
+    "_sleeve_rally_onset": lambda: False,
 }
 for _node in _TREE.body:
     if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:

@@ -80,14 +80,18 @@ def split_multiplier_for(ticker, as_of=None, window_days: int = 5):
     if not as_of:
         return None
 
-    with _LOCK:
-        if not _CACHE_LOADED:
-            try:
-                d = datetime.strptime(as_of, "%Y-%m-%d")
-                _load((d - timedelta(days=400)).strftime("%Y-%m-%d"),
-                      (d + timedelta(days=30)).strftime("%Y-%m-%d"))
-            except ValueError:
-                return None
+    # The fetch is deliberately OUTSIDE the lock. _load reaches Benzinga through
+    # _paginate (up to 5 pages x 30s timeout x 2 retries), so holding _LOCK
+    # across it could stall every thread calling this for minutes — and the one
+    # moment it can trigger is the first tick with a >=35% price step, i.e.
+    # during a crash, exactly when the order loop must not block.
+    if not _CACHE_LOADED:
+        try:
+            d = datetime.strptime(as_of, "%Y-%m-%d")
+            _load((d - timedelta(days=400)).strftime("%Y-%m-%d"),
+                  (d + timedelta(days=30)).strftime("%Y-%m-%d"))
+        except ValueError:
+            return None
 
     try:
         target = datetime.strptime(as_of, "%Y-%m-%d")

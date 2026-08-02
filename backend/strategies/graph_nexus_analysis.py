@@ -8643,42 +8643,24 @@ def _resolve_position_peak_state(
             peak_price = fallback_price
     if peak_price <= 0.0:
         peak_price = fallback_price
-    # 2026-08-02 SPLIT-AWARE PEAK. This is the sole reader of every `_peak_*`
-    # key, and those keys are PERSISTED to RethinkDB (they are not in the
-    # strategy_cache persistence blacklist), so a stale peak survives restarts.
-    # After an unadjusted 8-for-1 a stored peak of $808.88 sits against a live
-    # price of $101.57 -> drop_from_peak reads 87.5%, which trips the trailing
-    # stop, releases the rotation winner-lock, dissolves big-winner protection
-    # and disengages peak protection. Restating the peak here fixes all of them
-    # at once because they all read through this function.
+    # 2026-08-02 (REVERTED, deliberately). A split-aware peak restatement lived
+    # here and it was CRITICAL-severity wrong. It called
+    # detect_split_ratio(peak_price, fallback_price) where fallback_price is the
+    # CURRENT price, and peak >= current always holds because of the ratchet
+    # below. That is not a bar-to-bar comparison -- it is CUMULATIVE drawdown of
+    # any duration, so it matched at 50%, 66.7%, 75%, 80%, 83.3%, 87.5%, 90%...
+    # off the peak. A position sliding from $200 to $80 over three weeks would be
+    # observed crossing -50%, have its peak silently rewritten to the current
+    # price, have its ::armed flag popped, and read drop_from_peak = 0%. The
+    # trailing stop, rotation winner-lock, big-winner protection and peak
+    # protection all read through this function and would all be defeated
+    # together -- on a real crash, permanently, and persisted to RethinkDB.
     #
-    # A REVERSE split is the mirror and is worse: the peak ratchets UP 10x at
-    # :19686 and every later true price then looks like a huge drawdown, so the
-    # position can never be held again.
-    if isinstance(strategy_cache, dict) and peak_price > 0.0 and fallback_price > 0.0:
-        try:
-            from split_detect import detect_split_ratio
-            _sp_ratio = detect_split_ratio(peak_price, fallback_price)
-            if _sp_ratio is not None:
-                # detect_split_ratio returns the SHARE multiplier, so a PRICE
-                # divides by it (split_detect.py contract: shares *= ratio,
-                # price /= ratio). Multiplying here restated VGT's peak to
-                # $6471 -- a 98.4% drop-from-peak, worse than the 87.4% bug it
-                # was meant to fix -- and persisted it, after which 6471/101 =
-                # 63.7x matches no split ratio and the error is unrepairable.
-                peak_price = peak_price / _sp_ratio
-                strategy_cache[peak_key] = peak_price
-                # The armed ratchet was set against the pre-split scale; a
-                # reverse split would otherwise leave the stop armed forever.
-                strategy_cache.pop(f"{peak_key}::armed", None)
-                _log(
-                    f"Split-adjusted peak for {ticker}: restated by {_sp_ratio:g}x "
-                    f"to ${peak_price:.2f} (price ${fallback_price:.2f}) — a split "
-                    f"is not a drawdown",
-                    "cyan",
-                )
-        except Exception:
-            pass
+    # It is also unnecessary: bars are now fetched with adjustment="split"
+    # (broker.py), so a stored peak and a live price are already on the same
+    # scale. Inference here can only produce false positives. If a genuine
+    # need reappears, gate it on corporate_actions.split_multiplier_for -- an
+    # authoritative ex-date -- never on a price ratio.
     return peak_key, peak_price
 
 
@@ -20125,6 +20107,11 @@ def _ensure_overlay_bars_table(conn):
         pass
 
 
+def _overlay_bars_adjustment() -> str:
+    """Bar adjustment this process expects cached rows to be in."""
+    return str(os.environ.get("ALPACA_BARS_ADJUSTMENT", "split") or "split").lower()
+
+
 def _overlay_bars_cache_get(conn, symbol: str) -> dict | None:
     """Load the cached bars DOC for a symbol from RethinkDB.
 
@@ -20139,6 +20126,14 @@ def _overlay_bars_cache_get(conn, symbol: str) -> dict | None:
         _ensure_overlay_bars_table(conn)
         doc = _r.db(DB_NAME).table(NEXUS_OVERLAY_BARS_TABLE).get(symbol).run(conn)
         if not doc or not doc.get("bars"):
+            return None
+        # The row is keyed by symbol ALONE, so a row written before bars moved
+        # to adjustment="split" holds RAW closes and would be served as if it
+        # were split-adjusted — silently reintroducing the unadjusted-split
+        # corruption (VGT 8-for-1 read as an -87% crash) that the fetch-side
+        # change exists to remove. Treat a mismatched or missing adjustment as
+        # a MISS so the row is refetched and overwritten. No purge needed.
+        if str(doc.get("adjustment") or "") != _overlay_bars_adjustment():
             return None
         return doc
     except Exception:
@@ -20159,6 +20154,7 @@ def _overlay_bars_cache_set(conn, symbol: str, bars: list[dict],
     try:
         _ensure_overlay_bars_table(conn)
         doc = {"id": symbol, "bars": bars,
+               "adjustment": _overlay_bars_adjustment(),
                "cached_at": datetime.utcnow().isoformat()}
         if fetch_start:
             doc["fetch_start"] = fetch_start
@@ -22556,7 +22552,13 @@ def _apply_portfolio_drawdown_halt(
         )
 
     if halt_active and not triggered_now and last_value > 0.0:
-        if current_value > last_value:
+        # `>=`, not `>`. The kill tier liquidates to 100% cash, and a
+        # 100%-cash portfolio has an EXACTLY flat NAV — so a strict `>` can
+        # never book an up-day, up_days resets every bar, and the halt becomes
+        # an absorbing state the instance can never leave. Flat is not a
+        # drawdown; it satisfies "stopped going down", which is what the
+        # resume condition is actually asking.
+        if current_value >= last_value:
             up_days += 1
         else:
             up_days = 0

@@ -90,7 +90,7 @@ def test_cache_set_stores_coverage(monkeypatch):
 
 
 def test_cache_get_returns_doc(monkeypatch):
-    store = {"SPY": {"id": "SPY", "bars": _bars("2025-12-14", 5),
+    store = {"SPY": {"id": "SPY", "bars": _bars("2025-12-14", 5), "adjustment": "split",
                      "fetch_start": "2025-12-14", "fetch_end": "2026-01-01"}}
     _with_fake_rdb(monkeypatch, store)
     doc = g._overlay_bars_cache_get(object(), "SPY")
@@ -118,7 +118,7 @@ def _run_ensure(monkeypatch, store, cache, symbols, fetch_range,
 
 
 def test_ensure_treats_empty_row_as_miss(monkeypatch):
-    store = {"SPY": {"id": "SPY", "bars": []}}  # poisoned row (old writer)
+    store = {"SPY": {"id": "SPY", "bars": [], "adjustment": "split"}}  # poisoned row (old writer)
     cache = {}
     batches = _run_ensure(monkeypatch, store, cache, ["SPY"],
                           ("2025-12-14", "2026-07-19"))
@@ -128,7 +128,7 @@ def test_ensure_treats_empty_row_as_miss(monkeypatch):
 
 def test_ensure_refetches_when_row_starts_too_late(monkeypatch):
     # Row covers 2026-04-30.. but the run needs 2025-12-14.. → refetch.
-    store = {"QQQ": {"id": "QQQ", "bars": _bars("2026-04-30", 53),
+    store = {"QQQ": {"id": "QQQ", "bars": _bars("2026-04-30", 53), "adjustment": "split",
                      "fetch_start": "2026-04-30", "fetch_end": "2026-07-19"}}
     cache = {}
     batches = _run_ensure(monkeypatch, store, cache, ["QQQ"],
@@ -139,7 +139,7 @@ def test_ensure_refetches_when_row_starts_too_late(monkeypatch):
 def test_ensure_reuses_covering_row(monkeypatch):
     # Row starts within 7d grace of the requested start and ends near the
     # requested end → reused without any fetch.
-    store = {"VOO": {"id": "VOO", "bars": _bars("2025-12-16", 220),
+    store = {"VOO": {"id": "VOO", "bars": _bars("2025-12-16", 220), "adjustment": "split",
                      "fetch_start": "2025-12-16", "fetch_end": "2026-07-19"}}
     cache = {}
     batches = _run_ensure(monkeypatch, store, cache, ["VOO"],
@@ -150,8 +150,35 @@ def test_ensure_reuses_covering_row(monkeypatch):
 
 def test_ensure_legacy_row_uses_first_bar_for_start(monkeypatch):
     # Legacy rows (no fetch_start) fall back to the first bar's date.
-    store = {"XLF": {"id": "XLF", "bars": _bars("2026-04-30", 53)}}
+    store = {"XLF": {"id": "XLF", "bars": _bars("2026-04-30", 53), "adjustment": "split"}}
     cache = {}
     batches = _run_ensure(monkeypatch, store, cache, ["XLF"],
                           ("2025-12-14", "2026-07-19"))
     assert batches and "XLF" in batches[0]
+
+
+def test_legacy_row_without_adjustment_is_a_miss(monkeypatch):
+    """A row written before bars moved to adjustment="split" holds RAW closes.
+
+    Serving it as if it were split-adjusted is exactly the corruption the
+    fetch-side change removes (VGT's 8-for-1 read as an -87% crash), and the
+    row is keyed by symbol alone so nothing else distinguishes the two. Treat
+    it as a miss: the row is refetched and overwritten, no purge required.
+    """
+    store = {"SPY": {"id": "SPY", "bars": _bars("2025-12-14", 5)}}  # no adjustment
+    _with_fake_rdb(monkeypatch, store)
+    assert g._overlay_bars_cache_get(object(), "SPY") is None
+
+
+def test_row_with_mismatched_adjustment_is_a_miss(monkeypatch):
+    store = {"SPY": {"id": "SPY", "bars": _bars("2025-12-14", 5),
+                     "adjustment": "raw"}}
+    _with_fake_rdb(monkeypatch, store)
+    assert g._overlay_bars_cache_get(object(), "SPY") is None
+
+
+def test_cache_set_stamps_the_adjustment(monkeypatch):
+    written = {}
+    _with_fake_rdb(monkeypatch, written)
+    g._overlay_bars_cache_set(object(), "SPY", _bars("2025-12-14", 5))
+    assert written["SPY"]["adjustment"] == "split"

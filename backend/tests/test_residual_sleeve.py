@@ -19,6 +19,7 @@ if _backend not in sys.path:
 # functions out of the source and exec them into a stub namespace.
 _WANTED = {
     "_residual_sleeve_config",
+    "_chop_ret20_cfg",
     "_residual_sleeve_release",
     "_residual_sleeve_deploy",
     "_submit_portfolio_signal",
@@ -28,6 +29,7 @@ _src = open(os.path.join(_backend, "broker.py")).read()
 _tree = ast.parse(_src)
 b = types.SimpleNamespace()
 _ns = {
+    "math": __import__("math"),
     "_log": lambda *a, **k: None,
     "_RESIDUAL_SLEEVE_STATE": {"last_park_ts": None, "bear_entry_px": None,
                                "last_bear_exit_ts": None},
@@ -838,3 +840,44 @@ def test_chop_gate_does_not_affect_bull_bars():
     b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 4, 22, 15),
                               _spec_chop_ret20(0.0))
     assert len(emu.signals) == 1
+
+
+# ── Fail-closed: every ret20 failure mode used to fall toward PARKING, which is
+# the exact behaviour the gate exists to prevent (-6.56pp on the bear window).
+# The blind path in _detect_market_regime returns regime "chop" with ret20 still
+# None whenever no proxy has >=21 point-in-time closes, so this is reachable.
+
+def test_chop_park_blocked_when_ret20_missing():
+    _set_regime("chop"); _set_ret20(None)
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 3, 17, 15),
+                              _spec_chop_ret20(0.0))
+    assert emu.signals == [], "missing ret20 must not park (fail closed)"
+
+
+def test_chop_park_blocked_when_ret20_nan():
+    _set_regime("chop"); _set_ret20(float("nan"))
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 3, 17, 15),
+                              _spec_chop_ret20(0.0))
+    assert emu.signals == [], "NaN ret20 compares False both ways; must not park"
+
+
+def test_chop_park_blocked_when_strategy_cache_empty():
+    _set_regime("chop")
+    b._ns.pop("_strategy_cache", None)
+    emu = _Emu(cash=1800.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SPY": 600.0}, datetime(2026, 3, 17, 15),
+                              _spec_chop_ret20(0.0))
+    assert emu.signals == [], "no diag at all must not park"
+
+
+def test_blank_chop_ret20_string_does_not_disable_the_sleeve():
+    """A cleared UI field arrives as "". float("") raises, and the raise
+    escaped _residual_sleeve_config -- silently killing the whole sleeve at
+    all three call sites, not just this one gate."""
+    assert b._chop_ret20_cfg({"residual_sleeve_chop_min_ret20_pct": ""}) is None
+    assert b._chop_ret20_cfg({"residual_sleeve_chop_min_ret20_pct": None}) is None
+    assert b._chop_ret20_cfg({"residual_sleeve_chop_min_ret20_pct": "bogus"}) is None
+    assert b._chop_ret20_cfg({"residual_sleeve_chop_min_ret20_pct": "2.5"}) == 2.5
+    assert b._chop_ret20_cfg({}) is None
