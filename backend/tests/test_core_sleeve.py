@@ -282,3 +282,48 @@ def test_target_structure_reproduces_the_designed_weights():
 
 def test_min_deploy_floor_is_the_broker_floor_not_a_new_one():
     assert MIN_CORE_DEPLOY_USD == 50.0
+
+
+# ── The satellite must not crowd out the core ────────────────────────────────
+# Found by the first Layer-3 validation run (bt 786116): the SPY core sat at
+# exactly 30.0% -- its clamp FLOOR -- for the whole window instead of the 60%
+# target. Cause: core = clamp(1 - cash_floor - satellite, min, max) makes the
+# core a RESIDUAL of the satellite, and the only thing bounding the satellite
+# was nexus_portfolio_pct, which is measured against FULL NAV and therefore
+# stops binding by construction once a core exists.
+
+def _satellite_cap(config):
+    """Mirror of the bound applied in graph_nexus_analysis's total-spend cap."""
+    pct = float(config.get("nexus_portfolio_pct", 0.95) or 0.95)
+    if bool(config.get("core_sleeve_enabled", False)):
+        core = float(config.get("core_target_pct", 0.60) or 0.60)
+        cash = float(config.get("cash_reserve_floor_pct", 0.02) or 0.02)
+        room = max(0.05, 1.0 - core - cash)
+        if room < pct:
+            pct = room
+    return pct
+
+
+def test_satellite_cap_leaves_room_for_the_core_target():
+    cfg = {"core_sleeve_enabled": True, "core_target_pct": 0.60,
+           "cash_reserve_floor_pct": 0.02, "nexus_portfolio_pct": 0.95}
+    assert abs(_satellite_cap(cfg) - 0.38) < 1e-9
+
+
+def test_satellite_cap_is_untouched_when_the_core_is_off():
+    """Byte-identical to today when the flag is off -- this ships dark."""
+    cfg = {"core_sleeve_enabled": False, "nexus_portfolio_pct": 0.95}
+    assert _satellite_cap(cfg) == 0.95
+
+
+def test_a_tighter_operator_cap_still_wins():
+    cfg = {"core_sleeve_enabled": True, "core_target_pct": 0.60,
+           "cash_reserve_floor_pct": 0.02, "nexus_portfolio_pct": 0.20}
+    assert _satellite_cap(cfg) == 0.20
+
+
+def test_an_absurd_core_target_cannot_starve_the_satellite_to_zero():
+    """A 99% core must not make the satellite unfundable and wedge the book."""
+    cfg = {"core_sleeve_enabled": True, "core_target_pct": 0.99,
+           "cash_reserve_floor_pct": 0.02, "nexus_portfolio_pct": 0.95}
+    assert _satellite_cap(cfg) == 0.05

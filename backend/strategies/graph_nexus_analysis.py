@@ -31406,6 +31406,21 @@ class GraphNexusAnalysis:
         # allocation when multiple paths write in the same bar.
         # ────────────────────────────────────────────────────────────────
         _tot_cap_pct = float(config.get("nexus_portfolio_pct", 0.95) or 0.95)
+        # With an index core armed, this cap is measured against FULL NAV and so
+        # stops binding by construction -- 0.95 of NAV is more than the whole
+        # satellite sleeve, so the satellite is free to crowd the core out. That
+        # is not theoretical: the first Layer-3 validation run pinned the SPY
+        # core at exactly 30.0% (its clamp FLOOR, core_min_pct) for the entire
+        # window, because core = clamp(1 - cash_floor - satellite, ...) makes the
+        # core a RESIDUAL of the satellite and nothing bounded the satellite.
+        # Bound it to what the design leaves over, so a 60% core target actually
+        # produces a 60% core.
+        if bool(config.get("core_sleeve_enabled", False)):
+            _core_tgt = float(config.get("core_target_pct", 0.60) or 0.60)
+            _cash_fl = float(config.get("cash_reserve_floor_pct", 0.02) or 0.02)
+            _sat_room = max(0.05, 1.0 - _core_tgt - _cash_fl)
+            if _sat_room < _tot_cap_pct:
+                _tot_cap_pct = _sat_room
         if _tot_cap_pct > 0 and portfolio_total > 0:
             _tot_cap = portfolio_total * _tot_cap_pct
             _total_new_spend = sum(
