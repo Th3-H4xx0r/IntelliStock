@@ -5318,6 +5318,88 @@ def _dated_market_cap(
     return market_cap
 
 
+def _as_of_scaled_market_cap(symbol, market_cap, strategy_cache):
+    """Deflate a CURRENT-STATE market cap back toward the decision date.
+
+    Market cap is a hard buy gate, not a size: below ``min_market_cap`` the
+    Nexus quality filter zeroes the score, and below
+    ``momentum_watchlist_min_market_cap`` (default $2B) the momentum lane
+    refuses the entry. In research mode there is no dated fundamentals
+    snapshot, so both gates were reading ``yf.Ticker(sym).info["marketCap"]``
+    or the graph's ``c.yf_market_cap`` — a single undated scalar that is
+    always TODAY's value. Deciding a 2023 bar, that admitted NVDA on its 2026
+    valuation and blocked names that were large then and have since collapsed.
+    The bias is not symmetric: it systematically lets the eventual winners
+    through the floor and keeps the eventual losers out, which flatters
+    exactly the metric the backtest exists to measure.
+
+    yfinance exposes no historical market cap, so the honest reconstruction
+    available here is price-based: scale by the ratio of the last CLOSED
+    session's close to the reference close the current-state number
+    corresponds to. That removes the price component of the drift, which is
+    the part that spans orders of magnitude. It does NOT correct share-count
+    drift (buybacks, dilution, secondaries) — that residual is a few percent a
+    year for a mega-cap and can be a multiple over years for a serial diluter,
+    so this is a bias reduction, not a point-in-time value. A genuine dated
+    market cap only comes from a frozen fundamentals snapshot via
+    ``_dated_market_cap``.
+
+    Degenerate cases return the input unchanged: live or strict contexts, no
+    overlay bars for the symbol, or a cache whose newest bar is already the
+    decision date (nothing to deflate).
+    """
+    cache = strategy_cache if isinstance(strategy_cache, dict) else None
+    if cache is None:
+        return market_cap
+    try:
+        current_market_cap = float(market_cap or 0.0)
+    except (TypeError, ValueError):
+        return market_cap
+    if current_market_cap <= 0:
+        return market_cap
+    context = cache.get("_point_in_time_context")
+    if not _pit_is_research(context):
+        # Live reads a genuinely current value; strict already refused to
+        # substitute one. Only the declared research path needs deflating.
+        return market_cap
+    if cache.get("_pit_scale_market_cap") is False:
+        return market_cap
+    as_of = getattr(context, "as_of", None)
+    if not isinstance(as_of, datetime):
+        return market_cap
+    overlay = cache.get("_overlay_bars_raw")
+    if not isinstance(overlay, dict):
+        return market_cap
+    key = str(symbol or "").strip()
+    bars = overlay.get(key) or overlay.get(key.upper()) or []
+    if not isinstance(bars, list) or not bars:
+        return market_cap
+
+    def _closes(rows):
+        out = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                close = float(row.get("c", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if close > 0:
+                out.append(close)
+        return out
+
+    reference = _closes(bars)
+    as_of_visible = _closes(
+        _visible_overlay_bars(bars, cache, as_of.date().isoformat())
+    )
+    if not reference or not as_of_visible:
+        return market_cap
+    ratio = as_of_visible[-1] / reference[-1]
+    if not (ratio > 0.0) or ratio == float("inf"):
+        return market_cap
+    return current_market_cap * ratio
+
+
 def _v32_get_market_cap(
     symbol: str,
     strategy_cache: dict | None,
@@ -5355,7 +5437,9 @@ def _v32_get_market_cap(
                 except Exception:
                     mc = 0.0
                 if mc > 0:
-                    return mc
+                    # Cached metadata is whatever the current-state source said
+                    # when it was seeded — see _as_of_scaled_market_cap.
+                    return _as_of_scaled_market_cap(symbol, mc, strategy_cache)
     return None
 
 
@@ -5722,8 +5806,15 @@ def _extract_quality_metadata(
             sources.append("yfinance")
 
     current_price = _resolve_symbol_price(symbol, prices, price_history, portfolio_emulator=portfolio_emulator)
+    resolved_market_cap = merged.get("market_cap")
+    if dated_market_cap is None:
+        # Every source above except the strict snapshot is current-state, so
+        # only deflate when the snapshot did not supply the number.
+        resolved_market_cap = _as_of_scaled_market_cap(
+            symbol, resolved_market_cap, strategy_cache,
+        )
     return {
-        "market_cap": merged.get("market_cap"),
+        "market_cap": resolved_market_cap,
         "avg_volume": merged.get("avg_volume"),
         "current_price": current_price,
         "sources": tuple(sources),
@@ -6855,6 +6946,147 @@ def _daily_closes_from_intraday(
     )
 
 
+def _overlay_daily_cutoff(strategy_cache, date_key, config=None) -> str:
+    """Latest DAILY session date whose close was observable at the decision time.
+
+    The overlay cache (``strategy_cache["_overlay_bars_raw"]``) holds ``1Day``
+    bars fetched over a range that deliberately runs PAST the sim clock —
+    ``_overlay_bars_compute_range`` caps the end at wall-clock today, not at
+    ``date_key``. Every consumer of that cache guarded itself with
+    ``bar_date[:10] <= date_key``, which is only sound when the decision is
+    taken at or after the exchange close of ``date_key``.
+
+    At the 15m/1h cadence equities actually backtest at, it is not. A decision
+    at 09:45 ET on day D was reading day D's daily bar, whose ``c`` is the 16:00
+    close and whose ``h``/``l``/``v`` span the entire session. That put ~6h of
+    future price action into momentum discovery, the momentum watchlist score,
+    the falling-knife filter, the breakout scanner, the amplifier's
+    extra-capital call, price-trend detection, the SPY macro-risk haircut and
+    two LLM prompt contexts: the strategy could see that a name closed +8%
+    before "deciding" to buy it at 09:45. ``_point_in_time_closes`` already
+    solved exactly this for the regime detector and the breadth scan; this is
+    the same boundary expressed as a date so the cheap string filters at the
+    other call sites can keep their shape.
+
+    Returns the date string those filters should compare against. That is
+    ``date_key`` itself when the session's close is genuinely visible:
+
+      * no point-in-time context — unit tests and legacy callers keep the old
+        behaviour rather than silently losing a bar;
+      * live, where today's partial daily bar IS the current state and hiding
+        it would change live trading;
+      * daily cadence, which keeps the convention ``run_once``'s news window
+        already uses (``_is_daily``): a daily bar is the end-of-day state the
+        decision is made on, and fills land on the next bar;
+      * an intraday decision taken at or after the session close.
+
+    Otherwise it returns the previous calendar day, which excludes the still-open
+    session without having to know which earlier day was a trading day.
+    """
+    from datetime import timezone as _timezone
+
+    dk = str(date_key or "")[:10]
+    if not dk:
+        return dk
+    cfg = config if isinstance(config, dict) else {}
+    cache = strategy_cache if isinstance(strategy_cache, dict) else None
+    if cache is None:
+        return dk
+    # Two call sites (_resolve_asof_bars, _spy_20d_return) never receive config,
+    # so run_once mirrors both scalars onto the cache. Reading either source
+    # keeps one boundary for every consumer instead of a cadence that depends
+    # on which helper happened to be threaded a config dict.
+    def _setting(name, cache_name):
+        if name in cfg:
+            return cfg.get(name)
+        return cache.get(cache_name)
+
+    # Escape hatch, so the correction can be A/B'd against the old numbers
+    # instead of landing as an unexplainable step change in every reported return.
+    if bool(_setting(
+        "overlay_allow_same_session_daily_bar",
+        "_overlay_allow_same_session_daily_bar",
+    )):
+        return dk
+    context = cache.get("_point_in_time_context")
+    if context is None or bool(getattr(context, "is_live", False)):
+        return dk
+    try:
+        increment_sec = int(_setting(
+            "_resolved_time_increment_sec",
+            "_resolved_time_increment_sec",
+        ) or 0)
+    except (TypeError, ValueError):
+        increment_sec = 0
+    if increment_sec >= 86400:
+        return dk
+    as_of = getattr(context, "as_of", None)
+    if not isinstance(as_of, datetime):
+        return dk
+    memo = cache.get("_overlay_daily_cutoff_memo")
+    memo_key = (dk, as_of, increment_sec)
+    if isinstance(memo, dict) and memo_key in memo:
+        return memo[memo_key]
+    try:
+        session_date = datetime.fromisoformat(dk).date()
+    except (TypeError, ValueError):
+        return dk
+    session_close = None
+    resolver = cache.get("_point_in_time_session_close_resolver")
+    if callable(resolver):
+        try:
+            session_close = resolver(session_date)
+        except Exception:
+            # A missing/erroring calendar must not decide the boundary by
+            # accident. Fall through to the conservative bound below.
+            session_close = None
+    if not isinstance(session_close, datetime):
+        # No usable calendar: assume the latest regular close a US session can
+        # have (16:00 ET under EST = 21:00 UTC). Erring LATE only ever withholds
+        # a bar that was in fact already available; erring early re-opens the leak.
+        session_close = datetime(
+            session_date.year, session_date.month, session_date.day,
+            21, 0, tzinfo=_timezone.utc,
+        )
+    try:
+        if session_close.tzinfo is None:
+            session_close = session_close.replace(tzinfo=_timezone.utc)
+        as_of_utc = (
+            as_of.replace(tzinfo=_timezone.utc)
+            if as_of.tzinfo is None
+            else as_of.astimezone(_timezone.utc)
+        )
+        visible = as_of_utc >= session_close.astimezone(_timezone.utc)
+    except Exception:
+        return dk
+    cutoff = dk if visible else (session_date - timedelta(days=1)).isoformat()
+    if not isinstance(memo, dict):
+        memo = {}
+        cache["_overlay_daily_cutoff_memo"] = memo
+    # One key per bar; a run is bounded by its own bar count.
+    memo[memo_key] = cutoff
+    return cutoff
+
+
+def _visible_overlay_bars(bars, strategy_cache, date_key, config=None) -> list[dict]:
+    """Overlay daily bars whose session had closed at the decision time.
+
+    Thin wrapper over ``_overlay_daily_cutoff`` so the ten call sites that used
+    to open-code ``str(b.get("t", b.get("date", "")))[:10] <= date_key`` share
+    one boundary. See ``_overlay_daily_cutoff`` for why the raw comparison leaks.
+    """
+    cutoff = _overlay_daily_cutoff(strategy_cache, date_key, config)
+    if not isinstance(bars, list):
+        return []
+    if not cutoff:
+        return [b for b in bars if isinstance(b, dict)]
+    return [
+        b for b in bars
+        if isinstance(b, dict)
+        and str(b.get("t", b.get("date", "")))[:10] <= cutoff
+    ]
+
+
 def _recovery_override_regime(closes, current, ret5, config, diag):
     """2026-07-21/24 recovery-override (default OFF). When a genuine recovery is
     detected off a bottom — short-term thrust (ret5 >= regime_recovery_ret5_min_pct)
@@ -7640,7 +7872,10 @@ def _spy_20d_return(strategy_cache: dict | None, date_key: str) -> float | None:
             bars = bars_cache.get(candidate)
             if not isinstance(bars, list) or not bars:
                 continue
-            date_str = str(date_key or "")[:10]
+            # The market's own 20d return decides a risk haircut, so reading
+            # today's not-yet-final SPY close here leaked the market direction
+            # the decision is trying to anticipate — see _overlay_daily_cutoff.
+            date_str = _overlay_daily_cutoff(strategy_cache, date_key)
             closes: list[float] = []
             for b in bars:
                 if not isinstance(b, dict):
@@ -8985,11 +9220,7 @@ def _resolve_asof_bars(sym, price_history, strategy_cache, date_key=None, min_ba
     if not raw:
         return bars
     if date_key:
-        dk = str(date_key)[:10]
-        raw = [
-            b for b in raw
-            if isinstance(b, dict) and str(b.get("t", b.get("date", "")))[:10] <= dk
-        ]
+        raw = _visible_overlay_bars(raw, strategy_cache, date_key)
     return raw if len(raw) >= min_bars else bars
 
 
@@ -13519,7 +13750,7 @@ def _discover_stocks_from_momentum(
             bars_cache: dict = strategy_cache.get("_overlay_bars_raw") or {}
             for sym in scan_tickers:
                 bars = bars_cache.get(sym) or []
-                filtered = [b for b in bars if str(b.get("t", b.get("date", "")))[:10] <= date_key]
+                filtered = _visible_overlay_bars(bars, strategy_cache, date_key, config)
                 if len(filtered) < 6:
                     continue
                 closes = [float(b.get("c", 0)) for b in filtered if float(b.get("c", 0) or 0) > 0]
@@ -13634,8 +13865,10 @@ def _rediscover_momentum_comebacks(
         if not ticker:
             continue
         bars = bars_cache.get(ticker, [])
-        # V18a Codex fix: filter bars to <= date_key to prevent future data leakage in backtests
-        filtered = [b for b in bars if str(b.get("t", b.get("date", "")))[:10] <= date_key]
+        # V18a Codex fix: filter bars to <= date_key to prevent future data leakage
+        # in backtests. 2026-08-02: the same-session daily bar was still visible
+        # intraday — see _overlay_daily_cutoff.
+        filtered = _visible_overlay_bars(bars, strategy_cache, date_key, config)
         closes = [float(b.get("c") or 0) for b in filtered if float(b.get("c") or 0) > 0]
         if len(closes) < 22:
             continue
@@ -13722,8 +13955,11 @@ def _momentum_amplifier_pass(
         if unrealized_pct < min_pnl_pct or held_days < min_hold:
             continue
 
-        # Check 20d return from overlay bars (filter to <= date_key to prevent future data leak)
-        _amp_bars = [b for b in bars_cache.get(sym, []) if str(b.get("t", b.get("date", "")))[:10] <= date_key]
+        # Check 20d return from overlay bars (bounded to the last CLOSED session
+        # so an intraday bar cannot see today's 16:00 close — _overlay_daily_cutoff)
+        _amp_bars = _visible_overlay_bars(
+            bars_cache.get(sym, []), strategy_cache, date_key, config,
+        )
         closes = [float(b.get("c") or 0) for b in _amp_bars if float(b.get("c") or 0) > 0]
         if len(closes) < 22 or closes[-21] <= 0:
             continue
@@ -14287,12 +14523,11 @@ def _build_sector_price_context(
     lines: list[str] = []
     for label, ticker in _SECTOR_COMMODITY_BENCHMARKS.items():
         bars = bars_cache.get(ticker) or []
-        # Filter bars up to date_key to prevent look-ahead
-        filtered: list[dict] = []
-        for b in bars:
-            bar_date = str(b.get("t", b.get("date", "")))[:10]
-            if bar_date <= date_key:
-                filtered.append(b)
+        # Bounded to the last CLOSED session, not just the calendar day —
+        # see _overlay_daily_cutoff.
+        filtered: list[dict] = _visible_overlay_bars(
+            bars, strategy_cache, date_key, config,
+        )
         if len(filtered) < 6:
             continue
         closes = [float(b.get("c", 0)) for b in filtered if float(b.get("c", 0) or 0) > 0]
@@ -14379,8 +14614,8 @@ def _detect_price_based_trends(
 
     for label, ticker in _SECTOR_COMMODITY_BENCHMARKS.items():
         bars = bars_cache.get(ticker) or []
-        # Filter bars up to date_key (no look-ahead)
-        filtered = [b for b in bars if str(b.get("t", b.get("date", "")))[:10] <= date_key]
+        # Filter bars up to the last CLOSED session (no look-ahead)
+        filtered = _visible_overlay_bars(bars, strategy_cache, date_key, config)
         if len(filtered) < 6:
             continue
         closes = [float(b.get("c", 0)) for b in filtered if float(b.get("c", 0) or 0) > 0]
@@ -20557,8 +20792,11 @@ def _fetch_price_history_for_overlay(
         all_bars = bars_cache.get(sym) or []
         if not all_bars:
             continue
-        # Filter to bars on or before as_of_date, sort ascending, take last N
-        bars = [b for b in all_bars if str(b.get("t", ""))[:10] <= as_of_date]
+        # Filter to bars on or before the last CLOSED session, sort ascending,
+        # take last N. This list is rendered straight into the overlay LLM
+        # prompt, so a same-session close here is future price action quoted to
+        # the model as history — see _overlay_daily_cutoff.
+        bars = _visible_overlay_bars(all_bars, _cache, as_of_date, config)
         bars = sorted(bars, key=lambda b: str(b.get("t", "")))[-lookback_days:]
         closes = []
         for b in bars:
@@ -20763,7 +21001,7 @@ def _score_momentum_rank(
 
     for sym, info in watchlist.items():
         all_bars = bars_cache.get(sym) or []
-        filtered = [b for b in all_bars if str(b.get("t", b.get("date", "")))[:10] <= date_key]
+        filtered = _visible_overlay_bars(all_bars, strategy_cache, date_key, config)
         closes = [float(b.get("c", 0)) for b in filtered if float(b.get("c", 0) or 0) > 0]
         if len(closes) < min_history:
             continue
@@ -20812,7 +21050,10 @@ def _score_momentum_rank(
             _fk_exempt.update(str(k).strip().upper() for k in _fk_ps_hist.keys())
     except Exception:
         _fk_exempt = set()
-    scored = _apply_falling_knife_filter(scored, bars_cache, config, date_key, exempt_set=_fk_exempt)
+    scored = _apply_falling_knife_filter(
+        scored, bars_cache, config, date_key,
+        exempt_set=_fk_exempt, strategy_cache=strategy_cache,
+    )
     return scored
 
 
@@ -20822,6 +21063,7 @@ def _apply_falling_knife_filter(
     config: dict,
     date_key: str,
     exempt_set: set[str] | None = None,
+    strategy_cache: dict | None = None,
 ) -> list[tuple[str, float]]:
     """V31.4 Fix 19: filter crashing stocks with short-term bounce.
 
@@ -20867,7 +21109,7 @@ def _apply_falling_knife_filter(
             filtered.append((sym, score))
             continue
         all_bars = bars_cache.get(sym) or []
-        f_bars = [b for b in all_bars if str(b.get("t", b.get("date", "")))[:10] <= date_key]
+        f_bars = _visible_overlay_bars(all_bars, strategy_cache, date_key, config)
         closes = [float(b.get("c", 0) or 0) for b in f_bars if float(b.get("c", 0) or 0) > 0]
         # Insufficient history: don't filter (fail-safe)
         if len(closes) < 50:
@@ -23536,6 +23778,20 @@ class GraphNexusAnalysis:
         )
         if isinstance(strategy_cache, dict):
             strategy_cache["_point_in_time_context"] = point_in_time_context
+            # The resolver is a run_once PARAMETER, but the overlay-bar consumers
+            # that need it are module-level helpers nested 3-4 calls deep and
+            # threading it through ~10 signatures would touch far more surface
+            # than the boundary it enforces. Stash it beside the context so
+            # _overlay_daily_cutoff can ask "had this session closed yet?".
+            if callable(session_close_resolver):
+                strategy_cache["_point_in_time_session_close_resolver"] = (
+                    session_close_resolver
+                )
+            else:
+                strategy_cache.pop(
+                    "_point_in_time_session_close_resolver", None
+                )
+            strategy_cache.pop("_overlay_daily_cutoff_memo", None)
             if point_in_time_fundamentals is not None:
                 strategy_cache["_point_in_time_fundamentals"] = (
                     point_in_time_fundamentals
@@ -23564,6 +23820,17 @@ class GraphNexusAnalysis:
         if _ti_resolved <= 0:
             _ti_resolved = 3600  # live mode / unset → assume baseline
         config["_resolved_time_increment_sec"] = _ti_resolved
+        # Mirror onto the cache for _overlay_daily_cutoff: _resolve_asof_bars and
+        # _spy_20d_return take no config, and the daily-vs-intraday distinction
+        # decides whether the current session's daily bar is observable yet.
+        if isinstance(strategy_cache, dict):
+            strategy_cache["_resolved_time_increment_sec"] = _ti_resolved
+            strategy_cache["_overlay_allow_same_session_daily_bar"] = bool(
+                config.get("overlay_allow_same_session_daily_bar", False)
+            )
+            strategy_cache["_pit_scale_market_cap"] = bool(
+                config.get("pit_scale_market_cap_to_as_of", True)
+            )
 
         # 2026-05-07 backtest perf: clear the prior tick's stamp so a
         # mid-strategy crash leaves None (broker falls through to snapshot)
@@ -27452,7 +27719,9 @@ class GraphNexusAnalysis:
                                     if _ps_tk in _ps_reentry_cd:
                                         continue
                                     _ps_bars = _ps_bars_cache.get(_ps_tk) or []
-                                    _ps_f = [b for b in _ps_bars if str(b.get("t", b.get("date", "")))[:10] <= date_key]
+                                    _ps_f = _visible_overlay_bars(
+                                        _ps_bars, strategy_cache, date_key, config,
+                                    )
                                     _ps_closes = [float(b.get("c", 0) or 0) for b in _ps_f if float(b.get("c", 0) or 0) > 0]
                                     _ps_vols = [float(b.get("v", 0) or 0) for b in _ps_f]
                                     if len(_ps_closes) < 21 or len(_ps_vols) < 21:

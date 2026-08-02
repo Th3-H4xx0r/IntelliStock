@@ -97,6 +97,16 @@ _BLACKLIST_PREFIXES = (
     "_mw_free_cash_",           # free-cash snapshot used by this cycle's sizing
     "_overlay_no_data_",        # negative-result cache for overlay lookups, per-symbol per-run
     "_momentum_ranked_cache",   # ranked-momentum table, recomputed each run from fresh data
+    # Point-in-time boundary handles (2026-08-02). The context is a frozen
+    # dataclass and the resolver is a bare function — both coerce to None and
+    # would be silently dropped anyway, but a persisted decision boundary is
+    # exactly the thing that must never survive into a run with a different
+    # as_of. The cutoff memo is keyed by (date, as_of) tuples, so it is
+    # per-bar by construction and stringifying those keys would only store junk.
+    "_point_in_time_context",
+    "_point_in_time_session_close_resolver",
+    "_point_in_time_fundamentals",
+    "_overlay_daily_cutoff_memo",
 )
 
 _MAX_DICT_ENTRIES = 500
