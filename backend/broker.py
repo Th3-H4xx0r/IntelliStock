@@ -2238,7 +2238,8 @@ def _fetch_price_for_symbol(symbol: str, current_time, key=None, secret=None, fe
         # 1) Preferred: intraday bars up to current_time (backtest-safe).
         bars_data = _req_json(
             f"{ALPACA_DATA_BASE}/stocks/{sym}/bars",
-            {"start": start_iso, "end": cutoff_iso, "timeframe": "1Min", "limit": 10000, "feed": feed, "sort": "asc"},
+            {"start": start_iso, "end": cutoff_iso, "timeframe": "1Min", "limit": 10000, "feed": feed,
+             "sort": "asc", "adjustment": "split"},
             timeout=20,
         )
         bars = (bars_data or {}).get("bars") or []
@@ -2290,7 +2291,8 @@ def _fetch_price_for_symbol(symbol: str, current_time, key=None, secret=None, fe
         prev_day_iso = prev_day.strftime("%Y-%m-%dT%H:%M:%SZ")
         daily_data = _req_json(
             f"{ALPACA_DATA_BASE}/stocks/{sym}/bars",
-            {"start": prev_day_iso, "end": start_iso, "timeframe": "1Day", "limit": 5, "feed": feed, "sort": "desc"},
+            {"start": prev_day_iso, "end": start_iso, "timeframe": "1Day", "limit": 5, "feed": feed,
+             "sort": "desc", "adjustment": "split"},
             timeout=15,
         )
         daily_bars = (daily_data or {}).get("bars") or []
@@ -6557,13 +6559,27 @@ def _reconcile_alpaca_ownership(adapter, order_service):
 def _initialize_live_risk_authority(
     adapter, *, account_id: str, paper: bool
 ):
-    """Load account-scoped risk state; only paper may bootstrap it."""
+    """Load account-scoped risk state; a real-money account may bootstrap it
+    only from a flat book.
+
+    Refusing every live bootstrap was safe against one failure (a row lost
+    mid-drawdown returning with the drawdown forgiven) and catastrophic against
+    another: with no row, ``risk_state`` health stays ``unknown``, the gate
+    blocks every non-reduce-only order, and a funded instance boots silently
+    SELL-ONLY with nothing in the logs to say so. A flat book removes the
+    conflict -- no positions and no working orders means no unrealised loss for
+    a stale high-water mark to hide, so current equity IS the peak and the
+    bootstrap is exactly as safe as it is on paper. Anything else still refuses
+    and lands on the fail-closed path below, now with a legible reason.
+    """
 
     global _live_risk_store, _live_risk_state
     from live_risk_state import (
         RethinkRiskBackend,
         RiskStateStore,
         RiskStateUnavailable,
+        RiskStateBootstrapRefused,
+        initialize_live_risk_state,
         initialize_risk_state,
     )
 
@@ -6571,26 +6587,61 @@ def _initialize_live_risk_authority(
     try:
         state = store.load_required(str(instance_id), str(account_id))
     except RiskStateUnavailable:
-        if not paper:
-            _live_risk_store = store
-            _live_risk_state = None
-            with _live_order_dependency_lock:
-                _live_order_dependency_state.update(
-                    {"risk_state": "unknown", "risk_state_at": None}
-                )
-            return None
         equity = (
             getattr(adapter, "_account_equity", None)
             or getattr(adapter, "_initial_value", None)
         )
-        state = store.save(
-            initialize_risk_state(
-                str(instance_id),
-                str(account_id),
-                equity,
-                datetime.datetime.now(datetime.timezone.utc),
+        if not paper:
+            # Counts MUST come from broker truth, never the emulator mirror --
+            # the mirror is the thing that would be wrong if state were lost.
+            # -1 on an unreadable count so the bootstrap refuses rather than
+            # assuming flat.
+            def _broker_count(fn_name):
+                try:
+                    fn = getattr(adapter, fn_name, None)
+                    return len(fn() or ()) if callable(fn) else -1
+                except Exception:
+                    return -1
+
+            try:
+                _blocked = bool(getattr(adapter.refresh_account(), "trading_blocked", False))
+            except Exception:
+                _blocked = True
+            try:
+                state = store.save(
+                    initialize_live_risk_state(
+                        str(instance_id),
+                        str(account_id),
+                        equity,
+                        datetime.datetime.now(datetime.timezone.utc),
+                        paper=paper,
+                        open_position_count=_broker_count("get_all_positions"),
+                        open_order_count=_broker_count("list_open_orders"),
+                        trading_blocked=_blocked,
+                    )
+                )
+                _log("Live risk state bootstrapped from a flat book "
+                     f"(equity={equity}); drawdown authority is ARMED.", "green")
+            except RiskStateBootstrapRefused as _refused:
+                _log(f"Live risk state NOT bootstrapped: {_refused}. The order "
+                     "gate will block new exposure (reduce-only exits still "
+                     "pass) until a risk row exists.", "red")
+                _live_risk_store = store
+                _live_risk_state = None
+                with _live_order_dependency_lock:
+                    _live_order_dependency_state.update(
+                        {"risk_state": "unknown", "risk_state_at": None}
+                    )
+                return None
+        else:
+            state = store.save(
+                initialize_risk_state(
+                    str(instance_id),
+                    str(account_id),
+                    equity,
+                    datetime.datetime.now(datetime.timezone.utc),
+                )
             )
-        )
     _live_risk_store = store
     _live_risk_state = state
     return state
@@ -6641,6 +6692,28 @@ def _apply_live_confirmed_fill_risk(fill):
     updated = apply_confirmed_fill(_live_risk_state, fill)
     if updated != _live_risk_state:
         _live_risk_state = _live_risk_store.save(updated)
+
+
+def _open_order_idempotency_keys(instance_identity) -> frozenset:
+    """Client order ids of this instance's still-open orders.
+
+    Fails OPEN (empty set) on any error: an unreadable lifecycle store must
+    degrade to today's behaviour rather than block the order path, because the
+    service already enforces idempotency and the gate rule this feeds is
+    defence in depth.
+    """
+    try:
+        svc = globals().get("_live_stock_order_service")
+        store = getattr(svc, "lifecycle_store", None)
+        if store is None:
+            return frozenset()
+        return frozenset(
+            r.client_order_id
+            for r in store.list_for_instance(str(instance_identity))
+            if not r.terminal
+        )
+    except Exception:
+        return frozenset()
 
 
 def _live_order_dependency_snapshot(adapter, intent):
@@ -6740,7 +6813,14 @@ def _live_order_dependency_snapshot(adapter, intent):
         max_quote_age=datetime.timedelta(
             seconds=600 if intent.reduce_only else 30
         ),
-        open_order_idempotency_keys=frozenset(),
+        # Populate rather than hard-wire empty. The gate has a duplicate-order
+        # rule keyed on this set, and passing frozenset() made that rule inert:
+        # it could never see an already-open order for the same intent. The
+        # service short-circuits duplicates itself, so this is defence in
+        # depth -- but the gate is the layer that fails CLOSED, and it was
+        # being handed an empty world. Non-terminal records only: a settled
+        # order must not block a legitimate re-entry.
+        open_order_idempotency_keys=_open_order_idempotency_keys(instance_identity),
         authorized_sources=frozenset(OrderSource),
     )
 
@@ -7703,6 +7783,7 @@ if mode == MODE_BACKTEST:
     # Emulated-fee override (--taker-fee) wins; else resolve from the instance venue.
     _bt_taker_fee = emulated_taker_fee if emulated_taker_fee is not None else _instance_crypto_taker_fee()
     _bt_is_crypto = _is_crypto_instance_runtime()
+    _bt_is_non_equity = _is_non_equity_instance_runtime()
     # Task 4: the SAME resolved cost-model object that goes into experiment
     # preregistration is handed to the emulator, so a receipt can never claim a
     # cost basis the fills did not actually use. (Crypto ignores it — that path
@@ -7712,9 +7793,16 @@ if mode == MODE_BACKTEST:
         taker_fee=_bt_taker_fee,
         is_crypto=_bt_is_crypto,
         execution_delay=backtest_increment_td,
-        cost_model=None if _bt_is_crypto else _evidence_cost_model,
+        # The equity cost model must not be charged to instruments it was not
+        # measured on. It is keyed on NON-EQUITY, not on crypto: a Kalshi
+        # backtest is neither crypto nor equity, and keying on _bt_is_crypto
+        # handed it the equity simulator -- 30.3 bps of spread and slippage
+        # derived from a $2.4M-$7.9M-ADV stock book, applied to event contracts.
+        cost_model=None if _bt_is_non_equity else _evidence_cost_model,
     )
-    _bt_execution_kind = "legacy-immediate-crypto" if _bt_is_crypto else "equity-next-event-v1"
+    _bt_execution_kind = ("legacy-immediate-crypto" if _bt_is_crypto
+                          else "non-equity-immediate" if _bt_is_non_equity
+                          else "equity-next-event-v1")
     _log("PortfolioEmulator initialized for backtest (initial_cash=%s, taker_fee=%s%s, execution=%s)."
          % (initial_cash, _bt_taker_fee, " [emulated]" if emulated_taker_fee is not None else "", _bt_execution_kind), "green")
 elif mode == MODE_LIVE:
