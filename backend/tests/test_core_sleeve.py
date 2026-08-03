@@ -183,7 +183,12 @@ def test_bear_derisk_bypasses_the_cadence():
                                  regime="bear", bear_dwell_days=4,
                                  days_since_rebalance=0)
     assert order.reason == "bear_derisk"
-    assert round(order.notional, 2) == -1800.0  # 0.60 -> 0.30 of 6000
+    # STEP-CAPPED at core_bear_max_step_pct (15% of NAV) per bar. The full
+    # 0.60 -> 0.30 move is $1800; it now completes over two bars instead of
+    # dumping in one. The sweep found the unstepped form sells 68% of NAV in a
+    # single bar from the design's DEFAULT ~98% core state -- worse than the
+    # 60pp liquidation this design exists to replace.
+    assert round(order.notional, 2) == -900.0
 
 
 def test_circuit_blocks_adds_but_never_blocks_a_release():

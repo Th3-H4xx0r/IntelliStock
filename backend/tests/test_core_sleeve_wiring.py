@@ -325,8 +325,12 @@ def test_bear_derisk_is_bounded_not_a_liquidation():
     assert len(emu.signals) == 1
     frac = emu.signals[0]["sell_fraction"]
     assert frac < 1.0, "the bounded de-risk must not liquidate the core"
-    # target = 0.60 * 0.5 = 30% of NAV = $1800; from $3600 that is a $1800 sell.
-    assert abs(frac * 6.0 * 600.0 - 1800.0) < 1e-6
+    # Step cap: at most 15% of NAV per bar, so a $6000 book sells <= $900 here
+    # rather than the full $1800 drift.
+    # target = 0.60 * 0.5 = 30% of NAV = $1800 of drift from $3600, but the
+    # step cap allows only 15% of NAV ($900) this bar; the rest follows on
+    # later bars.
+    assert abs(frac * 6.0 * 600.0 - 900.0) < 1e-6
 
 
 def test_bear_derisk_waits_for_persistence():

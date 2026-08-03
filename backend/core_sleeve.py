@@ -72,6 +72,11 @@ class CoreSleeveConfig:
     bear_scale: float = 0.5
     bear_min_dwell_days: int = 3
     turnover_budget_monthly_pct: float = 0.0
+    #: Largest fraction of NAV the bear de-risk may sell in ONE bar. 0 disables
+    #: the cap, restoring the single-bar cliff. 0.15 completes a 68pp de-risk in
+    #: five bars, which is well inside a real downtrend and survivable through a
+    #: false positive.
+    bear_max_step_pct: float = 0.15
 
 
 def _f(cfg, key, default):
@@ -115,6 +120,7 @@ def core_sleeve_config(config) -> CoreSleeveConfig:
         bear_scale=_f(cfg, "core_bear_scale", 0.5),
         bear_min_dwell_days=_i(cfg, "core_bear_min_dwell_days", 3),
         turnover_budget_monthly_pct=_f(cfg, "turnover_budget_monthly_pct", 0.0),
+        bear_max_step_pct=_f(cfg, "core_bear_max_step_pct", 0.15),
     )
 
 
@@ -255,7 +261,26 @@ def core_rebalance_order(
         and int(bear_dwell_days or 0) >= cfg.bear_min_dwell_days
     )
     if bear_now and drift_usd < 0.0:
+        # Step-capped, because the de-risk this design REPLACES was criticised
+        # for dumping 60pp of one-way notional in a single bar -- and unstepped,
+        # this one is worse.
+        #
+        # 2026-08-03 adversarial sweep, HIGH: the DEFAULT state of this design is
+        # a ~98% core (a silent graph means satellite 0, so the residual clamps
+        # to max_pct). bear_scale=0.5 then drives the target to
+        # target_pct*0.5 = 30%, i.e. a 68%-of-NAV sell in ONE bar, bypassing the
+        # cadence, on a detector whose own comment says it lags a V-bottom by
+        # about two sessions. The existing test only proved frac < 1.0 on a 60%
+        # core; it never exercised the state the design actually produces.
+        #
+        # Capping the STEP keeps the de-risk (it completes over a few bars) while
+        # removing the single-bar cliff. A real downtrend persists long enough
+        # for several steps; a two-session false positive costs one step, not the
+        # whole book.
+        step_cap = max(0.0, float(cfg.bear_max_step_pct or 0.0)) * nav
         sell = min(-drift_usd, core_value)
+        if step_cap > 0.0:
+            sell = min(sell, step_cap)
         if sell < MIN_CORE_ORDER_USD:
             return RebalanceOrder(reason="bear_derisk_below_min", **base)
         return RebalanceOrder(notional=-sell, reason="bear_derisk", **base)
