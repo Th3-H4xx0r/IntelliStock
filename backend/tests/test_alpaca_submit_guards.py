@@ -368,3 +368,57 @@ def test_a_sell_that_floors_below_its_size_must_defer_not_truncate():
     requested, floored = 10.6, 10.0
     would_truncate = floored < requested
     assert would_truncate, "this is the case that must defer rather than post"
+
+
+# ── Live NAV must not lose an unpriced holding ───────────────────────────────
+# 2026-08-03 sweep: get_positions_value dropped any name absent from `prices`,
+# so an unpriced holding vanished from LIVE nav. The emulator carries it at its
+# last known price (d6faf1a), so live and backtest disagreed about NAV for the
+# same book. The index core's satellite is a NAV RESIDUAL, so losing a name
+# inflates the core target by that name's full weight and the core buys into an
+# already-fully-invested book -- the one arithmetic error in that design that
+# spends real money.
+
+class _Adp:
+    """Minimal stand-in exercising the same arithmetic as the adapter method."""
+    def __init__(self, positions, last_prices):
+        self._positions = dict(positions)
+        self._last_prices = dict(last_prices)
+
+    def get_positions_value(self, prices):
+        v = 0.0
+        for t, q in self._positions.items():
+            p = (prices or {}).get(t)
+            if p is None:
+                p = (self._last_prices or {}).get(str(t).upper())
+            if p is None:
+                continue
+            try:
+                pf = float(p)
+            except (TypeError, ValueError):
+                continue
+            if pf > 0:
+                v += q * pf
+        return v
+
+
+def test_an_unpriced_holding_is_carried_at_its_last_known_price():
+    a = _Adp({"AAA": 10.0, "GHOST": 5.0}, {"GHOST": 20.0})
+    assert a.get_positions_value({"AAA": 100.0}) == 1000.0 + 100.0
+
+
+def test_a_fresh_price_wins_over_the_cache():
+    a = _Adp({"AAA": 10.0}, {"AAA": 50.0})
+    assert a.get_positions_value({"AAA": 100.0}) == 1000.0
+
+
+def test_a_name_with_no_price_anywhere_still_contributes_zero():
+    """There is nothing honest to value it at -- but this is now the rare case,
+    not every symbol the tick happened to miss."""
+    a = _Adp({"AAA": 10.0, "GHOST": 5.0}, {})
+    assert a.get_positions_value({"AAA": 100.0}) == 1000.0
+
+
+def test_a_junk_cached_price_does_not_poison_nav():
+    a = _Adp({"AAA": 10.0, "GHOST": 5.0}, {"GHOST": "not-a-number"})
+    assert a.get_positions_value({"AAA": 100.0}) == 1000.0

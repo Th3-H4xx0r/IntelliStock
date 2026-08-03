@@ -2660,11 +2660,40 @@ class AlpacaAdapter(BrokerAdapter):
         return copy.copy(self._positions)
 
     def get_positions_value(self, prices: dict[str, float]) -> float:
+        """Marked value of the book, falling back to the last known price.
+
+        2026-08-03 adversarial sweep: this used to DROP any holding absent from
+        `prices`, so an unpriced name vanished from live NAV entirely. The
+        emulator does not do that -- d6faf1a made it carry a held position at
+        its last known price -- so live and backtest disagreed about NAV for the
+        same book, and every NAV-derived rule inherited the disagreement.
+
+        It matters most for the index core, whose satellite is computed as a NAV
+        RESIDUAL (nav - cash - core - hedge). Losing a name from NAV inflates
+        the core's target by that name's full weight, so the core BUYS into a
+        book that is already fully invested -- the one arithmetic error in that
+        design that spends real money. Reachable whenever the bounded EPPI
+        refresh times out (30s) and falls back to cached prices.
+
+        `_last_prices` is the same cache the order path already trusts for
+        marking, so this introduces no new source of truth. A name with neither
+        a fresh price nor a cached one still contributes 0 -- there is nothing
+        honest to value it at -- but that is now the rare case rather than every
+        symbol the tick happened to miss.
+        """
         v = 0.0
         for t, q in self._positions.items():
             p = (prices or {}).get(t)
-            if p is not None:
-                v += q * float(p)
+            if p is None:
+                p = (self._last_prices or {}).get(str(t).upper())
+            if p is None:
+                continue
+            try:
+                pf = float(p)
+            except (TypeError, ValueError):
+                continue
+            if pf > 0:
+                v += q * pf
         return v
 
     def get_portfolio_value(self, prices: dict[str, float]) -> float:
