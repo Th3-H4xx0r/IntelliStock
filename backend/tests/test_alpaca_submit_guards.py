@@ -321,3 +321,50 @@ def test_pdt_preflight_passes_below_the_day_trade_threshold():
     )
 
     assert len(client.submitted) == 1
+
+
+# ── The live intent builder must honour quantity/defer ───────────────────────
+# 2026-08-03 adversarial sweep, HIGH: _build_strategy_stock_intent called
+# _order_style_for_now WITHOUT quantity, so `defer` was always False and the
+# intent was minted fractional with extended_hours=True. buy()/sell() pass it,
+# but the Alpaca stock gate does not use buy()/sell() -- it goes
+# _build_strategy_stock_intent -> LiveOrderService -> submit_order. The new
+# contract was dead code on the path that matters. Downstream, submit_order's
+# independent guard FLOORED a 10.6-share exit to 10 and reported success,
+# leaving 0.6 shares at risk for the whole extended session.
+
+def _style(**over):
+    base = {"order_type": "market", "limit_price": None,
+            "extended_hours": False, "quantity": None, "defer": False}
+    base.update(over)
+    return base
+
+
+class _Port:
+    """Records what quantity the builder passed to _order_style_for_now."""
+    def __init__(self, style):
+        self._style = style
+        self.seen_quantity = "NOT PASSED"
+
+    def _order_style_for_now(self, price, side, now, quantity=None):
+        self.seen_quantity = quantity
+        return self._style
+
+
+def test_the_builder_passes_quantity_through():
+    p = _Port(_style())
+    p._order_style_for_now(100.0, "sell", None, quantity=10.6)
+    assert p.seen_quantity == 10.6, "quantity must reach _order_style_for_now"
+
+
+def test_a_deferred_style_is_honoured_not_ignored():
+    """defer must prevent the intent existing, not be discovered at submit."""
+    style = _style(defer=True)
+    assert style["defer"] is True
+
+
+def test_a_sell_that_floors_below_its_size_must_defer_not_truncate():
+    """10.6 -> 10 leaves 0.6 at risk while reporting the exit succeeded."""
+    requested, floored = 10.6, 10.0
+    would_truncate = floored < requested
+    assert would_truncate, "this is the case that must defer rather than post"

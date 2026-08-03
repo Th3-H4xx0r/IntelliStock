@@ -7487,8 +7487,29 @@ def _build_strategy_stock_intent(
     if quantity <= 0:
         raise ValueError("computed order quantity <= 0")
     side = "buy" if decision == 1 else "sell"
+    # quantity= is REQUIRED, not optional. _order_style_for_now grew
+    # quantity/defer on 2026-08-02 because the extended-hours flip was only half
+    # the rule: Alpaca supports fractional quantities during regular hours ONLY,
+    # so a fractional extended_hours=True limit order is rejected outright.
+    #
+    # 2026-08-03 adversarial sweep, HIGH: this call site omitted quantity, so
+    # `defer` was ALWAYS False and the intent was still minted fractional with
+    # extended_hours=True. buy()/sell() pass it, but the Alpaca stock gate does
+    # not go through buy()/sell() -- it goes _build_strategy_stock_intent ->
+    # LiveOrderService -> submit_order. The new contract was dead code on the
+    # path that actually matters. That is the _residual_sleeve_deploy shape
+    # again: plumbing wired into a call site the live path never reaches.
+    #
+    # What caught it downstream was the independent guard in submit_order, and
+    # its behaviour differs in a way that costs money: a full exit of 10.6
+    # shares was FLOORED to 10 and posted, the caller was told the exit
+    # succeeded, and 0.6 shares stayed at risk through the whole extended
+    # session. Honour defer here so the order is never created, rather than
+    # created and then silently truncated.
     style = (
-        portfolio._order_style_for_now(price, side, decision_at)
+        portfolio._order_style_for_now(
+            price, side, decision_at, quantity=float(quantity)
+        )
         if hasattr(portfolio, "_order_style_for_now")
         else {
             "order_type": "market",
@@ -7496,6 +7517,27 @@ def _build_strategy_stock_intent(
             "extended_hours": False,
         }
     )
+    if style.get("defer"):
+        raise ValueError(
+            f"order deferred: {symbol} {side} {quantity} is not executable in "
+            "the current session (sub-1-share outside RTH); it will be retried "
+            "when regular hours resume rather than posted and truncated"
+        )
+    _styled_qty = style.get("quantity")
+    if _styled_qty is not None:
+        # Whole-share flooring outside RTH. If that would not close the position
+        # in full, defer instead: a partial exit that reports success while
+        # leaving a remainder at risk is worse than waiting for RTH.
+        _styled_qty = Decimal(str(_styled_qty))
+        if _styled_qty <= 0:
+            raise ValueError(f"order deferred: {symbol} {side} floors to zero shares")
+        if side == "sell" and _styled_qty < quantity:
+            raise ValueError(
+                f"order deferred: {symbol} sell of {quantity} floors to "
+                f"{_styled_qty} outside RTH, which would leave "
+                f"{quantity - _styled_qty} at risk"
+            )
+        quantity = _styled_qty
     source = (
         OrderSource.RISK_EXIT if is_risk_exit else OrderSource.STRATEGY
     )
