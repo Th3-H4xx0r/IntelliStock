@@ -301,3 +301,47 @@ def test_acknowledged_order_missing_from_broker_stays_an_issue():
     assert result.issues == (
         f"local_order_missing_broker:{order.idempotency_key}",
     )
+
+
+# ── External broker orders must not block risk exits ─────────────────────────
+# 2026-08-03 adversarial sweep, HIGH: any broker order without a local
+# lifecycle record raised `unknown_broker_order` -> healthy=False -> the gate
+# reported positions "unhealthy" -> and `positions` is REQUIRED even for
+# reduce_only, so every risk exit was denied on a 60-second loop for as long as
+# that order sat in the history window. alpaca-main traded for months through
+# the legacy adapter.buy()/WAL path, so this was likely to fire on the first
+# tick after deploy and block exits on a live account.
+
+def _reconciler(prefix=""):
+    from live_orders.reconcile import StartupReconciler
+
+    class _Store:
+        def list_for_instance(self, _):
+            return ()
+
+    return StartupReconciler(lifecycle_store=_Store(),
+                             event_applier=lambda e: None,
+                             cid_prefix=prefix)
+
+
+class _Ord:
+    def __init__(self, cid):
+        self.client_order_id = cid
+
+
+def test_a_manual_broker_order_is_external_not_a_fault():
+    assert _reconciler("alpacama-")._is_external_order(_Ord("manual-ui-123")) is True
+
+
+def test_a_legacy_wal_order_is_external():
+    assert _reconciler("alpacama-")._is_external_order(_Ord("legacy-wal-99")) is True
+
+
+def test_our_own_orphan_still_raises():
+    """The fix must not hide genuine lifecycle corruption in OUR orders."""
+    assert _reconciler("alpacama-")._is_external_order(_Ord("alpacama-dead-0")) is False
+
+
+def test_without_a_prefix_it_falls_back_to_todays_behaviour():
+    """Cannot tell whose order it is -> treat as a fault, as before."""
+    assert _reconciler("")._is_external_order(_Ord("manual-ui-123")) is False

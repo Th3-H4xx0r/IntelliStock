@@ -7098,9 +7098,19 @@ def _reconcile_alpaca_ownership(adapter, order_service):
         broker_snapshot = adapter.capture_reconciliation_snapshot(
             account_id=order_service.account_id
         )
+        # cid_prefix lets the reconciler tell OUR orders from everyone else's.
+        # make_client_order_id emits "{instance[:8]}-{digest}-{retry}", so the
+        # same _safe() truncation must be used here or nothing matches and we
+        # silently fall back to treating every foreign order as a fault.
+        try:
+            from broker_adapters._client_order_id import _safe as _cid_safe
+            _cid_prefix = f"{_cid_safe(str(instance_id), 8) or 'x'}-"
+        except Exception:
+            _cid_prefix = ""
         result = StartupReconciler(
             lifecycle_store=order_service.lifecycle_store,
             event_applier=order_service.apply_broker_event,
+            cid_prefix=_cid_prefix,
         ).reconcile(broker_snapshot)
         adapter.complete_startup_reconciliation(result)
         with _live_order_dependency_lock:

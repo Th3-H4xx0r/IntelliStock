@@ -293,10 +293,38 @@ class StartupReconciler:
         lifecycle_store: OrderLifecycleStore,
         event_applier: Callable[[BrokerOrderEvent], object],
         abandoned_grace: timedelta = DEFAULT_ABANDONED_ORDER_GRACE,
+        cid_prefix: str = "",
     ) -> None:
         self.lifecycle_store = lifecycle_store
         self.event_applier = event_applier
         self.abandoned_grace = abandoned_grace
+        # Client-order-id prefix this instance mints (make_client_order_id emits
+        # "{instance[:8]}-{digest}-{retry}"). Used to tell OUR orders from
+        # everyone else's. Empty means "cannot tell", and we fall back to
+        # treating unknown orders as issues, i.e. today's behaviour.
+        self.cid_prefix = str(cid_prefix or "").strip()
+
+    def _is_external_order(self, order) -> bool:
+        """True when a broker order was placed by something other than this
+        instance's LiveOrderService.
+
+        2026-08-03 adversarial sweep, HIGH: an order with no local lifecycle
+        record raised `unknown_broker_order`, which set healthy=False, which
+        made the gate report positions "unhealthy" -- and `positions` is
+        REQUIRED even for reduce_only, so every risk exit was denied on a
+        60-second loop for as long as that order sat in the history window.
+
+        A manual order placed in the Alpaca UI, or one from the legacy
+        adapter.buy()/WAL path, is not evidence that OUR lifecycle is corrupt.
+        alpaca-main traded for months through the legacy path, so this was
+        likely to fire on the first tick after deploy and block exits on a live
+        account. External orders are recorded as informational, never as an
+        issue that gates protective sells.
+        """
+        if not self.cid_prefix:
+            return False
+        cid = str(getattr(order, "client_order_id", "") or "")
+        return not cid.startswith(self.cid_prefix)
 
     def _resolve_abandoned(
         self, snapshot: AuthoritativeBrokerSnapshot, record
@@ -387,6 +415,7 @@ class StartupReconciler:
         issues: list[str] = []
         unresolved: dict[str, Decimal] = {}
         seen_known: set[str] = set()
+        external: list[str] = []
         for order in snapshot.orders:
             record = records.get(order.client_order_id)
             if record is None:
@@ -394,9 +423,15 @@ class StartupReconciler:
                 unresolved[order.symbol] = max(
                     unresolved.get(order.symbol, Decimal("0")), quantity
                 )
-                issues.append(
-                    f"unknown_broker_order:{order.broker_order_id}"
-                )
+                if self._is_external_order(order):
+                    # Informational only -- an order we did not place cannot
+                    # prove our lifecycle is wrong, and treating it as an issue
+                    # blocks risk exits (see _is_external_order).
+                    external.append(str(order.broker_order_id))
+                else:
+                    issues.append(
+                        f"unknown_broker_order:{order.broker_order_id}"
+                    )
                 continue
             seen_known.add(order.client_order_id)
             if (
