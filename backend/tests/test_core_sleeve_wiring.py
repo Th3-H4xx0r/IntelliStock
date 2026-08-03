@@ -15,6 +15,8 @@ import sys
 import types
 from datetime import datetime, timedelta
 
+import core_sleeve as b_core  # noqa: E402  (sizing constants under test)
+
 _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
@@ -198,8 +200,14 @@ def test_silent_graph_puts_the_whole_book_in_the_index():
     emu = _Emu(cash=6000.0, nav=6000.0)
     b._residual_sleeve_deploy(emu, {"SPY": 600.0}, NOW, CORE)
     assert len(emu.signals) == 1
-    # target 1 - 0.02 cash floor - 0 satellite = 0.98, clamped at core_max.
-    assert abs(emu.signals[0]["cash_per_trade"] - 5880.0) < 1e-6
+    # target 1 - 0.02 cash floor - 0 satellite = 0.98, clamped at core_max, and
+    # then held back by CORE_DEPLOY_COST_HAIRCUT so the clip can pay its own
+    # spread. Sized at the full $5,880 the broker rejects it outright — see the
+    # constant's note and bt 383711.
+    _spend = 5880.0
+    assert abs(emu.signals[0]["cash_per_trade"]
+               - _spend / (1.0 + b_core.CORE_DEPLOY_COST_HAIRCUT)) < 1e-6
+    assert emu.signals[0]["cash_per_trade"] * 1.00231 <= _spend
 
 
 def test_a_full_satellite_leaves_the_core_at_target():
@@ -207,7 +215,10 @@ def test_a_full_satellite_leaves_the_core_at_target():
     emu = _Emu(cash=3720.0, nav=6000.0, positions={"AAPL": 22.8})
     b._residual_sleeve_deploy(emu, {"SPY": 600.0, "AAPL": 100.0}, NOW, CORE)
     assert len(emu.signals) == 1
-    assert abs(emu.signals[0]["cash_per_trade"] - 3600.0) < 1e-6
+    _spend = 3600.0
+    assert abs(emu.signals[0]["cash_per_trade"]
+               - _spend / (1.0 + b_core.CORE_DEPLOY_COST_HAIRCUT)) < 1e-6
+    assert emu.signals[0]["cash_per_trade"] * 1.00231 <= _spend
 
 
 def test_a_graph_buy_is_funded_by_the_index_not_by_cash():

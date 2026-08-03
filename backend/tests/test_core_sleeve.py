@@ -14,6 +14,7 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
 from core_sleeve import (  # noqa: E402
+    CORE_DEPLOY_COST_HAIRCUT,
     MIN_CORE_DEPLOY_USD,
     core_rebalance_order,
     core_sleeve_config,
@@ -143,7 +144,12 @@ def test_band_breach_deploys_once_the_cadence_allows():
     assert held.reason == "cadence_hold" and held.notional == 0.0
     go = core_rebalance_order(cfg, days_since_rebalance=5, **kw)
     assert go.reason == "band_deploy"
-    assert round(go.notional, 2) == 3600.0  # (0.60 - 0.00) * 6000
+    # Drift is (0.60 - 0.00) * 6000 = $3,600 and spendable cash is also $3,600,
+    # so the clip is bounded by the balance. It is deliberately sized a touch
+    # UNDER that: a buy at the full balance cannot pay its own spread and is
+    # rejected outright (see CORE_DEPLOY_COST_HAIRCUT / bt 383711).
+    assert round(go.notional, 2) == round(3600.0 / (1.0 + CORE_DEPLOY_COST_HAIRCUT), 2)
+    assert go.notional * 1.00231 <= 3600.0, "deploy must be affordable all-in"
 
 
 def test_cadence_is_only_consulted_after_the_band_is_breached():
@@ -244,8 +250,10 @@ def test_deploy_is_capped_by_cash_LESS_the_declared_floor():
     order = core_rebalance_order(cfg, nav=6000.0, core_value=0.0,
                                  satellite_value=2280.0, cash=500.0,
                                  days_since_rebalance=99)
-    # 500 cash - 2% of 6000 = 500 - 120 = 380
-    assert round(order.notional, 2) == 380.0
+    # 500 cash - 2% of 6000 = 500 - 120 = 380 spendable, then held back further
+    # so the order can pay its own execution cost and actually fill.
+    assert round(order.notional, 2) == round(380.0 / (1.0 + CORE_DEPLOY_COST_HAIRCUT), 2)
+    assert order.notional * 1.00231 <= 380.0, "deploy must be affordable all-in"
 
 
 def test_release_is_capped_by_the_position():
@@ -357,3 +365,47 @@ def test_a_sub_minimum_funding_shortfall_does_not_cancel_the_bear_derisk():
     assert order.reason == "bear_derisk", (
         f"a $1 shortfall must not cancel the de-risk (got {order.reason})")
     assert order.notional < 0
+
+
+def test_deploy_is_affordable_after_execution_costs():
+    """A deploy must never be sized at the whole spendable balance.
+
+    Regression for bt 383711. `core_rebalance_order` sized the buy against the
+    MID while the emulator (and Alpaca) charge mid + half-spread + fees, so any
+    deploy large enough to consume the spendable balance was rejected for being
+    unaffordable by exactly its own execution cost. Because the cadence clock
+    only advanced on a CONFIRMED fill, the identical order was then re-issued
+    every tick: 23 "79.5% -> 90.3%" decisions, 21 of them ok=False, and a core
+    that could never reach its target.
+
+    The invariant is the affordability one, not a particular haircut value:
+    all-in cost must fit inside the cash the caller was allowed to spend.
+    """
+    cfg = core_sleeve_config({
+        "core_sleeve_enabled": True,
+        "core_target_pct": 0.90,
+        "core_rebalance_band_pct": 0.05,
+        "core_rebalance_min_days": 5,
+    })
+    nav, cash = 6000.0, 755.0
+    # Core well under target, so the drift is far larger than the cash on hand
+    # and the deploy is necessarily capped by the balance rather than by drift.
+    order = core_rebalance_order(
+        cfg,
+        nav=nav,
+        core_value=0.795 * nav,
+        satellite_value=0.0,
+        cash=cash,
+        days_since_rebalance=99,
+    )
+    assert order.reason == "band_deploy", order.reason
+
+    spendable = cash - cfg.cash_floor_pct * nav
+    # 22.8 bps of half-spread + 0.3 bps of fees is what the measured model
+    # charges; the order plus its costs has to fit inside `spendable`.
+    all_in = order.notional * (1.0 + 0.00228 + 0.00003)
+    assert all_in <= spendable, (
+        f"deploy of ${order.notional:.2f} costs ${all_in:.2f} all-in but only "
+        f"${spendable:.2f} was spendable — the broker rejects this and the "
+        f"core can never reach target"
+    )

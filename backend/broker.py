@@ -4022,8 +4022,18 @@ def _residual_sleeve_release(
             # allocator already approved and must stay instant, so it
             # deliberately does NOT reset the clock: resetting it there would
             # let one busy buy day freeze the band for five sessions.
-            if _signal_result_is_confirmed(_cok) and _corder.reason != "funding":
+            # Stamped on the ATTEMPT, not the confirmation — see the matching
+            # note in `_residual_sleeve_deploy`. A rejected release that left the
+            # clock unstamped would re-issue the same sell every tick.
+            # `funding` still deliberately does not stamp: it is capital the
+            # allocator already approved and must stay instant.
+            if _corder.reason != "funding":
                 _RESIDUAL_SLEEVE_STATE[_CORE_SLEEVE_LAST_REBALANCE_KEY] = current_time
+                if not _signal_result_is_confirmed(_cok):
+                    _log(f"[core] release of ${-_corder.notional:.2f} {sym} was "
+                         f"NOT confirmed ({_corder.reason}) — holding the "
+                         f"cadence anyway so this cannot retry every tick",
+                         "yellow")
             _RESIDUAL_SLEEVE_STATE.pop(_CORE_SLEEVE_LAST_HOLD_REASON, None)
             _log(f"[core] released {_csell_qty:.4f} {sym} @ {px:.2f} "
                  f"({_cwhy}, ok={_cok})", "cyan")
@@ -4249,7 +4259,27 @@ def _residual_sleeve_deploy(
             )
             if _signal_result_is_confirmed(_cok):
                 _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
-                _RESIDUAL_SLEEVE_STATE[_CORE_SLEEVE_LAST_REBALANCE_KEY] = current_time
+            # 2026-08-03 RETRY STORM — stamp the cadence clock on the ATTEMPT,
+            # not on the confirmation. Gating this on `_signal_result_is_confirmed`
+            # meant a REJECTED core order never advanced the clock, so
+            # `days_since_rebalance` stayed unbounded, `core_rebalance_min_days`
+            # could never gate it, and the same order was re-submitted on every
+            # tick forever. Observed on bt 383711: 23 identical `band_deploy`
+            # decisions, all "79.5% -> 90.3%", the first two filling and the next
+            # 21 returning ok=False, re-issued every ~2s. In live that is an
+            # order-submission loop against a real broker, not just wasted
+            # backtest cost.
+            #
+            # A failed rebalance therefore now waits out the cadence like any
+            # other. That is the correct trade: being off-target for one cadence
+            # window is a bounded tracking error, while an unbounded retry is
+            # both a cost leak and a live-order hazard. The band is re-evaluated
+            # from scratch at the next window, so a transient failure self-heals.
+            _RESIDUAL_SLEEVE_STATE[_CORE_SLEEVE_LAST_REBALANCE_KEY] = current_time
+            if not _signal_result_is_confirmed(_cok):
+                _log(f"[core] deploy of ${_corder.notional:.2f} {sym} was NOT "
+                     f"confirmed ({_corder.reason}) — holding the cadence "
+                     f"anyway so this cannot retry every tick", "yellow")
             _RESIDUAL_SLEEVE_STATE.pop(_CORE_SLEEVE_LAST_HOLD_REASON, None)
             _log(f"[core] bought ${_corder.notional:.2f} {sym} @ {px:.2f} "
                  f"({_corder.reason}: {_corder.current_weight:.1%} -> "

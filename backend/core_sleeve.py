@@ -55,6 +55,29 @@ MIN_CORE_ORDER_USD = 5.0
 #: emit dust the fee model charges 30.3 bps on for no exposure change.
 MIN_CORE_DEPLOY_USD = 50.0
 
+#: 2026-08-03 — size the deploy against the ALL-IN cost, not against the mid.
+#:
+#: A buy costs `shares * fill_price + fees`, and `fill_price` carries the half
+#: spread (22.8 bps under `equity-measured-v3-nbbo23`). Sizing `buy` at exactly
+#: the spendable balance therefore asks for a clip the account cannot afford by
+#: precisely the execution cost, and BOTH the emulator
+#: (`portfolio_emulator._execute_buy`: `if total > self.get_buying_power():
+#: return False`) and Alpaca reject it. The emulator's own comment calls this
+#: out: "a caller that sized against the mid now discovers it cannot afford the
+#: whole clip -- which is precisely what happens live."
+#:
+#: Observed on bt 383711: every deploy while the core was under target asked for
+#: the full spendable balance, failed, and — because the cadence clock only
+#: stamped on CONFIRMED fills — re-issued on the very next tick. 23 identical
+#: "79.5% -> 90.3%" decisions, 21 of them ok=False. The core could never reach
+#: its target and the two that did fill only churned.
+#:
+#: 60 bps is ~2.6x the measured one-way cost. The headroom is deliberate: the
+#: model is an average over a 61-fill sample whose p90 spread is 109 bps, and
+#: underestimating here costs a whole rebalance window while overestimating
+#: leaves a few dollars unspent that the next window picks up.
+CORE_DEPLOY_COST_HAIRCUT = 0.0060
+
 
 @dataclass(frozen=True)
 class CoreSleeveConfig:
@@ -322,6 +345,12 @@ def core_rebalance_order(
         # produced the "core pinned at 30.0%" symptom, now with no cash buffer
         # to trade out of it.
         _spendable = max(0.0, float(cash or 0.0) - cfg.cash_floor_pct * nav)
+        # Reserve the execution cost of the clip itself. Without this the buy is
+        # sized at the full spendable balance whenever the drift exceeds it —
+        # the exact state the core is in while it is UNDER target — and is
+        # rejected for being unaffordable by the spread it has to pay.
+        # See CORE_DEPLOY_COST_HAIRCUT.
+        _spendable /= (1.0 + CORE_DEPLOY_COST_HAIRCUT)
         buy = min(drift_usd, _spendable)
         if buy < max(MIN_CORE_DEPLOY_USD, MIN_CORE_ORDER_USD):
             return RebalanceOrder(reason="deploy_below_min", **base)
