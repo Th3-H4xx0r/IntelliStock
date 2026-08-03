@@ -12,15 +12,15 @@
     "apexcharts": "^5.15.2",
     "dompurify": "^3.4.11",
     "marked": "^14.1.4",
-    "vue": "^3.5.38",
+    "vue": "^3.5.40",
     "vue3-apexcharts": "^1.11.1",
-    "vue-router": "^5.0.7"
+    "vue-router": "^5.2.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^6.0.7",
-    "autoprefixer": "^10.5.0",
-    "postcss": "^8.5.14",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "autoprefixer": "^10.5.4",
+    "postcss": "^8.5.25",
     "tailwindcss": "^3.4.19",
-    "vite": "^8.0.13"
+    "vite": "^8.2.0"
   }
 }
