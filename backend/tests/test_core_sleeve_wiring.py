@@ -646,11 +646,19 @@ def test_it_fails_towards_booking_on_a_broken_config():
 # 15% of equity, reaching ~53% in one order.
 
 class _HBook:
-    def __init__(self, positions, nav):
+    """Satellite is a NAV RESIDUAL (nav - cash - core - hedge), matching
+    _core_sleeve_decide. Summing priced positions is the arithmetic that lets an
+    unpriced holding read as $0 of satellite and silently disable the guard."""
+    def __init__(self, positions, nav, cash=0.0):
         self._positions = dict(positions)
         self._nav = float(nav)
+        self._cash = float(cash)
     def get_portfolio_value(self, prices):
         return self._nav
+    def get_cash(self):
+        return self._cash
+    def get_positions(self):
+        return dict(self._positions)
 
 
 def _hcfg(**over):
@@ -663,13 +671,13 @@ def _hcfg(**over):
 
 
 def test_headroom_is_the_room_left_to_the_design_share():
-    book = _HBook({"AAA": 100.0}, nav=10_000.0)          # satellite 2000 = 20%
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=8_000.0)   # satellite 2000 = 20%
     room = b._core_sleeve_satellite_headroom(book, {"AAA": 20.0}, _hcfg())
-    assert abs(room - 1800.0) < 1e-6                      # 38% of 10k = 3800
+    assert abs(room - 1800.0) < 1e-6                             # 38% of 10k = 3800
 
 
 def test_headroom_goes_negative_once_the_share_is_exceeded():
-    book = _HBook({"AAA": 100.0}, nav=10_000.0)          # satellite 5000 = 50%
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=5_000.0)   # satellite 5000 = 50%
     room = b._core_sleeve_satellite_headroom(book, {"AAA": 50.0}, _hcfg())
     assert room < 0
 
@@ -677,19 +685,20 @@ def test_headroom_goes_negative_once_the_share_is_exceeded():
 def test_headroom_counts_held_names_so_ADDS_are_bounded_too():
     """The overrun was winner-adds. An add past the share is the same overrun
     as a new name, so the held-name exemption had to go."""
-    book = _HBook({"AAA": 100.0}, nav=10_000.0)
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=6_200.0)   # satellite 3800 = 38%
     room = b._core_sleeve_satellite_headroom(book, {"AAA": 38.0}, _hcfg())
     assert abs(room) < 1e-6, "at exactly the share there must be zero room, held or not"
 
 
 def test_sleeve_legs_do_not_consume_satellite_headroom():
-    book = _HBook({"SPY": 10.0, "SQQQ": 20.0}, nav=10_000.0)
+    book = _HBook({"SPY": 10.0, "SQQQ": 20.0}, nav=10_000.0, cash=2_000.0)
+    # 6000 core + 2000 hedge + 2000 cash = nav -> satellite residual is 0
     room = b._core_sleeve_satellite_headroom(book, {"SPY": 600.0, "SQQQ": 100.0}, _hcfg())
     assert abs(room - 3800.0) < 1e-6
 
 
 def test_no_limit_when_the_core_is_off():
-    book = _HBook({"AAA": 100.0}, nav=10_000.0)
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=1_000.0)
     legacy = [{"strategy": "graph_nexus_analysis", "config": dict(LEGACY_CFG)}]
     assert b._core_sleeve_satellite_headroom(book, {"AAA": 90.0}, legacy) is None
 
@@ -706,3 +715,17 @@ def test_dust_sized_headroom_is_refused_not_trimmed_to():
     """Trimming to $3 creates a position that cannot be exited (Alpaca's
     fractional minimum is $1) and holds a max_positions slot forever."""
     assert b._CORE_MIN_SATELLITE_TRIM_USD >= 1.0
+
+
+
+def test_an_unpriced_holding_cannot_hide_from_the_residual():
+    """The reason this uses NAV - cash - core - hedge instead of summing priced
+    positions: a held name with no bar this tick contributes $0 to a sum while
+    contributing its full value to NAV. Summing, a genuine 80% satellite reads
+    as 30% and the guard disables itself exactly when the book is most overrun.
+    Reachable whenever the bounded EPPI refresh times out to cached prices."""
+    book = _HBook({"AAA": 100.0, "GHOST": 500.0}, nav=10_000.0, cash=2_000.0)
+    prices = {"AAA": 20.0}                     # GHOST deliberately unpriced
+    room = b._core_sleeve_satellite_headroom(book, prices, _hcfg())
+    # residual satellite = 10000 - 2000 - 0 - 0 = 8000, well past the 3800 share
+    assert room is not None and room < 0, "an unpriced holding must not vanish"

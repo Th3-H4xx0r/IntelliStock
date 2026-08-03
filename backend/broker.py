@@ -3051,16 +3051,32 @@ def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
         nav = float(portfolio.get_portfolio_value(prices) or 0.0)
         if nav <= 0:
             return None
-        held = getattr(portfolio, "_positions", None) or {}
         core_sym = str(cfg.get("residual_sleeve_symbol", "SPY") or "SPY").strip().upper()
         bear_sym = str(cfg.get("residual_sleeve_bear_symbol", "") or "").strip().upper()
-        sleeve = {core_sym, bear_sym} - {""}
-        satellite = 0.0
-        for tic, qty in list(held.items()):
-            t = str(tic or "").strip().upper()
-            if t in sleeve:
-                continue
-            satellite += float(qty or 0.0) * float((prices or {}).get(t, 0.0) or 0.0)
+        # Satellite as a NAV RESIDUAL, exactly as _core_sleeve_decide computes
+        # it -- never as a sum over individually priced positions.
+        #
+        # 2026-08-03 adversarial sweep, HIGH: summing priced positions is the
+        # arithmetic _core_sleeve_decide explicitly forbids. A held name with no
+        # bar this tick contributes $0 of satellite while contributing its full
+        # value to NAV, so a genuine 80% satellite reads as 30% and this guard
+        # silently disables itself -- precisely when the book is most overrun.
+        # It is reachable whenever the bounded EPPI refresh times out and falls
+        # back to cached prices.
+        #
+        # Using the residual also makes the guard agree with the sizing rule it
+        # protects, so the two can never disagree about how much satellite
+        # exists.
+        cash = float(portfolio.get_cash() or 0.0)
+        positions = (portfolio.get_positions() if hasattr(portfolio, "get_positions")
+                     else getattr(portfolio, "_positions", None)) or {}
+        core_value = float(positions.get(core_sym, 0.0) or 0.0) * float(
+            (prices or {}).get(core_sym, 0.0) or 0.0)
+        hedge_value = 0.0
+        if bear_sym:
+            hedge_value = float(positions.get(bear_sym, 0.0) or 0.0) * float(
+                (prices or {}).get(bear_sym, 0.0) or 0.0)
+        satellite = max(0.0, nav - cash - core_value - hedge_value)
         core_tgt = float(cfg.get("core_target_pct", 0.60) or 0.60)
         cash_fl = float(cfg.get("cash_reserve_floor_pct", 0.02) or 0.02)
         share = max(0.05, 1.0 - core_tgt - cash_fl)
