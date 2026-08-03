@@ -28,7 +28,8 @@ _WANTED = {
     "_signal_result_is_confirmed",
     "_conviction_bear_alloc",
 }
-_CORE_PREFIXES = ("_core_sleeve", "_core_turnover", "_turnover_ledger", "_CORE_")
+_CORE_PREFIXES = ("_core_sleeve", "_core_turnover", "_turnover_ledger",
+                  "_turnover_is_governed", "_CORE_")
 _WANTED_CONSTS = {"_RESIDUAL_SLEEVE_MIN_RELEASE_USD"}
 
 _src = open(os.path.join(_backend, "broker.py"), encoding="utf-8").read()
@@ -434,12 +435,25 @@ def test_the_calendar_backstop_does_not_fire_inside_the_window():
     assert b._turnover_ledger_rolling(NOW + timedelta(days=30)) == 5000.0
 
 
-def test_a_sleeve_trade_is_booked_into_the_ledger():
-    """Every discretionary trade has to reach the ledger or the budget measures
-    a fraction of the book and never binds."""
+def test_the_core_leg_is_NOT_booked_into_the_ledger():
+    """The core is exempt from the budget AND from the ledger that feeds it.
+
+    Booking it was the CRITICAL the sweep found: establishing a 60-98% core
+    costs that much of NAV in one-way turnover, so tick 1 filled the ledger to
+    ~98% of NAV and every DISCRETIONARY buy was blocked for 21 sessions. The
+    starvation was not removed by exempting the core at the read -- it moved
+    onto the satellite, which is worse, because the satellite is the alpha
+    engine and the loop is self-reinforcing.
+    """
     emu = _Emu(cash=6000.0, nav=6000.0)
     b._residual_sleeve_deploy(emu, {"SPY": 600.0}, NOW, CORE)
-    assert b._turnover_ledger_rolling(NOW) == 5880.0
+    assert b._turnover_ledger_rolling(NOW) == 0.0
+
+
+def test_a_discretionary_sleeve_trade_IS_still_booked():
+    """The budget must still measure what it governs, or it never binds."""
+    b._turnover_ledger_record(NOW, 1234.0, "satellite buy AAPL")
+    assert b._turnover_ledger_rolling(NOW) == 1234.0
 
 
 def test_the_budget_is_off_by_default_even_with_the_core_on():
@@ -576,3 +590,49 @@ def test_it_fails_open_on_a_broken_book():
         def get_portfolio_value(self, prices):
             raise RuntimeError("boom")
     assert b._core_sleeve_block_new_satellite(_Bad(), {}, _core_cfg(), "BBB") is False
+
+
+# ── The core's own establishment must not exhaust the discretionary budget ────
+# 2026-08-03 adversarial sweep, CRITICAL: exempting the core at the READ was
+# half a fix. Core notional was still WRITTEN to the ledger, and establishing a
+# 60-98% core costs that much of NAV in one-way turnover -- so on tick 1 the
+# ledger read ~98% of NAV and every discretionary buy was blocked for 21
+# sessions. The starvation was not removed, it moved from the core onto the
+# satellite, which is the louder failure because the satellite is the alpha
+# engine. It is also self-reinforcing: satellite dead -> satellite weight decays
+# -> residual pushes the core target up -> core buys more -> never recovers.
+
+def _gov_cfg(**over):
+    cfg = dict(LEGACY_CFG)
+    cfg.update({"core_sleeve_enabled": True, "residual_sleeve_symbol": "SPY",
+                "residual_sleeve_bear_symbol": "SQQQ"})
+    cfg.update(over)
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def test_core_notional_is_not_counted_against_the_budget():
+    assert b._turnover_is_governed("SPY", _gov_cfg()) is False
+
+
+def test_the_hedge_leg_is_still_counted():
+    assert b._turnover_is_governed("SQQQ", _gov_cfg()) is True
+
+
+def test_satellite_names_are_still_counted():
+    assert b._turnover_is_governed("AAPL", _gov_cfg()) is True
+
+
+def test_everything_is_counted_when_the_core_is_off():
+    """Byte-identical to today with the flag off."""
+    legacy = [{"strategy": "graph_nexus_analysis", "config": dict(LEGACY_CFG)}]
+    assert b._turnover_is_governed("SPY", legacy) is True
+
+
+def test_a_padded_core_symbol_is_still_recognised():
+    """`.strip()` matters -- a padded value has broken the sleeve before."""
+    assert b._turnover_is_governed("SPY", _gov_cfg(residual_sleeve_symbol=" SPY ")) is False
+
+
+def test_it_fails_towards_booking_on_a_broken_config():
+    """Unknown state -> count it. Under-counting silently raises the ceiling."""
+    assert b._turnover_is_governed("SPY", None) is True

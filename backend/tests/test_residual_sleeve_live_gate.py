@@ -20,6 +20,10 @@ _WANTED = {
     "_residual_sleeve_deploy",
 }
 _ns = {
+    # Booking gate: real impl exempts the core symbol so the core's own
+    # establishment cannot exhaust the discretionary budget. True = book it,
+    # which is today's behaviour and what these legacy tests assert.
+    "_turnover_is_governed": lambda *_a, **_k: True,
     "math": __import__("math"),
     "_log": lambda *_a, **_k: None,
     "_RESIDUAL_SLEEVE_STATE": {

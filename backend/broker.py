@@ -2955,6 +2955,36 @@ def _turnover_ledger_touch(current_time):
     return _ledger
 
 
+def _turnover_is_governed(symbol, cached_strategies) -> bool:
+    """False when this symbol's notional must NOT count against the budget.
+
+    2026-08-03 adversarial sweep, CRITICAL. Exempting the core at the READ was
+    only half a fix -- core notional was still WRITTEN to the ledger, and
+    establishing a 60-98% core costs that much of NAV in one-way turnover. So on
+    tick 1 the core buys, the ledger reads ~98% of NAV, and every DISCRETIONARY
+    buy is blocked for the next 21 sessions. The starvation was not removed, it
+    was moved off the core and onto the satellite -- a louder failure, because
+    the satellite is the alpha engine.
+
+    It is also self-reinforcing: with the satellite lane dead the satellite
+    weight decays toward zero, the residual pushes the core target UP, the core
+    buys MORE, and the budget never recovers.
+
+    The budget exists to throttle DISCRETIONARY churn. The core is the
+    low-turnover baseline, already bounded by a +/-5pp band and a 5-day cadence,
+    so it is neither governed by the budget nor counted against it. The hedge leg
+    and every satellite name still are.
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies)
+        if not bool(cfg.get("core_sleeve_enabled", False)):
+            return True          # core off -> today's behaviour, book everything
+        core_sym = str(cfg.get("residual_sleeve_symbol", "SPY") or "SPY").strip().upper()
+        return str(symbol or "").strip().upper() != core_sym
+    except Exception:
+        return True
+
+
 def _turnover_ledger_record(current_time, notional, label=""):
     """Book one-way traded notional into the rolling ledger.
 
@@ -3575,7 +3605,7 @@ def _residual_sleeve_release(
                 # Turnover is one-way notional, so a sleeve/core SELL counts
                 # exactly like a satellite sell. Booking it here rather than at
                 # the two call sites means no future release path can forget to.
-                if _rel_result:
+                if _rel_result and _turnover_is_governed(symbol, cached_strategies):
                     _turnover_ledger_record(
                         current_time, _rel_notional, f"sleeve sell {symbol}")
                 return _rel_result
@@ -3638,7 +3668,7 @@ def _residual_sleeve_release(
                     f"{','.join(submission.decision.reason_codes)}",
                     "yellow",
                 )
-            if submission.accepted:
+            if submission.accepted and _turnover_is_governed(symbol, cached_strategies):
                 _turnover_ledger_record(
                     current_time, _rel_notional, f"sleeve sell {symbol}")
             return submission.accepted
@@ -3950,7 +3980,7 @@ def _residual_sleeve_deploy(
                 )
                 # See the matching book in _submit_release: turnover is ONE-WAY
                 # notional, so a park counts the same as any other buy.
-                if _dep_result:
+                if _dep_result and _turnover_is_governed(symbol, cached_strategies):
                     _turnover_ledger_record(
                         current_time, cash_amount, f"sleeve buy {symbol}")
                 return _dep_result
@@ -4015,7 +4045,7 @@ def _residual_sleeve_deploy(
                     f"{','.join(submission.decision.reason_codes)}",
                     "yellow",
                 )
-            if submission.accepted:
+            if submission.accepted and _turnover_is_governed(symbol, cached_strategies):
                 _turnover_ledger_record(
                     current_time, cash_amount, f"sleeve buy {symbol}")
             return submission.accepted

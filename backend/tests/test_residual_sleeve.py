@@ -29,6 +29,10 @@ _src = open(os.path.join(_backend, "broker.py")).read()
 _tree = ast.parse(_src)
 b = types.SimpleNamespace()
 _ns = {
+    # Booking gate: real impl exempts the core symbol so the core's own
+    # establishment cannot exhaust the discretionary budget. True = book it,
+    # which is today's behaviour and what these legacy tests assert.
+    "_turnover_is_governed": lambda *_a, **_k: True,
     "math": __import__("math"),
     "_log": lambda *a, **k: None,
     "_RESIDUAL_SLEEVE_STATE": {"last_park_ts": None, "bear_entry_px": None,
