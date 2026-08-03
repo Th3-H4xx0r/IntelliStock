@@ -780,3 +780,19 @@ def test_the_cap_is_absent_when_the_core_is_off():
     book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=8_000.0)
     legacy = [{"strategy": "graph_nexus_analysis", "config": dict(LEGACY_CFG)}]
     assert b._core_sleeve_satellite_headroom(book, {"AAA": 20.0}, legacy) is None
+
+
+def test_the_cap_does_not_arm_when_the_core_itself_refuses_to():
+    """core_sleeve_enabled=true + residual_sleeve_enabled=false is one key away
+    from the live config. _core_sleeve_cfg fails CLOSED there (no sleeve symbol
+    exemptions => the core would be a large unprotected position), so no core is
+    ever bought. If the cap still armed, every new satellite name above the
+    share would be refused and the book would deadlock at ~38% invested with
+    ~62% dead cash and nothing able to deploy it."""
+    cfg = dict(LEGACY_CFG)
+    cfg.update({"core_sleeve_enabled": True, "residual_sleeve_enabled": False,
+                "core_target_pct": 0.60, "cash_reserve_floor_pct": 0.02})
+    spec = [{"strategy": "graph_nexus_analysis", "config": cfg}]
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=1_000.0)   # 90% satellite
+    assert b._core_sleeve_satellite_headroom(book, {"AAA": 90.0}, spec) is None, \
+        "the cap must be inert while the core cannot arm"

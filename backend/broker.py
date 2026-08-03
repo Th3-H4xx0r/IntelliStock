@@ -3045,11 +3045,23 @@ def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
     one large candidate starves several small ones purely by ordering.
     """
     try:
-        cfg = _core_sleeve_cfg_raw(cached_strategies)
-        if not bool(cfg.get("core_sleeve_enabled", False)):
+        # Gate on the PARSED config, not the raw flag.
+        #
+        # 2026-08-03 sweep, MED: reading `core_sleeve_enabled` directly meant the
+        # cap armed even when the core itself refused to. `_core_sleeve_cfg`
+        # fails CLOSED without `residual_sleeve_enabled`, because `_sleeve_symbols`
+        # returns an empty set in that case and the core would be a large
+        # permanent position with zero sell-exemptions. So with
+        # core_sleeve_enabled=true and residual_sleeve_enabled=false, no core was
+        # ever bought while every new satellite name above the share was still
+        # refused -- the book deadlocks at ~38% invested with ~62% dead cash and
+        # nothing able to deploy it. One key away from the live config.
+        if _core_sleeve_cfg(cached_strategies) is None:
             return None
+        cfg = _core_sleeve_cfg_raw(cached_strategies)
         nav = float(portfolio.get_portfolio_value(prices) or 0.0)
         if nav <= 0:
+            _log("[core] satellite headroom unavailable: NAV <= 0", "yellow")
             return None
         core_sym = str(cfg.get("residual_sleeve_symbol", "SPY") or "SPY").strip().upper()
         bear_sym = str(cfg.get("residual_sleeve_bear_symbol", "") or "").strip().upper()
@@ -3068,8 +3080,13 @@ def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
         # protects, so the two can never disagree about how much satellite
         # exists.
         cash = float(portfolio.get_cash() or 0.0)
+        # get_positions() rather than iterating _positions directly: the live
+        # adapter mutates that dict from the trade-updates WS thread under its
+        # own lock, so a bare iteration can raise "dictionary changed size
+        # during iteration" -- the ONE genuinely transient failure this function
+        # had, and the only real argument for fail-open.
         positions = (portfolio.get_positions() if hasattr(portfolio, "get_positions")
-                     else getattr(portfolio, "_positions", None)) or {}
+                     else dict(getattr(portfolio, "_positions", None) or {})) or {}
         core_value = float(positions.get(core_sym, 0.0) or 0.0) * float(
             (prices or {}).get(core_sym, 0.0) or 0.0)
         hedge_value = 0.0
@@ -3081,7 +3098,21 @@ def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
         cash_fl = float(cfg.get("cash_reserve_floor_pct", 0.02) or 0.02)
         share = max(0.05, 1.0 - core_tgt - cash_fl)
         return (share * nav) - satellite
-    except Exception:
+    except Exception as _hr_exc:
+        # Fail OPEN, but never SILENTLY.
+        #
+        # 2026-08-03 sweep, MED: the bare `except: return None` had no log and no
+        # counter, so a permanent failure (a config-shape bug, a renamed method)
+        # would disable this cap forever with no signal at all -- and this repo
+        # has already shipped a chop gate that failed open into exactly the
+        # behaviour it existed to prevent.
+        #
+        # The direction is still right: this function does no I/O, so almost
+        # every exception here is a programming error rather than a transient,
+        # and refusing to trade because a sizing guard is broken is worse than
+        # trading uncapped. But an operator has to be able to SEE it.
+        _log(f"[core] satellite headroom unavailable — cap is INERT this tick "
+             f"({type(_hr_exc).__name__}: {str(_hr_exc)[:90]})", "red")
         return None
 
 
