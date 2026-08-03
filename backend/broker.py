@@ -13446,6 +13446,36 @@ while not shutdown_requested:
                     _core_funding_request = _fr_capped
             except (TypeError, ValueError, AttributeError):
                 _core_funding_request = 0.0
+            # TICK-MODE PARITY for the CORE leg.
+            #
+            # 2026-08-03 sweep, MED: release runs unconditionally on this shared
+            # in-session path, while deploy is skipped on IDLE (live) and on
+            # MONITOR *and* IDLE (dual-cadence backtest). So the core could SELL
+            # on ticks where it could not BUY -- the sell-only asymmetry this
+            # file's own comment calls "not a conservative subset... a different
+            # strategy". Combined with the funding loop, a release could fire on
+            # an IDLE tick that had no way to buy the core back.
+            #
+            # Suppress only the CORE's discretionary rebalance on those ticks by
+            # zeroing the funding request. The LEGACY protective release path is
+            # deliberately untouched: a stop or a bear liquidation must still run
+            # on every tick, which is the whole point of it being on the shared
+            # path.
+            _core_tick_ok = True
+            if _core_sleeve_cfg(_cached_strategies) is not None:
+                _ct_mode = (
+                    (_strategy_cache.get("graph_nexus_analysis", {}) or {})
+                    .get("_nexus_last_tick_mode")
+                )
+                if mode == MODE_LIVE:
+                    _core_tick_ok = _tick_mode != "IDLE"
+                elif _dc_bt_sim:
+                    _core_tick_ok = _ct_mode not in ("MONITOR", "IDLE")
+            if not _core_tick_ok and _core_funding_request > 0.0:
+                _log("[core] funding release suppressed — deploy cannot run on "
+                     "this tick mode, so releasing now would strand the cash",
+                     "cyan")
+                _core_funding_request = 0.0
             _residual_sleeve_release(
                 portfolio_emulator, prices, current_time, _cached_strategies,
                 (
