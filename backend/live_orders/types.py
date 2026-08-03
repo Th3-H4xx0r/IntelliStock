@@ -237,6 +237,30 @@ class OrderIntent:
             "source": source.value,
             "symbol": symbol,
             "side": side.value,
+            # KNOWN LIMITATION, 2026-08-03 adversarial sweep (HIGH, unfixed).
+            #
+            # Keying buys on the session date means: buy AAPL at 10:00, exit at
+            # 11:00, and the 14:00 re-entry hashes to this SAME key. The morning
+            # record is terminal FILLED with cumulative_quantity > 0, so
+            # _live_identity returns idempotency.terminal_requires_retry and
+            # never escalates (escalation is zero-fill-only). The re-entry is
+            # denied for the rest of the session and never reaches the broker.
+            # Scaling into a position hits the same wall.
+            #
+            # The obvious fix -- key on the decision BAR -- was tried and
+            # REVERTED, because it breaks the protection this key exists for:
+            # test_reemitted_buy_keeps_one_identity_across_drifted_sizing
+            # documents that a restart replays one logical buy on a DIFFERENT
+            # bar (+2h) with drifted sizing. So "different bar" describes both
+            # the replay that must dedupe and the re-entry that must not; the
+            # bar alone cannot separate them.
+            #
+            # What separates them is whether the POSITION WAS CLOSED in between.
+            # The correct fix is to let escalation advance retry_ordinal when
+            # the prior identity is terminal-FILLED *and* the exposure is gone,
+            # which needs position truth inside _live_identity. Left unfixed
+            # rather than trading a duplicate-buy risk (loses money) for a
+            # blocked re-entry (loses opportunity).
             "session_date": _session_date(decision_at),
             "retry_ordinal": retry_ordinal,
         }
