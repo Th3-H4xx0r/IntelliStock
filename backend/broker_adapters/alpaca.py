@@ -1047,13 +1047,38 @@ class AlpacaAdapter(BrokerAdapter):
                 ) from e
 
             parsed = _parse_error(e)
-            # Reaching here means get_order_by_client_id SUCCEEDED and found
-            # nothing: positive evidence that Alpaca holds no such order. That
-            # is the difference between "rejected" and "unknown", and the
-            # lifecycle needs it — recording a definite rejection as UNKNOWN
-            # left a non-terminal row nothing could ever resolve, which made
-            # every later reconcile unhealthy and blocked risk exits.
-            parsed.broker_definitive_rejection = True
+            # A lookup that found nothing is positive evidence Alpaca holds no
+            # such order -- BUT ONLY IF ALPACA ANSWERED THE ORIGINAL POST.
+            #
+            # 2026-08-03 adversarial sweep, CRITICAL: this used to be set on
+            # EVERY exception reaching here, including requests.ReadTimeout /
+            # ConnectionError / 502 -- cases where the POST is still executing
+            # at Alpaca and a lookup microseconds later legitimately 404s.
+            # Downstream that becomes a terminal REJECTED, the reservation is
+            # released, and the next emission escalates retry_ordinal into a
+            # BRAND NEW client order id. A new cid is precisely what defeats
+            # Alpaca's duplicate-cid protection -- the protection this whole
+            # identity design exists for -- so a network blip became a DOUBLE
+            # BUY with real money.
+            #
+            # A transport-layer failure must stay AMBIGUOUS: UNKNOWN, retried
+            # under the SAME cid, where the broker can reject the duplicate.
+            # Only an HTTP response proves Alpaca considered and refused it.
+            _answered = (
+                getattr(e, "status_code", None) is not None
+                or getattr(e, "response", None) is not None
+                or getattr(parsed, "http_status", None) is not None
+            )
+            parsed.broker_definitive_rejection = bool(_answered)
+            if not _answered:
+                _alog(
+                    "ALPACA",
+                    f"submit_order for {client_order_id} failed at the transport "
+                    f"layer ({type(e).__name__}); lookup found nothing but Alpaca "
+                    "never answered — recording AMBIGUOUS, not rejected, so the "
+                    "retry reuses this cid instead of minting a new one.",
+                    "yellow",
+                )
 
             # 2026-04-30 Task D-revision: try-then-floor for fractional
             # rejection. If qty was fractional AND Alpaca rejected with

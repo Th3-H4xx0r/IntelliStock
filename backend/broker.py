@@ -7174,10 +7174,53 @@ def _initialize_live_risk_authority(
             # the mirror is the thing that would be wrong if state were lost.
             # -1 on an unreadable count so the bootstrap refuses rather than
             # assuming flat.
-            def _broker_count(fn_name):
+            #
+            # 2026-08-03 adversarial sweep, CRITICAL: this previously called
+            # `get_all_positions`, which is the alpaca-py CLIENT method and does
+            # not exist on AlpacaAdapter. `callable(None)` is False, so the count
+            # was ALWAYS -1, the bootstrap ALWAYS refused, and a funded account
+            # still booted silently sell-only. The fix shipped a nicer log line
+            # and nothing else. The adapter's real method is refresh_positions().
+            #
+            # Length alone is not proof of flatness either. refresh_positions
+            # preserves a stale cache on REST failure, and list_open_orders
+            # swallows exceptions and returns [] -- which would report "flat" on
+            # a dead endpoint, exactly the assumption the docstring says it
+            # refuses to make. So both arms must distinguish READ FAILED from
+            # GENUINELY EMPTY.
+            def _broker_positions_count():
                 try:
-                    fn = getattr(adapter, fn_name, None)
-                    return len(fn() or ()) if callable(fn) else -1
+                    fn = getattr(adapter, "refresh_positions", None)
+                    if not callable(fn):
+                        return -1
+                    rows = fn()
+                    if rows is None:
+                        return -1
+                    # A preserved stale cache is not fresh broker truth.
+                    if getattr(adapter, "_positions_stale_since", None) is not None:
+                        return -1
+                    return len(rows)
+                except Exception:
+                    return -1
+
+            def _broker_open_order_count():
+                try:
+                    fn = getattr(adapter, "list_open_orders", None)
+                    if not callable(fn):
+                        return -1
+                    # list_open_orders returns [] on error, so an empty result is
+                    # ambiguous. Corroborate with the reconciliation snapshot,
+                    # which reports completeness explicitly.
+                    rows = fn()
+                    if rows:
+                        return len(rows)
+                    snap = getattr(adapter, "capture_reconciliation_snapshot", None)
+                    if callable(snap):
+                        s = snap()
+                        if not bool(getattr(s, "orders_complete", False)):
+                            return -1
+                        return len(getattr(s, "open_orders", ()) or ())
+                    return -1
                 except Exception:
                     return -1
 
@@ -7193,8 +7236,8 @@ def _initialize_live_risk_authority(
                         equity,
                         datetime.datetime.now(datetime.timezone.utc),
                         paper=paper,
-                        open_position_count=_broker_count("get_all_positions"),
-                        open_order_count=_broker_count("list_open_orders"),
+                        open_position_count=_broker_positions_count(),
+                        open_order_count=_broker_open_order_count(),
                         trading_blocked=_blocked,
                     )
                 )
