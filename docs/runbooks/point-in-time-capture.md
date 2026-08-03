@@ -88,11 +88,38 @@ Non-boot is confirmed by three independent signals, not one: `uptimeStart` stays
 None, `LiveBootAudit` has 0 rows (alpaca-main has 169), and `LLMUsage` has 0
 rows.
 
-Diagnosing further needs host-side visibility that is not reachable from the
-DB: the backend container's logs around a start attempt, and whether
-`DOCKER_INSTANCE_IMAGE` (default `intellistock-backend`) resolves via
-`client.images.get(...)` on that host. `start_instance_container` returning
-None is silent from every vantage point available here.
+### Narrowed by reading docker-compose.yml
+
+Only TWO services can spawn containers at all — they are the only ones with the
+Docker socket mounted and `DOCKER_INSTANCE_IMAGE` set:
+
+| service | container | docker.sock | DOCKER_INSTANCE_IMAGE | command |
+|---|---|---|---|---|
+| `backend` | intellistock-backend | **yes** | yes | `server.py` |
+| `backtest-engine` | intellistock-backtest-engine | **yes** | yes | `backtest_engine.py` |
+| `api` | intellistock-api | **NO** | **NO** | `api/main.py` |
+
+`POST /instances/{id}/start` is served by **`api`**, which has no Docker access.
+`_get_docker_client()` returns None there, `_preflight_instance_launch` raises
+"Docker client is unavailable" — and the endpoint still answers
+`200 {"started": true}` because all it actually did was write `runCommand` to
+the DB. **The 200 means "flag set", NOT "container started."** Do not read it
+as confirmation.
+
+Spawning is therefore `server.py`'s job, via the Instances changefeed in the
+`backend` container. Which makes the open question specific:
+
+> **Is the `backend` service (container `intellistock-backend`, running
+> `server.py`) actually deployed and running on the host?**
+
+If it is not, every symptom here follows at once: the changefeed never fires,
+the startup scan never runs, the API can only ever set a flag, and instance
+containers already running (the crypto `test`, up since 2026-07-27) keep
+running untouched because nothing is managing them.
+
+Check with `docker ps | grep intellistock-backend` on the host, or in Dokploy's
+service list. If it is missing or restart-looping, that is the bug — not
+anything in the instance row.
 
 The instance row is left `runCommand=True` so it launches as soon as whatever
 is wrong is fixed. It costs nothing while it is not running — measured LLM
