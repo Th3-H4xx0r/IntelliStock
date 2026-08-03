@@ -231,12 +231,21 @@ def test_dust_orders_are_refused_on_both_sides():
     assert tiny_sell.notional == 0.0 and tiny_sell.reason == "release_below_min"
 
 
-def test_deploy_is_capped_by_available_cash():
+def test_deploy_is_capped_by_cash_LESS_the_declared_floor():
+    """Cash minus the 2% floor, not all of it.
+
+    `core = clamp(1 - cash_floor - satellite, ...)` only reserves the floor
+    while the raw expression sits INSIDE the clamp. Once the satellite pushes it
+    below min_pct the clamp lifts the target back up, and an unguarded
+    min(drift, cash) then spent every dollar -- leaving $0 against a declared 2%
+    floor, in exactly the overrun state that has no cash buffer to trade out of.
+    """
     cfg = core_sleeve_config(ON)
     order = core_rebalance_order(cfg, nav=6000.0, core_value=0.0,
                                  satellite_value=2280.0, cash=500.0,
                                  days_since_rebalance=99)
-    assert round(order.notional, 2) == 500.0
+    # 500 cash - 2% of 6000 = 500 - 120 = 380
+    assert round(order.notional, 2) == 380.0
 
 
 def test_release_is_capped_by_the_position():
@@ -332,3 +341,19 @@ def test_an_absurd_core_target_cannot_starve_the_satellite_to_zero():
     cfg = {"core_sleeve_enabled": True, "core_target_pct": 0.99,
            "cash_reserve_floor_pct": 0.02, "nexus_portfolio_pct": 0.95}
     assert _satellite_cap(cfg) == 0.05
+
+
+
+def test_a_sub_minimum_funding_shortfall_does_not_cancel_the_bear_derisk():
+    """A $1 shortfall used to return funding_below_min and skip EVERYTHING
+    below it, including risk reduction. A funding request too small to act on is
+    a reason to skip funding, not a reason to skip de-risking."""
+    cfg = core_sleeve_config(ON)
+    order = core_rebalance_order(cfg, nav=6000.0, core_value=5880.0,
+                                 satellite_value=0.0, cash=0.0,
+                                 funding_request=1.0,
+                                 regime="bear", bear_dwell_days=9,
+                                 days_since_rebalance=0)
+    assert order.reason == "bear_derisk", (
+        f"a $1 shortfall must not cancel the de-risk (got {order.reason})")
+    assert order.notional < 0

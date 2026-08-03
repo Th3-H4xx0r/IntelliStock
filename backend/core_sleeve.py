@@ -247,9 +247,20 @@ def core_rebalance_order(
     need = max(0.0, float(funding_request or 0.0) - max(0.0, float(cash or 0.0)))
     if need > 0.0 and core_value > 0.0:
         sell = min(need, core_value)
-        if sell < MIN_CORE_ORDER_USD:
-            return RebalanceOrder(reason="funding_below_min", **base)
-        return RebalanceOrder(notional=-sell, reason="funding", **base)
+        if sell >= MIN_CORE_ORDER_USD:
+            return RebalanceOrder(notional=-sell, reason="funding", **base)
+        # FALL THROUGH, do not return.
+        #
+        # 2026-08-03 adversarial sweep, MED-HIGH: this used to return
+        # `funding_below_min` here, which meant a shortfall of $0.01-$4.99
+        # silently cancelled EVERYTHING below -- including the bear de-risk. A
+        # book at 98% core in a confirmed bear with dwell 9 did no de-risking at
+        # all because the allocator happened to be $1 short that bar, and the
+        # condition can persist for many bars. Deploy cannot compensate: it owns
+        # the buy side only.
+        #
+        # A funding request too small to act on is not a reason to skip risk
+        # reduction. It is a reason to skip FUNDING.
 
     drift = target_w - current_w
     drift_usd = drift * nav
@@ -300,7 +311,18 @@ def core_rebalance_order(
             return RebalanceOrder(reason="turnover_budget_exhausted", **base)
         if str(circuit_tier or "").strip().lower() in ("hard", "kill"):
             return RebalanceOrder(reason="circuit_blocks_add", **base)
-        buy = min(drift_usd, max(0.0, float(cash or 0.0)))
+        # Reserve the declared cash floor.
+        #
+        # 2026-08-03 sweep, MED: `core = clamp(1 - cash_floor - satellite, ...)`
+        # only reserves the floor while the raw expression sits INSIDE the
+        # clamp. Once the satellite pushes it below min_pct the clamp lifts the
+        # target back up, and an unguarded `min(drift, cash)` then spent every
+        # dollar -- a 90% satellite with $1,000 cash bought $1,000 of core and
+        # left $0 against a declared 2% floor. That is the same state that
+        # produced the "core pinned at 30.0%" symptom, now with no cash buffer
+        # to trade out of it.
+        _spendable = max(0.0, float(cash or 0.0) - cfg.cash_floor_pct * nav)
+        buy = min(drift_usd, _spendable)
         if buy < max(MIN_CORE_DEPLOY_USD, MIN_CORE_ORDER_USD):
             return RebalanceOrder(reason="deploy_below_min", **base)
         return RebalanceOrder(notional=buy, reason="band_deploy", **base)
