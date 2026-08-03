@@ -3094,11 +3094,39 @@ def call_structured_llm_by_provider(
                             flush=True,
                         )
                 _native_call_t0 = time.monotonic()
+                # 2026-08-03 — BOUND THIS CALL.
+                #
+                # `agent.run_sync` was invoked with no timeout of any kind. The
+                # deadline machinery below (`_call_deadline`/`_attempt_timeout`,
+                # ~line 3419) covers only the PLAIN HTTP paths; this
+                # PydanticAI-native path — which every provider
+                # `_build_pydantic_ai_model` can build routes through — had
+                # nothing. A provider that accepts the connection and then
+                # never answers hung here forever: no timeout, no retry, no log
+                # line. Observed on bt 640949, wedged at 6.25% with the sentiment
+                # call outstanding for 5+ minutes and zero LLMUsage rows.
+                #
+                # In a backtest that stalls a run. On a LIVE tick it stalls the
+                # trading bar, which is the same failure class the per-attempt
+                # and shared-deadline caps were introduced to kill — this path
+                # was simply missed by that sweep (it is the third LLM path:
+                # llm_utils plain, llm_utils structured, chatbot/llm.py).
+                #
+                # A worker thread cannot be killed, so a wedged call still leaks
+                # one thread until its socket gives up. That is the accepted
+                # trade everywhere else in this codebase (`_snap_fut.result
+                # (timeout=...)` in broker.py): leaking a thread is survivable,
+                # stalling the bar is not. The provider lock is taken and
+                # released on THIS thread so a leaked worker can never hold it
+                # and deadlock every later call.
+                _native_timeout = _structured_call_timeout()
                 if provider_lock is not None:
                     with provider_lock:
-                        result = agent.run_sync(prompt, infer_name=False)
+                        result = _run_sync_bounded(agent, prompt, _native_timeout,
+                                                   provider, structured_model)
                 else:
-                    result = agent.run_sync(prompt, infer_name=False)
+                    result = _run_sync_bounded(agent, prompt, _native_timeout,
+                                               provider, structured_model)
                 usage_data = _structured_run_usage_dict(result)
                 # OpenRouter's usage envelope carries a per-call USD `cost`
                 # (requested via extra_body usage.include on the openrouter
@@ -3414,6 +3442,61 @@ _LLM_MAX_ATTEMPT_TIMEOUT = float(os.environ.get("LLM_MAX_ATTEMPT_TIMEOUT", "300"
 #: maintenance join the cap was introduced to fit inside. Only a shared
 #: deadline actually bounds the call.
 _LLM_TOTAL_CALL_BUDGET = float(os.environ.get("LLM_TOTAL_CALL_BUDGET", "600") or 600.0)
+
+
+#: Wall-clock cap for ONE PydanticAI-native `agent.run_sync`. Defaults to the
+#: same shared budget the plain paths use, so "how long may one LLM call take"
+#: has ONE answer regardless of which of the three paths serves it.
+def _structured_call_timeout() -> float:
+    try:
+        raw = os.environ.get("LLM_STRUCTURED_CALL_TIMEOUT")
+        if raw:
+            return max(1.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    return max(1.0, _LLM_TOTAL_CALL_BUDGET)
+
+
+#: Daemon pool for bounded structured calls. Daemon so a wedged provider can
+#: never hold the process open at shutdown, and unbounded in width because a
+#: leaked hung worker must not consume a slot that later calls need — the whole
+#: point is that a wedged call cannot block anything else.
+_STRUCTURED_CALL_EXECUTOR = None
+_STRUCTURED_CALL_EXECUTOR_LOCK = threading.Lock()
+
+
+def _structured_executor():
+    global _STRUCTURED_CALL_EXECUTOR
+    if _STRUCTURED_CALL_EXECUTOR is None:
+        with _STRUCTURED_CALL_EXECUTOR_LOCK:
+            if _STRUCTURED_CALL_EXECUTOR is None:
+                from concurrent.futures import ThreadPoolExecutor
+                _STRUCTURED_CALL_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=32, thread_name_prefix="llm-structured")
+    return _STRUCTURED_CALL_EXECUTOR
+
+
+def _run_sync_bounded(agent, prompt, timeout, provider="", model=""):
+    """`agent.run_sync` with a wall-clock ceiling.
+
+    Raises TimeoutError on expiry so the caller's existing candidate-fallback
+    loop treats it like any other provider failure and moves on, instead of
+    blocking forever. The worker is abandoned, not killed — see the call site
+    for why that trade is the right one.
+    """
+    from concurrent.futures import TimeoutError as _FTimeout
+    fut = _structured_executor().submit(agent.run_sync, prompt, infer_name=False)
+    try:
+        return fut.result(timeout=timeout)
+    except _FTimeout:
+        fut.cancel()
+        import sys
+        print(f"[llm_utils] structured call to {provider}/{model!r} exceeded "
+              f"{timeout:.0f}s — abandoning attempt (thread leaks until its "
+              f"socket times out); falling through to the next candidate",
+              file=sys.stderr, flush=True)
+        raise TimeoutError(
+            f"structured LLM call to {provider}/{model} exceeded {timeout:.0f}s")
 
 
 def _call_deadline(budget=None) -> float:
