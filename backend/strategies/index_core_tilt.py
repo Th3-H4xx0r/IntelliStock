@@ -190,15 +190,29 @@ def plan_targets(*, nav, core_symbol, core_value, core_target_pct,
 
     cadence_ok = (days_since_rebalance is None
                   or days_since_rebalance >= rebalance_min_days)
-    if abs(drift) <= float(core_band_pct) and not adds and not (held - set(members)):
-        notes.append(f"core within band ({current_core_w:.1%} vs "
-                     f"{core_target:.1%}) — holding")
-        targets.pop(core_symbol, None)
-        return targets, notes
-    if not cadence_ok and not adds and not (held - set(members)):
-        notes.append(f"core drifted {drift:+.1%} but cadence holds "
-                     f"({days_since_rebalance:.0f}d of {rebalance_min_days}d)")
-        return targets, notes
+    membership_changed = bool(adds) or bool(held - set(members))
+
+    # HOLD means hold EVERYTHING — return no targets at all.
+    #
+    # 2026-08-03: this used to pop only the core and still return the satellite
+    # entries, so a caller re-sized the satellite on every bar. Simulated over
+    # 501 real SPY sessions that was 501 rebalances and 21.49x/yr of turnover —
+    # identical whether the cadence was 90 days or 30, and identical with the
+    # buy/hold spread disabled, because neither gate was reached. The whole
+    # design claim is low turnover, and a partial hold silently voided it.
+    #
+    # Both gates now cover the satellite too. Drift is a sufficient proxy for
+    # satellite drift as well, since core weight is 1 - satellite by
+    # construction.
+    if not membership_changed:
+        if abs(drift) <= float(core_band_pct):
+            notes.append(f"within band ({current_core_w:.1%} core vs "
+                         f"{core_target:.1%}) — holding everything")
+            return {}, notes
+        if not cadence_ok:
+            notes.append(f"drifted {drift:+.1%} but cadence holds "
+                         f"({days_since_rebalance:.0f}d of {rebalance_min_days}d)")
+            return {}, notes
 
     targets[core_symbol] = core_target
     notes.append(f"core -> {core_target:.1%} (from {current_core_w:.1%})")

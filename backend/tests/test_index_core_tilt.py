@@ -212,3 +212,46 @@ def test_no_core_price_is_a_no_op_not_a_guess():
         ["A"], {"A": 50.0}, NOW, {"enabled": True}, {},
         portfolio_emulator=_Emu(positions={"SPY": 10.0}))
     assert out == {}
+
+
+def test_holding_returns_NO_targets_even_with_a_live_satellite():
+    """A hold must hold EVERYTHING, satellite included.
+
+    Regression for 2026-08-03. `plan_targets` popped only the core on the hold
+    path and still returned the satellite entries, so a caller re-sized the
+    satellite on every single bar. Simulated over 501 real SPY sessions that
+    was 501 rebalances and 21.49x/yr of turnover — identical at a 90-day
+    cadence and a 30-day one, and identical with the buy/hold spread disabled,
+    because neither gate was ever reached. The entire case for this strategy is
+    low turnover, and a partial hold silently voided it.
+
+    The existing band/cadence tests all used an EMPTY satellite, which is
+    exactly why they passed while the bug was live.
+    """
+    ranked = [f"S{i}" for i in range(20)]
+    held = ["S0", "S1", "S2"]
+    # Book already at target: core 85%, three satellite names sharing 15%.
+    targets, notes = plan_targets(
+        core_value=0.85 * 6000.0,
+        ranked_symbols=ranked,
+        held_symbols=held,
+        **{**BASE, "satellite_max_names": 3},
+    )
+    assert targets == {}, (
+        f"hold must emit nothing, got {targets} — satellite entries here mean "
+        f"the caller re-sizes every bar"
+    )
+    assert any("holding everything" in n for n in notes), notes
+
+
+def test_cadence_also_gates_the_satellite_not_just_the_core():
+    """Same property via the cadence gate rather than the band."""
+    ranked = [f"S{i}" for i in range(20)]
+    targets, notes = plan_targets(
+        core_value=0.60 * 6000.0,          # well outside the band
+        ranked_symbols=ranked,
+        held_symbols=["S0", "S1", "S2"],
+        **{**BASE, "satellite_max_names": 3, "days_since_rebalance": 5},
+    )
+    assert targets == {}, targets
+    assert any("cadence holds" in n for n in notes), notes
