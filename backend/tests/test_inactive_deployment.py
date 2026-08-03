@@ -168,3 +168,66 @@ def test_evidence_bundle_rejects_noncanonical_artifact_identity(bad_hash):
                 paper_passed=False,
             ),
         )
+
+
+def test_instance_containers_receive_neo4j_credentials():
+    """NEO4J_* must reach instance containers.
+
+    Regression for 2026-08-03. `start_instance_container` forwarded 18 env vars
+    and NEO4J_URI/USER/PASSWORD were not among them, so the strategy fell back
+    to DEFAULT_NEO4J_PASSWORD ("intellistock") and every live instance
+    authenticated with the wrong password:
+
+        Neo4j ETF mapping load failed: ... Unauthorized
+        Neo4j market_cap cache: load failed (AuthError()) — A1 mcap path
+          will be inert for this run
+
+    The run continues after that, degraded and quiet — no ETF mapping, no
+    sector mapping, no market-cap prefilter — on a strategy whose whole premise
+    is the graph. Asserted against the source because constructing a real
+    launch needs a Docker daemon.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "server.py"
+    tree = ast.parse(src.read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "start_instance_container")
+    forwarded = {n.value for n in ast.walk(fn)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    for var in ("NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD"):
+        assert var in forwarded, (
+            f"{var} is not forwarded into instance containers — the graph "
+            f"strategy will silently authenticate with DEFAULT_NEO4J_PASSWORD "
+            f"and run with an inert graph"
+        )
+
+
+def test_crypto_instances_are_launchable():
+    """kind='crypto' must not fall through to 'instance kind is malformed'.
+
+    Regression for 2026-08-03: the dispatch handled 'kalshi' and
+    (None|''|'equities') and raised LiveReadinessError for everything else, so
+    every crypto instance failed to start:
+
+        [SERVER] Failed to start instance container test (LiveReadinessError)
+
+    It went unnoticed because the running crypto container predated the
+    dispatch; the soak was one restart away from ending silently while the
+    instance row still read runCommand=True.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "server.py"
+    tree = ast.parse(src.read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "start_instance_container")
+    kinds = {n.value for n in ast.walk(fn)
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "crypto" in kinds, (
+        "start_instance_container has no 'crypto' branch — crypto instances "
+        "raise LiveReadinessError('instance kind is malformed') and can never "
+        "be (re)started"
+    )

@@ -509,6 +509,29 @@ def start_instance_container(instance_id, *, preflight=None):
     for _k in ('GEMINI_API_KEY', 'DEEPSEEK_API_KEY', 'BENZINGA_API_KEY',
                'GRAPH_NEXUS_LLM_PROVIDER', 'GRAPH_NEXUS_LLM_API_KEY', 'GRAPH_NEXUS_LLM_MODEL',
                'INTELLISTOCK_CRED_KEY',
+               # 2026-08-03 — these were MISSING, and the strategy that needs
+               # them is the graph strategy. Without them
+               # `_neo4j_settings` falls back to DEFAULT_NEO4J_PASSWORD
+               # ("intellistock", graph_nexus_analysis.py:350), which does not
+               # match a deployment that sets NEO4J_PASSWORD — so every
+               # instance container authenticated with the wrong password and
+               # logged:
+               #   Neo4j ETF mapping load failed: ... Unauthorized
+               #   Neo4j stock-sector mapping load failed: ... Unauthorized
+               #   Neo4j market_cap cache: load failed (AuthError()) — A1 mcap
+               #     path will be inert for this run
+               #
+               # The run CONTINUES after those lines, degraded and quiet: no
+               # ETF mapping, no sector mapping, no market-cap prefilter, on a
+               # strategy whose whole premise is the graph. This is the live
+               # path, so it applied to real-money instances too, and it would
+               # also have poisoned PIT capture — the captured `graph` dataset
+               # is exported from the same driver.
+               #
+               # Only forwarded when actually set in the server environment, so
+               # a deployment that relies on the defaults keeps today's
+               # behaviour byte-for-byte.
+               'NEO4J_URI', 'NEO4J_USER', 'NEO4J_PASSWORD',
                'ALLOW_LEGACY_ENV_CREDS',
                # When set, broker_session narrows the live tick gate from
                # extended hours to regular trading hours.
@@ -570,7 +593,21 @@ def start_instance_container(instance_id, *, preflight=None):
             return None
         if kind == "kalshi":
             cmd = ['python', '-m', 'kalshi.runner', str(instance_id)]
-        elif kind in (None, "", "equities"):
+        elif kind in (None, "", "equities", "crypto"):
+            # 2026-08-03 — `crypto` was missing here and fell through to the
+            # `else`, so EVERY crypto instance failed to launch with
+            # "instance kind is malformed". Observed on instance `test`:
+            #   [SERVER] Failed to start instance container test (LiveReadinessError)
+            #
+            # It was not noticed because the running crypto container PREDATES
+            # this dispatch (up since 2026-07-27) and nothing restarted it —
+            # the soak was one container restart away from silently ending, and
+            # the instance row would still have read runCommand=True.
+            #
+            # `instance.py` is correct for crypto: the crypto platform is the
+            # SAME codebase reached through the same broker.py and adapter,
+            # gated on kind rather than forked, so it needs no separate
+            # entrypoint the way Kalshi's lean engine does.
             cmd = ['python', 'instance.py', str(instance_id)]
         else:
             raise LiveReadinessError("instance kind is malformed")
