@@ -3144,7 +3144,36 @@ def _core_turnover_state(cached_strategies, nav, current_time):
     """
     _core = _core_sleeve_cfg(cached_strategies)
     if _core is None:
-        return False, 0.0
+        # 2026-08-03: the budget used to return (False, 0.0) here, which made
+        # `turnover_budget_monthly_pct` a CONDITIONALLY DEAD key -- it has a
+        # reader, so grep exonerates it, but it did nothing at all unless the
+        # index core happened to be armed. An operator setting only that key got
+        # silence. That is worse than a plainly dead key, and this repo has
+        # already shipped `max_single_position_pct` (fully dead, months) and
+        # `slot_min_notional_pct` (half-dead, backfill-path only).
+        #
+        # A turnover ceiling is not core-specific. It throttles discretionary
+        # churn, which is exactly as meaningful with the core off -- arguably
+        # more so, since that is today's 290%/month configuration. Honour it
+        # standalone by building a minimal config carrying just the budget.
+        _raw = _core_sleeve_cfg_raw(cached_strategies)
+        try:
+            _budget = float(_raw.get("turnover_budget_monthly_pct", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            _budget = 0.0
+        if _budget <= 0.0:
+            return False, 0.0          # genuinely off -- the default
+        try:
+            from core_sleeve import CoreSleeveConfig, turnover_budget_state
+            _standalone = CoreSleeveConfig(
+                enabled=True, turnover_budget_monthly_pct=_budget)
+            return turnover_budget_state(
+                _standalone,
+                rolling_notional=_turnover_ledger_rolling(current_time),
+                nav=float(nav or 0.0),
+            )
+        except Exception:
+            return False, 0.0
     try:
         from core_sleeve import turnover_budget_state
         return turnover_budget_state(

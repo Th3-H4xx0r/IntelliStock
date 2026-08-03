@@ -523,13 +523,28 @@ def test_the_satellite_lane_is_still_budgeted():
     assert blocked is True
 
 
-def test_the_budget_is_inert_without_the_core():
-    """The master flag gates the budget too — one switch, not two."""
+def test_the_budget_works_WITHOUT_the_core():
+    """A turnover ceiling is not core-specific, and a key that silently does
+    nothing is a footgun this repo has already been bitten by three times.
+
+    This previously returned (False, 0.0) whenever the core was off, which made
+    `turnover_budget_monthly_pct` CONDITIONALLY DEAD: it has a reader, so grep
+    exonerates it, but setting it alone did nothing at all. That is worse than a
+    plainly dead key -- and `max_single_position_pct` (fully dead for months)
+    and `slot_min_notional_pct` (half-dead, backfill-path only) are the
+    precedents.
+
+    Throttling discretionary churn is exactly as meaningful with the core off --
+    arguably more so, since that is today's 290%/month configuration. The
+    default is still 0 == OFF, so nothing arms by surprise.
+    """
     legacy_budget = [{"strategy": "graph_nexus_analysis",
                       "config": dict(LEGACY_CFG,
                                      turnover_budget_monthly_pct=0.01)}]
     b._turnover_ledger_record(NOW, 99_000.0, "t")
-    assert b._core_turnover_state(legacy_budget, 6000.0, NOW) == (False, 0.0)
+    blocked, used = b._core_turnover_state(legacy_budget, 6000.0, NOW)
+    assert blocked is True, "a budget set without the core must still bind"
+    assert used > 0.0
 
 
 # ── Standing satellite weight cap ────────────────────────────────────────────
