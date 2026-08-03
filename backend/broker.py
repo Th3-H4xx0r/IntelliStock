@@ -2994,6 +2994,42 @@ def _turnover_ledger_rolling(current_time):
         return 0.0
 
 
+def _core_sleeve_block_new_satellite(portfolio, prices, cached_strategies, symbol):
+    """True when a NEW satellite name must be refused to protect the core.
+
+    Returns False whenever the core is off, the symbol is already held, or the
+    satellite is still inside its design share, so this is inert unless the core
+    sleeve is armed. Fails OPEN on any error -- a sizing guard must never be the
+    reason the book stops trading.
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies)
+        if not bool(cfg.get("core_sleeve_enabled", False)):
+            return False
+        sym = str(symbol or "").strip().upper()
+        held = getattr(portfolio, "_positions", None) or {}
+        if float(held.get(sym, 0.0) or 0.0) > 0:
+            return False          # adds to an existing name are exempt
+        nav = float(portfolio.get_portfolio_value(prices) or 0.0)
+        if nav <= 0:
+            return False
+        core_sym = str(cfg.get("residual_sleeve_symbol", "SPY") or "SPY").upper()
+        bear_sym = str(cfg.get("residual_sleeve_bear_symbol", "") or "").upper()
+        sleeve = {core_sym, bear_sym} - {""}
+        satellite = 0.0
+        for tic, qty in held.items():
+            t = str(tic or "").strip().upper()
+            if t in sleeve:
+                continue
+            satellite += float(qty or 0.0) * float((prices or {}).get(t, 0.0) or 0.0)
+        core_tgt = float(cfg.get("core_target_pct", 0.60) or 0.60)
+        cash_fl = float(cfg.get("cash_reserve_floor_pct", 0.02) or 0.02)
+        share = max(0.05, 1.0 - core_tgt - cash_fl)
+        return (satellite / nav) >= share
+    except Exception:
+        return False
+
+
 def _core_sleeve_cfg_raw(cached_strategies):
     """Raw graph_nexus_analysis config dict, or {} -- used by the core-sleeve
     escape hatches that must be read before CoreSleeveConfig is parsed."""
@@ -13469,6 +13505,39 @@ while not shutdown_requested:
                         # book already fills the regime cap. Held-symbol adds
                         # (winner adds, partial fills) are exempt.
                         if decision == 1:
+                            # 2026-08-03 STANDING SATELLITE WEIGHT CAP.
+                            #
+                            # The core is deliberately a RESIDUAL of the
+                            # satellite -- that is the tilt mechanic: a graph BUY
+                            # raises the satellite, lowering the core, so the
+                            # name is held above its index weight funded by
+                            # selling the index. But the residual only lands on
+                            # the design's 60% when the satellite stays inside
+                            # its 38% share, and nothing bounded it.
+                            #
+                            # Validation run bt 589998 showed the consequence:
+                            # the core built correctly to 75.3% early, then the
+                            # satellite kept buying across bars until it held
+                            # ~68% of NAV, and `core = clamp(1 - cash_floor -
+                            # satellite, 0.30, 0.98)` drove the core to exactly
+                            # its 30.0% floor. The formula was right; the input
+                            # was unbounded.
+                            #
+                            # nexus_portfolio_pct does NOT cover this: it caps
+                            # cumulative new-entry spend PER BAR, so repeated
+                            # buys across bars (and appreciation) walk the
+                            # satellite past its share regardless. This is a
+                            # STANDING weight check, evaluated against the book
+                            # as it actually stands. Adds to names already held
+                            # are exempt -- refusing those would strand a
+                            # half-built position and is not what overran.
+                            if _core_sleeve_block_new_satellite(
+                                    portfolio_emulator, prices, _cached_strategies,
+                                    symbol):
+                                _log(f"SATELLITE CAP: {symbol} skipped — satellite "
+                                     f"already at its design share; core would be "
+                                     f"squeezed below target", "yellow")
+                                continue
                             # 2026-07-19 adversarial review MED: the bear
                             # symbol is reserved for the sleeve — a strategy
                             # position in it would collide with the leg's

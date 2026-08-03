@@ -512,3 +512,67 @@ def test_the_budget_is_inert_without_the_core():
                                      turnover_budget_monthly_pct=0.01)}]
     b._turnover_ledger_record(NOW, 99_000.0, "t")
     assert b._core_turnover_state(legacy_budget, 6000.0, NOW) == (False, 0.0)
+
+
+# ── Standing satellite weight cap ────────────────────────────────────────────
+# bt 589998: the core built to 75.3%, then the satellite kept buying across bars
+# until it held ~68% of NAV and the residual formula drove the core to exactly
+# its 30.0% floor. nexus_portfolio_pct caps per-BAR new spend, so repeated buys
+# across bars walk straight past the design share.
+
+class _Book:
+    def __init__(self, positions, nav):
+        self._positions = dict(positions)
+        self._nav = float(nav)
+    def get_portfolio_value(self, prices):
+        return self._nav
+
+
+def _core_cfg(**over):
+    cfg = dict(LEGACY_CFG)
+    cfg.update({"core_sleeve_enabled": True, "core_target_pct": 0.60,
+                "cash_reserve_floor_pct": 0.02, "residual_sleeve_symbol": "SPY",
+                "residual_sleeve_bear_symbol": "SQQQ"})
+    cfg.update(over)
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def test_a_new_name_is_refused_once_the_satellite_fills_its_share():
+    book = _Book({"AAA": 100.0, "SPY": 1.0}, nav=10_000.0)
+    prices = {"AAA": 40.0, "SPY": 600.0}          # satellite 4000/10000 = 40% >= 38%
+    assert b._core_sleeve_block_new_satellite(book, prices, _core_cfg(), "BBB") is True
+
+
+def test_a_new_name_is_allowed_while_the_satellite_has_room():
+    book = _Book({"AAA": 100.0, "SPY": 1.0}, nav=10_000.0)
+    prices = {"AAA": 20.0, "SPY": 600.0}          # satellite 2000/10000 = 20% < 38%
+    assert b._core_sleeve_block_new_satellite(book, prices, _core_cfg(), "BBB") is False
+
+
+def test_adds_to_a_held_name_are_exempt():
+    """Refusing these strands a half-built position, and held names are not
+    what overran the share."""
+    book = _Book({"AAA": 100.0, "SPY": 1.0}, nav=10_000.0)
+    prices = {"AAA": 40.0, "SPY": 600.0}
+    assert b._core_sleeve_block_new_satellite(book, prices, _core_cfg(), "AAA") is False
+
+
+def test_the_core_and_hedge_legs_are_not_counted_as_satellite():
+    book = _Book({"SPY": 10.0, "SQQQ": 20.0}, nav=10_000.0)
+    prices = {"SPY": 600.0, "SQQQ": 100.0}        # 8000 of sleeve, 0 satellite
+    assert b._core_sleeve_block_new_satellite(book, prices, _core_cfg(), "BBB") is False
+
+
+def test_the_cap_is_inert_when_the_core_is_off():
+    book = _Book({"AAA": 100.0}, nav=10_000.0)
+    prices = {"AAA": 90.0}                        # 90% satellite, but core disabled
+    spec = [{"strategy": "graph_nexus_analysis", "config": dict(LEGACY_CFG)}]
+    assert b._core_sleeve_block_new_satellite(book, prices, spec, "BBB") is False
+
+
+def test_it_fails_open_on_a_broken_book():
+    class _Bad:
+        _positions = {"AAA": 1.0}
+        def get_portfolio_value(self, prices):
+            raise RuntimeError("boom")
+    assert b._core_sleeve_block_new_satellite(_Bad(), {}, _core_cfg(), "BBB") is False
