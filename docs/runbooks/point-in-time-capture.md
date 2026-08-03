@@ -63,19 +63,29 @@ Setting `runCommand=True` alone was **not sufficient** on 2026-08-03. The
 did not (no `LiveBootAudit` row, no LLM calls, no `uptimeStart`) across two
 attempts an hour apart with the API confirmed answering.
 
-What does work is the **startup scan** (`server.py`, "Launch any instances
-already in DB with runCommand=True") — that is how the crypto instance `test`
-got its `uptimeStart`. So:
+A redeploy does **not** fix it either — that was tried and it failed. The
+crypto instance `test` has carried `uptimeStart=2026-07-27` across every deploy
+since, which means **deploys do not restart instance containers**; the startup
+scan did not launch `alpaca-paper-pit` when the backend redeployed on
+2026-08-03.
 
-```
-1. ensure runCommand=True on alpaca-paper-pit
-2. redeploy the backend  (the startup scan launches it)
-3. confirm boot:  LiveBootAudit rows > 0  and  uptimeStart is set
-```
+So as of 2026-08-03 there is **no known DB-only way to launch a
+freshly-created equity instance.** Two paths were tried and both failed:
 
-If the changefeed path is ever fixed, step 2 becomes unnecessary. Until then a
-freshly-created instance needs a deploy to start, which is worth knowing before
-spending an hour watching a healthy-looking row do nothing.
+| attempt | result |
+|---|---|
+| `runCommand=True` (changefeed) | no container, twice, API confirmed up |
+| redeploy backend (startup scan) | no container; `test` uptimeStart unchanged |
+
+Diagnosing further needs host-side visibility that is not reachable from the
+DB: the backend container's logs around a start attempt, and whether
+`DOCKER_INSTANCE_IMAGE` (default `intellistock-backend`) resolves via
+`client.images.get(...)` on that host. `start_instance_container` returning
+None is silent from every vantage point available here.
+
+The instance row is left `runCommand=True` so it launches as soon as whatever
+is wrong is fixed. It costs nothing while it is not running — measured LLM
+spend while armed-but-unbooted was **$0.00**.
 
 ## Confirming it works
 
