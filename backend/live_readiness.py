@@ -208,8 +208,25 @@ def brokerage_requires_live_gate(
     if type(instance) is not dict:
         raise LiveReadinessError("instance configuration is unavailable")
     kind = instance.get("kind")
-    if kind not in (None, "", "equities"):
-        raise LiveReadinessError("instance is not an equities configuration")
+    # 2026-08-03 — `crypto` belongs here. The crypto platform is the SAME
+    # codebase reached through the same broker.py and the same Alpaca adapter,
+    # gated on kind rather than forked, so its paper/funded classification is
+    # decided by exactly the same `alpaca_paper` flag as equities. The check
+    # below is therefore already correct for it.
+    #
+    # It was excluded only because crypto could never reach this call: the
+    # supervisor's launch dispatch had no "crypto" branch and refused to start
+    # such an instance at all (fixed 435e508). With launching fixed, the
+    # long-running crypto soak reached this guard for the first time and
+    # crash-looped on `instance is not an equities configuration` — a live
+    # instance that had been running since 2026-07-27 taken down by a guard it
+    # had simply never been routed through before.
+    #
+    # Unsupported brokerage types still fail CLOSED at the bottom of this
+    # function, so a Binance.US crypto account is treated as funded until it is
+    # explicitly classified. That is the safe direction and is unchanged.
+    if kind not in (None, "", "equities", "crypto"):
+        raise LiveReadinessError("instance kind is not a tradable configuration")
     brokerage_id = instance.get("brokerage_id")
     if type(brokerage_id) is not str or not brokerage_id:
         raise LiveReadinessError("linked brokerage is unavailable")

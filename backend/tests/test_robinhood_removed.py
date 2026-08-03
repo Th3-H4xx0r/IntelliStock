@@ -112,3 +112,37 @@ def test_symbol_history_uses_an_injected_market_data_provider():
             ]
         },
     }
+
+
+def test_crypto_instances_pass_the_live_gate_classifier():
+    """kind='crypto' must classify, not raise.
+
+    Regression for 2026-08-03. `brokerage_requires_live_gate` rejected any kind
+    outside (None,'','equities'). Crypto never hit it because the supervisor's
+    launch dispatch had no crypto branch and refused to start such an instance
+    at all. Once launching was fixed (435e508), the long-running crypto soak
+    reached this guard for the first time and crash-looped on
+    "instance is not an equities configuration" — a live instance up since
+    2026-07-27 taken down by a guard it had never been routed through.
+
+    Crypto is the same codebase through the same broker.py and Alpaca adapter,
+    so the same `alpaca_paper` flag decides paper vs funded.
+    """
+    from live_readiness import brokerage_requires_live_gate
+
+    bid = "b0d7dc67-f12b-4959-83db-0d324c6bc517"
+    paper = {"id": bid, "brokerage_type": "alpaca", "alpaca_paper": True}
+    funded = {"id": bid, "brokerage_type": "alpaca", "alpaca_paper": False}
+    inst = {"kind": "crypto", "brokerage_id": bid}
+
+    assert brokerage_requires_live_gate(inst, paper) is False
+    assert brokerage_requires_live_gate(inst, funded) is True
+
+
+def test_an_unknown_kind_still_fails_closed():
+    from live_readiness import LiveReadinessError, brokerage_requires_live_gate
+    try:
+        brokerage_requires_live_gate({"kind": "futures", "brokerage_id": "x"}, {})
+    except LiveReadinessError:
+        return
+    raise AssertionError("an unknown instance kind must be rejected")
