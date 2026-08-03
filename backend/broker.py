@@ -2795,6 +2795,9 @@ _RESIDUAL_SLEEVE_MIN_RELEASE_USD = 5.0
 # purely in-memory per-run state — persisting it would leak one run's open
 # hedge into the next run's first bar.
 _RESIDUAL_SLEEVE_PERSIST_KEY = "_residual_sleeve_state"
+#: Position entry clocks for the holding floor (see min_hold.py), persisted on
+#: the same flush as the sleeve state.
+_POSITION_ENTRY_PERSIST_KEY = "_position_entry_ts"
 # Only the fields whose loss changes a trading decision. _bear_confirmed_qty is
 # excluded: it is rebuilt per fill by _apply_backtest_confirmed_fill_state and a
 # stale copy would mis-weight the next entry basis.
@@ -3161,6 +3164,119 @@ def _core_sleeve_cfg_raw(cached_strategies):
     return {}
 
 
+# 2026-08-03 MINIMUM HOLDING PERIOD — see backend/min_hold.py for the why.
+#
+# Turnover is the binding constraint on this book: ~290% of NAV per month at a
+# measured 23.2 bps one-way is 8.07%/yr of drag before any signal has to prove
+# itself. A holding floor is the most direct lever on it — a position bought
+# today simply cannot be sold on a discretionary signal for `min_hold_days`.
+#
+# `{SYMBOL: iso8601}` of the bar a position was OPENED (0 -> >0). Persisted with
+# the sleeve state because this host restarts often and an entry map that reset
+# on restart would make every position undatable, which fails OPEN and silently
+# disables the gate exactly when a restart loop is churning the book hardest.
+_POSITION_ENTRY_TS: dict = {}
+
+#: Z21 action intents that mean "get out for a RISK reason". Hoisted to module
+#: scope so the holding-floor gate and the live Alpaca gate read the SAME set —
+#: two copies would eventually drift, and the failure mode of a drifted copy is
+#: a stop-loss silently suppressed by a turnover optimisation.
+_RISK_EXIT_INTENTS = frozenset({
+    "fast_loser_cut",
+    "trailing_stop_sell",
+    "circuit_breaker_sell",
+    "hold_limit_sell",
+    "deep_loser_protect",
+    "forced_exit",
+    "downtrend_protection_sell",
+})
+
+
+def _min_hold_cfg(cached_strategies):
+    """Parsed holding floor, or None when the master flag is off.
+
+    Same contract as `_core_sleeve_cfg`: ONE parse point, never raise out of
+    here. A raise would disable the gate at every call site at once, and a
+    silently-disabled turnover gate is indistinguishable from a working one
+    until the monthly cost shows up.
+    """
+    try:
+        from min_hold import min_hold_config
+        cfg = min_hold_config(_core_sleeve_cfg_raw(cached_strategies))
+        return cfg if cfg.enabled and cfg.min_days > 0 else None
+    except Exception as exc:
+        if not globals().get("_min_hold_parse_failed_logged"):
+            globals()["_min_hold_parse_failed_logged"] = True
+            _log(f"[min-hold] config parse failed ({type(exc).__name__}: {exc}) "
+                 "— holding floor INERT this run", "red")
+        return None
+
+
+def _min_hold_note_position(symbol, portfolio_emulator, current_time):
+    """Stamp/clear a symbol's entry timestamp from the CURRENT position.
+
+    Called after every fill on the shared path. Stamps on a 0 -> >0 open and
+    clears on a full exit, so a re-entry starts a fresh clock rather than
+    inheriting the age of a position that was already closed once.
+    """
+    try:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return
+        positions = getattr(portfolio_emulator, "_positions", {}) or {}
+        qty = float(positions.get(sym, 0.0) or positions.get(symbol, 0.0) or 0.0)
+        if qty > 1e-9:
+            _POSITION_ENTRY_TS.setdefault(sym, _iso_utc(current_time))
+        else:
+            _POSITION_ENTRY_TS.pop(sym, None)
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+
+def _iso_utc(value):
+    """Best-effort ISO-8601 UTC string for a timestamp, or ''."""
+    try:
+        import datetime as _dt
+        if isinstance(value, _dt.datetime):
+            v = value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
+            return v.isoformat()
+        return str(value or "")
+    except Exception:
+        return ""
+
+
+def _min_hold_blocks_sell(symbol, cached_strategies, current_time, *,
+                          is_risk_exit):
+    """True when the holding floor should suppress this discretionary SELL.
+
+    `is_risk_exit` is passed through to `min_hold.sell_is_blocked`, which never
+    blocks one. That exemption is the whole safety property: a floor that traps
+    a position a stop wants out of costs far more than the spread it saves.
+    """
+    cfg = _min_hold_cfg(cached_strategies)
+    if cfg is None:
+        return False
+    try:
+        from min_hold import sell_is_blocked
+        sym = str(symbol or "").strip().upper()
+        blocked, reason = sell_is_blocked(
+            cfg,
+            entry_ts=_POSITION_ENTRY_TS.get(sym),
+            now=current_time,
+            is_risk_exit=bool(is_risk_exit),
+        )
+        if blocked:
+            _log(f"MIN_HOLD_GATE: blocked discretionary sell of {sym} "
+                 f"({reason}) — risk exits are unaffected", "yellow")
+        return blocked
+    except Exception as exc:
+        # Fail OPEN, like the undatable case: this is a cost optimisation and
+        # must never become a liquidity trap.
+        _log(f"[min-hold] gate failed for {symbol} "
+             f"({type(exc).__name__}: {exc}) — allowing the sell", "yellow")
+        return False
+
+
 def _core_turnover_state(cached_strategies, nav, current_time):
     """``(blocked, used_fraction_of_nav)`` for the rolling turnover budget.
 
@@ -3459,6 +3575,11 @@ def _residual_sleeve_state_persist():
             _k: _RESIDUAL_SLEEVE_STATE.get(_k)
             for _k in _RESIDUAL_SLEEVE_PERSIST_FIELDS
         }
+        # Position entry clocks ride the same flush. Without persistence every
+        # restart makes every position undatable, and an undatable position
+        # fails OPEN — which would silently disable the holding floor exactly
+        # when a restart loop is churning the book hardest.
+        _cache[_POSITION_ENTRY_PERSIST_KEY] = dict(_POSITION_ENTRY_TS)
     except Exception:
         pass
 
@@ -3477,6 +3598,18 @@ def _residual_sleeve_state_restore():
     if globals().get("mode") != MODE_LIVE:
         return
     globals()["_RESIDUAL_SLEEVE_STATE_RESTORED"] = True
+    try:
+        # Rehydrate the holding-floor clocks first; they are independent of the
+        # sleeve fields below and must survive even if that block returns early
+        # (a book with no persisted sleeve state can still hold positions).
+        _saved_entry = (_strategy_cache.get("graph_nexus_analysis") or {}).get(
+            _POSITION_ENTRY_PERSIST_KEY)
+        if isinstance(_saved_entry, dict):
+            for _sym, _ts in _saved_entry.items():
+                if _sym and _ts and _sym not in _POSITION_ENTRY_TS:
+                    _POSITION_ENTRY_TS[str(_sym).strip().upper()] = _ts
+    except Exception:
+        pass
     try:
         _saved = (_strategy_cache.get("graph_nexus_analysis") or {}).get(
             _RESIDUAL_SLEEVE_PERSIST_KEY)
@@ -14404,6 +14537,27 @@ while not shutdown_requested:
                                     _log(f"MAX_POSITIONS_GATE: blocked {symbol} (held={_mpg_proj}, cap={_mpg_cap})", "yellow")
                                     _trade_skipped_no_price = True
                                     continue
+                            # 2026-08-03 MINIMUM HOLDING PERIOD. Placed here on
+                            # purpose: after max_positions (so a blocked sell
+                            # cannot free a slot the buy side would then claim)
+                            # and BEFORE the turnover ledger below (a trade the
+                            # gate suppresses must not be booked as notional
+                            # traded, or the budget would throttle the book for
+                            # churn that never happened).
+                            #
+                            # Discretionary sells ONLY. `_risk_exit_intents` and
+                            # nexus sell-enforcement are exempt, mirroring the
+                            # live gate a few lines down — a holding floor that
+                            # traps a position a stop wants out of costs far
+                            # more than the spread it saves. Inert unless
+                            # min_hold_enabled=true.
+                            if decision == -1 and _min_hold_blocks_sell(
+                                    symbol, _cached_strategies, current_time,
+                                    is_risk_exit=(
+                                        bool(_z21_intents & _RISK_EXIT_INTENTS)
+                                        or symbol in nexus_sell_enforcement)):
+                                _trade_skipped_no_price = True
+                                continue
                             # 2026-05-06: bound order submission at 90s. Adapter
                             # internally has ~70s retry budget + 25-45s inter-order
                             # delay = ~115s worst case naturally; outer 90s ceiling
@@ -14449,15 +14603,13 @@ while not shutdown_requested:
                                         and not _is_crypto_instance_runtime()
                                     )
                                     if _is_alpaca_stock_gate:
-                                        _risk_exit_intents = {
-                                            "fast_loser_cut",
-                                            "trailing_stop_sell",
-                                            "circuit_breaker_sell",
-                                            "hold_limit_sell",
-                                            "deep_loser_protect",
-                                            "forced_exit",
-                                            "downtrend_protection_sell",
-                                        }
+                                        # Single source of truth, shared with the
+                                        # holding-floor gate above — see
+                                        # _RISK_EXIT_INTENTS. Two copies would
+                                        # drift, and a drifted copy means a stop
+                                        # silently suppressed by a turnover
+                                        # optimisation.
+                                        _risk_exit_intents = _RISK_EXIT_INTENTS
                                         with _live_order_dependency_lock:
                                             _risk_id = str(
                                                 _live_order_dependency_state.get(
@@ -14591,6 +14743,17 @@ while not shutdown_requested:
                                 _turnover_ledger_record(
                                     current_time, _to_notional,
                                     f"main_signal {'buy' if decision == 1 else 'sell'} {symbol}")
+                                # Start/stop this symbol's holding clock on the
+                                # same converged path, so the floor measures the
+                                # same ages in live and backtest. Reads the
+                                # POST-fill position: >0 stamps an open (once,
+                                # via setdefault, so adding to a winner does not
+                                # reset the clock and hand it another full
+                                # min_hold window), 0 clears so a later re-entry
+                                # starts fresh instead of inheriting the age of a
+                                # position that was already closed.
+                                _min_hold_note_position(
+                                    symbol, portfolio_emulator, current_time)
 
                             # ── Task 7: keep the running cycle counts current so
                             # later buys in this _exec_order see this emission. A
