@@ -64,6 +64,41 @@ choosing a story over the measurements.
 
 DEFAULT OFF. `enabled` is false, so attaching this strategy changes nothing
 until an operator sets it.
+
+⚠️ KNOWN LIMITATION — THIS CANNOT HOLD A LARGE CORE ON ITS OWN
+---------------------------------------------------------------
+Running this against the real engine on 2026-03-30..04-27 (local harness, 181
+bars) produced a **15% SPY position against a 100% target**: it asked for
+$6,000 and got $900.
+
+`BROKER_MAX_SINGLE_POSITION_PCT` is a broker-side hard ceiling of 15% of equity
+on ANY single position, and a plain `run_once` strategy is subject to it. Large
+core positions are held through the RESIDUAL SLEEVE instead, which is why
+`core_sleeve.py` reuses `residual_sleeve_symbol`: that string is what
+`_sleeve_symbols` keys off, and it carries six independent sell-exemptions
+(scorer, position safety net, bear-book trim, sell-enforcement, regime cap).
+`_core_sleeve_cfg` deliberately fails CLOSED without `residual_sleeve_enabled`
+for exactly this reason — without the exemptions the core would be "a large
+permanent position with zero sell-exemptions".
+
+So the production route to an index core is NOT this module. It is:
+
+    core_sleeve_enabled          = true    (needs residual_sleeve_enabled=true)
+    min_hold_enabled             = true    (backend/min_hold.py)
+    min_hold_days                = 30
+    rank_band_enabled            = true
+    turnover_budget_monthly_pct  = 0.50
+
+on the EXISTING strategy — all built, all default-off.
+
+What this module is still good for: the satellite sizing rule in
+`plan_targets` is pure, tested, and correct (equal weight, core-as-residual,
+buy/hold spread, two turnover gates, degrades to the index on a dead signal),
+and it is measured at 0.50x/yr turnover core-only and 3.87x/yr with an
+adversarial tilt, against the live book's 34.80x/yr. To use it in production it
+would need to delegate the CORE to the sleeve and manage only the satellite —
+which is a real change, not a config tweak. Until then treat it as a validated
+sizing prototype, not a deployable strategy.
 """
 
 from __future__ import annotations
@@ -204,7 +239,20 @@ def plan_targets(*, nav, core_symbol, core_value, core_target_pct,
     # Both gates now cover the satellite too. Drift is a sufficient proxy for
     # satellite drift as well, since core weight is 1 - satellite by
     # construction.
-    if not membership_changed:
+    # A drift this large means the book is not in the intended shape at all —
+    # a partially-executed rebalance, a restart, a deposit — and is a
+    # CORRECTION rather than a discretionary rebalance. The cadence must not
+    # gate it.
+    #
+    # 2026-08-03, found by actually running the engine: the first rebalance
+    # emitted "core -> 100.0%" but the broker sized the buy at its ~$1,000
+    # default, leaving the book 17% invested. The cadence clock was stamped by
+    # that partial fill, and the strategy then correctly saw an 85pp drift and
+    # refused to fix it for 90 days. A cadence gate that locks in a
+    # half-executed allocation is worse than having no gate.
+    far_out = abs(drift) > max(3.0 * float(core_band_pct), 0.15)
+
+    if not membership_changed and not far_out:
         if abs(drift) <= float(core_band_pct):
             notes.append(f"within band ({current_core_w:.1%} core vs "
                          f"{core_target:.1%}) — holding everything")
@@ -213,6 +261,9 @@ def plan_targets(*, nav, core_symbol, core_value, core_target_pct,
             notes.append(f"drifted {drift:+.1%} but cadence holds "
                          f"({days_since_rebalance:.0f}d of {rebalance_min_days}d)")
             return {}, notes
+    if far_out and not cadence_ok:
+        notes.append(f"drift {drift:+.1%} exceeds the correction threshold — "
+                     f"overriding the {rebalance_min_days}d cadence")
 
     targets[core_symbol] = core_target
     notes.append(f"core -> {core_target:.1%} (from {current_core_w:.1%})")
@@ -279,6 +330,13 @@ class IndexCoreTilt:
             print(f"[IndexCoreTilt] {note}")
 
         decisions: dict = {}
+        # Sizing MUST be published explicitly. A bare `1` is sized by the
+        # broker's default cash_per_trade (~$1,000), which silently turned
+        # "go to 100% SPY" into a $1,003 purchase on a $6,000 book the first
+        # time this ran against the real engine. Target weights are the entire
+        # point of this strategy, so they are plumbed through the same
+        # `_nexus_position_sizes` channel graph_nexus_analysis uses.
+        sizes: dict = {}
         for sym, target_w in targets.items():
             px = float(prices.get(sym) or 0.0)
             if px <= 0:
@@ -287,15 +345,32 @@ class IndexCoreTilt:
             delta = (target_w * nav) - current
             if abs(delta) < MIN_ORDER_USD:
                 continue
-            decisions[sym] = 1 if delta > 0 else -1
+            if delta > 0:
+                decisions[sym] = 1
+                # Never ask for more than the cash on hand; an unaffordable
+                # clip is rejected outright and, worse, would be re-issued
+                # every bar (the exact failure the core sleeve hit in bt
+                # 383711). Leave a hair for the spread.
+                try:
+                    cash = float(portfolio_emulator.get_cash() or 0.0)
+                except Exception:
+                    cash = delta
+                sizes[sym] = {"buy_cash": max(0.0, min(delta, cash * 0.995))}
+            else:
+                decisions[sym] = -1
+                sizes[sym] = {"sell_fraction": max(0.0, min(1.0,
+                                                            -delta / current))
+                              if current > 0 else 1.0}
         # Anything held that the plan does not name is a full exit.
         for sym, qty in positions.items():
             s = str(sym).strip().upper()
             if qty and s not in targets and s != core_symbol:
                 decisions.setdefault(s, -1)
+                sizes.setdefault(s, {"sell_fraction": 1.0})
 
         if decisions:
             cache["_ict_last_rebalance"] = current_time
+            decisions["_nexus_position_sizes"] = sizes
         return decisions
 
     @staticmethod

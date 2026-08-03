@@ -171,9 +171,12 @@ def test_an_empty_satellite_sends_the_core_to_fully_invested():
 
 
 def test_cadence_holds_a_drifted_core_when_membership_is_unchanged():
+    # Drift must sit BETWEEN the band (5pp) and the correction threshold (15pp)
+    # for the cadence to be the binding gate. Empty satellite -> target 1.0, so
+    # 0.90 is a 10pp drift.
     kw = {**BASE, "days_since_rebalance": 10}
     targets, notes = plan_targets(
-        core_value=0.60 * 6000.0, ranked_symbols=[], held_symbols=[], **kw)
+        core_value=0.90 * 6000.0, ranked_symbols=[], held_symbols=[], **kw)
     assert targets == {}
     assert any("cadence holds" in n for n in notes)
 
@@ -204,7 +207,11 @@ def test_end_to_end_returns_only_ints_in_the_run_once_contract():
         {"enabled": True}, {},
         data={"conviction_scores": {"A": 0.9}},
         portfolio_emulator=_Emu(positions={"SPY": 10.0}))
+    sizes = out.pop("_nexus_position_sizes", None)
     assert all(v in (1, 0, -1) for v in out.values()), out
+    assert isinstance(sizes, dict) and sizes, "sizing must be published"
+    assert all("buy_cash" in h or "sell_fraction" in h
+               for h in sizes.values()), sizes
 
 
 def test_no_core_price_is_a_no_op_not_a_guess():
@@ -248,10 +255,43 @@ def test_cadence_also_gates_the_satellite_not_just_the_core():
     """Same property via the cadence gate rather than the band."""
     ranked = [f"S{i}" for i in range(20)]
     targets, notes = plan_targets(
-        core_value=0.60 * 6000.0,          # well outside the band
+        core_value=0.75 * 6000.0,          # 10pp drift: past the band, inside
+                                           # the 15pp correction threshold
         ranked_symbols=ranked,
         held_symbols=["S0", "S1", "S2"],
         **{**BASE, "satellite_max_names": 3, "days_since_rebalance": 5},
     )
     assert targets == {}, targets
     assert any("cadence holds" in n for n in notes), notes
+
+
+def test_a_large_drift_overrides_the_cadence():
+    """A half-executed allocation must not be frozen for a full cadence window.
+
+    Regression for 2026-08-03, found by running the real engine rather than by
+    a unit test. The first rebalance emitted "core -> 100.0%", the broker sized
+    the buy at its ~$1,000 default, and the book was left 17% invested. The
+    cadence clock had been stamped by that partial fill, so the strategy then
+    correctly saw an 85pp drift and refused to correct it for 90 days. A gate
+    that locks in a half-executed allocation is worse than no gate.
+    """
+    kw = {**BASE, "days_since_rebalance": 0}
+    targets, notes = plan_targets(
+        core_value=0.17 * 6000.0,      # the observed partial-fill state
+        ranked_symbols=[], held_symbols=[], **kw)
+    assert targets == {"SPY": 1.0}, targets
+    assert any("correction threshold" in n for n in notes), notes
+
+
+def test_sizing_never_asks_for_more_cash_than_the_book_has():
+    """An unaffordable clip is rejected AND re-issued every bar — exactly the
+    core-sleeve retry storm of bt 383711. Cap the ask at available cash."""
+    class _PoorEmu(_Emu):
+        def get_cash(self):
+            return 500.0
+
+    out = IndexCoreTilt().run_once(
+        [], {"SPY": 600.0}, NOW, {"enabled": True}, {},
+        portfolio_emulator=_PoorEmu())
+    sizes = out.get("_nexus_position_sizes") or {}
+    assert sizes["SPY"]["buy_cash"] <= 500.0, sizes
