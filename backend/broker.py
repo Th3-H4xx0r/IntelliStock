@@ -13386,6 +13386,33 @@ while not shutdown_requested:
                     if isinstance(_fr_hint, dict):
                         _core_funding_request += max(
                             0.0, float(_fr_hint.get("buy_cash", 0.0) or 0.0))
+                # CAP THE REQUEST AT WHAT THE SATELLITE CAN ACTUALLY ABSORB.
+                #
+                # 2026-08-03 adversarial sweep, CRITICAL (churn engine): this
+                # request is summed BEFORE the execution pass, and the satellite
+                # headroom trim then refuses or shrinks those very buys later in
+                # the same bar. Nothing told the release the buy had died, so at
+                # cycle end deploy saw the core below band and bought it back.
+                # Measured on a $10k book: sell $1,300 SPY, buy $1,300 SPY --
+                # $2,600 of one-way notional for ZERO net allocation change, in
+                # one bar, on the one lane exempt from the turnover budget.
+                #
+                # Once the satellite sits at its share this repeats every bar,
+                # because the request keeps being computed from names the cap is
+                # about to refuse. Capping the request at the headroom breaks the
+                # loop at its source: we never sell core to fund a buy that
+                # cannot clear.
+                _fr_room = _core_sleeve_satellite_headroom(
+                    portfolio_emulator, prices, _cached_strategies)
+                if _fr_room is not None:
+                    _fr_capped = max(0.0, min(_core_funding_request, _fr_room))
+                    if _fr_capped < _core_funding_request:
+                        _log(f"[core] funding request trimmed "
+                             f"${_core_funding_request:,.0f} -> ${_fr_capped:,.0f} "
+                             f"— satellite headroom will refuse the remainder; "
+                             f"releasing core for it would only be bought back",
+                             "cyan")
+                    _core_funding_request = _fr_capped
             except (TypeError, ValueError, AttributeError):
                 _core_funding_request = 0.0
             _residual_sleeve_release(

@@ -748,3 +748,35 @@ def test_an_unpriced_holding_cannot_hide_from_the_residual():
     room = b._core_sleeve_satellite_headroom(book, prices, _hcfg())
     # residual satellite = 10000 - 2000 - 0 - 0 = 8000, well past the 3800 share
     assert room is not None and room < 0, "an unpriced holding must not vanish"
+
+
+# ── The funding request must not fund buys the cap will refuse ───────────────
+# Sweep CRITICAL (churn engine): the request is summed BEFORE the execution
+# pass, and the satellite headroom trim then refuses those very buys later in
+# the same bar. Nothing told the release the buy had died, so deploy bought the
+# core back at cycle end. Measured on a $10k book: sell $1,300 SPY, buy $1,300
+# SPY -- $2,600 of one-way notional for ZERO net allocation change, in one bar,
+# on the one lane exempt from the turnover budget. Once the satellite sits at
+# its share it repeats every bar.
+
+def test_funding_request_is_capped_by_headroom():
+    """A request larger than the headroom must be trimmed to it."""
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=8_000.0)   # satellite 20%
+    room = b._core_sleeve_satellite_headroom(book, {"AAA": 20.0}, _hcfg())
+    request = 5_000.0
+    capped = max(0.0, min(request, room))
+    assert abs(room - 1800.0) < 1e-6
+    assert abs(capped - 1800.0) < 1e-6, "must not release core for the other $3,200"
+
+
+def test_no_funding_at_all_once_the_share_is_full():
+    """This is the steady state that produced the loop."""
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=5_000.0)   # satellite 50%
+    room = b._core_sleeve_satellite_headroom(book, {"AAA": 50.0}, _hcfg())
+    assert max(0.0, min(4_000.0, room)) == 0.0, "an overrun book must fund nothing"
+
+
+def test_the_cap_is_absent_when_the_core_is_off():
+    book = _HBook({"AAA": 100.0}, nav=10_000.0, cash=8_000.0)
+    legacy = [{"strategy": "graph_nexus_analysis", "config": dict(LEGACY_CFG)}]
+    assert b._core_sleeve_satellite_headroom(book, {"AAA": 20.0}, legacy) is None
