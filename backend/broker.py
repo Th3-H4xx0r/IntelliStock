@@ -3024,6 +3024,51 @@ def _turnover_ledger_rolling(current_time):
         return 0.0
 
 
+#: Below this much satellite headroom, refuse rather than trim -- a $3 buy is
+#: dust that cannot be exited (Alpaca's fractional minimum is $1) and would
+#: occupy a max_positions slot forever.
+_CORE_MIN_SATELLITE_TRIM_USD = 25.0
+
+
+def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
+    """Dollars of satellite room left before the core is squeezed below target.
+
+    None = no limit (core off, or the book cannot be measured). A NEGATIVE or
+    zero result means the satellite is already at or past its share.
+
+    2026-08-03 adversarial sweep, HIGH: the first version of this guard was a
+    binary THRESHOLD, not a budget -- at 37.9% satellite the next new name was
+    admitted in full, up to BROKER_MAX_SINGLE_POSITION_PCT (15% of equity),
+    taking the satellite to ~53% in one buy. A share cap that lets a single
+    order overshoot by 15pp is not a cap. Returning headroom lets the caller
+    TRIM instead of refusing, which also removes the all-or-nothing edge where
+    one large candidate starves several small ones purely by ordering.
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies)
+        if not bool(cfg.get("core_sleeve_enabled", False)):
+            return None
+        nav = float(portfolio.get_portfolio_value(prices) or 0.0)
+        if nav <= 0:
+            return None
+        held = getattr(portfolio, "_positions", None) or {}
+        core_sym = str(cfg.get("residual_sleeve_symbol", "SPY") or "SPY").strip().upper()
+        bear_sym = str(cfg.get("residual_sleeve_bear_symbol", "") or "").strip().upper()
+        sleeve = {core_sym, bear_sym} - {""}
+        satellite = 0.0
+        for tic, qty in list(held.items()):
+            t = str(tic or "").strip().upper()
+            if t in sleeve:
+                continue
+            satellite += float(qty or 0.0) * float((prices or {}).get(t, 0.0) or 0.0)
+        core_tgt = float(cfg.get("core_target_pct", 0.60) or 0.60)
+        cash_fl = float(cfg.get("cash_reserve_floor_pct", 0.02) or 0.02)
+        share = max(0.05, 1.0 - core_tgt - cash_fl)
+        return (share * nav) - satellite
+    except Exception:
+        return None
+
+
 def _core_sleeve_block_new_satellite(portfolio, prices, cached_strategies, symbol):
     """True when a NEW satellite name must be refused to protect the core.
 
@@ -13656,13 +13701,33 @@ while not shutdown_requested:
                             # as it actually stands. Adds to names already held
                             # are exempt -- refusing those would strand a
                             # half-built position and is not what overran.
-                            if _core_sleeve_block_new_satellite(
-                                    portfolio_emulator, prices, _cached_strategies,
-                                    symbol):
-                                _log(f"SATELLITE CAP: {symbol} skipped — satellite "
-                                     f"already at its design share; core would be "
-                                     f"squeezed below target", "yellow")
-                                continue
+                            # TRIM to the remaining share, do not refuse.
+                            #
+                            # Sweep HIGH #3: the binary form had two holes. It
+                            # exempted adds to HELD names -- but "the satellite
+                            # kept buying across bars" IS winner-adds, and
+                            # doc-179 runs winner_add_enabled=True, so the
+                            # overrun walked straight through the exemption. And
+                            # it was a threshold, not a budget: at 37.9% the next
+                            # name was admitted in full, up to 15% of equity,
+                            # reaching ~53% in one order.
+                            #
+                            # Headroom applies to EVERY satellite buy, held or
+                            # not. An add past the share is the same overrun as
+                            # a new name.
+                            _sat_room = _core_sleeve_satellite_headroom(
+                                portfolio_emulator, prices, _cached_strategies)
+                            if _sat_room is not None:
+                                if _sat_room <= _CORE_MIN_SATELLITE_TRIM_USD:
+                                    _log(f"SATELLITE CAP: {symbol} skipped — satellite "
+                                         f"at its design share (${_sat_room:,.0f} room); "
+                                         f"core would be squeezed below target", "yellow")
+                                    continue
+                                if cash_to_use > _sat_room:
+                                    _log(f"SATELLITE CAP: {symbol} trimmed "
+                                         f"${cash_to_use:,.0f} -> ${_sat_room:,.0f} "
+                                         f"to keep the core at target", "yellow")
+                                    cash_to_use = _sat_room
                             # 2026-07-19 adversarial review MED: the bear
                             # symbol is reserved for the sleeve — a strategy
                             # position in it would collide with the leg's

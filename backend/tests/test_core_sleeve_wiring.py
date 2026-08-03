@@ -636,3 +636,73 @@ def test_a_padded_core_symbol_is_still_recognised():
 def test_it_fails_towards_booking_on_a_broken_config():
     """Unknown state -> count it. Under-counting silently raises the ceiling."""
     assert b._turnover_is_governed("SPY", None) is True
+
+
+# ── Satellite headroom, not a threshold ──────────────────────────────────────
+# Sweep HIGH #3: the binary cap had two holes. It exempted adds to HELD names --
+# but "the satellite kept buying across bars" IS winner-adds, and doc-179 runs
+# winner_add_enabled=True, so the overrun walked straight through. And it was a
+# threshold, not a budget: at 37.9% the next name was admitted in FULL, up to
+# 15% of equity, reaching ~53% in one order.
+
+class _HBook:
+    def __init__(self, positions, nav):
+        self._positions = dict(positions)
+        self._nav = float(nav)
+    def get_portfolio_value(self, prices):
+        return self._nav
+
+
+def _hcfg(**over):
+    cfg = dict(LEGACY_CFG)
+    cfg.update({"core_sleeve_enabled": True, "core_target_pct": 0.60,
+                "cash_reserve_floor_pct": 0.02, "residual_sleeve_symbol": "SPY",
+                "residual_sleeve_bear_symbol": "SQQQ"})
+    cfg.update(over)
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def test_headroom_is_the_room_left_to_the_design_share():
+    book = _HBook({"AAA": 100.0}, nav=10_000.0)          # satellite 2000 = 20%
+    room = b._core_sleeve_satellite_headroom(book, {"AAA": 20.0}, _hcfg())
+    assert abs(room - 1800.0) < 1e-6                      # 38% of 10k = 3800
+
+
+def test_headroom_goes_negative_once_the_share_is_exceeded():
+    book = _HBook({"AAA": 100.0}, nav=10_000.0)          # satellite 5000 = 50%
+    room = b._core_sleeve_satellite_headroom(book, {"AAA": 50.0}, _hcfg())
+    assert room < 0
+
+
+def test_headroom_counts_held_names_so_ADDS_are_bounded_too():
+    """The overrun was winner-adds. An add past the share is the same overrun
+    as a new name, so the held-name exemption had to go."""
+    book = _HBook({"AAA": 100.0}, nav=10_000.0)
+    room = b._core_sleeve_satellite_headroom(book, {"AAA": 38.0}, _hcfg())
+    assert abs(room) < 1e-6, "at exactly the share there must be zero room, held or not"
+
+
+def test_sleeve_legs_do_not_consume_satellite_headroom():
+    book = _HBook({"SPY": 10.0, "SQQQ": 20.0}, nav=10_000.0)
+    room = b._core_sleeve_satellite_headroom(book, {"SPY": 600.0, "SQQQ": 100.0}, _hcfg())
+    assert abs(room - 3800.0) < 1e-6
+
+
+def test_no_limit_when_the_core_is_off():
+    book = _HBook({"AAA": 100.0}, nav=10_000.0)
+    legacy = [{"strategy": "graph_nexus_analysis", "config": dict(LEGACY_CFG)}]
+    assert b._core_sleeve_satellite_headroom(book, {"AAA": 90.0}, legacy) is None
+
+
+def test_no_limit_on_a_broken_book():
+    class _Bad:
+        _positions = {"AAA": 1.0}
+        def get_portfolio_value(self, prices):
+            raise RuntimeError("boom")
+    assert b._core_sleeve_satellite_headroom(_Bad(), {}, _hcfg()) is None
+
+
+def test_dust_sized_headroom_is_refused_not_trimmed_to():
+    """Trimming to $3 creates a position that cannot be exited (Alpaca's
+    fractional minimum is $1) and holds a max_positions slot forever."""
+    assert b._CORE_MIN_SATELLITE_TRIM_USD >= 1.0
