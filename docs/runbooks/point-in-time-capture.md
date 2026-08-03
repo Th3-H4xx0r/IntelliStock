@@ -74,8 +74,19 @@ freshly-created equity instance.** Two paths were tried and both failed:
 
 | attempt | result |
 |---|---|
-| `runCommand=True` (changefeed) | no container, twice, API confirmed up |
-| redeploy backend (startup scan) | no container; `test` uptimeStart unchanged |
+| `runCommand=True` in the DB (changefeed) | no container, twice, an hour apart, API confirmed up |
+| redeploy backend (startup scan) | no container; `test` uptimeStart unchanged across the deploy |
+| `POST /instances/{id}/start` (in-process handler) | HTTP 200 `{"started": true}` — **and still no container** |
+
+The third one is the informative failure: the authenticated endpoint runs
+*inside* the server process, so this is not a DB-vs-API or changefeed-delivery
+problem. All three paths successfully set `runCommand=True` and all three then
+fail at the same place — `start_instance_container` on the host — which is
+silent from every vantage point reachable from here.
+
+Non-boot is confirmed by three independent signals, not one: `uptimeStart` stays
+None, `LiveBootAudit` has 0 rows (alpaca-main has 169), and `LLMUsage` has 0
+rows.
 
 Diagnosing further needs host-side visibility that is not reachable from the
 DB: the backend container's logs around a start attempt, and whether
