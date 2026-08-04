@@ -4066,11 +4066,12 @@ def _residual_sleeve_release(
                             # is a full exit — reset entry/peak/exit-ts so the
                             # NEXT leg doesn't inherit this leg's stale high (which
                             # would instantly retro-arm + destroy the new hedge).
-                            if _signal_result_is_confirmed(_bok):
-                                # Book the proceeds this bar has already raised
-                                # (see the same-bar refill note above), so the
-                                # next call in this bar sees the demand as met
-                                # instead of re-selling a shrinking leg.
+                            # Book the proceeds this bar has already raised on
+                            # ACCEPTANCE, not on a confirmed fill — a next-event
+                            # SimulationSubmission is accepted-but-not-filled, so
+                            # gating this on `_signal_result_is_confirmed` made it
+                            # dead code in backtest (see the deploy-side note).
+                            if _bok:
                                 _acc_r = (float(_pr[1] or 0.0)
                                           if (_pr and _pr[0] == current_time) else 0.0)
                                 _RESIDUAL_SLEEVE_STATE["bear_pending_refill"] = (
@@ -4565,15 +4566,23 @@ def _residual_sleeve_deploy(
                 f"bear-leg park regime={regime}",
                 order_source="residual_bear_deploy",
             )
-            if _signal_result_is_confirmed(bok):
-                _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
-                # Accumulate this bar's committed notional (see the same-bar
-                # stacking note above). Recorded only on a CONFIRMED submit, so a
-                # rejected order does not reserve room it never used.
+            # Accumulate this bar's committed notional on ACCEPTANCE, not on a
+            # confirmed fill. 2026-08-04: this was originally gated on
+            # `_signal_result_is_confirmed`, which is
+            #     bool(result) and bool(getattr(result, "filled", True))
+            # and a next-event `SimulationSubmission` is accepted-but-NOT-filled
+            # (`accepted=True, filled=False`). So in BACKTEST the branch never
+            # ran, the key was never written, and the guard above read a value
+            # that did not exist — the fix was inert and bt 811098 reproduced
+            # the 94.7%-of-NAV stack unchanged. Acceptance is the right signal:
+            # the cash is committed the moment the order is queued.
+            if bok:
                 _p = _RESIDUAL_SLEEVE_STATE.get("bear_pending_deploy")
                 _acc = float(_p[1] or 0.0) if (_p and _p[0] == current_time) else 0.0
                 _RESIDUAL_SLEEVE_STATE["bear_pending_deploy"] = (
                     current_time, _acc + float(deploy or 0.0))
+            if _signal_result_is_confirmed(bok):
+                _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
                 # Weighted avg entry for the leg stop-loss.
                 _prev_entry = float(_RESIDUAL_SLEEVE_STATE.get("bear_entry_px") or 0.0)
                 _prev_qty = cur_val / bpx if bpx > 0 else 0.0

@@ -44,6 +44,49 @@ ALLOC = 0.35                      # BEAR_SPEC's residual_sleeve_bear_alloc_pct
 CAP_USD = ALLOC * NAV             # $2,100
 
 
+class _Submission:
+    """What the BACKTEST path actually returns — `simulated_execution.
+    SimulationSubmission`: accepted, but NOT filled, because execution is
+    next-event.
+
+        accepted: bool = True
+        filled:   bool = False
+        __bool__ -> accepted
+
+    This matters enormously. `_signal_result_is_confirmed` is
+    `bool(result) and bool(getattr(result, "filled", True))`, so anything hung
+    off it is DEAD CODE in backtest. A stub returning a bare `True` has no
+    `filled` attribute, defaults it to True, and silently exercises a branch the
+    engine never takes — which is exactly how an inert fix passed its tests and
+    shipped (bt 811098 reproduced the defect unchanged).
+    """
+    accepted = True
+    filled = False
+
+    def __bool__(self):
+        return self.accepted
+
+
+class _EmuNextEvent(h._Emu2):
+    """_Emu2, but returning a realistic next-event receipt."""
+
+    def execute_signal(self, sym, sig, px, timestamp=None, sell_fraction=None,
+                       cash_per_trade=None, order_source=None):
+        super().execute_signal(sym, sig, px, timestamp=timestamp,
+                               sell_fraction=sell_fraction,
+                               cash_per_trade=cash_per_trade)
+        return _Submission()
+
+
+def test_the_stub_models_the_engines_confirmation_semantics():
+    """Guard the guard: if this ever reports 'confirmed', these tests have
+    stopped exercising the backtest path and their greens mean nothing."""
+    assert bool(_Submission()) is True, "an accepted submission is truthy"
+    assert b._ns["_signal_result_is_confirmed"](_Submission()) is False, (
+        "a next-event submission must NOT read as confirmed — anything gated on "
+        "_signal_result_is_confirmed is dead code in backtest")
+
+
 def setup_function(_fn):
     h.setup_function(_fn)
     h._set_regime("bear")
@@ -55,7 +98,7 @@ def _total(emu):
 
 def test_single_deploy_is_capped_and_actually_fires():
     """Baseline + anti-vacuity guard: one call must EMIT and respect the cap."""
-    emu = h._Emu2(cash=NAV, nav=NAV)
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
     b._residual_sleeve_deploy(emu, {"SQQQ": PX}, datetime(2026, 4, 1, 13), h.BEAR_SPEC)
     assert len(emu.signals) == 1, "deploy path did not run — test would be vacuous"
     assert abs(_total(emu) - CAP_USD) < 1e-6, _total(emu)
@@ -67,7 +110,7 @@ def test_two_deploys_in_the_same_bar_must_not_exceed_the_nav_cap():
     The emulator stub does not settle fills, which is exactly the next-event
     behaviour the engine has. Reproduces bt 471471 / bt 884112.
     """
-    emu = h._Emu2(cash=NAV, nav=NAV)
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
     ts = datetime(2026, 4, 1, 13)
     b._residual_sleeve_deploy(emu, {"SQQQ": PX}, ts, h.BEAR_SPEC)
     b._residual_sleeve_deploy(emu, {"SQQQ": PX}, ts, h.BEAR_SPEC)
@@ -80,13 +123,30 @@ def test_two_deploys_in_the_same_bar_must_not_exceed_the_nav_cap():
         f"bt 884112 defect: a -3x inverse ETF at up to 95% of the book.")
 
 
+def test_without_same_bar_accounting_the_deploy_does_blow_the_cap():
+    """Proves the DEPLOY fix is load-bearing. Clearing `bear_pending_deploy`
+    between calls reproduces PRE-FIX behaviour — which is exactly what shipped
+    when the accounting was gated on `_signal_result_is_confirmed` and therefore
+    never ran in backtest (bt 811098)."""
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
+    ts = datetime(2026, 4, 1, 13)
+    for _ in range(2):
+        b._RESIDUAL_SLEEVE_STATE["bear_pending_deploy"] = None    # pre-fix state
+        b._residual_sleeve_deploy(emu, {"SQQQ": PX}, ts, h.BEAR_SPEC)
+    total = _total(emu)
+    assert len(emu.signals) == 2, "expected a second same-bar deploy without the fix"
+    assert total > CAP_USD * 1.5, (
+        f"expected the cap to be blown without same-bar accounting; got "
+        f"${total:,.0f} vs cap ${CAP_USD:,.0f}")
+
+
 def test_refill_raises_the_gap_once_and_does_not_liquidate_the_hedge():
     """The 14-slice unwind: bt 471471 sold ~$4,558 of a ~$4,700 leg to raise a
     ~$594 gap, because `_bcash` never saw the in-flight proceeds and
     `execute_signal` re-applied the same fraction to a shrinking base."""
     nav, px, qty = 6000.0, 30.0, 200.0          # $6,000 leg
     cash = 100.0                                 # far below the 15% target ($900)
-    emu = h._Emu2(cash=cash, nav=nav, positions={"SQQQ": qty})
+    emu = _EmuNextEvent(cash=cash, nav=nav, positions={"SQQQ": qty})
     ts = datetime(2026, 4, 6, 13)
     for _ in range(14):                          # the engine called it 14x that bar
         b._residual_sleeve_release(emu, {"SQQQ": px}, ts, h.BEAR_SPEC)
@@ -109,7 +169,7 @@ def test_without_same_bar_accounting_the_refill_does_liquidate_the_hedge():
     sold far past the demand — the bt 471471 shape.
     """
     nav, px, qty = 6000.0, 30.0, 200.0
-    emu = h._Emu2(cash=100.0, nav=nav, positions={"SQQQ": qty})
+    emu = _EmuNextEvent(cash=100.0, nav=nav, positions={"SQQQ": qty})
     ts = datetime(2026, 4, 6, 13)
     for _ in range(14):
         b._RESIDUAL_SLEEVE_STATE["bear_pending_refill"] = None   # pre-fix state
@@ -127,7 +187,7 @@ def test_without_same_bar_accounting_the_refill_does_liquidate_the_hedge():
 def test_a_later_bar_sizes_against_the_settled_position():
     """Scoping check: once the fill has settled, room is computed off the real
     position, so the leg converges to the cap rather than being starved."""
-    emu = h._Emu2(cash=NAV, nav=NAV)
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
     b._residual_sleeve_deploy(emu, {"SQQQ": PX}, datetime(2026, 4, 1, 13), h.BEAR_SPEC)
     first = _total(emu)
     assert first > 0
