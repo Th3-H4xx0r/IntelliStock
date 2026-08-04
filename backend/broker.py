@@ -4553,6 +4553,14 @@ def _residual_sleeve_deploy(
             # settled and get_positions() is authoritative again. A stale
             # reservation can therefore never starve the hedge.
             _pending = _RESIDUAL_SLEEVE_STATE.get("bear_pending_deploy")
+            # DIAGNOSTIC (2026-08-05): this guard verifiably works against real
+            # PortfolioEmulator + NextEventExecutionSimulator objects locally, yet
+            # production reproduced the 94.7%-of-NAV stack byte-identically across
+            # two build ids. Log unconditionally so a run's logs answer "is this
+            # code even executing, and does current_time match?" instead of
+            # another inference.
+            _log(f"[sleeve-diag] bear deploy call: current_time={current_time!r} "
+                 f"pending={_pending!r} cur_val={cur_val:.2f} nav={nav:.2f}", "cyan")
             if _pending and _pending[0] == current_time:
                 cur_val += float(_pending[1] or 0.0)
             room = max(0.0, _alloc * nav - cur_val)
