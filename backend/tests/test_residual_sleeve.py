@@ -125,6 +125,11 @@ def setup_function(_fn):
     b._RESIDUAL_SLEEVE_STATE["bear_stop_episode"] = False
     b._RESIDUAL_SLEEVE_STATE["bear_alloc_ratchet"] = 0.0
     b._RESIDUAL_SLEEVE_STATE["bear_peak_px"] = None
+    # 2026-08-04: same-bar deploy accounting. Module-level state keyed on the
+    # bar timestamp, so without this reset one test's committed notional shrinks
+    # the next test's `room` whenever they share a timestamp.
+    b._RESIDUAL_SLEEVE_STATE["bear_pending_deploy"] = None
+    b._RESIDUAL_SLEEVE_STATE["bear_pending_refill"] = None
     b._ns["_sleeve_circuit_tier"] = lambda: ""
     b._ns.pop("_strategy_cache", None)  # churn-fix tests inject dwell here
     _set_regime("bull")

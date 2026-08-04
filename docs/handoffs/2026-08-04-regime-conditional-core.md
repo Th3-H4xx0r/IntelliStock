@@ -139,7 +139,9 @@ portfolio value), **mechanism NOT established**:
    The harm is the OVERSHOOT, not the slicing: spread is charged per notional,
    so splitting one clip into fourteen costs little by itself.
 
-### (2) is now PROVEN — `sell_fraction` compounding
+### BOTH ARE NOW FIXED (2026-08-04, local — see §3g)
+
+### (2) is PROVEN — `sell_fraction` compounding
 
 `PortfolioEmulator.execute_signal` takes **no absolute share count on the sell
 side**. Its entire sell rule is:
@@ -270,6 +272,86 @@ guard was verified to FAIL against the pre-fix source.
 **Consequence for tonight:** doc-188 could not be measured on the OOS window,
 because the deployed engine still carries the bug and a fix requires a redeploy
 (which kills in-flight runs). 188-CONTINUOUS does run, because it opens in a bear.
+
+## 3g. BOTH SLEEVE DEFECTS FIXED — bar-scoped commitment accounting
+
+Root cause of BOTH: execution is NEXT-EVENT, and the dual-cadence MONITOR + FULL
+cycles both call the sleeve on a single bar. An order placed earlier in the bar
+has not filled, so `get_positions()` / `get_cash()` still show the pre-order
+state and the second call re-decides from scratch.
+
+Fix — remember what this bar already committed, keyed on `current_time`:
+
+| state key | added to | stops |
+|---|---|---|
+| `bear_pending_deploy` (ts, notional) | `cur_val`, shrinking `room` | a 2nd deploy re-granting the NAV cap |
+| `bear_pending_refill` (ts, proceeds) | `cash`, meeting the demand | the 14-slice hedge liquidation |
+
+Keyed on the timestamp, so a NEW bar starts clean — by then fills have settled
+and the emulator is authoritative again. A stale reservation can therefore never
+starve the hedge, which is the failure mode a naive latch would introduce.
+
+### How these were verified (two earlier attempts were WRONG)
+
+1. My first repro **passed vacuously** — it used the SPY-oriented `_Emu`/spec and
+   emitted **zero signals**, so `total <= cap` was asserted against 0. It was
+   committed in that state. Every test here now asserts `emu.signals` is
+   non-empty FIRST.
+2. The refill test then failed because the refill lives in
+   `_residual_sleeve_release`, not `_residual_sleeve_deploy`.
+
+With the right fixtures the defect reproduces exactly — two same-bar deploys give
+**$4,200 = 70.0% of NAV against a 35% cap**, precisely 2×. And a negative-control
+test clears `bear_pending_refill` between calls to reproduce PRE-FIX behaviour and
+asserts the runaway sell still happens, so a green suite proves the fix is doing
+the work rather than the harness hiding it.
+
+Suite: 4352 passed, 19 pre-existing failures.
+
+⚠️ **These change bear-leg behaviour, so continuous-window results measured
+before the fix are not comparable after it.** The CHOP window is unaffected (it
+never confirmed bear — 0/288 bars held SQQQ), so bt 978095 remains valid.
+
+## 3h. THE EXACT PATCH — doc-179 (live) → doc-188
+
+Measured delta, excluding model refs and the isolation salt:
+
+```
+# churn levers (BASE — they must bind in every regime)
+min_hold_enabled              : ABSENT -> True
+min_hold_days                 : ABSENT -> 30
+rank_band_enabled             : ABSENT -> True
+rank_band_entry_pct           : ABSENT -> 10
+rank_band_exit_pct            : ABSENT -> 50
+turnover_budget_monthly_pct   : ABSENT -> 0.5
+
+# index core — REGIME-SCOPED, never in the base
+regime_profiles.bull      += core_sleeve_enabled, core_target_pct,
+                             core_rebalance_band_pct, core_rebalance_min_days,
+                             core_bear_max_step_pct
+regime_profiles.recovery  += (the same five)
+
+# satellite suppression
+allocation_execute_min_raw_score : 0.25 -> 99     # NEVER 0 (falsy -> 0.35)
+allocation_top2_min_raw_score    : 0.5  -> 99
+etf_allocation_enabled           : True -> False
+```
+
+### Read what this actually says
+
+The last block **turns off stock picking**. doc-188 is not "Graph Nexus, tuned" —
+it is *an index core plus a regime-switched bear hedge*, with the graph reduced
+to a regime signal. That is what the measurements support (satellite P&L negative
+in every window: −70, −88, −224, −222; core + hedge earned everything), but it
+should be adopted with eyes open rather than as a parameter tweak.
+
+**Follow-on if it is adopted:** the LLM machinery still runs and still costs money
+and wall-clock while producing no trades. Discovery/overlay could then be
+throttled hard for a large cost saving — worth its own measurement.
+
+⚠️ Contingent on the chop result (bt 978095). doc-187 FAILED chop; if doc-188
+fails it too, this patch is validated only through a bear→bull turn and the
+recommendation must say so.
 
 ## 4. ATTRIBUTION — the satellite is a drag, the core is the strategy
 

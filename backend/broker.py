@@ -4025,8 +4025,28 @@ def _residual_sleeve_release(
                             _brel = _bdeep
                     _bnav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
                     _bcash = float(portfolio_emulator.get_cash() or 0.0)
-                    if _bnav > 0 and _bcash < _brel * _bnav:
-                        _bneeded = max(0.0, _brel * _bnav - _bcash)
+                    # 2026-08-04 SAME-BAR REFILL FIX. `_bcash` comes from
+                    # get_cash(), and execution is NEXT-EVENT, so proceeds from a
+                    # refill sell placed earlier THIS bar are not in it yet. The
+                    # condition therefore stayed true and the refill re-fired.
+                    # Worse, `execute_signal` takes NO absolute share count on a
+                    # sell -- it computes
+                    #     shares = (positions[sym] - reserved) * sell_fraction
+                    # so each repeat applied the SAME ~10.2% fraction to a
+                    # shrinking base, a geometric series:
+                    #
+                    #   bt 471471  2026-04-06T13:00  598,537,482,...,147 (14 sells)
+                    #   ~$4,558 of a ~$4,700 leg sold to raise a ~$594 gap
+                    #
+                    # The first clip alone met the demand. Subtract proceeds
+                    # already committed this bar so the demand is seen as met.
+                    # Keyed on `current_time`; a new bar starts clean, by which
+                    # point the sale has settled into get_cash().
+                    _pr = _RESIDUAL_SLEEVE_STATE.get("bear_pending_refill")
+                    _inflight = (float(_pr[1] or 0.0)
+                                 if (_pr and _pr[0] == current_time) else 0.0)
+                    if _bnav > 0 and (_bcash + _inflight) < _brel * _bnav:
+                        _bneeded = max(0.0, _brel * _bnav - _bcash - _inflight)
                         _bsell_qty = min(bqty, _bneeded / bpx)
                         if _bsell_qty > 0:
                             _bfrac = min(1.0, _bsell_qty / bqty)
@@ -4046,6 +4066,15 @@ def _residual_sleeve_release(
                             # is a full exit — reset entry/peak/exit-ts so the
                             # NEXT leg doesn't inherit this leg's stale high (which
                             # would instantly retro-arm + destroy the new hedge).
+                            if _signal_result_is_confirmed(_bok):
+                                # Book the proceeds this bar has already raised
+                                # (see the same-bar refill note above), so the
+                                # next call in this bar sees the demand as met
+                                # instead of re-selling a shrinking leg.
+                                _acc_r = (float(_pr[1] or 0.0)
+                                          if (_pr and _pr[0] == current_time) else 0.0)
+                                _RESIDUAL_SLEEVE_STATE["bear_pending_refill"] = (
+                                    current_time, _acc_r + float(_bsell_qty) * bpx)
                             if (
                                 _signal_result_is_confirmed(_bok)
                                 and _bfrac >= 1.0
@@ -4505,6 +4534,26 @@ def _residual_sleeve_deploy(
             park_floor_pct = max(cfg["buffer_pct"], _release_cash + cfg["buffer_pct"])
             idle = cash - park_floor_pct * nav
             cur_val = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0) * bpx
+            # 2026-08-04 SAME-BAR STACKING FIX. Execution is NEXT-EVENT, so an
+            # order placed earlier THIS bar has not filled and does not appear in
+            # get_positions() yet. The dual-cadence MONITOR + FULL cycles both
+            # call this function on a bar, so the second call saw cur_val ~= 0
+            # and re-granted almost the whole cap:
+            #
+            #   bt 471471  2026-04-01T13:00  $4,395 + $1,669 -> 94.8% of NAV
+            #   bt 884112  2026-04-01T13:00  $4,389 +   $567 -> 78.1% of NAV
+            #
+            # against a 70% ceiling, in a -3x daily-rebalanced inverse ETF. It
+            # reproduces in the CONTROL arm too, so it is base behaviour and is
+            # live on doc-179 today.
+            #
+            # Count notional already committed this bar as if it were held. Keyed
+            # on `current_time` so a NEW bar starts clean -- by then the fill has
+            # settled and get_positions() is authoritative again. A stale
+            # reservation can therefore never starve the hedge.
+            _pending = _RESIDUAL_SLEEVE_STATE.get("bear_pending_deploy")
+            if _pending and _pending[0] == current_time:
+                cur_val += float(_pending[1] or 0.0)
             room = max(0.0, _alloc * nav - cur_val)
             deploy = min(idle, room)
             if deploy < max(50.0, cfg["min_deploy_pct"] * nav):
@@ -4518,6 +4567,13 @@ def _residual_sleeve_deploy(
             )
             if _signal_result_is_confirmed(bok):
                 _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
+                # Accumulate this bar's committed notional (see the same-bar
+                # stacking note above). Recorded only on a CONFIRMED submit, so a
+                # rejected order does not reserve room it never used.
+                _p = _RESIDUAL_SLEEVE_STATE.get("bear_pending_deploy")
+                _acc = float(_p[1] or 0.0) if (_p and _p[0] == current_time) else 0.0
+                _RESIDUAL_SLEEVE_STATE["bear_pending_deploy"] = (
+                    current_time, _acc + float(deploy or 0.0))
                 # Weighted avg entry for the leg stop-loss.
                 _prev_entry = float(_RESIDUAL_SLEEVE_STATE.get("bear_entry_px") or 0.0)
                 _prev_qty = cur_val / bpx if bpx > 0 else 0.0
