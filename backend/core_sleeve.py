@@ -1,10 +1,22 @@
-"""Index-core allocation sizing — PROTOTYPE, not wired.
+"""Index-core allocation sizing.
 
 Design: docs/strategies/index-core-allocation-design.md
 
-This module has NO call sites. Nothing in broker.py or graph_nexus_analysis.py
-imports it. It exists so the sizing arithmetic of the proposed index core can be
-unit-tested before any of it is threaded into an execution path.
+WIRED (2026-08-03). This module used to say "PROTOTYPE, no call sites" and that
+is no longer true — broker.py imports `core_sleeve_config` from `_core_sleeve_cfg`,
+`core_rebalance_order` from `_core_sleeve_decide`, and `turnover_budget_state`
+from `_core_turnover_state`. The stale header cost a later session real time
+(it reads as "this cannot be the cause" while `core_rebalance_order` was in fact
+emitting the 23 retry-storm deploys of bt 383711), so keep it accurate.
+
+Still DEFAULT-OFF — see the `core_sleeve_enabled` note below. Off and unwired are
+different claims, and only the first one is true.
+
+NOTE ON SCOPE: `core_sleeve_enabled` may be set in a `regime_profiles` overlay
+rather than the base config, because `_apply_regime_profile` merges the overlay
+into the shared spec BEFORE the sleeve reads it. That is the supported way to
+run the core in a bull and leave a bear on the base (and its SQQQ hedge) —
+arming the core globally routes bear de-risk to CASH and drops that hedge.
 
 Why a separate module rather than more functions in broker.py: broker.py is not
 import-safe (argparse runs at module scope and SystemExits under pytest), which

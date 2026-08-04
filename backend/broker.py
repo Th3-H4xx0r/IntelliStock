@@ -14019,11 +14019,34 @@ while not shutdown_requested:
                                          f"at its design share (${_sat_room:,.0f} room); "
                                          f"core would be squeezed below target", "yellow")
                                     continue
-                                if cash_to_use > _sat_room:
+                                # 2026-08-04 CRASH FIX. This read `cash_to_use`,
+                                # which is not assigned until ~80 lines BELOW
+                                # (`cash_to_use = cash_per_trade`). At module
+                                # scope the name survives between iterations of
+                                # the `for symbol in _exec_order` loop, so this
+                                # only worked when some EARLIER iteration had
+                                # already bound it. The FIRST buy taken while
+                                # the core is armed raised
+                                #     NameError: name 'cash_to_use' is not defined
+                                # and killed the run (bt 311771, doc-188 on the
+                                # 07-07..08-01 window, which opens in a confirmed
+                                # bull so the core armed before any buy). doc-187
+                                # hid it: its windows open in a bear with the core
+                                # OFF, so early buys bound the name first. In LIVE
+                                # this kills the tick.
+                                #
+                                # Trim `cash_per_trade` instead. It is bound at
+                                # the top of this loop, and every downstream
+                                # sizing path derives from it
+                                # (`cash_to_use = cash_per_trade`, and
+                                # `min(cash_per_trade, available)` later), so the
+                                # cap now binds on EVERY lane rather than on one
+                                # assignment a later line could overwrite.
+                                if cash_per_trade > _sat_room:
                                     _log(f"SATELLITE CAP: {symbol} trimmed "
-                                         f"${cash_to_use:,.0f} -> ${_sat_room:,.0f} "
+                                         f"${cash_per_trade:,.0f} -> ${_sat_room:,.0f} "
                                          f"to keep the core at target", "yellow")
-                                    cash_to_use = _sat_room
+                                    cash_per_trade = _sat_room
                             # 2026-07-19 adversarial review MED: the bear
                             # symbol is reserved for the sleeve — a strategy
                             # position in it would collide with the leg's
