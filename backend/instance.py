@@ -99,6 +99,72 @@ def _maybe_start_alpha_watchdog(instance_id_val):
         return False
 
 
+class CleanRoomConfigError(RuntimeError):
+    """`clean_room_mode` is on but no `initial_value` was supplied."""
+
+
+def _clean_room_requires_initial_value(instance_doc, environ=None) -> bool:
+    """True when this instance will start clean-room WITHOUT a baseline.
+
+    Mirrors broker.py's resolution EXACTLY (env beats the row, for both keys),
+    so this preflight can never disagree with the adapter it is protecting.
+    """
+    env = environ if environ is not None else os.environ
+    doc = instance_doc if isinstance(instance_doc, dict) else {}
+
+    raw = str(env.get("LIVE_CLEAN_ROOM_MODE", "") or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        clean_room = True
+    elif raw in ("0", "false", "no", "off"):
+        clean_room = False
+    else:
+        clean_room = bool(doc.get("clean_room_mode", False))
+    if not clean_room:
+        return False
+
+    if str(env.get("LIVE_INITIAL_VALUE", "") or "").strip():
+        return False
+    try:
+        return float(doc.get("initial_value") or 0.0) <= 0.0
+    except (TypeError, ValueError):
+        return True
+
+
+def _assert_clean_room_initial_value(instance_id, instance_doc) -> None:
+    """Fail ONCE, loudly and actionably, instead of crash-looping.
+
+    2026-08-03. `LIVE_CLEAN_ROOM_MODE` is set host-wide here, so EVERY instance
+    needs `initial_value`. When it is missing the adapter correctly refuses to
+    build — inferring a baseline from broker equity would silently redefine the
+    P&L reference on every restart, and a drawdown circuit measured against a
+    moving baseline is worse than none. But the refusal surfaced as:
+
+        BrokerError: AlpacaAdapter clean_room_mode=True requires an explicit
+                     initial_value
+        [INSTANCE] Broker exited, restarting...          x6 in 60s
+        CRASH LOOP LATCHED - will NOT restart until operator intervention
+
+    Six Discord alerts and a latched instance for ONE missing DB field, with a
+    message that never says the field lives on `Instances.<id>`. Both
+    `alpaca-paper-pit` and the crypto soak `test` hit exactly this today, and
+    `alpaca-main` is still configured to hit it the moment it is started.
+
+    The guard is right; the ergonomics were not. Refusing to spawn is strictly
+    better than spawning something guaranteed to die six times.
+    """
+    if not _clean_room_requires_initial_value(instance_doc):
+        return
+    message = (
+        f"Instance {instance_id} will NOT start: clean-room mode is enabled but "
+        f"no baseline is set. Set Instances.{instance_id}.initial_value to the "
+        f"account value you want P&L measured from (or set the LIVE_INITIAL_VALUE "
+        f"env var). Refusing to launch the broker, which would otherwise fail to "
+        f"build its adapter and crash-loop six times before latching."
+    )
+    intellistock_logger.log(message, "red", service="INSTANCE")
+    raise CleanRoomConfigError(message)
+
+
 def _assert_watchdog_preflight() -> None:
     """Reject funded Alpaca startup before Popen if watchdog wiring is absent."""
 
@@ -517,6 +583,7 @@ def start_broker(symbols):
         _assert_live_broker_start_allowed(instance_id, _instance_doc)
     if _funded_alpaca:
         _assert_watchdog_preflight()
+    _assert_clean_room_initial_value(instance_id, _instance_doc)
     broker_env = os.environ.copy()
     broker_env.pop("INSTANCE_SOCKET_SUPERVISOR_TOKEN", None)
     broker_process = subprocess.Popen(
