@@ -389,6 +389,49 @@ so a rejected clip can never reserve room forever and starve the hedge.
 asserting a bound on it, and never infer deployment state from absent log lines —
 judge from `backtest_trades` / positions, which truncation cannot hide.
 
+## 3j. FUNDING-READINESS — what was closed, what remains
+
+### Closed
+
+| defect | evidence |
+|---|---|
+| `cash_to_use` NameError on the first buy with the core armed | fixed `698a6e7`; runs now pass the bar that used to kill them |
+| bear leg breaching its NAV cap (95% of NAV in a −3x ETF) | fixed `572238a`; bt 348664 shows **n=1** deploy and **peak 69.5%** vs a 70% cap, and a second partial run shows 36.0% with no stacking |
+| refill liquidating ~78% of the hedge | same mechanism, same fix |
+| **LIVE had no in-flight guard at all** | fixed `a51d0b6` — see below |
+| deploy stranding containers under hashed names | fixed `e66fffa` (frontend image pin) |
+
+**The live gap is the one that mattered most.** `_sleeve_pending_qty` originally
+read only the backtest execution simulator and returned 0.0 in live. An Alpaca
+order is acknowledged long before it fills, so the bear leg would have re-granted
+its entire NAV cap on every tick until the fill landed — the same mechanism that
+put 95% of a backtest book into SQQQ, but with real money. The live order service
+already tracked this (`_restore_reservations`); the sleeve simply never asked.
+It now walks the lifecycle store, and the tests cover partial fills, TERMINAL
+orders (which must never reserve room and starve the hedge), symbol/side
+filtering, `OrderSide` enum values, and a raising store degrading to 0.0.
+
+### Remaining before funding
+
+1. **Out-of-sample evidence.** Everything measured so far is on 2026-03-02..04-27
+   and 2026-07-07..08-01 — the windows every config was tuned on. Four unseen
+   windows are queued (May–Jun, Jan–Feb, Nov–Dec 2025, Jun–Jul). Pass bar, set
+   before the results: bear-ish windows POSITIVE, mean vs SPY > 0, no window above
+   the 70% cap. One bad window is not disqualifying; a negative MEAN is.
+2. **The chop win is 5 trades** — inside noise. The cost reduction
+   (turnover 66.5 → 16.4×/yr, exec 1.06% → 0.26% of book) is the durable part.
+3. **The edge is regime TIMING, not selection.** The stress audit puts that SQQQ
+   mechanism at 18 winners in 45 historical episodes (40%), −$87,736 on $100k.
+4. **`initial_value` on `alpaca-main`** — clean-room mode refuses to launch
+   without it. Operator decision, deliberately not re-litigated here.
+
+### Process failures this session, recorded
+
+* **Pushed while a backtest was in flight — twice.** The redeploy killed bt 685034
+  mid-run. The handoff warns about this explicitly and it still happened.
+* Four wrong diagnoses of the sleeve defect (§3i), three of them shipped as
+  falsely-green tests.
+
 ## 4. ATTRIBUTION — the satellite is a drag, the core is the strategy
 
 bt 581982, cleanest split measured:

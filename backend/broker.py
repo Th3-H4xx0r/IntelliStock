@@ -2626,6 +2626,76 @@ def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, posit
     return out
 
 
+def _fundamental_veto_blocks(symbol, cached_strategies, current_time):
+    """``(blocked, reason)`` — refuse a BUY whose point-in-time fundamentals are
+    bad enough that the name is more likely than not to destroy capital.
+
+    A VETO, NOT A SELECTOR, and the distinction is the whole design:
+
+      * Bessembinder — 58% of US stocks underperform T-bills over their lifetime,
+        so EXCLUDING likely losers is far more tractable than picking winners.
+      * Grinold — concentrating a signal whose information coefficient is
+        negative amplifies losses. This system's satellite measures at
+        **-$7.80 expected value per position** (34% hit rate, avg winner +$30 vs
+        avg loser -$27, no right tail), so it must not be used to CHOOSE.
+      * And its own conviction score cannot rank: **89% of buys carry the maximum
+        raw score**, so there is no internal gradient to gate on. The
+        discriminator has to come from outside the model. That is this.
+
+    Point-in-time by construction: `select_period` admits only fiscal periods
+    whose EDGAR `filed` date is on or before `current_time`, so a name is judged
+    on what was public THAT DAY, never on a restated figure published later.
+
+    FAILS OPEN, everywhere. No data, an unpriced sector, a network error, a
+    disabled flag — all return "do not block". A fundamentals feed must never be
+    able to halt trading; the worst it may do is decline to have an opinion.
+    DEFAULT OFF (`fundamental_veto_enabled`).
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        if not bool(cfg.get("fundamental_veto_enabled", False)):
+            return False, ""
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return False, ""
+        # The sleeve's own instruments are index/inverse ETFs with no
+        # fundamentals; vetoing them would disarm the core or the hedge.
+        _rsv = _residual_sleeve_config(cached_strategies) or {}
+        if sym in {str(_rsv.get("symbol") or "").upper(),
+                   str(_rsv.get("bear_symbol") or "").upper()}:
+            return False, "sleeve symbol"
+
+        from company_research import research_company
+
+        blocked_grades = str(cfg.get("fundamental_veto_block_grades", "F") or "")
+        blocked_grades = {g.strip().upper() for g in blocked_grades.split(",") if g.strip()}
+        # Block names with NO visible filings. Measured over the 98 positions this
+        # system actually took: the "no data" bucket was 36 positions worth
+        # **-$590 at a 25% hit rate** — the single largest destroyer, larger than
+        # grade F. These are foreign issuers, shells and fresh listings that no
+        # amount of research can evaluate. Default OFF because it is a big
+        # behavioural change, but it is the highest-value setting measured.
+        block_unknown = bool(cfg.get("fundamental_veto_block_unknown", False))
+
+        dossier = research_company(sym, current_time)
+        if dossier.grade is None:
+            if block_unknown:
+                return True, "no filings visible — cannot be researched"
+            return False, "no fundamentals"
+        if dossier.grade in blocked_grades:
+            why = "; ".join(dossier.red_flags[:3]) or "graded " + dossier.grade
+            return True, f"grade {dossier.grade}: {why}"
+        return False, f"grade {dossier.grade}"
+    except Exception as exc:
+        # Fail OPEN and say so once. A fundamentals outage must not become a
+        # trading halt.
+        if not globals().get("_fundamental_veto_error_logged"):
+            globals()["_fundamental_veto_error_logged"] = True
+            _log(f"[fundamental-veto] disabled this run "
+                 f"({type(exc).__name__}: {exc}) — buys are UNFILTERED", "yellow")
+        return False, "error"
+
+
 def _sleeve_pending_qty(portfolio_emulator, symbol, side, order_service=None):
     """Unfilled quantity of `side` orders for `symbol`, backtest AND live.
 
