@@ -15,6 +15,19 @@ services:
         # VITE_PREVIEW_MODE=true builds a landing-only bundle (no portal,
         # GitHub CTA in place of auth). Empty/unset = full portal.
         - VITE_PREVIEW_MODE=${VITE_PREVIEW_MODE:-}
+    # Pin the image tag like every other service. WITHOUT this, Compose derives
+    # the tag from the PROJECT NAME, which under Dokploy is a generated slug
+    # (`intellistockv4-fullstack-nnhtty-frontend`). When that slug changes the
+    # build succeeds but `up` cannot resolve the tag:
+    #
+    #   Container intellistock-frontend Error response from daemon:
+    #   No such image: intellistockv4-fullstack-nnhtty-frontend:latest
+    #
+    # That failure is worse than it looks: it aborts the deploy AFTER Compose has
+    # already renamed the backend services for recreation, stranding them as
+    # `<short-id>_intellistock-backend` etc. The next deploy then just STARTS the
+    # strays instead of recreating them, so new images silently never go live.
+    image: intellistock-frontend
     container_name: intellistock-frontend
     ports:
       - "${FRONTEND_PORT:-3000}:80"
