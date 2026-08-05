@@ -2626,6 +2626,49 @@ def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, posit
     return out
 
 
+def _sleeve_pending_qty(portfolio_emulator, symbol, side):
+    """Unfilled quantity of `side` orders for `symbol`, from the simulator.
+
+    2026-08-05. Execution is NEXT-EVENT: an order rests until the next quote,
+    which overnight means it sits unfilled across MANY bars until the open. Every
+    sleeve decision in between re-read `get_positions()` / `get_cash()`, saw no
+    trace of it, and sized as though nothing were outstanding:
+
+        bt 542752  two residual_bear_deploy orders decided on consecutive
+                   overnight bars (01:00, 02:00), both filling at the 13:00
+                   open, together 95.0% of NAV against a 70% cap.
+
+    An earlier attempt keyed this on `current_time` ("same bar"), which cannot
+    work — the calls are on DIFFERENT bars. The diagnostic that proved it:
+
+        current_time=2026-04-02 14:00  pending=(2026-04-01 01:00, 4387.66)
+
+    Reading the simulator is stateless and self-clearing: an order leaves
+    `pending_orders` when it fills OR expires, so a rejected or abandoned order
+    can never permanently reserve room and starve the hedge — the failure mode a
+    manual counter invites.
+
+    Returns 0.0 for any emulator without a simulator (legacy/live paths), which
+    restores the previous behaviour exactly.
+    """
+    try:
+        sim = getattr(portfolio_emulator, "_execution_simulator", None)
+        if sim is None:
+            return 0.0
+        want_sym = str(symbol or "").strip().upper()
+        want_side = str(side or "").strip().lower()
+        total = 0.0
+        for order in (getattr(sim, "pending_orders", ()) or ()):
+            if str(getattr(order, "symbol", "")).strip().upper() != want_sym:
+                continue
+            if str(getattr(order, "side", "")).strip().lower() != want_side:
+                continue
+            total += abs(float(getattr(order, "quantity", 0.0) or 0.0))
+        return total
+    except Exception:
+        return 0.0
+
+
 def _conviction_bear_alloc(cfg, regime, ret20, ret5, dwell, prev_ratchet):
     """2026-07-23 conviction-scaled SQQQ NAV cap. Returns (alloc, new_ratchet).
     Pure/testable. Default (scale disabled) -> static bear_alloc_pct. crash ->
@@ -4042,9 +4085,8 @@ def _residual_sleeve_release(
                     # already committed this bar so the demand is seen as met.
                     # Keyed on `current_time`; a new bar starts clean, by which
                     # point the sale has settled into get_cash().
-                    _pr = _RESIDUAL_SLEEVE_STATE.get("bear_pending_refill")
-                    _inflight = (float(_pr[1] or 0.0)
-                                 if (_pr and _pr[0] == current_time) else 0.0)
+                    _inflight = _sleeve_pending_qty(
+                        portfolio_emulator, bsym, "sell") * bpx
                     if _bnav > 0 and (_bcash + _inflight) < _brel * _bnav:
                         _bneeded = max(0.0, _brel * _bnav - _bcash - _inflight)
                         _bsell_qty = min(bqty, _bneeded / bpx)
@@ -4066,16 +4108,6 @@ def _residual_sleeve_release(
                             # is a full exit — reset entry/peak/exit-ts so the
                             # NEXT leg doesn't inherit this leg's stale high (which
                             # would instantly retro-arm + destroy the new hedge).
-                            # Book the proceeds this bar has already raised on
-                            # ACCEPTANCE, not on a confirmed fill — a next-event
-                            # SimulationSubmission is accepted-but-not-filled, so
-                            # gating this on `_signal_result_is_confirmed` made it
-                            # dead code in backtest (see the deploy-side note).
-                            if _bok:
-                                _acc_r = (float(_pr[1] or 0.0)
-                                          if (_pr and _pr[0] == current_time) else 0.0)
-                                _RESIDUAL_SLEEVE_STATE["bear_pending_refill"] = (
-                                    current_time, _acc_r + float(_bsell_qty) * bpx)
                             if (
                                 _signal_result_is_confirmed(_bok)
                                 and _bfrac >= 1.0
@@ -4552,17 +4584,10 @@ def _residual_sleeve_deploy(
             # on `current_time` so a NEW bar starts clean -- by then the fill has
             # settled and get_positions() is authoritative again. A stale
             # reservation can therefore never starve the hedge.
-            _pending = _RESIDUAL_SLEEVE_STATE.get("bear_pending_deploy")
-            # DIAGNOSTIC (2026-08-05): this guard verifiably works against real
-            # PortfolioEmulator + NextEventExecutionSimulator objects locally, yet
-            # production reproduced the 94.7%-of-NAV stack byte-identically across
-            # two build ids. Log unconditionally so a run's logs answer "is this
-            # code even executing, and does current_time match?" instead of
-            # another inference.
-            _log(f"[sleeve-diag] bear deploy call: current_time={current_time!r} "
-                 f"pending={_pending!r} cur_val={cur_val:.2f} nav={nav:.2f}", "cyan")
-            if _pending and _pending[0] == current_time:
-                cur_val += float(_pending[1] or 0.0)
+            # Count UNFILLED buys as already held. See _sleeve_pending_qty: under
+            # next-event execution an overnight order rests across many bars, and
+            # without this every bar in between re-grants the whole cap.
+            cur_val += _sleeve_pending_qty(portfolio_emulator, bsym, "buy") * bpx
             room = max(0.0, _alloc * nav - cur_val)
             deploy = min(idle, room)
             if deploy < max(50.0, cfg["min_deploy_pct"] * nav):
@@ -4584,11 +4609,6 @@ def _residual_sleeve_deploy(
             # that did not exist — the fix was inert and bt 811098 reproduced
             # the 94.7%-of-NAV stack unchanged. Acceptance is the right signal:
             # the cash is committed the moment the order is queued.
-            if bok:
-                _p = _RESIDUAL_SLEEVE_STATE.get("bear_pending_deploy")
-                _acc = float(_p[1] or 0.0) if (_p and _p[0] == current_time) else 0.0
-                _RESIDUAL_SLEEVE_STATE["bear_pending_deploy"] = (
-                    current_time, _acc + float(deploy or 0.0))
             if _signal_result_is_confirmed(bok):
                 _RESIDUAL_SLEEVE_STATE["last_park_ts"] = current_time
                 # Weighted avg entry for the leg stop-loss.

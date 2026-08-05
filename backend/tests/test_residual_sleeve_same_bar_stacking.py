@@ -14,15 +14,34 @@ exactly to portfolio value at those bars, so the weights are real.
 Because it reproduces in the CONTROL, this is base-sleeve behaviour and is
 therefore live on doc-179/alpaca-main today.
 
-WHY A SECOND CALL HAPPENS: execution is NEXT-EVENT
-(`NextEventExecutionSimulator`), so the first order has not filled when the
-second deploy sizes itself and `room = _alloc*nav - cur_val` still sees ~0 held.
-The dual-cadence MONITOR + FULL cycles both call `_residual_sleeve_deploy` on a
-bar, so two calls per timestamp is ordinary.
+THE FILENAME IS A MISNOMER, KEPT FOR HISTORY. It is NOT a same-bar defect.
 
-NOTE ON A PREVIOUS VERSION OF THIS FILE: it used the SPY-oriented `_Emu`/spec
-and emitted ZERO signals, so its `total <= cap` assertion passed against 0 —
-a vacuous green. Every test here now asserts a signal actually fired first.
+The 13:00 stamp on those trades is the FILL time — the next available quote,
+i.e. the market open. The decisions happened on separate OVERNIGHT bars. A
+diagnostic added to the deployed engine settled it:
+
+    current_time=2026-04-02 14:00  pending=(2026-04-01 01:00, 4387.66)
+
+Execution is NEXT-EVENT, so a clip decided at 01:00 rests unfilled until the
+open. Every sleeve decision in between re-read `get_positions()` / `get_cash()`,
+saw no trace of it, and sized as though nothing were outstanding. Two orders
+decided at 01:00 and 02:00 both printed at 13:00 for 95% of NAV.
+
+An earlier fix keyed the guard on `current_time` ("same bar") and could never
+work, because the calls are on DIFFERENT bars. The fix reads unfilled orders
+from the simulator instead (`_sleeve_pending_qty`), which is stateless and
+self-clearing: an order leaves `pending_orders` when it fills or expires, so a
+rejected order cannot permanently reserve room and starve the hedge.
+
+THREE EARLIER VERSIONS OF THIS FILE WERE FALSELY GREEN. Each is now guarded:
+  1. wrong fixtures (SPY `_Emu`/spec) -> ZERO signals, `total <= cap` asserted
+     against 0. Every test now asserts `emu.signals` is non-empty FIRST.
+  2. wrong entry point — the cash REFILL lives in `_residual_sleeve_release`.
+  3. stub returned a bare `True`, which has no `filled` attribute and so reads
+     as CONFIRMED; the engine's receipt is accepted-but-not-filled, making
+     anything gated on `_signal_result_is_confirmed` dead code in backtest.
+     `_Submission` now models it and a guard test pins the contract.
+The lesson: assert the path RAN, and model what the engine actually returns.
 """
 import os
 import sys
@@ -67,14 +86,44 @@ class _Submission:
         return self.accepted
 
 
+class _PendingOrder:
+    def __init__(self, symbol, side, quantity):
+        self.symbol, self.side, self.quantity = symbol, side, quantity
+
+
+class _Sim:
+    """Minimal stand-in for NextEventExecutionSimulator's pending-order view.
+
+    Orders REST here and are never settled, which is exactly what happens
+    overnight: a clip decided at 01:00 does not fill until the 13:00 open, so
+    every bar in between still sees it pending.
+    """
+    def __init__(self):
+        self.pending_orders = []
+
+
 class _EmuNextEvent(h._Emu2):
-    """_Emu2, but returning a realistic next-event receipt."""
+    """_Emu2 with a realistic next-event receipt AND a resting-order book."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._execution_simulator = _Sim()
 
     def execute_signal(self, sym, sig, px, timestamp=None, sell_fraction=None,
                        cash_per_trade=None, order_source=None):
         super().execute_signal(sym, sig, px, timestamp=timestamp,
                                sell_fraction=sell_fraction,
                                cash_per_trade=cash_per_trade)
+        if sig == 1:
+            qty = float(cash_per_trade or 0.0) / float(px or 1.0)
+            side = "buy"
+        else:
+            held = float(self._pos.get(sym, 0.0) or 0.0)
+            qty = held * float(sell_fraction or 1.0)
+            side = "sell"
+        if qty > 0:
+            self._execution_simulator.pending_orders.append(
+                _PendingOrder(sym, side, qty))
         return _Submission()
 
 
@@ -131,7 +180,7 @@ def test_without_same_bar_accounting_the_deploy_does_blow_the_cap():
     emu = _EmuNextEvent(cash=NAV, nav=NAV)
     ts = datetime(2026, 4, 1, 13)
     for _ in range(2):
-        b._RESIDUAL_SLEEVE_STATE["bear_pending_deploy"] = None    # pre-fix state
+        emu._execution_simulator.pending_orders.clear()    # pre-fix: in-flight invisible
         b._residual_sleeve_deploy(emu, {"SQQQ": PX}, ts, h.BEAR_SPEC)
     total = _total(emu)
     assert len(emu.signals) == 2, "expected a second same-bar deploy without the fix"
@@ -172,7 +221,7 @@ def test_without_same_bar_accounting_the_refill_does_liquidate_the_hedge():
     emu = _EmuNextEvent(cash=100.0, nav=nav, positions={"SQQQ": qty})
     ts = datetime(2026, 4, 6, 13)
     for _ in range(14):
-        b._RESIDUAL_SLEEVE_STATE["bear_pending_refill"] = None   # pre-fix state
+        emu._execution_simulator.pending_orders.clear()   # pre-fix: in-flight invisible
         b._residual_sleeve_release(emu, {"SQQQ": px}, ts, h.BEAR_SPEC)
 
     sells = [s for s in emu.signals if s.get("sig") == -1]

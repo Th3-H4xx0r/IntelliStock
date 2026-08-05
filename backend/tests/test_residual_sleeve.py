@@ -22,6 +22,10 @@ _WANTED = {
     "_chop_ret20_cfg",
     "_residual_sleeve_release",
     "_residual_sleeve_deploy",
+    # 2026-08-05: the sleeve reads unfilled orders off the execution simulator to
+    # size around in-flight clips. It is CALLED BY the two functions above, so it
+    # must be extracted too or they NameError inside the stub namespace.
+    "_sleeve_pending_qty",
     "_submit_portfolio_signal",
     "_signal_result_is_confirmed",
 }
