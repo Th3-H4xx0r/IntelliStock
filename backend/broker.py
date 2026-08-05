@@ -2626,8 +2626,8 @@ def _momentum_partial_trim_missing(nexus_position_sizes, expanded_symbols, posit
     return out
 
 
-def _sleeve_pending_qty(portfolio_emulator, symbol, side):
-    """Unfilled quantity of `side` orders for `symbol`, from the simulator.
+def _sleeve_pending_qty(portfolio_emulator, symbol, side, order_service=None):
+    """Unfilled quantity of `side` orders for `symbol`, backtest AND live.
 
     2026-08-05. Execution is NEXT-EVENT: an order rests until the next quote,
     which overnight means it sits unfilled across MANY bars until the open. Every
@@ -2648,14 +2648,56 @@ def _sleeve_pending_qty(portfolio_emulator, symbol, side):
     can never permanently reserve room and starve the hedge — the failure mode a
     manual counter invites.
 
-    Returns 0.0 for any emulator without a simulator (legacy/live paths), which
-    restores the previous behaviour exactly.
+    LIVE PARITY (2026-08-05). An earlier version read only the backtest simulator
+    and returned 0.0 in live, which left REAL MONEY with the exact blind spot this
+    exists to close: an Alpaca order is acknowledged long before it fills, and the
+    sleeve would re-grant the whole cap on every tick until it did. The live order
+    service already tracks this — `_restore_reservations` rebuilds a Reservation
+    for every non-terminal lifecycle record — but `_residual_sleeve_deploy` sized
+    off `get_positions()` and never consulted it.
+
+    `Reservation` carries no symbol, so walk the lifecycle store instead: each
+    non-terminal record has `.intent` (symbol, side, quantity) and
+    `.cumulative_quantity`, and the difference is what is still working.
+
+    Returns 0.0 when neither source is available, which restores the previous
+    behaviour exactly.
     """
+    want_sym = str(symbol or "").strip().upper()
+    want_side = str(side or "").strip().lower()
+
+    # --- LIVE: orders working at the broker -------------------------------
+    if order_service is not None:
+        try:
+            store = getattr(order_service, "lifecycle_store", None)
+            inst = getattr(order_service, "instance_id", None)
+            if store is not None and inst is not None:
+                total = 0.0
+                for record in (store.list_for_instance(inst) or ()):
+                    if getattr(record, "terminal", False):
+                        continue
+                    intent = getattr(record, "intent", None)
+                    if intent is None:
+                        continue
+                    if str(getattr(intent, "symbol", "")).strip().upper() != want_sym:
+                        continue
+                    _side = getattr(intent, "side", "")
+                    _side = getattr(_side, "value", _side)
+                    if str(_side).strip().lower() != want_side:
+                        continue
+                    total += max(0.0, float(intent.quantity)
+                                 - float(getattr(record, "cumulative_quantity", 0) or 0))
+                return total
+        except Exception:
+            # A reconciliation hiccup must not silently REMOVE the guard, but it
+            # also must not wedge the tick. Fall through to the simulator path;
+            # if that is absent too, 0.0 is the pre-existing behaviour.
+            pass
+
     try:
         sim = getattr(portfolio_emulator, "_execution_simulator", None)
         if sim is None:
             return 0.0
-        want_sym = str(symbol or "").strip().upper()
         want_side = str(side or "").strip().lower()
         total = 0.0
         for order in (getattr(sim, "pending_orders", ()) or ()):
@@ -4086,7 +4128,7 @@ def _residual_sleeve_release(
                     # Keyed on `current_time`; a new bar starts clean, by which
                     # point the sale has settled into get_cash().
                     _inflight = _sleeve_pending_qty(
-                        portfolio_emulator, bsym, "sell") * bpx
+                        portfolio_emulator, bsym, "sell", order_service) * bpx
                     if _bnav > 0 and (_bcash + _inflight) < _brel * _bnav:
                         _bneeded = max(0.0, _brel * _bnav - _bcash - _inflight)
                         _bsell_qty = min(bqty, _bneeded / bpx)
@@ -4587,7 +4629,8 @@ def _residual_sleeve_deploy(
             # Count UNFILLED buys as already held. See _sleeve_pending_qty: under
             # next-event execution an overnight order rests across many bars, and
             # without this every bar in between re-grants the whole cap.
-            cur_val += _sleeve_pending_qty(portfolio_emulator, bsym, "buy") * bpx
+            cur_val += _sleeve_pending_qty(
+                portfolio_emulator, bsym, "buy", order_service) * bpx
             room = max(0.0, _alloc * nav - cur_val)
             deploy = min(idle, room)
             if deploy < max(50.0, cfg["min_deploy_pct"] * nav):

@@ -245,3 +245,91 @@ def test_a_later_bar_sizes_against_the_settled_position():
     b._residual_sleeve_deploy(emu, {"SQQQ": PX}, datetime(2026, 4, 1, 14), h.BEAR_SPEC)
     held = emu._pos["SQQQ"] * PX + (_total(emu) - first)
     assert held <= CAP_USD + 1e-6, held
+
+
+# --- LIVE PARITY -----------------------------------------------------------
+#
+# The first version of `_sleeve_pending_qty` read ONLY the backtest simulator and
+# returned 0.0 in live, leaving REAL MONEY with the exact blind spot the helper
+# exists to close: an Alpaca order is acknowledged long before it fills, so the
+# sleeve would re-grant the whole cap on every tick until it did.
+
+class _Intent:
+    def __init__(self, symbol, side, quantity):
+        self.symbol, self.side, self.quantity = symbol, side, quantity
+
+
+class _Record:
+    def __init__(self, symbol, side, quantity, filled=0.0, terminal=False):
+        self.intent = _Intent(symbol, side, quantity)
+        self.cumulative_quantity = filled
+        self.terminal = terminal
+
+
+class _Store:
+    def __init__(self, records):
+        self._records = records
+
+    def list_for_instance(self, _instance_id):
+        return list(self._records)
+
+
+class _LiveService:
+    instance_id = "alpaca-main"
+
+    def __init__(self, records):
+        self.lifecycle_store = _Store(records)
+
+
+def _pending(emu, svc, side="buy"):
+    return b._ns["_sleeve_pending_qty"](emu, "SQQQ", side, svc)
+
+
+def test_live_counts_working_orders_as_already_held():
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
+    svc = _LiveService([_Record("SQQQ", "buy", 100.0)])
+    assert _pending(emu, svc) == 100.0
+
+
+def test_live_subtracts_the_portion_already_filled():
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
+    svc = _LiveService([_Record("SQQQ", "buy", 100.0, filled=40.0)])
+    assert _pending(emu, svc) == 60.0
+
+
+def test_live_ignores_terminal_orders_so_a_done_order_cannot_starve_the_hedge():
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
+    svc = _LiveService([_Record("SQQQ", "buy", 100.0, terminal=True)])
+    assert _pending(emu, svc) == 0.0
+
+
+def test_live_filters_by_symbol_and_side():
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
+    svc = _LiveService([
+        _Record("SQQQ", "sell", 50.0),      # wrong side
+        _Record("SPY", "buy", 70.0),        # wrong symbol
+        _Record("SQQQ", "buy", 25.0),       # counts
+    ])
+    assert _pending(emu, svc) == 25.0
+    assert _pending(emu, svc, side="sell") == 50.0
+
+
+def test_live_enum_sides_are_handled():
+    """OrderIntent.side is an OrderSide enum (str-valued), not a bare string."""
+    import enum
+
+    class _Side(str, enum.Enum):
+        BUY = "buy"
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
+    svc = _LiveService([_Record("SQQQ", _Side.BUY, 33.0)])
+    assert _pending(emu, svc) == 33.0
+
+
+def test_a_broken_store_does_not_wedge_the_tick():
+    class _Boom:
+        instance_id = "x"
+        @property
+        def lifecycle_store(self):
+            raise RuntimeError("reconciliation hiccup")
+    emu = _EmuNextEvent(cash=NAV, nav=NAV)
+    assert b._ns["_sleeve_pending_qty"](emu, "SQQQ", "buy", _Boom()) == 0.0
