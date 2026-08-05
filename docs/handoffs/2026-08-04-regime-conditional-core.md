@@ -353,6 +353,42 @@ throttled hard for a large cost saving — worth its own measurement.
 fails it too, this patch is validated only through a bear→bull turn and the
 recommendation must say so.
 
+## 3i. THE REAL SLEEVE DEFECT — and four wrong diagnoses on the way
+
+**It is not a same-bar defect.** A diagnostic added to the deployed engine settled
+it:
+
+```
+current_time=2026-04-02 14:00   pending=(2026-04-01 01:00, 4387.66)
+```
+
+The `13:00` stamp on the two stacked trades is the **FILL** time — the next
+available quote, i.e. the market open. The decisions were on separate OVERNIGHT
+bars. Execution is next-event, so a clip decided at 01:00 rests unfilled until
+the open, and every sleeve decision in between re-read `get_positions()` /
+`get_cash()`, saw nothing outstanding, and re-granted the whole cap.
+
+**`backtest_trades.timestamp` is the fill time. Same-timestamp trades are NOT
+same-bar decisions.** That single misreading drove three failed fixes.
+
+Fixed by `_sleeve_pending_qty`, which reads unfilled orders off the execution
+simulator — pending BUYs count toward `cur_val`, pending SELLs toward cash.
+Stateless and self-clearing (an order leaves `pending_orders` on fill OR expiry),
+so a rejected clip can never reserve room forever and starve the hedge.
+
+### The four wrong turns, recorded so they are not repeated
+
+| # | claim | why it was wrong |
+|---|---|---|
+| 1 | "invariant pinned" | test used SPY `_Emu`/spec, emitted ZERO signals; `total <= cap` asserted against 0 |
+| 2 | "both defects fixed" (`d6e24cb`) | gated on `_signal_result_is_confirmed`, which is FALSE in backtest — dead code |
+| 3 | "now genuinely fixed" (`ecce27e`) | keyed on `current_time`; the calls are on different bars |
+| 4 | "STILL OLD CODE" (bt 924675) | `logs` is TAIL-TRUNCATED ~500 lines; the event logs at bar 3 and is gone by the end |
+
+**Two rules that would have prevented all four:** assert the path RAN before
+asserting a bound on it, and never infer deployment state from absent log lines —
+judge from `backtest_trades` / positions, which truncation cannot hide.
+
 ## 4. ATTRIBUTION — the satellite is a drag, the core is the strategy
 
 bt 581982, cleanest split measured:
