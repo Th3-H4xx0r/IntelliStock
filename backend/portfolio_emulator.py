@@ -469,6 +469,60 @@ class PortfolioEmulator:
         self._equity_slippage_cost += slippage_cost
         self._equity_volume += notional
 
+    #: Set once per run by broker.py from the strategy config, so passive
+    #: execution can be A/B'd per-strategy-doc rather than only per-host. None
+    #: means "not configured" and the env var decides.
+    _PASSIVE_OVERRIDE = None
+
+    @classmethod
+    def set_passive_execution(cls, enabled, expire_quotes=8):
+        """Configure passive execution from a strategy config."""
+        try:
+            on = enabled if isinstance(enabled, bool) else str(
+                enabled or "").strip().lower() in {"1", "true", "yes", "on"}
+            exp = int(expire_quotes or 8)
+        except (TypeError, ValueError):
+            on, exp = False, 8
+        cls._PASSIVE_OVERRIDE = (bool(on), max(0, exp))
+
+    def _passive_limit_for(self, side, price):
+        """`(limit_price, expire_after_quotes)` for this order, or `(None, 0)`.
+
+        DEFAULT OFF. Without `PASSIVE_EXECUTION_ENABLED` every order keeps
+        today's marketable behaviour byte-for-byte, so an untouched run is
+        unchanged.
+
+        The limit is placed at the DECISION price — the mid the strategy saw —
+        rather than inside the spread. Posting inside would be more aggressive
+        and fill more often, but it also starts giving the spread back, and the
+        entire point is to stop paying it. Posting at the mid is the honest
+        midpoint between "always fills, always pays" and "never pays, never
+        fills".
+        """
+        try:
+            import os
+            override = type(self)._PASSIVE_OVERRIDE
+            if override is not None:
+                on, expire = override
+            else:
+                on = str(os.environ.get("PASSIVE_EXECUTION_ENABLED", "") or
+                         "").strip().lower() in {"1", "true", "yes", "on"}
+                try:
+                    expire = int(os.environ.get("PASSIVE_EXPIRE_QUOTES", "8") or 8)
+                except (TypeError, ValueError):
+                    expire = 8
+            if not on:
+                return None, 0
+            limit = float(price or 0.0)
+            if limit <= 0:
+                return None, 0
+            return limit, max(0, expire)
+        except Exception:
+            # Fail OPEN to the marketable path: a passive order that silently
+            # fails to rest is a trade that never happens, which is worse than
+            # paying the spread.
+            return None, 0
+
     def _rejects_below_minimum(self, ticker, notional):
         """True when the live broker would bounce this order on notional.
 
@@ -1411,6 +1465,20 @@ class PortfolioEmulator:
             # strategy, and it is counted into the realism summary instead.
             if self._rejects_below_minimum(ticker, shares * price):
                 return False
+            # 2026-08-03 PASSIVE EXECUTION (opt-in, default OFF).
+            #
+            # A market order crosses the spread by construction: a buy lifts the
+            # ask, a sell hits the bid. At the measured notional-weighted 45.6
+            # bps that is 22.8 bps on every side of every trade, and measured
+            # slippage vs mid is ~0.1 bps — so the cost is the CROSSING, not
+            # execution quality, and only a resting order avoids it.
+            #
+            # Posting at the mid asks a counterparty to come to us. The saving
+            # is the half spread; the price is non-fill risk, which the
+            # simulator surfaces via `expired_order_count` rather than hiding.
+            # Only viable alongside a holding floor: waiting hours for a fill is
+            # free on a 30-day hold and fatal at a 15-minute cadence.
+            _limit_px, _expire = self._passive_limit_for(side, price)
             order = SimulationOrder(
                 order_id=order_id,
                 symbol=ticker,
@@ -1420,6 +1488,8 @@ class PortfolioEmulator:
                 execute_not_before=timestamp + self._execution_delay,
                 source=order_source.strip(),
                 notional_limit=amount_to_use if side == "buy" else None,
+                limit_price=_limit_px,
+                expire_after_quotes=_expire,
             )
             self.record_order(order)
             self._simulation_order_sequence = next_sequence

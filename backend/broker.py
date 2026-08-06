@@ -8714,6 +8714,23 @@ if mode == MODE_BACKTEST:
     _cached_strategies, _strategy_row_id, _backtest_strategy_schema = load_strategies_from_db()
     if _cached_strategies:
         _log(f"Loaded {len(_cached_strategies)} strategy(ies) from DB", "green")
+        # 2026-08-03 — configure PASSIVE execution from the strategy doc, so it
+        # can be A/B'd per-doc instead of only per-host env. Default OFF: absent
+        # keys leave every order marketable and the run byte-identical.
+        try:
+            _pe_cfg = _core_sleeve_cfg_raw(_cached_strategies)
+            if _pe_cfg.get("passive_execution_enabled") is not None:
+                from portfolio_emulator import PortfolioEmulator as _PE
+                _PE.set_passive_execution(
+                    _pe_cfg.get("passive_execution_enabled"),
+                    _pe_cfg.get("passive_expire_quotes", 8))
+                _log(f"[passive] limit execution ENABLED from config "
+                     f"(expire_after={_pe_cfg.get('passive_expire_quotes', 8)} quotes) "
+                     f"— orders rest at the decision price instead of crossing",
+                     "cyan")
+        except Exception as _pe_exc:
+            _log(f"[passive] config read failed ({type(_pe_exc).__name__}) — "
+                 "orders stay marketable", "yellow")
         # Resolve all model_id references at startup. force_refresh drops
         # the model_resolver's 5-min TTL cache so a freshly-edited Models
         # row (via UI Test & Save) is picked up immediately — every
@@ -9987,6 +10004,23 @@ if mode != MODE_BACKTEST:
     _cached_strategies, _strategy_row_id, _ = load_strategies_from_db()
     if _cached_strategies:
         _log(f"Loaded {len(_cached_strategies)} strategy(ies) from DB", "green")
+        # 2026-08-03 — configure PASSIVE execution from the strategy doc, so it
+        # can be A/B'd per-doc instead of only per-host env. Default OFF: absent
+        # keys leave every order marketable and the run byte-identical.
+        try:
+            _pe_cfg = _core_sleeve_cfg_raw(_cached_strategies)
+            if _pe_cfg.get("passive_execution_enabled") is not None:
+                from portfolio_emulator import PortfolioEmulator as _PE
+                _PE.set_passive_execution(
+                    _pe_cfg.get("passive_execution_enabled"),
+                    _pe_cfg.get("passive_expire_quotes", 8))
+                _log(f"[passive] limit execution ENABLED from config "
+                     f"(expire_after={_pe_cfg.get('passive_expire_quotes', 8)} quotes) "
+                     f"— orders rest at the decision price instead of crossing",
+                     "cyan")
+        except Exception as _pe_exc:
+            _log(f"[passive] config read failed ({type(_pe_exc).__name__}) — "
+                 "orders stay marketable", "yellow")
         # Resolve all model_id references at startup. force_refresh drops
         # the resolver's 5-min TTL cache so the live broker always boots
         # with the latest credentials from the Models table — a key
@@ -14253,6 +14287,21 @@ while not shutdown_requested:
                                          f"${cash_per_trade:,.0f} -> ${_sat_room:,.0f} "
                                          f"to keep the core at target", "yellow")
                                     cash_per_trade = _sat_room
+                            # 2026-08-05 FUNDAMENTAL VETO (default OFF). Placed at
+                            # this choke point for the same reason as the regime
+                            # cap and the turnover budget: it is the one hop every
+                            # buy lane passes through (allocation, backfill queue,
+                            # momentum watchlist, direct-reserved, rotations).
+                            # Gating only the allocation lane is what let doc-188
+                            # keep trading 28 names it was supposed to have
+                            # suppressed.
+                            _fv_block, _fv_why = _fundamental_veto_blocks(
+                                symbol, _cached_strategies, current_time)
+                            if _fv_block:
+                                _log(f"FUNDAMENTAL VETO: {symbol} skipped — "
+                                     f"{_fv_why}", "yellow")
+                                _trade_skipped_no_price = True
+                                continue
                             # 2026-07-19 adversarial review MED: the bear
                             # symbol is reserved for the sleeve — a strategy
                             # position in it would collide with the leg's

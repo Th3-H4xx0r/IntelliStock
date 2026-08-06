@@ -132,6 +132,22 @@ class SimulationOrder:
     execute_not_before: datetime
     source: str = "equity_backtest"
     notional_limit: float | None = None
+    #: 2026-08-03 — PASSIVE execution. When set, this order RESTS at
+    #: `limit_price` instead of taking the touch, and fills only if the market
+    #: comes to it. None preserves today's marketable behaviour byte-for-byte.
+    #:
+    #: This is the largest unexploited cost lever on the book. Every fill
+    #: currently crosses the spread BY CONSTRUCTION — a market buy lifts the
+    #: ask, a market sell hits the bid — so the measured 22.8 bps of half-spread
+    #: is paid on every side of every trade. Measured slippage vs mid is ~0.1
+    #: bps, i.e. execution quality is already fine; the cost is the crossing
+    #: itself, and only a resting order avoids it.
+    limit_price: float | None = None
+    #: Quotes this order may rest for before it is abandoned. A resting order
+    #: that never fills is not free — it is a position you wanted and did not
+    #: get — so an unfilled limit must EXPIRE and be visible, never linger
+    #: silently. 0 means "never expire".
+    expire_after_quotes: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.order_id, str) or not self.order_id.strip():
@@ -163,6 +179,19 @@ class SimulationOrder:
             if side != "buy":
                 raise ValueError("notional_limit is only valid for buy orders")
         object.__setattr__(self, "notional_limit", notional_limit)
+        limit_price = self.limit_price
+        if limit_price is not None:
+            limit_price = _finite_number(
+                limit_price, field="limit_price", positive=True
+            )
+        object.__setattr__(self, "limit_price", limit_price)
+        try:
+            expire = int(self.expire_after_quotes or 0)
+        except (TypeError, ValueError):
+            raise ValueError("expire_after_quotes must be an integer")
+        if expire < 0:
+            raise ValueError("expire_after_quotes cannot be negative")
+        object.__setattr__(self, "expire_after_quotes", expire)
 
 
 @dataclass(frozen=True)
@@ -347,6 +376,8 @@ class _PendingOrder:
     cumulative_quantity: float = 0.0
     cumulative_cost: float = 0.0
     last_fill_quote_seconds: float | None = None
+    #: Quotes this order has rested through without filling (passive only).
+    quotes_seen: int = 0
 
 
 class NextEventExecutionSimulator:
@@ -358,6 +389,7 @@ class NextEventExecutionSimulator:
         self._known_order_ids: set[str] = set()
         self._fills: list[SimulationFill] = []
         self._rejected_order_count = 0
+        self._expired_order_count = 0
 
     @property
     def pending_orders(self) -> tuple[SimulationOrder, ...]:
@@ -374,6 +406,18 @@ class NextEventExecutionSimulator:
     @property
     def rejected_order_count(self) -> int:
         return self._rejected_order_count
+
+    @property
+    def expired_order_count(self) -> int:
+        """Passive orders abandoned unfilled.
+
+        This is the cost that REPLACES the spread when you stop crossing it. A
+        passive model that does not surface non-fills is indistinguishable from
+        free money, so this must be read alongside any saving claimed from
+        limit execution: a strategy that "saves" 22.8 bps while missing a third
+        of its entries has not saved anything.
+        """
+        return self._expired_order_count
 
     @property
     def fills(self) -> tuple[SimulationFill, ...]:
@@ -456,7 +500,45 @@ class NextEventExecutionSimulator:
             modeled_half_spread = (
                 mid * self.cost_model.spread_bps / 20_000.0
             )
-            if order.side == "buy":
+            if order.limit_price is not None:
+                # ── PASSIVE: the order RESTS; the market must come to it.
+                #
+                # Deliberately pessimistic, because an optimistic passive model
+                # is indistinguishable from free money and this codebase has
+                # already shipped one fantasy execution model (sub-$1 fills,
+                # zero spread) that made a strategy look profitable when it was
+                # not. Two rules:
+                #
+                #   1. A buy fills ONLY if the ASK falls to the limit — i.e. a
+                #      seller crossed to us. Requiring the ask (not the mid, and
+                #      not the bid) means we never assume a fill just because
+                #      the quote drifted our way.
+                #   2. The fill price is the LIMIT, never something better. Real
+                #      price improvement exists but is not ours to assume.
+                #
+                # Consequence: no spread is paid, and no slippage either — we
+                # set the price. What replaces that cost is NON-FILL risk,
+                # which is why `expire_after_quotes` exists and why unfilled
+                # orders must stay visible rather than silently resting.
+                if order.side == "buy":
+                    if quote.ask > order.limit_price:
+                        state.quotes_seen += 1
+                        if (order.expire_after_quotes
+                                and state.quotes_seen >= order.expire_after_quotes):
+                            completed.append(order_id)
+                            self._expired_order_count += 1
+                        continue
+                    fill_price = order.limit_price
+                else:
+                    if quote.bid < order.limit_price:
+                        state.quotes_seen += 1
+                        if (order.expire_after_quotes
+                                and state.quotes_seen >= order.expire_after_quotes):
+                            completed.append(order_id)
+                            self._expired_order_count += 1
+                        continue
+                    fill_price = order.limit_price
+            elif order.side == "buy":
                 touch_price = max(quote.ask, mid + modeled_half_spread)
                 fill_price = touch_price * (
                     1.0 + self.cost_model.slippage_bps / 10_000.0
@@ -512,8 +594,15 @@ class NextEventExecutionSimulator:
                 cumulative_quantity=cumulative,
                 price=fill_price,
                 fees=fees,
-                spread_cost=abs(touch_price - mid) * incremental,
-                slippage_cost=abs(fill_price - touch_price) * incremental,
+                # A passive fill crosses nothing: we posted the price and a
+                # counterparty came to us. Reporting a spread here would
+                # double-count — the economics are already in `price`, which is
+                # the limit rather than the touch. Non-fill risk is the cost
+                # that replaces it, and it shows up as expired orders.
+                spread_cost=(0.0 if order.limit_price is not None
+                             else abs(touch_price - mid) * incremental),
+                slippage_cost=(0.0 if order.limit_price is not None
+                               else abs(fill_price - touch_price) * incremental),
                 quote_timestamp=quote.timestamp,
                 executed_at=quote.timestamp,
                 cost_model_version=self.cost_model.version,
