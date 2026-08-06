@@ -5218,6 +5218,14 @@ def load_strategies_from_db():
 # so the only honest move is to tell the operator and change nothing.
 # Hard-failing is also wrong here: refusing to boot a real-money instance over a
 # stray config key is a bigger outage than the key itself.
+#
+# 2026-08-06: the registry knew ONE key while doc-179 alone carried ~38. Every
+# entry below was verified by scanning all 283 backend non-test sources for the
+# literal name and discarding schema blobs, CLI help text and comments — a key
+# is listed only if nothing reads it. Where a similarly-named key IS live, the
+# message names it, because the recurring failure is not "operator sets a
+# nonsense key", it is "operator sets the key one letter off from the real one
+# and the two disagree on units or magnitude".
 _DEAD_STRATEGY_CONFIG_KEYS = {
     "max_single_position_pct": (
         "no code reads it. For the strategy-side cap use "
@@ -5225,6 +5233,129 @@ _DEAD_STRATEGY_CONFIG_KEYS = {
         "broker-side hard ceiling use the BROKER_MAX_SINGLE_POSITION_PCT env "
         "var (FRACTION, default 0.15). The units differ, so this value is NOT "
         "auto-migrated"
+    ),
+    # --- regime caps: two naming families, both set, contradictory values ---
+    "regime_bear_max_positions": (
+        "no reader. The live key is `max_positions_bear` (broker.py:3836). "
+        "doc-179 sets this to 5 while max_positions_bear is 2 — the book is "
+        "cut to 2 names in a bear, not 5"
+    ),
+    "regime_chop_max_positions": (
+        "no reader. The live key is `max_positions_chop`"
+    ),
+    "regime_bear_conviction_mult": "no reader; no regime conviction scaling exists",
+    "regime_chop_conviction_mult": "no reader; no regime conviction scaling exists",
+    "regime_bear_vix_min": (
+        "no reader. The regime detector is purely price-based "
+        "(graph_nexus_analysis.py:7290) and never looks at VIX"
+    ),
+    "regime_bull_vix_max": (
+        "no reader. The regime detector is purely price-based and never looks at VIX"
+    ),
+    "regime_bear_stale_recovery_pct": "no reader; the feature was never merged",
+    # --- mid-winner trend reversal: an entire family with no implementation ---
+    "mid_winner_trend_reversal_min_held_days": (
+        "no reader. The live gate is `trend_reversal_confirm_min_hold_days` "
+        "(graph_nexus_analysis.py:9533, DEFAULT 3) — the shield engages from "
+        "day 3, not from whatever this is set to"
+    ),
+    "mid_winner_trend_reversal_confirm_bars": (
+        "no reader. The live key is `trend_reversal_confirmation_bars`"
+    ),
+    "mid_winner_trend_reversal_max_drawdown_pct": (
+        "no reader. The live key is `trend_reversal_peak_protect_pct`"
+    ),
+    "mid_winner_trend_reversal_min_pnl_pct": (
+        "no reader. The live key is `trend_reversal_green_min_pct`"
+    ),
+    "mid_winner_trend_reversal_block_enabled": (
+        "no reader. The whole mid_winner_trend_reversal_* family is dead; "
+        "the live gates are the trend_reversal_* keys"
+    ),
+    # --- momentum amplifier / winner-add family ---
+    "momentum_amplification": (
+        "no reader, and the name is a trap: the real switch is "
+        "`momentum_amplifier_enabled`, which DEFAULTS TO TRUE. Setting this to "
+        "false does not turn the lane off"
+    ),
+    "momentum_amplifier_max_per_fire_pct": (
+        "no reader. The live key is `momentum_amplifier_max_pct` (default 0.15)"
+    ),
+    "momentum_amplifier_max_per_bar": "no reader; no per-bar amplifier cap exists",
+    "momentum_amplifier_min_cash_pct": "no reader; no amplifier cash floor exists",
+    "momentum_swap_max_per_bar": "no reader; no per-bar swap cap exists",
+    "momentum_weight_multiplier": (
+        "no reader in production. It is implemented only in "
+        "tests/test_nexus_allocation.py, which reimplements the allocator — the "
+        "test passes against code that does not ship"
+    ),
+    "momentum_watchlist_history_bars": (
+        "appears only in a comment. The live key is "
+        "`overlay_bars_min_history_bars`"
+    ),
+    "winner_lock_absolute_pnl_threshold": "no reader; there is no absolute-P&L lock",
+    "winner_protection": (
+        "no reader as a config key (the only matches are the "
+        "`bypass_winner_protection` function parameter). The live key is "
+        "`winner_sell_protection_enabled`"
+    ),
+    # --- anchor reinforcement: per-stage limits that do not exist ---
+    "anchor_reinforce_stage1_max_dd": (
+        "no reader. All three stages share the single global "
+        "`anchor_reinforce_max_drawdown_from_peak_pct`"
+    ),
+    "anchor_reinforce_stage2_max_dd": (
+        "no reader; see anchor_reinforce_stage1_max_dd"
+    ),
+    "anchor_reinforce_stage3_max_dd": (
+        "no reader; see anchor_reinforce_stage1_max_dd"
+    ),
+    # --- stops ---
+    "trailing_stop_ratchet_enabled": (
+        "no reader; there is no ratchet. `trailing_stop_pnl_scaling_enabled` "
+        "WIDENS the trail as P&L grows, which is the opposite behaviour"
+    ),
+    "trailing_stop_ratchet_tiers": "no reader; see trailing_stop_ratchet_enabled",
+    "fast_loser_cut_pct_high_vol": (
+        "no reader. `fast_loser_cut_pct` applies to every name regardless of "
+        "volatility"
+    ),
+    # --- break-glass / breach heal ---
+    "top_momentum_break_glass_sell_fraction": (
+        "no reader. The top-momentum lane uses "
+        "`rotation_break_glass_sell_fraction`"
+    ),
+    "top_momentum_break_glass_cooldown_bars": (
+        "no reader; the top-momentum break-glass lane has no cooldown"
+    ),
+    "breach_heal_fresh_loss_max_days": (
+        "no reader; the breach-heal loop has no fresh-loss skip to tune"
+    ),
+    "breach_heal_fresh_loss_max_pnl_pct": (
+        "no reader; the breach-heal loop has no fresh-loss skip to tune"
+    ),
+    "breach_heal_skip_fresh_loss_enabled": (
+        "no reader; the breach-heal loop has no fresh-loss skip"
+    ),
+    # --- misc ---
+    "pead_discovery_enabled": "no reader; the PEAD lane does not exist",
+    "max_etfs_per_sector": (
+        "no reader; the per-sector ETF limit is a hardcoded map in "
+        "graph_nexus_analysis.py"
+    ),
+    "llm_azure_openai_endpoint": (
+        "no reader — note the `llm_` prefix. The live key is "
+        "`azure_openai_endpoint`. An endpoint set here is not used"
+    ),
+    "backtest_robinhood_bars_fallback_enabled": (
+        "no reader; backtest bar sourcing does not consult this"
+    ),
+    "post_sell_breakout_record_from_breach": (
+        "no reader; the post-sell breakout watcher records from the sell, "
+        "not from the breach, and that is not configurable"
+    ),
+    "analyst_panel_horizons": (
+        "no reader; the horizons are hardcoded in nexus_analyst_panel.py"
     ),
 }
 
@@ -5248,8 +5379,57 @@ def _warn_dead_strategy_config_keys(cached_strategies):
                     f"strategy '{name}' has NO effect — {_why}.",
                     "red",
                 )
+            _warn_unsatisfiable_config_bands(cfg, name)
     except Exception:
         pass
+
+
+# Pairs read as `if x < MIN or x > MAX: reject`. If MIN > MAX the band is empty
+# and the gate can never open, no matter what the market does.
+#
+# This is not hypothetical. All four live docs carry
+# backfill_rotation_winner_lock_bypass_min_held_pnl_pct = 5 with
+# _max_held_pnl_pct = 3 (graph_nexus_analysis.py:9381), so the bypass has never
+# once returned True. scripts/apply_round2_2026_07.py:88 lowered the ceiling
+# 10 -> 3 without touching the floor — a tuning campaign that closed the valve it
+# believed it was widening, and nothing anywhere said so.
+_CONFIG_BAND_PAIRS = (
+    ("backfill_rotation_winner_lock_bypass_min_held_pnl_pct",
+     "backfill_rotation_winner_lock_bypass_max_held_pnl_pct",
+     "the backfill-rotation winner-lock bypass"),
+    ("momentum_discovery_min_20d_return",
+     "momentum_discovery_max_20d_return",
+     "20-day momentum discovery"),
+    ("momentum_discovery_min_60d_return",
+     "momentum_discovery_max_60d_return",
+     "60-day momentum discovery"),
+    ("rank_band_entry_pct", "rank_band_exit_pct", "the rank band"),
+)
+
+
+def _warn_unsatisfiable_config_bands(cfg, strategy_name):
+    """Shout when a min/max pair describes an empty interval.
+
+    Deliberately does not repair the band. Which end is wrong is not inferable
+    from the values — raising the ceiling and lowering the floor produce
+    different strategies — so the only honest move is to name it and let the
+    operator decide.
+    """
+    for lo_key, hi_key, what in _CONFIG_BAND_PAIRS:
+        if lo_key not in cfg or hi_key not in cfg:
+            continue
+        try:
+            lo = float(cfg.get(lo_key))
+            hi = float(cfg.get(hi_key))
+        except (TypeError, ValueError):
+            continue
+        if lo > hi:
+            _log(
+                f"UNSATISFIABLE CONFIG BAND on strategy '{strategy_name}': "
+                f"{lo_key}={lo:g} exceeds {hi_key}={hi:g}, so {what} can NEVER "
+                f"fire. Raise the max or lower the min.",
+                "red",
+            )
 
 
 # Keys that must never ride in a regime_profiles overlay. Beyond the regime_*/
