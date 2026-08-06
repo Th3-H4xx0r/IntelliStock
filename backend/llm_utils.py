@@ -3476,27 +3476,80 @@ def _structured_executor():
     return _STRUCTURED_CALL_EXECUTOR
 
 
-def _run_sync_bounded(agent, prompt, timeout, provider="", model=""):
-    """`agent.run_sync` with a wall-clock ceiling.
+def _structured_stall_attempts() -> int:
+    """How many times to re-issue a call that stalled. Tunable via env."""
+    try:
+        return max(1, int(os.environ.get("LLM_STALL_ATTEMPTS", "3") or 3))
+    except (TypeError, ValueError):
+        return 3
 
-    Raises TimeoutError on expiry so the caller's existing candidate-fallback
-    loop treats it like any other provider failure and moves on, instead of
-    blocking forever. The worker is abandoned, not killed — see the call site
-    for why that trade is the right one.
+
+def _run_sync_bounded(agent, prompt, timeout, provider="", model=""):
+    """`agent.run_sync` with a wall-clock ceiling, retried on a stall.
+
+    A stalled call and a slow call look identical from here, but they need
+    opposite treatment: a stall never returns no matter how long you wait, and
+    re-issuing it almost always succeeds; a genuinely slow reasoning model just
+    needs more time. So the deadline ESCALATES — the first attempt is short
+    enough that a stall is abandoned quickly, and each retry gets longer, up to
+    the caller's full budget on the last one.
+
+    This used to raise on the first expiry and let the candidate-fallback loop
+    move to a different model. That is the wrong repair for the common case: a
+    550B reasoning model stalling once does not mean the model is unusable, and
+    falling through silently changed which model produced the run's decisions.
+    Retrying the SAME model keeps the run's identity intact.
+
+    The worker is abandoned, not killed — a thread cannot be killed, so a wedged
+    call leaks one thread until its socket gives up. That is the accepted trade
+    throughout this codebase: leaking a thread is survivable, stalling the bar
+    is not. It is also why the retries are bounded rather than unlimited.
     """
     from concurrent.futures import TimeoutError as _FTimeout
-    fut = _structured_executor().submit(agent.run_sync, prompt, infer_name=False)
-    try:
-        return fut.result(timeout=timeout)
-    except _FTimeout:
-        fut.cancel()
-        import sys
-        print(f"[llm_utils] structured call to {provider}/{model!r} exceeded "
-              f"{timeout:.0f}s — abandoning attempt (thread leaks until its "
-              f"socket times out); falling through to the next candidate",
-              file=sys.stderr, flush=True)
-        raise TimeoutError(
-            f"structured LLM call to {provider}/{model} exceeded {timeout:.0f}s")
+    import sys
+
+    attempts = _structured_stall_attempts()
+    # First attempt gets a fraction of the budget so a stall is caught early;
+    # the last always gets the full amount so a legitimately slow call is not
+    # starved by this mechanism.
+    fractions = [0.4, 0.7] if attempts >= 3 else [0.6]
+    started = time.monotonic()
+    for i in range(attempts):
+        # The LAST attempt always gets the caller's full budget, whatever the
+        # attempt count — otherwise LLM_STALL_ATTEMPTS=1 would silently give a
+        # single call only a fraction of the time it asked for, which is a
+        # tighter deadline than before this function existed.
+        is_last = (i == attempts - 1)
+        share = 1.0 if is_last else (fractions[i] if i < len(fractions) else 1.0)
+        # Floor is deliberately small. Production budgets are 180-360s, so it
+        # never binds there; making it large would collapse the escalation into
+        # one long attempt and undo the fail-fast this exists for.
+        budget = max(5.0, float(timeout) * share)
+        fut = _structured_executor().submit(agent.run_sync, prompt, infer_name=False)
+        try:
+            result = fut.result(timeout=budget)
+            if i:
+                print(f"[llm_utils] structured call to {provider}/{model!r} "
+                      f"succeeded on stall-retry {i + 1}/{attempts} after "
+                      f"{time.monotonic() - started:.0f}s total",
+                      file=sys.stderr, flush=True)
+            return result
+        except _FTimeout:
+            fut.cancel()
+            if i + 1 < attempts:
+                print(f"[llm_utils] structured call to {provider}/{model!r} "
+                      f"stalled past {budget:.0f}s — re-issuing "
+                      f"(attempt {i + 2}/{attempts}); the abandoned thread "
+                      f"leaks until its socket times out",
+                      file=sys.stderr, flush=True)
+                continue
+            print(f"[llm_utils] structured call to {provider}/{model!r} stalled "
+                  f"on all {attempts} attempts ({time.monotonic() - started:.0f}s "
+                  f"total) — falling through to the next candidate",
+                  file=sys.stderr, flush=True)
+            raise TimeoutError(
+                f"structured LLM call to {provider}/{model} stalled on "
+                f"{attempts} attempts within {timeout:.0f}s each")
 
 
 def _call_deadline(budget=None) -> float:
