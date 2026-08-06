@@ -22626,8 +22626,28 @@ def _apply_ml_and_overlay_to_scores(
                         "cyan",
                     )
         if overlay.get("buy_block") and final_score > 0:
-            final_score = 0
-            _log(f"ML overlay BUY_BLOCK: {sym} buy signal suppressed by overlay buy_block", "yellow")
+            # `overlay_buy_block_enabled` (2026-08-06, default True = unchanged).
+            # This veto had no off switch while every other gate in this
+            # function has one, and it is not a small filter: measured on
+            # bt 862697 it fired 73 times across 50 distinct symbols out of
+            # ~144 overlay decisions — it vetoed roughly HALF of every buy
+            # candidate the strategy produced, including SMH, SOXX, NVDA, MSFT,
+            # ALAB, CAMT, AEIS, ADI and GFS. With the satellite lane vetoed at
+            # that rate the book holds nothing but the index sleeve, and the
+            # run reads as "no opportunities" rather than "the overlay said no".
+            #
+            # It is a single LLM field (`bb`) from a per-ticker call, so its
+            # false-positive rate is a property of whichever model is
+            # configured — not of the market. That is exactly the kind of
+            # control that has to be switchable and measurable.
+            if bool(config.get("overlay_buy_block_enabled", True)):
+                final_score = 0
+                _log(f"ML overlay BUY_BLOCK: {sym} buy signal suppressed by overlay buy_block", "yellow")
+            else:
+                _log(
+                    f"ML overlay BUY_BLOCK IGNORED: {sym} — overlay_buy_block_enabled=false",
+                    "yellow",
+                )
         if overlay.get("sell_block") and final_score < 0 and not base.get("_forced_exit") and "Profit take" not in (base.get("reason") or ""):
             # V12: Bypass sell_block if unrealized loss exceeds configurable threshold
             _sb_bypass_pct = float(config.get("sell_block_bypass_loss_pct", -5.0))
