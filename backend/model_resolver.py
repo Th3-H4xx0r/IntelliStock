@@ -138,6 +138,30 @@ def resolve_model_refs_in_config(conn, config: dict, *, force_refresh: bool = Fa
             f"model={(model_doc.get('model') or '').strip()!r}"
         )
 
+        # Say so when the id contradicts the name beside it. The id wins here —
+        # unconditionally, a few lines below — so an operator who edits
+        # `llm_model` / `llm_provider` in the config gets no effect and no
+        # error, and the config then advertises a model the run never calls.
+        #
+        # That is not hypothetical. doc-193 read `llm_model:
+        # nvidia/nemotron-3-ultra-550b-a55b, llm_provider: openrouter` across
+        # twelve roles while every `*_llm_model_id` pointed at the gpt-5.4-nano
+        # row, so every run used nano and the logs were the only place that
+        # showed it. The config is what a person reads; a silent override makes
+        # it a lie.
+        _cur_model = str(resolved.get(f"{prefix}llm_model") or "").strip()
+        _cur_provider = str(resolved.get(f"{prefix}llm_provider") or "").strip().lower()
+        _new_model = (model_doc.get("model") or "").strip()
+        _new_provider = (model_doc.get("provider") or "").strip().lower()
+        if (_cur_model and _cur_model != _new_model) or (
+                _cur_provider and _cur_provider != _new_provider):
+            _emit_log(
+                f"  WARNING {key}: config says "
+                f"{_cur_provider or '?'}/{_cur_model or '?'} but the model_id "
+                f"resolves to {_new_provider}/{_new_model} — the ID WINS. "
+                f"Edit the model_id (or clear it) if you meant the other one."
+            )
+
         provider = (model_doc.get("provider") or "").strip().lower()
 
         # Build field mapping: model_doc field → strategy config key.
