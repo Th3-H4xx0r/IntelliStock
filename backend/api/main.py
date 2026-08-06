@@ -905,6 +905,53 @@ def _run(f, *args, **kwargs) -> Any:
 # --- Health check (public, no-auth) ---
 
 
+# Paths are relative to the BACKEND root, not the repo root: the image is built
+# with `context: ./backend`, so `backend/broker.py` in git is `/app/broker.py`
+# in the container. Anchoring on the repo layout would make every hash read
+# "unreadable" in production, which is the one place this has to work.
+_CODE_FINGERPRINT_FILES = (
+    "broker.py",
+    "strategies/graph_nexus_analysis.py",
+    "core_sleeve.py",
+    "api/main.py",
+)
+_CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
+
+
+def _code_fingerprint() -> "dict[str, str]":
+    """Hash the source files that actually decide trades, as loaded here.
+
+    This exists because the deploy pipeline has twice accepted a push and kept
+    serving the old image, and both times the way we found out was a backtest
+    that quietly exercised stale code — an expensive way to learn a container
+    did not restart. Hashing the files on disk answers "is my commit live?"
+    without a build-arg, a rebuild, or any cooperation from the deploy tooling:
+    compare against `git show HEAD:<path> | shasum -a 256` locally.
+
+    Computed once per process. A stale value here would defeat the whole point,
+    but the files cannot change under a running interpreter without a restart,
+    and a restart re-imports this module.
+    """
+    global _CODE_FINGERPRINT_CACHE
+    if _CODE_FINGERPRINT_CACHE is not None:
+        return _CODE_FINGERPRINT_CACHE
+    import hashlib as _hashlib
+    import os as _os
+
+    # .../backend/api/main.py -> .../backend  (== /app in the container)
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    out: "dict[str, str]" = {}
+    for rel in _CODE_FINGERPRINT_FILES:
+        path = _os.path.join(root, rel)
+        try:
+            with open(path, "rb") as fh:
+                out[rel.split("/")[-1]] = _hashlib.sha256(fh.read()).hexdigest()[:12]
+        except Exception as exc:  # missing file is itself a deploy signal
+            out[rel.split("/")[-1]] = f"unreadable: {type(exc).__name__}"
+    _CODE_FINGERPRINT_CACHE = out
+    return out
+
+
 @app.get("/health", response_class=JSONResponse)
 def api_health():
     """Liveness probe for load balancers / Dockploy / monitoring.
@@ -946,6 +993,7 @@ def api_health():
         "status": "ok" if _ok else "degraded",
         "rethinkdb": _db_status,
         "host": _sock.gethostname(),
+        "code": _code_fingerprint(),
     }
     if not _ok:
         return JSONResponse(status_code=503, content=payload)
