@@ -19872,7 +19872,23 @@ def _evaluate_position_risk(
                         f"current_pnl={_unrealized_pct:+.1f}% — deferring to trailing stop",
                         "magenta",
                     )
-                elif fresh_score >= 0 and _unrealized_pct <= _fast_cut_pct:
+                elif (fresh_score >= 0 and _unrealized_pct <= _fast_cut_pct
+                      and bool(config.get("fast_loser_cut_enabled", True))):
+                    # `fast_loser_cut_enabled` (2026-08-06, default True =
+                    # unchanged behaviour). This cut had NO off switch: every
+                    # other exit in this function has one, so an operator
+                    # building a let-winners-run profile could disable the
+                    # trailing stop, profit take, hold limit and drawdown
+                    # circuit and still be cut at -10%.
+                    #
+                    # That matters because a -10% floor is not a small filter on
+                    # the names this strategy is trying to hold. Measured over
+                    # the nine 2025-26 semiconductor moonshots, not one of which
+                    # drew down less than 22% on its way up, a -10% cut reaches
+                    # 5 of 9 and the -3% downtrend rule reaches 6 of 9 — while
+                    # -40% reaches none. Losing the tail is the cost, and it is
+                    # not visible in aggregate P&L until a 10-bagger is in the
+                    # book.
                     # P&L sweep 2026-07-19 (config-gated, default 0=off):
                     # day-one whipsaw guard. NEUTRAL lost $415 to 49 fast cuts
                     # (three same-day cuts were the entire window loss) while
@@ -23201,12 +23217,58 @@ def _apply_quality_filter(
             continue
 
         if market_cap is None and missing_meta_policy in {"block", "fail", "strict"}:
-            sc["score"] = 0
-            sc["action_intent"] = "hold"
-            orig_reason = str(sc.get("reason") or "")
-            sc["reason"] = f"Nexus quality filter: missing market_cap metadata for new non-ETF buy | {orig_reason}"[:1500]
-            filtered_count += 1
-            continue
+            # A missing market cap means one of three things — a genuine
+            # micro-cap, or a metadata lookup that failed, or a ticker the
+            # Stocks table never had. Only the first is a reason to refuse, and
+            # this branch used to treat all three the same. That is not a
+            # theoretical complaint: 0 of 7,052 Stocks rows carry a market_cap,
+            # so resolution falls to Neo4j or a live yfinance call whose except
+            # handler caches 0 permanently — one rate-limit window and the
+            # whole stock lane goes dark, ETFs exempt, while the operator sees
+            # only "blocked N low-quality buy(s)" with no names.
+            #
+            # Dollar volume settles it independently. The names this filter was
+            # built for (XNDU ~$200M, BBGI ~$60M, together −$534 in 4 days) do
+            # not trade tens of millions of dollars a day; a mega-cap does. So
+            # when the cap is unknown but the tape shows real size, admit the
+            # name and say so. When neither is available, refuse — and name the
+            # ticker, because a silent refusal is what made this expensive to
+            # find.
+            _dollar_volume = None
+            try:
+                if avg_volume is not None and cp > 0:
+                    _dollar_volume = float(avg_volume) * float(cp)
+            except (TypeError, ValueError):
+                _dollar_volume = None
+            _mcap_dv_floor = float(
+                config.get("quality_filter_missing_mcap_min_dollar_volume", 20_000_000)
+                or 20_000_000
+            )
+            if _dollar_volume is not None and _dollar_volume >= _mcap_dv_floor:
+                if isinstance(missing_meta_logged, set) and sym not in missing_meta_logged:
+                    missing_meta_logged.add(sym)
+                    _log(
+                        f"Nexus quality filter: {sym} has no market_cap, but "
+                        f"${_dollar_volume/1e6:.0f}M/day dollar volume clears the "
+                        f"${_mcap_dv_floor/1e6:.0f}M size floor — allowing",
+                        "yellow",
+                    )
+            else:
+                sc["score"] = 0
+                sc["action_intent"] = "hold"
+                orig_reason = str(sc.get("reason") or "")
+                sc["reason"] = f"Nexus quality filter: missing market_cap metadata for new non-ETF buy | {orig_reason}"[:1500]
+                if isinstance(missing_meta_logged, set) and sym not in missing_meta_logged:
+                    missing_meta_logged.add(sym)
+                    _dv_txt = (f"${_dollar_volume/1e6:.1f}M/day"
+                               if _dollar_volume is not None else "unknown")
+                    _log(
+                        f"Nexus quality filter BLOCKED {sym}: no market_cap and "
+                        f"dollar volume {_dv_txt} < ${_mcap_dv_floor/1e6:.0f}M floor",
+                        "red",
+                    )
+                filtered_count += 1
+                continue
         if market_cap is None and missing_meta_policy == "warn" and isinstance(missing_meta_logged, set) and sym not in missing_meta_logged:
             missing_meta_logged.add(sym)
             _log(f"Nexus quality filter: {sym} missing market_cap metadata - allowing due to warn policy", "yellow")
@@ -23236,7 +23298,20 @@ def _apply_quality_filter(
             continue
 
     if filtered_count > 0:
-        _log(f"Nexus quality filter: blocked {filtered_count} low-quality buy(s)", "yellow")
+        # Name the tickers. A bare count reads as routine hygiene whether it
+        # blocked two penny stocks or the entire stock lane, and that ambiguity
+        # is exactly what let a metadata outage look like a quiet market.
+        _blocked_names = sorted(
+            str(s) for s, _sc in (scores or {}).items()
+            if str((_sc or {}).get("reason") or "").startswith("Nexus quality filter:")
+        )
+        _shown = ", ".join(_blocked_names[:12]) or "?"
+        _more = f" (+{len(_blocked_names)-12} more)" if len(_blocked_names) > 12 else ""
+        _log(
+            f"Nexus quality filter: blocked {filtered_count} low-quality buy(s): "
+            f"{_shown}{_more}",
+            "yellow",
+        )
 
     return scores
 

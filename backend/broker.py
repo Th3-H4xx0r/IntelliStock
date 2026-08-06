@@ -3375,12 +3375,34 @@ def _min_hold_cfg(cached_strategies):
         return None
 
 
-def _min_hold_note_position(symbol, portfolio_emulator, current_time):
-    """Stamp/clear a symbol's entry timestamp from the CURRENT position.
+def _min_hold_note_position(symbol, portfolio_emulator, current_time, is_buy=None):
+    """Stamp/clear a symbol's entry timestamp.
 
-    Called after every fill on the shared path. Stamps on a 0 -> >0 open and
-    clears on a full exit, so a re-entry starts a fresh clock rather than
-    inheriting the age of a position that was already closed once.
+    The clock starts on the DECISION TO OPEN, not on the fill, and this is the
+    whole correctness of the gate.
+
+    The previous version read the post-fill position and stamped only when
+    quantity was already > 0. Under next-event execution nothing fills on the
+    submitting bar — `execute_signal` records the order and returns an
+    accepted-but-unfilled submission, and `_positions` is not touched until
+    `_apply_confirmed_fill` runs on a later bar. So a new-name buy saw qty == 0,
+    took the `else`, and *popped* the symbol instead of stamping it. `min_hold`
+    then hit its `no_entry_timestamp` branch, which fails OPEN, and the floor
+    never blocked anything. bt 216767 is the proof: a 106-day window under a
+    120-day floor sold BOIL after 5 days, OLMA after 7, CAE after 9.
+
+    The same read caused a second, quieter bug in the other direction. On a
+    SELL the position is still present (the fill is deferred), so `setdefault`
+    stamped the symbol at the moment of its first sale — and `setdefault` then
+    prevented a genuine later re-entry from ever correcting it.
+
+    So: a buy stamps on intent, once, via setdefault (adding to a winner must
+    not hand it a fresh min_hold window). A sell never stamps; it clears only
+    once the position has actually gone to zero.
+
+    `is_buy` is optional so existing callers keep working — when it is None the
+    old position-derived behaviour is used for the stamp decision, which is
+    still correct for any caller that runs after a settled fill.
     """
     try:
         sym = str(symbol or "").strip().upper()
@@ -3388,7 +3410,14 @@ def _min_hold_note_position(symbol, portfolio_emulator, current_time):
             return
         positions = getattr(portfolio_emulator, "_positions", {}) or {}
         qty = float(positions.get(sym, 0.0) or positions.get(symbol, 0.0) or 0.0)
-        if qty > 1e-9:
+        if is_buy is True:
+            _POSITION_ENTRY_TS.setdefault(sym, _iso_utc(current_time))
+        elif is_buy is False:
+            # Only a settled full exit clears the clock. While a sell is still
+            # in flight the position is intact and its age keeps running.
+            if qty <= 1e-9:
+                _POSITION_ENTRY_TS.pop(sym, None)
+        elif qty > 1e-9:
             _POSITION_ENTRY_TS.setdefault(sym, _iso_utc(current_time))
         else:
             _POSITION_ENTRY_TS.pop(sym, None)
@@ -15211,15 +15240,15 @@ while not shutdown_requested:
                                     f"main_signal {'buy' if decision == 1 else 'sell'} {symbol}")
                                 # Start/stop this symbol's holding clock on the
                                 # same converged path, so the floor measures the
-                                # same ages in live and backtest. Reads the
-                                # POST-fill position: >0 stamps an open (once,
-                                # via setdefault, so adding to a winner does not
-                                # reset the clock and hand it another full
-                                # min_hold window), 0 clears so a later re-entry
-                                # starts fresh instead of inheriting the age of a
-                                # position that was already closed.
+                                # same ages in live and backtest. The SIDE is
+                                # passed explicitly because execution is
+                                # next-event in both modes: on the submitting
+                                # bar the position has not moved yet, so the
+                                # post-fill quantity cannot tell an opening buy
+                                # from an exiting sell.
                                 _min_hold_note_position(
-                                    symbol, portfolio_emulator, current_time)
+                                    symbol, portfolio_emulator, current_time,
+                                    is_buy=(decision == 1))
 
                             # ── Task 7: keep the running cycle counts current so
                             # later buys in this _exec_order see this emission. A
