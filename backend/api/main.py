@@ -913,6 +913,13 @@ _CODE_FINGERPRINT_FILES = (
     "broker.py",
     "strategies/graph_nexus_analysis.py",
     "core_sleeve.py",
+    # The LLM layer decides trades as surely as the broker does — the overlay's
+    # buy_block veto alone suppressed half the buy candidates in one run — and
+    # model_resolver picks WHICH model makes those calls. A green check that
+    # omitted them once reported "all match" while an unshipped llm_utils fix
+    # was the thing being verified.
+    "llm_utils.py",
+    "model_resolver.py",
     "api/main.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None

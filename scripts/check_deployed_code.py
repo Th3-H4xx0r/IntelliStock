@@ -28,6 +28,8 @@ FILES = (
     "backend/broker.py",
     "backend/strategies/graph_nexus_analysis.py",
     "backend/core_sleeve.py",
+    "backend/llm_utils.py",
+    "backend/model_resolver.py",
     "backend/api/main.py",
 )
 
