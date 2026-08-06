@@ -221,6 +221,75 @@ way — it came from reading config and code and predicting behaviour, and it wa
 corrected by reading a run's logs. The predictions were specific and plausible;
 they were also, twice out of three, the wrong mechanism.
 
+---
+
+## Part 4 — doc-193 cannot reach 2x, and no amount of stock picking changes that
+
+This is arithmetic, not a backtest, and it is the most decisive thing in this
+document.
+
+**The core is 74%, not the 60% the config reads.** doc-193 sets
+`core_target_pct: 0.60`, but the running backtest logs:
+
+```
+[core] hold (release) — band_deploy: core 61.2% vs target 74.1% of NAV
+```
+
+`core_target_weight` is residual-driven — `clamp(1 − cash_floor − satellite,
+core_min, core_max)` — so as the satellite shrinks the core target *grows*,
+which squeezes the satellite further. The 0.60 only floors the bear de-risk.
+And `SATELLITE CAP` is now the binding blocker in the live run, refusing BNS,
+H, SRAD, RYTM, SMG and CRM with *"satellite at its design share ($-16 room)"*.
+
+So the real shape is **core 74.1%, satellite 23.9%**. At bull
+`max_positions = 14` that is **1.71% of NAV per name**.
+
+### What one winner can contribute
+
+| positions | weight each | +100% | +300% | +500% | **+1800%** | needed for 2x |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 6.0% | +14.3% | +26.3% | +38.2% | +115.9% | 1,534% |
+| 6 | 4.0% | +12.4% | +20.3% | +28.3% | +80.1% | 2,300% |
+| 8 | 3.0% | +11.4% | +17.3% | +23.3% | +62.1% | 3,067% |
+| **14** | **1.7%** | +10.1% | +13.5% | +16.9% | **+39.1%** | **5,367%** |
+
+**A second SNDK — the single best name out of 536, a 3.0% base rate — adds
++31.5pp.** Not 2x. The account goes up about a third.
+
+To double from one winner at 14 positions you would need **+5,367%**, nearly
+three times what SNDK actually did.
+
+### And perfect selection on every name is not enough either
+
+| core | satellite | sat ×2 | sat ×3 | sat ×5 | sat ×10 |
+|---:|---:|---:|---:|---:|---:|
+| **74%** | 23.9% | +32.3% | **+56.2%** | +104.0% | +223.5% |
+| 60% | 38.0% | +44.8% | +82.8% | +158.8% | +348.8% |
+| 40% | 58.0% | +62.5% | +120.5% | +236.5% | +526.5% |
+| 20% | 78.0% | +80.3% | +158.3% | +314.3% | +704.3% |
+| 5% | 93.0% | +93.6% | +186.6% | +372.6% | +837.6% |
+
+If **every** satellite name triples, doc-193 returns **+56%**. Reaching 2x
+requires the whole satellite to roughly 5x.
+
+### What this means
+
+Every exit fix in Parts 1 and 3 was necessary — they were throwing away real
+money, and `min_hold` being inert is a live-trading defect regardless. But none
+of them can produce 2-3x, because **the position sizing forecloses it before
+selection is even considered.**
+
+The only lever that changes the answer is the core weight, and it is a genuine
+trade-off, not an oversight: the core is what makes the bear regimes survivable
+and it is what cut turnover 66.5 → 16.4×/yr. Cutting it to 20% raises the
+ceiling to +158% on a tripled satellite and raises the drawdown by roughly the
+same mechanism.
+
+**Caveat:** these are single-period figures that ignore intra-window
+rebalancing and compounding, and they credit the core with SPY's 11.3% CAGR.
+The magnitudes shift over a year; the conclusion — that a 74% index core bounds
+the satellite's contribution to a fraction of its return — does not.
+
 ## Consequences
 
 **Do not run the 1-year backtest on doc-193 as it stands.** It will cut its
