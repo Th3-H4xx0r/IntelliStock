@@ -3143,8 +3143,36 @@ def _turnover_is_governed(symbol, cached_strategies) -> bool:
     """
     try:
         cfg = _core_sleeve_cfg_raw(cached_strategies)
-        if not bool(cfg.get("core_sleeve_enabled", False)):
-            return True          # core off -> today's behaviour, book everything
+        # `core_sleeve_enabled` is REGIME-SCOPED in practice: doc-193 sets it
+        # only inside regime_profiles.{bull,chop,recovery}, and _apply_regime_
+        # profile merges the matching overlay into this spec before we read it.
+        # So in a bear there is no matching profile, the key is absent, and the
+        # core stopped being exempt at exactly the wrong moment.
+        #
+        # The wrong moment because the bear TRANSITION is the single most
+        # expensive event in the ledger: releasing a ~60%-of-NAV core and
+        # deploying a 35% hedge leg books ~95% of NAV of one-way notional
+        # against a 50% budget. Every discretionary stock buy is then refused
+        # for the following 21 sessions — which covers the whole recovery leg
+        # off the bottom. The book comes out of the bear holding only the index
+        # and cannot re-establish a single position for a month, and nothing
+        # anywhere says so.
+        #
+        # Whether the core is armed RIGHT NOW is the wrong question. The core is
+        # the low-turnover baseline whenever it is configured at all, and
+        # disarming it is baseline reshaping, not discretionary churn. So look
+        # for the flag in the base config OR in any regime profile.
+        _armed = bool(cfg.get("core_sleeve_enabled", False))
+        if not _armed:
+            _profiles = cfg.get("regime_profiles") or {}
+            if isinstance(_profiles, dict):
+                _armed = any(
+                    bool((over or {}).get("core_sleeve_enabled", False))
+                    for over in _profiles.values()
+                    if isinstance(over, dict)
+                )
+        if not _armed:
+            return True          # core off everywhere -> book everything
         core_sym = str(cfg.get("residual_sleeve_symbol", "SPY") or "SPY").strip().upper()
         return str(symbol or "").strip().upper() != core_sym
     except Exception:
@@ -13179,6 +13207,19 @@ while not shutdown_requested:
                             if p and p > 0:
                                 prices[ns] = p
                             else:
+                                # The two sibling lanes above both log here; this
+                                # one did not, and it is the lane where silence
+                                # costs the most. These names are not candidates
+                                # — the allocator has already scored, sized and
+                                # approved them. A price-fetch miss drops a
+                                # funded buy with no output at all, so the run
+                                # reads as "the strategy chose not to buy".
+                                _log(
+                                    f"Nexus executable buy DROPPED: no price for {ns} "
+                                    f"at {current_time} — an approved, sized buy was "
+                                    f"discarded, not declined",
+                                    "yellow",
+                                )
                                 expanded_symbols.discard(ns)
 
             # 2026-07-18: live crypto bars — remember the discovered universe
