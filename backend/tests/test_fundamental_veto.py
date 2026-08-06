@@ -108,13 +108,17 @@ def test_unknown_is_allowed_by_default(monkeypatch):
     assert why == "no fundamentals"
 
 
-def test_unknown_can_be_blocked_because_it_is_the_worst_bucket(monkeypatch):
-    """Measured over the 98 positions actually taken, the 'no filings' bucket was
-    36 positions worth -$590 at a 25% hit rate — larger than grade F."""
+def test_unknown_is_NEVER_blocked_even_when_the_flag_is_set(monkeypatch):
+    """`fundamental_veto_block_unknown` is deliberately inert. It shipped once and
+    suppressed every satellite buy (bt 301356: 5 trades in 7% of a window, all of
+    them the SPY sleeve), because "no grade" conflates a genuine shell with an ETF
+    and with a failed EDGAR lookup. Blocking on silence turns a research feed into
+    a kill switch. Re-enable only once research_company reports WHY it has no
+    grade."""
     _patch(monkeypatch, grade=None)
     blocked, why = veto("ACME", _spec(fundamental_veto_block_unknown=True), AS_OF)
-    assert blocked is True
-    assert "cannot be researched" in why
+    assert blocked is False, "silence must never block a trade"
+    assert why == "no fundamentals"
 
 
 def test_sleeve_symbols_are_exempt(monkeypatch):
@@ -146,3 +150,13 @@ def test_as_of_is_the_decision_time_not_today(monkeypatch):
     veto("ACME", _spec(), AS_OF)
     assert _seen["as_of"] == AS_OF, _seen
     assert _seen["as_of"] != _d.today()
+
+
+
+def test_an_etf_survives_the_veto(monkeypatch):
+    """QQQ/SOXX resolve to a CIK but have no GrossProfit, so they grade None.
+    Blocking them would disarm every ETF lane the strategy uses."""
+    _patch(monkeypatch, grade=None)
+    for etf in ("QQQ", "SOXX", "BITO"):
+        blocked, _ = veto(etf, _spec(fundamental_veto_block_unknown=True), AS_OF)
+        assert blocked is False, etf

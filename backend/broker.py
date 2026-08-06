@@ -2669,18 +2669,26 @@ def _fundamental_veto_blocks(symbol, cached_strategies, current_time):
 
         blocked_grades = str(cfg.get("fundamental_veto_block_grades", "F") or "")
         blocked_grades = {g.strip().upper() for g in blocked_grades.split(",") if g.strip()}
-        # Block names with NO visible filings. Measured over the 98 positions this
-        # system actually took: the "no data" bucket was 36 positions worth
-        # **-$590 at a 25% hit rate** — the single largest destroyer, larger than
-        # grade F. These are foreign issuers, shells and fresh listings that no
-        # amount of research can evaluate. Default OFF because it is a big
-        # behavioural change, but it is the highest-value setting measured.
-        block_unknown = bool(cfg.get("fundamental_veto_block_unknown", False))
-
+        # `fundamental_veto_block_unknown` DELIBERATELY DOES NOTHING, and this is
+        # a scar, not an oversight.
+        #
+        # The measurement said blocking names with no visible filings was the
+        # single highest-value filter: 36 of 98 positions, -$590 at a 25% hit
+        # rate, larger than grade F. So it shipped. In production it suppressed
+        # EVERY satellite buy — bt 301356 traded 5 times in 7% of a window, all
+        # of them the SPY sleeve.
+        #
+        # The reason is that "grade is None" conflates three different things:
+        #   * a genuine shell with no filings          <- what we meant to block
+        #   * an ETF, which has no GrossProfit at all  <- must never be blocked
+        #   * an EDGAR lookup that failed or was rate-limited  <- must never block
+        # Only the first is a signal; the other two are silence. Blocking on
+        # silence turns a research feed into a kill switch, which is exactly what
+        # this module's docstring forbids. Re-enabling it requires
+        # `research_company` to report WHY it has no grade, so the three cases can
+        # be told apart. Until then this stays inert.
         dossier = research_company(sym, current_time)
         if dossier.grade is None:
-            if block_unknown:
-                return True, "no filings visible — cannot be researched"
             return False, "no fundamentals"
         if dossier.grade in blocked_grades:
             why = "; ".join(dossier.red_flags[:3]) or "graded " + dossier.grade
