@@ -155,6 +155,72 @@ defaults chosen with the answer in hand.
 
 ---
 
+---
+
+## Part 3 — what "it only buys SPY" actually was (measured, not inferred)
+
+Added after running bt 862697 on the exact window that produced the symptom and
+reading the log. **Both of my leading hypotheses were wrong**, and the real
+causes were bigger than either.
+
+Not the quality filter. It blocked **2** names (ACHC, CNNE), and the
+dollar-volume escape worked as designed — `ECDA missing market_cap metadata -
+allowing due to warn policy`.
+
+### Blocker 1: an LLM vetoed roughly half the book
+
+`overlay.buy_block` fired **73 times across 50 distinct symbols** out of ~144
+overlay decisions, including **SMH, SOXX, NVDA, MSFT, ALAB, CAMT, AEIS, ADI,
+GFS** — the exact semiconductor names this whole thesis rests on.
+
+`buy_block` is one boolean field (`bb`) returned by a per-ticker call to
+`openai/gpt-5.4-nano-HIGH`. Its false-positive rate is a property of whichever
+model is configured, not of the market. It was applied unconditionally while
+every other gate in that function is switchable. Now gated by
+`overlay_buy_block_enabled` (default True; **false on doc-193**).
+
+### Blocker 2: the turnover budget was poisoned during warm-up
+
+239 log lines: *"TURNOVER BUDGET BINDING: 83% of NAV traded in the last 21
+sessions — new discretionary buys are blocked this tick."*
+
+I had predicted this would be the bear-transition path. **It was not** — the
+regime was `bull` throughout. The real mechanism, proven by running the deployed
+predicate against the live config:
+
+```
+BEFORE the regime is classified (the detector needs 54 closes):
+   deployed code: SPY governed = True    <- the ~60%-of-NAV core buy is BOOKED
+   fixed code   : SPY governed = False   <- exempt
+AFTER the bull overlay merges:
+   both          : SPY governed = False
+```
+
+`core_sleeve_enabled` lives **only** in the bull/chop/recovery profiles. During
+the ~54-bar warm-up no overlay has merged, so the exemption lapses and the single
+core establishment fills 83% of a 50% budget — blocking every discretionary
+stock buy for the following 21 sessions. The bear-transition path is the same
+defect, just louder; one fix covers both.
+
+### Confirmed by rerun
+
+bt 654710, identical window, deploy verified before launch:
+
+| marker | bt 862697 | bt 654710 |
+|---|---:|---:|
+| `TURNOVER BUDGET BINDING` | 239 | **0** |
+| `ML overlay BUY_BLOCK` fired | 73 | **0** |
+| `BUY_BLOCK IGNORED` (computed, overridden) | — | 75 |
+| non-SPY symbols traded @ ~15 min | **0** | **4** (BOIL, FCG, RVTY, SHEL) |
+
+BOIL and FCG were both on 862697's vetoed list, so the lane that opened is
+precisely the one the overlay had closed.
+
+**Method note.** Every wrong hypothesis in this document was wrong in the same
+way — it came from reading config and code and predicting behaviour, and it was
+corrected by reading a run's logs. The predictions were specific and plausible;
+they were also, twice out of three, the wrong mechanism.
+
 ## Consequences
 
 **Do not run the 1-year backtest on doc-193 as it stands.** It will cut its
