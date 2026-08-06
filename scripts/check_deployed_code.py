@@ -52,8 +52,20 @@ def main():
     # The edge in front of the API 403s urllib's default User-Agent.
     req = urllib.request.Request(
         f"{API}/health", headers={"User-Agent": "intellistock-deploy-check/1.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        health = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            health = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        # A push triggers an auto-rebuild, and the edge answers 404/502/503
+        # while the container is being replaced. That is "deploying", not
+        # "mismatch" — reporting it as a failure would be a false alarm, and
+        # exiting 0 would be worse. Say what it is and exit 2.
+        print(f"API not serving yet (HTTP {exc.code}) — the container is most "
+              f"likely still rebuilding after a push. Re-run in a minute.")
+        return 2
+    except urllib.error.URLError as exc:
+        print(f"could not reach {API}: {exc.reason}")
+        return 2
     theirs = health.get("code")
     if not theirs:
         print("FAIL: /health has no `code` block — the API itself is running "
