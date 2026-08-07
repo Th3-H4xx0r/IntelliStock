@@ -361,7 +361,7 @@ onUnmounted(() => {
                       :key="s"
                       class="font-mono text-slate-300 bg-surface px-1.5 py-0.5 rounded"
                     >{{ s }}</span>
-                    <span v-if="(bt.stocks || []).length > 4" class="text-slate-600">+{{ bt.stocks.length - 4 }}</span>
+                    <span v-if="((bt.stocks_total ?? (bt.stocks || []).length) - (bt.stocks || []).length) > 0" class="text-slate-600">+{{ (bt.stocks_total ?? (bt.stocks || []).length) - (bt.stocks || []).length }}</span>
                   </div>
                 </td>
 

@@ -5141,6 +5141,10 @@ def action_link_data_brokerage_to_instance(conn, instance_id, brokerage_id):
 # --- Backtests ---
 
 
+#: How many tickers the list page renders before the "+N" chip.
+_LIST_TICKER_PREVIEW = 4
+
+
 def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="completed_at", sort_order="desc"):
     ensure_backtest_instances_table(conn)
     tables = list(r.db(DB_NAME).table_list().run(conn))
@@ -5238,6 +5242,22 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
             "created_at",
             "timestamp",
             "completed_at",
+        )
+        # `tickers` on a FINISHED row is all_traded (symbols | positions |
+        # traded), which reaches 325 entries — mean 32, median 7. The list page
+        # renders four of them and a "+N" chip, so shipping the whole array is
+        # pure waste: it is 43% of the response payload and it is deserialized
+        # for every one of 1,300+ rows on every page load, including the 1,285
+        # rows that pagination is about to discard.
+        #
+        # Slice server-side and send the count alongside, so the chip still has
+        # its number. Callers wanting the full universe use the detail endpoint,
+        # which already fetches the whole row.
+        results_query = results_query.merge(
+            lambda row: {
+                "tickers": row["tickers"].default([]).limit(_LIST_TICKER_PREVIEW),
+                "tickers_total": row["tickers"].default([]).count(),
+            }
         )
         result_rows = list(results_query.run(conn))
 
@@ -5385,6 +5405,7 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
             "id": rid,
             "instance": row.get("instance"),
             "stocks": row.get("stocks") or [],
+            "stocks_total": len(row.get("stocks") or []),
             "start_date": str(row.get("start-date", ""))[:10],
             "end_date": str(row.get("end-date", ""))[:10],
             "completed_at": completed_at,
@@ -5426,6 +5447,13 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
                 "id": rid,
                 "instance": row.get("instance_id", row.get("instance")),
                 "stocks": row.get("tickers") or [],
+                # The query slices `tickers` to a preview, so the true count
+                # must travel separately or the UI's "+N more" chip reads +0.
+                "stocks_total": int(
+                    row.get("tickers_total")
+                    if row.get("tickers_total") is not None
+                    else len(row.get("tickers") or [])
+                ),
                 "start_date": str(row.get("start_date", ""))[:10],
                 "end_date": str(row.get("end_date", ""))[:10],
                 "completed_at": completed_at,
