@@ -30277,7 +30277,59 @@ class GraphNexusAnalysis:
             ):
                 try:
                     _mw_pf_pnl: dict[str, dict] = {}
+                    # 2026-08-08 (bt 823150): the INDEX CORE is not swap fodder.
+                    #
+                    # `_mw_open_set` carries the broker sleeve's own legs, so SPY
+                    # entered the weakest-candidate pool — and being a low-beta
+                    # index against a rising satellite it sorts weakest almost
+                    # every bar. In 823150 it was the #1 weakest pick on the bars
+                    # SNDK was ranked #1, and the swap therefore proposed selling
+                    # the ENTIRE $4,063 core (65% of NAV) to buy one name. The
+                    # V31 sector cap then refused it, correctly:
+                    #   ROTATION PREVALIDATE sector-cap: skip incoming SNDK
+                    #   (sector 'technology' $4,601 > 40% cap $2,481)
+                    # $4,601 = ON $444 + AMD $94 + a $4,063 buy. (Checked against
+                    # Neo4j: SPY has no Company node at all, so it scores
+                    # 'unknown' — it was the BUY SIZE that breached the cap, not
+                    # SPY's own sector.) Net effect: SNDK emitted signal after
+                    # signal from $388 and was never bought.
+                    #
+                    # Both branches are wrong. Blocked, the winner is refused;
+                    # fired, the core is liquidated wholesale into a single name,
+                    # straight through `core_min_pct` — the guardrail the whole
+                    # core/satellite design rests on. The core already HAS a
+                    # bounded way to fund a conviction name (the floor-limited
+                    # overflow); the rotation lane must not have an unbounded one.
+                    #
+                    # `_sleeve_symbols` is the existing exemption and its own
+                    # docstring already states sleeve positions are "invisible to
+                    # strategy scoring, monitoring, and the kill loop" — this lane
+                    # simply never applied it. Excluding the legs also restores
+                    # sane swap sizing: the pool falls back to a real alpha
+                    # position, and `momentum_position_size_floor_pct` tops the
+                    # buy up to ~10% of NAV instead of 65%.
+                    #
+                    # Default OFF (`momentum_swap_exclude_sleeve_legs`).
+                    _mw_pf_sleeve = (
+                        _sleeve_symbols(config)
+                        if bool(config.get("momentum_swap_exclude_sleeve_legs", False))
+                        else set()
+                    )
+                    if _mw_pf_sleeve:
+                        _mw_pf_skipped = sorted(
+                            str(_s).strip().upper() for _s in _mw_open_set
+                            if str(_s).strip().upper() in _mw_pf_sleeve)
+                        if _mw_pf_skipped:
+                            _log(
+                                f"V31.7 portfolio_swap: excluding index-core leg(s) "
+                                f"{', '.join(_mw_pf_skipped)} from the weakest-candidate "
+                                f"pool — the core funds conviction through the "
+                                f"floor-bounded overflow, not a wholesale swap",
+                                "cyan",
+                            )
                     for _mw_pf_sym in _mw_open_set:
+                        if str(_mw_pf_sym).strip().upper() in _mw_pf_sleeve:
+                            continue
                         # V31.1 Codex-fix: pass live raw_score so winner_lock
                         # gate uses current signal strength, not snapshot default.
                         _mw_pf_live_raw = float(
