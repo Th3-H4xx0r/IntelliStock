@@ -59,6 +59,33 @@ def test_a_merged_overlay_arms_the_clamp():
     assert abs(satellite_design_share(merged, regime="bull") - 0.38) < 1e-9
 
 
+def test_a_known_regime_reads_its_own_profile_not_the_unmerged_flag():
+    """bt 632754 caught this: the FIRST version of the fix reproduced the bug.
+
+    The detector picks a regime almost immediately (`V31 market regime: chop
+    (closes=90)`), but the overlay never reaches the allocator's `config` — so
+    `core_sleeve_enabled` is still absent while `regime` is already "chop".
+    Short-circuiting to False on a known regime therefore left the clamp inert
+    on exactly the tick that builds the book, which is the original defect.
+    """
+    assert core_sleeve_armed_for_bar(DOC193, regime="chop") is True
+    assert abs(satellite_design_share(DOC193, regime="chop") - 0.38) < 1e-9
+    assert core_sleeve_armed_for_bar(DOC193, regime="bull") is True
+    assert core_sleeve_armed_for_bar(DOC193, regime="recovery") is True
+
+
+def test_a_regime_whose_profile_disables_the_core_does_not_arm():
+    cfg = {
+        "cash_reserve_floor_pct": 0.02,
+        "regime_profiles": {
+            "bull": {"core_sleeve_enabled": True, "core_target_pct": 0.6},
+            "crash": {"core_sleeve_enabled": False},
+        },
+    }
+    assert core_sleeve_armed_for_bar(cfg, regime="crash") is False
+    assert core_sleeve_armed_for_bar(cfg, regime="bull") is True
+
+
 def test_a_doc_with_no_core_anywhere_never_arms():
     """doc-179 shape — the live real-money doc must be untouched."""
     bare = {"nexus_portfolio_pct": 0.95, "cash_reserve_floor_pct": 0.02}

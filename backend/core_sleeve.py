@@ -185,8 +185,26 @@ def core_sleeve_armed_for_bar(config, *, regime=None) -> bool:
     cfg = config or {}
     if bool(cfg.get("core_sleeve_enabled", False)):
         return True
-    if str(regime or "").strip():
+    named = str(regime or "").strip().lower()
+    if named:
+        # A regime IS known. Consult ITS profile directly rather than trusting
+        # the flag on `config` — verified in bt 632754 that the overlay does NOT
+        # reach the allocator's config even when the detector has long since
+        # picked a regime (`V31 market regime: chop (closes=90)` fired two
+        # minutes before the first buy, and the clamp still read False).
+        #
+        # Returning False here on the strength of the un-merged flag was the
+        # first fix's own bug: it reproduced the original defect exactly.
+        profiles = cfg.get("regime_profiles") or {}
+        if isinstance(profiles, dict):
+            for name, over in profiles.items():
+                if str(name).strip().lower() == named and isinstance(over, dict):
+                    return bool(over.get("core_sleeve_enabled", False))
+        # No profile for this regime -> the core is off here BY DESIGN. doc-193
+        # has no `bear` profile, and `test_regime_conditional_core` measures that
+        # arm at +10.07% precisely because the core stays off and the hedge runs.
         return False
+    # Regime not yet known: arm if the core is configured for any regime.
     return bool(_enabled_regime_profiles(cfg))
 
 
