@@ -31703,7 +31703,79 @@ class GraphNexusAnalysis:
                 and not str(_s).startswith("_")
                 and str(_s).strip().upper() not in _held_for_cap
             )
-            if _total_new_spend > _tot_cap:
+            # ── 2026-08-08 CONCENTRATE (default OFF) ────────────────────
+            # Uniform scaling is why no position ever reaches size. bt 496659
+            # opened with satellite budget $2,280 (the 38% design share) spread
+            # across 5 sized names: every one scaled by 0.812 to ~$456, i.e.
+            # 7.6% of NAV. Measured across the book the objective's own number
+            # is mean 6.75% / median 4.73% — and "a +100% name at a 2% position
+            # is noise; at 10-15% it is the year".
+            #
+            # The budget is not the constraint. SPREADING it is. Scaling every
+            # candidate down guarantees that when the book finds many names,
+            # NONE of them matters — the more good ideas it has, the less each
+            # one can pay. That is exactly backwards.
+            #
+            # So rank by conviction and fund from the top at a real weight
+            # until the budget is spent, instead of shaving everyone. Names
+            # that miss out are not lost: they fall to the backfill queue and
+            # can enter on a later bar or via rotation.
+            #
+            # `total_spend_cap_target_weight_pct` (0 = keep each name's own
+            # requested size) sets the weight a funded name is taken at.
+            _conc_on = bool(config.get("total_spend_cap_concentrate", False))
+            if _total_new_spend > _tot_cap and _conc_on:
+                _conc_target_pct = float(
+                    config.get("total_spend_cap_target_weight_pct", 0.0) or 0.0)
+                _conc_target = (portfolio_total * _conc_target_pct
+                                if _conc_target_pct > 0 else 0.0)
+                _conc_cands = []
+                for _cc_sym, _cc_hint in nexus_position_sizes.items():
+                    if (not isinstance(_cc_hint, dict)
+                            or str(_cc_sym).startswith("_")
+                            or str(_cc_sym).strip().upper() in _held_for_cap):
+                        continue
+                    _cc_cash = float(_cc_hint.get("buy_cash", 0.0) or 0.0)
+                    if _cc_cash <= 0:
+                        continue
+                    try:
+                        _cc_score = float(_cc_hint.get("raw_net_score", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        _cc_score = 0.0
+                    _conc_cands.append((_cc_score, _cc_cash, str(_cc_sym), _cc_hint))
+                # conviction desc, then requested size desc, then ticker — the
+                # last term only so a tie is not decided by dict order.
+                _conc_cands.sort(key=lambda t: (-t[0], -t[1], t[2]))
+                _conc_left = _tot_cap
+                _conc_funded: list[str] = []
+                _conc_dropped: list[str] = []
+                # The floor is the TARGET WEIGHT, not min_position_size. Using
+                # the $100 broker minimum here would spend the tail of the
+                # budget on a 2%-of-NAV runt — the precise thing the objective
+                # calls noise, and what uniform scaling already produces. Left
+                # over budget is better left as cash for the queue or a
+                # rotation than turned into a position that cannot matter.
+                _conc_floor = _conc_target if _conc_target > 0 else _min_pos_final
+                for _cc_score, _cc_cash, _cc_sym, _cc_hint in _conc_cands:
+                    _cc_want = max(_cc_cash, _conc_target) if _conc_target > 0 else _cc_cash
+                    _cc_take = min(_cc_want, _conc_left)
+                    if _cc_take < _conc_floor or _cc_take < _min_pos_final:
+                        _conc_dropped.append(_cc_sym)
+                        continue
+                    _cc_hint["buy_cash"] = round(_cc_take, 2)
+                    _conc_left -= _cc_take
+                    _conc_funded.append(f"{_cc_sym}@${_cc_take:,.0f}")
+                for _cc_sym in _conc_dropped:
+                    nexus_position_sizes.pop(_cc_sym, None)
+                _log(
+                    f"V31.2 total-spend cap [CONCENTRATE]: funded "
+                    f"{len(_conc_funded)} of {len(_conc_cands)} by conviction "
+                    f"({', '.join(_conc_funded[:6])}"
+                    f"{'...' if len(_conc_funded) > 6 else ''}) out of "
+                    f"${_tot_cap:,.0f}; dropped {len(_conc_dropped)} to the queue",
+                    "cyan",
+                )
+            elif _total_new_spend > _tot_cap:
                 _scale = _tot_cap / _total_new_spend
                 _scaled_count = 0
                 _undersized_tickers: list[str] = []
