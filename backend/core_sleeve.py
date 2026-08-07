@@ -48,8 +48,10 @@ __all__ = [
     "CoreSleeveConfig",
     "RebalanceOrder",
     "core_sleeve_config",
+    "core_sleeve_armed_for_bar",
     "core_target_weight",
     "core_rebalance_order",
+    "satellite_design_share",
     "turnover_budget_state",
 ]
 
@@ -134,6 +136,100 @@ def _i(cfg, key, default):
         return int(value)
     except (TypeError, ValueError, AttributeError):
         return int(default)
+
+
+def _enabled_regime_profiles(config) -> list:
+    """Regime overlays that actually switch the core ON, as (name, overlay)."""
+    profiles = (config or {}).get("regime_profiles") or {}
+    if not isinstance(profiles, dict):
+        return []
+    return sorted(
+        (
+            (str(name), over)
+            for name, over in profiles.items()
+            if isinstance(over, dict) and bool(over.get("core_sleeve_enabled", False))
+        ),
+        key=lambda pair: pair[0],
+    )
+
+
+def core_sleeve_armed_for_bar(config, *, regime=None) -> bool:
+    """True when the core's design share should bound the satellite THIS bar.
+
+    2026-08-07, bt 804832. `_apply_regime_profile` merges the matching overlay
+    into the config before it is read, and returns the config UNCHANGED when no
+    overlay matches. So an absent `core_sleeve_enabled` is ambiguous — it means
+    EITHER "the detector has not picked a regime yet" (warm-up) OR "this regime
+    has no profile, so the core is deliberately off" (doc-193 has no bear
+    profile, and `test_regime_conditional_core` measures that bear arm at
+    +10.07% precisely BECAUSE the core stays off and the hedge runs).
+
+    `regime` disambiguates them, and it is the caller's detected regime for this
+    bar (`strategy_cache["_market_regime"]`), or None during warm-up:
+
+      * flag already True  -> armed (overlay merged and switched it on)
+      * regime KNOWN       -> not armed (no overlay for it = core off by design)
+      * regime UNKNOWN     -> armed if ANY profile enables the core
+
+    Only the third branch is new behaviour, and it is the bug: on tick 1 the
+    allocator's satellite clamp read the un-merged base config, saw False, and
+    sized the opening basket against `nexus_portfolio_pct` (0.95) instead of the
+    0.38 design share. It opened at 48.5% of NAV, headroom went negative on tick
+    2 and never recovered — 43 `SATELLITE CAP` refusals across 33 names.
+
+    An earlier version of this function scanned profiles unconditionally. That
+    also armed the clamp on every BEAR bar, reserving ~62% of NAV for a core
+    that would never be bought. Passing the regime is what keeps the fix scoped
+    to warm-up.
+    """
+    cfg = config or {}
+    if bool(cfg.get("core_sleeve_enabled", False)):
+        return True
+    if str(regime or "").strip():
+        return False
+    return bool(_enabled_regime_profiles(cfg))
+
+
+def satellite_design_share(config, *, regime=None) -> float:
+    """Fraction of NAV the satellite sleeve is allowed to occupy.
+
+    The SINGLE source of truth. Three sites computed this expression
+    independently (broker `_core_sleeve_satellite_headroom` and
+    `_core_sleeve_block_new_satellite`, and the allocator's total-spend cap in
+    graph_nexus_analysis), which is how they came to disagree about whether the
+    core was armed at all.
+
+    ``core_target_pct`` is resolved regime-aware for the same reason as the
+    enabled flag: it too lives only in the regime profiles, so reading it off
+    the base config during warm-up silently falls back to the default.
+    """
+    cfg = config or {}
+    target = cfg.get("core_target_pct")
+    if target is None:
+        # Only profiles that actually switch the core ON may define its target —
+        # a profile with the core OFF has no say in how much room it reserves.
+        # When `regime` names one of them, use it; otherwise take the LARGEST
+        # core target among enabled profiles, which is the tightest satellite
+        # share and therefore the conservative reading.
+        #
+        # The "first profile wins" version of this was order-dependent: RethinkDB
+        # returns sorted keys, so `bear` would have won simply by being
+        # alphabetically first — the one regime whose profile is most likely to
+        # carry a de-risked target it never intended to impose on a bull bar.
+        enabled = _enabled_regime_profiles(cfg)
+        named = str(regime or "").strip().lower()
+        chosen = [over for name, over in enabled if name.strip().lower() == named]
+        pool = chosen or [over for _name, over in enabled]
+        targets = [
+            over.get("core_target_pct")
+            for over in pool
+            if over.get("core_target_pct") is not None
+        ]
+        if targets:
+            target = max(_f({"v": t}, "v", 0.60) for t in targets)
+    core_tgt = _f({"v": target}, "v", 0.60)
+    cash_fl = _f(cfg, "cash_reserve_floor_pct", 0.02)
+    return max(0.05, min(0.95, 1.0 - core_tgt - cash_fl))
 
 
 def core_sleeve_config(config) -> CoreSleeveConfig:

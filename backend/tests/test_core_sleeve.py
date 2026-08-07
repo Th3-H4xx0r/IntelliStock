@@ -314,13 +314,20 @@ def test_min_deploy_floor_is_the_broker_floor_not_a_new_one():
 # was nexus_portfolio_pct, which is measured against FULL NAV and therefore
 # stops binding by construction once a core exists.
 
-def _satellite_cap(config):
-    """Mirror of the bound applied in graph_nexus_analysis's total-spend cap."""
+def _satellite_cap(config, *, regime=None):
+    """The bound applied in graph_nexus_analysis's total-spend cap.
+
+    2026-08-07: this was a hand-copied MIRROR and it silently stopped matching —
+    the allocator moved to the regime-aware helpers while this copy kept reading
+    the base config, so it reported 0.95 where the real clamp applied 0.38 on
+    every doc-193 warm-up bar. A mirror that drifts is worse than no test,
+    because it reports agreement it is no longer checking. Call the same
+    functions the allocator calls instead of restating them.
+    """
+    from core_sleeve import core_sleeve_armed_for_bar, satellite_design_share
     pct = float(config.get("nexus_portfolio_pct", 0.95) or 0.95)
-    if bool(config.get("core_sleeve_enabled", False)):
-        core = float(config.get("core_target_pct", 0.60) or 0.60)
-        cash = float(config.get("cash_reserve_floor_pct", 0.02) or 0.02)
-        room = max(0.05, 1.0 - core - cash)
+    if core_sleeve_armed_for_bar(config, regime=regime):
+        room = satellite_design_share(config, regime=regime)
         if room < pct:
             pct = room
     return pct

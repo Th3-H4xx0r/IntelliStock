@@ -3121,6 +3121,25 @@ def _turnover_ledger_touch(current_time):
     return _ledger
 
 
+def _safe_dividend_summary(emulator):
+    """Dividend carry for the result row, or None. Never raises.
+
+    2026-08-07 (bt 804832): `pnl_per_stock` sums TRADE rows while `pnl` is
+    final_value - initial_cash off the NAV snapshot. Accrued dividends credit
+    cash WITHOUT writing a trade row, so the two legitimately disagree by exactly
+    that amount — $7.42 on that run, 7.2% of the reported +$103.23 gain. Left
+    unnamed it reads as a reconciliation bug, and the obvious "fix" is to delete
+    a deliberate total-return correction. Named, `pnl - sum(pnl_per_stock)` is a
+    checkable identity.
+    """
+    try:
+        if emulator is None or not hasattr(emulator, "get_dividend_summary"):
+            return None
+        return emulator.get_dividend_summary()
+    except Exception:
+        return None
+
+
 def _turnover_is_governed(symbol, cached_strategies) -> bool:
     """False when this symbol's notional must NOT count against the budget.
 
@@ -3288,9 +3307,17 @@ def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
             hedge_value = float(positions.get(bear_sym, 0.0) or 0.0) * float(
                 (prices or {}).get(bear_sym, 0.0) or 0.0)
         satellite = max(0.0, nav - cash - core_value - hedge_value)
-        core_tgt = float(cfg.get("core_target_pct", 0.60) or 0.60)
-        cash_fl = float(cfg.get("cash_reserve_floor_pct", 0.02) or 0.02)
-        share = max(0.05, 1.0 - core_tgt - cash_fl)
+        # 2026-08-07 (bt 804832): one shared definition of the satellite share.
+        # This site and the allocator's total-spend cap each restated the same
+        # expression, which is how they came to disagree. On tick 1 THIS function
+        # returned None (its own arming gate, `_core_sleeve_cfg`, is base-flag
+        # gated and the flag had not merged yet) while the allocator's clamp was
+        # skipped for the same reason — so nothing bounded the opening basket and
+        # it built to 48.5% of NAV. This site only began capping on tick 2, by
+        # which point the satellite was already past its share and headroom was
+        # negative for the rest of the run.
+        from core_sleeve import satellite_design_share
+        share = satellite_design_share(cfg)
         return (share * nav) - satellite
     except Exception as _hr_exc:
         # Fail OPEN, but never SILENTLY.
@@ -3338,9 +3365,9 @@ def _core_sleeve_block_new_satellite(portfolio, prices, cached_strategies, symbo
             if t in sleeve:
                 continue
             satellite += float(qty or 0.0) * float((prices or {}).get(t, 0.0) or 0.0)
-        core_tgt = float(cfg.get("core_target_pct", 0.60) or 0.60)
-        cash_fl = float(cfg.get("cash_reserve_floor_pct", 0.02) or 0.02)
-        share = max(0.05, 1.0 - core_tgt - cash_fl)
+        # Shared definition — see _core_sleeve_satellite_headroom.
+        from core_sleeve import satellite_design_share
+        share = satellite_design_share(cfg)
         return (satellite / nav) >= share
     except Exception:
         return False
@@ -11747,6 +11774,21 @@ while not shutdown_requested:
                                 'execution_promotion_error': _bt_summary.get("execution_promotion_error"),
                                 'pnl_per_stock': pnl_per_stock,
                                 'pnl_percent_per_stock': pnl_percent_per_stock,
+                                # 2026-08-07 (bt 804832): surface the dividend carry.
+                                # `pnl_per_stock` sums TRADE rows; `pnl` is
+                                # final_value - initial_cash off the NAV snapshot.
+                                # Accrued dividends credit cash without writing a
+                                # trade row, so the two legitimately disagree by
+                                # exactly that amount — $7.42 on that run, which is
+                                # 7.2% of the reported +$103.23 gain. Unexplained, it
+                                # reads as a reconciliation bug and invites someone to
+                                # "fix" a deliberate total-return correction. Named
+                                # here, `pnl - sum(pnl_per_stock) == dividends_credited`
+                                # is a checkable identity.
+                                # Never let reporting cost a finished run: this dict
+                                # IS the persisted result, so a raise here would lose
+                                # a 2.5-hour backtest to a telemetry nicety.
+                                'dividend_summary': _safe_dividend_summary(portfolio_emulator),
                                 'stock_price_change': stock_price_change,
                                 'time_elapsed_seconds': time_elapsed_seconds,
                                 'code_version': _code_version_stamp(),
@@ -14025,6 +14067,25 @@ while not shutdown_requested:
                     if _mpg_warn:
                         _log(_mpg_warn, "yellow")
                     _mpg_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
+                    # NOTE (2026-08-07, bt 804832): the index-core legs arguably
+                    # should not consume a max_positions slot — with cap=6 the alpha
+                    # sleeve really only has FIVE, and the book read `held=6, cap=6`
+                    # on 418 of 634 bars. An exclusion was written here and REVERTED
+                    # after an adversarial sweep, because it cannot be done at this
+                    # site alone: `_z41_held_now` (the bear-capacity latch),
+                    # `_count_open_positions` (BFQ + cash-floor gates) and
+                    # `_mw_open_set` all count the legs, so excluding here only
+                    # desynchronises four counters. Concretely it moved the latched
+                    # bear's headroom from 0 to len(sleeve legs), re-opening the
+                    # per-bar refill the latch exists to prevent.
+                    #
+                    # It is also not where the money was: the blocked basket for
+                    # MAX_POSITIONS_GATE measured -2.6% to -9.6% forward, i.e. it was
+                    # refusing losers. SATELLITE CAP (+10.5% forward) is the gate that
+                    # was blocking winners, and that one is fixed.
+                    #
+                    # Do this properly by moving all four counters together, behind
+                    # its own paired A/B — not as a one-line exclusion here.
                     _mpg_held = {str(_s).strip().upper() for _s, _q in (_mpg_pos or {}).items() if float(_q or 0.0) > 0.0}
                 except Exception as _mpg_e:
                     _log(f"max_positions gate setup failed ({type(_mpg_e).__name__}: {_mpg_e}) — gate inert this tick", "yellow")

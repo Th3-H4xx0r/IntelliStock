@@ -23307,15 +23307,55 @@ def _apply_quality_filter(
         raw_score = abs(float(sc.get("raw_score", 0) or sc.get("raw_net_score", 0) or 0))
 
         if is_propagation and n_paths < propagation_min_paths:
-            sc["score"] = 0
-            sc["action_intent"] = "hold"
-            orig_reason = str(sc.get("reason") or "")
-            sc["reason"] = (
-                f"Nexus quality filter: {signal_family} {n_paths} paths < {propagation_min_paths} min, "
-                f"raw={raw_score:.3f} blocked regardless of propagation floor | {orig_reason}"
-            )[:1500]
-            filtered_count += 1
-            continue
+            # 2026-08-07 (bt 804832): this filter is a CORROBORATION test, but it
+            # was reading as a strength test and deleting the top of the
+            # distribution. Measured on that run: 47 fires, and 46 of them
+            # (97.9%) carried raw > 1.000 — mean 1.335, max 1.800. It caught the
+            # run's biggest winner on its single highest-scoring bar of the whole
+            # backtest (`raw=1.482`).
+            #
+            # The reason it lands there is structural. `raw` saturates at ±1 (the
+            # propagation aggregate is clamped and its seed sentiment is an
+            # integer), so ONE strong path already pins the ceiling and path count
+            # stops being independent evidence of weakness. Requiring a second
+            # path then filters hardest exactly where conviction is highest.
+            #
+            # Lever is default-OFF (0.0) so every existing doc is byte-identical;
+            # doc-193 opts in. A bypass still requires the score to be at or above
+            # the saturation ceiling, so this cannot admit a marginal name.
+            _qf_bypass_raw = float(config.get("propagation_min_paths_conviction_bypass_raw", 0.0) or 0.0)
+            # Compare the SIGNED aggregate, not its magnitude. `raw_score` above is
+            # an abs() (correct for a filter that serves both buys and sells), but a
+            # bypass that admits a BUY must not fire on a -1.5 bearish aggregate —
+            # and the log line would have printed it as `raw=1.500`, reading as
+            # maximally bullish. Today `quality_filter_block_negative_raw_score`
+            # (default True) happens to reject those earlier; that is an unrelated
+            # lever, and this must not depend on it staying on.
+            try:
+                _qf_signed = float(
+                    sc.get("raw_score", None)
+                    if sc.get("raw_score", None) is not None
+                    else sc.get("raw_net_score", 0) or 0
+                )
+            except (TypeError, ValueError):
+                _qf_signed = 0.0
+            if _qf_bypass_raw > 0 and n_paths >= 1 and _qf_signed >= _qf_bypass_raw:
+                _log(
+                    f"Nexus quality filter CONVICTION BYPASS: {sym} ({signal_family}) "
+                    f"{n_paths} path(s) < {propagation_min_paths} min but raw={_qf_signed:+.3f} "
+                    f">= {_qf_bypass_raw:.3f} — admitted",
+                    "green",
+                )
+            else:
+                sc["score"] = 0
+                sc["action_intent"] = "hold"
+                orig_reason = str(sc.get("reason") or "")
+                sc["reason"] = (
+                    f"Nexus quality filter: {signal_family} {n_paths} paths < {propagation_min_paths} min, "
+                    f"raw={raw_score:.3f} blocked regardless of propagation floor | {orig_reason}"
+                )[:1500]
+                filtered_count += 1
+                continue
 
     if filtered_count > 0:
         # Name the tickers. A bare count reads as routine hygiene whether it
@@ -28128,13 +28168,42 @@ class GraphNexusAnalysis:
             # correctly (sorted([])=[], pools become empty, etc.).
             if stock_buys or _bfq_pending:
                 # Sort by raw_net_score for tiered allocation
-                stock_buys_scored = sorted(
-                    stock_buys or [],
-                    key=lambda sym: (
-                        -abs(float((scores.get(sym) or {}).get("raw_net_score", 0.0) or 0.0)),
-                        str(sym),
-                    ),
-                )
+                # 2026-08-07 (bt 804832): `raw_net_score` saturates at ±1.000 by
+                # construction — the propagation aggregate is clamped to ±1 and its
+                # seed sentiment is an INTEGER (+1/0/-1) off the LLM schema, so a
+                # single supporting path already pins the maximum. Measured on that
+                # run: 15,991 of 17,260 rows sat inside a tie block, the largest
+                # per-day block had a median of 91 names, and the entry band's
+                # cutoff repeatedly fell INSIDE a tie. With `str(sym)` as the only
+                # discriminator, admission at the boundary was decided
+                # ALPHABETICALLY.
+                #
+                # Break the tie on evidence that is actually continuous, in
+                # decreasing order of how much it says about a real move. This
+                # cannot change any ordering where the primary scores differ, so a
+                # book with no ties is byte-identical.
+                def _sb_rank_key(sym):
+                    _d = scores.get(sym) or {}
+
+                    def _n(key):
+                        # NaN must not reach the sort key: it compares False
+                        # against everything, silently destroying the total order
+                        # so the result depends on INPUT order and `str(sym)`
+                        # stops being a deterministic final resort.
+                        try:
+                            _v = float(_d.get(key, 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            return 0.0
+                        return _v if math.isfinite(_v) else 0.0
+
+                    return (
+                        -abs(_n("raw_net_score")),   # unchanged primary
+                        -_n("confidence"),           # continuous, both lanes carry it
+                        -_n("base_signal"),          # SIGNED: this list is buys only
+                        str(sym),                    # deterministic final resort
+                    )
+
+                stock_buys_scored = sorted(stock_buys or [], key=_sb_rank_key)
 
                 # --- V5: Split into pools FIRST, then apply caps per-pool ---
                 # This ensures propagation stocks (SNDK, MU) get pool slots
@@ -28632,6 +28701,12 @@ class GraphNexusAnalysis:
                             "cyan",
                         )
                         _max_positions = _z41_capped
+                # NOTE (2026-08-07, bt 804832): a sleeve-leg exclusion was written
+                # here to match a broker-side one and REVERTED with it. See the note
+                # at broker.py's `_mpg_held`: this counter is one of FOUR
+                # (`_z41_held_now`, `_count_open_positions`, `_mw_open_set`) and
+                # moving it alone desynchronises the bear-capacity latch, the BFQ
+                # headroom and the cash-reserve floor from the main slate.
                 _current_positions = len(portfolio_emulator.get_positions()) if portfolio_emulator and hasattr(portfolio_emulator, 'get_positions') else 0
                 _blocked_buys = []
                 # V28.8.1 (Codex-corrected): breach detection + strategy_cache flag
@@ -31137,6 +31212,23 @@ class GraphNexusAnalysis:
                         "yellow",
                     )
                     continue
+                # NOTE (2026-08-07, bt 804832): a drain-time re-check of the
+                # entry-extension gate was written here and REVERTED. The queue can
+                # buy a name the gate refused — VTYX, the run's worst entry, was
+                # extension-blocked (+77.4% > 25%) AND rank-band rejected, then
+                # bought via the queue 19 days after the gap that was its whole move.
+                #
+                # But the guard blocks the biggest WINNER too. `entry_extension_block_pct`
+                # is 0 in the bull/recovery overlays and 25 only in the base (chop/bear),
+                # and the regime flips chop<->bull eight times in this window. SNDK's
+                # queue buy landed on a bull tick purely by luck; on any chop bar this
+                # guard refuses it (+111.2% runup logged ten days earlier) while SNDK
+                # went on to +129%. Trading a -$0.41 loser for the run's best name is
+                # the wrong side of that bet.
+                #
+                # If revisited: the gate must distinguish a SUSTAINED trend from
+                # post-gap exhaustion, not just measure extension. Until then the
+                # queue keeps its override.
                 if _bfq_alloc > 0.0:
                     # CAN BUY from queue!
                     _bfq_meta = _build_nexus_candidate_meta(
@@ -31510,10 +31602,44 @@ class GraphNexusAnalysis:
         # core a RESIDUAL of the satellite and nothing bounded the satellite.
         # Bound it to what the design leaves over, so a 60% core target actually
         # produces a 60% core.
-        if bool(config.get("core_sleeve_enabled", False)):
-            _core_tgt = float(config.get("core_target_pct", 0.60) or 0.60)
+        # 2026-08-07 (bt 804832): resolve the core flag REGIME-AWARE. Reading
+        # `core_sleeve_enabled` off the base config made this clamp inert on the
+        # first tick — the key lives only in regime_profiles.* and no overlay has
+        # merged during warm-up — so the opening basket sized against
+        # nexus_portfolio_pct (0.95) and took the satellite to 48.5% of NAV
+        # against a 38% design share. Headroom never came back positive.
+        # `_market_regime` is absent during warm-up and set once the detector has
+        # enough closes — it is what separates "no overlay merged YET" from "this
+        # regime has no profile, so the core is off on purpose".
+        _core_regime = (strategy_cache or {}).get("_market_regime") if isinstance(strategy_cache, dict) else None
+        try:
+            from core_sleeve import core_sleeve_armed_for_bar, satellite_design_share
+            _core_armed = core_sleeve_armed_for_bar(config, regime=_core_regime)
+            _sat_room = satellite_design_share(config, regime=_core_regime)
+        except ImportError as _cs_imp:
+            # Fail to the CONSERVATIVE share, not to the uncapped one. The old
+            # inline fallback returned 0.95 here on a warm-up bar — i.e. it handed
+            # the satellite the whole book, which is the very bug this clamp
+            # exists to prevent. Narrow to ImportError so a real defect inside the
+            # helpers raises instead of silently reinstating that behaviour, and
+            # never do it silently.
+            _core_armed = bool(config.get("core_sleeve_enabled", False)) or bool(
+                (config.get("regime_profiles") or {})
+                and any(
+                    isinstance(_o, dict) and _o.get("core_sleeve_enabled")
+                    for _o in (config.get("regime_profiles") or {}).values()
+                )
+            )
+            _core_tgt = config.get("core_target_pct")
+            _core_tgt = 0.60 if _core_tgt is None else float(_core_tgt or 0.60)
             _cash_fl = float(config.get("cash_reserve_floor_pct", 0.02) or 0.02)
             _sat_room = max(0.05, 1.0 - _core_tgt - _cash_fl)
+            _log(
+                f"core_sleeve import failed ({_cs_imp}) — satellite clamp using "
+                f"fallback share {_sat_room:.3f} (armed={_core_armed})",
+                "yellow",
+            )
+        if _core_armed:
             if _sat_room < _tot_cap_pct:
                 _tot_cap_pct = _sat_room
         if _tot_cap_pct > 0 and portfolio_total > 0:
