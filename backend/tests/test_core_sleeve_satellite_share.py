@@ -143,3 +143,40 @@ def test_non_dict_and_empty_configs_do_not_raise():
     for cfg in (None, {}, {"regime_profiles": None}, {"regime_profiles": []}):
         assert core_sleeve_armed_for_bar(cfg, regime=None) is False
         assert 0.05 <= satellite_design_share(cfg) <= 0.95
+
+
+def test_the_overflow_ceiling_is_the_core_floor_not_its_target():
+    """bt 677976: the design share as a HARD ceiling pins the satellite forever.
+
+    Headroom is born at $0, so a winner can only enter by backfilling an exit —
+    SNDK went in for $156 on the same bar another name was sold, at 96.7% of the
+    way through a +166% move. The sleeve's own design says a graph BUY should
+    raise the satellite and lower the core ("funded by selling the index"), and
+    the guardrail that already exists for that is `core_min_pct`.
+    """
+    from core_sleeve import satellite_max_share
+    assert abs(satellite_design_share(DOC193, regime="chop") - 0.38) < 1e-9
+    # 1 - core_min_pct(0.30) - cash_floor(0.02)
+    assert abs(satellite_max_share(DOC193, regime="chop") - 0.68) < 1e-9
+    # On the reference $6,000 book: $2,280 of design room, $4,080 floor-bounded.
+    assert abs(6000 * satellite_max_share(DOC193, regime="chop") - 4080.0) < 1e-6
+
+
+def test_the_overflow_ceiling_never_falls_below_the_design_share():
+    """A doc with a high core_min_pct must not produce a ceiling BELOW the
+    design share — that would make conviction names strictly worse off."""
+    from core_sleeve import satellite_max_share
+    cfg = {
+        "cash_reserve_floor_pct": 0.02,
+        "core_min_pct": 0.90,          # floor above the 0.60 target
+        "regime_profiles": {"bull": {"core_sleeve_enabled": True, "core_target_pct": 0.6}},
+    }
+    assert satellite_max_share(cfg, regime="bull") >= satellite_design_share(cfg, regime="bull")
+
+
+def test_overflow_ceiling_stays_bounded_on_hostile_core_min():
+    from core_sleeve import satellite_max_share
+    base = {"cash_reserve_floor_pct": 0.02}
+    for floor in (0.0, 1.5, -2.0, float("nan"), float("inf"), "x", None):
+        share = satellite_max_share(dict(base, core_min_pct=floor))
+        assert 0.05 <= share <= 0.95, (floor, share)

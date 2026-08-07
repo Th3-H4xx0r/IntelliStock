@@ -3243,8 +3243,36 @@ def _turnover_ledger_rolling(current_time):
 _CORE_MIN_SATELLITE_TRIM_USD = 25.0
 
 
-def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
+def _satellite_conviction_min_raw(cached_strategies) -> float:
+    """Raw score at or above which a satellite buy may overflow the design share.
+
+    0.0 (default) disables the overflow entirely, so every existing document is
+    byte-identical.
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return float(cfg.get("satellite_conviction_overflow_min_raw_score", 0.0) or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies, *, conviction=False):
     """Dollars of satellite room left before the core is squeezed below target.
+
+    ``conviction=True`` measures against the core's FLOOR (`core_min_pct`)
+    instead of its target, which is the overflow band a high-conviction name is
+    allowed to take out of the index.
+
+    2026-08-07, bt 677976: treating the design share as a hard ceiling pinned the
+    satellite at exactly 38% for the whole run — headroom born at $0, so a new
+    name could only enter by backfilling an exit. SNDK went in on the same bar
+    another name was sold, for $156, at 96.7% of the way through a +166% move.
+    Both this function and the core's funding request are keyed on the value it
+    returns, and they MUST use the same predicate: extending the buy without
+    extending the release starves the buy of cash, and extending the release
+    without extending the buy sells core to fund an order that is then refused
+    and buys it straight back — the churn engine the 2026-08-03 sweep measured at
+    $2,600 of one-way notional for zero net allocation change.
 
     None = no limit (core off, or the book cannot be measured). A NEGATIVE or
     zero result means the satellite is already at or past its share.
@@ -3316,8 +3344,9 @@ def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies):
         # it built to 48.5% of NAV. This site only began capping on tick 2, by
         # which point the satellite was already past its share and headroom was
         # negative for the rest of the run.
-        from core_sleeve import satellite_design_share
-        share = satellite_design_share(cfg)
+        from core_sleeve import satellite_design_share, satellite_max_share
+        share = (satellite_max_share(cfg) if conviction
+                 else satellite_design_share(cfg))
         return (share * nav) - satellite
     except Exception as _hr_exc:
         # Fail OPEN, but never SILENTLY.
@@ -14155,16 +14184,55 @@ while not shutdown_requested:
                 # about to refuse. Capping the request at the headroom breaks the
                 # loop at its source: we never sell core to fund a buy that
                 # cannot clear.
+                # 2026-08-07 (bt 677976): split the request by conviction and cap
+                # each part against the SAME ceiling its buy will face. The two
+                # gates must agree or one of two failures follows: cap the release
+                # at the design share while the buy is allowed to overflow, and the
+                # buy starves for cash; extend the release without extending the
+                # buy, and the core sells to fund an order that is then refused and
+                # buys it straight back — the $2,600-for-nothing churn loop.
+                _fr_conv_min = _satellite_conviction_min_raw(_cached_strategies)
+                _fr_conv = 0.0
+                _fr_plain = 0.0
+                for _fr_sym in (nexus_executable_buys or ()):
+                    _fr_hint = (nexus_position_sizes or {}).get(_fr_sym) or {}
+                    if not isinstance(_fr_hint, dict):
+                        continue
+                    _fr_cash = max(0.0, float(_fr_hint.get("buy_cash", 0.0) or 0.0))
+                    _fr_is_conv = False
+                    if _fr_conv_min > 0:
+                        try:
+                            _fr_is_conv = float(
+                                _fr_hint.get("raw_net_score", 0.0) or 0.0) >= _fr_conv_min
+                        except (TypeError, ValueError):
+                            _fr_is_conv = False
+                    if _fr_is_conv:
+                        _fr_conv += _fr_cash
+                    else:
+                        _fr_plain += _fr_cash
                 _fr_room = _core_sleeve_satellite_headroom(
                     portfolio_emulator, prices, _cached_strategies)
+                _fr_room_conv = _core_sleeve_satellite_headroom(
+                    portfolio_emulator, prices, _cached_strategies, conviction=True)
                 if _fr_room is not None:
-                    _fr_capped = max(0.0, min(_core_funding_request, _fr_room))
+                    # Non-conviction buys may only use the design-share room; the
+                    # overflow band above it is reserved for conviction names, and
+                    # is what remains of it after the plain buys have taken theirs.
+                    _fr_allow_plain = max(0.0, min(_fr_plain, _fr_room))
+                    _fr_ceiling = _fr_room if _fr_room_conv is None else _fr_room_conv
+                    _fr_allow_conv = max(
+                        0.0, min(_fr_conv, max(0.0, _fr_ceiling - _fr_allow_plain)))
+                    _fr_capped = _fr_allow_plain + _fr_allow_conv
                     if _fr_capped < _core_funding_request:
                         _log(f"[core] funding request trimmed "
                              f"${_core_funding_request:,.0f} -> ${_fr_capped:,.0f} "
                              f"— satellite headroom will refuse the remainder; "
                              f"releasing core for it would only be bought back",
                              "cyan")
+                    elif _fr_allow_conv > 0:
+                        _log(f"[core] funding ${_fr_allow_conv:,.0f} of conviction "
+                             f"overflow out of the core (design room ${_fr_room:,.0f}, "
+                             f"floor-bounded room ${_fr_ceiling:,.0f})", "green")
                     _core_funding_request = _fr_capped
             except (TypeError, ValueError, AttributeError):
                 _core_funding_request = 0.0
@@ -14570,14 +14638,42 @@ while not shutdown_requested:
                             # Headroom applies to EVERY satellite buy, held or
                             # not. An add past the share is the same overrun as
                             # a new name.
+                            # 2026-08-07 (bt 677976): a HIGH-CONVICTION name may take
+                            # its funding out of the index, which is what the sleeve
+                            # was designed to do — "held ABOVE its index weight,
+                            # funded by selling the index". Without this the design
+                            # share is a hard ceiling and the satellite never moves
+                            # off it, so a winner can only enter by backfilling
+                            # someone's exit. That is exactly how SNDK went in at
+                            # $156 on the same bar another name was sold, 96.7% of
+                            # the way through a +166% move.
+                            #
+                            # The overflow band ends at the core's FLOOR
+                            # (`core_min_pct`), the guardrail that already existed
+                            # and is already tested. Default 0.0 = off.
+                            _sat_conv_min = _satellite_conviction_min_raw(_cached_strategies)
+                            _sat_is_conv = False
+                            if _sat_conv_min > 0:
+                                try:
+                                    _sat_raw = float((nexus_hint or {}).get("raw_net_score", 0.0) or 0.0)
+                                except (TypeError, ValueError):
+                                    _sat_raw = 0.0
+                                _sat_is_conv = _sat_raw >= _sat_conv_min
                             _sat_room = _core_sleeve_satellite_headroom(
-                                portfolio_emulator, prices, _cached_strategies)
+                                portfolio_emulator, prices, _cached_strategies,
+                                conviction=_sat_is_conv)
                             if _sat_room is not None:
                                 if _sat_room <= _CORE_MIN_SATELLITE_TRIM_USD:
                                     _log(f"SATELLITE CAP: {symbol} skipped — satellite "
-                                         f"at its design share (${_sat_room:,.0f} room); "
-                                         f"core would be squeezed below target", "yellow")
+                                         f"at its {'overflow ceiling' if _sat_is_conv else 'design share'} "
+                                         f"(${_sat_room:,.0f} room); "
+                                         f"core would be squeezed below "
+                                         f"{'its floor' if _sat_is_conv else 'target'}", "yellow")
                                     continue
+                                if _sat_is_conv:
+                                    _log(f"SATELLITE OVERFLOW: {symbol} raw={_sat_raw:+.3f} "
+                                         f">= {_sat_conv_min:.2f} — funding ${_sat_room:,.0f} "
+                                         f"of room out of the core (floor-bounded)", "green")
                                 # 2026-08-04 CRASH FIX. This read `cash_to_use`,
                                 # which is not assigned until ~80 lines BELOW
                                 # (`cash_to_use = cash_per_trade`). At module

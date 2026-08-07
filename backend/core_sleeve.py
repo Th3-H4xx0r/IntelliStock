@@ -52,6 +52,7 @@ __all__ = [
     "core_target_weight",
     "core_rebalance_order",
     "satellite_design_share",
+    "satellite_max_share",
     "turnover_budget_state",
 ]
 
@@ -248,6 +249,36 @@ def satellite_design_share(config, *, regime=None) -> float:
     core_tgt = _f({"v": target}, "v", 0.60)
     cash_fl = _f(cfg, "cash_reserve_floor_pct", 0.02)
     return max(0.05, min(0.95, 1.0 - core_tgt - cash_fl))
+
+
+def satellite_max_share(config, *, regime=None) -> float:
+    """Hard ceiling on the satellite — the share at which the core hits its FLOOR.
+
+    2026-08-07, bt 677976. `satellite_design_share` is a *design* weight, and
+    treating it as a hard ceiling pins the satellite at exactly that number
+    forever: headroom is born at $0 and a new name can only enter by backfilling
+    someone's exit. Measured on that run, SNDK entered on 2026-01-30 — the same
+    bar another name was sold — for $156, and captured 2.7% of a +166% move
+    because it had gone in at 96.7% of the way through it.
+
+    That contradicts the sleeve's own design, which says a graph BUY should
+    RAISE the satellite and lower the core: "the name is held ABOVE its index
+    weight, funded by selling the index (an overweight)". `core_target_weight`
+    already implements exactly that (core is the residual of the satellite). The
+    static cap was added to stop the satellite crowding the core to its floor,
+    and over-corrected into never letting it move at all.
+
+    The real guardrail is `core_min_pct` (0.30, already enforced by
+    `core_target_weight`'s clamp and covered by tests). This returns the
+    satellite share at that floor — 0.68 on the defaults — so a
+    high-conviction name can be funded out of the index while the core is still
+    protected by the same floor it always had. Never below the design share.
+    """
+    cfg = config or {}
+    cash_fl = _f(cfg, "cash_reserve_floor_pct", 0.02)
+    core_min = _f(cfg, "core_min_pct", 0.30)
+    ceiling = max(0.05, min(0.95, 1.0 - core_min - cash_fl))
+    return max(ceiling, satellite_design_share(cfg, regime=regime))
 
 
 def core_sleeve_config(config) -> CoreSleeveConfig:
