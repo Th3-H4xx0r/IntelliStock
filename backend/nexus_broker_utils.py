@@ -34,6 +34,97 @@ def max_positions_projected_count(held_symbols, planned_sells_full_exit, emitted
         return -1
 
 
+def max_positions_admissible_buys(
+        held_symbols, cap, planned_sells_full_exit, ordered_buys) -> set:
+    """Pre-pass: which of ``ordered_buys`` will the max_positions gate admit?
+
+    ``max_positions_gate`` is evaluated at ORDER EMISSION, deep inside the
+    execution loop. The index core sizes its funding release BEFORE that loop
+    runs, off the buys the allocator approved this bar. Nothing told the
+    release that the position cap was about to refuse most of them, so the core
+    sold SPY to fund orders that never emitted and the end-of-cycle deploy
+    bought it straight back.
+
+    Measured on bt 455506 (2026-01-01..2026-03-01, $6,000 book): 65 of 91
+    `SATELLITE OVERFLOW` fires were refused by MAX_POSITIONS_GATE on the same
+    tick, and the SPY core saw-toothed 6.13 -> 4.21 -> 5.80 -> 4.64 -> 5.49 ->
+    4.76 shares — $9,081 of post-initial gross notional for a net change of
+    -1.37 shares (~$950), i.e. 8.8x notional per $1 of net allocation. That
+    churn ran on the one lane exempt from the turnover budget while
+    TURNOVER BUDGET BINDING pinned the book at 50-51% of a 50% budget and
+    refused 16 real candidates.
+
+    This is the same class of bug the 2026-08-03 sweep fixed for the satellite
+    headroom ("we never sell core to fund a buy that cannot clear") — the
+    remaining hole was that the headroom is not the only gate a buy must clear.
+
+    Replays the gate's own accounting in execution order so the answer matches
+    what the loop will actually do:
+      * ``ordered_buys`` MUST be in execution order — the cap is consumed
+        first-come, so order decides who gets the last slot.
+      * adds to already-held names never consume a slot,
+      * a planned FULL exit frees one (this is what lets a rotation's paired
+        buy stay funded — bt 455506's SNDK entered exactly this way, on a
+        sell-RGEN/buy-SNDK swap),
+      * each admitted NEW name consumes one for the buys behind it.
+
+    Returns the admitted subset. Fail-open: on malformed input, or a cap of
+    None, every candidate is returned — starving a legitimate buy of funding is
+    a worse failure than the churn this prevents.
+    """
+    try:
+        ordered = [s for s in (ordered_buys or []) if s is not None]
+        if cap is None:
+            return {str(s).strip().upper() for s in ordered if str(s).strip()}
+        held = _mpg_norm_set(held_symbols)
+        full_exits = _mpg_norm_set(planned_sells_full_exit)
+        emitted: set[str] = set()
+        admitted: set[str] = set()
+        for raw in ordered:
+            sym = str(raw).strip().upper()
+            if not sym:
+                continue
+            if max_positions_gate(held, cap, full_exits, emitted, sym):
+                admitted.add(sym)
+                # Mirror the emission-time bookkeeping: only a NEW name grows
+                # the projected count. An add to a held name is free.
+                if sym not in held:
+                    emitted.add(sym)
+        return admitted
+    except Exception:
+        try:
+            return {str(s).strip().upper() for s in (ordered_buys or [])
+                    if s is not None and str(s).strip()}
+        except Exception:
+            return set()
+
+
+def planned_full_exit_symbols(held_symbols, position_sizes) -> set:
+    """Held names whose sized plan this bar is a FULL exit (sell_fraction ~1.0).
+
+    Mirrors the emission-time rule in broker.py (``>= 0.999`` on a held name)
+    so the funding pre-pass and the gate agree on which slots free up. Only
+    names currently HELD can free a slot.
+    """
+    out: set[str] = set()
+    try:
+        held = _mpg_norm_set(held_symbols)
+        for sym, hint in (position_sizes or {}).items():
+            if not isinstance(hint, dict):
+                continue
+            key = str(sym).strip().upper()
+            if key not in held:
+                continue
+            try:
+                if float(hint.get("sell_fraction", 0.0) or 0.0) >= 0.999:
+                    out.add(key)
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        return out
+    return out
+
+
 def resolve_max_positions_cap(cached_strategies) -> tuple:
     """Resolve the hard max_positions cap from the loaded strategy specs.
 

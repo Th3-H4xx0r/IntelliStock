@@ -25,7 +25,7 @@ from typing import Any, Optional
 from portfolio_emulator import PortfolioEmulator, create_backtest_emulator
 from llm_utils import llm_model_reference, normalize_reasoning_effort
 from model_resolver import resolve_model_refs_in_config
-from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning
+from nexus_broker_utils import build_nexus_buy_guard, buy_ceiling, get_nexus_buy_block_details, get_nexus_buy_block_reason, max_positions_gate, max_positions_projected_count, resolve_max_positions_cap, max_positions_arm_warning, max_positions_admissible_buys, planned_full_exit_symbols
 from persistence_safety import SecretMaterialError, assert_secret_free, sanitize_snapshot
 from secret_store import decrypt_required
 from stock_credential_boundary import (
@@ -3254,6 +3254,21 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return float(cfg.get("satellite_conviction_overflow_min_raw_score", 0.0) or 0.0)
     except (TypeError, ValueError, AttributeError):
         return 0.0
+
+
+def _core_funding_mpg_aware(cached_strategies) -> bool:
+    """Should the core's funding release skip buys max_positions will refuse?
+
+    False (default) keeps every existing document byte-identical. See
+    `max_positions_admissible_buys` for the measurement (bt 455506: 65 of 91
+    conviction overflows refused on the same tick, $9,081 of SPY gross for
+    -$950 net).
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("core_funding_max_positions_aware", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 def _core_sleeve_satellite_headroom(portfolio, prices, cached_strategies, *, conviction=False):
@@ -14194,9 +14209,67 @@ while not shutdown_requested:
                 _fr_conv_min = _satellite_conviction_min_raw(_cached_strategies)
                 _fr_conv = 0.0
                 _fr_plain = 0.0
+                # 2026-08-07 (bt 455506) SECOND CHURN LEAK — the position cap.
+                #
+                # The 2026-08-03 sweep capped this request at the satellite
+                # headroom so the core would "never sell core to fund a buy that
+                # cannot clear". Correct, but headroom is not the only gate a buy
+                # must clear: MAX_POSITIONS_GATE runs at order emission, far below
+                # this line, and 455506 measured it refusing 65 of the 91
+                # `SATELLITE OVERFLOW` fires on the same tick — 71%, zero of which
+                # filled. Because the release had already been sized off them, the
+                # SPY core saw-toothed 6.13 -> 4.21 -> 5.80 -> 4.64 -> 5.49 -> 4.76
+                # shares: $9,081 of post-initial gross for -1.37 shares of net
+                # change, 8.8x notional per $1 allocated. On the one lane exempt
+                # from the turnover budget, while TURNOVER BUDGET BINDING pinned
+                # the book at 50-51% of a 50% budget and blocked 16 real
+                # candidates.
+                #
+                # So: replay the cap here, in EXECUTION ORDER, and fund only the
+                # buys that will actually emit. `_exec_order` is already built
+                # above (sells first, then buys by intent/allocation/ticker), and
+                # is the exact sequence the submit loop walks — the cap is
+                # consumed first-come, so anything else would fund the wrong name.
+                #
+                # Planned full exits are honoured, which is what keeps a ROTATION
+                # funded: 455506's SNDK entered on a sell-RGEN/buy-SNDK swap and
+                # must stay fundable. Fail-open (see the helper) — starving a
+                # legitimate buy is worse than the churn this removes.
+                #
+                # Default OFF (`core_funding_max_positions_aware`).
+                _fr_admissible = None
+                if _core_funding_mpg_aware(_cached_strategies) and _mpg_cap is not None:
+                    try:
+                        _fr_exits = planned_full_exit_symbols(
+                            _mpg_held, nexus_position_sizes)
+                        _fr_ordered = [
+                            _s for _s in (_exec_order or ())
+                            if str(_s).strip().upper() in {
+                                str(_b).strip().upper()
+                                for _b in (nexus_executable_buys or ())}
+                        ]
+                        _fr_admissible = max_positions_admissible_buys(
+                            _mpg_held, _mpg_cap, _fr_exits, _fr_ordered)
+                        _fr_refused = [
+                            str(_s).strip().upper() for _s in _fr_ordered
+                            if str(_s).strip().upper() not in _fr_admissible]
+                        if _fr_refused:
+                            _log(f"[core] funding pre-pass: max_positions will refuse "
+                                 f"{len(_fr_refused)} of {len(_fr_ordered)} sized buy(s) "
+                                 f"({', '.join(sorted(_fr_refused)[:8])}"
+                                 f"{'...' if len(_fr_refused) > 8 else ''}) — "
+                                 f"not releasing core to fund them", "cyan")
+                    except Exception as _fr_e:
+                        _log(f"[core] funding pre-pass failed "
+                             f"({type(_fr_e).__name__}: {_fr_e}) — funding every sized buy",
+                             "yellow")
+                        _fr_admissible = None
                 for _fr_sym in (nexus_executable_buys or ()):
                     _fr_hint = (nexus_position_sizes or {}).get(_fr_sym) or {}
                     if not isinstance(_fr_hint, dict):
+                        continue
+                    if (_fr_admissible is not None
+                            and str(_fr_sym).strip().upper() not in _fr_admissible):
                         continue
                     _fr_cash = max(0.0, float(_fr_hint.get("buy_cash", 0.0) or 0.0))
                     _fr_is_conv = False
