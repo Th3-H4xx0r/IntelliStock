@@ -169,3 +169,49 @@ def test_contract_ordered_buys_only_held_sell_leg_would_look_admissible():
     """
     held = {"RGEN", "BBB", "CCC", "DDD", "EEE", "FFF"}
     assert "RGEN" in max_positions_admissible_buys(held, 6, {"RGEN"}, ["RGEN", "SNDK"])
+
+
+# ── bt 806490: the over-correction ───────────────────────────────────────────
+#
+# The first pre-pass cut SPY gross churn $9,081 -> $462 and turnover blocks
+# 16 -> 0, then froze the book: insufficient_cash 7 -> 71, ONE core release in
+# the whole run, nothing traded after 01-26, and SNDK's ten signals from $388
+# to $655 all died on ~$16 of cash. Once fully invested, the core release is
+# the book's only cash source.
+
+
+def test_core_legs_must_not_consume_a_slot_in_the_prepass():
+    """The desync that froze bt 806490.
+
+    `_mpg_held` counts the SPY core leg, so the pre-pass read held=6/cap=6 and
+    refused funding while the buy gate read open_pos=5 and would have admitted
+    the name. Excluding the leg locally restores one usable slot.
+    """
+    held_with_leg = {"SPY", "BBB", "CCC", "DDD", "EEE", "FFF"}
+    assert max_positions_admissible_buys(held_with_leg, 6, set(), ["SNDK"]) == set()
+
+    held_alpha = {s for s in held_with_leg if s != "SPY"}
+    assert max_positions_admissible_buys(held_alpha, 6, set(), ["SNDK"]) == {"SNDK"}
+
+
+def test_conviction_name_is_never_starved():
+    """Rule (2): the overflow band exists to fund exactly this name.
+
+    Mirrors the broker's post-filter. Asymmetric downside — funding it costs at
+    most one round trip of core notional; not funding it cost a +166% move.
+    """
+    held = {"AAA", "BBB", "CCC", "DDD", "EEE", "FFF"}
+    sizes = {
+        "SNDK": {"buy_cash": 656.0, "raw_net_score": 1.7},
+        "MEH": {"buy_cash": 200.0, "raw_net_score": 0.4},
+    }
+    conv_min = 1.5
+    admissible = max_positions_admissible_buys(held, 6, set(), list(sizes))
+    assert admissible == set()  # cap refuses both
+
+    for sym, hint in sizes.items():
+        if float(hint.get("raw_net_score", 0.0)) >= conv_min:
+            admissible.add(sym)
+
+    assert "SNDK" in admissible, "the year-maker must always be funded"
+    assert "MEH" not in admissible, "plain-buy churn must still be suppressed"

@@ -14237,19 +14237,63 @@ while not shutdown_requested:
                 # legitimate buy is worse than the churn this removes.
                 #
                 # Default OFF (`core_funding_max_positions_aware`).
+                # 2026-08-07 (bt 806490) — TWO CORRECTIONS, both learned the
+                # expensive way. The first version of this pre-pass cut SPY gross
+                # churn from $9,081 to $462 and turnover blocks from 16 to 0, and
+                # then FROZE THE BOOK: `insufficient_cash` went 7 -> 71, the core
+                # released ONCE in the whole run, and after 01-26 nothing traded
+                # for five weeks. SNDK emitted ten buy signals from $388 to $655
+                # and every one died on cash of ~$16.
+                #
+                # Once the book is fully invested the core release is its ONLY
+                # source of cash, so gating that release on a per-name verdict
+                # from a gate that is almost always closed does not throttle
+                # churn — it switches the strategy off. Hence:
+                #
+                # (1) The core's own legs must not consume a slot HERE. `_mpg_held`
+                #     counts SPY, so at cap=6 the pre-pass read held=6 while the
+                #     buy gate read open_pos=5 and would have admitted the name.
+                #     This is the known four-counter desync — but excluding the
+                #     legs from the PRODUCTION counters is the change that was
+                #     written and reverted (it re-opens the latched bear's per-bar
+                #     refill). This exclusion is local to the funding pre-pass and
+                #     touches none of them.
+                # (2) A conviction name is NEVER starved. It is the one the
+                #     objective exists to catch, the overflow band was built to
+                #     fund, and the downside is asymmetric: the worst case for
+                #     funding it is one round-trip of core notional, and the worst
+                #     case for not funding it is missing a +166% move. Churn from
+                #     PLAIN buys is still suppressed, and that is the bulk of it.
                 _fr_admissible = None
                 if _core_funding_mpg_aware(_cached_strategies) and _mpg_cap is not None:
                     try:
                         _fr_exits = planned_full_exit_symbols(
                             _mpg_held, nexus_position_sizes)
+                        _fr_legs = {
+                            str(_s).strip().upper()
+                            for _s in _residual_sleeve_universe_symbols(_cached_strategies)}
+                        _fr_held_alpha = {
+                            _s for _s in _mpg_held
+                            if str(_s).strip().upper() not in _fr_legs}
+                        _fr_buys_u = {str(_b).strip().upper()
+                                      for _b in (nexus_executable_buys or ())}
                         _fr_ordered = [
                             _s for _s in (_exec_order or ())
-                            if str(_s).strip().upper() in {
-                                str(_b).strip().upper()
-                                for _b in (nexus_executable_buys or ())}
+                            if str(_s).strip().upper() in _fr_buys_u
                         ]
                         _fr_admissible = max_positions_admissible_buys(
-                            _mpg_held, _mpg_cap, _fr_exits, _fr_ordered)
+                            _fr_held_alpha, _mpg_cap, _fr_exits, _fr_ordered)
+                        # A conviction name is always fundable — see (2) above.
+                        if _fr_conv_min > 0:
+                            for _s in _fr_ordered:
+                                _h = (nexus_position_sizes or {}).get(_s) or {}
+                                if not isinstance(_h, dict):
+                                    continue
+                                try:
+                                    if float(_h.get("raw_net_score", 0.0) or 0.0) >= _fr_conv_min:
+                                        _fr_admissible.add(str(_s).strip().upper())
+                                except (TypeError, ValueError):
+                                    continue
                         _fr_refused = [
                             str(_s).strip().upper() for _s in _fr_ordered
                             if str(_s).strip().upper() not in _fr_admissible]
