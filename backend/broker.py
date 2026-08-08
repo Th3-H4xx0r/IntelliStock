@@ -3256,6 +3256,15 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _turnover_cfg_conviction_bypass(cached_strategies) -> bool:
+    """May a high-conviction buy pass a pinned turnover budget? Default False."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("turnover_budget_conviction_bypass_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _core_funding_mpg_aware(cached_strategies) -> bool:
     """Should the core's funding release skip buys max_positions will refuse?
 
@@ -14880,7 +14889,52 @@ while not shutdown_requested:
                             # (BEAR_F6). Blocking the BUY leg of a rotation is
                             # the point: a rotation is 2x notional and is churn
                             # by construction, and its funding SELL still runs.
-                            if _turnover_blocked:
+                            # 2026-08-08 (bt 264179) CONVICTION BYPASS (default OFF).
+                            #
+                            # The budget exists to stop CHURN. It must not stop the
+                            # one trade the book exists to make. Concentrating into
+                            # 14%-of-NAV positions raises turnover mechanically —
+                            # the opening basket alone is ~56% of NAV — so the brake
+                            # was already pinned when the winner showed up:
+                            #
+                            #   V31.2 [CONCENTRATE]: funded 3 of 5 (SNDK@$879, ...)
+                            #   SATELLITE OVERFLOW: SNDK raw=+1.700 >= 1.50
+                            #   TURNOVER BUDGET BLOCK: SNDK skipped — 67% of NAV
+                            #                          traded in 21 sessions
+                            #
+                            # That repeated on 01-12, 01-13 and 01-14 with SNDK
+                            # correctly sized at 14.6% of NAV, and SNDK was finally
+                            # bought on 01-30 at $614.80 for $126 — 96.7% of the way
+                            # through a +166% move, contributing $3.42. Refusing a
+                            # +166% name to save spread is not a cost saving.
+                            #
+                            # Scoped hard: same `raw >= 1.5` cutoff the satellite
+                            # overflow uses (~top decile; doc-193 measured p50 1.000
+                            # / p75 1.300 / p90 1.800). Everything below it is still
+                            # refused, so ordinary rotation churn — which is what the
+                            # 2026-08-03 sweep measured and what the budget was built
+                            # for — remains blocked. Exempting sells or the opening
+                            # basket instead is on the do-not-retry list: it leaves
+                            # 7.1% charged against a 50% budget and the brake never
+                            # binds again.
+                            _tb_conv_min = _satellite_conviction_min_raw(_cached_strategies)
+                            _tb_bypass = False
+                            if (_turnover_blocked and _tb_conv_min > 0
+                                    and bool(_turnover_cfg_conviction_bypass(_cached_strategies))):
+                                try:
+                                    _tb_raw = float((nexus_hint or {}).get("raw_net_score", 0.0) or 0.0)
+                                except (TypeError, ValueError):
+                                    _tb_raw = 0.0
+                                if _tb_raw >= _tb_conv_min:
+                                    _tb_bypass = True
+                                    _log(
+                                        f"TURNOVER BUDGET BYPASS: {symbol} raw={_tb_raw:+.3f} "
+                                        f">= {_tb_conv_min:.2f} — admitting a conviction buy "
+                                        f"through a {_turnover_used * 100.0:.0f}% budget; the "
+                                        f"brake is for churn, not for the trade that matters",
+                                        "green",
+                                    )
+                            if _turnover_blocked and not _tb_bypass:
                                 _log(
                                     f"TURNOVER BUDGET BLOCK: {symbol} skipped — "
                                     f"{_turnover_used * 100.0:.0f}% of NAV traded "

@@ -362,12 +362,24 @@ def _turnover_skip_blocks():
 
     Matched by the `continue` in the body, so the sibling `if _turnover_blocked:`
     that only emits the once-per-tick operator log is not mistaken for a gate.
+
+    2026-08-08: the refusal is now `if _turnover_blocked and not _tb_bypass:`
+    (a conviction buy at raw >= the satellite-overflow cutoff may pass a pinned
+    brake — bt 264179 refused SNDK at 14.6% of NAV three times on a 67% budget
+    and then bought it on 01-30 at 96.7% through its move for $126). Match any
+    test that READS `_turnover_blocked`, so the invariants below keep holding
+    whatever the guard is conjoined with.
     """
+    def _reads_turnover_blocked(test) -> bool:
+        return any(
+            isinstance(sub, ast.Name) and sub.id == "_turnover_blocked"
+            for sub in ast.walk(test)
+        )
+
     return [
         n for n in ast.walk(_TREE)
         if isinstance(n, ast.If)
-        and isinstance(n.test, ast.Name)
-        and n.test.id == "_turnover_blocked"
+        and _reads_turnover_blocked(n.test)
         and any(isinstance(s, ast.Continue) for s in ast.walk(n))
     ]
 
