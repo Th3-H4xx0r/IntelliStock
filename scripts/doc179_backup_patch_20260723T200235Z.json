@@ -1,0 +1,10 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260723T200235Z",
+ "old_values": {
+  "residual_sleeve_bear_require_fresh_pct": 0
+ },
+ "new_values": {
+  "residual_sleeve_bear_require_fresh_pct": 0.5
+ }
+}

@@ -1,0 +1,24 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260801T100232Z",
+ "old_values": {
+  "breadth_scan_batch_per_bar": null,
+  "breadth_scan_admit_per_bar": 3,
+  "breadth_scan_admit_max": 150,
+  "breadth_scan_r20_parabolic_cap_pct": null,
+  "breadth_scan_r60_parabolic_cap_pct": null,
+  "momentum_discovery_max_per_day": 12,
+  "residual_sleeve_bear_min_dwell_days": null,
+  "residual_sleeve_chop_enabled": null
+ },
+ "new_values": {
+  "breadth_scan_batch_per_bar": 250,
+  "breadth_scan_admit_per_bar": 25,
+  "breadth_scan_admit_max": 400,
+  "breadth_scan_r20_parabolic_cap_pct": 200.0,
+  "breadth_scan_r60_parabolic_cap_pct": 400.0,
+  "momentum_discovery_max_per_day": 30,
+  "residual_sleeve_bear_min_dwell_days": 5,
+  "residual_sleeve_chop_enabled": true
+ }
+}

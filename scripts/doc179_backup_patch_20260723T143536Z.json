@@ -1,0 +1,10 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260723T143536Z",
+ "old_values": {
+  "residual_sleeve_bear_hold_through_chop": null
+ },
+ "new_values": {
+  "residual_sleeve_bear_hold_through_chop": true
+ }
+}

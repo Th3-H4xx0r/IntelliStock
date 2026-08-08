@@ -3265,6 +3265,19 @@ def _turnover_cfg_bypass_ceiling(cached_strategies) -> float:
         return 0.0
 
 
+def _max_positions_honour_regime_cap(cached_strategies) -> bool:
+    """May Z4.1's regime cap WIDEN the hard gate? Default False.
+
+    Tightening is always honoured (see the call site); this flag governs only
+    the widening direction, because that is the one that adds risk.
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("max_positions_honour_regime_cap", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _max_positions_excludes_sleeve(cached_strategies) -> bool:
     """Do the index-core legs give up their max_positions slot? Default False.
 
@@ -13186,8 +13199,22 @@ while not shutdown_requested:
             nexus_position_sizes: dict = {}  # sym -> {"buy_cash": float} and/or {"sell_fraction": float}
             nexus_executable_buys = set()
             nexus_action_intents_merged: dict = {}  # P1A: sym -> action_intent (for buy sort)
+            # Z4.1's regime-adjusted position cap, published by the strategy.
+            # None = not published (old build) -> the static config wins, as before.
+            nexus_max_positions = None
             for _spec_r, _scores_r, _reasons_r, *_meta_r in run_once_results:
                 meta = _meta_r[0] if _meta_r else {}
+                _nmp = meta.get("_nexus_max_positions")
+                if _nmp is not None:
+                    try:
+                        _nmp_i = int(_nmp)
+                        # Several specs could publish; take the TIGHTEST so a
+                        # de-risked regime can never be widened by a sibling.
+                        nexus_max_positions = (
+                            _nmp_i if nexus_max_positions is None
+                            else min(nexus_max_positions, _nmp_i))
+                    except (TypeError, ValueError):
+                        pass
                 for d in (meta.get("_nexus_discovered") or []):
                     nexus_discovered_syms.add(d)
                 for s in (meta.get("_nexus_sell_enforcement") or []):
@@ -14133,6 +14160,17 @@ while not shutdown_requested:
             # nexus config / cap can't be resolved the gate stays inert.
             _mpg_cap = None
             _mpg_held: set = set()
+            # 2026-08-08: tell the emulator whether a same-tick funding sell that
+            # is submitted-but-unfilled may count toward buying power. Set every
+            # tick because the strategy config can be reloaded mid-run. Default
+            # False keeps existing runs byte-identical.
+            if portfolio_emulator is not None:
+                try:
+                    portfolio_emulator.credit_pending_sell_proceeds = bool(
+                        (_core_sleeve_cfg_raw(_cached_strategies) or {}).get(
+                            "backtest_credit_pending_sell_proceeds", False))
+                except Exception:
+                    pass
             _mpg_full_exits: set = set()   # names FULLY exited this cycle (sells run first)
             _mpg_new_emitted: set = set()  # NEW names already emitted this cycle
             if portfolio_emulator is not None:
@@ -14141,6 +14179,27 @@ while not shutdown_requested:
                     _mpg_warn = max_positions_arm_warning(_mpg_cap_reason)
                     if _mpg_warn:
                         _log(_mpg_warn, "yellow")
+                    # 2026-08-08 (bt 820236): honour Z4.1's regime-adjusted cap.
+                    #
+                    # The strategy lifts the cap per regime (chop 6->8, bull
+                    # 6->14) and logged it 164 times, while this gate read the
+                    # STATIC cfg["max_positions"]: 2,409 `armed` lines, every one
+                    # cap=6, not one 8 or 14. The book sat at held=6/cap=6 on
+                    # 94.5% of 634 bars and refused 45 sized buys worth $41,453.
+                    #
+                    # Gated so it can only ever be used when the static cap was
+                    # itself resolvable, and TIGHTENING is always honoured while
+                    # widening requires the flag — a de-risked bear cap must
+                    # never need an opt-in to apply.
+                    if _mpg_cap is not None and nexus_max_positions is not None:
+                        _mpg_widen = _max_positions_honour_regime_cap(_cached_strategies)
+                        if nexus_max_positions < _mpg_cap or _mpg_widen:
+                            if nexus_max_positions != _mpg_cap:
+                                _log(f"max_positions: honouring the regime cap "
+                                     f"{_mpg_cap} -> {nexus_max_positions} "
+                                     f"(Z4.1 published it; the static config said "
+                                     f"{_mpg_cap})", "cyan")
+                            _mpg_cap = nexus_max_positions
                     _mpg_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
                     # NOTE (2026-08-07, bt 804832): the index-core legs arguably
                     # should not consume a max_positions slot — with cap=6 the alpha

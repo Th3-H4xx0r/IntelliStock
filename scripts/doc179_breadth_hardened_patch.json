@@ -1,0 +1,5 @@
+{
+  "breadth_scan_admit_max": 20,
+  "breadth_scan_r5_min_pct": 9,
+  "breadth_scan_r20_min_pct": 16
+}

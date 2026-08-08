@@ -1,0 +1,105 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260724T064234Z",
+ "old_values": {
+  "regime_recovery_override_enabled": false,
+  "regime_recovery_ma_bars": null,
+  "regime_recovery_ret5_min_pct": 2,
+  "regime_recovery_off_low_pct": 0.5,
+  "regime_recovery_fast_confirm_enabled": null,
+  "max_positions_recovery": null,
+  "regime_profiles": {
+   "bull": {
+    "deployment_ramp_chop_scale": 0.85,
+    "entry_extension_block_pct": 0,
+    "entry_survives_partial_sell_enabled": true,
+    "momentum_partial_trim_execution_enabled": true,
+    "nexus_monitor_risk_exit_execution_enabled": true,
+    "portfolio_drawdown_halt_enabled": false,
+    "profit_take_tiers": [
+     [
+      70,
+      0.2
+     ],
+     [
+      120,
+      0.25
+     ],
+     [
+      170,
+      0.3
+     ]
+    ],
+    "trailing_stop_activation_pct": 40,
+    "trailing_stop_activation_vol_multiplier": 0,
+    "trailing_stop_pct": 15,
+    "trailing_stop_pnl_scaling_enabled": false,
+    "v32_convert_min_loss_pct": -1
+   }
+  }
+ },
+ "new_values": {
+  "regime_recovery_override_enabled": true,
+  "regime_recovery_ma_bars": 10,
+  "regime_recovery_ret5_min_pct": 1.5,
+  "regime_recovery_off_low_pct": 0.5,
+  "regime_recovery_fast_confirm_enabled": true,
+  "max_positions_recovery": 14,
+  "regime_profiles": {
+   "bull": {
+    "deployment_ramp_chop_scale": 0.85,
+    "entry_extension_block_pct": 0,
+    "entry_survives_partial_sell_enabled": true,
+    "momentum_partial_trim_execution_enabled": true,
+    "nexus_monitor_risk_exit_execution_enabled": true,
+    "portfolio_drawdown_halt_enabled": false,
+    "profit_take_tiers": [
+     [
+      70,
+      0.2
+     ],
+     [
+      120,
+      0.25
+     ],
+     [
+      170,
+      0.3
+     ]
+    ],
+    "trailing_stop_activation_pct": 40,
+    "trailing_stop_activation_vol_multiplier": 0,
+    "trailing_stop_pct": 15,
+    "trailing_stop_pnl_scaling_enabled": false,
+    "v32_convert_min_loss_pct": -1
+   },
+   "recovery": {
+    "deployment_ramp_chop_scale": 0.85,
+    "entry_extension_block_pct": 25,
+    "entry_survives_partial_sell_enabled": true,
+    "momentum_partial_trim_execution_enabled": true,
+    "nexus_monitor_risk_exit_execution_enabled": true,
+    "portfolio_drawdown_halt_enabled": true,
+    "profit_take_tiers": [
+     [
+      70,
+      0.2
+     ],
+     [
+      120,
+      0.25
+     ],
+     [
+      170,
+      0.3
+     ]
+    ],
+    "trailing_stop_activation_pct": 40,
+    "trailing_stop_activation_vol_multiplier": 0,
+    "trailing_stop_pct": 15,
+    "trailing_stop_pnl_scaling_enabled": false,
+    "v32_convert_min_loss_pct": -1
+   }
+  }
+ }
+}

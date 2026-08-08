@@ -1,0 +1,10 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260730T184410Z",
+ "old_values": {
+  "history_scope_salt": null
+ },
+ "new_values": {
+  "history_scope_salt": "iso-2026-07-30-a1"
+ }
+}

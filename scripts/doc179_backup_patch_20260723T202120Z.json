@@ -1,0 +1,10 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260723T202120Z",
+ "old_values": {
+  "circuit_breaker_reentry_blacklist_bars": null
+ },
+ "new_values": {
+  "circuit_breaker_reentry_blacklist_bars": 5
+ }
+}

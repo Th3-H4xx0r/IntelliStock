@@ -284,6 +284,11 @@ class PortfolioEmulator:
         ):
             raise ValueError("settlement_delay must be a nonnegative timedelta")
         self._settled_sell_proceeds_fraction = settled_fraction
+        # Count same-tick SUBMITTED-but-unfilled sells toward buying power.
+        # Default False keeps every existing backtest byte-identical; the broker
+        # sets it from `backtest_credit_pending_sell_proceeds`. See
+        # `pending_sell_proceeds` for the measurement that motivated it.
+        self.credit_pending_sell_proceeds = False
         self._settlement_delay = settlement_delay
         self._unsettled_tranches = []
         self._clock = None
@@ -405,19 +410,73 @@ class PortfolioEmulator:
             return 0.0
         return sum(amount for _settles_at, amount in self._unsettled_tranches)
 
-    def get_buying_power(self, reserved=0.0):
+    def pending_sell_proceeds(self, prices=None):
+        """Expected proceeds of sells already SUBMITTED but not yet filled.
+
+        Execution is next-event: an order submitted while a bar is processed
+        fills at the next quote. The index core submits its funding SPY sell on
+        the SAME tick as the buy it is funding, so the buy is sized against a
+        cash balance that does not yet contain the money raised for it.
+
+        Measured over bt 820236 / 613166 / 725146: 41 cash-bound buy events,
+        $14,801.27 of approved size refused, and $14,084.02 of that (95.2%)
+        was a same-tick core release that had been submitted and not filled.
+        On the canonical bar (725146, 2026-02-05) the core sized the release to
+        the cent — `need = 827.86 - 124.64 = 703.22`, released $703.18 — and the
+        buy still saw `available=$4.64` and skipped. Only the clock was wrong.
+
+        Valued at the LAST TRADED price, never at a hoped-for price, and only
+        for orders the simulator is actually holding.
+        """
+        sim = self._execution_simulator
+        if sim is None:
+            return 0.0
+        marks = dict(getattr(self, "_last_prices", None) or {})
+        if prices:
+            for sym, px in prices.items():
+                try:
+                    if float(px or 0.0) > 0:
+                        marks[str(sym).strip().upper()] = float(px)
+                except (TypeError, ValueError):
+                    continue
+        total = 0.0
+        try:
+            for order in sim.pending_orders:
+                if str(getattr(order, "side", "")).strip().lower() != "sell":
+                    continue
+                sym = str(getattr(order, "symbol", "")).strip().upper()
+                px = float(marks.get(sym, 0.0) or 0.0)
+                qty = float(getattr(order, "quantity", 0.0) or 0.0)
+                if px > 0 and qty > 0:
+                    total += qty * px
+        except Exception:
+            return 0.0
+        return max(0.0, total)
+
+    def get_buying_power(self, reserved=0.0, *, prices=None):
         """Cash that could actually fund a new order right now.
 
         Distinct from `get_cash()` on purpose: unsettled sell proceeds are part
         of the account's cash (and therefore of NAV) but cannot be spent yet.
         Conflating the two is exactly how a backtest recycles capital faster
         than the live account does.
+
+        `credit_pending_sell_proceeds` (default False) additionally counts sells
+        that are SUBMITTED but not yet filled — see `pending_sell_proceeds`. That
+        is not the same loosening: an unsettled tranche is cash the broker has
+        and will not lend against, whereas a pending same-tick sell is an order
+        already in the market whose proceeds this very bar's buy was sized
+        against. The same 0.95 haircut applies, so the credit can never exceed
+        what a partial fill would deliver.
         """
         try:
             reserved = float(reserved or 0.0)
         except (TypeError, ValueError):
             reserved = 0.0
-        return max(0.0, self._cash - self._withheld_cash() - reserved)
+        base = self._cash - self._withheld_cash() - reserved
+        if getattr(self, "credit_pending_sell_proceeds", False):
+            base += self._settled_sell_proceeds_fraction * self.pending_sell_proceeds(prices)
+        return max(0.0, base)
 
     def _withhold_sell_proceeds(self, ticker, proceeds, timestamp):
         """Withhold the unsettled slice of an equity sale until T+1."""
@@ -1417,6 +1476,16 @@ class PortfolioEmulator:
                 )
                 # Buying power, not raw cash: in-flight buy reservations AND
                 # the unsettled slice of recent sales are both off the table.
+                #
+                # This clamp is why crediting the release at the BROKER gate
+                # alone was inert — the gate said PASS and the emulator cut the
+                # order anyway (bt 613166 02-05: gate $805.24 -> fill $87.45).
+                # `get_buying_power` now carries the pending-sell credit, so
+                # both ends agree.
+                # No `prices` here — execute_signal only carries the BUY
+                # symbol's price, and the pending sell is a different symbol
+                # (the SPY core leg). `pending_sell_proceeds` falls back to
+                # `_last_prices`, which is marked for every held symbol.
                 amount_to_use = min(
                     cash_per_trade,
                     self.get_buying_power(reserved_cash),

@@ -1,0 +1,27 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260724T152137Z",
+ "old_values": {
+  "breadth_scan_enabled": null,
+  "breadth_scan_regimes": null,
+  "breadth_scan_universe_size": null,
+  "breadth_scan_admit_per_bar": null,
+  "breadth_scan_admit_max": null,
+  "breadth_scan_min_mcap": null,
+  "breadth_scan_r5_min_pct": null,
+  "breadth_scan_r20_min_pct": null
+ },
+ "new_values": {
+  "breadth_scan_enabled": true,
+  "breadth_scan_regimes": [
+   "bull",
+   "chop"
+  ],
+  "breadth_scan_universe_size": 500,
+  "breadth_scan_admit_per_bar": 3,
+  "breadth_scan_admit_max": 150,
+  "breadth_scan_min_mcap": 2000000000,
+  "breadth_scan_r5_min_pct": 7,
+  "breadth_scan_r20_min_pct": 12
+ }
+}

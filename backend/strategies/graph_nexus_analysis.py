@@ -13896,7 +13896,26 @@ def _discover_stocks_from_momentum(
                     continue
                 latest = closes[-1]
                 r20 = ((latest - closes[-21]) / closes[-21] * 100.0) if len(closes) > 21 and closes[-21] > 0 else 0.0
-                r60 = ((latest - closes[-61]) / closes[-61] * 100.0) if len(closes) > 61 and closes[-61] > 0 else 0.0
+                # 2026-08-08: a 60d return we cannot compute is MISSING, not 0.0.
+                # With too few closes this silently returned 0.0 and the name
+                # ranked as if it had gone nowhere. bt 718249/613166/725146 each
+                # had a poisoned shared bar cache (54 closes at 2026-01-01 vs
+                # 90) and 12-14 of their 15 bar-1 momentum discoveries carried a
+                # fabricated r60 == +0.0%. WDC entered bt 820236 ONLY on the 60d
+                # axis (20d +7.7% was below the 10% floor, 60d +37.5%) and paid
+                # +$450.49 = 61% of that run's entire P&L; in the poisoned runs
+                # it was never discovered.
+                #
+                # -inf sorts last under the 60d key and can never clear min_60d,
+                # so a missing value is excluded rather than flattered. Default
+                # keeps the old 0.0 so this is opt-in with the ranking change.
+                _r60_ok = len(closes) > 61 and closes[-61] > 0
+                if _r60_ok:
+                    r60 = (latest - closes[-61]) / closes[-61] * 100.0
+                elif bool(config.get("momentum_missing_60d_excluded", False)):
+                    r60 = float("-inf")
+                else:
+                    r60 = 0.0
                 if r20 >= min_20d or r60 >= min_60d:
                     # Z1.1: skip parabolic candidates
                     if (max_20d > 0 and r20 > max_20d) or (max_60d > 0 and r60 > max_60d):
@@ -13917,7 +13936,25 @@ def _discover_stocks_from_momentum(
 
     # Sort by strongest momentum first; ticker ASC tiebreak for full determinism
     # (P1B widens the window where ties matter via the overflow budget).
-    candidates.sort(key=lambda x: (-max(x[1], x[2]), -x[1], -x[2], x[0]))
+    #
+    # 2026-08-08: the sort key is the thing with no edge. Measured over 362
+    # discovered names across bt 820236 + bt 613166, with forward returns taken
+    # from the runs' own decision-loop prices:
+    #
+    #     IC(60d)          = +0.201   p = 0.00012
+    #     IC(20d)          = -0.127   p = 0.016     (negative in 8/8 slices)
+    #     IC(max(20d,60d)) = -0.003   p = 0.96      <-- the key used here
+    #
+    # max() lets the negative-IC 20d axis decide the order whenever it is the
+    # larger number, which is exactly when the name has just run. A 60d-first
+    # key beat it 6/6 at K=12/20/30: top-12 by day went +19.02% -> +24.19% on
+    # 820236 and -0.16% -> +6.44% on 613166, changing only 2 of 12 names.
+    #
+    # Default keeps the old key so this is opt-in per document.
+    if bool(config.get("momentum_rank_on_60d", False)):
+        candidates.sort(key=lambda x: (-x[2], -x[1], x[0]))
+    else:
+        candidates.sort(key=lambda x: (-max(x[1], x[2]), -x[1], -x[2], x[0]))
 
     newly_discovered = []
     for ticker, r20, r60 in candidates:
@@ -31904,18 +31941,13 @@ class GraphNexusAnalysis:
                 # Under concentration an unpriceable name costs a whole 12%
                 # position, so defer it to the queue instead — it is priced and
                 # re-offered next bar. But if NOTHING resolves a price the
-                # plumbing simply is not up yet, and deferring everything would
-                # refuse to open the book at all; in that case fall back to
-                # funding by conviction and let the broker gate decide.
-                _conc_any_priced = False
+                # plumbing simply is not up yet. An unpriceable candidate is
+                # therefore FUNDED, not deferred — see the narrowing note below.
                 _conc_price_of: dict = {}
                 for _cc_score, _cc_cash, _cc_sym, _cc_hint in _conc_cands:
-                    _cc_p = _resolve_symbol_price(
+                    _conc_price_of[_cc_sym] = _resolve_symbol_price(
                         _cc_sym, prices, data if isinstance(data, dict) else None,
                         portfolio_emulator=portfolio_emulator) or 0.0
-                    _conc_price_of[_cc_sym] = _cc_p
-                    if _cc_p > 0:
-                        _conc_any_priced = True
                 for _cc_score, _cc_cash, _cc_sym, _cc_hint in _conc_cands:
                     # Never spend the budget on a name the broker will refuse.
                     # bt 865585: RIG took a full $720 slot (12% of NAV) and was
@@ -31930,11 +31962,19 @@ class GraphNexusAnalysis:
                     # cannot clear. `_rotation_incoming_executable` is the
                     # existing pre-validator for exactly this and is documented
                     # never to be laxer than the broker gate.
+                    # 2026-08-08 (bt 725146) NARROWED. This used to defer any
+                    # candidate we could not price, to stop bt 865585's RIG
+                    # taking a $720 slot it could never fill. It cost far more
+                    # than it saved: SNDK was the MOST-deferred name in 725146,
+                    # skipped 4 times as "price unresolved" — a freshly promoted
+                    # propagation name has no bar at allocation time, which is
+                    # exactly the profile of a new breakout.
+                    #
+                    # Refuse only what we can positively show is unbuyable. An
+                    # unknown price now funds the slot and lets the broker's own
+                    # floor decide. The occasional wasted slot costs one
+                    # position; deferring the winner costs the year.
                     _cc_price = _conc_price_of.get(_cc_sym, 0.0)
-                    if _cc_price <= 0 and _conc_any_priced:
-                        _conc_skipped.append(f"{_cc_sym}(price unresolved)")
-                        _conc_dropped.append(_cc_sym)
-                        continue
                     _cc_ok, _cc_why = _rotation_incoming_executable(
                         _cc_sym, _cc_price, config,
                         asset_class=str(_cc_hint.get("asset_class") or "stock"))
@@ -32283,6 +32323,19 @@ class GraphNexusAnalysis:
         nexus_position_sizes["_momentum_partial_trim_execution_enabled"] = bool(config.get("momentum_partial_trim_execution_enabled", False))
         scores["_nexus_position_sizes"] = nexus_position_sizes
         scores["_nexus_executable_buys"] = _nexus_executable_buys
+        # 2026-08-08 (bt 820236): publish the REGIME-ADJUSTED position cap.
+        #
+        # Z4.1 lifts the cap (chop 6->8, bull 6->14) and logs it 164 times, but
+        # `_max_positions` is a local here and `resolve_max_positions_cap` reads
+        # the STATIC cfg["max_positions"] (nexus_broker_utils.py:148-152). Every
+        # one of 2,409 `max_positions gate armed` lines read cap=6; not one read
+        # 8 or 14, and the book sat at held=6/cap=6 on 94.5% of 634 bars. The
+        # gate refused 45 sized buys worth $41,453 in bt 820236 alone.
+        #
+        # This is NOT "raise max_positions" (on the do-not-retry list) — it is
+        # the strategy's OWN per-regime intent, already computed and already
+        # logged, finally reaching the gate that enforces it.
+        scores["_nexus_max_positions"] = int(_max_positions)
         scores["_nexus_action_intents"] = action_intents
         scores["_nexus_active_events"] = [dict(ev) for ev in active_events[:20]]
         # Pass only final live propagation-expansion buys to broker, not names demoted to queue/hold.

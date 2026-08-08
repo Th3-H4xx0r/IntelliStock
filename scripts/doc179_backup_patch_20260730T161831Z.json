@@ -1,0 +1,132 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260730T161831Z",
+ "old_values": {
+  "regime_profiles": {
+   "bull": {
+    "deployment_ramp_chop_scale": 0.85,
+    "entry_extension_block_pct": 0,
+    "entry_survives_partial_sell_enabled": true,
+    "momentum_breakout_max_nav_pct": 0.1,
+    "momentum_partial_trim_execution_enabled": true,
+    "nexus_monitor_risk_exit_execution_enabled": true,
+    "portfolio_drawdown_halt_enabled": false,
+    "profit_take_tiers": [
+     [
+      70,
+      0.2
+     ],
+     [
+      120,
+      0.25
+     ],
+     [
+      170,
+      0.3
+     ]
+    ],
+    "trailing_stop_activation_pct": 40,
+    "trailing_stop_activation_vol_multiplier": 0,
+    "trailing_stop_pct": 15,
+    "trailing_stop_pnl_scaling_enabled": false,
+    "v32_convert_min_loss_pct": -1
+   },
+   "recovery": {
+    "deployment_ramp_chop_scale": 0.85,
+    "entry_extension_block_pct": 0,
+    "entry_survives_partial_sell_enabled": true,
+    "momentum_partial_trim_execution_enabled": true,
+    "nexus_monitor_risk_exit_execution_enabled": true,
+    "portfolio_drawdown_halt_enabled": false,
+    "profit_take_tiers": [
+     [
+      70,
+      0.2
+     ],
+     [
+      120,
+      0.25
+     ],
+     [
+      170,
+      0.3
+     ]
+    ],
+    "trailing_stop_activation_pct": 40,
+    "trailing_stop_activation_vol_multiplier": 0,
+    "trailing_stop_pct": 15,
+    "trailing_stop_pnl_scaling_enabled": false,
+    "v32_convert_min_loss_pct": -1
+   }
+  },
+  "deployment_ramp_chop_scale": 0.6,
+  "regime_upgrade_confirm_bars": 3,
+  "max_positions_chop": 8,
+  "regime_rally_onset_enabled": null
+ },
+ "new_values": {
+  "regime_profiles": {
+   "bull": {
+    "deployment_ramp_chop_scale": 0.85,
+    "entry_extension_block_pct": 0,
+    "entry_survives_partial_sell_enabled": true,
+    "momentum_breakout_max_nav_pct": 0.1,
+    "momentum_partial_trim_execution_enabled": true,
+    "nexus_monitor_risk_exit_execution_enabled": true,
+    "portfolio_drawdown_halt_enabled": false,
+    "profit_take_tiers": [
+     [
+      70,
+      0.2
+     ],
+     [
+      120,
+      0.25
+     ],
+     [
+      170,
+      0.3
+     ]
+    ],
+    "trailing_stop_activation_pct": 40,
+    "trailing_stop_activation_vol_multiplier": 0,
+    "trailing_stop_pct": 15,
+    "trailing_stop_pnl_scaling_enabled": false,
+    "v32_convert_min_loss_pct": -1,
+    "circuit_breaker_regime_adjustment_semantics_v2": true,
+    "fast_loser_cut_pct": -18
+   },
+   "recovery": {
+    "deployment_ramp_chop_scale": 0.85,
+    "entry_extension_block_pct": 0,
+    "entry_survives_partial_sell_enabled": true,
+    "momentum_partial_trim_execution_enabled": true,
+    "nexus_monitor_risk_exit_execution_enabled": true,
+    "portfolio_drawdown_halt_enabled": false,
+    "profit_take_tiers": [
+     [
+      70,
+      0.2
+     ],
+     [
+      120,
+      0.25
+     ],
+     [
+      170,
+      0.3
+     ]
+    ],
+    "trailing_stop_activation_pct": 40,
+    "trailing_stop_activation_vol_multiplier": 0,
+    "trailing_stop_pct": 15,
+    "trailing_stop_pnl_scaling_enabled": false,
+    "v32_convert_min_loss_pct": -1
+   }
+  },
+  "deployment_ramp_chop_scale": 0.85,
+  "regime_upgrade_confirm_bars": 2,
+  "max_positions_chop": 10,
+  "regime_rally_onset_enabled": true
+ }
+}

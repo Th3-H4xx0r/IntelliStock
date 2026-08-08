@@ -1,0 +1,22 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260801T205053Z",
+ "old_values": {
+  "residual_sleeve_symbol": "SPY",
+  "residual_sleeve_chop_enabled": null,
+  "residual_sleeve_release_cash_pct": 0.15,
+  "residual_sleeve_buffer_pct": 0.02,
+  "residual_sleeve_min_deploy_pct": 0.05,
+  "residual_sleeve_min_park_hours": 24,
+  "residual_sleeve_bear_min_dwell_days": null
+ },
+ "new_values": {
+  "residual_sleeve_symbol": "QQQ",
+  "residual_sleeve_chop_enabled": true,
+  "residual_sleeve_release_cash_pct": 0.03,
+  "residual_sleeve_buffer_pct": 0.01,
+  "residual_sleeve_min_deploy_pct": 0.01,
+  "residual_sleeve_min_park_hours": 1.0,
+  "residual_sleeve_bear_min_dwell_days": 5
+ }
+}

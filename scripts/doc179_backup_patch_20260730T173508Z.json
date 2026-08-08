@@ -1,0 +1,14 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260730T173508Z",
+ "old_values": {
+  "max_positions_bull": 14,
+  "max_positions_recovery": 14,
+  "slot_min_notional_pct": 1.5
+ },
+ "new_values": {
+  "max_positions_bull": 8,
+  "max_positions_recovery": 8,
+  "slot_min_notional_pct": 7.0
+ }
+}

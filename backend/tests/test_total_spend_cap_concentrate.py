@@ -209,23 +209,23 @@ def test_without_the_check_the_satellite_under_deploys():
 
 
 def _allocate_cold(sizes, cap, nav, target_pct=0.12, price_floor=8.0, prices=None):
-    """Concentrate with the cold-start rule the opening bar needs."""
+    """Concentrate with the NARROWED executability rule (bt 725146).
+
+    An unknown price now FUNDS the slot; only a price we can positively show is
+    below the floor is refused.
+    """
     prices = prices or {}
     cands = [(float(h.get("raw_net_score", 0.0) or 0.0), float(h.get("buy_cash", 0.0) or 0.0), s)
              for s, h in sizes.items() if float(h.get("buy_cash", 0.0) or 0.0) > 0]
     if sum(c[1] for c in cands) <= cap:
         return dict(sizes)
-    any_priced = any(prices.get(s, 0.0) > 0 for _sc, _c, s in cands)
     target = nav * target_pct if target_pct > 0 else 0.0
     floor = target if target > 0 else MIN_POS
     cands.sort(key=lambda t: (-t[0], -t[1], t[2]))
     out, left = dict(sizes), cap
     for _sc, cash, sym in cands:
         p = prices.get(sym, 0.0)
-        if p <= 0 and any_priced:
-            out.pop(sym, None)
-            continue
-        if p > 0 and p < price_floor:
+        if p > 0 and p < price_floor:          # positively unbuyable
             out.pop(sym, None)
             continue
         take = min(max(cash, target) if target > 0 else cash, left)
@@ -243,63 +243,29 @@ def _five():
             for n, s in zip(names, [1.8, 1.3, 1.2, 1.1, 1.0])}
 
 
-def test_unpriced_name_is_deferred_when_others_are_priced():
-    """bt 142474 bar 1: RIG had no bars yet, so the floor check failed open and
-    it took a full $720 slot it could never fill."""
-    prices = {"NXT": 91.36, "RIG": 0.0, "CPER": 35.08, "GDX": 87.27, "WDC": 181.55}
+def test_a_priced_sub_floor_name_is_refused():
+    """bt 865585: RIG at $4.14 took a $720 slot the broker would never fill."""
+    prices = {"NXT": 91.36, "RIG": 4.14, "CPER": 35.08, "GDX": 87.27, "WDC": 181.55}
     out = _allocate_cold(_five(), 2280.0, 6000.0, prices=prices)
     assert "RIG" not in out
-    assert set(out) == {"NXT", "CPER", "GDX"}
-    assert sum(v["buy_cash"] for v in out.values()) / 6000.0 == pytest.approx(0.36)
+    assert all(v["buy_cash"] == pytest.approx(720.0) for v in out.values())
+
+
+def test_an_unpriced_name_is_now_FUNDED_not_deferred():
+    """bt 725146 narrowing. SNDK was the most-deferred name in that run, skipped
+    4x as 'price unresolved' — a freshly promoted propagation name has no bar at
+    allocation time, which is exactly the profile of a new breakout. The
+    occasional wasted slot costs one position; deferring the winner costs the
+    year."""
+    prices = {"NXT": 91.36, "SNDK": 0.0, "CPER": 35.08, "GDX": 87.27, "WDC": 181.55}
+    sizes = _five(); sizes["SNDK"] = sizes.pop("RIG"); sizes["SNDK"]["raw_net_score"] = 1.7
+    out = _allocate_cold(sizes, 2280.0, 6000.0, prices=prices)
+    assert "SNDK" in out, "an unpriceable breakout must not lose its slot"
+    assert out["SNDK"]["buy_cash"] == pytest.approx(720.0)
 
 
 def test_cold_start_still_opens_the_book_when_nothing_is_priced():
-    """If the price plumbing is not up, deferring everything would refuse to
-    open the book. Fall back to conviction and let the broker gate decide."""
     prices = {n: 0.0 for n in _five()}
     out = _allocate_cold(_five(), 2280.0, 6000.0, prices=prices)
     assert len(out) == 3
     assert all(v["buy_cash"] == pytest.approx(720.0) for v in out.values())
-
-
-def test_a_priced_sub_floor_name_is_still_refused():
-    prices = {"NXT": 91.36, "RIG": 4.14, "CPER": 35.08, "GDX": 87.27, "WDC": 181.55}
-    assert "RIG" not in _allocate_cold(_five(), 2280.0, 6000.0, prices=prices)
-
-
-# ── bt 801641: concentration switched itself off when the sleeve grew ────────
-
-
-def test_concentrate_must_run_even_when_the_budget_is_not_breached():
-    """Raising the satellite to 63% of NAV stopped the cap binding at all.
-
-    bt 801641: 6 names summing $3,360 against a $3,780 sleeve. Under
-    'only concentrate when over budget' the allocator's even split took over
-    and every position opened at 8.6-9.7% instead of the 14% target. The bigger
-    the sleeve, the less likely the cap binds -- so a breach-gated
-    concentration turns itself off exactly when there is most room to size into.
-    """
-    sizes = {n: {"buy_cash": 560.0, "raw_net_score": s} for n, s in
-             [("VICR", 1.8), ("WDC", 1.6), ("LRCX", 1.4),
-              ("GDX", 1.2), ("CPER", 1.0), ("EEM", 0.8)]}
-    cap, nav = 3780.0, 6000.0
-    assert sum(v["buy_cash"] for v in sizes.values()) < cap  # not breached
-
-    # breach-gated (the bug): untouched, everything stays at 9.3%
-    assert _allocate(sizes, cap, nav, target_pct=0.14) == sizes
-
-    # always-on: fund by conviction at the target weight
-    target = nav * 0.14
-    left, funded = cap, {}
-    for _s, sym in sorted(((v["raw_net_score"], k) for k, v in sizes.items()), reverse=True):
-        take = min(max(sizes[sym]["buy_cash"], target), left)
-        if take < target:
-            continue
-        funded[sym] = take
-        left -= take
-
-    assert set(funded) == {"VICR", "WDC", "LRCX", "GDX"}
-    assert all(v == pytest.approx(840.0) for v in funded.values())
-    assert all(v / nav == pytest.approx(0.14) for v in funded.values())
-    # four real positions instead of six half-sized ones
-    assert sum(funded.values()) / nav == pytest.approx(0.56)

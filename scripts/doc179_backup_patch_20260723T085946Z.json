@@ -1,0 +1,22 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260723T085946Z",
+ "old_values": {
+  "residual_sleeve_bear_alloc_scale_enabled": null,
+  "residual_sleeve_bear_alloc_max_pct": null,
+  "residual_sleeve_bear_scale_start_pct": null,
+  "residual_sleeve_bear_scale_slope": null,
+  "residual_sleeve_bear_scale_min_days": null,
+  "residual_sleeve_bear_scale_ret5_floor_pct": null,
+  "residual_sleeve_release_cash_pct_deep": null
+ },
+ "new_values": {
+  "residual_sleeve_bear_alloc_scale_enabled": true,
+  "residual_sleeve_bear_alloc_max_pct": 0.7,
+  "residual_sleeve_bear_scale_start_pct": 4.0,
+  "residual_sleeve_bear_scale_slope": 0.1,
+  "residual_sleeve_bear_scale_min_days": 3,
+  "residual_sleeve_bear_scale_ret5_floor_pct": 0.5,
+  "residual_sleeve_release_cash_pct_deep": 0.05
+ }
+}

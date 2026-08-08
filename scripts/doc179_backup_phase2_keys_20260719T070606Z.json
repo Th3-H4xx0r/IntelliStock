@@ -1,0 +1,26 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260719T070606Z",
+ "old_values": {
+  "quality_filter_missing_metadata_policy": "warn",
+  "entry_extension_block_pct": null,
+  "entry_extension_lookback_bars": null,
+  "fast_loser_cut_min_hold_days": null,
+  "residual_sleeve_enabled": null,
+  "residual_sleeve_symbol": null,
+  "residual_sleeve_buffer_pct": null,
+  "residual_sleeve_min_deploy_pct": null,
+  "residual_sleeve_release_cash_pct": null
+ },
+ "new_values": {
+  "quality_filter_missing_metadata_policy": "block",
+  "entry_extension_block_pct": 25.0,
+  "entry_extension_lookback_bars": 20,
+  "fast_loser_cut_min_hold_days": 2,
+  "residual_sleeve_enabled": true,
+  "residual_sleeve_symbol": "SPY",
+  "residual_sleeve_buffer_pct": 0.02,
+  "residual_sleeve_min_deploy_pct": 0.05,
+  "residual_sleeve_release_cash_pct": 0.15
+ }
+}

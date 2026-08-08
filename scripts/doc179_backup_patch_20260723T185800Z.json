@@ -1,0 +1,12 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260723T185800Z",
+ "old_values": {
+  "residual_sleeve_bear_leg_trail_activation_pct": null,
+  "residual_sleeve_bear_leg_trail_pct": null
+ },
+ "new_values": {
+  "residual_sleeve_bear_leg_trail_activation_pct": 10.0,
+  "residual_sleeve_bear_leg_trail_pct": 10.0
+ }
+}

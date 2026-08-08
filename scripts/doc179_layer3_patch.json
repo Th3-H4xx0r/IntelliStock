@@ -1,0 +1,15 @@
+{
+ "core_sleeve_enabled": true,
+ "core_target_pct": 0.6,
+ "core_rebalance_band_pct": 0.05,
+ "core_rebalance_min_days": 5,
+ "core_bear_max_step_pct": 0.15,
+ "turnover_budget_monthly_pct": 0.5,
+ "rank_band_enabled": true,
+ "rank_band_entry_pct": 10.0,
+ "rank_band_exit_pct": 50.0,
+ "profit_take_disabled": true,
+ "trailing_stop_disabled": true,
+ "catastrophic_stop_enabled": true,
+ "catastrophic_stop_pct": -20.0
+}

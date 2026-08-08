@@ -1,0 +1,10 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260724T140526Z",
+ "old_values": {
+  "momentum_watchlist_track_extension_blocked": null
+ },
+ "new_values": {
+  "momentum_watchlist_track_extension_blocked": true
+ }
+}

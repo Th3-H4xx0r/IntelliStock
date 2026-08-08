@@ -1,0 +1,12 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260724T123621Z",
+ "old_values": {
+  "momentum_watchlist_track_extension_blocked": null,
+  "overlay_bars_min_history_bars": null
+ },
+ "new_values": {
+  "momentum_watchlist_track_extension_blocked": true,
+  "overlay_bars_min_history_bars": 252
+ }
+}

@@ -1,0 +1,22 @@
+{
+ "doc_id": 179,
+ "applied_at": "20260719T070025Z",
+ "old_values": {
+  "fast_loser_cut_recent_runup_block_pct": 40,
+  "max_positions": 8,
+  "max_positions_bull": null,
+  "max_positions_chop": null,
+  "max_positions_bear": null,
+  "etf_portfolio_pct": 0.05,
+  "deployment_bar1_cap_pct": 0.8
+ },
+ "new_values": {
+  "fast_loser_cut_recent_runup_block_pct": 20.0,
+  "max_positions": 14,
+  "max_positions_bull": 14,
+  "max_positions_chop": 8,
+  "max_positions_bear": 8,
+  "etf_portfolio_pct": 0.15,
+  "deployment_bar1_cap_pct": 0.9
+ }
+}

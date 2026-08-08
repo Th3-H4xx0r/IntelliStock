@@ -91,6 +91,23 @@ def make_key(
     return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
 
 
+def _is_skeleton(obj: Any) -> bool:
+    """Mirror llm_utils' skeleton test. Imported lazily because this module is
+    loaded by the harness launcher before backend/ is necessarily on sys.path;
+    if it can't be reached, treat nothing as skeleton (today's behavior)."""
+    try:
+        from llm_utils import _is_skeleton_structured_output
+    except Exception:
+        try:
+            from backend.llm_utils import _is_skeleton_structured_output
+        except Exception:
+            return False
+    try:
+        return bool(_is_skeleton_structured_output(obj))
+    except Exception:
+        return False
+
+
 def _path_for(d: str, key: str) -> str:
     return os.path.join(d, key[:2], key + ".json")
 
@@ -137,10 +154,16 @@ def wrap_structured(orig: Callable, force_provider=None, force_model=None) -> Ca
     via [ModelResolver], bypassing _resolve_role_llm_config). The cache key uses
     the rewritten (claude) identity so re-runs replay consistently.
     """
+    force_effort = (os.environ.get("HARNESS_FORCE_LLM_EFFORT") or "").strip() or None
+
     def wrapped(provider, api_key, model, prompt, output_type, **kw):
         if force_provider:
             provider = force_provider
             model = force_model or model
+        if force_effort:
+            pc = dict(kw.get("provider_config") or {})
+            pc["reasoning_effort"] = force_effort
+            kw["provider_config"] = pc
         if cache_dir() is None or output_type is None:
             return orig(provider, api_key, model, prompt, output_type, **kw)
         key = None
@@ -151,8 +174,18 @@ def wrap_structured(orig: Callable, force_provider=None, force_model=None) -> Ca
             if hit is not None and "response" in hit:
                 try:
                     obj = output_type.model_validate(hit["response"])
-                    _bump("struct_hit")
-                    return obj
+                    # A cache must be a pure speedup: a HIT has to return
+                    # exactly what a MISS would have returned. The live path
+                    # rejects skeleton output (an all-defaults object carrying
+                    # no model opinion) and retries; the three RethinkDB
+                    # cache-hit branches in llm_utils mirror that check, and so
+                    # must this one, or whether a harness run gets a real
+                    # opinion or a neutral default depends on cache warmth.
+                    if _is_skeleton(obj):
+                        obj = None
+                    if obj is not None:
+                        _bump("struct_hit")
+                        return obj
                 except Exception:
                     _bump("error")  # stale/incompatible cached shape → fall through
         except Exception:
