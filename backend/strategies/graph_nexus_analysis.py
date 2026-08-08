@@ -22973,9 +22973,52 @@ def _apply_rank_band_gate(
 
     blocked_buys: list[str] = []
     held_sells: list[str] = []
+    # 2026-08-08 MOMENTUM EXEMPTION (default OFF), bt 820236.
+    #
+    # This band ranks on `_rotation_effective_score` — the news/graph/ML blend.
+    # The docstring above already exempts ETFs and sleeve legs for exactly the
+    # right reason: "their conviction is trend strength and regime, not the
+    # news/graph/ML blend, so their raw_net_score is structurally near zero;
+    # ranking them against stocks would not tighten the ETF sleeve, it would
+    # silently switch it off."
+    #
+    # A momentum breakout is the same case, and the run shows the same
+    # consequence. bt 820236 refused 2,833 buy signals through this band, and
+    # the names it refused are the ones the objective is built to catch:
+    #
+    #   VICR  discovered 20d=+20.4%  60d=+119.6%  -> rank-band blocked x6, never bought
+    #   AAOI  discovered                          -> rank-band blocked x3, never bought
+    #   AMAT  discovered                          -> rank-band blocked x9, never bought
+    #   LASR  discovered 20d=+21.5%  60d= +40.9%  -> never bought
+    #
+    # against the two names that were bought and carried the run:
+    #
+    #   WDC   discovered 20d= +7.7%  60d= +37.5%  -> +$450.49
+    #   LRCX  discovered 20d=+15.8%  60d= +31.9%  -> +$238.22
+    #
+    # VICR was three times the 60-day mover WDC was, and could not enter,
+    # because a name can lead the market on price and still sit mid-pack on a
+    # news/graph ranking. Cost control that selects on the wrong axis does not
+    # buy cheaper winners, it buys different ones.
+    #
+    # Scoped to the ENTRY band only — the exit band, the hold band and every
+    # protective exit are untouched, so the buy/hold spread this implements
+    # still governs when a position LEAVES. Keyed on the momentum watchlist
+    # score, which is the ranking the momentum lane itself uses.
+    _rb_mom_min = float(config.get("rank_band_momentum_exempt_min_score", 0.0) or 0.0)
+    _rb_mom_exempt: list[str] = []
+
     for rank, (blended, sym) in enumerate(ranked, start=1):
         sc = scores[sym]
         score = int(sc.get("score", 0) or 0)
+        if score == 1 and rank > entry_cut and _rb_mom_min > 0:
+            try:
+                _rb_mom = float(sc.get("momentum_watchlist_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                _rb_mom = 0.0
+            if _rb_mom >= _rb_mom_min:
+                _rb_mom_exempt.append(f"{sym}({_rb_mom:.2f})")
+                continue
         if score == 1 and rank > entry_cut:
             sc["score"] = 0
             sc["action_intent"] = "hold"
@@ -22997,6 +23040,15 @@ def _apply_rank_band_gate(
             )[:1500]
             held_sells.append(sym)
 
+    if _rb_mom_exempt:
+        _log(
+            f"Rank band: {len(_rb_mom_exempt)} momentum name(s) exempt from the "
+            f"entry band (score >= {_rb_mom_min:.2f}) "
+            f"[{', '.join(_rb_mom_exempt[:8])}"
+            f"{'...' if len(_rb_mom_exempt) > 8 else ''}] — this band ranks on the "
+            f"news/graph blend, which is not why a breakout is a buy",
+            "green",
+        )
     if blocked_buys or held_sells:
         _log(
             f"Rank band (entry<=#{entry_cut}, exit>#{exit_cut} of {len(ranked)}): "
