@@ -57,7 +57,21 @@ DB_NAME = "IntelliStock"
 REPO = Path(__file__).resolve().parent.parent
 
 # Mutable per-run state: this is what makes current_events differ.
-CLEAR_TABLES = ("GraphNexusActiveEvents", "GraphNexusActiveEventHistory")
+#
+# NexusStrategyCache carries `turnover_ledger` (broker.py:2985) and it is
+# INHERITED between runs. Measured at tick 1, before a single decision:
+#     820236 70%   613166 56%   718249 72%   725146 72%
+# of a 50%/month budget — four different values on the same window and cash, so
+# the budget was already binding before either arm traded. The 31-day backstop
+# (broker.py:3114) does not age out buckets a previous run wrote against the
+# same 2026-01 session dates. Any A/B that inherits different ledgers is
+# measuring the ledger. It also carries the momentum-held map, the backfill
+# queue and the position-entry clocks, all of which drift the same way.
+CLEAR_TABLES = (
+    "GraphNexusActiveEvents",
+    "GraphNexusActiveEventHistory",
+    "NexusStrategyCache",
+)
 # The cache we are trying to HIT. Never cleared here.
 KEEP_TABLES = ("GraphNexusActiveEventMaintenance",)
 
