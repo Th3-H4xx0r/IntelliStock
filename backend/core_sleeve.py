@@ -248,7 +248,35 @@ def satellite_design_share(config, *, regime=None) -> float:
             target = max(_f({"v": t}, "v", 0.60) for t in targets)
     core_tgt = _f({"v": target}, "v", 0.60)
     cash_fl = _f(cfg, "cash_reserve_floor_pct", 0.02)
-    return max(0.05, min(0.95, 1.0 - core_tgt - cash_fl))
+    design = max(0.05, min(0.95, 1.0 - core_tgt - cash_fl))
+    # 2026-08-08 CONVICTION RESERVE (default 0.0 = off), bt 613166.
+    #
+    # The book commits its whole risk budget on day one to whatever happens to
+    # be available then, and cannot make room for a better name that shows up
+    # later. bt 613166 opened NVDA/HESM/NTR at 14% each, and when SNDK arrived
+    # on 02-05 at raw=+1.705 the allocator sized it correctly at $872 and the
+    # sleeve had nothing left to give it:
+    #
+    #   SATELLITE OVERFLOW: SNDK raw=+1.705 >= 1.50 —
+    #                       funding $168 of room out of the core (floor-bounded)
+    #   Buy gate: cash=$150.12 -> FILL $87.45 = 1.5% of NAV
+    #
+    # The conviction band is only (max_share - design_share) wide — 10 points on
+    # the current config — so once plain buys have taken the design share there
+    # is no room for the name the band exists to fund.
+    #
+    # Withholding a slice of the DESIGN share from plain buys widens that band
+    # without touching the core's target or its floor: the core still aims at
+    # `core_target_pct` and is still bounded by `core_min_pct`, and a conviction
+    # name can still reach `satellite_max_share`. Plain buys simply stop short,
+    # so the reserve is there when a big mover appears.
+    #
+    # Only affects the DESIGN share; `satellite_max_share` is deliberately
+    # untouched, which is what makes this a reserve rather than a de-risk.
+    reserve = _f(cfg, "satellite_conviction_reserve_pct", 0.0)
+    if reserve > 0:
+        design = max(0.05, design - reserve)
+    return design
 
 
 def satellite_max_share(config, *, regime=None) -> float:
