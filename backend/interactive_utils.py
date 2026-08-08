@@ -6111,6 +6111,7 @@ def action_summarize_backtest(conn, backtest_id):
         if _fee_vol > 0
         else None
     )
+    from backtest_risk_metrics import risk_metrics as _risk_metrics
     portfolio_value_history = doc.get("portfolio_value_history") or []
     start_val = portfolio_value_history[0].get("value") if portfolio_value_history else None
     end_val = portfolio_value_history[-1].get("value") if len(portfolio_value_history) > 1 else start_val
@@ -6150,6 +6151,14 @@ def action_summarize_backtest(conn, backtest_id):
         "total_round_trip_pnl": sum(cycle_pnls) if cycle_pnls else None,
         "portfolio_value_high": max(float(h.get("value") or 0) for h in portfolio_value_history) if portfolio_value_history else None,
         "portfolio_value_low": min(float(h.get("value") or 0) for h in portfolio_value_history) if portfolio_value_history else None,
+        # high/low are run EXTREMES and cannot express a drawdown: bt 820236's
+        # low ($5,869.45) sits below its $6,000 start, so it PRECEDES the peak
+        # ($6,974.29) and the 15.84% that falls out of them is not a decline
+        # anyone suffered. Six of the promotion gate's criteria are evaluated
+        # against the equity curve, which the run built and then discarded, so
+        # they could not be computed at all. Carry the ordered series and the
+        # true peak-to-trough with it.
+        "risk_metrics": _risk_metrics(portfolio_value_history),
         "strategy_schema": doc.get("strategy_schema"),
         "strategy_id": doc.get("strategy_id"),
         "pause_reason_tag":   doc.get("pause_reason_tag"),
