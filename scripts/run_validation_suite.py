@@ -160,6 +160,17 @@ def main(argv=None) -> int:
     results = []
     for key, start, end, _why in plan:
         print(f"\n=== {key}  {start}..{end}")
+        # Reset the mutable active-event state before every run. Without it the
+        # run inherits whatever the previous one left in GraphNexusActiveEvents,
+        # `current_events` differs from day one, and the maintenance cache takes
+        # a legitimate miss on every call — 42 batches and $1.47 on bt 718249.
+        # The cache table itself is preserved, so the second and later runs of a
+        # window replay from the same cold baseline and HIT. It is also what
+        # makes two arms comparable at all.
+        rst = _run("python3 scripts/reset_backtest_event_state.py "
+                   f"--instance v2-let-run-core --apply")
+        print("    " + " | ".join(l.strip() for l in rst.stdout.strip().splitlines()
+                                  if "row(s)" in l))
         bt_id = launch(start, end)
         if bt_id is None:
             return 1
