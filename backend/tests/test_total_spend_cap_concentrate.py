@@ -203,3 +203,65 @@ def test_without_the_check_the_satellite_under_deploys():
     funded = _allocate(sizes, 2280.0, 6000.0, target_pct=0.12)
     filled = {k: v for k, v in funded.items() if k != "RIG"}  # RIG refused
     assert sum(v["buy_cash"] for v in filled.values()) / 6000.0 == pytest.approx(0.24)
+
+
+# ── bt 142474: the opening tick, again ───────────────────────────────────────
+
+
+def _allocate_cold(sizes, cap, nav, target_pct=0.12, price_floor=8.0, prices=None):
+    """Concentrate with the cold-start rule the opening bar needs."""
+    prices = prices or {}
+    cands = [(float(h.get("raw_net_score", 0.0) or 0.0), float(h.get("buy_cash", 0.0) or 0.0), s)
+             for s, h in sizes.items() if float(h.get("buy_cash", 0.0) or 0.0) > 0]
+    if sum(c[1] for c in cands) <= cap:
+        return dict(sizes)
+    any_priced = any(prices.get(s, 0.0) > 0 for _sc, _c, s in cands)
+    target = nav * target_pct if target_pct > 0 else 0.0
+    floor = target if target > 0 else MIN_POS
+    cands.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    out, left = dict(sizes), cap
+    for _sc, cash, sym in cands:
+        p = prices.get(sym, 0.0)
+        if p <= 0 and any_priced:
+            out.pop(sym, None)
+            continue
+        if p > 0 and p < price_floor:
+            out.pop(sym, None)
+            continue
+        take = min(max(cash, target) if target > 0 else cash, left)
+        if take < floor or take < MIN_POS:
+            out.pop(sym, None)
+            continue
+        out[sym] = {**out[sym], "buy_cash": round(take, 2)}
+        left -= take
+    return out
+
+
+def _five():
+    names = ["NXT", "RIG", "CPER", "GDX", "WDC"]
+    return {n: {"buy_cash": 561.4, "raw_net_score": s}
+            for n, s in zip(names, [1.8, 1.3, 1.2, 1.1, 1.0])}
+
+
+def test_unpriced_name_is_deferred_when_others_are_priced():
+    """bt 142474 bar 1: RIG had no bars yet, so the floor check failed open and
+    it took a full $720 slot it could never fill."""
+    prices = {"NXT": 91.36, "RIG": 0.0, "CPER": 35.08, "GDX": 87.27, "WDC": 181.55}
+    out = _allocate_cold(_five(), 2280.0, 6000.0, prices=prices)
+    assert "RIG" not in out
+    assert set(out) == {"NXT", "CPER", "GDX"}
+    assert sum(v["buy_cash"] for v in out.values()) / 6000.0 == pytest.approx(0.36)
+
+
+def test_cold_start_still_opens_the_book_when_nothing_is_priced():
+    """If the price plumbing is not up, deferring everything would refuse to
+    open the book. Fall back to conviction and let the broker gate decide."""
+    prices = {n: 0.0 for n in _five()}
+    out = _allocate_cold(_five(), 2280.0, 6000.0, prices=prices)
+    assert len(out) == 3
+    assert all(v["buy_cash"] == pytest.approx(720.0) for v in out.values())
+
+
+def test_a_priced_sub_floor_name_is_still_refused():
+    prices = {"NXT": 91.36, "RIG": 4.14, "CPER": 35.08, "GDX": 87.27, "WDC": 181.55}
+    assert "RIG" not in _allocate_cold(_five(), 2280.0, 6000.0, prices=prices)

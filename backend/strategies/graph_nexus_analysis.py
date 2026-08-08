@@ -31757,6 +31757,28 @@ class GraphNexusAnalysis:
                 # rotation than turned into a position that cannot matter.
                 _conc_floor = _conc_target if _conc_target > 0 else _min_pos_final
                 _conc_skipped: list[str] = []
+                # COLD START. `_rotation_incoming_executable` fails open on an
+                # unresolved price, and on the bar that BUILDS THE BOOK a freshly
+                # discovered name has no bars yet — bt 142474 funded RIG@$720 on
+                # bar 1 (price 0 -> check passes) and skipped it correctly on bar
+                # 2 (price $4.14 -> below the $8.00 floor). Opening tick, again:
+                # the same place the satellite clamp was inert in 00eeb15.
+                #
+                # Under concentration an unpriceable name costs a whole 12%
+                # position, so defer it to the queue instead — it is priced and
+                # re-offered next bar. But if NOTHING resolves a price the
+                # plumbing simply is not up yet, and deferring everything would
+                # refuse to open the book at all; in that case fall back to
+                # funding by conviction and let the broker gate decide.
+                _conc_any_priced = False
+                _conc_price_of: dict = {}
+                for _cc_score, _cc_cash, _cc_sym, _cc_hint in _conc_cands:
+                    _cc_p = _resolve_symbol_price(
+                        _cc_sym, prices, data if isinstance(data, dict) else None,
+                        portfolio_emulator=portfolio_emulator) or 0.0
+                    _conc_price_of[_cc_sym] = _cc_p
+                    if _cc_p > 0:
+                        _conc_any_priced = True
                 for _cc_score, _cc_cash, _cc_sym, _cc_hint in _conc_cands:
                     # Never spend the budget on a name the broker will refuse.
                     # bt 865585: RIG took a full $720 slot (12% of NAV) and was
@@ -31771,9 +31793,11 @@ class GraphNexusAnalysis:
                     # cannot clear. `_rotation_incoming_executable` is the
                     # existing pre-validator for exactly this and is documented
                     # never to be laxer than the broker gate.
-                    _cc_price = _resolve_symbol_price(
-                        _cc_sym, prices, data if isinstance(data, dict) else None,
-                        portfolio_emulator=portfolio_emulator) or 0.0
+                    _cc_price = _conc_price_of.get(_cc_sym, 0.0)
+                    if _cc_price <= 0 and _conc_any_priced:
+                        _conc_skipped.append(f"{_cc_sym}(price unresolved)")
+                        _conc_dropped.append(_cc_sym)
+                        continue
                     _cc_ok, _cc_why = _rotation_incoming_executable(
                         _cc_sym, _cc_price, config,
                         asset_class=str(_cc_hint.get("asset_class") or "stock"))
