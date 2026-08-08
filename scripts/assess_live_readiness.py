@@ -63,7 +63,17 @@ EVIDENCE = PromotionEvidence(
     bootstrap_active_low=0.0,
     information_ratio=0.0,
     deflated_sharpe_probability=0.0,
-    max_drawdown_magnitude=0.155,    # bt 820236 peak 6974.29 -> low 5869.45
+    # NOT MEASURED. `portfolio_value_high`/`_low` on the result row are run
+    # EXTREMES, not a peak-to-trough pair -- bt 820236's low ($5,869.45) is
+    # below its $6,000 start, so it precedes the peak ($6,974.29) and
+    # (high-low)/high = 15.84% is an upper bound, not a drawdown. The result
+    # row carries no equity time series at all, so max_drawdown, beta,
+    # information_ratio, deflated_sharpe, profit_factor and the unseen-quarter
+    # fraction are ALL currently uncomputable. That gap is itself a promotion
+    # blocker: six of the gate's criteria cannot be evaluated from what a
+    # backtest emits today. Left at 1.0 so the gate refuses rather than passes
+    # on an unmeasured value.
+    max_drawdown_magnitude=1.0,
     beta=0.0,
     profit_factor_after_costs=0.0,
     positive_unseen_quarter_fraction=0.0,
