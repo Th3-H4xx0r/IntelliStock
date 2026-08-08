@@ -241,6 +241,23 @@ services:
       # iteration during stock discovery (the engine forwards it; it must be set
       # before the interpreter starts). Default 0 for reproducible backtests.
       - PYTHONHASHSEED=${PYTHONHASHSEED:-0}
+      # BACKTEST_SEED completes the pair. Without it derive_backtest_seed falls
+      # back to sha256("<backtest_row_id>|<universe>"), so EVERY run draws a
+      # different seed purely because it has a different row id — two runs of an
+      # identical config cannot reproduce. Measured: bt 820236 and bt 718249,
+      # same window/instance/cash, finished with ZERO position names in common.
+      #
+      # It also costs real money. Discovery diverges, so the candidate set
+      # differs, so the active-event maintenance cache — keyed on
+      # (scope, date) but VALIDATED on a fingerprint of its inputs — misses on
+      # essentially every call: 42 invocations, 42 LLM batches, 0 cache hits in
+      # bt 718249, $1.47 of a $3.43 run.
+      #
+      # .env.example has documented BACKTEST_SEED=42 all along; nothing ever
+      # passed it through. Defaulted here so reproducibility is the out-of-box
+      # behaviour, and still overridable per deployment when a replicate needs
+      # a deliberately different draw.
+      - BACKTEST_SEED=${BACKTEST_SEED:-42}
       # R19: explicit passthrough as belt-and-suspenders against env_file
       # not being populated by the orchestrator (e.g. Dockploy may render
       # service env separately from the project .env file).
