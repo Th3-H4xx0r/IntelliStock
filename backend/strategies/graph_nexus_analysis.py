@@ -31613,6 +31613,31 @@ class GraphNexusAnalysis:
                 if float(_pc_q or 0) > 0:
                     _held_for_cap.add(str(_pc_sym).strip().upper())
         _min_pos_final = float(config.get("min_position_size", 100.0) or 100.0)
+        # 2026-08-08 (bt 498816): a NEW entry must be worth a max_positions SLOT.
+        #
+        # `min_position_size` is an absolute dollar floor, so on a $6,000 book it
+        # admits a 1.7%-of-NAV entry. 498816 opened three names at 12.0% each and
+        # then let AMD ($94, 1.6%) and KLAC ($100, 1.7%) take two of the five
+        # alpha slots through the BFQ lanes. With max_positions=6 and the index
+        # core holding one, those two runts were 40% of the alpha book's CAPACITY
+        # for 3.3% of its money — and SNDK was refused on 01-12, 01-13 and 01-14
+        # (`MAX_POSITIONS_GATE: blocked SNDK (held=6, cap=6)`) before a swap
+        # finally freed a slot on 01-16, by which point it cost $414.69 instead
+        # of $388.46.
+        #
+        # That is the objective's blocker #3 stated exactly: "a great name is
+        # refused because a mediocre one sits on the budget". The scarce resource
+        # is the SLOT, not the dollar, so the floor has to be a share of NAV.
+        # Both the total-spend cap and the final-pass undersized guard read
+        # `_min_pos_final`, so raising it here closes every lane at once —
+        # including the BFQ paths that bypass the concentrate cap.
+        #
+        # Default 0.0 = off, so every existing document is unchanged.
+        _min_pos_nav_pct = float(config.get("min_position_nav_pct", 0.0) or 0.0)
+        if _min_pos_nav_pct > 0 and portfolio_total > 0:
+            _min_pos_nav = float(portfolio_total) * _min_pos_nav_pct
+            if _min_pos_nav > _min_pos_final:
+                _min_pos_final = _min_pos_nav
         _rot_incr_cap_pct = float(config.get("rotation_incremental_cap_pct", 0.15) or 0.15)
         if _rot_incr_cap_pct > 0 and _rot_incr_cap_pct < 1.0 and portfolio_total > 0:
             _rot_incr_cap = portfolio_total * _rot_incr_cap_pct
