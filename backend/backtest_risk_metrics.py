@@ -117,3 +117,84 @@ def risk_metrics(history, max_curve_points: int = 512) -> dict:
         "observation_count": len(values),
         "equity_curve": downsample(history, max_curve_points),
     }
+
+
+def sleeve_churn(trades, sleeve_symbols) -> dict:
+    """How much the index core traded to achieve how little net change.
+
+    The core is a RESIDUAL of the satellite -- core = clamp(1 - cash_floor -
+    satellite, min, max) -- so every satellite move retargets it. Concentrating
+    the satellite into 14%-of-NAV positions swings that target 14 points at a
+    time, and the core trades to follow. Its funding RELEASE is deliberately
+    exempt from the rebalance cadence (it exists to fund an approved buy), so
+    the cadence that bounds the deploy side does not bound it.
+
+    Measured on bt 820236: 26 SPY fills, 17 side-flips, sources
+    residual_bull_refill x17 and residual_bull_deploy x9 -- $11,186 of
+    post-initial gross around a $2,398 core. Turnover is the objective's named
+    leak (~50%/mo break-even, 23-35% for this edge), and a saw-tooth on the one
+    lane exempt from the turnover budget is the most expensive place to have it.
+
+    This measures; it changes no behaviour. `churn_ratio` is gross traded per
+    dollar of NET position change -- 1.0 is a clean directional move, and the
+    larger it gets the more of the trading achieved nothing. None when there is
+    no net change to divide by (a perfect round trip), which is the pathological
+    case and must not read as 0.
+    """
+    syms = {str(s).strip().upper() for s in (sleeve_symbols or set())}
+    fills = []
+    for t in (trades or []):
+        if not isinstance(t, dict):
+            continue
+        if str(t.get("ticker") or "").strip().upper() not in syms:
+            continue
+        try:
+            total = abs(float(t.get("total") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        action = str(t.get("action") or "").strip().lower()
+        if total <= 0 or action not in {"buy", "sell"}:
+            continue
+        fills.append((action, total))
+
+    if not fills:
+        return {"fill_count": 0, "gross_notional": 0.0, "net_notional": 0.0,
+                "churn_ratio": None, "side_flips": 0}
+
+    gross = sum(total for _a, total in fills)
+    net = sum(total if a == "buy" else -total for a, total in fills)
+    flips = sum(1 for x, y in zip(fills, fills[1:]) if x[0] != y[0])
+    # The opening deployment is a directional move, not churn; exclude it so the
+    # ratio describes what happened AFTER the book was built.
+    post_initial_gross = gross - fills[0][1]
+    return {
+        "fill_count": len(fills),
+        "gross_notional": gross,
+        "post_initial_gross_notional": post_initial_gross,
+        "net_notional": net,
+        "churn_ratio": (gross / abs(net)) if abs(net) > 1e-9 else None,
+        "side_flips": flips,
+    }
+
+
+def sleeve_symbols_from_schema(strategy_schema) -> set:
+    """The sleeve's own legs, read off a stored strategy_schema.
+
+    The result row keeps the schema, so churn can be attributed without the
+    caller re-deriving which tickers are broker-level cash parking rather than
+    strategy positions.
+    """
+    out: set = set()
+    try:
+        for spec in ((strategy_schema or {}).get("strategies") or []):
+            cfg = (spec or {}).get("config") or {}
+            if not bool(cfg.get("residual_sleeve_enabled", False)):
+                continue
+            for key, default in (("residual_sleeve_symbol", "SPY"),
+                                 ("residual_sleeve_bear_symbol", "")):
+                sym = str(cfg.get(key, default) or "").strip().upper()
+                if sym:
+                    out.add(sym)
+    except Exception:
+        return out
+    return out

@@ -6111,7 +6111,11 @@ def action_summarize_backtest(conn, backtest_id):
         if _fee_vol > 0
         else None
     )
-    from backtest_risk_metrics import risk_metrics as _risk_metrics
+    from backtest_risk_metrics import (
+        risk_metrics as _risk_metrics,
+        sleeve_churn as _sleeve_churn,
+        sleeve_symbols_from_schema as _sleeve_syms_from_schema,
+    )
     portfolio_value_history = doc.get("portfolio_value_history") or []
     start_val = portfolio_value_history[0].get("value") if portfolio_value_history else None
     end_val = portfolio_value_history[-1].get("value") if len(portfolio_value_history) > 1 else start_val
@@ -6159,6 +6163,15 @@ def action_summarize_backtest(conn, backtest_id):
         # they could not be computed at all. Carry the ordered series and the
         # true peak-to-trough with it.
         "risk_metrics": _risk_metrics(portfolio_value_history),
+        # The core is a residual of the satellite, and its funding release is
+        # exempt from the rebalance cadence, so it saw-tooths on the one lane
+        # the turnover budget does not police. bt 820236: 26 SPY fills, 17
+        # side-flips, $11,186 of post-initial gross around a $2,398 core. That
+        # had to be reconstructed by parsing a log; it belongs on the row.
+        "sleeve_churn": _sleeve_churn(
+            doc.get("backtest_trades") or [],
+            _sleeve_syms_from_schema(doc.get("strategy_schema")),
+        ),
         "strategy_schema": doc.get("strategy_schema"),
         "strategy_id": doc.get("strategy_id"),
         "pause_reason_tag":   doc.get("pause_reason_tag"),

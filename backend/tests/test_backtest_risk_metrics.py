@@ -100,3 +100,78 @@ def test_risk_metrics_block_shape():
     assert m["observation_count"] == 5
     assert m["max_drawdown_peak_value"] == pytest.approx(6974.29)
     assert len(m["equity_curve"]) == 5
+
+
+# ── bt 820236: the core saw-toothed on the lane the turnover budget ignores ──
+
+from backtest_risk_metrics import (  # noqa: E402
+    sleeve_churn,
+    sleeve_symbols_from_schema,
+)
+
+
+def _t(action, ticker, total):
+    return {"action": action, "ticker": ticker, "total": total}
+
+
+def test_bt820236_shape_is_reported_as_churn():
+    """The real fill sequence: an opening deploy, then alternating legs."""
+    trades = [_t("buy", "SPY", 2398.0)] + [
+        _t(side, "SPY", amt) for side, amt in
+        [("sell", 779.0), ("buy", 654.0), ("sell", 633.0), ("buy", 490.0),
+         ("sell", 449.0), ("buy", 443.0), ("sell", 390.0)]
+    ]
+    out = sleeve_churn(trades, {"SPY"})
+    assert out["fill_count"] == 8
+    assert out["side_flips"] == 7, "alternating legs, not a directional move"
+    assert out["post_initial_gross_notional"] == pytest.approx(3838.0)
+    # a lot of trading for very little net position change
+    assert out["churn_ratio"] > 2.0
+
+
+def test_a_directional_move_is_not_flagged_as_churn():
+    trades = [_t("buy", "SPY", 1000.0), _t("buy", "SPY", 1000.0)]
+    out = sleeve_churn(trades, {"SPY"})
+    assert out["side_flips"] == 0
+    assert out["churn_ratio"] == pytest.approx(1.0)
+
+
+def test_a_perfect_round_trip_is_none_not_zero():
+    """Zero net change is the pathological case; it must not read as clean."""
+    trades = [_t("buy", "SPY", 500.0), _t("sell", "SPY", 500.0)]
+    assert sleeve_churn(trades, {"SPY"})["churn_ratio"] is None
+
+
+def test_only_sleeve_legs_are_counted():
+    trades = [_t("buy", "SPY", 500.0), _t("buy", "SNDK", 900.0),
+              _t("sell", "SQQQ", 300.0)]
+    out = sleeve_churn(trades, {"SPY", "SQQQ"})
+    assert out["fill_count"] == 2
+    assert out["gross_notional"] == pytest.approx(800.0)
+
+
+def test_no_sleeve_activity_is_zeroed_not_none():
+    out = sleeve_churn([_t("buy", "SNDK", 900.0)], {"SPY"})
+    assert out["fill_count"] == 0 and out["gross_notional"] == 0.0
+
+
+def test_malformed_trades_are_skipped():
+    trades = ["junk", {"action": "buy"}, {"action": "hold", "ticker": "SPY", "total": 5.0},
+              {"action": "buy", "ticker": "SPY", "total": "x"},
+              _t("buy", "SPY", 100.0)]
+    assert sleeve_churn(trades, {"SPY"})["fill_count"] == 1
+
+
+def test_sleeve_symbols_read_off_the_stored_schema():
+    schema = {"strategies": [{"config": {
+        "residual_sleeve_enabled": True,
+        "residual_sleeve_symbol": " spy ",
+        "residual_sleeve_bear_symbol": "SQQQ"}}]}
+    assert sleeve_symbols_from_schema(schema) == {"SPY", "SQQQ"}
+
+
+def test_disabled_sleeve_contributes_no_symbols():
+    schema = {"strategies": [{"config": {"residual_sleeve_enabled": False,
+                                         "residual_sleeve_symbol": "SPY"}}]}
+    assert sleeve_symbols_from_schema(schema) == set()
+    assert sleeve_symbols_from_schema(None) == set()
