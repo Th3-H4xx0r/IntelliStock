@@ -265,3 +265,41 @@ def test_cold_start_still_opens_the_book_when_nothing_is_priced():
 def test_a_priced_sub_floor_name_is_still_refused():
     prices = {"NXT": 91.36, "RIG": 4.14, "CPER": 35.08, "GDX": 87.27, "WDC": 181.55}
     assert "RIG" not in _allocate_cold(_five(), 2280.0, 6000.0, prices=prices)
+
+
+# ── bt 801641: concentration switched itself off when the sleeve grew ────────
+
+
+def test_concentrate_must_run_even_when_the_budget_is_not_breached():
+    """Raising the satellite to 63% of NAV stopped the cap binding at all.
+
+    bt 801641: 6 names summing $3,360 against a $3,780 sleeve. Under
+    'only concentrate when over budget' the allocator's even split took over
+    and every position opened at 8.6-9.7% instead of the 14% target. The bigger
+    the sleeve, the less likely the cap binds -- so a breach-gated
+    concentration turns itself off exactly when there is most room to size into.
+    """
+    sizes = {n: {"buy_cash": 560.0, "raw_net_score": s} for n, s in
+             [("VICR", 1.8), ("WDC", 1.6), ("LRCX", 1.4),
+              ("GDX", 1.2), ("CPER", 1.0), ("EEM", 0.8)]}
+    cap, nav = 3780.0, 6000.0
+    assert sum(v["buy_cash"] for v in sizes.values()) < cap  # not breached
+
+    # breach-gated (the bug): untouched, everything stays at 9.3%
+    assert _allocate(sizes, cap, nav, target_pct=0.14) == sizes
+
+    # always-on: fund by conviction at the target weight
+    target = nav * 0.14
+    left, funded = cap, {}
+    for _s, sym in sorted(((v["raw_net_score"], k) for k, v in sizes.items()), reverse=True):
+        take = min(max(sizes[sym]["buy_cash"], target), left)
+        if take < target:
+            continue
+        funded[sym] = take
+        left -= take
+
+    assert set(funded) == {"VICR", "WDC", "LRCX", "GDX"}
+    assert all(v == pytest.approx(840.0) for v in funded.values())
+    assert all(v / nav == pytest.approx(0.14) for v in funded.values())
+    # four real positions instead of six half-sized ones
+    assert sum(funded.values()) / nav == pytest.approx(0.56)

@@ -31748,8 +31748,16 @@ class GraphNexusAnalysis:
             #
             # `total_spend_cap_target_weight_pct` (0 = keep each name's own
             # requested size) sets the weight a funded name is taken at.
+            # 2026-08-08 (bt 801641): concentrate whenever it is ON, not only
+            # when the budget is already breached. Raising the satellite to 63%
+            # of NAV stopped the cap binding at all — 6 names summing $3,360
+            # against a $3,780 sleeve — so the allocator's own even split took
+            # over and every position landed at 8.6-9.7% instead of the 14%
+            # target. The bigger the sleeve, the less likely the cap binds, so
+            # gating concentration on a breach means it switches itself off
+            # exactly when there is most room to size into.
             _conc_on = bool(config.get("total_spend_cap_concentrate", False))
-            if _total_new_spend > _tot_cap and _conc_on:
+            if _conc_on:
                 _conc_target_pct = float(
                     config.get("total_spend_cap_target_weight_pct", 0.0) or 0.0)
                 _conc_target = (portfolio_total * _conc_target_pct
