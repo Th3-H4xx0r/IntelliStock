@@ -3256,6 +3256,19 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _max_positions_excludes_sleeve(cached_strategies) -> bool:
+    """Do the index-core legs give up their max_positions slot? Default False.
+
+    Must agree with `graph_nexus_analysis.slot_exclusions` — the whole point of
+    the flag is that all four capacity counters move together.
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("max_positions_exclude_sleeve_legs", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _turnover_cfg_conviction_bypass(cached_strategies) -> bool:
     """May a high-conviction buy pass a pinned turnover budget? Default False."""
     try:
@@ -14140,6 +14153,27 @@ while not shutdown_requested:
                     # Do this properly by moving all four counters together, behind
                     # its own paired A/B — not as a one-line exclusion here.
                     _mpg_held = {str(_s).strip().upper() for _s, _q in (_mpg_pos or {}).items() if float(_q or 0.0) > 0.0}
+                    # 2026-08-08: counter 1 of 4. The NOTE above says an
+                    # exclusion here alone is a REGRESSION, and it is — the other
+                    # three are now excluded in lockstep behind the same flag
+                    # (`slot_exclusions` in graph_nexus_analysis.py), so the
+                    # bear-capacity latch cannot gain phantom headroom.
+                    #
+                    # bt 820236 is the cost of not doing it: SNDK sized at $873
+                    # (14.6% of NAV), overflow-funded, turnover-bypassed, and
+                    # refused by `blocked SNDK (held=6, cap=6)` on a line that
+                    # simultaneously read `open_pos=5`.
+                    #
+                    # Default OFF (max_positions_exclude_sleeve_legs).
+                    if _max_positions_excludes_sleeve(_cached_strategies):
+                        _mpg_legs = {
+                            str(_s).strip().upper()
+                            for _s in _residual_sleeve_universe_symbols(_cached_strategies)}
+                        if _mpg_legs & _mpg_held:
+                            _mpg_held = {_s for _s in _mpg_held if _s not in _mpg_legs}
+                            _log(f"max_positions: index-core leg(s) "
+                                 f"{', '.join(sorted(_mpg_legs & set(_mpg_pos or {})))} do not "
+                                 f"consume a slot — alpha book holds {len(_mpg_held)}", "cyan")
                 except Exception as _mpg_e:
                     _log(f"max_positions gate setup failed ({type(_mpg_e).__name__}: {_mpg_e}) — gate inert this tick", "yellow")
                     _mpg_cap = None

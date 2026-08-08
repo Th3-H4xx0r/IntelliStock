@@ -5624,14 +5624,55 @@ def _v32_momentum_ath_or_mcap_block(
     return False, ""
 
 
-def _count_open_positions(portfolio_emulator) -> int:
+def slot_exclusions(config) -> set:
+    """Symbols that must not consume a max_positions SLOT. Empty unless asked.
+
+    2026-08-08. The index core is broker-level cash parking, not a strategy
+    position, but it occupies a slot in all FOUR counters that decide capacity.
+    With max_positions=6 the alpha sleeve really only has five, and bt 820236
+    shows what that costs: SNDK cleared every other gate on 01-12 -- sized at
+    $873 (14.6% of NAV) by the concentrate allocator, funded by the satellite
+    overflow, waved through a 105% turnover budget by the conviction bypass --
+    and died on
+
+        MAX_POSITIONS_GATE: blocked SNDK (held=6, cap=6)
+
+    on the same log line that read `open_pos=5`. That disagreement IS the bug:
+    `_mpg_held` counts the SPY leg and the buy gate's counter does not.
+
+    broker.py:14099-14117 records that excluding it from `_mpg_held` alone was
+    written and REVERTED, because `_z41_held_now` (the bear-capacity latch),
+    `_count_open_positions` (BFQ + cash-floor gates) and `_mw_open_set` count
+    the legs too, so a one-site exclusion only desynchronises them -- it moved
+    the latched bear's headroom from 0 to len(sleeve legs) and re-opened the
+    per-bar refill the latch exists to stop. Its instruction was to "do this
+    properly by moving all four counters together, behind its own paired A/B".
+
+    This is that helper: ONE definition, one flag, so the four cannot disagree.
+
+    Default OFF (`max_positions_exclude_sleeve_legs`).
+    """
+    try:
+        cfg = config or {}
+        if not bool(cfg.get("max_positions_exclude_sleeve_legs", False)):
+            return set()
+        return _sleeve_symbols(cfg)
+    except Exception:
+        return set()
+
+
+def _count_open_positions(portfolio_emulator, exclude=None) -> int:
     if portfolio_emulator is None:
         return 0
     try:
         positions = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (portfolio_emulator._positions or {})
     except Exception:
         positions = getattr(portfolio_emulator, "_positions", {}) or {}
-    return sum(1 for qty in (positions or {}).values() if float(qty or 0.0) > 0.0)
+    _skip = {str(s).strip().upper() for s in (exclude or set())}
+    return sum(
+        1 for sym, qty in (positions or {}).items()
+        if float(qty or 0.0) > 0.0 and str(sym).strip().upper() not in _skip
+    )
 
 
 def _valuation_prices_with_fallback(
@@ -11213,7 +11254,8 @@ def _compute_releasable_cash_reserve(
     if not bool(config.get("cash_reserve_release_after_min_positions", True)):
         return 0.0
     min_positions = int(config.get("cash_reserve_hard_min_positions", 5) or 5)
-    if _count_open_positions(portfolio_emulator) < min_positions:
+    if _count_open_positions(
+            portfolio_emulator, slot_exclusions(config)) < min_positions:
         return 0.0
     min_score = float(config.get("cash_reserve_release_min_score", 0.50) or 0.50)
     if not any(float(((scores or {}).get(sym) or {}).get("raw_net_score", 0.0) or 0.0) >= min_score for sym in (buy_candidates or [])):
@@ -28012,7 +28054,7 @@ class GraphNexusAnalysis:
             _available_buy_budget += _reserve_release_budget
             _log(
                 f"Cash reserve release: +${_reserve_release_budget:.0f} enabled for high-conviction buys "
-                f"(open_positions={_count_open_positions(portfolio_emulator)}, min_positions={int(config.get('cash_reserve_hard_min_positions', 5) or 5)})",
+                f"(open_positions={_count_open_positions(portfolio_emulator, slot_exclusions(config))}, min_positions={int(config.get('cash_reserve_hard_min_positions', 5) or 5)})",
                 "yellow",
             )
         _spy_20d = _spy_20d_return(strategy_cache, date_key)
@@ -28679,10 +28721,15 @@ class GraphNexusAnalysis:
                     # reducing the book stays the trim's job, which does it
                     # gradually and worst-first.
                     if _z41_latch_on and str(_z41_regime or "").strip().lower() == "chop":
+                        # Counter 2 of 4 (see `slot_exclusions`): the latch must
+                        # measure the ALPHA book, or excluding the legs elsewhere
+                        # hands it phantom headroom -- the exact regression that
+                        # got the one-site version reverted.
                         _z41_held_now = 0
                         try:
                             if portfolio_emulator is not None and hasattr(portfolio_emulator, "get_positions"):
-                                _z41_held_now = len(portfolio_emulator.get_positions() or {})
+                                _z41_held_now = _count_open_positions(
+                                    portfolio_emulator, slot_exclusions(config))
                         except Exception:
                             _z41_held_now = 0
                         _z41_latched = max(_regime_position_cap(config, "bear"), _z41_held_now)
@@ -30046,9 +30093,13 @@ class GraphNexusAnalysis:
             # exist if stock_buys was empty and the allocation block didn't run)
             _mw_open_set: set[str] = set()
             if portfolio_emulator is not None:
+                _mw_skip = slot_exclusions(config)  # counter 4 of 4
                 for _mw_s, _mw_q in (getattr(portfolio_emulator, "_positions", {}) or {}).items():
                     if float(_mw_q or 0) > 0:
-                        _mw_open_set.add(str(_mw_s).strip().upper())
+                        _mw_su = str(_mw_s).strip().upper()
+                        if _mw_su in _mw_skip:
+                            continue
+                        _mw_open_set.add(_mw_su)
             # Track newly bought momentum positions
             for _sym, _hint in nexus_position_sizes.items():
                 if isinstance(_hint, dict) and float(_hint.get("buy_cash", 0) or 0) > 0:
@@ -30990,7 +31041,8 @@ class GraphNexusAnalysis:
             _bfq_leftover = max(0.0, _bfq_spendable_cash - _bfq_planned_spend)
             _bfq_reserve_from_budget = _reserved_backfill_budget if _bfq else 0.0
             _bfq_cash = max(0.0, _bfq_leftover + _bfq_reserve_from_budget)
-            _bfq_positions = _count_open_positions(portfolio_emulator)
+            _bfq_positions = _count_open_positions(
+                portfolio_emulator, slot_exclusions(config))  # counter 3 of 4
             # V28.7: unified max_positions default — main allocation was tightened from
             # 50 to 15, but BFQ path still used the old 50 default, so BFQ dequeue could
             # admit buys past the V28.7 cap. Match the default so a config without the
