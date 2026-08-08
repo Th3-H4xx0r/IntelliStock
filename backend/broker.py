@@ -14148,6 +14148,33 @@ while not shutdown_requested:
             # (default True) in the strategy config.
             _scp_enabled = True
             _scp_sell_proceeds: list = []
+            # 2026-08-08 (bt 559864): the same crediting is needed in BACKTEST.
+            # The comment below says backtest cash "is already credited
+            # synchronously by the emulator". It is not, because execution is
+            # NEXT-EVENT: a sell submitted while the 15:00 bar is processed
+            # fills at the 16:00 quote, so its proceeds land after the same
+            # bar's buy has already been sized.
+            #
+            # On 01-13 the book sold $1,845 (SPY $1,107.91 + EEM $737.54) and
+            # the paired buy read $125.31 of cash:
+            #   Momentum portfolio swap: sell EEM (pnl=+2.6%) -> buy SNDK ($743)
+            #   Buy gate inputs for SNDK: cash=$125.31 cash_per_trade=$742.82
+            #                            available=$125.31 -> PASS
+            #   FILL BUY SNDK qty=0.319 price=392.37          ($125 = 2.1% of NAV)
+            # The rotation was correctly sized at 12.4% of NAV and executed at
+            # 2.1% — a winner entered as noise, funded by a sell of its own
+            # making. In backtest the funding sell is deterministic (it is in
+            # this same cycle and it will fill), so crediting it is sound.
+            _scp_bt = False
+            try:
+                for _scp_spec in (_cached_strategies or []):
+                    _scp_c = (_scp_spec or {}).get("config") or {}
+                    if "backtest_credit_sell_proceeds_enabled" in _scp_c:
+                        _scp_bt = bool(_scp_c.get("backtest_credit_sell_proceeds_enabled"))
+                        break
+            except Exception:
+                _scp_bt = False
+            _scp_credit_on = (mode == MODE_LIVE) or _scp_bt
             if mode == MODE_LIVE:
                 try:
                     for _scp_spec in (_cached_strategies or []):
@@ -14986,7 +15013,7 @@ while not shutdown_requested:
                             # clamps the haircut ≤ 1 so the ceiling can never
                             # exceed cash + proceeds; disabled via the
                             # live_credit_sell_proceeds_enabled kill-switch.
-                            if mode == MODE_LIVE and _scp_sell_proceeds:
+                            if _scp_credit_on and _scp_sell_proceeds:
                                 _scp_ceiling = buy_ceiling(_sizing_ceiling, _scp_sell_proceeds, enabled=_scp_enabled)
                                 if _scp_ceiling > _sizing_ceiling:
                                     _log(
@@ -15595,7 +15622,7 @@ while not shutdown_requested:
                             # if the WS fill already landed during the wait,
                             # the adapter already credited cash AND removed the
                             # position — qty reads 0 and nothing double-books.
-                            if mode == MODE_LIVE and decision == -1 and _mpg_submit_ok and _scp_enabled:
+                            if _scp_credit_on and decision == -1 and _mpg_submit_ok and _scp_enabled:
                                 try:
                                     _scp_pos = portfolio_emulator.get_positions() if hasattr(portfolio_emulator, "get_positions") else (getattr(portfolio_emulator, "_positions", {}) or {})
                                     _scp_qty = float((_scp_pos or {}).get(str(symbol).strip().upper(), 0.0) or 0.0)

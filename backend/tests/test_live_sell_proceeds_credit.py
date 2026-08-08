@@ -200,18 +200,33 @@ def test_broker_imports_and_wires_buy_ceiling():
     assert "buy_ceiling" in src.split("\n")[0:60][0] or "buy_ceiling" in src  # imported
     # Kill-switch read from strategy config, live-only gates on both seams.
     assert "live_credit_sell_proceeds_enabled" in src
-    assert src.count("mode == MODE_LIVE and _scp_sell_proceeds") == 1  # buy seam
+    # 2026-08-08 (bt 559864): both seams now gate on `_scp_credit_on`, which is
+    # `(mode == MODE_LIVE) or _scp_bt`. The live behaviour is unchanged; the
+    # backtest path is opt-in. See test_backtest_path_is_off_by_default.
+    assert src.count("if _scp_credit_on and _scp_sell_proceeds:") == 1  # buy seam
+    assert "_scp_credit_on = (mode == MODE_LIVE) or _scp_bt" in src
     assert "decision == -1 and _mpg_submit_ok and _scp_enabled" in src  # sell seam
 
 
-def test_backtest_path_unchanged():
+def test_backtest_path_is_off_by_default():
+    """Renamed from test_backtest_path_unchanged (bt 559864).
+
+    The original asserted both seams read `mode == MODE_LIVE` verbatim, on the
+    premise that "the backtest emulator's synchronous crediting is untouched".
+    That premise was wrong: execution is next-event, so a sell submitted on the
+    15:00 bar fills at 16:00 and its proceeds are NOT available to that bar's
+    buy. bt 559864 sold $1,845 and funded the paired buy with $125 — a winner
+    sized at 12.4% of NAV entered at 2.1%.
+
+    So the seams are now opt-in rather than live-only. What must still hold is
+    that an existing backtest is unaffected unless it asks: the flag is read
+    with a False default and nothing else can turn it on.
+    """
     src = _broker_source()
-    # Every Task-13 seam is gated on MODE_LIVE; the backtest emulator's
-    # synchronous crediting is untouched.
-    for line in src.split("\n"):
-        if "_scp_sell_proceeds.append" in line or "buy_ceiling(_sizing_ceiling" in line:
-            # both live inside `if mode == MODE_LIVE` blocks — assert the
-            # guards exist verbatim.
-            pass
-    assert "if mode == MODE_LIVE and decision == -1 and _mpg_submit_ok and _scp_enabled:" in src
-    assert "if mode == MODE_LIVE and _scp_sell_proceeds:" in src
+    assert "backtest_credit_sell_proceeds_enabled" in src
+    assert "_scp_bt = False" in src
+    assert "_scp_bt = bool(_scp_c.get(\"backtest_credit_sell_proceeds_enabled\"))" in src
+    assert "_scp_credit_on = (mode == MODE_LIVE) or _scp_bt" in src
+    # the live kill-switch is independent and still guards both seams
+    assert "live_credit_sell_proceeds_enabled" in src
+    assert "_scp_enabled" in src
