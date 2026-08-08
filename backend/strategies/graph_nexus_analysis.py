@@ -31756,7 +31756,31 @@ class GraphNexusAnalysis:
                 # over budget is better left as cash for the queue or a
                 # rotation than turned into a position that cannot matter.
                 _conc_floor = _conc_target if _conc_target > 0 else _min_pos_final
+                _conc_skipped: list[str] = []
                 for _cc_score, _cc_cash, _cc_sym, _cc_hint in _conc_cands:
+                    # Never spend the budget on a name the broker will refuse.
+                    # bt 865585: RIG took a full $720 slot (12% of NAV) and was
+                    # then blocked by the execution price floor —
+                    #   SKIP BUY RIG - Nexus execution price floor:
+                    #   RIG at $4.14 is below $8.00
+                    # Under uniform scaling that wasted 1/5th of a bar's spend;
+                    # under concentration it wastes a whole position and the
+                    # satellite opened at 24% of NAV instead of 38%, with the
+                    # core absorbing the slack at 76%. Same failure class as the
+                    # core funding pre-pass: budget committed to a buy that
+                    # cannot clear. `_rotation_incoming_executable` is the
+                    # existing pre-validator for exactly this and is documented
+                    # never to be laxer than the broker gate.
+                    _cc_price = _resolve_symbol_price(
+                        _cc_sym, prices, data if isinstance(data, dict) else None,
+                        portfolio_emulator=portfolio_emulator) or 0.0
+                    _cc_ok, _cc_why = _rotation_incoming_executable(
+                        _cc_sym, _cc_price, config,
+                        asset_class=str(_cc_hint.get("asset_class") or "stock"))
+                    if not _cc_ok:
+                        _conc_skipped.append(f"{_cc_sym}({_cc_why})")
+                        _conc_dropped.append(_cc_sym)
+                        continue
                     _cc_want = max(_cc_cash, _conc_target) if _conc_target > 0 else _cc_cash
                     _cc_take = min(_cc_want, _conc_left)
                     if _cc_take < _conc_floor or _cc_take < _min_pos_final:
@@ -31772,7 +31796,9 @@ class GraphNexusAnalysis:
                     f"{len(_conc_funded)} of {len(_conc_cands)} by conviction "
                     f"({', '.join(_conc_funded[:6])}"
                     f"{'...' if len(_conc_funded) > 6 else ''}) out of "
-                    f"${_tot_cap:,.0f}; dropped {len(_conc_dropped)} to the queue",
+                    f"${_tot_cap:,.0f}; dropped {len(_conc_dropped)} to the queue"
+                    + (f"; skipped as not executable: {', '.join(_conc_skipped[:4])}"
+                       if _conc_skipped else ""),
                     "cyan",
                 )
             elif _total_new_spend > _tot_cap:
