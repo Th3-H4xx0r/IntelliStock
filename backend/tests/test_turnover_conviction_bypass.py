@@ -68,3 +68,49 @@ def test_a_bad_score_cannot_sneak_through_on_magnitude():
     """raw_net_score is signed; a -1.7 bearish aggregate must not read as
     conviction (the same trap the min-paths bypass had to fix)."""
     assert admits(-1.700, turnover_blocked=True, bypass_enabled=True) is False
+
+
+# ── bt 820236: the bypass removed the brake instead of raising it ────────────
+
+
+def admits_bounded(raw, turnover_used, budget_pct=0.50, bypass_enabled=True,
+                   conv_min=CONV_MIN, ceiling=0.0):
+    """Mirror of the broker-side bypass WITH the hard ceiling."""
+    blocked = turnover_used >= budget_pct
+    if not blocked:
+        return True
+    if not bypass_enabled or conv_min <= 0:
+        return False
+    if ceiling > 0 and turnover_used >= ceiling:
+        return False
+    return float(raw) >= conv_min
+
+
+def test_unbounded_bypass_removes_the_brake_entirely():
+    """What 820236 did: turnover ran to 105% of NAV on a 50% budget."""
+    for used in (0.57, 0.80, 1.05):
+        assert admits_bounded(1.700, used, ceiling=0.0) is True
+
+
+def test_ceiling_refuses_conviction_once_turnover_is_extreme():
+    """Conviction raises the brake; it must not remove it."""
+    assert admits_bounded(1.700, 0.70, ceiling=0.80) is True
+    assert admits_bounded(1.700, 0.80, ceiling=0.80) is False
+    assert admits_bounded(1.700, 1.05, ceiling=0.80) is False
+
+
+def test_ceiling_is_inclusive_at_the_boundary():
+    assert admits_bounded(1.700, 0.7999, ceiling=0.80) is True
+    assert admits_bounded(1.700, 0.8000, ceiling=0.80) is False
+
+
+def test_below_budget_is_unaffected_by_the_ceiling():
+    assert admits_bounded(0.2, 0.10, ceiling=0.80) is True
+
+
+def test_ordinary_churn_still_refused_under_the_ceiling():
+    assert admits_bounded(1.000, 0.60, ceiling=0.80) is False
+
+
+def test_zero_ceiling_preserves_previous_behaviour():
+    assert admits_bounded(1.700, 2.00, ceiling=0.0) is True

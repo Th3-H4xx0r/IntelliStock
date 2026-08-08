@@ -3256,6 +3256,15 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _turnover_cfg_bypass_ceiling(cached_strategies) -> float:
+    """Turnover share above which even a conviction buy is refused. 0 = none."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return float(cfg.get("turnover_budget_conviction_bypass_max_pct", 0.0) or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
 def _max_positions_excludes_sleeve(cached_strategies) -> bool:
     """Do the index-core legs give up their max_positions slot? Default False.
 
@@ -14951,7 +14960,19 @@ while not shutdown_requested:
                             # basket instead is on the do-not-retry list: it leaves
                             # 7.1% charged against a 50% budget and the brake never
                             # binds again.
+                            # HARD CEILING on the bypass (2026-08-08, bt 820236).
+                            # The bypass alone removes the brake rather than
+                            # raising it: 820236 ran turnover at 57-105% of NAV
+                            # against a 50% budget, and churned $11,186 of SPY
+                            # gross around a $2,398 core. Turnover is the known
+                            # leak — ~50%/mo break-even, 23-35% for this edge —
+                            # so an unbounded conviction exemption trades a
+                            # measured cost for an unmeasured one.
+                            #
+                            # Above the ceiling even conviction is refused. 0.0
+                            # keeps the previous unbounded behaviour.
                             _tb_conv_min = _satellite_conviction_min_raw(_cached_strategies)
+                            _tb_ceiling = _turnover_cfg_bypass_ceiling(_cached_strategies)
                             _tb_bypass = False
                             if (_turnover_blocked and _tb_conv_min > 0
                                     and bool(_turnover_cfg_conviction_bypass(_cached_strategies))):
@@ -14959,7 +14980,15 @@ while not shutdown_requested:
                                     _tb_raw = float((nexus_hint or {}).get("raw_net_score", 0.0) or 0.0)
                                 except (TypeError, ValueError):
                                     _tb_raw = 0.0
-                                if _tb_raw >= _tb_conv_min:
+                                if _tb_ceiling > 0 and _turnover_used >= _tb_ceiling:
+                                    _log(
+                                        f"TURNOVER BYPASS CEILING: {symbol} refused despite "
+                                        f"raw={_tb_raw:+.3f} — {_turnover_used * 100.0:.0f}% of NAV "
+                                        f"traded is at/over the {_tb_ceiling * 100.0:.0f}% ceiling; "
+                                        f"conviction raises the brake, it does not remove it",
+                                        "yellow",
+                                    )
+                                elif _tb_raw >= _tb_conv_min:
                                     _tb_bypass = True
                                     _log(
                                         f"TURNOVER BUDGET BYPASS: {symbol} raw={_tb_raw:+.3f} "
