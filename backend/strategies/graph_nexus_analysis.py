@@ -14053,6 +14053,43 @@ def _discover_stocks_from_momentum(
     #
     # Default keeps the old key so this is opt-in per document.
     if bool(config.get("momentum_rank_on_60d", False)):
+        # 2026-08-09 BREAKOUT FRESHNESS (default OFF).
+        #
+        # Ranking on accumulated trailing return is structurally a late-entry
+        # machine: a name qualifies only AFTER it has moved, so the strongest
+        # trailing number is by construction the most-elapsed move. Measured
+        # across 21 filled positions in three runs, fraction-of-move-elapsed at
+        # fill vs capture is r = -0.895 (p < 0.0001) with perfect separation —
+        # every position filled at <=55% elapsed made money, every one at >100%
+        # lost. And in bt 201039 the names that moved MOST were the ones we did
+        # WORST on: SNDK +166% -> -4.4%, PLRZ +62% -> -17.6%, HL +30% -> -18.5%,
+        # against XOM +27% -> +26.9% and NTR +22% -> +21.2%.
+        #
+        # A 20-day-high breakout is the same information taken EARLY. Matched
+        # test across 5 windows including OOS: it beats rank-on-trailing-return
+        # 4/5 on mean, 4/5 on median and 5/5 on the big movers, and N=20 beats
+        # N=40/55/60 in 5/5 — a monotone ordering, not a fitted optimum. On the
+        # names that cost us: SNDK triggers 01-05 at $283.44 (10.1% elapsed)
+        # against the run's $660.48 (92.3%); HL $21.01 (14.4%) against $28.23
+        # (71.6%); WDC $211.98 (31.9%) against $259.37 (70.1%).
+        #
+        # Freshness is a TIE-BREAK on top of the 60d rank, not a replacement:
+        # trailing return still says WHICH names are strong (IC +0.201), and
+        # freshness says WHICH OF THOSE is early. Replacing the rank outright
+        # was measured to cost the names we already get right (XOM +26.9% ->
+        # +21.8%, NTR +21.2% -> +13.3%), because those enter at ~0% elapsed via
+        # the news lane and do not need a trigger.
+        _bo_band = float(config.get("momentum_breakout_freshness_pct", 0.0) or 0.0)
+        _bo_hist = (strategy_cache or {}).get("_overlay_bars_raw") or {}
+        _bo_lb = int(config.get("momentum_breakout_lookback_bars", 20) or 20)
+
+        def _fresh(sym) -> int:
+            """0 when the name just broke out of its own base, else 1."""
+            if _bo_band <= 0:
+                return 1
+            ext, _ = _extension_above_anchor(sym, _bo_hist, _bo_lb)
+            return 0 if (ext is not None and 0.0 <= ext <= _bo_band) else 1
+
         # A missing 60d means UNKNOWN, not WORST: rank it on the 20d we do have
         # rather than sending it to the back of a list that is then cut at
         # `momentum_discovery_max_per_day`. The 60d THRESHOLD is unaffected —
@@ -14060,7 +14097,7 @@ def _discover_stocks_from_momentum(
         # 20d axis to be a candidate at all.
         def _rank60(x):
             r20, r60 = x[1], x[2]
-            return (-(r60 if r60 > float("-inf") else r20), -r20, x[0])
+            return (_fresh(x[0]), -(r60 if r60 > float("-inf") else r20), -r20, x[0])
         candidates.sort(key=_rank60)
     else:
         candidates.sort(key=lambda x: (-max(x[1], x[2]), -x[1], -x[2], x[0]))
