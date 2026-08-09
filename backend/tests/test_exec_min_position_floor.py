@@ -32,7 +32,7 @@ def exec_min_pos(config, nav):
     return floor
 
 
-def skips(cash_to_use, cash_per_trade, config, nav):
+def skips(cash_to_use, cash_per_trade, config, nav, held=False):
     """The broker's skip test.
 
     When a NAV floor is configured, size is the whole question and the buy is
@@ -41,6 +41,8 @@ def skips(cash_to_use, cash_per_trade, config, nav):
     the hole GH went through — the allocator had already sized it down to the
     available $32.55, so cash_to_use == cash_per_trade and it never fired.
     """
+    if held:
+        return False          # an ADD takes no max_positions slot
     m = exec_min_pos(config, nav)
     hard = m > HISTORICAL_MIN
     return cash_to_use < m and (hard or cash_to_use < cash_per_trade)
@@ -100,3 +102,16 @@ def test_it_agrees_with_the_allocator_floor():
     refuses, which is how the runts got through in the first place."""
     allocator_floor = max(100.0, NAV * ON["min_position_nav_pct"])
     assert exec_min_pos(ON, NAV) == pytest.approx(allocator_floor)
+
+
+def test_an_ADD_to_a_held_name_is_exempt():
+    """bt 571147 refused SNDK's winner-add ($216) and bt 427197 WDC's ($586).
+    The floor protects a max_positions SLOT; an add takes no slot, and the
+    allocator's own floor already exempts held names."""
+    assert skips(216.0, 840.0, ON, NAV, held=False) is True
+    assert skips(216.0, 840.0, ON, NAV, held=True) is False
+    assert skips(586.0, 840.0, ON, NAV, held=True) is False
+
+
+def test_a_NEW_name_runt_is_still_refused():
+    assert skips(48.23, 840.0, ON, NAV, held=False) is True

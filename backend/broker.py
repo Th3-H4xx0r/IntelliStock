@@ -15405,8 +15405,24 @@ while not shutdown_requested:
                         # the clause never fired. A position below the NAV floor
                         # must not open regardless of how it got small — when the
                         # floor is configured, size is the whole question.
-                        _emp_hard = _exec_min_pos > 50.0
-                        if decision == 1 and cash_to_use < _exec_min_pos and (
+                        # 2026-08-09: an ADD to a name we already hold is exempt.
+                        # The floor exists so a position too small to matter cannot
+                        # take a max_positions SLOT — an add takes no slot. Applying
+                        # it to adds refused SNDK's winner-add ($216) in bt 571147
+                        # and WDC's ($586) in bt 427197, i.e. it blocked exactly the
+                        # top-up of the names the book most wanted more of. The
+                        # allocator's own floor already exempts held names; this end
+                        # did not, so the two disagreed.
+                        _emp_held = False
+                        try:
+                            _emp_pos = (portfolio_emulator.get_positions()
+                                        if hasattr(portfolio_emulator, "get_positions")
+                                        else (getattr(portfolio_emulator, "_positions", {}) or {}))
+                            _emp_held = float((_emp_pos or {}).get(symbol, 0.0) or 0.0) > 0.0
+                        except Exception:
+                            _emp_held = False
+                        _emp_hard = _exec_min_pos > 50.0 and not _emp_held
+                        if decision == 1 and cash_to_use < _exec_min_pos and not _emp_held and (
                                 _emp_hard or cash_to_use < cash_per_trade):
                             _log(f"SKIP BUY {symbol} — cash_to_use ${cash_to_use:.2f} < min ${_exec_min_pos:.0f} (allocated ${cash_per_trade:.2f})", "yellow")
                             _trade_skipped_no_price = True  # reuse flag to prevent recording
