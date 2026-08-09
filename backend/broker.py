@@ -15368,9 +15368,46 @@ while not shutdown_requested:
                                 )
                             except Exception:
                                 pass
-                        # V3: Execution-time min position size check for buys
+                        # V3: Execution-time min position size check for buys.
+                        #
+                        # 2026-08-09: $50 is 0.8% of a $6,000 book, so a buy the
+                        # allocator sized at 14% of NAV and cash then truncated
+                        # to almost nothing still opened a position AND consumed
+                        # a max_positions slot. bt 371379:
+                        #   GH   sized $32.55  -> filled $32.41  (0.5% of NAV)
+                        #   AMZN sized $557.05 -> cash $108.30   (1.8%)
+                        #   ETN  sized $467.91 -> cash $162.37   (2.7%)
+                        # each holding one of 7 slots on a book that refuses new
+                        # names at the cap. A position too small to matter must
+                        # not cost a slot — that is the objective's blocker #3
+                        # arriving through the execution path instead of the
+                        # allocator, which already enforces this floor via
+                        # `min_position_nav_pct` on SIZED buys.
+                        #
+                        # Same floor as the allocator, so the two agree: the
+                        # dollar minimum, or the NAV share, whichever is larger.
+                        # Absent config keeps the historical $50.
                         _exec_min_pos = 50.0
-                        if decision == 1 and cash_to_use < _exec_min_pos and cash_to_use < cash_per_trade:
+                        try:
+                            _emp_cfg = _core_sleeve_cfg_raw(_cached_strategies) or {}
+                            _emp_pct = float(_emp_cfg.get("min_position_nav_pct", 0.0) or 0.0)
+                            if _emp_pct > 0 and portfolio_emulator is not None:
+                                _emp_nav = float(
+                                    portfolio_emulator.get_portfolio_value(prices) or 0.0)
+                                if _emp_nav > 0:
+                                    _exec_min_pos = max(_exec_min_pos, _emp_nav * _emp_pct)
+                        except Exception:
+                            _exec_min_pos = 50.0
+                        # The legacy test also required cash_to_use < cash_per_trade,
+                        # i.e. "only refuse what was truncated". That leaves the
+                        # hole GH went through: the allocator had already sized it
+                        # DOWN to the available $32.55, so the two were equal and
+                        # the clause never fired. A position below the NAV floor
+                        # must not open regardless of how it got small — when the
+                        # floor is configured, size is the whole question.
+                        _emp_hard = _exec_min_pos > 50.0
+                        if decision == 1 and cash_to_use < _exec_min_pos and (
+                                _emp_hard or cash_to_use < cash_per_trade):
                             _log(f"SKIP BUY {symbol} — cash_to_use ${cash_to_use:.2f} < min ${_exec_min_pos:.0f} (allocated ${cash_per_trade:.2f})", "yellow")
                             _trade_skipped_no_price = True  # reuse flag to prevent recording
                             # V7.1: Report skipped buys to strategy cache for backfill queue
