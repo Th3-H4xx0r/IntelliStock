@@ -5537,8 +5537,8 @@ def _v32_momentum_ath_or_mcap_block(
         # age-0 discovery — the gate was never once reachable before this.
         _mext_lb = _scale_bars(int(config.get("entry_extension_lookback_bars", 20) or 20), config)
         _mext_bars = _resolve_asof_bars(symbol, price_history, strategy_cache, date_key)
-        _mext_hit, _mext_runup = _recent_runup_protect(
-            symbol, {symbol: _mext_bars}, _mext_pct, _mext_lb)
+        _mext_hit, _mext_runup, _mext_metric, _mext_diag = _extension_blocks_entry(
+            symbol, {symbol: _mext_bars}, _mext_pct, _mext_lb, config)
         # 2026-07-21: glitch ceiling. The overlay cache carries split-unadjusted
         # / poisoned rows that yield impossible runups (ORGN +3281%, PSTV
         # +4553%); acting on those blocked good names. Above the ceiling the
@@ -5553,8 +5553,11 @@ def _v32_momentum_ath_or_mcap_block(
             _mext_hit = False
         if _mext_hit:
             if log_fn:
-                log_fn(f"V32 {lane} extension-block: {symbol} recent runup "
-                       f"+{_mext_runup:.1f}% > {_mext_pct:.0f}% — no conviction bypass",
+                log_fn(f"V32 {lane} extension-block: {symbol} {_mext_metric} "
+                       f"+{_mext_runup:.1f}% > {_mext_pct:.0f}% — no conviction bypass "
+                       f"[bars={_mext_diag.get('bars_used', len(_mext_bars))}"
+                       + (f" anchor=${_mext_diag['anchor']:.2f} price=${_mext_diag['price']:.2f}"
+                          if _mext_diag.get("anchor") else "") + "]",
                        "yellow")
             return True, f"extension_runup_{_mext_runup:.0f}pct"
         # Fail-closed posture (opt-in): a discovery-lane entry we still can't
@@ -23378,8 +23381,8 @@ def _apply_quality_filter(
             # gate is reachable for age-0 discovery entries (see _resolve_asof_bars).
             _ext_lookback = _scale_bars(int(config.get("entry_extension_lookback_bars", 20) or 20), config)
             _ext_bars = _resolve_asof_bars(sym, price_history, strategy_cache, date_key)
-            _ext_hit, _ext_runup = _recent_runup_protect(
-                sym, {sym: _ext_bars}, _ext_block_pct, _ext_lookback)
+            _ext_hit, _ext_runup, _ext_metric, _ext_diag = _extension_blocks_entry(
+                sym, {sym: _ext_bars}, _ext_block_pct, _ext_lookback, config)
             # 2026-07-21 glitch ceiling: impossible runups from split-unadjusted
             # / poisoned overlay bars fail OPEN (see momentum-lane site). 0=off.
             _ext_glitch = float(config.get("entry_extension_glitch_ceiling_pct", 0.0) or 0.0)
