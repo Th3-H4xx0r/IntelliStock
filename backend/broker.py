@@ -6131,6 +6131,15 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 # Fix 15: Extract propagation-expansion BUY tickers
                 nexus_expansion_buys = raw.pop("_nexus_expansion_buys", [])
                 nexus_executable_buys = raw.pop("_nexus_executable_buys", [])
+                # Z4.1's regime-adjusted position cap. Must be POPPED here (so it
+                # is not mistaken for a ticker in the score loop below) AND
+                # packed into metadata, which is the only channel the tick body
+                # reads. Publishing it into `scores` alone was silently inert:
+                # bt 555694 logged 0 "honouring the regime cap" lines while every
+                # gate line still read cap=6.
+                nexus_max_positions = raw.pop("_nexus_max_positions", None)
+                if nexus_max_positions is not None:
+                    metadata["_nexus_max_positions"] = nexus_max_positions
                 if nexus_discovered:
                     metadata["_nexus_discovered"] = list(nexus_discovered)
                 if nexus_sell_enforcement:
