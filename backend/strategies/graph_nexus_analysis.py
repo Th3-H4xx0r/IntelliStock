@@ -20124,6 +20124,45 @@ def _evaluate_position_risk(
                         ):
                             _peak_protected = True
 
+                # 2026-08-09 PEAK GIVE-BACK EXIT (default OFF).
+                #
+                # `peak_protection_*` above is a BYPASS — it defers to the
+                # trailing stop, which this document disables, so a name that
+                # runs +60% and hands it all back has NO peak-referenced
+                # protection at all. The repo already records this:
+                # test_adv_exit_discipline_findings.py:82 "F1 — trailing_stop_
+                # disabled removes the ONLY peak-referenced protection".
+                #
+                # bt 427197 lost 5.7pp of a +15.9% run to ONE name: SLV ran
+                # $67.35 -> $107.99 (+60.3%, 19% of NAV) and fell to $70.40.
+                # -$379 of a -$346 net move. Every other gate is ENTRY-anchored
+                # and SLV was never worse than -4.4% against its entry, so
+                # nothing could see it. `Trailing stop SUPPRESSED ... SLV
+                # drop=40.5% >= 12%` fired 125 times.
+                #
+                # Replayed over 6 runs / 5 windows / 3 regimes at (+30%, 25%) it
+                # fires ZERO times on eight winners — WDC 17.1%, SNDK 22.4% (x2
+                # runs), LRCX 16.2%, AMAT 15.4%, AGMI 20.3%, XOM 6.9%, AAOI
+                # 12.4% max drawdown-from-peak — and once on SLV at 40.4%. A
+                # 2.6pp clearance, not a knife edge. This is NOT re-arming the
+                # 12-15% trail, which kills all eight.
+                _pgb_min_peak = float(config.get("peak_giveback_min_peak_pnl_pct", 0.0) or 0.0)
+                _pgb_dd = float(config.get("peak_giveback_exit_drawdown_pct", 0.0) or 0.0)
+                if (_pgb_min_peak > 0 and _pgb_dd > 0
+                        and _peak_pnl_pct_for_log >= _pgb_min_peak
+                        and _drawdown_from_peak_pct_for_log >= _pgb_dd):
+                    _log(
+                        f"PEAK GIVE-BACK EXIT: {sym} peaked +{_peak_pnl_pct_for_log:.1f}% "
+                        f"(>={_pgb_min_peak:.0f}%) and has handed back "
+                        f"{_drawdown_from_peak_pct_for_log:.1f}% (>={_pgb_dd:.0f}%) — "
+                        f"selling; entry-anchored gates cannot see an open-profit "
+                        f"give-back", "red")
+                    fresh_score = -1
+                    fresh_reason = (
+                        f"Peak give-back exit: peaked +{_peak_pnl_pct_for_log:.1f}% "
+                        f"then handed back {_drawdown_from_peak_pct_for_log:.1f}% "
+                        f"(thresholds {_pgb_min_peak:.0f}%/{_pgb_dd:.0f}%)")
+
                 _fast_cut_pct = float(config.get("fast_loser_cut_pct", -10.0))
                 # 2026-07-19 regime-safety Phase 4: hard/kill drawdown-circuit
                 # tiers tighten the cut floor (e.g. -10% -> -7%).
@@ -31131,6 +31170,34 @@ class GraphNexusAnalysis:
         _queue_admission_failures: dict[str, str] = {}
         if _bfq_enabled:
             _bfq_candidate_syms = list(_queue_stock_buys) if '_queue_stock_buys' in locals() else (list(stock_buys) if 'stock_buys' in locals() else [])
+            # 2026-08-09 SOURCE-ORDERING BUG. The list above is built ~650 lines
+            # ABOVE the momentum lane, which writes `_momentum_new_buys` at
+            # :28800. So a name whose ONLY buy signal that bar comes from the
+            # momentum watchlist is never offered to the backfill queue at all —
+            # no ADD line, no BLOCKED line, nothing.
+            #
+            # bt 427197: SNDK entered solely via that lane on 01-09 and 01-12,
+            # on days the queue had 11 FREE slots (39/60 then 49/60). It was
+            # never offered. By 01-13, when it finally fired as a native Direct
+            # buy, the queue was 60/60 and shut for the rest of the run — 399
+            # `full_priority_blocked` lines. SNDK moved $237 -> $641 (+166%) and
+            # was bought ZERO times. bt 915207 reached it through a different
+            # path and paid $510.41 for $29.11.
+            #
+            # This is an ordering defect, not a tuning knob: 427197 399 blocks /
+            # 915207 691 / 383778 37 / bear 542754 0. Appending here costs
+            # nothing when the queue has room (`_bfq` appends without eviction
+            # while len < max_size) and the admission rules below still decide.
+            if bool(config.get("bfq_include_momentum_lane", False)):
+                try:
+                    _bfq_seen = {str(s).strip().upper() for s in _bfq_candidate_syms}
+                    for _mp in (_momentum_new_buys or []):
+                        _mp_t = str((_mp or {}).get("ticker") or "").strip().upper()
+                        if _mp_t and _mp_t not in _bfq_seen:
+                            _bfq_candidate_syms.append(_mp_t)
+                            _bfq_seen.add(_mp_t)
+                except (TypeError, AttributeError, NameError):
+                    pass
             _log(
                 f"Backfill queue: enabled | stock_buys={len(_bfq_candidate_syms)} | "
                 f"queue_size={len(_bfq_pending)} | halt={'YES' if _drawdown_halt_active else 'NO'}",
